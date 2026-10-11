@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 
 from deerflow_extension_api.plugins import BackendAction, PluginContribution
-from deerflow_extension_api.storage import StorageController, StorageUnsupported
+from deerflow_extension_api.storage import StorageUnsupported
 
 from deerflow.extensions.loader import ExtensionSpec
 from deerflow.features.resources import FeatureResources
@@ -28,8 +28,8 @@ class FeatureServices:
 
 
 class FeatureService:
-    def __init__(self, namespace, title, behavior, *, mediated=False):
-        self.namespace, self.title, self.mediated = namespace, title, mediated
+    def __init__(self, namespace, title, behavior, *, host_written=False):
+        self.namespace, self.title, self.host_written = namespace, title, host_written
         self.behavior = behavior
         self.provider = None
         self.healthy = False
@@ -95,52 +95,67 @@ class FeatureService:
                 raise WorkflowRejected(exc) from None
             raise
 
-    async def recover(self, payload, ctx):
+    async def settle_publication(self, intent, *, session):
+        """Reconcile one exact host workflow inside its caller's transaction.
+
+        The caller completes the operation in that transaction and removes the
+        receipt only after confirmed commit. This method has no human actor.
+        """
+        from copy import deepcopy
+
         from deerflow.config.paths import get_paths, paths_scope
         from deerflow.features.paths import FeaturePaths
         from deerflow.features.publications import reconcile_publication
+        from deerflow.features.resources import StorageFeatureLinkRow
         from deerflow.persistence.shared_publications.sql import SharedPublicationRepository
         from deerflow.persistence.spaces.files import SpaceFileOperationRow
-        from deerflow.spaces.contract import Permission, SpaceDenied
-        from deerflow.spaces.workflows import _receipt
+        from deerflow.persistence.spaces.model import SpaceRow
+        from deerflow.spaces.attachments import SpaceAttachments
+        from deerflow.spaces.contract import SpaceDenied
+        from deerflow.spaces.workflows import _owner, _read_only, _receipt
+        from deerflow.utils.file_io import await_drained, run_file_io
 
-        if not self.mediated or ctx.storage is None or set(payload) != {"operation_id", "generation"}:
-            raise StorageUnsupported("This controller requires an exact pending operation and generation")
-        actor = _current_actor()
-        files = self.resources().files
-        space = await self.resource()
-        files._operation_id(payload["operation_id"])
-        if type(payload["generation"]) is not int or payload["generation"] != space.generation:
-            raise SpaceDenied("Controller recovery requires the current resource generation")
-        _declaration, guard = ctx.storage._controller(space.id)
-        await files.registry.get(actor=actor, space_id=space.id, permission=Permission.ADMIN | Permission.OPERATE)
-        async with files.registry._sf() as session:
-            intent = await session.get(SpaceFileOperationRow, (space.id, payload["operation_id"]))
-            if intent is None or intent.phase != "pending" or intent.request.get("namespace") != self.namespace:
-                raise SpaceDenied("No pending operation belongs to this controller")
-            request = dict(intent.request)
+        # Refresh may return and overwrite the caller's same ORM instance.
+        expected = (intent.space_id, intent.operation_id, intent.actor_kind, intent.actor_id, intent.generation, deepcopy(intent.request))
 
-        async def reconcile(volumes):
-            with paths_scope(FeaturePaths(get_paths(), actor.subject_id, {self.namespace: volumes[space.id]})):
-                return await reconcile_publication(SharedPublicationRepository(files.registry._sf), _receipt.get(), intent)
+        async def perform():
+            files = self.resources().files
+            owner, receipt = _owner.get(), _receipt.get()
+            if not self.host_written or self.namespace != "hm.shared" or owner is None or owner[0] is not files or expected[0] not in owner[1] or _read_only.get():
+                raise SpaceDenied("Publication settlement requires the owned host workflow")
+            if not session.in_transaction() or not session.is_active:
+                raise ValueError("Publication settlement requires an active transaction")
+            current = await session.get(SpaceFileOperationRow, expected[:2], populate_existing=True)
+            if current is None or current.phase != "pending" or current.actor_kind != "human" or (current.space_id, current.operation_id, current.actor_kind, current.actor_id, current.generation, current.request) != expected:
+                raise SpaceDenied("The exact pending publication is unavailable")
+            if not isinstance(current.request, dict) or current.request.get("action") != "feature-workflow" or current.request.get("namespace") != self.namespace or current.request.get("by") != "host":
+                raise SpaceDenied("The pending operation is not a host publication")
+            link = await session.get(StorageFeatureLinkRow, ("hm.company-space", "company"))
+            row = await session.get(SpaceRow, current.space_id)
+            if (
+                link is None
+                or link.space_id != current.space_id
+                or row is None
+                or (row.status, row.mode, row.custody_kind, row.feature_namespace, row.feature_controller, row.feature_metadata_version) != ("active", "native", "company", None, None, None)
+            ):
+                raise SpaceDenied("Publication settlement requires the assigned company Space")
+            if await SpaceAttachments._current(session, [current.space_id], lock=True):
+                raise SpaceDenied("Publication settlement requires fenced attachments")
+            volume = await files._volume(session, row)
+            if receipt is None or receipt.root != volume.control_path or receipt.operation_id != current.operation_id or receipt.value.get("request") != current.request:
+                raise SpaceDenied("The exact publication receipt is unavailable")
+            await run_file_io(receipt.load)
+            with paths_scope(FeaturePaths(get_paths(), current.actor_id, {self.namespace: volume})):
+                return await reconcile_publication(SharedPublicationRepository(files.registry._sf, session=session), receipt, current)
 
-        return await files.run_workflow(
-            actor=actor,
-            requests={space.id: (Permission.ADMIN | Permission.OPERATE, space.generation)},
-            destination_id=space.id,
-            operation_id=payload["operation_id"],
-            request=request,
-            controller_admission=guard,
-            call=reconcile,
-            reconcile=True,
-        )
+        return await await_drained(perform())
 
 
-def _install(registry, config, namespace, title, behavior, *, mediated=False):
+def _install(registry, config, namespace, title, behavior, *, host_written=False):
     enabled = config.get("enabled", True)
     if type(enabled) is not bool or set(config) - {"enabled"}:
         raise ValueError("Storage feature configuration accepts only boolean enabled")
-    service = FeatureService(namespace, title, behavior, mediated=mediated)
+    service = FeatureService(namespace, title, behavior, host_written=host_written)
 
     async def resource(_payload, ctx):
         if ctx.storage is None or ctx.actor is None:
@@ -149,17 +164,14 @@ def _install(registry, config, namespace, title, behavior, *, mediated=False):
         # DTO contains no host paths or backing identities.
         return {"id": space.id, "name": space.name, "mode": space.mode.value, "generation": space.generation, "permissions": int(space.permissions)}
 
-    async def recover(payload, ctx):
-        return await service.recover(payload, ctx)
-
     contribution = PluginContribution(
         namespace=namespace,
         title=title,
         enabled=enabled,
         api_version=4,
         storage_api_version=1,
-        storage_controller=StorageController("publication", 1) if mediated else None,
-        backend=(BackendAction("resource", resource), *((BackendAction("recover", recover),) if mediated else ())),
+        storage_controller=None,
+        backend=(BackendAction("resource", resource),),
     )
     service.contribution = contribution
     if registry.plugin(contribution) is not True:
@@ -176,7 +188,7 @@ def install_my_files(registry, config):
 def install_shared(registry, config):
     from deerflow.features.behaviors import SharedBehavior
 
-    _install(registry, config, "hm.shared", "Shared", SharedBehavior(), mediated=True)
+    _install(registry, config, "hm.shared", "Shared", SharedBehavior(), host_written=True)
 
 
 def install_projects(registry, config):

@@ -29,9 +29,10 @@ from deerflow.config.storage_spaces_config import StorageSpacesConfig
 from deerflow.features.resources import StorageFeatureLinkRow
 from deerflow.persistence.agent_instances.model import AgentInstanceRow
 from deerflow.persistence.spaces.files import SpaceBackingRow
+from deerflow.persistence.spaces.model import SpaceRow
 from deerflow.persistence.user.model import UserRow
 from deerflow.spaces.backings import RESERVE_BYTES, RESERVE_INODES, PreparedVolumeCatalog
-from deerflow.spaces.contract import PrincipalRef, ResolvedPrincipal
+from deerflow.spaces.contract import Custody, InvalidPrincipal, MutationMode, Permission, PrincipalRef, ResolvedPrincipal, SpaceConflict
 from deerflow.spaces.docker import StorageHostUnqualified
 from deerflow.spaces.principals import HostPrincipalResolver
 from deerflow.spaces.provision import KINDS, StorageFit, plan_counts, storage_fit
@@ -86,6 +87,8 @@ class ExecutionStatus:
     mount_retry_at: float = 0
     adapter_task: asyncio.Future | None = None
     metadata_task: asyncio.Future | None = None
+    company_task: asyncio.Future | None = None
+    company_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     pending_reconcile: list[str] = field(default_factory=list)
     attachments_fenced: int = 0
     attempts_settled: int = 0
@@ -455,7 +458,93 @@ async def _startup_lines(app, *, counts=None):
         logger.warning("storage: space %s (%s) unverified (%s); %s of %s spaces verified", slot, getattr(spec, "kind", None), text, verified, len(files.catalog.volumes))
 
 
+async def _company_role(session):
+    link = await session.get(StorageFeatureLinkRow, ("hm.company-space", "company"))
+    if link is None:
+        return None
+    row = await session.get(SpaceRow, link.space_id)
+    if row is None or (row.status, row.custody_kind, row.mode, row.feature_namespace, row.feature_controller, row.feature_metadata_version) != ("active", "company", "native", None, None, None):
+        raise SpaceConflict("The assigned company Space is unavailable; its identity is retained")
+    return row
+
+
+async def ensure_company_space(app) -> None:
+    """Create the native company role only after this pool has qualified."""
+    status = app.state.agent_execution
+    files = app.state.storage_spaces
+    if files is None or status.host_id is None or (await storage_state(app)).state in ("off", "unavailable"):
+        return
+
+    async def perform():
+        async with status.company_lock:
+            async with files.registry._sf() as session:
+                row = await _company_role(session)
+                identifier = row.id if row is not None else None
+            created = identifier is None
+            if created:
+                identifier = await files.registry.host_create(name="Company", custody=Custody.company(), mode=MutationMode.NATIVE, feature=None, kind="company")
+            async with files.registry._sf() as session:
+                row = await _company_role(session)
+                if row is None or row.id != identifier:
+                    raise SpaceConflict("The company role changed during assignment")
+                volume = await files._volume(session, row)
+                if getattr(volume.spec, "kind", None) not in (None, "company"):
+                    raise SpaceConflict("The company role is not bound to a company slot")
+                backing = await session.get(SpaceBackingRow, row.backing_handle)
+                slot = backing.slot_id
+            if created:
+                logger.info("storage: company space created (%s)", slot)
+
+    await await_drained(perform())
+
+
+async def grant_company_space(app, account_id: str) -> None:
+    """Grant one currently resolving human READ/EXPORT, never mutation rights."""
+    files = app.state.storage_spaces
+    if files is None or (await storage_state(app)).state in ("off", "unavailable"):
+        return
+    subject = PrincipalRef("human", account_id)
+    async with files.registry._sf() as session:
+        account = await session.get(UserRow, account_id)
+        if account is not None and account.released_at is not None:
+            raise InvalidPrincipal("Released accounts cannot receive company storage")
+        if account is None and not (account_id == AUTH_DISABLED_USER_ID and is_auth_disabled()):
+            raise InvalidPrincipal("Company storage requires an existing account")
+        row = await _company_role(session)
+        if row is None:
+            raise SpaceConflict("The company Space is not assigned")
+        identifier = row.id
+    await files.registry.host_grant(identifier, subject, Permission.READ | Permission.EXPORT)
+
+
+async def _company_step(app, *, timeout: float) -> bool:
+    status = app.state.agent_execution
+    if status.host_id is None or (await storage_state(app)).state in ("off", "unavailable"):
+        return False
+    if status.company_task is None:
+        status.company_task = asyncio.create_task(ensure_company_space(app))
+        status.company_task.add_done_callback(_observe)
+    task = status.company_task
+    done, _pending = await asyncio.wait({task}, timeout=max(0, timeout))
+    if not done:
+        return False
+    status.company_task = None
+    try:
+        task.result()
+    except Exception as exc:
+        logger.warning("storage: company assignment remains pending (%s)", exc)
+        return False
+    return True
+
+
 async def storage_recheck(app):
+    await _admission_recheck(app)
+    status = app.state.agent_execution
+    if status.host_id is not None and (await storage_state(app)).state not in ("off", "unavailable"):
+        await _company_step(app, timeout=0)
+
+
+async def _admission_recheck(app):
     status = app.state.agent_execution
     if status.storage_reason != "admission-failed":
         return
@@ -516,7 +605,7 @@ async def close_storage_spaces(app):
         status = getattr(app.state, "agent_execution", None)
         owned = [getattr(app.state, "storage_inventory_task", None)]
         if status is not None:
-            owned.extend((status.adapter_task, status.metadata_task, status.mount_task, status.mount_cleanup_task, status.mount_verify_task))
+            owned.extend((status.adapter_task, status.metadata_task, status.company_task, status.mount_task, status.mount_cleanup_task, status.mount_verify_task))
         owned = [task for task in owned if task is not None]
         if owned:
             await asyncio.gather(*owned, return_exceptions=True)
@@ -625,6 +714,8 @@ async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session
     app.state.agent_instances.allowance_of = lambda kind: allowance(app, kind)
     if status.storage_reason is None and status.metadata_task is None and not status.mount_pending:
         await _adapter_step(app, timeout=min(ADAPTER_LIMIT_SECONDS, max(0, entered + STARTUP_BUDGET_SECONDS - time.monotonic())))
+    if await _company_step(app, timeout=max(0, entered + STARTUP_BUDGET_SECONDS - time.monotonic())):
+        counts = None
     await _startup_lines(app, counts=counts)
     app.state.storage_recheck_stop = asyncio.Event()
     app.state.storage_recheck_task = asyncio.create_task(_recheck_loop(app))

@@ -14,8 +14,12 @@ Shared looks up the company role. Feature requests allocate no storage. Namespac
 folders and private staging are separate, and missing/unverified assignments
 return structured 503 responses without host paths. The kernel adds explicit
 actorless host allocation, atomic human grants and guarded host-written
-workflows. Automatic assignment and the complete Shared protocol switch remain
-for the next integration stage; defaults stay disabled. No database schema change
+workflows. Qualified Gateway startup now creates one native Company Space without
+a human creator or ambient grant. Shared uses host-written publication/removal
+with READ/EXPORT destination and source permissions, while direct mutation and
+writable mounts remain denied. Recovery is host-only and shares the outer SQL
+transaction; receipts stay until confirmed commit. Automatic account assignment
+and background settlement remain for later integration changes; defaults stay disabled. No database schema change
 is added, but existing feature-link rows now identify resource roles rather than
 one resource per plugin.
 

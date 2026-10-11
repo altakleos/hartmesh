@@ -9,8 +9,8 @@ def test_default_features_use_normal_loader_and_explicit_disable():
     assert len(loaded.services) == 3
     assert all(plugin.api_version == 4 and plugin.storage_api_version == 1 for _, plugin in loaded.plugins)
     shared = next(plugin for _, plugin in loaded.plugins if plugin.namespace == "hm.shared")
-    assert shared.storage_controller.name == "publication"
-    assert shared.storage_controller.metadata_version == 1
+    assert shared.storage_controller is None
+    assert [action.name for action in shared.backend] == ["resource"]
     disabled = [ExtensionSpec(use=entry, enabled=False) for entry in DEFAULT_FEATURES]
     loaded, diagnostics = load_extensions(with_default_features(disabled))
     assert not loaded.plugins and not loaded.services and not diagnostics

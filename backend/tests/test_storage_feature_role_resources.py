@@ -22,7 +22,7 @@ async def storage(tmp_path, request):
 
 
 def service(files, namespace):
-    item = FeatureService(namespace, "Files", None, mediated=namespace == "hm.shared")
+    item = FeatureService(namespace, "Files", None, host_written=namespace == "hm.shared")
     item.healthy = True
     item.provider = HostStorageProvider(lambda: files)
     return item

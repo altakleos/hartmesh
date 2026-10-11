@@ -16,7 +16,7 @@ from deerflow.config.paths import USER_FILES_VIRTUAL_PREFIX, get_paths, paths_sc
 from deerflow.extensions.plugin_tools import plugin_settings
 from deerflow.features.paths import FeaturePaths
 from deerflow.features.plugins import FeatureService, FeatureServices
-from deerflow.features.resources import MissingFeatureResource
+from deerflow.features.resources import MissingFeatureResource, StorageFeatureLinkRow
 from deerflow.spaces.backings import BackingUnavailable
 from deerflow.spaces.contract import Permission, SpaceDenied
 from deerflow.spaces.facade import storage_actor_scope
@@ -83,7 +83,7 @@ def storage_feature(namespace, *, write=False):
             with storage_actor_scope(actor):
                 try:
                     space = await service.resource()
-                    permission = Permission.OPERATE if write and service.mediated else Permission.WRITE if write else Permission.READ
+                    permission = Permission.READ | Permission.EXPORT if write and service.host_written else Permission.WRITE if write else Permission.READ
                     requests = {space.id: (permission, space.generation)}
                     associations = {namespace: space.id}
                     body = bound.arguments.get("body")
@@ -92,16 +92,22 @@ def storage_feature(namespace, *, write=False):
                         if (await asyncio.to_thread(plugin_settings, *home_entry))["enabled"] is not True:
                             raise HTTPException(503, "My Files is disabled")
                         home = await home_service.resource()
-                        requests[home.id] = (Permission.READ | Permission.EXPORT | Permission.ADMIN, home.generation)
+                        requests[home.id] = (Permission.READ | Permission.EXPORT, home.generation)
                         associations["hm.my-files"] = home.id
 
                     async def controller(_session, rows):
                         if not await enabled():
                             raise SpaceDenied("The required installed feature is disabled or unavailable")
-                        if service.mediated:
+                        if service.host_written:
+                            link = await _session.get(StorageFeatureLinkRow, ("hm.company-space", "company"))
                             row, _grant = rows[space.id]
-                            if (row.mode, row.feature_namespace, row.feature_controller, row.feature_metadata_version) != ("mediated", namespace, "publication", 1):
-                                raise SpaceDenied("The installed publication controller is incompatible with this resource")
+                            if (
+                                namespace != "hm.shared"
+                                or link is None
+                                or link.space_id != space.id
+                                or (row.mode, row.custody_kind, row.feature_namespace, row.feature_controller, row.feature_metadata_version) != ("native", "company", None, None, None)
+                            ):
+                                raise SpaceDenied("The host publication requires the assigned company Space")
 
                     async def invoke(volumes):
                         paths = FeaturePaths(get_paths(), actor.subject_id, {name: volumes[identifier] for name, identifier in associations.items()})
@@ -140,6 +146,7 @@ def storage_feature(namespace, *, write=False):
                             },
                             controller_admission=controller,
                             call=invoke,
+                            host_write=service.host_written,
                         )
                     return await files.run_read_workflow(actor=actor, requests=requests, controller_admission=controller, call=invoke)
                 except BackingUnavailable:

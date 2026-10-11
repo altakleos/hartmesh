@@ -197,8 +197,10 @@ offline suite runs in four CI shards; strict blocking-I/O, frontend/isolation an
 both production Docker acceptance configurations remain required gates.
 
 Removing My Files or an optional wiki view preserves IDs, files and core grants.
-Removing Shared's required controller preserves mediated/read-only enforcement
-and denies its affected mutations/recovery. Source chat deletion removes neither
+Removing the Shared feature preserves its native Company Space, bytes and
+READ/EXPORT grants while disabling its host-written publication/removal routes.
+Shared has no mediated controller or public recovery action; unrelated mediated
+resources retain their required-controller enforcement. Source chat deletion removes neither
 saved resources nor publication copies. Principal retirement rejects delayed
 calls while other authorized company members retain their resource and bytes.
 No agent runtime, scheduler or legacy-folder adoption is needed for this handoff.

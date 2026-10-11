@@ -301,7 +301,7 @@ These APIs confer no public HTTP authority.
 `run_workflow(host_write=True)` admits a native destination under the member
 request's exact READ | EXPORT, records `"by": "host"`, and rejects archived or
 otherwise pending destinations. Source admission/disclosure and private receipts
-remain enforced. No production Shared dispatch uses this flag yet.
+remain enforced. The bundled Shared dispatcher uses this host-written protocol.
 `run_read_workflow` takes shared host locks with `READ_LOCK_WAIT_SECONDS = 5`,
 then rechecks authority and backing after the wait. `SpaceFull` identifies only
 definite pre-publication byte/inode capacity failures; post-publication errors
@@ -463,8 +463,8 @@ Enabling `storage_spaces` loads three ordinary extension entries by default:
 `deerflow.features.plugins:install_my_files`, `:install_shared` and
 `:install_projects`. Explicit entries in `plugins` override their defaults,
 including `enabled: false` to omit a feature. Each supplies a resource
-action and the existing app-scoped service lifecycle. Shared also supplies an
-exact controller recovery action. There is one loader and no feature installer.
+action and the existing app-scoped service lifecycle. Shared is host-written and
+supplies neither a mediated controller nor a public recovery action. There is one loader and no feature installer.
 
 My Files and Projects look up the same assigned user resource through
 `("hm.user-space", "human:<id>")`; Shared looks up
@@ -486,16 +486,17 @@ under its existing rules and collects private staging; it never deletes ordinary
 native files as apparent feature orphans. Project archive/restore updates project
 metadata without permanently archiving/tombstoning its backing resource.
 
-In this staged build, Shared retains its mediated `hm.shared` publication
-controller version 1. Automatic company/user assignment and the complete
-host-written Shared protocol switch are not activated yet. Operator integrations
-can explicitly assign a compatible resource; convenience routes never provision
-one. Only persisted explicit grants admit additional
-readers/publishers; use ordinary resource ADMIN grant requests with acknowledgement
-of existing data. READ/EXPORT permit settled browsing and downloads, OPERATE admits
-publication/removal, and controller recovery also requires ADMIN. Company custody
-itself grants no access and no ordinary user can bootstrap company authority.
-Generic writes and writable resource attachments remain denied for Shared.
+Qualified Gateway startup creates the native Company Space with its company role,
+without a human actor, grant or event. Creation is serialized and bounded by the
+remaining startup budget; timed-out work is retained and drained on shutdown.
+Later qualification rechecks retry failed company provisioning. An existing
+inactive or incompatible role is retained and reported, never replaced.
+Automatic account assignment and periodic settlement are still deferred. Trusted
+hosts explicitly grant resolving, unreleased humans READ/EXPORT; setup-pending
+accounts remain eligible. Company custody itself grants no access. Shared uses
+those permissions for publication/removal, including READ/EXPORT on a My Files
+source. Generic writes and writable resource attachments remain denied to those
+members, including administrators.
 
 The kernel now supplies explicit host transactions and assignment helpers.
 `host_locked` locks scoped parents in sorted order without resolving a human
@@ -509,8 +510,9 @@ An explicit host-write workflow admits the human with READ/EXPORT and records
 `by: host`, while requiring an active native destination and rejecting unresolved
 destination intents. Only its exact reconciliation intent is exempt; source-only
 reads remain available. This is a host API, not a browser/extension capability.
-The bundled Shared dispatcher keeps its existing protocol until the integration
-switch; automatic startup callers are introduced in the next stage.
+The bundled Shared dispatcher rechecks the exact native company-role assignment
+in every admission, including completion after effects. It retains the original
+human attribution together with `by: host`.
 
 Compatibility Keep/Publish/Remove calls use the installed enabled service plus
 current resource permissions. Publication from My Files also requires source
@@ -530,10 +532,17 @@ reconcile pending removals.
 
 A lost publication acknowledgement first checks its preassigned exact publication
 ID. Committed records preserve their bytes. Unknown outcomes keep bytes and an
-operation-bound private receipt. The installed enabled Shared controller's
-`recover` action accepts only an exact pending operation ID/current generation,
-reconciles recorded publication/journal identities and refuses unknown receipts.
-No generic native recovery downgrade bypasses it. Live host-operation locks
+operation-bound private receipt. The private host-only
+`settle_publication(intent, session=...)` helper requires the exact pending intent,
+verified company-role volume, persisted receipt and fenced attachments under an
+owned workflow lock. It never resolves or reinstates the original publisher.
+Its publication repository borrows the caller's transaction and flushes without
+committing or closing it. The caller completes the intent in that transaction and
+removes the receipt only after confirmed commit. Rollback/cancellation retain the
+pending intent and receipt; insertion rollback preserves published bytes. Removal
+reconciliation finishes or restores staged bytes according to its already committed
+publication record. The automatic caller arrives in a later change.
+No public recovery action or generic native recovery downgrade bypasses this. Live host-operation locks
 prevent recovery from declaring a still-running callback retired. Disabling or
 removing the feature keeps resources, grants, rows and bytes; affected behavior
 is unavailable, while settled generic reads/export obey the persisted core floor.

@@ -91,9 +91,10 @@ uploads/downloads, text editing and explicit cross-space copies independently
 of chat. Default My Files and Projects plugins look up the assigned user Space;
 Shared looks up the company Space. Feature requests never allocate storage. The
 staged Compose build returns a structured 503 when that assignment is missing;
-automatic assignment and Shared's host-written workflows arrive in the next
-integration stage. Legacy folders are not
-adopted or moved. Shared access requires explicit resource grants; company
+startup creates the native Company Space after host qualification. Shared publishes
+through host workflows with members holding READ/EXPORT only; direct edits and
+writable attachments remain denied. Automatic account assignment and background
+settlement arrive in later integration changes. Legacy folders are not adopted or moved. Shared access requires explicit resource grants; company
 custody does not grant access. Disable a convenience feature without deleting its
 resource; its generic folder remains available under current grants.
 The [consumer handoff](docs/STORAGE_SPACES_CONSUMER.md) covers asynchronous callers,
