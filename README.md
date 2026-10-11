@@ -100,7 +100,12 @@ The [backing requirements](docs/STORAGE_SPACES.md#qualified-linux-backing) descr
 the fixed filesystem byte/inode bounds and platform reserve. Administrators can
 create quiesced backups, restore with current grants, archive and delete through
 the generic recovery controls. A trusted consumer can attach native roots on the
-qualified direct Linux Docker host; uncertain containment blocks takeover.
+qualified local Linux Docker host; lifecycle changes require confirmed containment.
+Multiple native attachments and Gateway file writes can share a Space. File
+publication preserves revision and collision checks; applications coordinate
+their own concurrent writes. Backups, restores and deletion still require every
+attachment to be fenced. Pending file writes block further mutations while
+ordinary reads remain available; pending lifecycle operations block all access.
 Installed extensions can negotiate storage contract v1 with plugin contract v4.
 Actions, model tools and services use host-bound resource capabilities and typed
 actors; nonhuman callers never impersonate a human owner. Resource pages request

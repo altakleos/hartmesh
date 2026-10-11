@@ -113,10 +113,12 @@ async def test_backup_corruption_never_replaces_visible_files(storage):
 async def test_pending_file_operation_requires_explicit_owner_reconciliation(storage):
     files, sf, _, recovery = storage
     space = await home(files)
+    await files.write(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=operation(), path="readable", content=b"retained", create=True)
     op = operation()
     async with sf() as session, session.begin():
         session.add(SpaceFileOperationRow(space_id=space.id, operation_id=op, actor_kind=ALICE.kind, actor_id=ALICE.subject_id, generation=1, phase="pending", request={"action": "write", "path": "page"}))
-    with pytest.raises(SpaceConflict):
+    assert await files.read(actor=ALICE, space_id=space.id, path="readable", max_bytes=20) == b"retained"
+    with pytest.raises(FileNotFoundError):
         await files.read(actor=ALICE, space_id=space.id, path="page", max_bytes=20)
     with pytest.raises(ValueError):
         await recovery.accept_current_state(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=op, acknowledge_uncertain_outcome=False)

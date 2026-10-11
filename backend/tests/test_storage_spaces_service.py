@@ -415,7 +415,7 @@ async def test_pending_operation_id_in_another_resource_is_not_an_admission_bypa
     source, destination = await home(service), await home(service)
     op = operation()
     async with sf() as session:
-        session.add(SpaceFileOperationRow(space_id=source.id, operation_id=op, actor_kind=ALICE.kind, actor_id=ALICE.subject_id, generation=1, phase="pending", request={"action": "write"}))
+        session.add(SpaceFileOperationRow(space_id=source.id, operation_id=op, actor_kind=ALICE.kind, actor_id=ALICE.subject_id, generation=1, phase="pending", request={"action": "copy"}))
         await session.commit()
     with pytest.raises(SpaceOperationPending):
         await service.copy(actor=ALICE, source_id=source.id, destination_id=destination.id, source_generation=1, destination_generation=1, source_path="unknown", destination_path="x", operation_id=op)

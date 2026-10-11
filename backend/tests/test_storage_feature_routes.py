@@ -191,7 +191,7 @@ async def test_unknown_publication_is_retained_and_exact_controller_recovers(fea
     monkeypatch.setattr(repo, "publication", unavailable)
     response = await client.post("/api/shared/publish", json={"path": "/mnt/user-data/outputs/uncertain.txt", "thread_id": THREAD})
     assert response.status_code == 409, response.text
-    assert (await client.get("/api/shared")).status_code == 409
+    assert (await client.get("/api/shared")).status_code == 200
     actor = PrincipalRef("human", str(alice.id))
     space = (await files.registry.list(actor=actor))[0]
     facts = await SpaceRecovery(files).status(actor=actor, space_id=space.id)

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Storage concurrency
+
+Multiple native attachments and Gateway file writes can share a Space. Pending
+file/feature writes retain mutation guards while allowing ordinary reads; other
+pending operations keep blocking every admission. Reading host workflows use
+shared locks with a five-second total wait outside SQL and recheck current
+authority before their callback. Lifecycle effects still require all attachments
+fenced, including after adapter loss. Pre-publication capacity failures report
+`SpaceFull`; failures after publication retain an uncertain operation. This change
+adds no database schema changes.
+
 ### Schema changes
 
 Compared with `v2.2.0+hartmesh.45`, the database head advances from

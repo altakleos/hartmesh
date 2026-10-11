@@ -32,10 +32,17 @@ class SpaceRecovery:
         self.attachments = attachments or getattr(files, "attachments", None)
 
     async def _quiesce(self, actor, space_id, generation, operation_id=None, attachment_ids=None):
-        # The installed service denies ADMIN while any native attachment
-        # remains. The explicit provider closes RO handles as well as writers.
+        # Lifecycle actions explicitly close RO handles as well as writers.
+        # Ordinary ADMIN admission no longer proves writer exclusion.
         if self.attachments is not None and attachment_ids != []:
             await self.attachments.retire(actor=actor, space_id=space_id, expected_generation=generation, operation_id=operation_id, attachment_ids=attachment_ids)
+
+    @staticmethod
+    async def _require_fenced(session, space_id):
+        from deerflow.spaces.attachments import SpaceAttachments
+
+        if await SpaceAttachments._current(session, [space_id], lock=True):
+            raise SpaceConflict("The storage attachment must be fenced before this operation")
 
     @staticmethod
     def _advance(session, row, actor, action, details):
@@ -95,6 +102,7 @@ class SpaceRecovery:
                     volume = await self.files._volume(session, row)
                     operation = await session.get(SpaceFileOperationRow, (space_id, operation_id))
                     self.files._same_operation(operation, actor, expected_generation, request)
+                    await self._require_fenced(session, space_id)
                     result = await execute(session, row, grant, volume)
                     operation.phase = "complete"
                     operation.result = {**(operation.result or {}), "value": asdict(result)}
@@ -155,6 +163,7 @@ class SpaceRecovery:
                 operation = await session.get(SpaceFileOperationRow, (space_id, operation_id))
                 if operation.phase != "complete" or operation.result.get("cleanup") != "pending":
                     return
+                await self._require_fenced(session, space_id)
                 volume = await self.files._volume(session, rows[space_id][0])
                 await run_file_io(snapshots.cleanup_restore, volume, operation_id)
                 operation.result = {**operation.result, "cleanup": "complete"}
@@ -226,6 +235,7 @@ class SpaceRecovery:
                 operation = await session.get(SpaceFileOperationRow, (space_id, operation_id))
                 if operation is None or operation.phase != "pending":
                     raise SpaceConflict("No matching pending operation exists")
+                await self._require_fenced(session, space_id)
                 await self.files._volume(session, row)
                 if operation.request.get("action") in ("restore", "delete", "archive"):
                     self._advance(session, row, actor, "recovery", {"operation_id": operation_id, "resolution": "owner-accepted-current-state"})

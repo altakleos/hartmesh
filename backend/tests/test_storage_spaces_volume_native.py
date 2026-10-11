@@ -308,7 +308,7 @@ async def test_real_attachment_fences_children_and_replaces_environment(backing,
     from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceBackupRow, SpaceMountRow
     from deerflow.persistence.spaces.model import SpaceEventRow, SpaceGrantRow, SpaceRow
     from deerflow.spaces.attachments import ResourceMount, SpaceAttachments
-    from deerflow.spaces.contract import Custody, MutationMode, PrincipalRef, ResolvedPrincipal, SpaceConflict
+    from deerflow.spaces.contract import Custody, MutationMode, PrincipalRef, ResolvedPrincipal
     from deerflow.spaces.docker import ATTACHMENT_LABEL, HOST_LABEL, DockerStorageAdapter
     from deerflow.spaces.principals import HostPrincipalResolver
     from deerflow.spaces.recovery import SpaceRecovery
@@ -370,6 +370,8 @@ if os.fork()==0:
         time.sleep(.02)
 while True: time.sleep(.1)
 """
+        if len(containers) == 1:
+            program = "import pathlib,time; pathlib.Path('/mnt/spaces/home/peer').write_text('ready');\nwhile True: time.sleep(.1)"
         result = subprocess.run([*args, image, "python", "-c", program], capture_output=True, text=True, check=True, timeout=30)
         containers.append((result.stdout.strip(), plan.id))
         return result.stdout.strip()
@@ -384,8 +386,12 @@ while True: time.sleep(.1)
         while not (volume.data_path / "child").exists():
             assert asyncio.get_running_loop().time() < deadline, "Native child did not begin writing"
             await asyncio.sleep(0.05)
-        with pytest.raises(SpaceConflict):
-            await mounts.attach(actor=actor, incarnation=uuid.uuid4().hex, resources=[ResourceMount(space.id, 1, "home", writable=True)])
+        await mounts.attach(actor=actor, incarnation=uuid.uuid4().hex, resources=[ResourceMount(space.id, 1, "home", writable=True)])
+        deadline = asyncio.get_running_loop().time() + 15
+        while not (volume.data_path / "peer").exists():
+            assert asyncio.get_running_loop().time() < deadline, "Parallel attachment did not write"
+            await asyncio.sleep(0.05)
+        await files.write(actor=actor, space_id=space.id, expected_generation=1, operation_id=uuid.uuid4().hex, path="host", content=b"host beside two containers", create=True)
         backup = await recovery.backup(actor=actor, space_id=space.id, expected_generation=1, operation_id=uuid.uuid4().hex)
         before = (volume.data_path / "child").read_bytes()
         await asyncio.sleep(0.2)
@@ -419,7 +425,7 @@ async def test_qualified_company_wiki_nonhuman_actor_survives_native_replacement
     from deerflow.persistence.spaces.model import SpaceEventRow, SpaceGrantRow, SpaceRow
     from deerflow.runtime import user_context
     from deerflow.spaces.attachments import ResourceMount, SpaceAttachments
-    from deerflow.spaces.contract import Permission, PrincipalRef, ResolvedPrincipal, SpaceConflict, SpaceDenied
+    from deerflow.spaces.contract import Permission, PrincipalRef, ResolvedPrincipal, SpaceDenied
     from deerflow.spaces.docker import DockerStorageAdapter
     from deerflow.spaces.facade import HostStorageProvider, storage_actor_scope
     from deerflow.spaces.principals import HostPrincipalResolver
@@ -483,8 +489,9 @@ db.commit(); db.close()
         while not (volume.data_path / "indexed").exists():
             assert asyncio.get_running_loop().time() < deadline, "Native wiki index did not become ready"
             await asyncio.sleep(0.05)
-        with storage_actor_scope(worker), pytest.raises(SpaceConflict):
-            await consumer.write(space_id=resource.id, generation=resource.generation, operation_id=uuid.uuid4().hex, path="conflicting-host-edit", content=b"x", create=True)
+        with storage_actor_scope(worker):
+            await consumer.write(space_id=resource.id, generation=resource.generation, operation_id=uuid.uuid4().hex, path="host-edit", content=b"x", create=True)
+        assert (volume.data_path / "host-edit").read_bytes() == b"x"
         await attachments.retire(actor=owner, space_id=resource.id, expected_generation=resource.generation, attachment_ids=[attachment.id])
         program[0] = (
             "import sqlite3,json,time,pathlib; root=pathlib.Path('/mnt/spaces/wiki'); db=sqlite3.connect(root/'index.sqlite'); "
@@ -800,9 +807,10 @@ def test_full_filesystem_edit_leaves_the_existing_file_intact(backing):
     # replacement exceeds this filesystem's total bound, rather than assuming
     # that a small host write must fail at the native writer's earlier limit.
     with volume.filesystem() as fs:
-        with pytest.raises(OSError) as raised:
+        from deerflow.spaces.filesystem import SpaceFull
+
+        with pytest.raises(SpaceFull):
             fs.write_atomic("page", b"x" * volume.spec.max_bytes, expected_sha256=hashlib.sha256(b"before").hexdigest())
-        assert raised.value.errno == errno.ENOSPC
         assert fs.read_bytes("page", max_bytes=100) == b"before"
     assert not list(volume.control_path.glob("stage-*"))
 

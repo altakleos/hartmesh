@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from deerflow.spaces.filesystem import ConfinedFilesystem, FileConflict, FilesystemUnavailable, FileTooLarge, UnsafeSpacePath
+from deerflow.spaces.filesystem import ConfinedFilesystem, FileConflict, FilesystemUnavailable, FileTooLarge, SpaceFull, UnsafeSpacePath
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="This confined filesystem adapter is explicitly Linux-only")
 
@@ -176,7 +176,7 @@ def test_stage_failure_keeps_old_file_and_cleans_private_temporary(fs, roots, mo
         raise OSError(28, "fixture full disk")
 
     monkeypatch.setattr(os, "write", full_disk)
-    with pytest.raises(OSError, match="full disk"):
+    with pytest.raises(SpaceFull, match="no room"):
         fs.write_atomic("page", b"after", expected_sha256=digest(b"before"))
     monkeypatch.setattr(os, "write", original_write)
     assert (data / "page").read_bytes() == b"before"

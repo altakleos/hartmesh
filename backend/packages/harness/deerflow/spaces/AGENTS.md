@@ -73,13 +73,17 @@ rejection rolls back the grant, event and generation together.
 creation. Slot/UUID uniqueness prevents duplicate allocation; used bindings
 are never recycled. Root inodes persist across Gateway restarts. `admitted()`
 locks all scoped parents in sorted order and rechecks authority before I/O.
-File intents commit before filesystem work; uncertain publication/SQL outcomes
-block further operations and metadata changes. Completed IDs bind exact actor,
+File intents commit before filesystem work; uncertain file/feature-workflow
+outcomes block WRITE/OPERATE/ADMIN, while other pending actions block all access.
+Busy refusals carry workflow/lifecycle cause. Completed IDs bind exact actor,
 generation and request. Drain the entire owned mutation before cancellation.
 Cross-space copy needs source READ/EXPORT, destination WRITE, and source ADMIN
 plus explicit acknowledgement when destination readers broaden the audience.
 
-Host edits require an exclusive window with no native attachments. The host-only
+Host edits and multiple native attachments share ordinary filesystem semantics.
+Invalid attachment phases always refuse; pending/fence_pending refuse ADMIN only.
+Lifecycle effects and accepted state explicitly require every attachment fenced
+under the final parent lock, including adapter loss. The host-only
 attachment service reserves durable intents, commits exact container identity
 before activation, and fences by confirmed removal on one qualified Linux Docker
 host. Missing/foreign identity, unknown containment and adapter loss stay pending;
@@ -120,7 +124,10 @@ never change shipped ancestry or erase used custody/grant/event tables.
 
 Host cross-session workflows commit intents before domain effects and hold private
 filesystem locks outside SQL while the feature repository commits. Every core
-admission probes those locks; accepting a live callback as retired is forbidden.
+ADMIN/OPERATE admission probes those locks. Read workflows wait up to five seconds
+for shared locks outside SQL, then revalidate grants, generations, backings and
+controller admission; writing workflows use immediate exclusive locks.
+Accepting a live callback as retired is forbidden. Direct writes do not flock.
 Drain cancellation, preserve unknown results, and distinguish confirmed pre-effect
 rejections. Bounded exact-ID receipts live in private control, never data mounts.
 Default first-party contributions/compatibility/context adapters are under

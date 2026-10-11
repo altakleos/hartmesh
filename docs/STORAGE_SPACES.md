@@ -258,13 +258,12 @@ this is not a snapshot of arbitrary concurrent native/database writes.
 HTML, SVG, XML and other active content are downloads. The editor displays
 literal text and never executes file contents in the HartMesh origin. Access is
 checked on the resource, including when optional authorization is off. Host
-edits require an exclusive window: an existing native attachment must be
-retired first. The default Gateway has no native execution consumer; a trusted
+edits can coexist with active native attachments. The default Gateway has no native execution consumer; a trusted
 host consumer installs the separately qualified attachment adapter.
 
-Browser saves use the loaded SHA-256 inside an exclusive host edit window. A
+Browser saves use the loaded SHA-256 and verify the original inode before replacement. A
 stale file, generation or grant fails without silently overwriting or merging
-the draft. This window is not a general concurrent shell/SQLite transaction
+the draft. This is not a general concurrent shell/SQLite transaction
 protocol. Explicit cross-space copy requires source READ/EXPORT and destination
 WRITE. A broader destination audience additionally requires source ADMIN and
 explicit disclosure acknowledgement. A read grant alone cannot disclose bytes.
@@ -303,7 +302,10 @@ per-file approval/event system. Source-chat deletion has no role in these URLs.
 without changing `0030` ancestry. Used bindings and operation facts cannot be
 downgraded away. Root inode identity is checked after service restarts. An intent
 is durable before file publication; if publication or SQL completion is
-uncertain, subsequent access/metadata mutations fail visibly pending recovery.
+uncertain, further WRITE/OPERATE/ADMIN requests fail visibly pending recovery.
+Ordinary READ/EXPORT requests remain available beside pending file actions and
+feature workflows. Pending copy, controller and lifecycle actions block all
+admissions. A busy refusal carries `workflow` or `lifecycle` as its cause.
 No automatic replay reports success or erases the evidence.
 
 ## Native attachment and containment
@@ -318,22 +320,39 @@ source EXPORT for cross-resource copying and the same audience-disclosure
 admission as explicit transfers.
 
 An attachment can span many executions and parallel application processes.
-There is one writable environment incarnation per resource, rather than one
-task mutex. READ mounts can coexist; applications retain responsibility for
-their own filesystem/database coordination. Host browser edits require all
-attachments to be retired. Generic mediated RW attachment is always denied.
+Multiple writable environment incarnations and Gateway file writes can share a
+resource. Applications coordinate their own filesystem/database writes. The
+Gateway stages and syncs new files before atomic no-replace publication, verifies
+revision and inode before replacing an edit, never truncates in place, and retries
+a changing bounded read once. Invalid persisted attachment phases refuse every
+request; `pending` and `fence_pending` attachments refuse ADMIN only. Lifecycle
+backup, restore, archive, deletion and acceptance of current state still require
+all attachments fenced, even after the attachment adapter is lost. Generic
+mediated RW attachment is always denied.
 
-The initial `DockerStorageAdapter` supports only a direct Linux host whose local
-Unix Docker endpoint and root-owned daemon PID establish the same mount namespace
-as the Gateway. Kernel UNIX socket diagnostics bind the current canonical socket
-inode/device to the listener held by that verified daemon, including inherited
-systemd listeners; the `/var/run` alias must identify the same socket. It refuses
-ambiguous/replaced listeners, alternate/proxied Unix sockets, remote Docker,
-Docker Desktop, namespace-remapped Gateways and unrelated configured mounts.
-Such deployments need a separately qualified daemon-side backing-identity adapter;
-matching pathname strings do not prove matching bytes.
-The local builder helper also rejects restricted-network providers; their
-network controller must be integrated before attaching these resource views.
+Host writing workflows take private exclusive locks without waiting. Reading
+workflows take shared locks and wait at most five seconds across their requested
+resources, outside SQL transactions; current grants, generation and backing
+identity are checked again before the callback. Ordinary WRITE/READ/EXPORT
+admission does not probe these locks; ADMIN/OPERATE does. Direct filesystem
+writes provide no cross-container writer exclusion.
+
+Capacity errors before publication raise `SpaceFull`, a definite file conflict,
+and leave no public entry or stage file. Errors after publication, including
+directory-sync failures, retain an uncertain pending intent for recovery.
+
+The `DockerStorageAdapter` requires a local Linux Docker endpoint with a
+root-owned canonical Unix socket. Existing `/run` and `/var/run` aliases must
+identify the same socket, and replacement during qualification is refused. A
+UID-1000 read-only, network-isolated helper reads an unpredictable nonce file
+through Docker's bind mount to prove that the daemon sees the same pool; the
+same test runs against each bound view before preparation. Exact engine identity
+and endpoint are rechecked without repeating the nonce on lifecycle calls.
+Remote Docker, Docker Desktop, alternate endpoints and writable configured
+mounts remain unsupported. Qualification can run from a containerized Gateway;
+matching pathname strings alone never prove matching bytes. Restricted-network
+or read-only configured-mount execution is refused at prepare/start/resume until
+its topology is integrated; discovery and fencing remain available.
 
 The existing `LocalContainerBackend` builder can prepare a stopped container.
 Its exact immutable ID commits before activation checks or start. Inspection

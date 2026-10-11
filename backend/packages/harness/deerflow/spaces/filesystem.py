@@ -37,6 +37,10 @@ class FileConflict(SpaceConflict):
     """The existing file differs from the revision the caller admitted."""
 
 
+class SpaceFull(FileConflict):
+    """The filesystem has no room; nothing was published."""
+
+
 class FileTooLarge(ValueError):
     """Use the streaming download rather than a bounded in-memory read."""
 
@@ -223,6 +227,7 @@ class ConfinedFilesystem:
             raise ValueError("Creation cannot also name an existing revision")
         parent, name = self._parent(path)
         stage, stage_fd = "stage-" + uuid.uuid4().hex, None
+        published = False
         try:
             old = None
             try:
@@ -261,9 +266,14 @@ class ConfinedFilesystem:
                 if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns) != (old.st_dev, old.st_ino, old.st_size, old.st_mtime_ns, old.st_ctime_ns):
                     raise FileConflict("File changed before replacement")
                 os.replace(stage, name, src_dir_fd=self._control_fd, dst_dir_fd=parent)
+            published = True
             os.fsync(parent)
             os.fsync(self._control_fd)
             return hashlib.sha256(content).hexdigest()
+        except OSError as exc:
+            if not published and exc.errno in (errno.ENOSPC, errno.EDQUOT):
+                raise SpaceFull("The filesystem has no room; nothing was published") from exc
+            raise
         finally:
             if stage_fd is not None:
                 os.close(stage_fd)
@@ -284,6 +294,8 @@ class ConfinedFilesystem:
             error = ctypes.get_errno()
             if error == errno.EEXIST:
                 raise FileConflict("Destination already exists")
+            if error in (errno.ENOSPC, errno.EDQUOT):
+                raise SpaceFull("The filesystem has no room; nothing was published")
             if error in (errno.ENOSYS, errno.EINVAL):
                 raise FilesystemUnavailable("The host cannot supply atomic no-replace publication")
             raise OSError(error, os.strerror(error))
@@ -295,6 +307,10 @@ class ConfinedFilesystem:
                 os.mkdir(name, mode=0o700, dir_fd=parent)
             except FileExistsError:
                 raise FileConflict("Destination already exists") from None
+            except OSError as exc:
+                if exc.errno in (errno.ENOSPC, errno.EDQUOT):
+                    raise SpaceFull("The filesystem has no room; nothing was published") from exc
+                raise
             owner = os.fstat(self._data_fd)
             os.chown(name, owner.st_uid, owner.st_gid, dir_fd=parent, follow_symlinks=False)
             os.fsync(parent)

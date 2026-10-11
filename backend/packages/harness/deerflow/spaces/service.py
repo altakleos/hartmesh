@@ -1,8 +1,8 @@
 """Host resource files with durable admission; no paths or actors from plugins.
 
-Prepared fixed filesystems are the production adapter. Until a qualified native
-attachment provider is installed, new roots admit only this serialized host
-writer. Their SQL operation records preserve uncertain outcomes across restart.
+Prepared fixed filesystems are the production adapter. Native containers and
+host writes share ordinary filesystem semantics; durable SQL operation records
+preserve uncertain outcomes across restart. Lifecycle effects require fencing.
 """
 
 from __future__ import annotations
@@ -38,7 +38,11 @@ class SpaceCapacityExhausted(SpaceConflict):
 
 
 class SpaceOperationPending(StorageOperationPending, SpaceConflict):
-    """An interrupted operation needs explicit recovery before further access."""
+    """An interrupted operation needs recovery before conflicting access."""
+
+    def __init__(self, detail, *, cause="workflow"):
+        super().__init__(detail)
+        self.cause = cause
 
 
 class SpaceFiles:
@@ -58,24 +62,32 @@ class SpaceFiles:
 
         owner = _owner.get()
         for key, (row, _grant) in admitted.items():
-            if owner is None or owner[0] is not self or key not in owner[1]:
+            if requests[key][0] & (Permission.ADMIN | Permission.OPERATE) and (owner is None or owner[0] is not self or key not in owner[1]):
                 await run_file_io(probe, await self._volume(session, row))
         pending = (await session.execute(select(SpaceFileOperationRow).where(SpaceFileOperationRow.space_id.in_(admitted), SpaceFileOperationRow.phase == "pending"))).scalars().all()
-        if any((row.space_id, row.operation_id) != operation_id for row in pending):
-            raise SpaceOperationPending("A file operation has an unconfirmed outcome; recovery is required")
+        for operation in pending:
+            if (operation.space_id, operation.operation_id) == operation_id:
+                continue
+            action = operation.request.get("action") if isinstance(operation.request, dict) else None
+            file_action = isinstance(action, str) and action in {"write", "put", "mkdir", "rename", "remove", "feature-workflow"}
+            if not file_action or requests[operation.space_id][0] & (Permission.WRITE | Permission.OPERATE | Permission.ADMIN):
+                cause = "lifecycle" if action in ("backup", "restore", "archive", "delete", "accept") else "workflow"
+                raise SpaceOperationPending("A file operation has an unconfirmed outcome; recovery is required", cause=cause)
         if self.attachment_guard is not None:
             await self.attachment_guard(session, admitted, requests)
         else:
-            # Adapter loss/restart cannot turn persisted mounts into an
-            # exclusive host edit window. Retain facts until real containment.
+            # Adapter loss retains unconfirmed containment for administrative
+            # admission. Ordinary file access does not require writer exclusion.
             from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceMountRow
 
             attachments = (
                 await session.execute(select(SpaceAttachmentRow, SpaceMountRow).join(SpaceMountRow, SpaceMountRow.attachment_id == SpaceAttachmentRow.id).where(SpaceMountRow.space_id.in_(admitted), SpaceAttachmentRow.phase != "fenced"))
             ).all()
             for attachment, mount in attachments:
-                if attachment.phase != "active" or requests[mount.space_id][0] & (Permission.WRITE | Permission.ADMIN):
-                    raise SpaceOperationPending("Storage attachment provider is required to confirm containment")
+                if attachment.phase not in ("active", "pending", "fence_pending"):
+                    raise SpaceOperationPending("Invalid persisted attachment state", cause="lifecycle")
+                if attachment.phase != "active" and requests[mount.space_id][0] & Permission.ADMIN:
+                    raise SpaceOperationPending("Storage attachment provider is required to confirm containment", cause="lifecycle")
 
     @asynccontextmanager
     async def provisioning(self, *, actor, name, custody, mode, feature=None, kind=None):
@@ -388,7 +400,7 @@ class SpaceFiles:
         return await await_drained(perform())
 
     async def run_read_workflow(self, *, actor, requests, call, controller_admission=None):
-        """Drain a read callback outside SQL while private locks prevent changes."""
+        """Wait outside SQL; shared locks serialize readers against host workflows."""
         from deerflow.spaces.workflows import _owner, _read_only, acquire, close
 
         async def perform():
@@ -400,8 +412,23 @@ class SpaceFiles:
                     if controller_admission is not None:
                         await controller_admission(session, rows)
                     volumes = {key: await self._volume(session, row) for key, (row, _) in rows.items()}
-                    descriptors = await run_file_io(acquire, volumes)
-                    token = _owner.set((self, frozenset(rows)))
+                descriptors = await run_file_io(acquire, volumes, shared=True)
+                token = _owner.set((self, frozenset(volumes)))
+                async with self.registry.admitted(actor=actor, requests=requests) as (session, rows):
+                    if controller_admission is not None:
+                        await controller_admission(session, rows)
+                    for key, (row, _) in rows.items():
+                        current = await self._volume(session, row)
+                        previous = volumes[key]
+                        if (current.spec.slot_id, current.spec.filesystem_uuid, current.root_inode, current.control_inode, current.data_path, current.control_path) != (
+                            previous.spec.slot_id,
+                            previous.spec.filesystem_uuid,
+                            previous.root_inode,
+                            previous.control_inode,
+                            previous.data_path,
+                            previous.control_path,
+                        ):
+                            raise SpaceConflict("The workflow backing changed while waiting")
                 result = await call(volumes)
                 async with self.registry.admitted(actor=actor, requests=requests) as (session, rows):
                     if controller_admission is not None:

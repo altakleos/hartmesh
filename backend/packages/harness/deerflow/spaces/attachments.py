@@ -99,10 +99,8 @@ class SpaceAttachments:
                 continue
             if attachment.phase not in ("active", "pending", "fence_pending"):
                 raise AttachmentPending("Invalid persisted attachment state")
-            if attachment.phase != "active":
+            if attachment.phase != "active" and permission & Permission.ADMIN:
                 raise AttachmentPending("A storage attachment has an unconfirmed outcome")
-            if permission & Permission.ADMIN or (permission & Permission.WRITE and (action is None or mount.writable)):
-                raise SpaceConflict("The storage attachment must be fenced before this operation")
 
     async def _audience(self, session, rows, resources, acknowledgement):
         destinations = [r.space_id for r in resources if r.writable]

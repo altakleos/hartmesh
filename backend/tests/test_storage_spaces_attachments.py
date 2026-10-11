@@ -49,21 +49,20 @@ async def storage(tmp_path, request):
 
 
 @pytest.mark.asyncio
-async def test_attachment_survives_calls_and_blocks_host_editor(storage):
+async def test_attachment_survives_calls_and_coexists_with_host_editor(storage):
     files, sf, _, mounts, provider = storage
     space = await home(files)
     attachment = await mounts.attach(actor=ALICE, incarnation=operation(), resources=[ResourceMount(space.id, 1, "home", writable=True)])
     assert attachment.host_id == provider.host_id and attachment.container_id in provider.started
-    with pytest.raises(SpaceConflict, match="attachment"):
-        await files.write(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=operation(), path="page", content=b"edit", create=True)
+    await files.write(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=operation(), path="page", content=b"edit", create=True)
     restarted = SpaceAttachments(files, provider)
-    with pytest.raises(SpaceConflict):
-        await restarted.attach(actor=ALICE, incarnation=operation(), resources=[ResourceMount(space.id, 1, "new", writable=True)])
+    await restarted.attach(actor=ALICE, incarnation=operation(), resources=[ResourceMount(space.id, 1, "new", writable=True)])
+    assert len(provider.containers) == 2
     await restarted.retire(actor=ALICE, space_id=space.id, expected_generation=1)
     assert not provider.containers
     async with sf() as session:
-        assert (await session.execute(select(SpaceAttachmentRow))).scalar_one().phase == "fenced"
-    await files.write(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=operation(), path="page", content=b"persisted", create=True)
+        assert all(row.phase == "fenced" for row in (await session.execute(select(SpaceAttachmentRow))).scalars())
+    await files.write(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=operation(), path="after", content=b"persisted", create=True)
 
 
 @pytest.mark.asyncio
@@ -109,8 +108,7 @@ async def test_unknown_writer_keeps_retirement_pending_without_expiry(storage):
         assert (await session.execute(select(SpaceAttachmentRow))).scalar_one().phase == "fence_pending"
     with pytest.raises(SpaceConflict):
         await files.registry.set_grant(actor=ALICE, space_id=space.id, expected_generation=1, subject=BOB, permissions=Permission.READ, acknowledge_existing_data=True)
-    with pytest.raises(SpaceConflict):
-        await mounts.attach(actor=ALICE, incarnation=operation(), resources=[ResourceMount(space.id, 1, "takeover", writable=True)])
+    await mounts.attach(actor=ALICE, incarnation=operation(), resources=[ResourceMount(space.id, 1, "parallel", writable=True)])
     provider.uncertain = False
     await mounts.retire(actor=ALICE, space_id=space.id, expected_generation=1)
     assert not provider.containers
@@ -182,8 +180,7 @@ async def test_unknown_prepare_without_discoverable_identity_stays_pending(stora
         await mounts.attach(actor=ALICE, incarnation=operation(), resources=[ResourceMount(space.id, 1, "home", writable=True)])
     with pytest.raises(AttachmentPending, match="identity is unknown"):
         await mounts.retire(actor=ALICE, space_id=space.id, expected_generation=1)
-    with pytest.raises(SpaceConflict):
-        await files.write(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=operation(), path="page", content=b"unsafe", create=True)
+    await files.write(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=operation(), path="page", content=b"host", create=True)
 
 
 @pytest.mark.asyncio
@@ -223,7 +220,7 @@ async def test_explicit_retirement_retry_does_not_stop_replacement(storage):
 
 
 @pytest.mark.asyncio
-async def test_adapter_loss_never_grants_a_host_edit_window(storage):
+async def test_adapter_loss_preserves_file_access_beside_active_attachment(storage):
     from deerflow.spaces.registry import SpaceRegistry
     from deerflow.spaces.service import SpaceFiles
 
@@ -231,8 +228,8 @@ async def test_adapter_loss_never_grants_a_host_edit_window(storage):
     space = await home(files)
     await mounts.attach(actor=ALICE, incarnation=operation(), resources=[ResourceMount(space.id, 1, "home", writable=True)])
     restarted = SpaceFiles(SpaceRegistry(sf, files.registry._resolver), catalog)
-    with pytest.raises(SpaceConflict, match="provider"):
-        await restarted.write(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=operation(), path="page", content=b"racy", create=True)
+    await restarted.write(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=operation(), path="page", content=b"ordinary", create=True)
+    assert await restarted.read(actor=ALICE, space_id=space.id, path="page", max_bytes=100) == b"ordinary"
 
 
 @pytest.mark.asyncio
