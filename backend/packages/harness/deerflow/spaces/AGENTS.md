@@ -133,6 +133,20 @@ rejections. Bounded exact-ID receipts live in private control, never data mounts
 Default first-party contributions/compatibility/context adapters are under
 `features/` and Gateway `storage_features.py`; see the [feature contract](../../../../../docs/STORAGE_SPACES.md#default-first-party-features).
 Migration `0033` persists their opaque unique relationships; no legacy adoption.
+Bundled features now look up role links: `hm.user-space/human:<id>` serves My
+Files and Projects; `hm.company-space/company` serves Shared. They never call
+`ensure`. Namespace folders are under data; staging remains under control.
+Missing links have a distinct structured 503, separate from revoked access.
+`host_locked` is explicit host authority: sorted parent locks, no principal,
+grant or operation admission. Actorless company provisioning uses a private
+boundary and writes no human grant/event. Ordinary creation still requires a
+typed resolving principal. `host_grant` resolves a human, validates nonzero
+mode-specific permissions, requires every attachment fenced and awaits its
+callback under the same transaction, including no-op grants.
+Host-written workflows require active native destinations and still reject
+pending destination intents, despite admitting the human with READ/EXPORT.
+Only the exact own reconciliation intent is exempt. The flag is host-only;
+bundled Shared dispatch, controller and recovery switch together in stage two.
 
 Consumer readiness: [the handoff](../../../../../docs/STORAGE_SPACES_CONSUMER.md)
 maps the public API to functional SQL and mandatory native evidence. The native

@@ -88,8 +88,11 @@ identity, personal/company custody and explicit typed grants. Company custody
 does not make data public. With a qualified provider volume inventory and a
 persistent database, `/workspace/spaces` offers ordinary folders, dotfiles,
 uploads/downloads, text editing and explicit cross-space copies independently
-of chat. When enabled, default My Files, Shared and Projects plugins provision
-fresh qualified resources behind their existing routes. Legacy folders are not
+of chat. Default My Files and Projects plugins look up the assigned user Space;
+Shared looks up the company Space. Feature requests never allocate storage. The
+staged Compose build returns a structured 503 when that assignment is missing;
+automatic assignment and Shared's host-written workflows arrive in the next
+integration stage. Legacy folders are not
 adopted or moved. Shared access requires explicit resource grants; company
 custody does not grant access. Disable a convenience feature without deleting its
 resource; its generic folder remains available under current grants.

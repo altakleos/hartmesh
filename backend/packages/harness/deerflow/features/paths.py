@@ -20,25 +20,25 @@ class FeaturePaths(Paths):
         return self._feature_volumes[namespace]
 
     def user_files_dir(self, user_id):
-        return self._volume("hm.my-files", user_id).data_path
+        return self._volume("hm.my-files", user_id).data_path / "files"
 
     def ensure_user_files_dir(self, user_id):
         return self.user_files_dir(user_id)
 
     def user_files_control_dir(self, user_id):
-        return self._volume("hm.my-files", user_id).control_path
+        return self._volume("hm.my-files", user_id).control_path / "my-files"
 
     def shared_dir(self):
-        return self._volume("hm.shared").data_path
+        return self._volume("hm.shared").data_path / "shared"
 
     def ensure_shared_dir(self):
         return self.shared_dir()
 
     def shared_control_dir(self):
-        return self._volume("hm.shared").control_path
+        return self._volume("hm.shared").control_path / "shared"
 
     def user_projects_dir(self, user_id):
-        return self._volume("hm.projects", user_id).data_path
+        return self._volume("hm.projects", user_id).data_path / "projects"
 
     def project_staging_dir(self, user_id, project_id):
         _path(project_id)

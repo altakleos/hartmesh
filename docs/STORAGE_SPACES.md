@@ -424,14 +424,23 @@ transactions at capacity; see the [consumer evidence](STORAGE_SPACES_CONSUMER.md
 Enabling `storage_spaces` loads three ordinary extension entries by default:
 `deerflow.features.plugins:install_my_files`, `:install_shared` and
 `:install_projects`. Explicit entries in `plugins` override their defaults,
-including `enabled: false` to omit a feature. Each supplies a business resource
+including `enabled: false` to omit a feature. Each supplies a resource
 action and the existing app-scoped service lifecycle. Shared also supplies an
 exact controller recovery action. There is one loader and no feature installer.
 
-My Files and Projects each link an owner to one private native resource. The
-relationship is persisted atomically with resource/backing creation; rename,
-restart and feature disable preserve IDs. Revoked or deleted links do not lazily
-allocate replacement roots. Projects remain owner-filtered conversation groups
+My Files and Projects look up the same assigned user resource through
+`("hm.user-space", "human:<id>")`; Shared looks up
+`("hm.company-space", "company")`. There is one role link per resource,
+persisted atomically with assignment; feature requests never allocate or replace
+it. The table keeps its shape and unique resource constraint, with no migration.
+Rename, restart and feature disable preserve IDs. Missing assignments answer 503
+`storage-unavailable` with `space-not-assigned` and a public message; revoked or
+deleted assigned resources retain the ordinary inaccessible outcome. Backing
+verification failures answer 503 `space-unverified`, with no private host path.
+My Files, Shared and Projects use `data/files`, `data/shared` and `data/projects`;
+private state uses `control/my-files`, `control/shared`,
+`control/project-staging/<id>` and `control/project-conversion`.
+Projects remain owner-filtered conversation groups
 and shelves: sharing a resource does not broaden project metadata audiences.
 Instructions/indexes remain transient, untrusted and resolved at run admission.
 Shelf content is hash checked in resource mode. Retention purges referenced trash
@@ -439,14 +448,31 @@ under its existing rules and collects private staging; it never deletes ordinary
 native files as apparent feature orphans. Project archive/restore updates project
 metadata without permanently archiving/tombstoning its backing resource.
 
-Shared is a company-custodied mediated resource bound to the `hm.shared`
-`publication` controller version 1. Its first provisioning requires current
-company provisioning authority. Only persisted explicit grants admit additional
+In this staged build, Shared retains its mediated `hm.shared` publication
+controller version 1. Automatic company/user assignment and the complete
+host-written Shared protocol switch are not activated yet. Operator integrations
+can explicitly assign a compatible resource; convenience routes never provision
+one. Only persisted explicit grants admit additional
 readers/publishers; use ordinary resource ADMIN grant requests with acknowledgement
 of existing data. READ/EXPORT permit settled browsing and downloads, OPERATE admits
 publication/removal, and controller recovery also requires ADMIN. Company custody
 itself grants no access and no ordinary user can bootstrap company authority.
 Generic writes and writable resource attachments remain denied for Shared.
+
+The kernel now supplies explicit host transactions and assignment helpers.
+`host_locked` locks scoped parents in sorted order without resolving a human
+grant or invoking the ordinary operation guard. Private actorless company
+creation writes no human grant or event. `host_grant` requires a resolving human,
+nonzero mode-compatible permissions and every attachment fenced; its optional
+admission callback runs inside the transaction before writes or a no-op result.
+The grant, generation and attributed event commit together.
+
+An explicit host-write workflow admits the human with READ/EXPORT and records
+`by: host`, while requiring an active native destination and rejecting unresolved
+destination intents. Only its exact reconciliation intent is exempt; source-only
+reads remain available. This is a host API, not a browser/extension capability.
+The bundled Shared dispatcher keeps its existing protocol until the integration
+switch; automatic startup callers are introduced in the next stage.
 
 Compatibility Keep/Publish/Remove calls use the installed enabled service plus
 current resource permissions. Publication from My Files also requires source
