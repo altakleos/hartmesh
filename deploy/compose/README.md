@@ -42,6 +42,22 @@ Nothing in the bundle relies on being executable: every script `compose.yaml`
 runs is invoked as `sh /opt/hartmesh/...`, and the operator tools under
 `scripts/` are invoked as `bash scripts/...` (their headers say so).
 
+## Storage and agents
+
+The data disk must be a shared mount before starting this profile, including
+when the storage keys are absent. Both the one-shot and Gateway use an `rslave`
+bind so mounts made in the host namespace become visible inside the containers.
+Check before `up`:
+
+```bash
+findmnt -no PROPAGATION --target /srv/hartmesh
+```
+
+The result must be `shared`. If it is not, an administrator runs
+`mount --make-shared /srv/hartmesh` on the VM and adds `shared` to the data disk's
+mount options in `/etc/fstab` so the setting survives a reboot. An unshared
+mount causes Docker to refuse the bind before the Gateway starts.
+
 ## The `.env` contract
 
 The operator writes exactly these keys; the profile consumes them and needs no

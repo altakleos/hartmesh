@@ -115,6 +115,22 @@ CAPACITY_WAIT_RANGE = (0, 60)
 SIGN_ON_CLOCK_SKEW_RANGE = (0, 300)
 SIGN_ON_DEFAULT_CLOCK_SKEW = 60
 _WHOLE_SECONDS = re.compile(r"\A[0-9]+\Z")
+USERS_ENV = "HARTMESH_USERS"
+USER_STORAGE_ENV = "HARTMESH_USER_STORAGE_GIB"
+AI_ASSISTANTS_PER_USER_ENV = "HARTMESH_AI_ASSISTANTS_PER_USER"
+AI_ASSISTANT_STORAGE_ENV = "HARTMESH_AI_ASSISTANT_STORAGE_GIB"
+AI_EMPLOYEES_ENV = "HARTMESH_AI_EMPLOYEES"
+AI_EMPLOYEE_STORAGE_ENV = "HARTMESH_AI_EMPLOYEE_STORAGE_GIB"
+COMPANY_STORAGE_ENV = "HARTMESH_COMPANY_STORAGE_GIB"
+USERS_RANGE = (1, 100)
+ASSISTANTS_PER_USER_RANGE = (0, 10)
+EMPLOYEES_RANGE = (0, 100)
+CAPACITY_RANGE = (1, 1024)
+# This renderer stays independent of backend imports. Offline tests check the
+# mirrors; the absent-key default and agent admission flip in later stages.
+MAX_SPACES = 256  # mirrors deerflow.spaces.provision
+ABSENT_MEANS_DEFAULT = False  # mirrors app.gateway.storage_init
+AGENT_COUNTS_ACTIVE = False
 MODELS_ENV = "HARTMESH_MODELS_FILE"
 # ── Sign-in mode ────────────────────────────────────────────────────────────
 SIGN_ON_ISSUER_ENV = "HARTMESH_SIGN_ON_ISSUER"
@@ -461,6 +477,88 @@ def _references(value: object, found: set[str]) -> None:
     elif isinstance(value, list):
         for item in value:
             _references(item, found)
+
+
+def _select_storage_integer(environ: Mapping[str, str], key: str, bounds: tuple[int, int], *, capacity: bool = False) -> int | None:
+    raw = environ.get(key, "").strip()
+    if not raw:
+        return None
+    low, high = bounds
+    unit = " of GiB" if capacity else ""
+    error = f"{key} must be a whole number{unit} from {low} to {high} (or absent)"
+    if key == AI_EMPLOYEES_ENV:
+        error += "; on and off are not values of this key"
+    if not _WHOLE_SECONDS.fullmatch(raw) or len(raw) > 6 or not low <= int(raw) <= high:
+        raise RenderError(error)
+    return int(raw)
+
+
+def select_users(environ: Mapping[str, str]) -> int | None:
+    return _select_storage_integer(environ, USERS_ENV, USERS_RANGE)
+
+
+def select_user_storage_gib(environ: Mapping[str, str]) -> int | None:
+    return _select_storage_integer(environ, USER_STORAGE_ENV, CAPACITY_RANGE, capacity=True)
+
+
+def select_ai_assistants_per_user(environ: Mapping[str, str]) -> int | None:
+    return _select_storage_integer(environ, AI_ASSISTANTS_PER_USER_ENV, ASSISTANTS_PER_USER_RANGE)
+
+
+def select_ai_assistant_storage_gib(environ: Mapping[str, str]) -> int | None:
+    return _select_storage_integer(environ, AI_ASSISTANT_STORAGE_ENV, CAPACITY_RANGE, capacity=True)
+
+
+def select_ai_employees(environ: Mapping[str, str]) -> int | None:
+    return _select_storage_integer(environ, AI_EMPLOYEES_ENV, EMPLOYEES_RANGE)
+
+
+def select_ai_employee_storage_gib(environ: Mapping[str, str]) -> int | None:
+    return _select_storage_integer(environ, AI_EMPLOYEE_STORAGE_ENV, CAPACITY_RANGE, capacity=True)
+
+
+def select_company_storage_gib(environ: Mapping[str, str]) -> int | None:
+    return _select_storage_integer(environ, COMPANY_STORAGE_ENV, CAPACITY_RANGE, capacity=True)
+
+
+def _storage_sections(document: dict[str, Any], environ: Mapping[str, str]) -> None:
+    for section, keys in (("agents_api", "HARTMESH_AI_ASSISTANTS_PER_USER and HARTMESH_AI_EMPLOYEES"), ("storage_spaces", "HARTMESH_USERS and the capacity keys")):
+        if section in document:
+            raise RenderError(f"template `{section}` must be absent; {keys} select it")
+    values = {
+        "users": select_users(environ),
+        "user_gib": select_user_storage_gib(environ),
+        "ai_assistants_per_user": select_ai_assistants_per_user(environ),
+        "ai_assistant_gib": select_ai_assistant_storage_gib(environ),
+        "ai_employees": select_ai_employees(environ),
+        "ai_employee_gib": select_ai_employee_storage_gib(environ),
+        "company_gib": select_company_storage_gib(environ),
+    }
+    enabled = values["users"] is not None or ABSENT_MEANS_DEFAULT
+    defaults = {"users": 10, "user_gib": 1, "ai_assistants_per_user": 1 if ABSENT_MEANS_DEFAULT else 0, "ai_assistant_gib": 1, "ai_employees": 10 if ABSENT_MEANS_DEFAULT else 0, "ai_employee_gib": 1, "company_gib": 1}
+    plan = {key: default if values[key] is None else values[key] for key, default in defaults.items()} if enabled else None
+    if plan is not None:
+        users, assistants, employees = plan["users"], plan["ai_assistants_per_user"], plan["ai_employees"]
+        count = users * (1 + assistants) + employees + 1
+        if count > MAX_SPACES:
+            raise RenderError(f"the keys call for {count} Spaces ({users} users, {users} x {assistants} AI assistants, {employees} AI employees, the company); at most {MAX_SPACES} can be prepared on one VM")
+    inventory = str(Path(environ.get("HARTMESH_DATA_DIR", "/srv/hartmesh")) / "spaces" / "inventory.v2.json")
+    document["storage_spaces"] = {"enabled": enabled, "inventory_path": inventory, "user_spaces": False, "plan": plan}
+    document["agents_api"] = {"enabled": enabled, "ai_assistants_per_user": plan["ai_assistants_per_user"] if enabled and AGENT_COUNTS_ACTIVE else 0, "ai_employees": plan["ai_employees"] if enabled and AGENT_COUNTS_ACTIVE else 0}
+
+
+def storage_summary(document: Mapping[str, Any]) -> str:
+    storage = document["storage_spaces"]
+    if not storage["enabled"]:
+        return "spaces=off; "
+    plan, agents = storage["plan"], document["agents_api"]
+    state = "on" if agents["ai_assistants_per_user"] or agents["ai_employees"] else "none"
+    return (
+        f"spaces: users {plan['users']} x {plan['user_gib']} GiB, "
+        f"assistants {plan['ai_assistants_per_user']} per user x {plan['ai_assistant_gib']} GiB, "
+        f"employees {plan['ai_employees']} x {plan['ai_employee_gib']} GiB, "
+        f"company {plan['company_gib']} GiB; agents={state}; "
+    )
 
 
 def select_egress(environ: Mapping[str, str]) -> str:
@@ -868,6 +966,7 @@ def render(
     if name is not None:
         ui["product_name"] = name
     document["ui"] = ui
+    _storage_sections(document, environ)
 
     problems: list[str] = []
     _credential_problems(document, (), problems)
@@ -945,7 +1044,7 @@ def main(argv: list[str] | None = None) -> int:
         sign_in_line += f" (provider {SIGN_ON_PROVIDER_ID}, callback https://{os.environ[PUBLIC_HOST_ENV].strip()}/api/v1/auth/callback/{SIGN_ON_PROVIDER_ID}{membership})"
     else:
         sign_in_line += f" (registration {select_local_registration(os.environ)})"
-    summary = f"models from {source}; egress={select_egress(os.environ)}; {sign_in_line}; provider keys found: {providers}; sandbox ready_timeout={budget}s, capacity_wait_timeout={slot_wait}s; {bundle_line}"
+    summary = f"models from {source}; egress={select_egress(os.environ)}; {storage_summary(document)}{sign_in_line}; provider keys found: {providers}; sandbox ready_timeout={budget}s, capacity_wait_timeout={slot_wait}s; {bundle_line}"
     if args.check:
         print(f"render_config: {args.template} renders ({summary})")
         return 0
