@@ -21,6 +21,8 @@
 #     both, a half-set group, or local passwords without the registration key
 #     refuses to render (README: "Sign-in").
 #
+# Storage planning and agent counts come only from the seven HARTMESH storage
+# keys; the renderer writes storage_spaces and agents_api whole.
 # Everything else is copied through unchanged. Paths are literal because this
 # file cannot interpolate them: HARTMESH_DATA_DIR is therefore fixed at
 # /srv/hartmesh by this file (README: "Mount points").

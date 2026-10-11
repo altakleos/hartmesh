@@ -58,6 +58,14 @@ projection; projection failures return unavailable defaults. The deployment's
 `user_spaces` flag now refuses generic Space creation while retaining host
 assignment. No additional schema or configuration version changes.
 
+The Compose profile renders the seven optional storage settings and prepares
+typed pools through a bounded, privileged `storage-init` one-shot. Gateway and
+one-shot pool binds require shared propagation on the data disk, even when the
+settings are absent; check the Compose README before starting. The release pin
+rewrites both services and the Gateway helper image together. Storage stays off
+with `HARTMESH_USERS` absent and agent creation counts remain zero. No additional
+schema or configuration version changes.
+
 ## [2.2.0+hartmesh.45] - 2026-10-09
 
 ### AI employee Work and supervision

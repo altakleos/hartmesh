@@ -370,6 +370,13 @@ source/harness hashes, and clean images only after both runs. The final tracked
 snapshot detects source drift. `pair-result.json` supplements each schema-2
 profile receipt; it does not replace published-candidate admission evidence.
 
+## Compose image pinning
+
+`pin_compose_images.py` tracks `image`, `proxy_image` and the Gateway's
+`HARTMESH_STORAGE_INIT_IMAGE` together. All three backend references (Gateway,
+storage preparation service, mount helper) use the same release digest; the
+unique image list gains no duplicate line.
+
 ## Release artifact admission
 
 `release_artifacts.py` admits only canonical `X.Y.Z+hartmesh.N` candidates;

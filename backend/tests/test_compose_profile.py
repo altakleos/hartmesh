@@ -50,7 +50,9 @@ CONTRACT_KEYS = {
     "REDIS_PASSWORD",
     "AUTH_JWT_SECRET",
 }
-SERVICES = {"gateway", "frontend", "nginx", "postgres", "redis", "searxng"}
+SERVICES = {"gateway", "frontend", "nginx", "postgres", "redis", "searxng", "storage-init"}
+ONE_SHOT_SERVICES = {"storage-init"}
+STORAGE_INIT_KEYS = {"HARTMESH_USERS", "HARTMESH_USER_STORAGE_GIB", "HARTMESH_AI_ASSISTANTS_PER_USER", "HARTMESH_AI_ASSISTANT_STORAGE_GIB", "HARTMESH_AI_EMPLOYEES", "HARTMESH_AI_EMPLOYEE_STORAGE_GIB", "HARTMESH_COMPANY_STORAGE_GIB"}
 # Optional keys compose.yaml itself interpolates; each must carry its own
 # default so an existing tenant .env that never heard of it still renders.
 OPTIONAL_KEYS = {"HARTMESH_APP_SUBNET", "HARTMESH_SANDBOX_RESOLV_CONF"}
@@ -226,12 +228,12 @@ def test_resolver_override_is_only_for_open_runsc(render_config: ModuleType, tmp
 # ── compose.yaml ─────────────────────────────────────────────────────────────
 
 
-def test_profile_declares_exactly_the_six_services_and_no_named_volumes(compose: dict) -> None:
+def test_profile_declares_the_six_services_the_storage_one_shot_and_no_named_volumes(compose: dict) -> None:
     assert compose["name"] == "hartmesh"
     assert set(compose["services"]) == SERVICES
     assert "volumes" not in compose, "named volumes would live on the root disk, which is not tenant data"
     for name, service in compose["services"].items():
-        assert service.get("restart") == "unless-stopped", name
+        assert service.get("restart") == ("no" if name in ONE_SHOT_SERVICES else "unless-stopped"), name
         assert "logging" not in service, f"{name}: the daemon's journald default must not be overridden"
 
 
@@ -438,6 +440,10 @@ def test_bind_mounts_stay_under_the_data_directory_or_the_read_only_bundle(compo
                     assert volume == {"type": "bind", "source": "${HARTMESH_SANDBOX_RESOLV_CONF:-/run/systemd/resolve/resolv.conf}", "target": "/run/hartmesh-host-resolv.conf", "read_only": True, "bind": {"create_host_path": False}}
                     assert service["environment"]["HARTMESH_SANDBOX_RESOLV_CONF"] == volume["source"]
                     continue
+                if volume.get("source") == "${HARTMESH_DATA_DIR}/spaces":
+                    assert name in {"gateway", "storage-init"}
+                    assert volume == {"type": "bind", "source": "${HARTMESH_DATA_DIR}/spaces", "target": "${HARTMESH_DATA_DIR}/spaces", "bind": {"propagation": "rslave", "create_host_path": True}}
+                    continue
                 assert volume["type"] == "tmpfs", (name, volume)
                 continue
             source, _, rest = volume.partition(":")
@@ -616,8 +622,9 @@ def test_gateway_wiring_follows_the_contract(compose: dict) -> None:
 
 def test_sandbox_network_is_declared_and_joined_by_no_service(compose: dict) -> None:
     assert set(compose["networks"]) == {"app", "sandbox"}
-    for name, service in compose["services"].items():
-        assert service["networks"] == ["app"], name
+    assert {name for name, service in compose["services"].items() if service.get("networks") == ["app"]} == SERVICES - ONE_SHOT_SERVICES
+    assert compose["services"]["storage-init"]["network_mode"] == "none"
+    assert "networks" not in compose["services"]["storage-init"]
     run = (PROFILE / "gateway" / "run.sh").read_text(encoding="utf-8")
     assert 'docker network create --driver bridge -o com.docker.network.bridge.enable_icc=false "$DEER_FLOW_SANDBOX_NETWORK"' in run, "under open, peers must not reach each other on the bridge"
     assert 'docker network inspect "$DEER_FLOW_SANDBOX_NETWORK"' in run
@@ -693,7 +700,7 @@ def test_datastores_run_as_the_data_directory_owner_with_relaxed_durability(comp
     assert "--appendfsync everysec" in redis["command"][-1]
     assert "--maxmemory 128mb --maxmemory-policy volatile-lru" in redis["command"][-1], "maxmemory is half the cgroup so an AOF rewrite fork fits; only TTL keys are evictable"
     assert "$$REDIS_PASSWORD" in redis["command"][-1]
-    assert compose["services"]["gateway"]["depends_on"] == {"postgres": {"condition": "service_healthy"}, "redis": {"condition": "service_healthy"}}
+    assert compose["services"]["gateway"]["depends_on"] == {"postgres": {"condition": "service_healthy"}, "redis": {"condition": "service_healthy"}, "storage-init": {"condition": "service_completed_successfully", "required": False}}
 
 
 # ── the .env contract ────────────────────────────────────────────────────────
@@ -739,7 +746,7 @@ def test_env_example_lists_exactly_the_fixed_contract_keys() -> None:
     keys = {line.split("=", 1)[0] for line in lines if line and not line.startswith("#")}
     assert keys == CONTRACT_KEYS | SIGN_ON_KEYS, "the example shows sign-on-only mode"
     comments = [line for line in lines if line.startswith("#")]
-    assert len(comments) == 10
+    assert len(comments) == 20
     assert "sign-on-only" in comments[0] and LOCAL_PASSWORDS_KEY in comments[0] and "callback" in comments[0]
     assert "Membership follows the claim" in comments[1] and "HARTMESH_SIGN_ON_ROLES" in comments[1]
     assert [line.split("=", 1)[0] for line in comments[2:5]] == ["#HARTMESH_SIGN_ON_ACCESS_CLAIM", "#HARTMESH_SIGN_ON_ACCESS_VALUES", "#HARTMESH_SIGN_ON_ROLES"], "the optional access keys are shown commented out"
@@ -751,7 +758,19 @@ def test_env_example_lists_exactly_the_fixed_contract_keys() -> None:
     assert "Optional keys" in comments[7] and "HartMesh" in comments[7]
     assert comments[8] == "#HARTMESH_PRODUCT_NAME=HartMesh", "optional, shown commented out with the name it already has"
     # Last: the provider keys onboarding appends follow it directly.
-    assert "verbatim" in comments[9] and "subset" in comments[9]
+    assert "Storage and agents" in comments[9]
+    assert "Needed =" in comments[10]
+    assert "31 GiB plus 5 GiB" in comments[11]
+    assert comments[12:19] == [
+        "#HARTMESH_USERS=10",
+        "#HARTMESH_USER_STORAGE_GIB=1",
+        "#HARTMESH_AI_ASSISTANTS_PER_USER=1",
+        "#HARTMESH_AI_ASSISTANT_STORAGE_GIB=1",
+        "#HARTMESH_AI_EMPLOYEES=10",
+        "#HARTMESH_AI_EMPLOYEE_STORAGE_GIB=1",
+        "#HARTMESH_COMPANY_STORAGE_GIB=1",
+    ]
+    assert "verbatim" in comments[19] and "subset" in comments[19]
     values = dict(line.split("=", 1) for line in lines if line and not line.startswith("#"))
     assert values["HARTMESH_TRUSTED_PROXIES"] == "192.0.2.10,192.0.2.11"
     assert values["HARTMESH_PUBLIC_HOST"] == "tenant.example.com"
@@ -781,13 +800,13 @@ def test_compose_renders_one_subnet_into_both_places_with_and_without_the_overri
         assert rendered["networks"]["app"]["ipam"]["config"][0]["subnet"] == expected
         assert rendered["services"]["gateway"]["environment"]["AUTH_TRUSTED_PROXIES"] == expected
         assert {name for name, service in rendered["services"].items() if service.get("ports")} == {"nginx"}
-        assert {name for name, service in rendered["services"].items() if list(service["networks"]) == ["app"]} == SERVICES
+        assert {name for name, service in rendered["services"].items() if list(service.get("networks", {})) == ["app"]} == SERVICES - ONE_SHOT_SERVICES
 
 
 def test_profile_consumes_no_key_outside_the_contract() -> None:
     source = COMPOSE.read_text(encoding="utf-8")
     referenced = set(_ENV_REFERENCE.findall(source))
-    assert referenced <= CONTRACT_KEYS | OPTIONAL_KEYS | COMMAND_ENVIRONMENT_KEYS, referenced - CONTRACT_KEYS - OPTIONAL_KEYS - COMMAND_ENVIRONMENT_KEYS
+    assert referenced <= CONTRACT_KEYS | OPTIONAL_KEYS | COMMAND_ENVIRONMENT_KEYS | STORAGE_INIT_KEYS, referenced - CONTRACT_KEYS - OPTIONAL_KEYS - COMMAND_ENVIRONMENT_KEYS - STORAGE_INIT_KEYS
     for key in COMMAND_ENVIRONMENT_KEYS:
         # Absent is a supported state (keys cannot be set in the product), so
         # the only default is empty, and the Gateway is the only reader.
@@ -802,7 +821,7 @@ def test_profile_consumes_no_key_outside_the_contract() -> None:
     seams = {"HARTMESH_RENDER_ONLY", "HARTMESH_NGINX_SOURCE", "HARTMESH_NGINX_TARGET"}
     for path in (PROFILE / "gateway" / "run.sh", PROFILE / "gateway" / "entrypoint.sh", PROFILE / "gateway" / "render_config.py", PROFILE / "nginx" / "render.sh"):
         names = set(contract_like.findall(path.read_text(encoding="utf-8"))) - seams
-        allowed = CONTRACT_KEYS | OPTIONAL_KEYS | PASSTHROUGH_KEYS | MODE_KEYS
+        allowed = CONTRACT_KEYS | OPTIONAL_KEYS | PASSTHROUGH_KEYS | MODE_KEYS | STORAGE_INIT_KEYS
         assert names <= allowed, (path.name, names - allowed)
 
 
@@ -1372,3 +1391,190 @@ def test_role_identifier_exception_does_not_allow_credentials(render_config: Mod
     with pytest.raises(render_config.RenderError, match="credential fields") as exc:
         render_config.render_text(yaml.safe_dump(template), render_config.load_catalog(CATALOG), _base_environ())
     assert "must-not-be-copied" not in str(exc.value)
+
+
+# Storage rendering and preparation are offline contracts. Native filesystem
+# admission is covered separately by the Linux Docker acceptance tier.
+STORAGE_ENV_KEYS = {
+    "HARTMESH_USERS": ("users", 1, 100, ""),
+    "HARTMESH_USER_STORAGE_GIB": ("user_gib", 1, 1024, " of GiB"),
+    "HARTMESH_AI_ASSISTANTS_PER_USER": ("ai_assistants_per_user", 0, 10, ""),
+    "HARTMESH_AI_ASSISTANT_STORAGE_GIB": ("ai_assistant_gib", 1, 1024, " of GiB"),
+    "HARTMESH_AI_EMPLOYEES": ("ai_employees", 0, 100, ""),
+    "HARTMESH_AI_EMPLOYEE_STORAGE_GIB": ("ai_employee_gib", 1, 1024, " of GiB"),
+    "HARTMESH_COMPANY_STORAGE_GIB": ("company_gib", 1, 1024, " of GiB"),
+}
+
+
+def test_template_carries_no_storage_spaces_and_no_agents_api_entry() -> None:
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    assert "storage_spaces" not in template and "agents_api" not in template
+    assert not any(plugin.get("use", "").endswith((":install_my_files", ":install_shared", ":install_projects")) for plugin in template["plugins"])
+
+
+def test_render_config_mirrors_the_storage_constants(render_config: ModuleType) -> None:
+    import ast
+
+    def assignment(path: Path, name: str):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        return next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets))
+
+    assert render_config.MAX_SPACES == assignment(REPO_ROOT / "backend/packages/harness/deerflow/spaces/provision.py", "MAX_SPACES") == 256
+    assert render_config.ABSENT_MEANS_DEFAULT == assignment(REPO_ROOT / "backend/app/gateway/storage_init.py", "ABSENT_MEANS_DEFAULT") is False
+    assert render_config.AGENT_COUNTS_ACTIVE is False
+
+
+@pytest.mark.parametrize("raw", [None, "", "  "])
+def test_render_keeps_storage_off_while_users_is_absent(render_config: ModuleType, raw: str | None) -> None:
+    env = {**_base_environ(), "HARTMESH_AI_EMPLOYEES": "8"}
+    if raw is not None:
+        env["HARTMESH_USERS"] = raw
+    document, _ = render_config.render(yaml.safe_load(TEMPLATE.read_text(encoding="utf-8")), (), env)
+    assert document["storage_spaces"] == {"enabled": False, "inventory_path": "/srv/hartmesh/spaces/inventory.v2.json", "user_spaces": False, "plan": None}
+    assert document["agents_api"] == {"enabled": False, "ai_assistants_per_user": 0, "ai_employees": 0}
+
+
+@pytest.mark.parametrize("extras,counts", [({}, (0, 0)), ({"HARTMESH_AI_ASSISTANTS_PER_USER": "2", "HARTMESH_AI_EMPLOYEES": "3"}, (2, 3)), ({"HARTMESH_AI_ASSISTANTS_PER_USER": "0", "HARTMESH_AI_EMPLOYEES": "0"}, (0, 0))])
+def test_render_writes_the_plan_from_the_seven_keys_with_their_defaults(render_config: ModuleType, extras: dict, counts: tuple) -> None:
+    env = {**_base_environ(), "HARTMESH_USERS": " 10 ", **extras}
+    document, _ = render_config.render(yaml.safe_load(TEMPLATE.read_text(encoding="utf-8")), (), env)
+    assert document["storage_spaces"] == {
+        "enabled": True,
+        "inventory_path": "/srv/hartmesh/spaces/inventory.v2.json",
+        "user_spaces": False,
+        "plan": {"users": 10, "user_gib": 1, "ai_assistants_per_user": counts[0], "ai_assistant_gib": 1, "ai_employees": counts[1], "ai_employee_gib": 1, "company_gib": 1},
+    }
+    assert document["agents_api"] == {"enabled": True, "ai_assistants_per_user": 0, "ai_employees": 0}
+
+
+def test_render_keeps_requested_capacities_and_inventory_host_path(render_config: ModuleType) -> None:
+    env = {**_base_environ(), "HARTMESH_DATA_DIR": "/srv/other", "HARTMESH_USERS": "3", **{key: "7" for key, (field, *_rest) in STORAGE_ENV_KEYS.items() if field.endswith("gib")}}
+    document, _ = render_config.render(yaml.safe_load(TEMPLATE.read_text(encoding="utf-8")), (), env)
+    storage = document["storage_spaces"]
+    assert storage["inventory_path"] == "/srv/other/spaces/inventory.v2.json"
+    assert all(storage["plan"][field] == 7 for field, *_rest in STORAGE_ENV_KEYS.values() if field.endswith("gib"))
+
+
+@pytest.mark.parametrize("key", list(STORAGE_ENV_KEYS))
+@pytest.mark.parametrize("raw", ["-1", "1025", "on", "off", "1.5", "+1", "1e1", "١", "9" * 5000])
+def test_render_refuses_each_key_outside_its_range_with_its_text(render_config: ModuleType, key: str, raw: str) -> None:
+    _field, low, high, unit = STORAGE_ENV_KEYS[key]
+    expected = f"{key} must be a whole number{unit} from {low} to {high} (or absent)"
+    if key == "HARTMESH_AI_EMPLOYEES":
+        expected += "; on and off are not values of this key"
+    with pytest.raises(render_config.RenderError) as exc:
+        render_config.render(yaml.safe_load(TEMPLATE.read_text(encoding="utf-8")), (), {**_base_environ(), key: raw})
+    assert str(exc.value) == expected
+
+
+def test_render_refuses_a_plan_above_256_spaces(render_config: ModuleType) -> None:
+    with pytest.raises(render_config.RenderError) as exc:
+        render_config.render(yaml.safe_load(TEMPLATE.read_text(encoding="utf-8")), (), {**_base_environ(), "HARTMESH_USERS": "100", "HARTMESH_AI_ASSISTANTS_PER_USER": "10", "HARTMESH_AI_EMPLOYEES": "100"})
+    assert str(exc.value) == "the keys call for 1201 Spaces (100 users, 100 x 10 AI assistants, 100 AI employees, the company); at most 256 can be prepared on one VM"
+
+
+@pytest.mark.parametrize("key", list(STORAGE_ENV_KEYS))
+def test_each_storage_selector_enforces_its_inclusive_bounds(render_config: ModuleType, key: str) -> None:
+    selectors = {
+        "users": "users",
+        "user_gib": "user_storage_gib",
+        "ai_assistants_per_user": "ai_assistants_per_user",
+        "ai_assistant_gib": "ai_assistant_storage_gib",
+        "ai_employees": "ai_employees",
+        "ai_employee_gib": "ai_employee_storage_gib",
+        "company_gib": "company_storage_gib",
+    }
+    field, low, high, _unit = STORAGE_ENV_KEYS[key]
+    select_value = getattr(render_config, "select_" + selectors[field])
+    assert select_value({}) is None and select_value({key: " "}) is None
+    for value in (low, high):
+        assert select_value({key: f" {value} "}) == value
+    for value in (low - 1, high + 1):
+        with pytest.raises(render_config.RenderError):
+            select_value({key: str(value)})
+
+
+def test_template_checks_precede_storage_selectors(render_config: ModuleType) -> None:
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    template.update(agents_api={}, storage_spaces={})
+    with pytest.raises(render_config.RenderError) as exc:
+        render_config.render(template, (), {**_base_environ(), "HARTMESH_USERS": "bad"})
+    assert str(exc.value) == "template `agents_api` must be absent; HARTMESH_AI_ASSISTANTS_PER_USER and HARTMESH_AI_EMPLOYEES select it"
+
+
+@pytest.mark.parametrize("section,keys", [("storage_spaces", "HARTMESH_USERS and the capacity keys"), ("agents_api", "HARTMESH_AI_ASSISTANTS_PER_USER and HARTMESH_AI_EMPLOYEES")])
+@pytest.mark.parametrize("value", [None, {}, {"enabled": False}])
+def test_render_refuses_a_template_that_names_storage_spaces_or_agents_api(render_config: ModuleType, section: str, keys: str, value: object) -> None:
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    template[section] = value
+    with pytest.raises(render_config.RenderError) as exc:
+        render_config.render(template, (), _base_environ())
+    assert str(exc.value) == f"template `{section}` must be absent; {keys} select it"
+
+
+@pytest.mark.parametrize("check", [False, True])
+def test_summary_line_reports_the_spaces_and_the_agents(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], check: bool) -> None:
+    for key in STORAGE_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    for key, value in _base_environ().items():
+        monkeypatch.setenv(key, value)
+    args = ["--template", str(TEMPLATE), "--catalog", str(CATALOG), *(["--check"] if check else ["--output", str(tmp_path / "config.yaml")])]
+    assert render_config.main(args) == 0
+    assert "egress=allowlist; spaces=off; " in capsys.readouterr().out
+    monkeypatch.setenv("HARTMESH_USERS", "10")
+    monkeypatch.setenv("HARTMESH_AI_ASSISTANTS_PER_USER", "1")
+    monkeypatch.setenv("HARTMESH_AI_EMPLOYEES", "10")
+    assert render_config.main(args) == 0
+    assert "egress=allowlist; spaces: users 10 x 1 GiB, assistants 1 per user x 1 GiB, employees 10 x 1 GiB, company 1 GiB; agents=none; " in capsys.readouterr().out
+
+
+def test_storage_init_is_pinned_outside_the_memory_equality(compose: dict) -> None:
+    service = compose["services"]["storage-init"]
+    assert service["privileged"] is True and service["pid"] == "host" and service["network_mode"] == "none"
+    assert service["restart"] == "no" and service["mem_limit"] == service["memswap_limit"] == "128m" and service["pids_limit"] == 64
+    assert service["working_dir"] == "/app/backend"
+    assert service["entrypoint"] == ["uv", "run", "--no-sync", "python", "-m", "app.gateway.storage_init"]
+    assert service["command"] == ["prepare", "--at-start"]
+    assert not {"user", "cap_drop", "env_file", "healthcheck", "logging", "networks"}.intersection(service)
+    assert "storage-init" not in MEMORY_MIB
+
+
+def test_storage_init_runs_the_backend_image_by_one_digest(compose: dict, pin_images: ModuleType, tmp_path: Path) -> None:
+    backend = compose["services"]["gateway"]["image"]
+    assert compose["services"]["storage-init"]["image"] == compose["services"]["gateway"]["environment"]["HARTMESH_STORAGE_INIT_IMAGE"] == backend
+    files = _placeholder_profile(pin_images, tmp_path)
+    before = pin_images.read_references(files.images)
+    result = pin_images.pin(files, _fake_resolver([]), release=RELEASE)
+    updated = yaml.safe_load(files.compose.read_text(encoding="utf-8"))["services"]
+    expected = next(ref for ref in result.references if pin_images.repository_of(ref) == pin_images.repository_of(backend))
+    assert updated["gateway"]["image"] == updated["storage-init"]["image"] == updated["gateway"]["environment"]["HARTMESH_STORAGE_INIT_IMAGE"] == expected
+    assert expected != backend
+    assert len(before) == len(result.references) == len(IMAGES.read_text(encoding="utf-8").splitlines())
+    updated["gateway"]["environment"]["HARTMESH_STORAGE_INIT_IMAGE"] = "ghcr.io/altakleos/hartmesh-backend@sha256:" + "0" * 64
+    files.compose.write_text(yaml.safe_dump({"services": updated}), encoding="utf-8")
+    with pytest.raises(pin_images.PinError, match="not a line"):
+        pin_images.verify(files)
+
+
+def test_storage_init_and_the_gateway_bind_the_pool_at_its_host_path_as_rslave(compose: dict) -> None:
+    for name in ("gateway", "storage-init"):
+        mounts = [mount for mount in compose["services"][name]["volumes"] if isinstance(mount, dict) and mount.get("source") == "${HARTMESH_DATA_DIR}/spaces"]
+        assert mounts == [{"type": "bind", "source": "${HARTMESH_DATA_DIR}/spaces", "target": "${HARTMESH_DATA_DIR}/spaces", "bind": {"propagation": "rslave", "create_host_path": True}}]
+
+
+def test_gateway_waits_for_storage_init_without_requiring_it(compose: dict) -> None:
+    assert compose["services"]["gateway"]["depends_on"]["storage-init"] == {"condition": "service_completed_successfully", "required": False}
+
+
+def test_storage_init_receives_the_data_directory_and_the_seven_keys_by_name(compose: dict) -> None:
+    assert compose["services"]["storage-init"]["environment"] == {"PYTHONPATH": ".", "UV_CACHE_DIR": "/tmp/uv-cache", "HARTMESH_DATA_DIR": "${HARTMESH_DATA_DIR}", **{key: "${" + key + ":-}" for key in STORAGE_ENV_KEYS}}
+    source = COMPOSE.read_text(encoding="utf-8")
+    for key in STORAGE_ENV_KEYS:
+        assert len(re.findall(r"\$\{" + key + r"\b", source)) == source.count("${" + key + ":-}") == 1
+
+
+def test_readme_gives_the_pre_flight_check_for_the_shared_data_disk() -> None:
+    section = (PROFILE / "README.md").read_text(encoding="utf-8").split("## Storage and agents", 1)[1].split("\n## ", 1)[0]
+    assert "findmnt -no PROPAGATION --target /srv/hartmesh" in section
+    assert "mount --make-shared /srv/hartmesh" in section and "shared" in section and "/etc/fstab" in section
+    assert "keys are absent" in section

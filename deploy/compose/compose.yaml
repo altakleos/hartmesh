@@ -73,6 +73,38 @@ services:
     networks: [app]
     restart: unless-stopped
 
+  # Storage preparation is a privileged one-shot, outside the running-service budget.
+  storage-init:
+    image: ghcr.io/altakleos/hartmesh-backend@sha256:e2d91bf4207c531347246f3f78b9085a549b7601a28af276abd1863d35479bd1
+    working_dir: /app/backend
+    entrypoint: ["uv", "run", "--no-sync", "python", "-m", "app.gateway.storage_init"]
+    command: ["prepare", "--at-start"]
+    privileged: true
+    pid: host
+    network_mode: none
+    environment:
+      PYTHONPATH: "."
+      UV_CACHE_DIR: /tmp/uv-cache
+      HARTMESH_DATA_DIR: ${HARTMESH_DATA_DIR}
+      HARTMESH_USERS: ${HARTMESH_USERS:-}
+      HARTMESH_USER_STORAGE_GIB: ${HARTMESH_USER_STORAGE_GIB:-}
+      HARTMESH_AI_ASSISTANTS_PER_USER: ${HARTMESH_AI_ASSISTANTS_PER_USER:-}
+      HARTMESH_AI_ASSISTANT_STORAGE_GIB: ${HARTMESH_AI_ASSISTANT_STORAGE_GIB:-}
+      HARTMESH_AI_EMPLOYEES: ${HARTMESH_AI_EMPLOYEES:-}
+      HARTMESH_AI_EMPLOYEE_STORAGE_GIB: ${HARTMESH_AI_EMPLOYEE_STORAGE_GIB:-}
+      HARTMESH_COMPANY_STORAGE_GIB: ${HARTMESH_COMPANY_STORAGE_GIB:-}
+    volumes:
+      - type: bind
+        source: ${HARTMESH_DATA_DIR}/spaces
+        target: ${HARTMESH_DATA_DIR}/spaces
+        bind:
+          propagation: rslave
+          create_host_path: true
+    mem_limit: 128m
+    memswap_limit: 128m
+    pids_limit: 64
+    restart: "no"
+
   # ── Gateway (FastAPI + embedded agent runtime) ───────────────────────────
   gateway:
     image: ghcr.io/altakleos/hartmesh-backend@sha256:e2d91bf4207c531347246f3f78b9085a549b7601a28af276abd1863d35479bd1
@@ -112,6 +144,8 @@ services:
       # config.yaml to what .env alone renders (README: "Provider keys in the
       # product").
       HARTMESH_PROFILE_DIR: /opt/hartmesh
+      # The same backend image supplies the Gateway's bounded mount-only helper.
+      HARTMESH_STORAGE_INIT_IMAGE: ghcr.io/altakleos/hartmesh-backend@sha256:e2d91bf4207c531347246f3f78b9085a549b7601a28af276abd1863d35479bd1
       # The key a provider key set in the product is stored encrypted under.
       # Interpolated rather than left to env_file so it can come from the
       # environment of the `docker compose` command itself and stay off the
@@ -214,6 +248,12 @@ services:
       - ./providers:/opt/hartmesh/providers:ro
       - ./extensions_config.json:/opt/hartmesh/extensions_config.json:ro
       - type: bind
+        source: ${HARTMESH_DATA_DIR}/spaces
+        target: ${HARTMESH_DATA_DIR}/spaces
+        bind:
+          propagation: rslave
+          create_host_path: true
+      - type: bind
         source: ${HARTMESH_SANDBOX_RESOLV_CONF:-/run/systemd/resolve/resolv.conf}
         target: /run/hartmesh-host-resolv.conf
         read_only: true
@@ -226,6 +266,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+        required: false
     healthcheck:
       # /health/ready runs the dependency probes behind a 3 s endpoint
       # deadline; the client timeout stays above that bound. Docker runs the

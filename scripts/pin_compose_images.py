@@ -8,7 +8,7 @@ stack references the same strings, so this script keeps three files in
 lockstep:
 
 * ``deploy/compose/images.txt``     - the reference list (input and output)
-* ``deploy/compose/compose.yaml``   - every ``image:`` value
+* ``deploy/compose/compose.yaml``   - every ``image:`` and ``HARTMESH_STORAGE_INIT_IMAGE:`` value
 * ``deploy/compose/config.yaml``    - ``sandbox.image`` and ``network.proxy_image``
 
 ``pin --release X.Y.Z+hartmesh.N`` first rewrites every fork image line (a
@@ -55,7 +55,7 @@ RELEASE_VERSION = re.compile(r"\Av?(?P<version>[0-9]+\.[0-9]+\.[0-9]+\+hartmesh\
 # ``ghcr.io/<owner>/<repo>-<component>`` for exactly one of these.
 FORK_COMPONENTS = ("backend", "frontend", "provisioner", "sandbox", "sandbox-network-proxy")
 FORK_REPOSITORY = re.compile(r"\Aghcr\.io/[a-z0-9._-]+/[a-z0-9._-]+-(?:" + "|".join(re.escape(component) for component in FORK_COMPONENTS) + r")\Z")
-_YAML_IMAGE_LINE = re.compile(r"^(?P<prefix>\s*(?:-\s*)?(?:image|proxy_image):\s*)(?P<reference>\S+)(?P<suffix>\s*(?:#.*)?)$")
+_YAML_IMAGE_LINE = re.compile(r"^(?P<prefix>\s*(?:-\s*)?(?:image|proxy_image|HARTMESH_STORAGE_INIT_IMAGE):\s*)(?P<reference>\S+)(?P<suffix>\s*(?:#.*)?)$")
 
 Resolver = Callable[[str], str]
 
