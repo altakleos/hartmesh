@@ -20,6 +20,29 @@ class AgentConflict(RuntimeError):
     """Stale instance generation or reused creation identity with another intent."""
 
 
+class Refusal(Exception):
+    """A host refusal with a stable code, status and fallback sentence."""
+
+    status = 409
+    reason = ""
+
+    def __init__(self, detail: str, *, status: int | None = None, reason: str | None = None, **extra):
+        super().__init__(detail)
+        self.detail = detail
+        if status is not None:
+            self.status = status
+        if reason is not None:
+            self.reason = reason
+        self.extra = extra
+
+
+class ExecutionUnavailable(Refusal):
+    reason = "execution-unavailable"
+
+    def __init__(self, execution_reason: str | None):
+        super().__init__("AI assistants and AI employees cannot run on this deployment right now.", execution_reason=execution_reason)
+
+
 class AgentPermission(IntFlag):
     USE = 1
     INSPECT = 2

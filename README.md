@@ -583,6 +583,11 @@ typed storage pools. It checks disk headroom before preparation and supports
 offline growth that preserves files; see [Storage Spaces](docs/STORAGE_SPACES.md)
 for its privilege requirements and current scope.
 
+With managed storage enabled, missing or unverified backings leave the Gateway
+running with durable history and Work records available. Startup logs report
+storage and execution availability; failed Docker admission is retried every
+minute. Inventory changes and offline growth take effect after a Gateway restart.
+
 Gateway runs use the top-level `recursion_limit` in `config.yaml` when an API
 request does not provide one. The default is `100`; valid per-request values
 take precedence, and `max_recursion_limit` (default `1000`) caps both. Changes

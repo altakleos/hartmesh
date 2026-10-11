@@ -68,7 +68,7 @@ def test_stored_keys_are_applied_before_anything_is_built_from_the_config() -> N
     for built in ("make_checkpointer(", "make_store(", "run_events_config = getattr(config"):
         assert rebind < runtime.index(built), built
     lifespan = (BACKEND / "app" / "gateway" / "app.py").read_text(encoding="utf-8")
-    entered = lifespan.index("_runtime_with_mcp_pool_shutdown(app, startup_config):")
+    entered = lifespan.index("_runtime_with_mcp_pool_shutdown(app, startup_config)")
     rebound = lifespan.index('if getattr(app.state, "provider_keys_applied", False):')
     assert lifespan.index("startup_config = get_app_config()", rebound) < lifespan.index("await _ensure_admin_user(app)")
     assert entered < rebound < lifespan.index("await _ensure_admin_user(app)")

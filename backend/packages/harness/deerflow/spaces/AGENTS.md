@@ -7,6 +7,16 @@ Preparation never runs in a request. The Compose CLI validates confined paths,
 holds one pool lock and publishes each completed slot atomically. Retained plus
 missing slots must stay within `MAX_SPACES`; lowering counts never erases slots.
 
+Typed `provisioning` keeps inventory order, skips unavailable/nonempty slots and
+creates `LAYOUT` only after binding uniqueness flushes. Drain layout workers
+before releasing allocation SQL ownership; `assign` drains the entire role-link
+transaction. Bound/unclaimed sets retain uncertainty. Same-UUID growth requires
+unchanged data/control inodes and nondecreasing bounds, recorded under resource
+parent locks from the startup-pinned inventory. Prove bound volumes before taking
+the short SQL publication lock, so stalled startup verification never retains
+SQLite's application writer. Startup ownership and availability
+are documented in [the guide](../../../../../docs/STORAGE_SPACES.md).
+
 `spaces/` owns generic resource identity and mandatory access, independent of
 chats, agent definitions and feature installation. `storage/` remains the
 separate content-addressed blob store. Product workflows do not belong here.
