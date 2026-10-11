@@ -119,6 +119,29 @@ availability are operator responsibilities; mounts must exist before the host
 loads that inventory. A late durability failure after publishing the inventory
 preserves prepared backings. Existing pools and data are not reformatted.
 
+The backend image also includes `python -m app.gateway.storage_init` for typed
+Compose pools. Its verbs are `prepare`, `mount-all`, `fstab-sync`, `verify`,
+`resize`, `forget`, `quiesce` and `status`. It reads `HARTMESH_DATA_DIR` and the
+seven storage/count environment keys, and requires a privileged Linux container
+with the host PID namespace and a shared pool bind. It never reads app config or
+the database. Compose service wiring follows in a later change.
+
+Typed pools use `inventory.v2.json` with a kind on every slot. Preparation checks
+the whole missing plan before allocating anything, leaves the larger of 4 GiB
+and 10% of the disk free, and preserves at least 1,024 host inodes. Each completed
+slot is published atomically, so a repeat continues an interrupted plan. Counts
+may rise or fall without removing existing slots. Growth preserves files and
+filesystem identity; it requires the Gateway and other holders to be stopped.
+`forget --discard` explicitly destroys a slot's contents. Every successful or
+partial verb prints one sorted JSON document; a refusal carries its reason.
+Host commands run through `nsenter -m -t 1`. Every verb holds the pool's exclusive
+lock. `prepare --at-start` bounds its entire child process group at 600 seconds;
+the process exits zero so startup can continue, while its JSON document retains
+the actual return code and any partial outcome. No request provisions a slot.
+After a forced interruption, the document lists persisted slots and their current
+mount state; facts the supervisor cannot establish are explicitly `null`.
+Storage remains off when `HARTMESH_USERS` is absent in this foundation change.
+
 The mandatory Linux Docker job requires actual mounted backings and rejects
 every skipped native case. This development host cannot mount the fixture; it
 does not substitute ordinary directories or claim local native qualification.

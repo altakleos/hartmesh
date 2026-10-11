@@ -23,6 +23,62 @@ from _storage_spaces_native_test_support import prepare_consumer_container
 from deerflow.spaces.backings import BackingUnavailable, PreparedVolumeCatalog
 
 
+@pytest.fixture(scope="module")
+def typed_prepared_pool(tmp_path_factory):
+    if os.environ.get("HARTMESH_REQUIRE_MANAGED_STORAGE") != "1":
+        pytest.skip("Typed pool qualification runs in its mandatory Linux CI job")
+    from app.gateway.storage_init import KINDS, StorageInitializer
+    from deerflow.config.storage_spaces_config import StoragePlan
+
+    data_dir = tmp_path_factory.mktemp("typed-storage")
+    fstab = data_dir / "test-fstab"
+    fstab.write_text("# native fixture only\n", encoding="utf-8")
+    plan = StoragePlan(users=1, user_gib=1, ai_assistants_per_user=0, ai_assistant_gib=1, ai_employees=0, ai_employee_gib=1, company_gib=1)
+    tool = StorageInitializer(data_dir, plan, capacities=dict.fromkeys(KINDS, 64 << 20), fstab_path=fstab)
+    with tool.locked(repair_pool=True):
+        doc = tool.prepare()
+        assert doc["returncode"] == 0, doc
+    try:
+        yield tool
+    finally:
+        with tool.locked():
+            doc = tool.quiesce()
+            assert doc["returncode"] == 0, doc
+
+
+def test_prepared_pool_has_the_design_owners_and_modes(typed_prepared_pool):
+    import stat
+
+    tool = typed_prepared_pool
+    assert (tool.pool.stat().st_uid, tool.pool.stat().st_gid, stat.S_IMODE(tool.pool.stat().st_mode)) == (0, 1000, 0o750)
+    assert (tool.manifest.stat().st_uid, tool.manifest.stat().st_gid, stat.S_IMODE(tool.manifest.stat().st_mode)) == (1000, 1000, 0o440)
+    assert (tool.pool / ".probe").stat().st_uid == 1000
+    inventory = tool.load()
+    assert [s.kind for s in inventory.volumes.values()] == ["company", "user"]
+    for spec in inventory.volumes.values():
+        assert (spec.image_path.stat().st_uid, spec.image_path.stat().st_gid, stat.S_IMODE(spec.image_path.stat().st_mode)) == (0, 1000, 0o640)
+        assert spec.image_path.stat().st_blocks * 512 >= 64 << 20
+        for name, mode in (("data", 0o770), ("control", 0o700)):
+            meta = (spec.mount_path / name).stat()
+            assert (meta.st_uid, meta.st_gid, stat.S_IMODE(meta.st_mode)) == (1000, 1000, mode)
+        inventory.verify(spec.slot_id)
+
+
+def test_resized_space_keeps_its_files_and_reports_the_new_bound(typed_prepared_pool):
+    tool = typed_prepared_pool
+    spec = next(s for s in tool.load().volumes.values() if s.kind == "user")
+    source = spec.mount_path / "data/persistent.txt"
+    source.write_bytes(b"retained across offline ext4 growth")
+    with tool.locked():
+        doc = tool.resize("1", slot=spec.slot_id, capacity_bytes=128 << 20)
+        assert doc["returncode"] == 0, doc
+    grown = tool.load().verify(spec.slot_id)
+    assert grown.spec.filesystem_uuid == spec.filesystem_uuid and grown.spec.kind == "user"
+    assert grown.spec.max_bytes == 128 << 20 and grown.spec.max_inodes == (128 << 20) // 8192
+    assert grown.available_bytes > 64 << 20
+    assert source.read_bytes() == b"retained across offline ext4 growth"
+
+
 @pytest.mark.asyncio
 async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(backing, tmp_path, monkeypatch):
     """Use the shipped AIO image and existing SDK across immutable-ID control."""

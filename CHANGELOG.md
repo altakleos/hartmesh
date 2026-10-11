@@ -36,6 +36,13 @@ AI assistant/AI employee counts, and optional deployment-owned role briefs.
 Storage and agent defaults remain disabled; these keys prepare later Compose
 activation work.
 
+The backend image includes an environment-only `storage_init` operator CLI for
+typed fixed ext4 pools: preparation, mounting, fstab synchronization, verification,
+offline growth, explicit removal, quiescence and status. Preparation is resumable,
+checks the whole plan against disk/inode headroom, and remains off when
+`HARTMESH_USERS` is absent. The existing standalone helper remains compatible.
+There are no additional database schema changes beyond revision 0041 above.
+
 ## [2.2.0+hartmesh.45] - 2026-10-09
 
 ### AI employee Work and supervision

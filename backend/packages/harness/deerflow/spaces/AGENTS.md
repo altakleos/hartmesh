@@ -1,5 +1,12 @@
 # Storage Spaces
 
+`provision.py` owns operator preparation and whole-plan byte/inode arithmetic.
+The legacy script imports its unchanged entry point. Typed schema-2 inventories
+carry user/assistant/employee/company kinds; schema-1 slots remain untyped.
+Preparation never runs in a request. The Compose CLI validates confined paths,
+holds one pool lock and publishes each completed slot atomically. Retained plus
+missing slots must stay within `MAX_SPACES`; lowering counts never erases slots.
+
 `spaces/` owns generic resource identity and mandatory access, independent of
 chats, agent definitions and feature installation. `storage/` remains the
 separate content-addressed blob store. Product workflows do not belong here.
