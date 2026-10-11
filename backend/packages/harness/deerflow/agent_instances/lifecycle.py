@@ -139,7 +139,13 @@ class InstanceLifecycle:
         ).all()
         if {key for key, _phase in rows} != set(intent.attachment_ids):
             raise AgentConflict("Lifecycle containment scope no longer belongs to Home")
-        return all(phase == "fenced" for _key, phase in rows)
+        if not all(phase == "fenced" for _key, phase in rows):
+            return False
+        # A retry keeps its captured scope and never closes a later human view.
+        # Generic ADMIN now coexists with active mounts, so lifecycle completion
+        # must explicitly confirm that every current Home attachment is fenced.
+        current = await session.scalar(select(SpaceAttachmentRow.id).join(SpaceMountRow, SpaceMountRow.attachment_id == SpaceAttachmentRow.id).where(SpaceMountRow.space_id == intent.home_id, SpaceAttachmentRow.phase != "fenced").limit(1))
+        return current is None
 
     async def change(self, *, actor, instance_id, expected_generation, operation_id, action, definition=None, supervisor=None, member=None, permissions=None):
         validate_generation(expected_generation)

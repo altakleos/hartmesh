@@ -9,11 +9,14 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 
 from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL, AUTH_SOURCE_PAT
 from app.gateway.deps import get_current_user_from_request
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.routers._file_http import DescriptorFileResponse
+from deerflow.persistence.spaces.files import SpaceFileOperationRow
+from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceMountRow
 from deerflow.spaces.contract import Custody, InvalidPrincipal, MutationMode, Permission, PrincipalRef, SpaceConflict, SpaceDenied, SpaceNotFound
 from deerflow.spaces.filesystem import FilesystemUnavailable, _path
 from deerflow.spaces.recovery import SpaceRecovery
@@ -154,6 +157,15 @@ async def get_space(space_id: str, request: Request):
     actor = await _actor(request)
     service = _service(request)
     space = await service.registry.get(actor=actor, space_id=space_id)
+    # Read availability does not prove an uncertain write was settled. Preserve
+    # its recovery projection without deriving it from a refused quota read.
+    async with service.registry._sf() as session:
+        pending = await session.scalar(select(SpaceFileOperationRow.operation_id).where(SpaceFileOperationRow.space_id == space_id, SpaceFileOperationRow.phase == "pending").limit(1))
+        containment = await session.scalar(
+            select(SpaceAttachmentRow.id).join(SpaceMountRow, SpaceMountRow.attachment_id == SpaceAttachmentRow.id).where(SpaceMountRow.space_id == space_id, SpaceAttachmentRow.phase.not_in(("active", "fenced"))).limit(1)
+        )
+    if pending is not None or containment is not None:
+        return {**jsonable_encoder(asdict(space)), "storage_state": "recovery-pending"}
     try:
         quota = await service.quota(actor=actor, space_id=space_id)
     except SpaceConflict:

@@ -260,6 +260,12 @@ async def test_pending_empty_scope_never_retires_a_new_human_attachment(instance
     replacement = await attachments.attach(actor=ALICE, incarnation=operation(), resources=[ResourceMount(home.id, home.generation, "human", writable=True)])
     pending = await InstanceLifecycle(agents).change(actor=ALICE, instance_id=agent.id, expected_generation=agent.generation, operation_id=key, action="suspend")
     assert pending["complete"] is False and replacement.container_id in provider.containers
+    async with sf() as session:
+        intent = await session.get(AgentLifecycleRow, (agent.id, key))
+        assert intent.phase == "pending" and intent.attachment_ids == []
+    await attachments.retire(actor=ALICE, space_id=home.id, expected_generation=home.generation, attachment_ids=[replacement.id])
+    complete = await InstanceLifecycle(agents).change(actor=ALICE, instance_id=agent.id, expected_generation=agent.generation, operation_id=key, action="suspend")
+    assert complete["complete"] is True
 
 
 @pytest.mark.asyncio

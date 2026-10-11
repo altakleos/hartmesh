@@ -3,9 +3,13 @@
 import fcntl
 import os
 import stat
+import time
 from contextvars import ContextVar
 
 from deerflow.files.store import open_directory_source
+
+READ_LOCK_WAIT_SECONDS = 5
+READ_LOCK_POLL_SECONDS = 0.05
 
 _owner = ContextVar("storage_host_workflow_owner", default=None)
 _LOCK = ".host-workflow.lock"
@@ -30,7 +34,7 @@ def mark_effect():
         effect[0] = True
 
 
-def _open(volume, *, create):
+def _open(volume, *, create, shared=False):
     root = open_directory_source(volume.control_path)
     try:
         try:
@@ -42,7 +46,7 @@ def _open(volume, *, create):
             os.close(fd)
             raise OSError("Private host-operation lock changed")
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
         except BlockingIOError:
             os.close(fd)
             from deerflow.spaces.service import SpaceOperationPending
@@ -59,11 +63,23 @@ def probe(volume):
         os.close(fd)
 
 
-def acquire(volumes):
+def acquire(volumes, *, shared=False):
+    from deerflow.spaces.service import SpaceOperationPending
+
     descriptors = []
+    deadline = time.monotonic() + READ_LOCK_WAIT_SECONDS
     try:
         for key in sorted(volumes):
-            descriptors.append(_open(volumes[key], create=True))
+            while True:
+                try:
+                    descriptor = _open(volumes[key], create=True, shared=shared)
+                    descriptors.append(descriptor)
+                    break
+                except SpaceOperationPending:
+                    remaining = deadline - time.monotonic()
+                    if not shared or remaining <= 0:
+                        raise
+                    time.sleep(min(READ_LOCK_POLL_SECONDS, remaining))
         return descriptors
     except BaseException:
         close(descriptors)

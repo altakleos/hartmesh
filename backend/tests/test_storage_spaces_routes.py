@@ -249,3 +249,38 @@ async def test_cancelled_resource_send_closes_its_file_and_root_descriptors(spac
     for fd in descriptors:
         with pytest.raises(OSError):
             os.fstat(fd)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["active", "pending", "fence_pending"])
+@pytest.mark.parametrize("adapter", [True, False])
+async def test_metadata_keeps_unconfirmed_containment_visible_while_reads_are_allowed(space_file_storage, monkeypatch, phase, adapter):
+    from test_storage_spaces_attachments import ContainedProvider
+
+    from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow
+    from deerflow.spaces.attachments import ResourceMount, SpaceAttachments
+    from deerflow.spaces.service import SpaceFiles
+
+    service, sf, catalog = space_file_storage
+    space = await home(service)
+    mounts = SpaceAttachments(service, ContainedProvider())
+    attached = await mounts.attach(actor=ALICE, incarnation=operation(), resources=[ResourceMount(space.id, 1, "files", writable=True)])
+    async with sf() as session:
+        record = await session.get(SpaceAttachmentRow, attached.id)
+        record.phase = phase
+        await session.commit()
+    if not adapter:
+        service = SpaceFiles(service.registry, catalog)
+    quota_calls = []
+
+    async def quota(**kwargs):
+        quota_calls.append(kwargs)
+        return {"editor": "shared"}
+
+    monkeypatch.setattr(service, "quota", quota)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=request_app(service)), base_url="http://test") as client:
+        response = await client.get(f"/api/spaces/{space.id}")
+    assert response.status_code == 200, response.text
+    assert response.json()["storage_state"] == ("available" if phase == "active" else "recovery-pending")
+    assert len(quota_calls) == (1 if phase == "active" else 0)
+    assert await service.list_directory(actor=ALICE, space_id=space.id) == ([], False)
