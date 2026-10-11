@@ -1,11 +1,12 @@
 """Bind one existing run to its qualified home environment, without fake users."""
 
+import asyncio
 import shlex
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 import httpx
@@ -129,15 +130,19 @@ async def qualified_attachments(files, *, baseline_provider=None):
             baseline_provider = await await_drained(run_file_io(get_baseline_sandbox_provider))
     if not isinstance(baseline_provider, AioSandboxProvider) or not isinstance(baseline_provider._backend, LocalContainerBackend):
         raise StorageHostUnqualified("Instance execution requires qualified direct-host Docker AIO storage")
-    adapter = await await_drained(run_file_io(DockerStorageAdapter.from_local_backend, baseline_provider._backend))
-    # One host adapter service per configured inventory; its guard applies to
-    # every ordinary file/membership/lifecycle operation, including restarts.
-    mounts = getattr(files, "attachments", None)
-    if mounts is None:
-        mounts = SpaceAttachments(files, adapter)
-    elif mounts.provider.host_id != adapter.host_id:
-        raise StorageAdapterUnsupported("The home attachment belongs to another qualified host")
-    return baseline_provider, mounts
+    if getattr(files, "inventory_path", None) is None:
+        raise StorageHostUnqualified("Native execution requires a configured inventory path")
+    lock = getattr(files, "_qualification_lock", None)
+    if lock is None:
+        lock = files._qualification_lock = asyncio.Lock()
+    async with lock:
+        mounts = getattr(files, "attachments", None)
+        adapter = await await_drained(run_file_io(DockerStorageAdapter.from_local_backend, baseline_provider._backend, pool=Path(files.inventory_path).parent, clean_probe=mounts is None))
+        if mounts is None:
+            mounts = SpaceAttachments(files, adapter)
+        elif mounts.provider.host_id != adapter.host_id:
+            raise StorageAdapterUnsupported("The home attachment belongs to another qualified host")
+        return baseline_provider, mounts
 
 
 async def prepare_environment(execution, *, baseline_provider=None, app_config=None):

@@ -1,5 +1,6 @@
 """Task-owned native fixture creation, never a production attachment adapter."""
 
+import os
 import re
 import subprocess
 
@@ -32,6 +33,10 @@ def prepare_consumer_container(plan, image, program, containers, containment, *,
         "--pids-limit",
         "64",
     ]
+    writer_runtime = os.environ.get("HARTMESH_NATIVE_WRITER_RUNTIME")
+    if writer_runtime:
+        index = arguments.index("--pull=never") + 1
+        arguments[index:index] = ["--runtime", writer_runtime]
     for view in plan.views:
         arguments += ["--mount", "type=bind,src=" + view.source + ",dst=" + view.destination + ("" if view.writable else ",readonly")]
     result = runner([*arguments, image, "python", "-c", program], check=True, capture_output=True, text=True, timeout=30)

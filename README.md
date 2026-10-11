@@ -601,6 +601,9 @@ mount even with those settings absent; see the
 [Compose pre-flight check](deploy/compose/README.md#storage-and-agents). Gateway
 startup uses the same image for a bounded mount-only call. Timed-out calls remain
 owned through cleanup, and an unconfirmed removal keeps storage unavailable.
+Docker storage admission now proves that the daemon sees the same pool and bound
+files as the Gateway through a temporary read-only file probe. This proof is
+separate from quota verification and workspace network support.
 
 Gateway runs use the top-level `recursion_limit` in `config.yaml` when an API
 request does not provide one. The default is `100`; valid per-request values

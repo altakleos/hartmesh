@@ -81,10 +81,15 @@ plus explicit acknowledgement when destination readers broaden the audience.
 
 Host edits require an exclusive window with no native attachments. The host-only
 attachment service reserves durable intents, commits exact container identity
-before activation, and fences by confirmed removal on one direct Linux Docker
+before activation, and fences by confirmed removal on one qualified Linux Docker
 host. Missing/foreign identity, unknown containment and adapter loss stay pending;
-leases never prove retirement. Reject remote/remapped daemon namespaces and extra
-mounts. Joint views require audience admission. No chat or task lifecycle owns it.
+leases never prove retirement. Local endpoint checks retain root socket/alias
+identity; a UID-1000 nonce-file probe proves pool and bound-view path coherence.
+Private probe directories serialize cleanup through pinned descriptors; only the
+controlled first runtime qualification clears the pool. Repeated construction
+still probes but preserves live markers. Unsupported workspace topology rejects
+prepare and activation/resume while discovery/fencing remain available. Joint
+views require audience admission. No chat or task lifecycle owns it.
 
 Native recovery quiesces all mounts, records backup identity before I/O and
 validates archived trees before publication. Restore keeps root identity/current

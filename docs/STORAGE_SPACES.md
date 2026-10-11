@@ -123,11 +123,24 @@ The Gateway pins the inventory at startup. Missing or malformed inventories and
 individual slot failures retain durable resource and AI employee records; they
 do not stop the Gateway. A durable database is required. Startup records separate
 storage and execution status, including individual unverified slot identities.
+Docker admission checks the local root-owned Unix socket and daemon identity,
+then asks a UID-1000, read-only, network-isolated container to read a fresh nonce
+file from the pool. Each bound native view gets the same check through its private
+control directory before workspace creation. These probes establish path coherence;
+the ext4 backing verifier separately establishes capacity and filesystem identity.
+Probes bind one file, use the daemon's default runtime and clean their own markers.
+Native writer tests optionally use `HARTMESH_NATIVE_WRITER_RUNTIME`, including
+`runsc`; a directory or engine double never qualifies native limits.
+
 Docker admission has a 30-second wait within the 120-second storage startup
 budget. Timed-out verification and admission remain owned; the minute recheck
 uses their outcome before starting another admission. Static provider failures
 require configuration repair and a restart. Shutdown drains owned initialization
 before database teardown, including when later service startup fails.
+Successful pool qualification does not enable unsupported workspace topology.
+Restricted networking and configured-mount workspace support remain a later
+runtime change; preparation and resume currently retain that guard, while
+discovery and fencing remain available.
 
 When `HARTMESH_STORAGE_INIT_IMAGE` is configured, Gateway startup asks that
 pinned backend image to run `mount-all` before inventory verification. The helper
