@@ -541,6 +541,8 @@ account was released, it refuses before changing disablement or held work.
 The existing `released` operator field still denotes email release; `released_at`
 distinguishes a seat release. Physical volume emptying and AI-assistant release are
 subsequent integration changes; a released slot is not yet recycled.
+Privileged personal MCP discovery and cached calls also recheck current account
+eligibility, so a retained administrator role cannot restore disabled access.
 
 The kernel now supplies explicit host transactions and assignment helpers.
 `host_locked` locks scoped parents in sorted order without resolving a human

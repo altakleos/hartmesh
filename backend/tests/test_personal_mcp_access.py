@@ -20,6 +20,7 @@ from deerflow.mcp import personal_access
 from deerflow.mcp.task_tool_caller import McpTaskToolCaller
 from deerflow.mcp.user_config import load_user_mcp_config, user_mcp_config_path
 from deerflow.mcp.user_tools import _guard, _load
+from deerflow.persistence.user.access import DisabledIdentityRow, IdentityHoldRow, RoleLimitRow
 from deerflow.persistence.user.model import UserRow
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
@@ -28,7 +29,8 @@ from deerflow.runtime.user_context import reset_current_user, set_current_user
 async def accounts(tmp_path, monkeypatch):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/users.db")
     async with engine.begin() as connection:
-        await connection.run_sync(UserRow.__table__.create)
+        for row in (UserRow, DisabledIdentityRow, IdentityHoldRow, RoleLimitRow):
+            await connection.run_sync(row.__table__.create)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     repository = SQLiteUserRepository(sessions)
     user = await repository.create_user(User(email="admin@example.com", system_role="admin"))
@@ -55,7 +57,7 @@ def privileged_definition(kind):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["http", "sse", "stdio", "legacy", "oauth"])
-@pytest.mark.parametrize("revocation", ["demote", "delete", "lookup_failure"])
+@pytest.mark.parametrize("revocation", ["demote", "delete", "lookup_failure", "disable", "release"])
 async def test_revocation_blocks_discovery_existing_tools_and_cached_durable_calls(accounts, monkeypatch, kind, revocation):
     repository, user, sessions = accounts
     owner = str(user.id)
@@ -105,6 +107,15 @@ async def test_revocation_blocks_discovery_existing_tools_and_cached_durable_cal
                 async with sessions() as session:
                     await session.execute(delete(UserRow).where(UserRow.id == owner))
                     await session.commit()
+            elif revocation == "disable":
+                from deerflow.config.auth_config import LOCAL_ACCOUNT_ISSUER
+
+                await repository.disable_identity(LOCAL_ACCOUNT_ISSUER, owner)
+            elif revocation == "release":
+                from datetime import UTC, datetime
+
+                async with sessions() as session, session.begin():
+                    (await session.get(UserRow, owner)).released_at = datetime.now(UTC)
             else:
                 monkeypatch.setattr(repository, "get_user_by_id", AsyncMock(side_effect=RuntimeError("database unavailable")))
 

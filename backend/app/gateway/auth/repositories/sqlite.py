@@ -203,8 +203,8 @@ class SQLiteUserRepository(UserRepository):
     async def _disabled_at(self, session: AsyncSession, row: UserRow) -> datetime | None:
         """Whether the deployer turned this identity off: the one place the fact lives.
 
-        Only a provider account has an identity to look up; a local account
-        cannot be turned off this way and never matches. A provider account
+        Local disablement matches its reserved issuer and immutable account ID,
+        independently of email or provider subject. A provider account
         linked before the issuer was recorded (NULL, see 0039) matches on its
         subject alone: fail closed, since the row will adopt the configured
         issuer at its next sign-in and until then only the subject is known.
