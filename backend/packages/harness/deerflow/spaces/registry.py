@@ -37,6 +37,7 @@ class SpaceRegistry:
         # Installed only by the host's file/attachment service. The abstract
         # registry can still be used before a filesystem adapter is available.
         self.operation_guard = None
+        self.files = None
 
     async def _actor(self, actor: PrincipalRef) -> ResolvedPrincipal:
         if not isinstance(actor, PrincipalRef):
@@ -118,17 +119,27 @@ class SpaceRegistry:
 
     @asynccontextmanager
     async def creating(self, *, actor: PrincipalRef, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None):
-        resolved = await self._actor(actor)
+        async with self._creating(actor=actor, name=name, custody=custody, mode=mode, feature=feature) as value:
+            yield value
+
+    @asynccontextmanager
+    async def _host_creating(self, *, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None):
+        async with self._creating(actor=None, name=name, custody=custody, mode=mode, feature=feature, _host=True) as value:
+            yield value
+
+    @asynccontextmanager
+    async def _creating(self, *, actor: PrincipalRef, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None, _host=False):
+        resolved = None if _host else await self._actor(actor)
         name = validate_name(name)
         if not isinstance(custody, Custody) or not isinstance(mode, MutationMode) or (feature is not None and not isinstance(feature, FeatureBinding)):
             raise ValueError("Invalid space resource definition")
         if custody.kind == "personal" and custody.principal != actor:
             raise SpaceDenied("Personal custody cannot claim another principal")
-        if custody.kind == "company" and not resolved.can_provision_company:
+        if custody.kind == "company" and not _host and not resolved.can_provision_company:
             raise SpaceDenied("Company provisioning requires host authority")
         if mode == MutationMode.MEDIATED and feature is None:
             raise ValueError("Mediated resources require a bound controller")
-        permissions = Permission.READ | Permission.EXPORT | Permission.ADMIN | (Permission.WRITE if mode == MutationMode.NATIVE else Permission.OPERATE)
+        permissions = Permission(0) if _host else Permission.READ | Permission.EXPORT | Permission.ADMIN | (Permission.WRITE if mode == MutationMode.NATIVE else Permission.OPERATE)
         row = SpaceRow(
             id=uuid.uuid4().hex,
             backing_handle=uuid.uuid4().hex,
@@ -147,14 +158,78 @@ class SpaceRegistry:
             async with session.begin():
                 if session.bind.dialect.name == "sqlite":
                     await session.execute(text("BEGIN IMMEDIATE"))
-                current = await self._actor(actor)
-                if custody.kind == "company" and not current.can_provision_company:
-                    raise SpaceDenied("Company provisioning requires current host authority")
+                if not _host:
+                    current = await self._actor(actor)
+                    if custody.kind == "company" and not current.can_provision_company:
+                        raise SpaceDenied("Company provisioning requires current host authority")
                 session.add(row)
                 await session.flush()
-                session.add(SpaceGrantRow(space_id=row.id, principal_kind=actor.kind, subject_id=actor.subject_id, permissions=int(permissions)))
-                session.add(SpaceEventRow(space_id=row.id, generation=1, action="create", actor_kind=actor.kind, actor_id=actor.subject_id, details={"mode": mode.value, "custody": custody.kind}))
+                if not _host:
+                    session.add(SpaceGrantRow(space_id=row.id, principal_kind=actor.kind, subject_id=actor.subject_id, permissions=int(permissions)))
+                    session.add(SpaceEventRow(space_id=row.id, generation=1, action="create", actor_kind=actor.kind, actor_id=actor.subject_id, details={"mode": mode.value, "custody": custody.kind}))
                 yield session, row, permissions
+
+    @asynccontextmanager
+    async def host_locked(self, space_ids):
+        """Trusted host transaction; no principal, grant or operation admission."""
+        if isinstance(space_ids, str):
+            raise ValueError("Resource admission requires an explicit scope")
+        identifiers = sorted(set(space_ids))
+        if not identifiers:
+            raise ValueError("Resource admission requires an explicit scope")
+        async with self._sf() as session:
+            async with session.begin():
+                if session.bind.dialect.name == "sqlite":
+                    await session.execute(text("BEGIN IMMEDIATE"))
+                rows = {}
+                for identifier in identifiers:
+                    row = (await session.execute(select(SpaceRow).where(SpaceRow.id == identifier).with_for_update())).scalar_one_or_none()
+                    if row is not None:
+                        rows[identifier] = row
+                yield session, rows
+
+    async def host_create(self, *, name, custody, mode, feature, kind):
+        """Allocate by host authority without an ambient human grant or event."""
+        if self.files is None:
+            raise SpaceConflict("Host storage allocation is unavailable")
+        return await self.files.assign(kind=kind, actor=None, name=name, custody=custody, mode=mode, feature=feature)
+
+    async def host_grant(self, space_id, subject, permissions, *, host_id=None, admission=None):
+        """A resolving human receives explicit authority under the host row lock."""
+        from deerflow.spaces.attachments import SpaceAttachments
+
+        if not isinstance(subject, PrincipalRef) or subject.kind != "human":
+            raise InvalidPrincipal("Host grants require a resolving human subject")
+        if not isinstance(permissions, Permission) or not permissions:
+            raise ValueError("Host grants require nonzero typed permissions")
+        await self._actor(subject)
+        async with self.host_locked([space_id]) as (session, rows):
+            row = rows.get(space_id)
+            if row is None:
+                raise SpaceNotFound("Space is unavailable")
+            await self._actor(subject)
+            permissions = validate_permissions(permissions, MutationMode(row.mode))
+            if await SpaceAttachments._current(session, [space_id], lock=True):
+                raise SpaceConflict("The storage attachment must be fenced before this operation")
+            if admission is not None:
+                await admission(session)
+            existing = await self._grant(session, row, subject)
+            if existing is not None:
+                _stored_permissions(existing.permissions, MutationMode(row.mode))
+                if existing.permissions == int(permissions):
+                    return
+            if row.generation >= 2**31 - 1:
+                raise SpaceConflict("Space generation is exhausted; preserve the resource for provider recovery")
+            if existing is None:
+                session.add(SpaceGrantRow(space_id=space_id, principal_kind="human", subject_id=subject.subject_id, permissions=int(permissions)))
+            else:
+                existing.permissions = int(permissions)
+            row.generation += 1
+            row.updated_at = datetime.now(UTC)
+            details = {"subject_kind": "human", "subject_id": subject.subject_id, "permissions": int(permissions), "by": "host"}
+            if host_id is not None:
+                details["operator_host_id"] = host_id
+            session.add(SpaceEventRow(space_id=space_id, generation=row.generation, action="grant", actor_kind="human", actor_id=subject.subject_id, details=details))
 
     async def create(self, *, actor: PrincipalRef, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None) -> Space:
         async with self.creating(actor=actor, name=name, custody=custody, mode=mode, feature=feature) as (_, row, permissions):

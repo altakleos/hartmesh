@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Assigned feature storage
+
+My Files and Projects now look up one assigned user Space by its role link;
+Shared looks up the company role. Feature requests allocate no storage. Namespace
+folders and private staging are separate, and missing/unverified assignments
+return structured 503 responses without host paths. The kernel adds explicit
+actorless host allocation, atomic human grants and guarded host-written
+workflows. Automatic assignment and the complete Shared protocol switch remain
+for the next integration stage; defaults stay disabled. No database schema change
+is added, but existing feature-link rows now identify resource roles rather than
+one resource per plugin.
+
 ### Storage concurrency
 
 Multiple native attachments and Gateway file writes can share a Space. Pending

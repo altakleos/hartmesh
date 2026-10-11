@@ -17,6 +17,10 @@ class StorageFeatureLinkRow(Base):
     space_id: Mapped[str] = mapped_column(String(32), ForeignKey("storage_spaces.id"))
 
 
+class MissingFeatureResource(SpaceNotFound):
+    """The role link is absent, distinct from inaccessible assigned storage."""
+
+
 class FeatureResources:
     def __init__(self, files, namespace):
         self.files, self.namespace = files, namespace
@@ -31,7 +35,7 @@ class FeatureResources:
     async def get(self, *, actor, key):
         space_id = await self.find(key)
         if space_id is None:
-            raise SpaceNotFound("Feature resource has not been provisioned")
+            raise MissingFeatureResource("Your files are being prepared. Chats run without them for now.")
         return await self.files.registry.get(actor=actor, space_id=space_id)
 
     async def ensure(self, *, actor, key, name, custody, mode, feature=None):

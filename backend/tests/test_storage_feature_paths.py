@@ -17,6 +17,8 @@ async def test_feature_bytes_and_private_staging_use_separate_qualified_roots(tm
         data, control = root / "data", root / "control"
         data.mkdir(parents=True)
         control.mkdir(mode=0o700)
+        (data / {"hm.my-files": "files", "hm.shared": "shared", "hm.projects": "projects"}[namespace]).mkdir()
+        (control / {"hm.my-files": "my-files", "hm.shared": "shared", "hm.projects": "project-staging"}[namespace]).mkdir(mode=0o700)
         volumes[namespace] = SimpleNamespace(data_path=data, control_path=control)
     paths = FeaturePaths(Paths(tmp_path / "legacy"), "alice", volumes)
     source = tmp_path / "source.txt"
@@ -33,8 +35,8 @@ async def test_feature_bytes_and_private_staging_use_separate_qualified_roots(tm
         state = shared_mutation_state()
         state.acquire()
         state.close()
-    assert (volumes["hm.my-files"].data_path / kept.path).read_bytes() == b"exact"
-    assert (volumes["hm.shared"].data_path / published.path).read_bytes() == b"exact"
+    assert (volumes["hm.my-files"].data_path / "files" / kept.path).read_bytes() == b"exact"
+    assert (volumes["hm.shared"].data_path / "shared" / published.path).read_bytes() == b"exact"
     assert staged.staging_path.is_relative_to(volumes["hm.projects"].control_path)
     assert not list(volumes["hm.projects"].data_path.rglob(".staging"))
     assert not (volumes["hm.shared"].data_path / ".shared-state").exists()

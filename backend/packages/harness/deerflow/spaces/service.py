@@ -23,7 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperationRow
 from deerflow.persistence.spaces.model import SpaceGrantRow, SpaceRow
 from deerflow.spaces.backings import BackingUnavailable, PreparedVolumeCatalog
-from deerflow.spaces.contract import Custody, FeatureBinding, MutationMode, Permission, PrincipalRef, Space, SpaceConflict, SpaceDenied
+from deerflow.spaces.contract import Custody, FeatureBinding, InvalidPrincipal, MutationMode, Permission, PrincipalRef, Space, SpaceConflict, SpaceDenied
 from deerflow.spaces.filesystem import FileConflict, UnsafeSpacePath, _path
 from deerflow.spaces.provision import LAYOUT
 from deerflow.spaces.registry import SpaceRegistry, _stored_permissions
@@ -55,6 +55,7 @@ class SpaceFiles:
         self._verified = {}
         # All resource metadata mutations use this same pending-operation gate.
         registry.operation_guard = self._guard
+        registry.files = self
         self.attachment_guard = None
 
     async def _guard(self, session, admitted, requests, operation_id):
@@ -94,7 +95,8 @@ class SpaceFiles:
         """Host-only atomic provisioning boundary for feature-owned SQL links."""
         if kind is not None and kind not in LAYOUT:
             raise ValueError("Unknown storage kind")
-        async with self.registry.creating(actor=actor, name=name, custody=custody, mode=mode, feature=feature) as (session, row, permissions):
+        creation = self.registry._host_creating(name=name, custody=custody, mode=mode, feature=feature) if actor is None else self.registry.creating(actor=actor, name=name, custody=custody, mode=mode, feature=feature)
+        async with creation as (session, row, permissions):
             used = set((await session.execute(select(SpaceBackingRow.slot_id))).scalars())
             volume = None
             for slot_id, candidate_spec in self.catalog.volumes.items():
@@ -130,7 +132,7 @@ class SpaceFiles:
                 # A rolled-back or uncertain publication retains these folders.
                 self.unclaimed_slots[getattr(spec, "kind", None)].add(spec.slot_id)
                 await await_drained(run_file_io(self._layout, volume, kind))
-            yield session, self.registry._view(row, int(permissions))
+            yield session, self.registry._view(row, int(permissions), allow_empty=actor is None)
         self._verified[spec.slot_id] = volume
         self.bound_slots[getattr(spec, "kind", None)].add(spec.slot_id)
         self.unclaimed_slots[getattr(spec, "kind", None)].discard(spec.slot_id)
@@ -160,15 +162,15 @@ class SpaceFiles:
             finally:
                 os.close(fd)
 
-    async def assign(self, *, kind, actor, name, custody, mode):
+    async def assign(self, *, kind, actor, name, custody, mode, feature=None):
         from deerflow.features.resources import StorageFeatureLinkRow
 
-        if kind == "user" and actor.kind != "human":
+        if kind == "user" and (not isinstance(actor, PrincipalRef) or actor.kind != "human"):
             raise SpaceDenied("User storage assignment requires a human identity")
 
         async def perform():
-            async with self.provisioning(actor=actor, name=name, custody=custody, mode=mode, kind=kind) as (session, space):
-                role = {"user": ("hm.user-space", "human:" + actor.subject_id), "company": ("hm.company-space", "company")}.get(kind)
+            async with self.provisioning(actor=actor, name=name, custody=custody, mode=mode, feature=feature, kind=kind) as (session, space):
+                role = ("hm.user-space", "human:" + actor.subject_id) if kind == "user" else ("hm.company-space", "company") if kind == "company" else None
                 if role is not None:
                     session.add(StorageFeatureLinkRow(namespace=role[0], key=role[1], space_id=space.id))
                     await session.flush()
@@ -238,6 +240,8 @@ class SpaceFiles:
     async def create(self, *, actor: PrincipalRef, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None) -> Space:
         if not self.user_spaces:
             raise SpaceDenied("Creating Spaces is not enabled on this deployment")
+        if not isinstance(actor, PrincipalRef):
+            raise InvalidPrincipal("Storage requires a host-validated principal")
         for _attempt in range(len(self.catalog.volumes) + 1):
             try:
                 async with self.provisioning(actor=actor, name=name, custody=custody, mode=mode, feature=feature) as (_session, space):
@@ -399,6 +403,18 @@ class SpaceFiles:
         # commit, before a cancelled caller can release host ownership.
         return await await_drained(perform())
 
+    async def _host_write_admission(self, session, rows, destination_id, operation_id):
+        row = rows[destination_id][0]
+        if row.status != "active" or row.mode != "native":
+            raise SpaceDenied("A host write requires an active native Space")
+        # The human's READ/EXPORT grant does not waive the destination's writer
+        # guard. Scope the exception only to this workflow's exact own intent.
+        pending = select(SpaceFileOperationRow.operation_id).where(SpaceFileOperationRow.space_id == destination_id, SpaceFileOperationRow.phase == "pending")
+        if operation_id is not None:
+            pending = pending.where(SpaceFileOperationRow.operation_id != operation_id)
+        if await session.scalar(pending.limit(1)) is not None:
+            raise SpaceOperationPending("A destination file operation has an unconfirmed outcome; recovery is required")
+
     async def run_read_workflow(self, *, actor, requests, call, controller_admission=None):
         """Wait outside SQL; shared locks serialize readers against host workflows."""
         from deerflow.spaces.workflows import _owner, _read_only, acquire, close
@@ -442,7 +458,7 @@ class SpaceFiles:
 
         return await await_drained(perform())
 
-    async def run_workflow(self, *, actor, requests, destination_id, operation_id, request, call, controller_admission=None, reconcile=False):
+    async def run_workflow(self, *, actor, requests, destination_id, operation_id, request, call, controller_admission=None, reconcile=False, host_write=False):
         """Host-only domain work spanning its own SQL sessions and file publication.
 
         Private process-held filesystem locks prevent accepting/replaying a live
@@ -451,6 +467,15 @@ class SpaceFiles:
         """
         from deerflow.spaces.workflows import WorkflowReceipt, WorkflowRejected, _effect, _owner, _receipt, acquire, close
 
+        if type(host_write) is not bool:
+            raise ValueError("Host-write authority requires an explicit boolean")
+        permission = requests[destination_id][0]
+        if host_write:
+            if permission != (Permission.READ | Permission.EXPORT):
+                raise ValueError("A host write requires destination READ and EXPORT")
+            request = {**request, "by": "host"}
+        elif not permission & (Permission.WRITE | Permission.OPERATE):
+            raise SpaceDenied("A writing workflow requires mutation authority")
         self._operation_id(operation_id)
         generation = requests[destination_id][1]
         if generation is None:
@@ -464,6 +489,8 @@ class SpaceFiles:
             receipt = None
             try:
                 async with self.registry.admitted(actor=actor, requests=requests, operation_id=(destination_id, operation_id) if reconcile else None) as (session, rows):
+                    if host_write:
+                        await self._host_write_admission(session, rows, destination_id, operation_id if reconcile else None)
                     if controller_admission is not None:
                         await controller_admission(session, rows)
                     volumes = {key: await self._volume(session, row) for key, (row, _) in rows.items()}
@@ -476,6 +503,8 @@ class SpaceFiles:
                     else:
                         session.add(SpaceFileOperationRow(space_id=destination_id, operation_id=operation_id, actor_kind=actor.kind, actor_id=actor.subject_id, generation=generation, phase="pending", request=request))
                 async with self.registry.admitted(actor=actor, requests=requests, operation_id=(destination_id, operation_id)) as (session, rows):
+                    if host_write:
+                        await self._host_write_admission(session, rows, destination_id, operation_id)
                     if controller_admission is not None:
                         await controller_admission(session, rows)
                 try:
@@ -487,6 +516,8 @@ class SpaceFiles:
                     receipt_token = _receipt.set(receipt)
                     result = await call(volumes)
                     async with self.registry.admitted(actor=actor, requests=requests, operation_id=(destination_id, operation_id)) as (session, rows):
+                        if host_write:
+                            await self._host_write_admission(session, rows, destination_id, operation_id)
                         if controller_admission is not None:
                             await controller_admission(session, rows)
                         intent = await session.get(SpaceFileOperationRow, (destination_id, operation_id))

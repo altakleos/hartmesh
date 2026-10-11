@@ -7,7 +7,6 @@ from deerflow_extension_api.storage import StorageController, StorageUnsupported
 
 from deerflow.extensions.loader import ExtensionSpec
 from deerflow.features.resources import FeatureResources
-from deerflow.spaces.contract import Custody, FeatureBinding, MutationMode
 from deerflow.spaces.facade import _current_actor
 
 DEFAULT_FEATURES = (
@@ -60,24 +59,13 @@ class FeatureService:
         files = self.provider._get_files()
         if files is None:
             raise StorageUnsupported("This host has no qualified resource storage")
-        return FeatureResources(files, self.namespace)
+        return FeatureResources(files, "hm.company-space" if self.namespace == "hm.shared" else "hm.user-space")
 
-    async def resource(self, *, provision=True):
+    async def resource(self):
         actor = _current_actor()
         if actor.kind != "human":
             raise StorageUnsupported("This convenience feature supports human owners; nonhuman homes use generic storage")
-        resources = self.resources()
-        key = "company" if self.mediated else f"{actor.kind}:{actor.subject_id}"
-        if not provision:
-            return await resources.get(actor=actor, key=key)
-        return await resources.ensure(
-            actor=actor,
-            key=key,
-            name=self.title,
-            custody=Custody.company() if self.mediated else Custody.personal(actor),
-            mode=MutationMode.MEDIATED if self.mediated else MutationMode.NATIVE,
-            feature=FeatureBinding(self.namespace, "publication", 1) if self.mediated else None,
-        )
+        return await self.resources().get(actor=actor, key="company" if self.namespace == "hm.shared" else f"human:{actor.subject_id}")
 
     def admitted_behavior(self):
         from deerflow.config.paths import get_paths
@@ -120,7 +108,7 @@ class FeatureService:
             raise StorageUnsupported("This controller requires an exact pending operation and generation")
         actor = _current_actor()
         files = self.resources().files
-        space = await self.resource(provision=False)
+        space = await self.resource()
         files._operation_id(payload["operation_id"])
         if type(payload["generation"]) is not int or payload["generation"] != space.generation:
             raise SpaceDenied("Controller recovery requires the current resource generation")

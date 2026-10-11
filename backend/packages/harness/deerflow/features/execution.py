@@ -23,7 +23,7 @@ async def run_project_feature(loaded, callback, *, write=False, operation="conte
         raise StorageUnsupported("The Projects feature is disabled or not installed")
     actor = _current_actor()
     files = service.resources().files
-    space = await service.resource(provision=False)
+    space = await service.resource()
     requests = {space.id: (Permission.READ | (Permission.WRITE if write else Permission(0)), space.generation)}
 
     async def guard(_session, _rows):

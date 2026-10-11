@@ -20,7 +20,7 @@ from deerflow.persistence.projects.model import ProjectDocumentRow, ProjectRow
 from deerflow.persistence.projects.sql import ProjectDocumentRepository, ProjectRepository
 from deerflow.persistence.shared_publications.model import SharedPublicationRow
 from deerflow.persistence.shared_publications.sql import SharedPublicationRepository
-from deerflow.spaces.contract import Permission, PrincipalRef, ResolvedPrincipal
+from deerflow.spaces.contract import Custody, FeatureBinding, MutationMode, Permission, PrincipalRef, ResolvedPrincipal
 from deerflow.spaces.facade import HostStorageProvider
 from deerflow.spaces.principals import HostPrincipalResolver
 
@@ -78,6 +78,17 @@ async def feature_app(tmp_path, request, monkeypatch):
         app.include_router(projects.router)
         app.include_router(project_documents.router)
         app.include_router(trash.router)
+        # Explicit assignments replace allocation from convenience-feature reads.
+        for person in (alice, bob):
+            actor = PrincipalRef("human", str(person.id))
+            await files.assign(kind="user", actor=actor, name="Files", custody=Custody.personal(actor), mode=MutationMode.NATIVE)
+        # The complete bundled Shared switch is staged in2.4. This injected
+        # controller fixture retains its existing mediated protocol meanwhile.
+        async with files.provisioning(actor=PrincipalRef("human", str(alice.id)), name="Shared", custody=Custody.company(), mode=MutationMode.MEDIATED, feature=FeatureBinding("hm.shared", "publication", 1), kind="company") as (
+            session,
+            company,
+        ):
+            session.add(StorageFeatureLinkRow(namespace="hm.company-space", key="company", space_id=company.id))
         paths = Paths(tmp_path / "ordinary")
         monkeypatch.setattr("deerflow.config.paths._paths", paths)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
@@ -127,7 +138,7 @@ async def test_disabled_feature_preserves_core_access_and_has_no_legacy_fallback
     original = dispatch.plugin_settings
     monkeypatch.setattr(dispatch, "plugin_settings", lambda source, plugin: {**original(source, plugin), "enabled": False})
     assert (await client.get("/api/files")).status_code == 503
-    assert await files.list_directory(actor=actor, space_id=space.id) == ([], False)
+    assert await files.list_directory(actor=actor, space_id=space.id, path="files") == ([], False)
     assert (await files.registry.get(actor=actor, space_id=space.id)).id == space.id
 
 
@@ -136,7 +147,7 @@ async def test_company_custody_requires_explicit_grants_and_current_membership(f
     client, _, files, _, _, alice, bob, current = feature_app
     assert (await client.get("/api/shared")).status_code == 200
     actor = PrincipalRef("human", str(alice.id))
-    space = (await files.registry.list(actor=actor))[0]
+    space = next(row for row in await files.registry.list(actor=actor) if row.custody.kind == "company")
     current[0] = bob
     assert (await client.get("/api/shared")).status_code == 404
     current[0] = alice
@@ -193,7 +204,7 @@ async def test_unknown_publication_is_retained_and_exact_controller_recovers(fea
     assert response.status_code == 409, response.text
     assert (await client.get("/api/shared")).status_code == 200
     actor = PrincipalRef("human", str(alice.id))
-    space = (await files.registry.list(actor=actor))[0]
+    space = next(row for row in await files.registry.list(actor=actor) if row.custody.kind == "company")
     facts = await SpaceRecovery(files).status(actor=actor, space_id=space.id)
     pending = next(item for item in facts["operations"] if item["phase"] == "pending")
     loaded = app.state.extensions
@@ -231,7 +242,7 @@ async def test_project_shelf_is_owned_private_staging_and_archive_stays_reversib
     assert archived.status_code == 200, archived.text
     actor = PrincipalRef("human", str(alice.id))
     resources = await files.registry.list(actor=actor)
-    space = next(space for space in resources if space.name == "Projects")
+    space = next(space for space in resources if space.custody.kind == "personal")
     assert space.status == "active"
     assert (await client.post(f"/api/projects/{identifier}/restore")).status_code == 200
     assert all(not list(volume.data_path.rglob(".staging")) for volume in catalog.verified.values())
@@ -262,7 +273,9 @@ async def test_project_stream_rechecks_the_same_opened_content_after_native_repl
     request = asyncio.create_task(client.get(f"/api/projects/{project}/documents/{document['id']}/content"))
     await asyncio.wait_for(started.wait(), 10)
     try:
-        await files.write(actor=actor, space_id=space.id, expected_generation=space.generation, operation_id=uuid4().hex, path=f"{document['stored_relpath']}/original/guide.txt", content=b"other", expected_sha256=document["sha256"])
+        await files.write(
+            actor=actor, space_id=space.id, expected_generation=space.generation, operation_id=uuid4().hex, path=f"projects/{document['stored_relpath']}/original/guide.txt", content=b"other", expected_sha256=document["sha256"]
+        )
     finally:
         release.set()
     response = await request
@@ -279,7 +292,7 @@ async def test_altered_shelf_document_is_never_attached_under_old_provenance(fea
     document = (await app.state.project_document_repo.list_active(project, limit=100, offset=0, user_id=str(alice.id)))[0]
     actor = PrincipalRef("human", str(alice.id))
     space = (await files.registry.list(actor=actor))[0]
-    await files.write(actor=actor, space_id=space.id, expected_generation=space.generation, operation_id=uuid4().hex, path=f"{document['stored_relpath']}/original/guide.txt", content=b"other", expected_sha256=document["sha256"])
+    await files.write(actor=actor, space_id=space.id, expected_generation=space.generation, operation_id=uuid4().hex, path=f"projects/{document['stored_relpath']}/original/guide.txt", content=b"other", expected_sha256=document["sha256"])
 
     async def forbidden(_self):
         pytest.fail("Altered shelf bytes must be rejected before target upload allocation")
@@ -337,10 +350,10 @@ async def test_saved_bytes_survive_actual_thread_deletion_and_optional_feature_r
     unavailable = await client.get("/api/files")
     assert unavailable.status_code == 503, unavailable.text
     endpoint = f"/api/spaces/{resource.id}/content"
-    retained = await client.get(endpoint, params={"path": "saved.md"})
+    retained = await client.get(endpoint, params={"path": "files/saved.md"})
     assert retained.status_code == 200 and retained.content == b"Retained beyond the source chat\n", retained.text
     updated = await client.put(
-        endpoint, params={"path": "saved.md", "generation": resource.generation, "operation_id": uuid4().hex, "expected_sha256": hashlib.sha256(retained.content).hexdigest()}, content=b"Edited with no feature plugins\n"
+        endpoint, params={"path": "files/saved.md", "generation": resource.generation, "operation_id": uuid4().hex, "expected_sha256": hashlib.sha256(retained.content).hexdigest()}, content=b"Edited with no feature plugins\n"
     )
     assert updated.status_code == 200, updated.text
-    assert (await client.get(endpoint, params={"path": "saved.md"})).content == b"Edited with no feature plugins\n"
+    assert (await client.get(endpoint, params={"path": "files/saved.md"})).content == b"Edited with no feature plugins\n"

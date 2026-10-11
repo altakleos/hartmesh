@@ -11,15 +11,21 @@ from fastapi import HTTPException, Request
 from starlette.responses import FileResponse
 
 from app.gateway.routers.spaces import _ERRORS, SpaceFileResponse, _actor, _http_error
-from app.gateway.storage_spaces import supports_storage_credentials
+from app.gateway.storage_spaces import STORAGE_REASONS, supports_storage_credentials
 from deerflow.config.paths import USER_FILES_VIRTUAL_PREFIX, get_paths, paths_scope
 from deerflow.extensions.plugin_tools import plugin_settings
 from deerflow.features.paths import FeaturePaths
 from deerflow.features.plugins import FeatureService, FeatureServices
+from deerflow.features.resources import MissingFeatureResource
+from deerflow.spaces.backings import BackingUnavailable
 from deerflow.spaces.contract import Permission, SpaceDenied
 from deerflow.spaces.facade import storage_actor_scope
 from deerflow.spaces.service import SpaceFiles
 from deerflow.spaces.workflows import WorkflowRejected, _effect
+
+
+def _unavailable(reason):
+    return HTTPException(503, {"code": "storage-unavailable", "reason": reason, "message": "Your files are not available right now. Chats run without them."})
 
 
 def _installed(request, namespace):
@@ -57,8 +63,12 @@ def storage_feature(namespace, *, write=False):
             files = getattr(request.app.state, "storage_spaces", None)
             if not isinstance(files, SpaceFiles):
                 if getattr(request.app.state, "storage_spaces_enabled", False):
-                    raise HTTPException(503, "Qualified storage is unavailable")
+                    reason = getattr(getattr(request.app.state, "agent_execution", None), "storage_reason", None)
+                    raise _unavailable(reason if reason in STORAGE_REASONS else "admission-failed")
                 return await function(*args, **kwargs)
+            reason = getattr(getattr(request.app.state, "agent_execution", None), "storage_reason", None)
+            if reason is not None:
+                raise _unavailable(reason if reason in STORAGE_REASONS else "admission-failed")
             if not supports_storage_credentials(request):
                 raise HTTPException(403, "This credential has no storage resource scopes")
             service, entry = _installed(request, namespace)
@@ -132,6 +142,10 @@ def storage_feature(namespace, *, write=False):
                             call=invoke,
                         )
                     return await files.run_read_workflow(actor=actor, requests=requests, controller_admission=controller, call=invoke)
+                except BackingUnavailable:
+                    raise _unavailable("space-unverified") from None
+                except MissingFeatureResource as exc:
+                    raise HTTPException(503, {"code": "storage-unavailable", "reason": "space-not-assigned", "message": str(exc)}) from None
                 except _ERRORS as exc:
                     raise _http_error(exc) from None
 
