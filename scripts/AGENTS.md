@@ -370,6 +370,12 @@ source/harness hashes, and clean images only after both runs. The final tracked
 snapshot detects source drift. `pair-result.json` supplements each schema-2
 profile receipt; it does not replace published-candidate admission evidence.
 
+## Storage preparation
+
+`storage_spaces_volume.py` imports the harness `prepare_volumes` implementation
+and writes legacy inventory schema 1. Typed Compose preparation is the backend
+`app.gateway.storage_init` CLI, never a host install or VM-image builder.
+
 ## Compose image pinning
 
 `pin_compose_images.py` tracks `image`, `proxy_image` and the Gateway's

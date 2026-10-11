@@ -84,6 +84,12 @@ Gateway startup applies the migration through the existing bootstrap.
 
 ## Qualified Linux backing
 
+See the [Compose storage runbook](../deploy/compose/README.md#storage-and-agents)
+for the shared-mount preflight, seven planning keys, pool layout, operator verbs
+and snapshot rollback. The model and agents remain inactive by default in this
+release. The renderer and operator CLI both keep `ABSENT_MEANS_DEFAULT = False`.
+
+
 The opt-in host filesystem adapter exposes a product file API and browser. It supports
 ordinary dotfiles, relative internal links, binary files and SQLite through
 Linux `openat2` confinement. Absolute links and nested mount transitions are
@@ -137,6 +143,11 @@ budget. Timed-out verification and admission remain owned; the minute recheck
 uses their outcome before starting another admission. Static provider failures
 require configuration repair and a restart. Shutdown drains owned initialization
 before database teardown, including when later service startup fails.
+Startup orders the optional `mount-all` call, pinned inventory verification,
+service construction, bound-resource metadata checks, then Docker admission
+within one budget. `execution_state` and `allowance(kind)` use current inventory
+and durable rows rather than a cached free count. Feature dispatch remains
+lookup-only and returns bounded structured 503 reasons.
 Successful pool qualification does not enable unsupported workspace topology.
 Restricted networking and configured-mount workspace support remain a later
 runtime change; preparation and resume currently retain that guard, while
@@ -199,9 +210,16 @@ Compose pools. Its verbs are `prepare`, `mount-all`, `fstab-sync`, `verify`,
 `resize`, `forget`, `quiesce` and `status`. It reads `HARTMESH_DATA_DIR` and the
 seven storage/count environment keys, and requires a privileged Linux container
 with the host PID namespace and a shared pool bind. It never reads app config or
-the database. Compose service wiring follows in a later change.
+the database. The Compose bundle runs it as the bounded privileged one-shot before Gateway
+startup; see [the operator runbook](../deploy/compose/README.md#storage-and-agents).
 
-Typed pools use `inventory.v2.json` with a kind on every slot. Preparation checks
+Typed pools use `inventory.v2.json` with a kind on every slot and
+`max_inodes = max_bytes // 8192`. Schema 1 remains supported by the standalone
+helper. The pool is root:1000 0750; images root:1000 0640; inventory 1000:1000
+0440; visible data 1000:1000 0770 and private control 1000:1000 0700. A marked
+fstab block orders mounts before Docker, and `.storage-init.lock` serializes
+operator verbs. `host_image_path` stays unset when pool paths match inside and
+outside the Gateway. Preparation checks
 the whole missing plan before allocating anything, leaves the larger of 4 GiB
 and 10% of the disk free, and preserves at least 1,024 host inodes. Each completed
 slot is published atomically, so a repeat continues an interrupted plan. Counts
@@ -235,10 +253,13 @@ storage_spaces:
   inventory_path: /mnt/tenant/storage-spaces/inventory.v1.json
 ```
 
-Restart the Gateway. Invalid mounts, mismatched identities, missing reserve or
-memory database mode refuse startup. `/api/features` reports the service that
-actually started, rather than a subsequently edited config. This startup-only
-section is new in config version 53.
+Restart the Gateway. Missing/unreadable inventory, invalid mounts, mismatched
+identities or missing reserve report unavailable storage while preserving durable
+records; they do not stop Gateway startup. A durable database remains required.
+`/api/features` reports the service that actually started, rather than a later
+config edit. The section is startup-only; configuration version 54 adds the plan
+and `user_spaces` flag. The Compose renderer sets `user_spaces: false`, so its
+generic creation route answers 403 while host assignment remains available.
 
 The sidebar offers **Spaces** when supported. Create a personal space, or a
 company space with host provisioning authority. A new resource claims one empty
@@ -269,6 +290,23 @@ WRITE. A broader destination audience additionally requires source ADMIN and
 explicit disclosure acknowledgement. A read grant alone cannot disclose bytes.
 
 ## Resource API
+
+Trusted host integrations may use `registry.host_create` to allocate without a
+human actor/grant/event, and `host_grant` for an atomic validated human grant:
+its callback runs before no-op detection and every attachment must be fenced.
+`host_locked` locks sorted distinct Space rows without assuming a human grant;
+missing rows are skipped and all statuses remain eligible for host coordination.
+These APIs confer no public HTTP authority.
+
+`run_workflow(host_write=True)` admits a native destination under the member
+request's exact READ | EXPORT, records `"by": "host"`, and rejects archived or
+otherwise pending destinations. Source admission/disclosure and private receipts
+remain enforced. No production Shared dispatch uses this flag yet.
+`run_read_workflow` takes shared host locks with `READ_LOCK_WAIT_SECONDS = 5`,
+then rechecks authority and backing after the wait. `SpaceFull` identifies only
+definite pre-publication byte/inode capacity failures; post-publication errors
+stay uncertain for recovery.
+
 
 All browser requests use the authenticated human. Attributed internal requests
 use their validated actual owner; missing attribution never becomes `default`.

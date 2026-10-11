@@ -42,22 +42,6 @@ Nothing in the bundle relies on being executable: every script `compose.yaml`
 runs is invoked as `sh /opt/hartmesh/...`, and the operator tools under
 `scripts/` are invoked as `bash scripts/...` (their headers say so).
 
-## Storage and agents
-
-The data disk must be a shared mount before starting this profile, including
-when the storage keys are absent. Both the one-shot and Gateway use an `rslave`
-bind so mounts made in the host namespace become visible inside the containers.
-Check before `up`:
-
-```bash
-findmnt -no PROPAGATION --target /srv/hartmesh
-```
-
-The result must be `shared`. If it is not, an administrator runs
-`mount --make-shared /srv/hartmesh` on the VM and adds `shared` to the data disk's
-mount options in `/etc/fstab` so the setting survives a reboot. An unshared
-mount causes Docker to refuse the bind before the Gateway starts.
-
 ## The `.env` contract
 
 The operator writes exactly these keys; the profile consumes them and needs no
@@ -103,6 +87,13 @@ get explicit `environment:` entries and never see a provider key.
 
 | Key | Consumed by |
 | --- | --- |
+| `HARTMESH_USERS` | User slot count, 1–100; absent keeps storage off. (§ "Storage and agents"). |
+| `HARTMESH_USER_STORAGE_GIB` | User capacity, 1–1024 GiB; absent 1. (§ "Storage and agents"). |
+| `HARTMESH_AI_ASSISTANTS_PER_USER` | Assistant slots per user, 0–10; absent 0 in this release. (§ "Storage and agents"). |
+| `HARTMESH_AI_ASSISTANT_STORAGE_GIB` | Assistant capacity, 1–1024 GiB; absent 1. (§ "Storage and agents"). |
+| `HARTMESH_AI_EMPLOYEES` | AI employee slots, 0–100; absent 0 in this release. (§ "Storage and agents"). |
+| `HARTMESH_AI_EMPLOYEE_STORAGE_GIB` | AI employee capacity, 1–1024 GiB; absent 1. (§ "Storage and agents"). |
+| `HARTMESH_COMPANY_STORAGE_GIB` | Company capacity, 1–1024 GiB; absent 1. (§ "Storage and agents"). |
 | `HARTMESH_APP_SUBNET` | The `app` bridge's IPAM subnet **and** the Gateway's `AUTH_TRUSTED_PROXIES`, which are the same reference. Absent -- which is what every existing tenant `.env` is -- both take the shipped default, `10.201.26.0/24`. Set it only when that range collides with something the guest must still reach (§ "Network model"). |
 | `HARTMESH_PRODUCT_NAME` | What the product is called: the heading on the sign-in and setup pages, the browser tab, the workspace when the tenant bundle names no company, the assistant's own name, and DingTalk's message title. Rendered into `ui.product_name` (the template must not carry it); one line of at most 40 characters, surrounding spaces trimmed. Absent -- which is what every existing tenant `.env` is -- `HartMesh`. A name the Gateway would refuse (a control or reordering character, over 40 characters), or one beginning with `$` (the Gateway would read it as an environment variable), refuses to render. It is read at Gateway start: a new name takes a restart. Quote a name containing `#` (`HARTMESH_PRODUCT_NAME="Acme #1"`), or `.env` reads the rest as a comment. A company name from the tenant bundle still wins inside the workspace after sign-in (§ "Tenant bundle"). |
 | `HARTMESH_MODELS_FILE` | The path of the operator's own model file, read by `gateway/render_config.py` at every Gateway start. Absent -- which is what every existing tenant `.env` is -- the rendered `models:` section comes from the bundled provider catalog exactly as before. Set, that one file is the whole model list (§ "Operator-managed models"). |
@@ -126,6 +117,10 @@ writes for every tenant. Optional keys adapt the profile when its defaults
 do not suit the host or tenant. The resolver source must exist even when
 allowlist mode is selected; Compose refuses a missing file instead of
 creating an empty directory in its place.
+
+The seven storage keys reach `gateway/render_config.py` through the Gateway's
+`env_file`. Compose also interpolates each once, with an empty default, into
+`storage-init`, the only other service that reads these tenant keys.
 
 They reach the stack by different routes, on purpose. Both `HARTMESH_APP_SUBNET`
 uses are the same `${HARTMESH_APP_SUBNET:-...}` reference, so an override
@@ -932,6 +927,10 @@ data. Anonymous ones count: a service whose image declares a `VOLUME` gets
 one at every `up` unless the profile mounts that path itself, which is why
 the search service has a tmpfs on `/var/cache/searxng`.
 
+`/srv/hartmesh/spaces`, created by `storage-init`, holds the inventory, images
+and mounts. The Gateway binds it at the same host path with slave propagation;
+`storage-init` binds only this directory (§ "Storage and agents").
+
 ### Directory ownership
 
 `postgres/` and `redis/` are pre-created as `1000:1000 0750` while the
@@ -960,6 +959,9 @@ here, so the probe performs the same `setpriv` drop before its Python runs.
 Proved on the published image: with those two capabilities the drop succeeds,
 the process reports `CapEff 0` and `NoNewPrivs 1`, and the docker CLI reaches
 the daemon from uid 1000.
+
+The profile also has a privileged one-shot, `storage-init`, which runs as root
+with no network and exits before the Gateway starts (§ "Storage and agents").
 
 ### Tenant bundle
 
@@ -1737,6 +1739,8 @@ Moving the 5.0 GiB line instead is the operator's call, not this profile's.
 Every term of that line, so a change to one has to name the other it took
 from: services 2880 MiB (the table above), two 1024 MiB sandbox slots, and
 their two 96 MiB relays is 5120 MiB, exactly 5.0 GiB.
+`storage-init`'s 128 MiB is outside that sum: the one-shot exits before the
+Gateway starts, and its startup `mount-all` helper uses the remaining VM headroom.
 `backend/tests/test_compose_profile.py` adds them up, so a limit cannot move
 without a counterpart moving with it.
 
@@ -2151,6 +2155,307 @@ per-person cap or minimum interval), and *Trigger now* is subject to the same
 one-at-a-time budget and shows `queued` while it waits. Not measured: an
 unattended run against the tenant's own model route on a leased guest, and the
 Gateway's memory under scheduled work.
+
+## Storage and agents
+
+**The storage model and the agents are not offered in this release.** This
+release carries the storage service and seven optional planning keys, inactive
+by default. With `HARTMESH_USERS` absent, Storage Spaces and the agents API
+remain off as in release 45. `storage-init` creates `/srv/hartmesh/spaces` and
+its lock, prepares no filesystems, and exits. The Gateway writes
+`storage: off (HARTMESH_USERS absent)`; `/health` reports `"storage": "off"`
+and `"agents": "off"`. Setting the keys is for operator qualification only.
+
+A **Space** is a fixed-capacity ext4 filesystem inside a fully allocated image
+on the data disk. A **slot** is a prepared filesystem, assigned or free, with
+kind `user`, `assistant`, `employee` or `company`. The **pool** holds the slots
+at `/srv/hartmesh/spaces`. An AI assistant is a person's own agent; an AI
+employee is the company's agent. Counts and capacities below plan their storage;
+they do not activate those capabilities in this release.
+
+Examples use these shell functions, defined in the operator's shell:
+
+```bash
+hm() { docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env "$@"; }
+si() { hm run --rm -T storage-init "$@"; }
+```
+
+Supply `HARTMESH_PROVIDER_KEYS_SECRET` in the command environment for `hm up`
+when provider keys have been stored through the product (§ "Provider keys in
+the product").
+
+### What the profile prepares
+
+The data disk must be a shared mount before starting this profile, including
+when the storage keys are absent. Both the one-shot and Gateway use an `rslave`
+bind so mounts made in the host namespace become visible inside the containers.
+Check before `up`:
+
+```bash
+findmnt -no TARGET,PROPAGATION --target /srv/hartmesh
+findmnt -no PROPAGATION --target /srv/hartmesh
+```
+
+The propagation must be `shared`. If it is not, an administrator runs
+`mount --make-shared /srv/hartmesh` on the VM and adds `shared` to the data disk's
+mount options in `/etc/fstab` so the setting survives a reboot. If `findmnt`
+names a different mount target, use that target for the remedy. An unshared
+mount causes Docker to refuse the bind before the Gateway starts; skipping the
+one-shot does not bypass the Gateway's identical requirement.
+
+Qualification with the keys set also needs these host checks:
+
+```bash
+findmnt -no FSTYPE --target /srv/hartmesh  # ext4
+ls -l /dev/loop-control                  # character device
+uname -r                                # Linux 6.0 or later
+command -v mkfs.ext4 e2fsck resize2fs losetup mount umount findmnt fallocate
+```
+
+The final line must find eight tools from `util-linux` and `e2fsprogs`.
+The slot verifier requires filesystem identity support from Linux 6.0 or later.
+Missing storage prerequisites leave storage unavailable; they do not replace
+the configured backing with an ordinary directory.
+
+With keys set, the one-shot checks the complete missing plan, prepares slots
+one at a time in company/user/assistant/employee order, mounts existing slots,
+and updates its fstab block. The Gateway verifies the inventory and backing,
+then probes whether Docker sees the same bytes. Automatic account assignment
+and chat mounts from Spaces are not part of this release.
+
+### The keys
+
+All seven keys are validated even when storage is off. Values are decimal whole
+numbers with surrounding blanks trimmed; empty means absent. A change takes
+`hm up -d --wait`. The template contains neither `storage_spaces` nor
+`agents_api`; the renderer writes both sections.
+
+| Key | Range | When absent in this release | What it plans |
+| --- | --- | --- | --- |
+| `HARTMESH_USERS` | 1–100 | Storage off | User slots. Once used, keep this key: removing it makes files in Spaces unreachable until it returns. |
+| `HARTMESH_USER_STORAGE_GIB` | 1–1024 | 1 | Whole GiB per user slot. |
+| `HARTMESH_AI_ASSISTANTS_PER_USER` | 0–10 | 0 | Assistant slots per planned user. |
+| `HARTMESH_AI_ASSISTANT_STORAGE_GIB` | 1–1024 | 1 | Whole GiB per assistant slot. |
+| `HARTMESH_AI_EMPLOYEES` | 0–100 | 0 | Company AI employee slots; `on` and `off` are invalid. |
+| `HARTMESH_AI_EMPLOYEE_STORAGE_GIB` | 1–1024 | 1 | Whole GiB per AI employee slot. |
+| `HARTMESH_COMPANY_STORAGE_GIB` | 1–1024 | 1 | Whole GiB for the company slot. |
+
+The required allocation and fit checks are:
+
+```text
+required_bytes = users × U + users × assistants_per_user × A + employees × E + C
+spaces         = users × (1 + assistants_per_user) + employees + 1  (at most 256)
+fits           = free_bytes − missing_bytes ≥ max(4 GiB, 0.10 × disk_bytes)
+                 and free_inodes − 4 × missing_count ≥ 1,024
+max_inodes     = max_bytes // 8192  per Space
+```
+
+`U`, `A`, `E` and `C` are the capacities converted from GiB to bytes.
+Missing bytes/counts include only slots still to prepare. Explicitly setting
+`HARTMESH_USERS=10`, `HARTMESH_AI_ASSISTANTS_PER_USER=1` and
+`HARTMESH_AI_EMPLOYEES=10`, with capacities of 1 GiB, reserves 31 GiB:
+ten user, ten assistant, ten employee and one company slot. On a 50 GiB data
+disk it also requires 5 GiB left free. About 48 GiB initially free would leave
+about 12 GiB beyond that reserve. This is arithmetic, not a measured workload.
+Setting only `HARTMESH_USERS=10` prepares eleven 1 GiB slots in this release.
+
+With the keys set, this release prepares and verifies Spaces, but My Files,
+Shared and Projects return `storage-unavailable`/`space-not-assigned` until a
+role is assigned, and ordinary conversations do not start with this storage
+configuration. Both rendered agent counts remain zero even when nonzero counts
+reserve agent slots. A successful qualification writes `storage: ready (…)`
+and `agents: none (…)`; it does not offer account storage or agents yet.
+
+Each refusal follows `render_config: refusing to render: `:
+
+| Refusal text |
+| --- |
+| `HARTMESH_USERS must be a whole number from 1 to 100 (or absent)` |
+| `HARTMESH_USER_STORAGE_GIB must be a whole number of GiB from 1 to 1024 (or absent)` |
+| `HARTMESH_AI_ASSISTANTS_PER_USER must be a whole number from 0 to 10 (or absent)` |
+| `HARTMESH_AI_ASSISTANT_STORAGE_GIB must be a whole number of GiB from 1 to 1024 (or absent)` |
+| `HARTMESH_AI_EMPLOYEES must be a whole number from 0 to 100 (or absent); on and off are not values of this key` |
+| `HARTMESH_AI_EMPLOYEE_STORAGE_GIB must be a whole number of GiB from 1 to 1024 (or absent)` |
+| `HARTMESH_COMPANY_STORAGE_GIB must be a whole number of GiB from 1 to 1024 (or absent)` |
+| `the keys call for <n> Spaces (<u> users, <u> x <a> AI assistants, <e> AI employees, the company); at most 256 can be prepared on one VM` |
+| ``template `agents_api` must be absent; HARTMESH_AI_ASSISTANTS_PER_USER and HARTMESH_AI_EMPLOYEES select it`` |
+| ``template `storage_spaces` must be absent; HARTMESH_USERS and the capacity keys select it`` |
+
+### The pool
+
+`storage-init` owns this layout; the Gateway runs as uid/gid 1000:
+
+| Path under `/srv/hartmesh/spaces` | Owner | Mode | Purpose |
+| --- | --- | --- | --- |
+| Pool directory | root:1000 | 0750 | Pool boundary. |
+| `inventory.v2.json` | 1000:1000 | 0440 | Slot identities, kinds and bounds. |
+| `.storage-init.lock` | root:root | 0600 | Exclusive operator lock. |
+| `.probe/` | 1000:1000 | 0700 | Temporary Docker nonce probes. |
+| `<slot>.img` | root:1000 | 0640 | Fully allocated ext4 image. |
+| `<slot>.volume` mount point | root:1000 | 0750 | Mount point beneath the mounted root. |
+| `<slot>.volume/data/` | 1000:1000 | 0770 | Visible files. |
+| `<slot>.volume/control/` | 1000:1000 | 0700 | Private staging, receipts and restore points. |
+
+Slot IDs have 32 hexadecimal characters. The mounted filesystem root retains
+root:root 0755. Visible and private bytes consume the same fixed capacity;
+an empty 1 GiB slot already occupies 1 GiB of the data disk. Inventory schema 2
+adds a kind to every slot; the standalone helper still writes schema 1.
+Never edit the inventory by hand.
+
+Assignment creates kind-specific folders at 0700: user `files/`, `projects/`,
+`conversations/`; company `shared/`, `projects/`; agent `uploads/`, `outputs/`,
+`.agent-skill-packages/`. Feature plugins only look up assigned roles and folders.
+This release does not automatically assign accounts or the company.
+
+The fstab block, derived only from inventory, lies between
+`# hartmesh-storage begin` and `# hartmesh-storage end`. Entries use
+`loop,nodev,nosuid,nofail,x-systemd.requires-mounts-for=/srv/hartmesh,x-systemd.before=docker.service`.
+`nofail` permits boot with a damaged slot; it does not prove that slot usable.
+If fstab cannot be written, the result records a problem and Gateway `mount-all`
+can still mount existing slots at start.
+
+### storage-init
+
+This is the profile's only privileged service: the same backend image digest
+as the Gateway, `pid: host`, no network, 128 MiB, 64 processes, and no restart.
+It binds only the pool and enters the host mount namespace with `nsenter -m -t 1`.
+It reads the data-directory and planning environment, never app configuration
+or the database. It knows slots and kinds, not accounts or agents.
+
+At every `up`, `prepare --at-start` has a 600-second limit and exits zero so a
+storage failure does not prevent Gateway startup. Its JSON `returncode`,
+`verdict` and `problems` retain the actual outcome. An interrupted plan continues
+at the next `up` or `si prepare`. Docker restart alone does not rerun the one-shot;
+the fstab block and Gateway helper mount existing slots instead.
+
+Gateway startup may run only `mount-all`, through its pinned
+`HARTMESH_STORAGE_INIT_IMAGE`, with a 60-second deadline. Unconfirmed helper
+creation/removal blocks another call until its exact owned helper is resolved;
+an empty container listing alone is not proof that creation finished.
+
+Each operator verb holds the pool lock, waiting at most 30 seconds. The lock
+remains held by inherited host-tool descriptors through offline repair/growth.
+Unlisted images are retained and reported; only explicit `forget` removes them.
+When Docker cannot start the one-shot itself, `hm up -d --wait --scale storage-init=0`
+can start the rest, provided the shared-mount preflight passed. It prepares no
+missing slots and does not cure a Gateway helper failure.
+
+### Reading the start-up lines
+
+| Output | Meaning |
+| --- | --- |
+| `storage: off (HARTMESH_USERS absent)` | Storage disabled; no slot verification or admission. |
+| `storage: storage-init mount-all exit …` | Helper outcome for existing mounts. |
+| `storage: ready (…)` | Pool admitted, with prepared/verified counts and bounds. |
+| `storage: ready, … spaces short (…)` | Incomplete plan; inspect whether the missing allocation fits. |
+| `storage: unavailable (…)` | Inventory, data-disk, mount helper or Docker admission failed. |
+| `storage: space … unverified (…)` | One slot could not be verified; its existing identity is retained. |
+| `agents: none (…)` | Both rendered agent counts are zero. |
+
+The renderer reports `spaces=off` with the key absent, otherwise the planned
+counts/capacities followed by `agents=none`. It reads no disk. `/health` reports
+state words only; `/api/features` adds authenticated readiness and counts,
+without paths or byte capacities. See [Storage Spaces](../../docs/STORAGE_SPACES.md).
+
+### Fresh install
+
+Complete the shared-mount preflight, leave `HARTMESH_USERS` absent, then start
+with `hm up -d --wait`. Read `hm logs --no-log-prefix storage-init gateway`.
+Expect the one-shot's `nothing-to-do` document with an off note, the Gateway's
+`storage: off (HARTMESH_USERS absent)`, `/health` storage/agents `off`, and the
+renderer summary `spaces=off`. No storage image is prepared in this mode.
+
+### Upgrading from release 45
+
+Before replacing a bundle:
+
+```bash
+findmnt -no TARGET,PROPAGATION --target /srv/hartmesh
+findmnt -no FSTYPE --target /srv/hartmesh
+uname -r
+```
+
+1. Agree the maintenance window and snapshot the data disk at the platform.
+   Keep the snapshot: it is the supported way back to release 45.
+2. Stop the stack with `hm down`. Inspect and remove the old Gateway's exact
+   orphaned sandbox/relay/bridge containers using the existing upgrade procedure
+   (§ "Upgrading a guest that already runs sandboxes").
+3. Replace `/opt/hartmesh` with the new pinned bundle and complete its shared-mount
+   preflight. Its new `si status` command can now report the off state. Leave
+   `HARTMESH_USERS` absent for normal use.
+4. Run `hm up -d --wait`, supplying the provider-key wrapping secret if needed.
+5. Inspect storage-init/Gateway logs and `/health`; expect the same off results
+   as a fresh installation. Normal bootstrap applies revision
+   `0041_storage_host_replacements` on SQLite or PostgreSQL.
+
+The snapshot is taken before the database upgrade. No user-file transfer is
+performed by this foundation. For the additive table/columns and guarded
+technical downgrade, see the [schema notes](../../CHANGELOG.md#schema-changes).
+
+### Rolling back
+
+Returning to release 45 requires restoring the data-disk snapshot taken before
+the upgrade. Replacing only the bundle cannot roll back revision 0041.
+Stop the stack and any containers holding pool filesystems, use `si quiesce`,
+and confirm it reports no holders or busy loop devices. The data disk must be
+unmounted while restored; use a stopped guest if required by the platform.
+Restore the disk, restore the release-45 bundle at `/opt/hartmesh`, then start
+that bundle with its original environment and read readiness/logs.
+
+### Commands
+
+With `HARTMESH_USERS` absent, commands return an off/nothing-to-do result rather
+than operating on slots; `quiesce` remains available. `status` still checks host
+prerequisites and validates inventory, so it may refuse before returning off. Keep
+the key for an existing enabled pool, including while performing verification,
+growth or removal. An off result is not proof that a slot was verified or removed.
+
+Each verb emits one sorted JSON document. Exit 0 means success/nothing to do,
+1 refusal, and 2 partial or uncertain completion. `prepare --at-start` always
+exits zero while retaining the actual return code in its document.
+
+| Command | Effect and limits |
+| --- | --- |
+| `si prepare` | Check the whole missing plan, allocate/mount missing slots, publish inventory after each, synchronize fstab and verify. Resume an interrupted plan. |
+| `si mount-all` | Mount existing listed slots only; report `mounted`, `already`, `failed`. Partial mount failures exit 2. |
+| `si fstab-sync` | Rewrite only the marked inventory-derived fstab block; malformed/multiple blocks are refused. |
+| `si verify [<slot> ...] [--repair]` | Verify all or selected slots. Without repair, report only; repair restores supported ownership/mount/allocation facts, not lost bytes. |
+| `si resize <slot> <GiB>` or `si resize --kind <kind> <GiB>` | Offline growth only. Check complete added allocation and all holders before growth; preserve identity and files, update inventory, remount. Never shrink. |
+| `si forget <slot> [--discard]` | Permanently remove a listed slot or unlisted image. Always refuse holders; nonempty slots require `--discard`. No knowledge of SQL bindings. |
+| `si quiesce` | Unmount listed/unlisted pool images only when no container holds them; confirm loop devices detached. Do not restore while any holder/busy entry remains. |
+| `si status` | Read pool/plan/mount/fstab/disk facts, including absent inventory, without changing them. |
+
+Common refusals include invalid keys, missing host tools/namespace permission,
+an inventory outside the pool, and a held lock. `resize`, `forget` and `quiesce`
+inspect container processes' mount tables before unmounting: a successful host
+unmount alone cannot prove that a container released its own mount.
+Stop the Gateway and every actual holder before those offline operations.
+`forget --discard` destroys files; it cannot establish that an image is unused
+by an application binding. Inspect durable bindings before removing a slot.
+
+### Changing the counts and capacities
+
+Raising a count prepares missing slots on the next `up` if the complete addition
+fits. Lowering a count removes nothing. A larger capacity applies to new slots;
+existing slots require offline `resize` and a Gateway restart. A smaller capacity
+affects future preparation only. An interrupted growth is continued with the
+same command; a smaller target cannot truncate an already extended image.
+
+### Full Spaces, the data disk, and unverified Spaces
+
+Each filesystem enforces bytes and inodes. `si status` separates prepared,
+missing and reserved capacity; `si verify` identifies unverified slots. Freeing
+files does not shrink an allocated image. Pool admission also preserves its
+configured free-data-disk floor (1 GiB and 1,024 inodes); below it storage is
+unavailable until capacity is restored.
+
+Preparation/growth require the larger 4 GiB/10% headroom. If the missing plan
+does not fit, no new slot is prepared. Grow the data disk or reduce the planned
+addition, then repeat preparation. A slot with damaged/missing identity stays
+unverified; ordinary directories and matching path strings are no substitute.
+Use repair only for the reported repairable fact, or restore the platform
+snapshot for lost data. Unassigned slots containing files are never silently
+claimed by another resource.
 
 ## Durability
 
@@ -3029,6 +3334,10 @@ and running the pin script. Eight images are pinned: gateway, frontend,
 sandbox, the network proxy (built under this repository's own name,
 `<repo>-sandbox-network-proxy`), `postgres`, `redis`, `nginx` and
 `searxng/searxng`.
+
+The backend digest appears in three Compose values: the Gateway image, the
+`storage-init` image and `HARTMESH_STORAGE_INIT_IMAGE`. The pin script rewrites
+all three together; `images.txt` still has eight images.
 
 ## Not here
 

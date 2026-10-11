@@ -11,6 +11,19 @@ retain their behavior. Creation needs no conversation or running sandbox.
 
 ## Management API
 
+Managed-storage availability is separate from agent identity. `/api/features`
+reports `agent_instances.execution` as `ready` or `unavailable` with a bounded
+reason; `/health` maps this to state words `ready`, `none`, `held` or `unavailable`
+(and `off` with storage disabled). Current reasons include `storage-unavailable`,
+`agents-none`, `space-unverified` and `space-not-assigned`. Hold/host-replacement
+enforcement is not activated yet. AI assistant/AI employee allowances expose
+`allowed` and `in_use` counts, never bytes. An execution admission refusal carries
+HTTP 409 with a public `detail`, `reason: execution-unavailable` and a separate
+`execution_reason`. Feature file routes instead use a structured `detail` with
+`code`, `reason` and a public message. The Compose renderer still writes both
+agent creation counts as zero.
+
+
 `POST /api/agent-instances` requires provider permissions `agents:read` and
 `agents:write`. Send a UUID-hex `creation_id`, display `name`, and caller-visible
 custom `definition_name`. Optional `custody` is `personal` (default) or `company`;
@@ -74,8 +87,11 @@ Current grants control lists before pagination, history, streams, exports and
 run evidence. Revocation stops subsequent SSE frames. JSON metadata cannot bind
 an ordinary chat or change an instance identity.
 
-Instance execution currently requires the qualified direct Linux Docker AIO
-storage adapter. Other transports refuse execution. The existing lead graph,
+Instance execution currently requires the qualified Linux Docker AIO storage
+adapter. Admission probes a fresh nonce through the daemon instead of requiring
+the Gateway and Docker to share a mount namespace: a Gateway container may
+qualify through its mounted local socket. Restricted-network/configured-mount
+workspace construction remains unsupported; other transports refuse execution. The existing lead graph,
 run worker, journals and checkpoint accessors remain in use. The environment
 mounts only the instance Home at `/mnt/spaces/home`; its fixed workspace,
 uploads and outputs aliases refer to that Home. SDK requests address the exact
@@ -122,6 +138,13 @@ Migration `0035_agent_conversations` adds one binding table with the instance
 reference, original requester and retry identity. It retains deleted-chat
 tombstones and has no user/thread deletion cascade. Existing application tables
 and configuration format are unchanged. Downgrade refuses to erase used bindings.
+
+Migration `0041_storage_host_replacements` follows `0040_work_execution`. It
+adds the host-replacement table, nullable user seat-release marker, four storage
+attachment fence-attribution columns and three Work-attempt containment/workspace
+columns, and permits `host` as a Work-event actor. These later host facts are not
+written yet. It ships with configuration version 54. Normal bootstrap upgrades
+SQLite/PostgreSQL; rollback to release 45 restores the pre-upgrade snapshot.
 
 ## Instance memory
 

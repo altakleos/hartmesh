@@ -59,8 +59,12 @@ release 45 requires restoring a database snapshot taken before the upgrade.
 
 Configuration version 54 adds validated storage planning counts and capacities,
 AI assistant/AI employee counts, and optional deployment-owned role briefs.
-Storage and agent defaults remain disabled; these keys prepare later Compose
-activation work.
+The storage model and agents are not offered in this release. With
+`HARTMESH_USERS` absent, storage-init prepares no filesystem and user behavior
+remains as in release 45. Setting the keys is limited to operator qualification:
+the pool verifies but account assignment/chat mounts are not active, and both
+rendered agent counts remain zero. The Compose storage runbook documents current
+planning defaults, commands and the shared-mount preflight required even when off.
 
 The backend image includes an environment-only `storage_init` operator CLI for
 typed fixed ext4 pools: preparation, mounting, fstab synchronization, verification,

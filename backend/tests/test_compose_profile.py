@@ -1578,3 +1578,13 @@ def test_readme_gives_the_pre_flight_check_for_the_shared_data_disk() -> None:
     assert "findmnt -no PROPAGATION --target /srv/hartmesh" in section
     assert "mount --make-shared /srv/hartmesh" in section and "shared" in section and "/etc/fstab" in section
     assert "keys are absent" in section
+
+
+def test_readme_says_spaces_and_agents_are_not_offered_while_the_default_is_off():
+    text = (PROFILE / "README.md").read_text(encoding="utf-8")
+    section = text.split("## Storage and agents\n", 1)[1].split("\n## ", 1)[0].lstrip()
+    assert section.startswith("**The storage model and the agents are not offered in this release.**")
+    assert "HARTMESH_USERS" in section and "storage: off (HARTMESH_USERS absent)" in section
+    assert '"storage": "off"' in section and '"agents": "off"' in section
+    assert "Both rendered agent counts remain zero" in section
+    assert "ai()" not in section and "release-seat" not in section
