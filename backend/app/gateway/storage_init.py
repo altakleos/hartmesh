@@ -148,9 +148,12 @@ def container_holders(loops: dict[str, str | None], *, proc_root: Path = Path("/
 
 
 class Host:
+    def __init__(self):
+        self.lock_fd: int | None = None
+
     def run(self, *args: str, input: str | None = None, timeout: int = 30, accepted=(0,)) -> str:
         try:
-            result = subprocess.run(["nsenter", "-m", "-t", "1", "--", *map(str, args)], input=input, capture_output=True, text=True, timeout=timeout, check=False)
+            result = subprocess.run(["nsenter", "-m", "-t", "1", "--", *map(str, args)], input=input, capture_output=True, text=True, timeout=timeout, check=False, pass_fds=() if self.lock_fd is None else (self.lock_fd,))
         except OSError as exc:
             raise Refused(f"cannot enter the host mount namespace (nsenter -m -t 1: {exc}); the service needs privileged: true and pid: host") from exc
         if result.returncode not in accepted:
@@ -203,8 +206,15 @@ class StorageInitializer:
                     if time.monotonic() >= deadline:
                         raise Refused(f"another storage-init holds {self.pool}/.storage-init.lock and did not finish within 30 s") from None
                     time.sleep(min(1, max(0, deadline - time.monotonic())))
-            yield
+            previous_fd = self.host.lock_fd
+            self.host.lock_fd = fd
+            try:
+                yield
+            finally:
+                self.host.lock_fd = previous_fd
         finally:
+            # Close rather than unlock: a surviving host tool must keep the
+            # shared flock until its inherited descriptor is also closed.
             os.close(fd)
 
     def preflight(self):

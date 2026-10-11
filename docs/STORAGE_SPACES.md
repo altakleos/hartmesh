@@ -135,7 +135,8 @@ filesystem identity; it requires the Gateway and other holders to be stopped.
 `forget --discard` explicitly destroys a slot's contents. Every successful or
 partial verb prints one sorted JSON document; a refusal carries its reason.
 Host commands run through `nsenter -m -t 1`. Every verb holds the pool's exclusive
-lock. `prepare --at-start` bounds its entire child process group at 600 seconds;
+lock, inherited by host tools so it remains held if the CLI process dies during
+offline repair or growth. `prepare --at-start` bounds its entire child process group at 600 seconds;
 the process exits zero so startup can continue, while its JSON document retains
 the actual return code and any partial outcome. No request provisions a slot.
 After a forced interruption, the document lists persisted slots and their current

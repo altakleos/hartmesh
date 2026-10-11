@@ -50,6 +50,9 @@ def test_prepared_pool_has_the_design_owners_and_modes(typed_prepared_pool):
     import stat
 
     tool = typed_prepared_pool
+    with tool.locked():
+        inherited = tool.host.run("sh", "-c", 'readlink "/proc/self/fd/$1"', "storage-lock-proof", str(tool.host.lock_fd))
+        assert inherited.strip() == str(tool.pool / ".storage-init.lock")
     assert (tool.pool.stat().st_uid, tool.pool.stat().st_gid, stat.S_IMODE(tool.pool.stat().st_mode)) == (0, 1000, 0o750)
     assert (tool.manifest.stat().st_uid, tool.manifest.stat().st_gid, stat.S_IMODE(tool.manifest.stat().st_mode)) == (1000, 1000, 0o440)
     assert (tool.pool / ".probe").stat().st_uid == 1000

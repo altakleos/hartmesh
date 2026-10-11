@@ -519,6 +519,58 @@ def test_second_run_refuses_on_lock_without_reading_inventory(operator, monkeypa
         os.close(fd)
 
 
+def test_host_tool_keeps_pool_locked_after_python_leader_is_killed(operator, tmp_path, monkeypatch):
+    tool = operator[0]
+    monkeypatch.setattr(si, "LOCK_WAIT_SECONDS", 0.02)
+    shim = tmp_path / "nsenter"
+    shim.write_text(f"#!{sys.executable}\nimport os,sys\nassert sys.argv[1:6] == ['-m','-t','1','--',sys.executable]\nos.execvp(sys.argv[5],sys.argv[5:])\n", encoding="utf-8")
+    shim.chmod(0o700)
+    pidfile = tmp_path / "host-tool.pid"
+    child_program = f"import os,time; from pathlib import Path; Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(120)"
+    leader = tmp_path / "leader.py"
+    leader.write_text(
+        "import os,sys\nfrom pathlib import Path\nfrom app.gateway.storage_init import StorageInitializer\n"
+        f"tool=StorageInitializer(Path({str(tool.data_dir)!r}),None)\n"
+        "tool.setup=lambda **kwargs: None\nos.fchown=lambda *args: None\n"
+        f"with tool.locked():\n    tool.host.run(sys.executable,'-c',{child_program!r},timeout=120)\n",
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+        "PYTHONPATH": str(Path(si.__file__).resolve().parents[2]) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+    }
+    process = subprocess.Popen([sys.executable, str(leader)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 10
+        while not pidfile.exists():
+            if process.poll() is not None:
+                pytest.fail(f"leader failed: {process.stderr.read().decode()}")
+            assert time.monotonic() < deadline, "host tool did not start"
+            time.sleep(0.01)
+        process.kill()
+        process.wait(timeout=5)
+        with pytest.raises(si.Refused, match="holds.*lock"):
+            with tool.locked():
+                pytest.fail("surviving host tool lost its serialization lock")
+        os.killpg(process.pid, signal.SIGKILL)
+        deadline = time.monotonic() + 2
+        while True:
+            try:
+                with tool.locked():
+                    break
+            except si.Refused:
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=5)
+        process.stderr.close()
+
+
 def test_fstab_sync_reports_unwritable_fstab_and_preserves_inventory(operator, monkeypatch):
     tool = operator[0]
     tool.prepare()
