@@ -588,6 +588,11 @@ running with durable history and Work records available. Startup logs report
 storage and execution availability; failed Docker admission is retried every
 minute. Inventory changes and offline growth take effect after a Gateway restart.
 
+`/api/features` reports storage readiness, account seats, AI assistant/AI employee
+allowances and the caller's file readiness. `/health` reports storage and agent
+status without exposing counts or paths. Deployments can disable generic Space
+creation while keeping host assignment available.
+
 Gateway runs use the top-level `recursion_limit` in `config.yaml` when an API
 request does not provide one. The default is `100`; valid per-request values
 take precedence, and `max_recursion_limit` (default `1000`) caps both. Changes

@@ -51,6 +51,13 @@ offline growth preserves filesystem identity and updates durable bounds after
 restart. Work reads report current execution availability through the shared
 status probe. This change adds no database schema or configuration version change.
 
+Feature bootstrap reports storage/execution state, account seats, AI assistant/
+AI employee allowances and caller-specific file readiness. Public health adds
+state words without counts or paths. Unsupported identities receive no personal
+projection; projection failures return unavailable defaults. The deployment's
+`user_spaces` flag now refuses generic Space creation while retaining host
+assignment. No additional schema or configuration version changes.
+
 ## [2.2.0+hartmesh.45] - 2026-10-09
 
 ### AI employee Work and supervision

@@ -6,6 +6,8 @@ from unittest.mock import patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from test_agent_instances import instances as instances
+from test_storage_spaces_startup import startup as startup
 
 from app.gateway.deps import get_config
 from app.gateway.routers import features
@@ -67,12 +69,16 @@ def _default_ui_payload() -> dict:
     }
 
 
-def test_features_reports_agents_api_enabled() -> None:
+def test_features_reports_agents_api_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(features, "local_registration_open", lambda: False)
     with TestClient(_app_with_config(agents_api_enabled=True)) as client:
         response = client.get("/api/features")
     assert response.status_code == 200
     assert response.json() == {
-        "storage_spaces": {"enabled": False, "backend": None, "native_attachments": False, "editor_concurrency": None},
+        "storage_spaces": {"enabled": False, "backend": None, "native_attachments": False, "editor_concurrency": None, "user_spaces": False, "state": "off", "reason": None, "own": "ready"},
+        "accounts": {"seats": {"allowed": 0, "in_use": 0}},
+        "agent_instances": {"enabled": False, "execution": "unavailable", "reason": None, "ai_assistants": {"per_user": 0, "allowed": 0, "in_use": 0, "mine": 0}, "ai_employees": {"allowed": 0, "in_use": 0}},
+        "people_search": "prefix",
         "customer_administration": {"plugin_management": False, "local_skill_management": False, "local_mcp_management": False, "provider_operations": False},
         "agents_api": {"enabled": True},
         "browser_control": {"enabled": False},
@@ -92,12 +98,134 @@ def test_features_reports_agents_api_enabled() -> None:
     }
 
 
-def test_features_reports_agents_api_disabled() -> None:
+async def _managed_features(startup, *, user_id="alice", source="session", attributed_owner=None):
+    import httpx
+
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
+    ss, state_app, config, sf, _, _, _ = startup
+    if not hasattr(state_app.state, "agent_execution"):
+        await ss.initialize_storage_spaces(state_app, config, session_factory=sf)
+    app = _app_with_config(agents_api_enabled=True)
+    app.state = state_app.state
+
+    @app.middleware("http")
+    async def identity(request, call_next):
+        request.state.user = SimpleNamespace(id=user_id, system_role=INTERNAL_SYSTEM_ROLE if source == "internal" else "user") if user_id else None
+        request.state.auth_source = source
+        return await call_next(request)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/features", headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: attributed_owner} if attributed_owner else {})
+    assert response.status_code == 200
+    return response.json()
+
+
+@pytest.mark.asyncio
+async def test_features_report_storage_allowances_and_only_the_callers_assistants(startup):
+    from _storage_spaces_test_support import ALICE, operation
+    from test_agent_instances import definition
+
+    agents = startup[-1]
+    await agents._enroll(ALICE, {"name": "Pending fixture", "custody": "personal", "supervisor_id": "alice"}, definition(), operation())
+    response = await _managed_features(startup)
+    assert response["storage_spaces"] == {"enabled": True, "backend": "fixed-ext4", "native_attachments": False, "editor_concurrency": "shared", "user_spaces": False, "state": "ready", "reason": None, "own": "not-assigned"}
+    assert response["accounts"]["seats"] == {"allowed": 1, "in_use": 2}
+    assert response["agent_instances"] == {
+        "enabled": True,
+        "execution": "ready",
+        "reason": None,
+        "ai_assistants": {"per_user": 1, "allowed": 1, "in_use": 1, "mine": 1},
+        "ai_employees": {"allowed": 1, "in_use": 0},
+    }
+    other = await _managed_features(startup, user_id="bob")
+    assert other["agent_instances"]["ai_assistants"]["mine"] == 0
+    assert other["agent_instances"]["ai_assistants"]["in_use"] == 1
+    assert response["agents_api"] == {"enabled": True}
+
+
+@pytest.mark.parametrize("source", ["pat", "internal", None])
+@pytest.mark.asyncio
+async def test_features_do_not_project_a_person_from_unsupported_identity(startup, source):
+    response = await _managed_features(startup, user_id="default", source=source)
+    assert response["agent_instances"]["ai_assistants"]["mine"] == 0
+    assert response["storage_spaces"]["own"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_features_report_assigned_unverified_and_no_free_slot_without_reallocating(startup, monkeypatch):
+    from _storage_spaces_test_support import ALICE
+
+    from deerflow.spaces.backings import BackingUnavailable
+    from deerflow.spaces.contract import Custody, MutationMode
+
+    ss, app, config, sf, catalog, _, _ = startup
+    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    files = app.state.storage_spaces
+    await files.assign(kind="user", actor=ALICE, name="User fixture", custody=Custody.personal(ALICE), mode=MutationMode.NATIVE)
+    response = await _managed_features(startup)
+    assert response["storage_spaces"]["own"] == "ready"
+    response = await _managed_features(startup, user_id="bob")
+    assert response["storage_spaces"]["own"] == "no-seat"
+
+    def unavailable(*args, **kwargs):
+        raise BackingUnavailable("fixture mount missing")
+
+    monkeypatch.setattr(catalog, "verify", unavailable)
+    response = await _managed_features(startup)
+    assert response["storage_spaces"]["own"] == "unverified"
+    app.state.agent_execution.storage_reason = "admission-failed"
+    response = await _managed_features(startup)
+    assert response["storage_spaces"]["own"] == "ready"
+    assert response["agent_instances"]["reason"] == "storage-unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["execution_state", "allowance"])
+async def test_features_fail_closed_when_projection_fails(startup, monkeypatch, failure):
+    from unittest.mock import AsyncMock
+
+    ss, app, config, sf, _, _, _ = startup
+    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    monkeypatch.setattr(ss, failure, AsyncMock(side_effect=RuntimeError("fixture state unavailable")))
+    response = await _managed_features(startup)
+    assert response["storage_spaces"]["state"] == "unavailable"
+    assert response["agent_instances"]["enabled"] is False
+    assert response["agent_instances"]["execution"] == "unavailable"
+    assert response["accounts"]["seats"] == {"allowed": 0, "in_use": 0}
+    assert response["agents_api"] == {"enabled": True}
+
+
+@pytest.mark.parametrize("source", ["auth_disabled", "internal"])
+@pytest.mark.asyncio
+async def test_features_project_explicit_development_and_attributed_internal_owners(startup, source):
+    from _storage_spaces_test_support import ALICE, operation
+    from test_agent_instances import definition
+
+    await startup[-1]._enroll(ALICE, {"name": "Pending fixture", "custody": "personal", "supervisor_id": "alice"}, definition(), operation())
+    response = await _managed_features(startup, user_id="alice" if source == "auth_disabled" else "default", source=source, attributed_owner="alice" if source == "internal" else None)
+    assert response["agent_instances"]["ai_assistants"]["mine"] == 1
+    assert response["storage_spaces"]["own"] == "not-assigned"
+
+
+@pytest.mark.parametrize("registration_open,expected", [(True, "exact"), (False, "prefix")])
+def test_features_people_search_follows_local_registration(monkeypatch, registration_open, expected):
+    monkeypatch.setattr(features, "local_registration_open", lambda: registration_open)
+    with TestClient(_app_with_config(agents_api_enabled=False)) as client:
+        response = client.get("/api/features")
+    assert response.json()["people_search"] == expected
+
+
+def test_features_reports_agents_api_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(features, "local_registration_open", lambda: False)
     with TestClient(_app_with_config(agents_api_enabled=False)) as client:
         response = client.get("/api/features")
     assert response.status_code == 200
     assert response.json() == {
-        "storage_spaces": {"enabled": False, "backend": None, "native_attachments": False, "editor_concurrency": None},
+        "storage_spaces": {"enabled": False, "backend": None, "native_attachments": False, "editor_concurrency": None, "user_spaces": False, "state": "off", "reason": None, "own": "ready"},
+        "accounts": {"seats": {"allowed": 0, "in_use": 0}},
+        "agent_instances": {"enabled": False, "execution": "unavailable", "reason": None, "ai_assistants": {"per_user": 0, "allowed": 0, "in_use": 0, "mine": 0}, "ai_employees": {"allowed": 0, "in_use": 0}},
+        "people_search": "prefix",
         "customer_administration": {"plugin_management": False, "local_skill_management": False, "local_mcp_management": False, "provider_operations": False},
         "agents_api": {"enabled": False},
         "browser_control": {"enabled": False},

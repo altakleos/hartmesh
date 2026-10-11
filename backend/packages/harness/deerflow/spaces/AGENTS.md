@@ -17,6 +17,11 @@ the short SQL publication lock, so stalled startup verification never retains
 SQLite's application writer. Startup ownership and availability
 are documented in [the guide](../../../../../docs/STORAGE_SPACES.md).
 
+`binding_verified` projects facts after closing its SQL session; it grants no
+admission. Assignable-slot snapshots exclude bound/unclaimed/unverified slots,
+independently of account-seat occupancy. `user_spaces` gates `create` only;
+host assignment remains ungated. Availability uses one shared allowance formula.
+
 `spaces/` owns generic resource identity and mandatory access, independent of
 chats, agent definitions and feature installation. `storage/` remains the
 separate content-addressed blob store. Product workflows do not belong here.

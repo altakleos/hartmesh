@@ -33,6 +33,28 @@ def request_app(service, actor=ALICE, source="session"):
 
 
 @pytest.mark.asyncio
+async def test_creation_flag_refuses_generic_route_and_keeps_host_assignment(space_file_storage):
+    from deerflow.spaces.contract import Custody, MutationMode
+
+    files, _, catalog = space_file_storage
+    files.user_spaces = False
+    app = request_app(files)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/spaces", json={"name": "Unrequested", "custody": "personal"})
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Creating Spaces is not enabled on this deployment"}
+    for spec in catalog.volumes.values():
+        spec.kind = "assistant"
+        # Explicit quota facts for the HTTP projection; no kernel quota claim.
+        catalog.verified[spec.slot_id].available_bytes = spec.max_bytes
+        catalog.verified[spec.slot_id].available_inodes = spec.max_inodes
+    space_id = await files.assign(kind="assistant", actor=ALICE, name="Assigned", custody=Custody.personal(ALICE), mode=MutationMode.NATIVE)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        quota = (await client.get(f"/api/spaces/{space_id}")).json()["quota"]
+    assert quota["editor"] == "shared"
+
+
+@pytest.mark.asyncio
 async def test_resource_urls_and_revisions_are_independent_of_threads(space_file_storage):
     service, _, _ = space_file_storage
     space = await home(service)

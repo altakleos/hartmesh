@@ -441,6 +441,31 @@ async def test_application_refusal_handler_preserves_fields_without_router_inter
 
 
 @pytest.mark.asyncio
+async def test_public_health_reports_words_only_and_storage_failure_precedes_agent_counts(startup, monkeypatch):
+    from app.gateway import app as app_module
+    from app.gateway.auth import mode
+    from deerflow.config.agents_api_config import AgentsApiConfig
+
+    ss, state_app, config, sf, _, _, _ = startup
+    await ss.initialize_storage_spaces(state_app, config, session_factory=sf)
+    monkeypatch.setattr(mode, "auth_mode", lambda: "local")
+    monkeypatch.setattr(mode, "registration_state", lambda: "closed")
+    app = app_module.create_app()
+    app.state = state_app.state
+    health = next(route.endpoint for route in app.routes if getattr(route, "path", None) == "/health")
+    result = await health()
+    assert result == {"status": "healthy", "service": "deer-flow-gateway", "auth_mode": "local", "registration": "closed", "storage": "ready", "agents": "ready"}
+    monkeypatch.setattr(ss, "get_agents_api_config", lambda: AgentsApiConfig(ai_assistants_per_user=0, ai_employees=0))
+    assert (await health())["agents"] == "none"
+    app.state.agent_execution.storage_reason = "admission-failed"
+    result = await health()
+    assert result["agents"] == "unavailable" and result["storage"] == "unavailable"
+    assert all(isinstance(value, str) for value in result.values())
+    app.state.storage_spaces_enabled = False
+    assert (await health())["agents"] == (await health())["storage"] == "off"
+
+
+@pytest.mark.asyncio
 async def test_human_directory_rechecks_disabled_and_role_limits():
     from app.gateway.storage_spaces import human_lookup
 

@@ -1337,6 +1337,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             Service health status information.
         """
         from app.gateway.auth.mode import auth_mode, registration_state
+        from app.gateway.storage_spaces import storage_health
 
         return {
             "status": "healthy",
@@ -1348,6 +1349,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             # sign-on-only mode).
             "auth_mode": auth_mode(),
             "registration": registration_state(),
+            **await storage_health(app),
         }
 
     @app.get("/health/ready", tags=["health"])

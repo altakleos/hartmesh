@@ -138,6 +138,15 @@ async def require_execution(app, instance_id: str | None) -> None:
         raise ExecutionUnavailable(state.reason)
 
 
+async def storage_health(app):
+    storage = await storage_state(app)
+    if storage.state == "off":
+        return {"storage": "off", "agents": "off"}
+    execution = await execution_state(app)
+    agents = {"agents-none": "none", "operator-hold": "held"}.get(execution.reason, "unavailable" if execution.execution == "unavailable" else "ready")
+    return {"storage": storage.state, "agents": agents}
+
+
 def _read_pool(config):
     path = Path(config.inventory_path)
     reason, text = None, None
