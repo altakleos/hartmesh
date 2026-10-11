@@ -97,12 +97,20 @@ def test_runner_timeout_terminates_its_process_group(tmp_path: Path) -> None:
     # A terminated orphan may briefly remain a zombie awaiting init's reap;
     # it must never remain a running browser/driver process after the deadline.
     state = Path(f"/proc/{child}/stat")
-    try:
-        child_state = state.read_text(encoding="utf-8").split()[2]
-    except (FileNotFoundError, ProcessLookupError):
-        pass  # init may reap the terminated child between lookup and read.
-    else:
-        assert child_state == "Z"
+    # Waiting for the launcher does not wait for its orphaned child. SIGKILL
+    # can still be pending when /proc reports the child as runnable.
+    import time
+
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            child_state = state.read_text(encoding="utf-8").split()[2]
+        except (FileNotFoundError, ProcessLookupError):
+            break  # init may reap the terminated child between lookup and read.
+        if child_state == "Z":
+            break
+        assert time.monotonic() < deadline, f"Timed-out child remains in state {child_state}"
+        time.sleep(0.01)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX Docker acceptance runner")
