@@ -164,7 +164,12 @@ def test_browser_tools_enabled_when_cdp_risk_explicitly_accepted():
         assert browser_router._browser_tools_enabled() is True
 
 
-def test_browser_navigate_redacts_failure_url_from_logs_and_response(caplog):
+@pytest.mark.parametrize("capture_redaction", [False, True])
+def test_browser_navigate_redacts_failure_url_from_logs_and_response(caplog, monkeypatch, capture_redaction):
+    if capture_redaction:
+        from deerflow.logging_config import UrlRedactionFilter
+
+        monkeypatch.setattr(caplog.handler, "filters", [*caplog.handler.filters, UrlRedactionFilter()])
     user = User(email="browser@example.com", password_hash="x", system_role="user")
     app = make_authed_test_app(user_factory=lambda: user)
     app.include_router(browser_router.router)
@@ -174,6 +179,7 @@ def test_browser_navigate_redacts_failure_url_from_logs_and_response(caplog):
     caplog.set_level(logging.ERROR, logger="app.gateway.routers.browser")
     with (
         patch.object(browser_router, "_browser_tools_enabled", return_value=True),
+        patch.object(browser_router.logger, "error", wraps=browser_router.logger.error) as log_error,
         patch(
             "deerflow.community.browser_automation.navigate_and_capture",
             new=AsyncMock(side_effect=RuntimeError(f"timed out opening {failing_url}")),
@@ -186,7 +192,11 @@ def test_browser_navigate_redacts_failure_url_from_logs_and_response(caplog):
 
     assert response.status_code == 502
     assert response.json() == {"detail": "Browser navigation failed"}
-    assert "https://example.com/callback" in caplog.text
+    # Other handlers can redact the shared record before caplog receives it.
+    # Check the route's sanitized URL before filters as well as the final log.
+    log_error.assert_called_once()
+    assert log_error.call_args.args[2] == "https://example.com/callback"
+    assert "https://example.com/" in caplog.text
     assert "code=secret" not in caplog.text
     assert "fragment" not in caplog.text
     assert "secret" not in response.text
