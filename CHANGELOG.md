@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Compose conversation storage
+
+Opt-in managed ordinary chats use their assigned User Space for conversation
+workspace, uploads, outputs and My Files, with company Shared mounted read-only.
+Missing or unverified personal storage and unsupported storage credentials allow
+text chats without file access. Retained/warm sandbox clients recheck current
+authority and actual Docker mounts before use. Uploads, edits and previews use
+pinned descriptors and private quota-counted stages; quota exhaustion reports
+HTTP 507 `files-full`. Output evidence refreshes admission before and after a
+confined scan. Conversation deletion fences creation through confirmed container
+absence, fresh admission and confined file removal. Latest-turn branching copies
+only conversation files with target reservation and rollback on failure; other
+branches copy history without files. Gateway shutdown drains storage admission
+before closing SQL.
+Defaults remain disabled. This change adds no database schema changes.
+Additional managed file operations fail explicitly until their adapters land:
+Save/Share, project promotion/thread listing, run archives, browser screenshots
+and installing a skill from a conversation. Legacy deployments keep these APIs.
+
 ### Conversation path foundation
 
 Trusted host integrations can route conversation folders into an explicitly

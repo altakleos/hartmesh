@@ -15,6 +15,7 @@ import logging
 import os
 import platform
 import posixpath
+import re
 import secrets
 import shlex
 import socket
@@ -22,8 +23,9 @@ import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
+from deerflow.spaces.backings import BackingUnavailable
 from deerflow.utils.network import get_free_port, release_port
 
 from .backend import DestroyOutcome, SandboxBackend, wait_for_sandbox_ready
@@ -35,10 +37,35 @@ logger = logging.getLogger(__name__)
 _AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
 
 
+class ChatMountMismatch(BackingUnavailable):
+    """A known container for this owner requires a different mount profile."""
+
+
 class _ExistingRestrictedSandbox(RuntimeError):
     def __init__(self, info: SandboxInfo):
         super().__init__(f"restricted sandbox {info.sandbox_id} already exists")
         self.info = info
+
+
+@dataclass(frozen=True)
+class _MountInspection:
+    type: str
+    source: str
+    destination: str
+    writable: bool
+    propagation: str
+
+
+def _inspect_mounts(entry):
+    raw = entry.get("Mounts")
+    if not isinstance(raw, list):
+        return None
+    result = []
+    for mount in raw:
+        if not isinstance(mount, dict) or type(mount.get("RW")) is not bool or any(not isinstance(mount.get(key), str) for key in ("Type", "Source", "Destination", "Propagation")):
+            return None
+        result.append(_MountInspection(mount["Type"], mount["Source"], mount["Destination"], mount["RW"], mount["Propagation"]))
+    return tuple(result)
 
 
 @dataclass(frozen=True)
@@ -50,6 +77,8 @@ class _ContainerInspection:
     networks: frozenset[str]
     relay_token: str | None = None
     max_shell_sessions: int | None = None
+    container_id: str | None = None
+    mounts: tuple[_MountInspection, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -945,6 +974,7 @@ class LocalContainerBackend(SandboxBackend):
         user_id: str | None = None,
         provision_lark_cli_runtime: bool = False,
         provision_lark_cli_broker: bool = False,
+        storage_labels: dict[str, str] | None = None,
     ) -> SandboxInfo:
         """Start a new container and return its connection info.
 
@@ -972,6 +1002,10 @@ class LocalContainerBackend(SandboxBackend):
         del provision_lark_cli_runtime, provision_lark_cli_broker
         container_name = f"{self._container_prefix}-{sandbox_id}"
         owner_labels = self._owner_labels(user_id, thread_id)
+        if storage_labels is not None:
+            if not isinstance(storage_labels, dict) or any(not isinstance(key, str) or re.fullmatch(r"hartmesh\.storage\.space\.[0-9a-f]{32}", key) is None or value != "1" for key, value in storage_labels.items()):
+                raise ValueError("Chat storage labels must be exact host slot identities")
+            owner_labels.update({**storage_labels, "hartmesh.chat.storage": "on"})
 
         # Retry loop: if Docker rejects the port (e.g. a stale container still
         # holds the binding after a process restart), skip that port and try the
@@ -1041,6 +1075,7 @@ class LocalContainerBackend(SandboxBackend):
             container_id=container_id,
             request_headers={RELAY_AUTH_HEADER: relay_token} if relay_token is not None else {},
             provenance=PROVENANCE_CREATED,
+            chat_storage_enabled=storage_labels is not None,
         )
 
     def _start_restricted_sandbox(
@@ -1410,6 +1445,21 @@ class LocalContainerBackend(SandboxBackend):
             return True
         return False
 
+    @staticmethod
+    def _desired_chat_storage():
+        from deerflow.config.paths import get_paths
+        from deerflow.spaces.chat_bridge import get_chat_storage_host
+        from deerflow.spaces.chat_paths import ChatStoragePaths
+
+        return isinstance(get_paths(), ChatStoragePaths) or get_chat_storage_host() is not None
+
+    @staticmethod
+    def _observed_chat_storage(inspection):
+        profile = inspection.labels.get("hartmesh.chat.storage")
+        if profile is not None and profile != "on":
+            return None
+        return profile == "on" or any(key.startswith("hartmesh.storage.space.") for key in inspection.labels)
+
     def discover(self, sandbox_id: str) -> SandboxInfo | None:
         """Discover an existing container by its deterministic name.
 
@@ -1460,6 +1510,9 @@ class LocalContainerBackend(SandboxBackend):
                 )
                 return None
             created_at = sandbox_inspection.created_at
+            storage_mode = self._observed_chat_storage(sandbox_inspection)
+            if storage_mode != self._desired_chat_storage():
+                return SandboxInfo(sandbox_id=sandbox_id, sandbox_url="", container_name=container_name, container_id=sandbox_inspection.container_id, created_at=created_at, requires_replacement=True, chat_storage_enabled=storage_mode)
             if persisted_mode != self._network_mode:
                 return SandboxInfo(
                     sandbox_id=sandbox_id,
@@ -1528,9 +1581,11 @@ class LocalContainerBackend(SandboxBackend):
             container_name=container_name,
             created_at=created_at,
             request_headers=request_headers,
+            container_id=sandbox_inspection.container_id if sandbox_inspection is not None else None,
+            chat_storage_enabled=self._observed_chat_storage(sandbox_inspection) if sandbox_inspection is not None else None,
         )
 
-    def list_running(self) -> list[SandboxInfo]:
+    def list_running(self, *, strict: bool = False) -> list[SandboxInfo]:
         """Enumerate all running containers matching the configured prefix.
 
         Uses a single ``docker ps`` call to list container names, then a
@@ -1555,6 +1610,7 @@ class LocalContainerBackend(SandboxBackend):
                 [
                     self._runtime,
                     "ps",
+                    *(["--all"] if strict else []),
                     "--filter",
                     f"name={self._container_prefix}-",
                     "--format",
@@ -1566,6 +1622,8 @@ class LocalContainerBackend(SandboxBackend):
             )
             if result.returncode != 0:
                 stderr = (result.stderr or "").strip()
+                if strict:
+                    raise RuntimeError("Container cleanup inventory is unavailable")
                 logger.warning(
                     "Failed to list running containers with %s ps (returncode=%s, stderr=%s)",
                     self._runtime,
@@ -1576,6 +1634,8 @@ class LocalContainerBackend(SandboxBackend):
             if not result.stdout.strip():
                 return []
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            if strict:
+                raise RuntimeError("Container cleanup inventory is unavailable") from e
             logger.warning(f"Failed to list running containers: {e}")
             return []
 
@@ -1591,6 +1651,8 @@ class LocalContainerBackend(SandboxBackend):
         try:
             inspections = self._batch_inspect(container_names, strict=True)
         except RuntimeError as e:
+            if strict:
+                raise
             logger.warning("Failed to inspect running sandbox resources: %s", e)
             return []
 
@@ -1598,6 +1660,8 @@ class LocalContainerBackend(SandboxBackend):
         for container_name in container_names:
             data = inspections.get(container_name)
             if data is None:
+                if strict:
+                    raise RuntimeError("Container cleanup inventory is missing a listed candidate's inspection")
                 continue
             sandbox_id = container_name[len(self._container_prefix) + 1 :]
             persisted_modes[container_name] = self._persisted_sandbox_mode(data, sandbox_id) if self._runtime == "docker" else "open"
@@ -1608,6 +1672,8 @@ class LocalContainerBackend(SandboxBackend):
                 try:
                     inspections.update(self._batch_inspect(proxy_names, strict=True))
                 except RuntimeError as e:
+                    if strict:
+                        raise
                     logger.warning("Failed to inspect running sandbox proxy resources: %s", e)
                     return []
 
@@ -1625,16 +1691,34 @@ class LocalContainerBackend(SandboxBackend):
                 # ``deer-flow-netproxy-*`` sidecar names. Inspecting the stable
                 # role/id identity excludes them while still allowing legacy
                 # open sandboxes to be reported for a fenced mode transition.
+                if strict:
+                    labelled_id = data.labels.get("deerflow.sandbox_id")
+                    known_proxy = (
+                        data.labels.get("deerflow.role") == "network-proxy"
+                        and isinstance(labelled_id, str)
+                        and bool(labelled_id)
+                        and container_name == self._resource_names(labelled_id)[0]
+                        and data.labels.get("deerflow.network_mode") in ("blocked", "allowlist")
+                        and isinstance(data.container_id, str)
+                        and re.fullmatch(r"[0-9a-f]{64}", data.container_id) is not None
+                    )
+                    if not known_proxy:
+                        raise RuntimeError("Container cleanup inventory contains an ambiguous candidate")
                 continue
+            if strict and (not isinstance(data.container_id, str) or re.fullmatch(r"[0-9a-f]{64}", data.container_id) is None or self._owner_from_labels(data.labels) is None):
+                raise RuntimeError("Container cleanup inventory has an unknown owner or incarnation")
             created_at, host_port = data.created_at, data.host_port
             request_headers: dict[str, str] = {}
-            requires_replacement = persisted_mode != self._network_mode or not self._has_compatible_shell_capacity(data)
+            storage_mode = self._observed_chat_storage(data)
+            requires_replacement = persisted_mode != self._network_mode or not self._has_compatible_shell_capacity(data) or storage_mode != self._desired_chat_storage()
             if not requires_replacement and self._network_mode != "open":
                 proxy_name, _ = self._resource_names(sandbox_id)
                 proxy_data = inspections.get(proxy_name)
                 try:
                     resource_status = self._restricted_resources_status(sandbox_id, inspections=inspections)
                 except RuntimeError as e:
+                    if strict:
+                        raise
                     logger.warning("Could not verify persisted network policy for sandbox %s during reconciliation: %s", sandbox_id, e)
                     continue
                 if resource_status != "compatible":
@@ -1662,6 +1746,8 @@ class LocalContainerBackend(SandboxBackend):
                     request_headers=request_headers,
                     requires_replacement=requires_replacement,
                     owner=self._owner_from_labels(data.labels),
+                    container_id=data.container_id,
+                    chat_storage_enabled=storage_mode,
                 )
             )
 
@@ -1828,8 +1914,82 @@ class LocalContainerBackend(SandboxBackend):
                 networks=frozenset(str(value) for value in (network_settings.get("Networks") or {})),
                 relay_token=_extract_container_environment(config, RELAY_TOKEN_ENV),
                 max_shell_sessions=max_shell_sessions,
+                container_id=entry.get("Id") if isinstance(entry.get("Id"), str) else None,
+                mounts=_inspect_mounts(entry),
             )
         return out
+
+    def validate_thread_mounts(self, info, *, mounts, protected_roots=()):
+        """Inspect a candidate without adopting it or changing any holder's state."""
+        from deerflow.spaces.backings import BackingUnavailable
+
+        if self._runtime != "docker" or not info.container_name:
+            raise BackingUnavailable("Chat storage requires inspectable Docker bind mounts")
+        try:
+            observed = self._batch_inspect([info.container_name], strict=True).get(info.container_name)
+        except (RuntimeError, OSError, ValueError, TypeError, AttributeError) as exc:
+            raise BackingUnavailable("Chat container mount inspection is unavailable") from exc
+        if observed is None or observed.container_id is None or re.fullmatch(r"[0-9a-f]{64}", observed.container_id) is None or observed.mounts is None:
+            raise BackingUnavailable("Chat container mount identity is unknown")
+        if info.container_id is not None and info.container_id != observed.container_id:
+            raise BackingUnavailable("Chat container identity changed during reuse")
+        if not self._labels_match(observed.labels, self._owner_labels(mounts.user_id, mounts.thread_id)):
+            raise BackingUnavailable("Chat container belongs to another owner or conversation")
+        slot_labels = {key: value for key, value in observed.labels.items() if key.startswith("hartmesh.storage.space.")}
+        if slot_labels != dict(mounts.labels):
+            raise ChatMountMismatch("Chat container storage slot attribution changed")
+        self._validate_thread_mount_profile(observed.mounts, mounts=mounts, protected_roots=protected_roots)
+        return observed.container_id
+
+    def validate_planned_thread_mounts(self, extra_mounts, *, mounts, protected_roots=(), config_mount_exclusion_root=None):
+        """Reject extra data exposure before Docker can start any container."""
+        if self._runtime != "docker":
+            raise BackingUnavailable("Chat storage requires Docker bind mounts")
+        exclusion = PurePosixPath(posixpath.normpath(config_mount_exclusion_root)) if config_mount_exclusion_root is not None else None
+        planned = list(extra_mounts or ())
+        for configured in self._config_mounts:
+            destination = PurePosixPath(posixpath.normpath(str(configured.container_path)))
+            if exclusion is not None and destination.is_relative_to(exclusion):
+                continue
+            planned.append((configured.host_path, configured.container_path, configured.read_only))
+        observed = tuple(_MountInspection("bind", str(source), str(destination), not readonly, "rprivate") for source, destination, readonly in planned)
+        self._validate_thread_mount_profile(observed, mounts=mounts, protected_roots=protected_roots)
+        # A configured alias can hide a Space behind an unrelated lexical
+        # source. Exact conversation sources were already checked no-follow.
+        expected = {destination for _, destination, _ in mounts.binds}
+        roots = (*protected_roots, *(path for volume in (mounts.user, mounts.company) if volume is not None for name in ("mount_path", "image_path") if isinstance((path := getattr(volume.spec, name, None)), Path)))
+        protected = tuple(Path(root).resolve() for root in roots)
+        for source, destination, _ in planned:
+            if posixpath.normpath(str(destination)) in expected:
+                continue
+            actual = Path(source).resolve()
+            if any(actual.is_relative_to(root) or root.is_relative_to(actual) for root in protected):
+                raise ChatMountMismatch("Chat mount configuration exposes an unadmitted Space path")
+
+    @staticmethod
+    def _validate_thread_mount_profile(observed_mounts, *, mounts, protected_roots):
+        expected = {destination: (source, not readonly) for source, destination, readonly in mounts.binds}
+        remaining = set(expected)
+        roots = (*protected_roots, *(path for volume in (mounts.user, mounts.company) if volume is not None for name in ("mount_path", "image_path") if isinstance((path := getattr(volume.spec, name, None)), Path)))
+        protected = tuple(PurePosixPath(root) for root in roots)
+        destinations = (PurePosixPath("/mnt/user-data"), PurePosixPath("/mnt/acp-workspace"))
+        for mount in observed_mounts:
+            source = PurePosixPath(posixpath.normpath(mount.source))
+            destination = PurePosixPath(posixpath.normpath(mount.destination))
+            if not destination.is_absolute() or "\x00" in mount.source or "\x00" in mount.destination:
+                raise BackingUnavailable("Chat container has invalid mount facts")
+            target = str(destination)
+            if target in expected:
+                if target not in remaining or mount.type != "bind" or (str(source), mount.writable) != expected[target] or mount.propagation != "rprivate":
+                    raise ChatMountMismatch("Chat container does not have its exact admitted bind")
+                remaining.remove(target)
+                continue
+            if any(destination.is_relative_to(root) or root.is_relative_to(destination) for root in destinations):
+                raise ChatMountMismatch("Chat container has an unexpected data overlay")
+            if any(source.is_relative_to(root) or root.is_relative_to(source) for root in protected):
+                raise ChatMountMismatch("Chat container exposes an unadmitted Space path")
+        if remaining:
+            raise ChatMountMismatch("Chat container is missing an admitted data bind")
 
     # ── Container operations ─────────────────────────────────────────────
 

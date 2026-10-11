@@ -586,6 +586,12 @@ WORKING_DIRECTORY_TEMPLATE = """<working_directory existed="true">
 OUTPUT_REMINDER = """- Output Files: Final deliverables must be in `/mnt/user-data/outputs` (Skill drafts remain ordinary artifacts until explicitly installed through authorized skill management)
 """
 
+CHAT_FILES_UNAVAILABLE = """<working_directory existed="false">
+Files are not available for this conversation. Continue with text responses.
+Uploads, saved files, file deliverables and ACP file access are unavailable.
+Do not promise file delivery or retry a failed file action in another folder.
+</working_directory>"""
+
 FILE_EDITING_REMINDER = """- File Editing Workflow: When revising an existing file, prefer
   `str_replace` over `write_file` — it sends only the diff and avoids
   re-emitting the whole file (mirrors Claude Code's Edit and Codex's
@@ -1057,6 +1063,15 @@ def _build_user_files_section(*, app_config: AppConfig | None = None) -> str:
     """The files bullets — the person's own and the company's — only where the sandbox can see those directories."""
     if not _sandbox_mounts_thread_data(app_config):
         return ""
+    from deerflow.config.paths import get_paths
+    from deerflow.spaces.chat_paths import ChatStoragePaths
+
+    paths = get_paths()
+    if isinstance(paths, ChatStoragePaths):
+        if not paths.has_personal_files:
+            return ""
+        section = USER_FILES_PROMPT_LINE + (SHARED_FILES_PROMPT_LINE if paths.has_shared_files else "")
+        return section + "If a write fails because there is no space left, say that the person's files are full and that deleting files in My files or deleting old conversations frees room; do not retry in another folder.\n"
     return USER_FILES_PROMPT_LINE + SHARED_FILES_PROMPT_LINE
 
 
@@ -1089,6 +1104,8 @@ def _build_custom_mounts_section(*, app_config: AppConfig | None = None) -> str:
 
 def build_ordinary_file_context(*, app_config, tools: frozenset[str]) -> str:
     """Retain ordinary mount facts without coaching unavailable tools."""
+    if _chat_has_no_files():
+        return CHAT_FILES_UNAVAILABLE
     sections = []
     if _sandbox_mounts_thread_data(app_config):
         sections += [
@@ -1103,6 +1120,14 @@ def build_ordinary_file_context(*, app_config, tools: frozenset[str]) -> str:
         if "bash" in tools:
             sections.append("- Copy an ACP output into `/mnt/user-data/outputs` with `bash`, naming that destination under `present` to register it.")
     return "\n".join(section for section in sections if section)
+
+
+def _chat_has_no_files():
+    from deerflow.config.paths import get_paths
+    from deerflow.spaces.chat_paths import ChatStoragePaths
+
+    paths = get_paths()
+    return isinstance(paths, ChatStoragePaths) and not paths.has_personal_files
 
 
 def _build_memory_tool_section(*, app_config: AppConfig | None = None, memory_enabled: bool = True) -> str:
@@ -1232,7 +1257,8 @@ def apply_prompt_template(
 
     # Build ACP agent section only if ACP agents are configured
     ordinary = runtime_scope is None or runtime_scope.mode == "conversation"
-    acp_section = _build_acp_section(app_config=app_config, bash_available=bash_available) if ordinary and (runtime_scope is None or "invoke_acp_agent" in runtime_scope.tools) else ""
+    no_chat_files = ordinary and _chat_has_no_files()
+    acp_section = _build_acp_section(app_config=app_config, bash_available=bash_available) if ordinary and not no_chat_files and (runtime_scope is None or "invoke_acp_agent" in runtime_scope.tools) else ""
     custom_mounts_section = _build_custom_mounts_section(app_config=app_config) if ordinary else ""
     user_files_section = _build_user_files_section(app_config=app_config) if ordinary else ""
     acp_and_mounts_section = "\n".join(section for section in (acp_section, custom_mounts_section) if section)
@@ -1271,7 +1297,9 @@ def apply_prompt_template(
         from deerflow.config import get_app_config
 
         app_config = get_app_config()
-    if runtime_scope is None:
+    if no_chat_files:
+        working_directory_section = CHAT_FILES_UNAVAILABLE
+    elif runtime_scope is None:
         working_directory_section = WORKING_DIRECTORY_TEMPLATE.format(
             user_files_section=user_files_section,
             preinstalled_libraries=preinstalled_libraries_section(app_config.sandbox, bash_available=bash_available),
@@ -1285,9 +1313,9 @@ def apply_prompt_template(
         )
     rendered_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         working_directory_section=working_directory_section,
-        output_reminder=OUTPUT_REMINDER if runtime_scope is None or runtime_scope.mode != "unavailable" and runtime_scope.tools & {"bash", "present_files"} else "",
-        file_editing_reminder=FILE_EDITING_REMINDER if runtime_scope is None or {"write_file", "str_replace"} <= runtime_scope.tools else "",
-        image_reminder=IMAGE_REMINDER if runtime_scope is None or "present_files" in runtime_scope.tools else '- Use "```mermaid" for Mermaid diagrams.',
+        output_reminder=OUTPUT_REMINDER if not no_chat_files and (runtime_scope is None or runtime_scope.mode != "unavailable" and runtime_scope.tools & {"bash", "present_files"}) else "",
+        file_editing_reminder=FILE_EDITING_REMINDER if not no_chat_files and (runtime_scope is None or {"write_file", "str_replace"} <= runtime_scope.tools) else "",
+        image_reminder=IMAGE_REMINDER if not no_chat_files and (runtime_scope is None or "present_files" in runtime_scope.tools) else '- Use "```mermaid" for Mermaid diagrams.',
         interaction_thinking_guidance=interaction_policy.thinking_guidance,
         clarification_system=interaction_policy.clarification_system,
         clarification_reminder=interaction_policy.clarification_reminder,

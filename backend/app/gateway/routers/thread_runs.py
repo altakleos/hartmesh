@@ -1757,6 +1757,9 @@ async def create_run_artifact_archive(
     request: Request,
 ) -> StreamingResponse:
     """Download the current contents of the files presented by one terminal run."""
+    from app.gateway.chat_files import require_legacy_file_operation
+
+    await require_legacy_file_operation(request, thread_id)
     await _require_run_visible_to_scope(run_id, thread_id, request)
     presented_paths = await _archive_presented_paths(thread_id, run_id, request)
 

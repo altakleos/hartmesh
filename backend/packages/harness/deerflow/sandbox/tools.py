@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 import ntpath
@@ -38,6 +37,7 @@ from deerflow.sandbox.exceptions import (
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
 from deerflow.sandbox.lease import (
     get_sandbox_lease_manager,
+    run_sync_lifecycle_operation,
     run_sync_sandbox_command,
     sandbox_command_scope,
     sandbox_lease_owner,
@@ -1592,17 +1592,19 @@ def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
         raise SandboxRuntimeError("Tool runtime not available")
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
-    # Read-only lookup: this only resolves the provider entry, and ownership
-    # (release) stays with after_agent's short-circuit on the wrapped state.
-    sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
+    # Lookup does not change holder ownership; storage admission still refreshes
+    # before any returned client can perform an effect.
+    sandbox_state, fork_restored = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is None:
         raise SandboxRuntimeError("Sandbox state not initialized in runtime")
     sandbox_id = sandbox_state.get("sandbox_id")
     if sandbox_id is None:
         raise SandboxRuntimeError("Sandbox ID not found in state")
-    sandbox = get_sandbox_provider().get(sandbox_id)
+    provider = get_sandbox_provider()
+    sandbox = provider.get(sandbox_id)
     if sandbox is None:
         raise SandboxNotFoundError(f"Sandbox with ID '{sandbox_id}' not found", sandbox_id=sandbox_id)
+    _validate_chat_tool_client(provider, sandbox_id, sandbox, thread_id=_resolve_runtime_thread_id(runtime), user_id=_resolved_user_id(runtime), allow_unscoped_borrow=fork_restored)
 
     if runtime.context is not None:
         runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for downstream use
@@ -1638,7 +1640,7 @@ async def _rollback_failed_sandbox_lookup_async(
         if owner_id is not None:
             await get_sandbox_lease_manager(provider).release_async(owner_id)
         else:
-            await asyncio.to_thread(provider.release, sandbox_id)
+            await run_sync_lifecycle_operation(provider.release, sandbox_id)
     except Exception:
         logger.warning(
             "Failed to roll back sandbox after async post-acquire lookup failure: %s",
@@ -1691,6 +1693,25 @@ def _resolve_runtime_thread_id(runtime: Runtime) -> str | None:
     return thread_id
 
 
+def _check_chat_tool_candidate(provider, token, sandbox):
+    from deerflow.spaces.backings import BackingUnavailable
+
+    if not provider.storage_candidate_is_current(token) or getattr(token, "client", None) is not sandbox:
+        raise BackingUnavailable("Chat client changed before tool execution")
+
+
+def _validate_chat_tool_client(provider, sandbox_id, sandbox, *, thread_id, user_id, allow_unscoped_borrow=False):
+    if getattr(provider, "requires_chat_storage_validation", False) is True:
+        token = provider.validate_storage_candidate(sandbox_id, thread_id=thread_id, user_id=user_id, allow_unscoped_borrow=allow_unscoped_borrow)
+        _check_chat_tool_candidate(provider, token, sandbox)
+
+
+async def _validate_chat_tool_client_async(provider, sandbox_id, sandbox, *, thread_id, user_id, allow_unscoped_borrow=False):
+    if getattr(provider, "requires_chat_storage_validation", False) is True:
+        token = await provider.validate_storage_candidate_async(sandbox_id, thread_id=thread_id, user_id=user_id, allow_unscoped_borrow=allow_unscoped_borrow)
+        _check_chat_tool_candidate(provider, token, sandbox)
+
+
 def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     """Ensure sandbox is initialized, acquiring lazily if needed.
 
@@ -1737,6 +1758,7 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
             thread_id = _resolve_runtime_thread_id(runtime)
             user_id = resolve_runtime_user_id(runtime)
             if thread_id is not None:
+                owned_acquisition = False
                 if owner_id is None:
                     if not fork_restored:
                         scoped = provider.get_scoped(
@@ -1746,6 +1768,7 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
                         )
                         if scoped is None:
                             sandbox_id = provider.acquire(thread_id, user_id=user_id)
+                            owned_acquisition = True
                 elif fork_restored:
                     # Only the server-created fork wrapper may borrow a sandbox
                     # from a different thread identity. Ordinary checkpoint ids
@@ -1769,6 +1792,12 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
                     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
                 sandbox = provider.get(sandbox_id)
                 if sandbox is not None:
+                    try:
+                        _validate_chat_tool_client(provider, sandbox_id, sandbox, thread_id=thread_id, user_id=user_id, allow_unscoped_borrow=fork_restored)
+                    except BaseException:
+                        if owned_acquisition:
+                            _rollback_failed_sandbox_lookup(provider, sandbox_id, owner_id)
+                        raise
                     if runtime.context is not None:
                         runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
                     return sandbox
@@ -1799,6 +1828,11 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     if sandbox is None:
         _rollback_failed_sandbox_lookup(provider, sandbox_id, owner_id)
         raise SandboxNotFoundError("Sandbox not found after acquisition", sandbox_id=sandbox_id)
+    try:
+        _validate_chat_tool_client(provider, sandbox_id, sandbox, thread_id=thread_id, user_id=user_id)
+    except BaseException:
+        _rollback_failed_sandbox_lookup(provider, sandbox_id, owner_id)
+        raise
 
     if runtime.context is not None:
         runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
@@ -1837,6 +1871,7 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
             thread_id = _resolve_runtime_thread_id(runtime)
             user_id = resolve_runtime_user_id(runtime)
             if thread_id is not None:
+                owned_acquisition = False
                 if owner_id is None:
                     if not fork_restored:
                         scoped = provider.get_scoped(
@@ -1846,6 +1881,7 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
                         )
                         if scoped is None:
                             sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
+                            owned_acquisition = True
                 elif fork_restored:
                     sandbox_id = await get_sandbox_lease_manager(provider).reuse_or_acquire_async(
                         owner_id,
@@ -1866,6 +1902,12 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
                     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
                 sandbox = provider.get(sandbox_id)
                 if sandbox is not None:
+                    try:
+                        await _validate_chat_tool_client_async(provider, sandbox_id, sandbox, thread_id=thread_id, user_id=user_id, allow_unscoped_borrow=fork_restored)
+                    except BaseException:
+                        if owned_acquisition:
+                            await _rollback_failed_sandbox_lookup_async(provider, sandbox_id, owner_id)
+                        raise
                     if runtime.context is not None:
                         runtime.context["sandbox_id"] = sandbox_id
                     return sandbox
@@ -1892,6 +1934,11 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
     if sandbox is None:
         await _rollback_failed_sandbox_lookup_async(provider, sandbox_id, owner_id)
         raise SandboxNotFoundError("Sandbox not found after acquisition", sandbox_id=sandbox_id)
+    try:
+        await _validate_chat_tool_client_async(provider, sandbox_id, sandbox, thread_id=thread_id, user_id=user_id)
+    except BaseException:
+        await _rollback_failed_sandbox_lookup_async(provider, sandbox_id, owner_id)
+        raise
 
     if runtime.context is not None:
         runtime.context["sandbox_id"] = sandbox_id

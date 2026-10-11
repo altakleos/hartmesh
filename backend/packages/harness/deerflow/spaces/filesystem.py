@@ -74,7 +74,7 @@ def _path(value: str, *, allow_root: bool = False) -> str:
     return value
 
 
-def _openat2(root_fd: int, path: str, flags: int) -> int:
+def _openat2(root_fd: int, path: str, flags: int, *, follow_symlinks: bool = True) -> int:
     # Linux assigns openat2 number437 on both qualified 64-bit architectures.
     # No lexical resolve/open fallback: it would reopen link-race escapes.
     if sys.platform != "linux" or os.uname().machine not in ("x86_64", "aarch64"):
@@ -83,7 +83,7 @@ def _openat2(root_fd: int, path: str, flags: int) -> int:
     libc.syscall.restype = ctypes.c_long
     # BENEATH | NO_MAGICLINKS | NO_XDEV. Relative internal links remain valid;
     # absolute links and nested mount transitions are explicitly unsupported.
-    how = _OpenHow(flags | os.O_CLOEXEC, 0, 0x08 | 0x02 | 0x01)
+    how = _OpenHow(flags | os.O_CLOEXEC, 0, 0x08 | 0x02 | 0x01 | (0 if follow_symlinks else 0x04))
     result = libc.syscall(437, root_fd, ctypes.c_char_p(path.encode("utf-8")), ctypes.byref(how), ctypes.sizeof(how))
     if result < 0:
         error = ctypes.get_errno()
@@ -133,15 +133,17 @@ class ConfinedFilesystem:
                 setattr(self, attribute, None)
                 os.close(fd)
 
-    def _open(self, path: str, flags: int, *, allow_root: bool = False) -> int:
+    def _open(self, path: str, flags: int, *, allow_root: bool = False, follow_symlinks: bool = True) -> int:
         if self._data_fd is None:
             raise FilesystemUnavailable("The resource descriptor has closed")
-        return _openat2(self._data_fd, _path(path, allow_root=allow_root), flags)
+        if follow_symlinks:
+            return _openat2(self._data_fd, _path(path, allow_root=allow_root), flags)
+        return _openat2(self._data_fd, _path(path, allow_root=allow_root), flags, follow_symlinks=False)
 
-    def open_regular(self, path: str) -> int:
+    def open_regular(self, path: str, *, follow_symlinks: bool = True) -> int:
         # O_PATH avoids opening a planted FIFO/device. The host-owned proc-fd
         # reopen targets that already-verified inode, never the mutable name.
-        descriptor = self._open(path, os.O_PATH)
+        descriptor = self._open(path, os.O_PATH, follow_symlinks=follow_symlinks)
         try:
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 raise UnsafeSpacePath("Only regular files can be read")

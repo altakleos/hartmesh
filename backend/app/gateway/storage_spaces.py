@@ -785,7 +785,9 @@ async def storage_spaces_lifecycle(app):
     try:
         yield
     finally:
-        await close_storage_spaces(app)
+        from app.gateway.deps import _close_runtime_storage
+
+        await _close_runtime_storage(app)
 
 
 def supports_storage_credentials(request) -> bool:

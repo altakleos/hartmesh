@@ -40,7 +40,7 @@ def installed_projection(extensions, params):
     return None
 
 
-def project_artifact(installed, thread_id: str, path: str, *, user_id: str | None) -> Response:
+def project_artifact(installed, thread_id: str, path: str, *, user_id: str | None, source_reader=None) -> Response:
     source_name, plugin, declaration = installed
     if plugin_settings(source_name, plugin)["enabled"] is not True or declaration.project is None:
         raise HTTPException(501, "Artifact preview capability unavailable")
@@ -50,13 +50,16 @@ def project_artifact(installed, thread_id: str, path: str, *, user_id: str | Non
         virtual = normalize_outputs_virtual_path(path)
     except HTTPException:
         raise HTTPException(415, "Artifact preview requires an outputs source") from None
-    root = get_paths().sandbox_outputs_dir(thread_id, user_id=user_id or get_effective_user_id())
-    actual = root / virtual.removeprefix("/mnt/user-data/outputs/")
     try:
-        with os.fdopen(open_regular_source(actual), "rb") as source:
-            if os.fstat(source.fileno()).st_size > declaration.source_max_bytes:
-                raise HTTPException(413, "Artifact source exceeds its preview budget")
-            raw = source.read(declaration.source_max_bytes + 1)
+        if source_reader is not None:
+            raw = source_reader(declaration.source_max_bytes)
+        else:
+            root = get_paths().sandbox_outputs_dir(thread_id, user_id=user_id or get_effective_user_id())
+            actual = root / virtual.removeprefix("/mnt/user-data/outputs/")
+            with os.fdopen(open_regular_source(actual), "rb") as source:
+                if os.fstat(source.fileno()).st_size > declaration.source_max_bytes:
+                    raise HTTPException(413, "Artifact source exceeds its preview budget")
+                raw = source.read(declaration.source_max_bytes + 1)
     except SafeFileAccessUnavailable:
         raise HTTPException(501, "Artifact preview requires safe source reads") from None
     except FileNotFoundError:

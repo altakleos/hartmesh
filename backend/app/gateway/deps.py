@@ -538,6 +538,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Own cleanup before initialization so partial startup and host
         # cancellation cannot strand an engine created along the way.
         stack.push_async_callback(close_engine)
+        app.state.runtime_storage_shutdown_task = None
+        stack.push_async_callback(_close_runtime_storage, app)
         await init_engine_from_config(config.database)
         await _pin_provider_accounts_to_their_issuer(config)
 
@@ -746,28 +748,50 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             # otherwise leak into asyncio.run() shutdown, where langgraph's
             # _checkpointer_put_after_previous aput races the closed pool and
             # raises PoolClosed (issue #3373).
-            run_manager = getattr(app.state, "run_manager", None)
-            if run_manager is not None:
-                shutdown_deadline = asyncio.get_running_loop().time() + _RUN_DRAIN_TIMEOUT_SECONDS
-                try:
-                    await _drain_inflight_runs(run_manager)
-                finally:
-                    await _flush_recovered_stream_cleanups(
-                        app.state.stream_bridge,
-                        recovered_stream_cleanup_tasks,
-                        timeout=min(
-                            1.0,
-                            max(
-                                0.0,
-                                shutdown_deadline - asyncio.get_running_loop().time(),
+            try:
+                run_manager = getattr(app.state, "run_manager", None)
+                if run_manager is not None:
+                    shutdown_deadline = asyncio.get_running_loop().time() + _RUN_DRAIN_TIMEOUT_SECONDS
+                    try:
+                        await _drain_inflight_runs(run_manager)
+                    finally:
+                        await _flush_recovered_stream_cleanups(
+                            app.state.stream_bridge,
+                            recovered_stream_cleanup_tasks,
+                            timeout=min(
+                                1.0,
+                                max(
+                                    0.0,
+                                    shutdown_deadline - asyncio.get_running_loop().time(),
+                                ),
                             ),
-                        ),
-                    )
+                        )
+            finally:
+                await await_drained(_close_runtime_storage(app))
 
 
 # ---------------------------------------------------------------------------
 # Getters – called by routers per-request
 # ---------------------------------------------------------------------------
+
+
+async def _close_runtime_storage(app):
+    """Own one idempotent storage drain before the persistence stack closes."""
+    task = getattr(app.state, "runtime_storage_shutdown_task", None)
+    if task is None:
+
+        async def drain():
+            from app.gateway.chat_storage import close_chat_storage_host
+            from app.gateway.storage_spaces import close_storage_spaces
+
+            try:
+                await close_chat_storage_host(app)
+            finally:
+                await close_storage_spaces(app)
+
+        task = asyncio.create_task(drain())
+        app.state.runtime_storage_shutdown_task = task
+    await await_drained(task)
 
 
 def _require(attr: str, label: str) -> Callable[[Request], T]:
@@ -889,6 +913,7 @@ def get_run_context(request: Request) -> RunContext:
         app_config=get_config(),
         extensions=getattr(request.app.state, "extensions", None),
         storage_provider=get_extension_storage_provider(request),
+        chat_storage_scope=getattr(request.app.state, "chat_storage_scope", None),
         customer_administration_policy=request_customer_administration_policy(request),
         on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
     )

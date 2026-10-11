@@ -239,6 +239,24 @@ def get_baseline_sandbox_provider(**kwargs) -> SandboxProvider:
     return winner
 
 
+def _detach_sandbox_provider(expected_provider=None):
+    """Check a lifecycle guard outside the singleton lock before detaching."""
+    global _default_sandbox_provider
+    while True:
+        with _provider_lock:
+            provider = expected_provider if expected_provider is not None else _default_sandbox_provider
+        if provider is None:
+            return None
+        guard = getattr(provider, "_check_sync_lifecycle", None)
+        if callable(guard):
+            guard()
+        with _provider_lock:
+            if expected_provider is not None or _default_sandbox_provider is provider:
+                if _default_sandbox_provider is provider:
+                    _default_sandbox_provider = None
+                return provider
+
+
 def reset_sandbox_provider() -> None:
     """Reset the sandbox provider singleton.
 
@@ -256,12 +274,9 @@ def reset_sandbox_provider() -> None:
     Do not reuse the detached provider after reset.
     Use `shutdown_sandbox_provider()` for proper cleanup.
     """
-    global _default_sandbox_provider
     # Detach the reference under the lock, then run the provider's `reset()`
     # callback outside it (see the `_provider_lock` note).
-    with _provider_lock:
-        provider = _default_sandbox_provider
-        _default_sandbox_provider = None
+    provider = _detach_sandbox_provider()
     if provider is not None:
         from deerflow.sandbox.lease import discard_sandbox_lease_manager
 
@@ -269,19 +284,16 @@ def reset_sandbox_provider() -> None:
         provider.reset()
 
 
-def shutdown_sandbox_provider() -> None:
+def shutdown_sandbox_provider(*, expected_provider: SandboxProvider | None = None) -> None:
     """Shutdown and reset the sandbox provider.
 
     This properly shuts down the provider (releasing all sandboxes)
     before clearing the singleton. Call this when the application
     is shutting down or when you need to completely reset the sandbox system.
     """
-    global _default_sandbox_provider
     # Detach the reference under the lock, then run the (potentially slow)
     # `shutdown()` callback outside it (see the `_provider_lock` note).
-    with _provider_lock:
-        provider = _default_sandbox_provider
-        _default_sandbox_provider = None
+    provider = _detach_sandbox_provider(expected_provider)
     if provider is not None and hasattr(provider, "shutdown"):
         from deerflow.sandbox.lease import discard_sandbox_lease_manager
 

@@ -1,5 +1,18 @@
 # Storage Spaces
 
+Ordinary chat routing uses private `chat_paths.py`, `chat_bridge.py` and
+`chat_snapshots.py` adapters. `ChatStoragePaths` carries trusted role/root facts
+and exact mount projections, never a cached grant. The Gateway owns async
+qualification, closes SQL before filesystem verification and rechecks current
+identity/roles/grants/bindings afterwards. No qualified User means no data/ACP
+mount or legacy data-directory fallback. Company unavailability omits Shared
+alone. Policy views and acquisition locks are operational state outside Spaces.
+Host effects refresh admission and use pinned confined descriptors; ordinary
+chat containers need no attachment row or per-chat probe. Do not infer permission
+from a path projection, container name or cached client. Unsupported storage
+credentials remain denied by the facade even when their active human identity
+can run a text chat.
+
 `provision.py` owns operator preparation and whole-plan byte/inode arithmetic.
 The legacy script imports its unchanged entry point. Typed schema-2 inventories
 carry user/assistant/employee/company kinds; schema-1 slots remain untyped.

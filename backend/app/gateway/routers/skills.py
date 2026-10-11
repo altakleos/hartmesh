@@ -507,6 +507,9 @@ async def clone_skill(request: Request, body: SkillCloneRequest, config: AppConf
 async def install_skill(request: Request, body: SkillInstallRequest, config: AppConfig = Depends(get_config)) -> SkillInstallResponse:
     require_customer_management_for_request(request, "local_skill_management")
     await require_private_skill_owner(request)
+    from app.gateway.chat_files import require_legacy_file_operation
+
+    await require_legacy_file_operation(request, body.thread_id)
     try:
         skill_file_path = resolve_thread_virtual_path(body.thread_id, body.path)
     except FileNotFoundError as e:

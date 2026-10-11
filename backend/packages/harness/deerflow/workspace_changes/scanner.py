@@ -136,6 +136,9 @@ def scan_workspace_roots(
     text_paths: set[str] | None = None,
     text_cache_dir: Path | None = None,
     extra_excluded_dir_names: frozenset[str] | None = None,
+    root_opener=None,
+    directory_validator=None,
+    file_opener=None,
 ) -> WorkspaceSnapshot:
     if not callable(getattr(os, "fwalk", None)):
         raise SafeFileAccessUnavailable("Safe workspace capture requires descriptor-relative directory walking")
@@ -162,7 +165,7 @@ def scan_workspace_roots(
 
     for root in roots:
         try:
-            root_fd = open_directory_source(root.host_path)
+            root_fd = root_opener(root) if root_opener is not None else open_directory_source(root.host_path)
         except FileNotFoundError:
             continue
         except SafeFileAccessUnavailable:
@@ -171,9 +174,21 @@ def scan_workspace_roots(
             truncated = True
             continue
         try:
+            expected_device = os.fstat(root_fd).st_dev if root_opener is not None else None
             # fwalk pins each directory beneath the admitted root and refuses
             # symlink descent. File opens/stat/readlink use its directory fd.
             for dirpath, dirnames, filenames, directory_fd in os.fwalk(".", dir_fd=root_fd, follow_symlinks=False, onerror=scan_error):
+                if directory_validator is not None:
+                    try:
+                        directory_validator(root, dirpath, directory_fd)
+                    except (OSError, StoreError):
+                        truncated = True
+                        dirnames[:] = []
+                        continue
+                if expected_device is not None and os.fstat(directory_fd).st_dev != expected_device:
+                    truncated = True
+                    dirnames[:] = []
+                    continue
                 directories += 1
                 if directories > max(1, resolved_limits.max_scanned_files):
                     return WorkspaceSnapshot(files=files, truncated=True, text_cache_dir=str(cache_dir) if cache_dir is not None else None)
@@ -200,6 +215,7 @@ def scan_workspace_roots(
                             text_paths=text_paths,
                             text_cache_dir=cache_dir,
                             text_budget=text_budget,
+                            file_opener=file_opener,
                         )
                     else:
                         continue
@@ -227,9 +243,10 @@ def _snapshot_file(
     text_paths: set[str] | None,
     text_cache_dir: Path | None,
     text_budget: _TextBudget,
+    file_opener=None,
 ) -> FileSnapshot | None:
     try:
-        fd = os.open(host_file.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+        fd = file_opener(root, host_file.relative_to(root.host_path).as_posix()) if file_opener is not None else os.open(host_file.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
     except OSError:
         return None
     try:

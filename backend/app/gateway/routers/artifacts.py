@@ -22,6 +22,7 @@ from app.gateway.path_utils import resolve_thread_read_path as resolve_thread_vi
 from app.gateway.routers._artifact_projection import installed_projection, project_artifact
 from app.gateway.routers._file_headers import _build_content_disposition
 from app.gateway.routers._file_http import DescriptorFileResponse
+from deerflow.agent_instances.contract import Refusal
 from deerflow.authz.sandbox_authz import safe_app_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.files.store import SafeFileAccessUnavailable, StoreError, open_regular_source
@@ -269,14 +270,25 @@ def _extract_file_from_skill_archive(zip_path: Path, internal_path: str) -> byte
     except StoreError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     with source:
-        if not zipfile.is_zipfile(source):
-            return None
-        source.seek(0)
-        try:
-            with zipfile.ZipFile(source, "r") as zip_ref:
-                return _extract_open_skill_member(zip_ref, internal_path)
-        except (zipfile.BadZipFile, KeyError):
-            return None
+        return _extract_skill_source(source, internal_path)
+
+
+def _extract_skill_source(source, internal_path):
+    if not zipfile.is_zipfile(source):
+        return None
+    source.seek(0)
+    try:
+        with zipfile.ZipFile(source, "r") as zip_ref:
+            return _extract_open_skill_member(zip_ref, internal_path)
+    except (zipfile.BadZipFile, KeyError):
+        return None
+
+
+def _load_qualified_skill_member(source, internal_path):
+    content = _extract_skill_source(source, internal_path)
+    if content is None:
+        raise HTTPException(404, f"File '{internal_path}' not found in skill archive")
+    return content, mimetypes.guess_type(internal_path)[0]
 
 
 def _extract_open_skill_member(zip_ref: zipfile.ZipFile, internal_path: str) -> bytes | None:
@@ -357,6 +369,7 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
         - Active web content such as `.html`, `.xhtml`, `.svg`, and `.xml` artifacts is always downloaded
     """
     from app.gateway.agent_conversations import require_conversation
+    from app.gateway.chat_files import ChatFileResponse, prepare_chat_files
 
     if await require_conversation(request, thread_id):
         from app.gateway.routers.spaces import get_content
@@ -379,11 +392,18 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
     # effective user.
     raw_owner_user_id = get_trusted_internal_owner_user_id(request)
     owner_user_id = make_safe_user_id(raw_owner_user_id) if raw_owner_user_id else None
+    chat_access = await prepare_chat_files(request, thread_id)
 
     if not download and request is not None:
         app_state = getattr(getattr(request, "scope", {}).get("app"), "state", None)
         installed = installed_projection(getattr(app_state, "extensions", None), getattr(request, "query_params", {}))
         if installed is not None:
+            if chat_access is not None:
+                return await chat_access.read_with(
+                    request,
+                    path,
+                    lambda source: project_artifact(installed, thread_id, path, user_id=owner_user_id, source_reader=lambda budget: source.read(budget + 1)),
+                )
             return await await_drained(asyncio.to_thread(project_artifact, installed, thread_id, path, user_id=owner_user_id))
 
     # Check if this is a request for a file inside a .skill archive (e.g., xxx.skill/SKILL.md)
@@ -394,13 +414,15 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
         skill_file_path = path[: marker_pos + len(".skill")]  # e.g., "mnt/user-data/outputs/my-skill.skill"
         internal_path = path[marker_pos + len(skill_marker) :]  # e.g., "SKILL.md"
 
-        actual_skill_path = await asyncio.to_thread(resolve_thread_virtual_path, thread_id, skill_file_path, user_id=owner_user_id)
-
-        # Offload the stat probes + ZIP open/extract + MIME sniff (blocking filesystem IO).
-        content, mime_type = await await_drained(asyncio.to_thread(_load_skill_archive_member, actual_skill_path, skill_file_path, internal_path))
+        if chat_access is not None:
+            content, mime_type = await chat_access.read_with(request, skill_file_path, lambda source: _load_qualified_skill_member(source, internal_path))
+            actual_skill_path = Path(skill_file_path)
+        else:
+            actual_skill_path = await asyncio.to_thread(resolve_thread_virtual_path, thread_id, skill_file_path, user_id=owner_user_id)
+            content, mime_type = await await_drained(asyncio.to_thread(_load_skill_archive_member, actual_skill_path, skill_file_path, internal_path))
 
         # Add cache headers to avoid repeated ZIP extraction (cache for 5 minutes)
-        cache_headers = {"Cache-Control": "private, max-age=300"}
+        cache_headers = {"Cache-Control": "private, no-store" if chat_access is not None else "private, max-age=300"}
         download_name = Path(internal_path).name or actual_skill_path.stem
         if download or _is_active_content_mime_type(mime_type):
             return Response(content=content, media_type=mime_type or "application/octet-stream", headers=_build_attachment_headers(download_name, cache_headers))
@@ -435,6 +457,8 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
                 headers=inline_headers,
             )
 
+    if chat_access is not None:
+        return ChatFileResponse(request, chat_access, path, download=download, hash_max_bytes=MAX_EDITABLE_ARTIFACT_BYTES)
     actual_path = await asyncio.to_thread(resolve_thread_virtual_path, thread_id, path, user_id=owner_user_id)
 
     logger.info(f"Resolving artifact path: thread_id={thread_id}, requested_path={path}, actual_path={actual_path}")
@@ -474,6 +498,15 @@ async def update_artifact(
     sandbox = None
     try:
         async with reserve_artifact_write(request, thread_id, user_id=effective_user_id):
+            from app.gateway.agent_conversations import reject_legacy_binding
+            from app.gateway.chat_files import prepare_chat_files
+
+            await reject_legacy_binding(request, thread_id)
+            chat_access = await prepare_chat_files(request, thread_id)
+            if chat_access is not None:
+                updated = _encode_artifact_update(body.content)
+                digest = await chat_access.edit_artifact(request, virtual_path, updated, body.expected_sha256, maximum_bytes=MAX_EDITABLE_ARTIFACT_BYTES)
+                return ArtifactUpdateResponse(path=virtual_path, sha256=digest, size=len(updated))
             actual_path = await asyncio.to_thread(
                 resolve_outputs_confined_path,
                 thread_id,
@@ -522,7 +555,7 @@ async def update_artifact(
             )
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Save after the run finishes.") from None
-    except HTTPException:
+    except (HTTPException, Refusal):
         raise
     except Exception:
         logger.exception("Failed to update artifact %s for thread %s", path, thread_id)

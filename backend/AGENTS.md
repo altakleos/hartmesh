@@ -345,12 +345,10 @@ Outlines use ATX syntax (1–6 hashes, space/tab separator, ≤3 leading spaces)
 - Supports: PDF, PPT, Excel, Word documents (converted via `markitdown`)
 - Rejects directories before copying to keep uploads all-or-nothing
 - One conversion worker per request when called from an active event loop
-- Files stored in thread-isolated directories under the resolving user's bucket (`users/{user_id}/threads/{thread_id}/user-data/uploads`). For IM channels the owner is threaded explicitly via the `user_id=` kwarg (see IM Channels → Owner-scoped file storage); HTTP/embedded callers resolve it from `get_effective_user_id()`
-- Duplicate filenames within one request get `_N` suffixes to prevent overwrites.
-- Gateway HTTP uploads stage `.upload-*.part` files, hidden from upload listings, agent context, and sandbox listings/searches. After size validation, publication is atomic; staged-name cleanup logs errors and leaves leftovers for startup sweep.
-- Gateway HTTP upload/list/delete handlers offload filesystem work through `deerflow.utils.file_io.run_file_io`, a dedicated ContextVar-preserving file IO executor. Non-mounted sandbox uploads acquire sandboxes with `SandboxProvider.acquire_async()` and offload `read_bytes()` plus `sandbox.update_file()` together.
-- Mounted uploads skip sandbox acquire/sync. AIO remote/provisioner requires accurate `sandbox.thread_data_mounts: true`; omission keeps backend auto-detection.
-- `UploadsMiddleware` caps outline titles at 200 characters and previews at 2000 including markers. Titles use `original_user_content`, not upload-prefixed content; attachment-only titles use a sanitized, bounded filename or count.
+- Legacy files live in `users/{user_id}/threads/{thread_id}/user-data/uploads`; IM passes `user_id`, HTTP/embedded resolves `get_effective_user_id()`. Duplicate names get `_N`; `.upload-*.part` stages stay hidden until atomic publication, with failed cleanup logged for startup sweep.
+- Managed chats use operation-scoped `ChatStoragePaths` after fresh owning-loop role/grant/root admission; paths hold no authority. NoUser is text-only with no legacy directories or personal/Shared/ACP binds. Instance Home authority stays separate. See [Space adapters](packages/harness/deerflow/spaces/AGENTS.md) and [HTTP file lifecycle](app/gateway/routers/AGENTS.md).
+- File effects use ContextVar-preserving `run_file_io` and drain cancellation. Non-mounted uploads use `acquire_async` plus offloaded read/sync; mounted uploads skip acquire/sync. AIO remote/provisioner requires accurate `sandbox.thread_data_mounts: true`, otherwise detection remains automatic. Host bridge waits cannot block its owning loop or the bounded file-I/O pool; shutdown drains runs/provider/host before storage/SQL.
+- `UploadsMiddleware` caps titles at 200 characters and previews at 2000 including markers. Titles use `original_user_content`; attachment-only titles use a sanitized bounded filename or count.
 
 See [docs/FILE_UPLOAD.md](docs/FILE_UPLOAD.md) for details.
 

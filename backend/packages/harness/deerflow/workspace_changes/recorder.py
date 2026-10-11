@@ -135,6 +135,13 @@ async def capture_workspace_snapshot(
     extra_excluded_dir_names: frozenset[str] | None = None,
     outputs_only: bool = False,
 ) -> WorkspaceSnapshot:
+    from deerflow.spaces.chat_paths import ChatStoragePaths
+
+    paths = get_paths()
+    if isinstance(paths, ChatStoragePaths):
+        from deerflow.spaces.chat_snapshots import capture_chat_snapshot
+
+        return await capture_chat_snapshot(paths, thread_id, user_id=user_id, limits=limits, include_text=include_text, outputs_only=outputs_only, extra_excluded_dir_names=extra_excluded_dir_names)
     # `_prepare_capture` creates the text cache dir inside the worker, so the
     # handoff must be cancellation-safe: if the run is cancelled after mkdtemp
     # but before we receive the path, the shielded worker still finishes and we
@@ -219,23 +226,20 @@ async def record_workspace_changes(
     extra_excluded_dir_names: frozenset[str] | None = None,
 ) -> dict | None:
     try:
-        roots = await asyncio.to_thread(build_thread_workspace_roots, thread_id, user_id=user_id)
-        after_metadata = await asyncio.to_thread(
-            scan_workspace_roots,
-            roots,
-            limits=limits,
-            include_text=False,
-            extra_excluded_dir_names=extra_excluded_dir_names,
-        )
-        changed_paths = get_changed_paths(before, after_metadata)
-        after = await asyncio.to_thread(
-            scan_workspace_roots,
-            roots,
-            limits=limits,
-            include_text=True,
-            text_paths=changed_paths,
-            extra_excluded_dir_names=extra_excluded_dir_names,
-        )
+        from deerflow.spaces.chat_paths import ChatStoragePaths
+
+        paths = get_paths()
+        if isinstance(paths, ChatStoragePaths):
+            from deerflow.spaces.chat_snapshots import capture_chat_snapshot
+
+            after_metadata = await capture_chat_snapshot(paths, thread_id, user_id=user_id, limits=limits, include_text=False, extra_excluded_dir_names=extra_excluded_dir_names)
+            changed_paths = get_changed_paths(before, after_metadata)
+            after = await capture_chat_snapshot(paths, thread_id, user_id=user_id, limits=limits, text_paths=changed_paths, extra_excluded_dir_names=extra_excluded_dir_names)
+        else:
+            roots = await asyncio.to_thread(build_thread_workspace_roots, thread_id, user_id=user_id)
+            after_metadata = await asyncio.to_thread(scan_workspace_roots, roots, limits=limits, include_text=False, extra_excluded_dir_names=extra_excluded_dir_names)
+            changed_paths = get_changed_paths(before, after_metadata)
+            after = await asyncio.to_thread(scan_workspace_roots, roots, limits=limits, include_text=True, text_paths=changed_paths, extra_excluded_dir_names=extra_excluded_dir_names)
         result = compare_snapshots(before, after, limits=limits)
         if not result.has_changes():
             return None

@@ -606,14 +606,16 @@ class Paths:
             d.chmod(0o777)
 
     @staticmethod
-    def _ensure_projected_thread_dirs(root: Path, thread_id: str) -> None:
+    def _ensure_projected_thread_dirs(root: Path, thread_id: str, *, root_descriptor: int | None = None) -> None:
         """Create below an existing root without following mutable descendant links."""
         if not all(hasattr(os, name) for name in ("O_DIRECTORY", "O_NOFOLLOW", "fchmod")):
             raise OSError(errno.ENOTSUP, "Projected threads require descriptor-confined directory creation")
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
         with ExitStack() as descriptors:
-            root_fd = os.open(root, flags)
-            descriptors.callback(os.close, root_fd)
+            root_fd = root_descriptor
+            if root_fd is None:
+                root_fd = os.open(root, flags)
+                descriptors.callback(os.close, root_fd)
             device = os.fstat(root_fd).st_dev
 
             def child(parent_fd: int, name: str, *, thread_node: bool = True) -> int:

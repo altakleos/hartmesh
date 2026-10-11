@@ -20,6 +20,7 @@ from deerflow.features.resources import MissingFeatureResource, StorageFeatureLi
 from deerflow.spaces.backings import BackingUnavailable
 from deerflow.spaces.contract import Permission, SpaceDenied
 from deerflow.spaces.facade import storage_actor_scope
+from deerflow.spaces.filesystem import SpaceFull
 from deerflow.spaces.service import SpaceFiles
 from deerflow.spaces.workflows import WorkflowRejected, _effect
 
@@ -81,6 +82,16 @@ def storage_feature(namespace, *, write=False):
                 raise HTTPException(503, "The required storage feature is disabled")
             actor = await _actor(request)
             with storage_actor_scope(actor):
+                if (namespace, function.__name__) in {
+                    ("hm.my-files", "keep_thread_file"),
+                    ("hm.shared", "publish"),
+                    ("hm.projects", "promote_thread_file_to_shelf"),
+                    ("hm.projects", "list_project_thread_files"),
+                }:
+                    from app.gateway.chat_files import require_legacy_file_operation
+
+                    source_thread = bound.arguments.get("thread_id") or getattr(bound.arguments.get("body"), "thread_id", None)
+                    await require_legacy_file_operation(request, source_thread)
                 try:
                     space = await service.resource()
                     permission = Permission.READ | Permission.EXPORT if write and service.host_written else Permission.WRITE if write else Permission.READ
@@ -153,6 +164,10 @@ def storage_feature(namespace, *, write=False):
                     raise _unavailable("space-unverified") from None
                 except MissingFeatureResource as exc:
                     raise HTTPException(503, {"code": "storage-unavailable", "reason": "space-not-assigned", "message": str(exc)}) from None
+                except SpaceFull:
+                    from deerflow.spaces.chat_paths import ChatFilesFull
+
+                    raise ChatFilesFull() from None
                 except _ERRORS as exc:
                     raise _http_error(exc) from None
 

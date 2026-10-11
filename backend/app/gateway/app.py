@@ -607,10 +607,11 @@ async def _lifespan_resources(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("Upload staging file cleanup skipped", exc_info=True)
 
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
+    from app.gateway.chat_storage import chat_storage_lifecycle
     from app.gateway.personal_mcp_access import personal_mcp_authority
     from app.gateway.storage_spaces import storage_spaces_lifecycle
 
-    async with personal_mcp_authority(), _runtime_with_mcp_pool_shutdown(app, startup_config), storage_spaces_lifecycle(app):
+    async with personal_mcp_authority(), storage_spaces_lifecycle(app), chat_storage_lifecycle(app, enabled=startup_config.storage_spaces.enabled), _runtime_with_mcp_pool_shutdown(app, startup_config):
         logger.info("LangGraph runtime initialised")
         if getattr(app.state, "provider_keys_applied", False):
             # Keys set in the product were applied and the config reloaded
