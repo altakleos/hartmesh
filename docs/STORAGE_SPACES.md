@@ -129,6 +129,21 @@ uses their outcome before starting another admission. Static provider failures
 require configuration repair and a restart. Shutdown drains owned initialization
 before database teardown, including when later service startup fails.
 
+When `HARTMESH_STORAGE_INIT_IMAGE` is configured, Gateway startup asks that
+pinned backend image to run `mount-all` before inventory verification. The helper
+runs without a network, with fixed memory/process limits and a 60-second deadline;
+the Gateway cannot invoke preparation, resizing or other operator verbs. Outside
+the Compose bundle, an unset image key skips this call.
+
+Timeout cleanup targets only the helper's generated name. Unacknowledged creation
+or removal blocks automatic mount retries, even if the helper later disappears:
+an empty listing cannot prove that an in-flight creation will never finish.
+The journal reports the owned name for operator review. Shutdown drains the call
+and attempts retained cleanup before database teardown. A successful retry
+reverifies the catalogue pinned at startup, clears recovered-slot errors and
+refreshes binding facts before Docker admission. Missing/unreadable inventories
+and insufficient disk retain their stronger failure reason.
+
 Typed assignment selects only its kind or a legacy untyped slot, creates its
 visible and private folder layout after SQL binding uniqueness is established,
 and writes user/company role links in that transaction. Cancelled layout workers
