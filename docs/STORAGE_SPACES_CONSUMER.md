@@ -101,9 +101,13 @@ outcome stays pending; changing the operation ID does not authorize replay.
 File contents do not advance metadata generation. Restore and lifecycle/grant
 changes use current generations and do not restore obsolete memberships.
 
-Host file edits need an exclusive window after native attachments are fenced.
-SHA-256 save checks are valid inside that window; they do not coordinate arbitrary
-concurrent shell writes. Database applications own transactions/locking. Reads
+Host file edits and multiple native writers may coexist. Gateway writes retain
+confined staging and atomic publication; SHA-256/inode save checks do not
+coordinate arbitrary concurrent shell writes. Database applications own
+transactions/locking. Lifecycle effects still require every attachment fenced.
+Pending file/workflow writes block WRITE/OPERATE/ADMIN while ordinary reads remain
+available. Reading workflows take shared host locks with a five-second deadline
+outside SQL and recheck current authority before their callback. Reads
 open confined descriptors under current admission and release SQL before streams;
 an admitted inode read is not a snapshot of concurrent native/database writes.
 
@@ -112,24 +116,29 @@ an admitted inode read is not a snapshot of concurrent native/database writes.
 `SpaceAttachments.attach` accepts a host-validated actor, execution-incarnation
 UUID and `ResourceMount` entries with resource IDs/current generations, safe
 aliases and explicit RO/RW modes. The consumer records returned immutable
-attachment identity. It must not start prepared containers independently, create
-another writer after an uncertain outcome or replace approved roots with paths.
+attachment identity. It must not start prepared containers independently or replace approved roots
+with paths. A new parallel attachment does not retire or settle an earlier
+attachment whose outcome remains uncertain.
 
-The qualified `DockerStorageAdapter` uses a verified direct **single Linux
-Docker host** and canonical local Unix daemon endpoint in the same mount namespace
-as the Gateway. Remote/proxied Docker, Docker Desktop, namespace-remapped hosts,
-unrelated mounts and restricted-network builders are unsupported. The trusted
+The qualified `DockerStorageAdapter` validates a canonical root-owned local Unix
+Docker endpoint and daemon identity. A uid-1000, read-only, network-isolated
+container reads a fresh nonce from the pool at admission and from each bound
+view before workspace creation. This proves byte/path coherence even when the
+Gateway itself runs in a container through a socket bind; matching path strings
+are insufficient. Remote/proxied Docker and Docker Desktop remain unsupported.
+Restricted-network/configured-mount builders remain unsupported until their
+workspace topology is implemented. The trusted
 builder creates a stopped container; exact identity commits before activation.
 At most 32 roots belong to one attachment and 32 live/pending attachments to a
-resource. One writable environment incarnation may use a resource across many
-asynchronous calls and application processes. Ordinary task completion does not
+resource. Multiple writable environment incarnations may use a resource across
+asynchronous calls and application processes; they coordinate ordinary writes. Ordinary task completion does not
 retire the environment.
 
 An ADMIN caller uses `retire` with captured attachment IDs. Exact container
 removal and confirmed absence fence readers, writers and child processes. Lease
 expiry, elapsed time and a stopped but restartable container are insufficient.
-Unconfirmed containment blocks takeover, conflicting edits and completed write
-revocation. No cross-host HA guarantee is provided.
+Unconfirmed containment blocks lifecycle completion and completed write
+revocation; active native attachments alone do not exclude ordinary host edits. No cross-host HA guarantee is provided.
 
 Native backups are `quiesced-filesystem`: all admitted environments are fenced
 before copying the ordinary tree, including SQLite WAL/journals. Application
@@ -159,6 +168,14 @@ Absolute links, escaping paths, special file nodes and nested mount transitions
 are unsupported by host confinement. Relative links must stay inside their root.
 
 ## Qualification evidence and feature independence
+
+Enabled storage installs the three first-party feature entries unless explicitly
+named by the operator's plugin list; the Compose template names none. With storage
+off the routes retain their earlier behavior. With it on, `resource()` only reads
+the user/company role link: it creates no Space or folder. A missing role returns
+structured 503 `storage-unavailable` with reason `space-not-assigned`. `FeaturePaths`
+selects each visible folder under `data/` and its private folder under `control/`.
+
 
 | Requirement | Executable coverage |
 | --- | --- |

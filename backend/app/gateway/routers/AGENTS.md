@@ -3,7 +3,7 @@
 Feature bootstrap counts are global except the authenticated caller's `mine`.
 Own-file status closes SQL before kernel proof and uses assignable slots, not
 seat vacancy. Failed projection returns unavailable defaults; public health
-reports words only. Unsupported identities never project a synthetic owner.
+reports storage/agent state words only, without counts, bytes or paths. Unsupported identities never project a synthetic owner.
 
 Installed artifact declarations additionally dispatch `preview=namespace/id`
 through `_artifact_projection.py` after the same read/owner fence. Match only

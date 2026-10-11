@@ -124,6 +124,12 @@ read state after0038. Canonical Work transitions synchronize linked requests in
 the same transaction; their decision/review commands require exact request and
 response-set acknowledgement. See [Attention](HUMAN_INPUT_REQUESTS.md).
 
+Migration `0041_storage_host_replacements` follows `0040_work_execution` and
+adds nullable `contained_reason`, `workspace_ready_at` and `attachment_id` to
+`agent_work_attempts`, and permits `host` as an actor in `agent_work_events`.
+No current execution path writes those three columns or host settlement events;
+they reserve durable facts for later host containment and settlement.
+
 ## Explicit execution and supervision
 
 Activation adds the current `runs:create` ceiling to Use plus Inspect and

@@ -1,5 +1,9 @@
 # AIO Sandbox
 
+With managed storage off, `_get_thread_mounts` retains the release-45 binds and
+does not resolve a Space. Compose's storage-on ordinary chat mounts are deferred;
+do not treat pool admission as support for restricted resident topology.
+
 `LocalContainerBackend._start_container(start=False)` prepares a stopped Docker
 environment with the existing builder. Only host storage admission may activate
 it after durable exact-ID registration and mount/containment verification. This

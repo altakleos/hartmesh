@@ -1,6 +1,6 @@
 ### Gateway API (`app/gateway/`)
 
-Storage: [mounting](../../../docs/STORAGE_SPACES.md).
+Storage: [startup](../../../docs/STORAGE_SPACES.md).
 
 Reject external run/state writes with `sandbox`, `thread_data`, or `viewed_images`.
 
