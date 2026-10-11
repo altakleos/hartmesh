@@ -224,6 +224,8 @@ class SpaceFiles:
                 self.unclaimed_slots[getattr(spec, "kind", None)].add(slot)
 
     async def create(self, *, actor: PrincipalRef, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None) -> Space:
+        if not self.user_spaces:
+            raise SpaceDenied("Creating Spaces is not enabled on this deployment")
         for _attempt in range(len(self.catalog.volumes) + 1):
             try:
                 async with self.provisioning(actor=actor, name=name, custody=custody, mode=mode, feature=feature) as (_session, space):
@@ -260,6 +262,26 @@ class SpaceFiles:
     def _check_incarnation(binding, volume):
         if (volume.root_inode, volume.control_inode) != (binding.root_inode, binding.control_inode):
             raise BackingUnavailable("Durable resource root incarnation changed; preserve provider recovery state")
+
+    def assignable_slots(self, kind, *, unverified=()):
+        """A host snapshot of unbound, empty qualified capacity; never an admission."""
+        excluded = set(unverified).union(*self.bound_slots.values(), *self.unclaimed_slots.values())
+        return {slot for slot, spec in self.catalog.volumes.items() if getattr(spec, "kind", None) in (kind, None) and slot not in excluded}
+
+    async def binding_verified(self, space_id):
+        """Project backing facts without holding SQL across filesystem proof."""
+        async with self.registry._sf() as session:
+            row = await session.get(SpaceRow, space_id)
+            binding = await session.get(SpaceBackingRow, row.backing_handle) if row is not None else None
+            if binding is None or binding.space_id != space_id:
+                return False
+        try:
+            self._binding_spec(binding)
+            volume = await run_file_io(self.catalog.verify, binding.slot_id, previous=self._verified.get(binding.slot_id))
+            self._check_incarnation(binding, volume)
+        except (BackingUnavailable, OSError):
+            return False
+        return True
 
     @staticmethod
     def _io(volume, call: Callable):
@@ -300,7 +322,7 @@ class SpaceFiles:
                 "available_bytes": volume.available_bytes,
                 "available_inodes": volume.available_inodes,
                 "backend": "fixed-ext4",
-                "editor": "exclusive-host-window",
+                "editor": "shared",
             }
 
     @staticmethod

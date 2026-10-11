@@ -8,23 +8,31 @@ started.
 """
 
 import asyncio
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 
+from app.gateway.auth.mode import local_registration_open
 from app.gateway.browser_capability import browser_capability
 from app.gateway.conversation_access import conversation_references_enabled
 from app.gateway.customer_administration import request_customer_administration_policy, resolve_customer_management_actor
-from app.gateway.deps import get_config
+from app.gateway.deps import get_config, get_current_user_from_request
+from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.knowledge_scope_admission import RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
 from app.gateway.run_models import MAX_CONVERSATION_REFERENCES
 from deerflow.config.app_config import AppConfig
 from deerflow.config.tenant_bundle import MAX_COMPANY_NAME_CHARS, MAX_SUPPORT_URL_CHARS, TenantBundle, configured_tenant_bundle
 from deerflow.config.ui_config import MAX_STARTER_PROMPT_CHARS, MAX_STARTER_TITLE_CHARS, MAX_STARTERS, UiConfig
+from deerflow.features.resources import StorageFeatureLinkRow
+from deerflow.persistence.agent_instances.model import AgentInstanceRow
 from deerflow.subagents.capacity import configured_subagent_max_running
+from deerflow.utils.file_io import run_file_io
 
 router = APIRouter(prefix="/api", tags=["features"])
+logger = logging.getLogger(__name__)
 
 
 class AgentsApiFeature(BaseModel):
@@ -38,6 +46,32 @@ class StorageSpacesFeature(BaseModel):
     backend: str | None = None
     native_attachments: bool = False
     editor_concurrency: str | None = None
+    user_spaces: bool = False
+    state: Literal["off", "ready", "incomplete", "unavailable"] = "off"
+    reason: str | None = None
+    own: Literal["ready", "not-assigned", "no-seat", "unverified"] = "ready"
+
+
+class SeatCount(BaseModel):
+    allowed: int = 0
+    in_use: int = 0
+
+
+class AccountsFeature(BaseModel):
+    seats: SeatCount = Field(default_factory=SeatCount)
+
+
+class AssistantAllowance(SeatCount):
+    per_user: int = 0
+    mine: int = 0
+
+
+class AgentInstancesFeature(BaseModel):
+    enabled: bool = False
+    execution: Literal["ready", "unavailable"] = "unavailable"
+    reason: str | None = None
+    ai_assistants: AssistantAllowance = Field(default_factory=AssistantAllowance)
+    ai_employees: SeatCount = Field(default_factory=SeatCount)
 
 
 class BrowserControlFeature(BaseModel):
@@ -166,6 +200,9 @@ class FeaturesResponse(BaseModel):
 
     customer_administration: CustomerAdministrationFeature = Field(default_factory=CustomerAdministrationFeature)
     storage_spaces: StorageSpacesFeature = Field(default_factory=StorageSpacesFeature)
+    accounts: AccountsFeature = Field(default_factory=AccountsFeature)
+    agent_instances: AgentInstancesFeature = Field(default_factory=AgentInstancesFeature)
+    people_search: Literal["prefix", "exact"] = "exact"
     agents_api: AgentsApiFeature
     browser_control: BrowserControlFeature
     mcp_tasks: McpTasksFeature
@@ -187,12 +224,17 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
     browser = browser_capability(config)
     bundle = configured_tenant_bundle(config.tenant_bundle.path)
     subagent_batch_worker_running = bool(getattr(request.app.state, "subagent_batches_available", False))
+    storage, accounts, instances = await _storage_features(request, config)
+    try:
+        people_search = "exact" if await run_file_io(local_registration_open) else "prefix"
+    except Exception:
+        logger.exception("People-search availability could not be read")
+        people_search = "exact"
     return FeaturesResponse(
-        storage_spaces=StorageSpacesFeature(
-            enabled=getattr(request.app.state, "storage_spaces", None) is not None,
-            backend="fixed-ext4" if getattr(request.app.state, "storage_spaces", None) is not None else None,
-            editor_concurrency="exclusive-host-window" if getattr(request.app.state, "storage_spaces", None) is not None else None,
-        ),
+        storage_spaces=storage,
+        accounts=accounts,
+        agent_instances=instances,
+        people_search=people_search,
         customer_administration=await _customer_administration_feature(request, config),
         agents_api=AgentsApiFeature(enabled=config.agents_api.enabled),
         browser_control=BrowserControlFeature(enabled=browser.available),
@@ -231,6 +273,58 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
             provider=ProviderSupport(display_name=bundle.provider_name, support_url=bundle.support_url),
         ),
     )
+
+
+async def _feature_owner(request):
+    from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION
+
+    source = getattr(request.state, "auth_source", None)
+    if source == AUTH_SOURCE_INTERNAL:
+        return get_trusted_internal_owner_user_id(request)
+    if source in (AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED):
+        user = await get_current_user_from_request(request)
+        return str(user.id) if getattr(user, "id", None) is not None else None
+    return None
+
+
+async def _storage_features(request, config):
+    from app.gateway import storage_spaces as ss
+
+    app = request.app
+    try:
+        state = await ss.storage_state(app)
+        if state.state == "off":
+            return StorageSpacesFeature(), AccountsFeature(), AgentInstancesFeature()
+        files = app.state.storage_spaces
+        execution = await ss.execution_state(app)
+        counts = {kind: await ss.allowance(app, kind) for kind in ("user", "assistant", "employee")}
+        owner = await _feature_owner(request)
+        mine, own = 0, "ready"
+        if owner is not None:
+            async with files.registry._sf() as session:
+                mine = await session.scalar(
+                    select(func.count()).select_from(AgentInstanceRow).where(AgentInstanceRow.custody == "personal", AgentInstanceRow.owner_id == owner, AgentInstanceRow.status.in_(("provisioning", "active", "suspended", "archived")))
+                )
+                link = await session.get(StorageFeatureLinkRow, ("hm.user-space", "human:" + owner))
+                space_id = link.space_id if link is not None else None
+            if state.state not in ("off", "unavailable"):
+                if space_id is None:
+                    own = "not-assigned" if files.assignable_slots("user", unverified=app.state.agent_execution.unverified) else "no-seat"
+                else:
+                    own = "ready" if await files.binding_verified(space_id) else "unverified"
+        storage = StorageSpacesFeature(enabled=True, backend="fixed-ext4", editor_concurrency="shared", user_spaces=files.user_spaces, state=state.state, reason=state.reason, own=own)
+        accounts = AccountsFeature(seats=SeatCount(allowed=counts["user"].allowed, in_use=counts["user"].in_use))
+        instances = AgentInstancesFeature(
+            enabled=config.agents_api.enabled,
+            execution=execution.execution,
+            reason=execution.reason,
+            ai_assistants=AssistantAllowance(per_user=getattr(config.agents_api, "ai_assistants_per_user", 1), allowed=counts["assistant"].allowed, in_use=counts["assistant"].in_use, mine=mine),
+            ai_employees=SeatCount(allowed=counts["employee"].allowed, in_use=counts["employee"].in_use),
+        )
+        return storage, accounts, instances
+    except Exception:
+        logger.exception("Storage and agent availability could not be read")
+        return StorageSpacesFeature(state="unavailable"), AccountsFeature(), AgentInstancesFeature()
 
 
 def _ui_feature(ui: UiConfig, bundle: TenantBundle) -> UiFeature:

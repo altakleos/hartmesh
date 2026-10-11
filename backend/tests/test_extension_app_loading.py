@@ -130,6 +130,8 @@ def test_create_app_mounts_extension_routers_after_all_host_routes(monkeypatch):
         "service": "deer-flow-gateway",
         "auth_mode": "local",
         "registration": "open",
+        "storage": "off",
+        "agents": "off",
     }
     assert client.get("/api/extension-test/ping").status_code == 401
 

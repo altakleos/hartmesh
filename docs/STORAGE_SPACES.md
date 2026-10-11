@@ -144,6 +144,28 @@ uses prepared capacity, configured counts and existing use. Disabled human
 accounts still hold seats until explicitly released; AI assistants and AI
 employees count in every status except deleted.
 
+`GET /api/features` reports the storage state/reason, the caller's own-file
+readiness, account seats and AI assistant/AI employee allowances. Aggregate
+`allowed` and `in_use` counts are global; an AI assistant's `mine` count is
+caller-specific. Identity comes from an authenticated session, explicit
+auth-disabled adapter or attributed internal owner. Unsupported credentials
+receive no personal projection. The existing `agents_api.enabled` flag remains
+independent so custom-agent clients retain their existing contract. Off deployments
+report zero native counts; failed projection returns unavailable defaults with
+HTTP 200. No byte capacities appear in this response.
+
+Own files are `not-assigned` while an actual assignable user slot remains,
+`no-seat` when none remains, and `unverified` when an assigned binding cannot
+prove its filesystem. Account seat occupancy does not imply file assignment.
+Status reads close SQL before filesystem verification and grant no admission;
+each file operation still rechecks authority and provider facts. `/health` adds
+only storage/agent state words, preserving its existing fields. Storage failure
+precedes the `none` agent state. It exposes no counts, paths or exception text.
+
+`storage_spaces.user_spaces: false` refuses generic API creation with HTTP 403.
+Host provisioning/assignment remains available. Feature and quota projections
+use the `shared` editor label; native attachments remain separately advertised.
+
 The backend image also includes `python -m app.gateway.storage_init` for typed
 Compose pools. Its verbs are `prepare`, `mount-all`, `fstab-sync`, `verify`,
 `resize`, `forget`, `quiesce` and `status`. It reads `HARTMESH_DATA_DIR` and the
