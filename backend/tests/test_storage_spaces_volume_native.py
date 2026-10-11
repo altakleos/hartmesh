@@ -148,6 +148,8 @@ async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(bac
 
     image = os.environ.get("HARTMESH_INSTANCE_AIO_IMAGE")
     assert image and "@sha256:" in image, "Native instance qualification requires the pinned shipped AIO image"
+    if writer_runtime := os.environ.get("HARTMESH_NATIVE_WRITER_RUNTIME"):
+        monkeypatch.setenv("DEER_FLOW_SANDBOX_RUNTIME", writer_runtime)
     for key, value in {"DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS": "0", "DEER_FLOW_SANDBOX_MEMORY": "768m", "DEER_FLOW_SANDBOX_CPUS": "1", "DEER_FLOW_SANDBOX_PIDS_LIMIT": "128", "DEER_FLOW_SANDBOX_CONTAINER_USER": "1000:1000"}.items():
         monkeypatch.setenv(key, value)
     catalog, _, _, containment = backing
@@ -161,7 +163,7 @@ async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(bac
         return ResolvedPrincipal(reference, reference == alice) if reference in (alice, bob) else None
 
     directory = InstanceDirectory(sf, human=human)
-    files = SpaceFiles(SpaceRegistry(sf, HostPrincipalResolver(human=human, nonhuman=directory.lookup)), catalog)
+    files = SpaceFiles(SpaceRegistry(sf, HostPrincipalResolver(human=human, nonhuman=directory.lookup)), catalog, inventory_path=catalog.data_disk / "inventory.v1.json")
     agents = AgentInstances(files, directory)
     authority = AgentConversations(agents)
     threads = ThreadMetaRepository(sf, instance_authority=authority)
@@ -349,6 +351,10 @@ async def test_real_attachment_fences_children_and_replaces_environment(backing,
             "--pids-limit",
             "64",
         ]
+        writer_runtime = os.environ.get("HARTMESH_NATIVE_WRITER_RUNTIME")
+        if writer_runtime:
+            index = args.index("--pull=never") + 1
+            args[index:index] = ["--runtime", writer_runtime]
         for view in plan.views:
             args += ["--mount", "type=bind,src=" + view.source + ",dst=" + view.destination + ("" if view.writable else ",readonly")]
         program = """import os,time,sqlite3
@@ -368,7 +374,7 @@ while True: time.sleep(.1)
         containers.append((result.stdout.strip(), plan.id))
         return result.stdout.strip()
 
-    provider = DockerStorageAdapter(prepare=prepare)
+    provider = DockerStorageAdapter(prepare=prepare, pool=catalog.data_disk, probe_image=os.environ["HARTMESH_INSTANCE_AIO_IMAGE"])
     mounts = SpaceAttachments(files, provider)
     recovery = SpaceRecovery(files, attachments=mounts)
     try:
@@ -438,7 +444,7 @@ async def test_qualified_company_wiki_nonhuman_actor_survives_native_replacement
     def prepare(plan):
         return prepare_consumer_container(plan, image, program[0], containers, containment)
 
-    docker = DockerStorageAdapter(prepare=prepare)
+    docker = DockerStorageAdapter(prepare=prepare, pool=catalog.data_disk, probe_image=os.environ["HARTMESH_INSTANCE_AIO_IMAGE"])
     attachments = SpaceAttachments(files, docker)
     token = user_context._current_user.set(None)
     try:
@@ -520,8 +526,8 @@ def test_real_create_with_lost_acknowledgement_preserves_backing_until_verified_
     from deerflow.spaces.contract import PrincipalRef
     from deerflow.spaces.docker import DockerStorageAdapter
 
-    _, volume, image, containment = backing
-    adapter = DockerStorageAdapter(prepare=lambda _plan: pytest.fail("This test creates only through its owned fixture helper"))
+    catalog, volume, image, containment = backing
+    adapter = DockerStorageAdapter(prepare=lambda _plan: pytest.fail("This test creates only through its owned fixture helper"), pool=catalog.data_disk, probe_image=os.environ["HARTMESH_INSTANCE_AIO_IMAGE"])
     plan = AttachmentPlan(uuid.uuid4().hex, uuid.uuid4().hex, PrincipalRef("nonhuman", "worker:fixture"), adapter.host_id, (NativeView(uuid.uuid4().hex, 1, str(volume.data_path), "/mnt/spaces/wiki", True),))
     tracked, created = [], []
 
@@ -559,6 +565,9 @@ def prepared(tmp_path_factory):
     disk = tmp_path_factory.mktemp("resource volume")
     volumes = module.prepare_volumes(disk, count=1, size_bytes=64 << 20, inodes=256, reserve_bytes=16 << 20, reserve_inodes=64, data_uid=1000)
     catalog = PreparedVolumeCatalog.from_manifest(disk / "inventory.v1.json")
+    probe = disk / ".probe"
+    probe.mkdir(mode=0o700)
+    os.chown(probe, 1000, 1000)
     containment = {"confirmed": True}
     try:
         yield catalog, volumes[0], image, containment
@@ -616,6 +625,10 @@ def _native(backing, program: str, *, readonly: bool = False):
         "-c",
         program,
     ]
+    writer_runtime = os.environ.get("HARTMESH_NATIVE_WRITER_RUNTIME")
+    if writer_runtime:
+        index = command.index("--pull=never") + 1
+        command[index:index] = ["--runtime", writer_runtime]
     try:
         result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=60)
         return json.loads(result.stdout)

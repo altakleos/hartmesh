@@ -5,14 +5,15 @@ It creates, never starts, the environment. This adapter adds no scheduling,
 leases, agent identity, image management or host-path API.
 """
 
+import errno
 import json
 import os
 import re
 import secrets
-import socket
 import stat
-import struct
 import subprocess
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from deerflow.spaces.filesystem import FilesystemUnavailable
@@ -29,130 +30,84 @@ class StorageHostUnqualified(StorageAdapterUnsupported):
     """Static host/provider configuration cannot support native attachments."""
 
 
-def _decode_socket_vfs(data, kernel_inode, sequence):
-    if len(data) < 32:
-        raise StorageAdapterUnsupported("Socket diagnostic reply is truncated")
-    length, kind, flags, returned_sequence, _port = struct.unpack_from("=IHHII", data)
-    if length < 32 or length > len(data) or kind != 20 or flags & 2 or returned_sequence != sequence:
-        raise StorageAdapterUnsupported("Socket diagnostic reply is invalid")
-    family, socket_type, state, _pad, inode, _cookie_a, _cookie_b = struct.unpack_from("=BBBBIII", data, 16)
-    if (family, socket_type, state, inode) != (socket.AF_UNIX, socket.SOCK_STREAM, 10, kernel_inode):
-        raise StorageAdapterUnsupported("Socket diagnostic reply identifies another listener")
-    result = None
-    position = 32
-    while position < length:
-        if position + 4 > length:
-            raise StorageAdapterUnsupported("Socket diagnostic attribute is truncated")
-        size, attribute = struct.unpack_from("=HH", data, position)
-        if size < 4 or position + size > length:
-            raise StorageAdapterUnsupported("Socket diagnostic attribute is invalid")
-        # Linux UAPI unix_diag.h: UNIX_DIAG_VFS=1, two native u32 fields.
-        if attribute == 1:
-            if result is not None or size != 12:
-                raise StorageAdapterUnsupported("Socket VFS identity is ambiguous")
-            result = struct.unpack_from("=II", data, position + 4)
-        position += (size + 3) & ~3
-    if result is None:
-        raise StorageAdapterUnsupported("Kernel cannot prove this listener's VFS identity")
-    return result
+_PROBE_LOCKS = {}
+_PROBE_LOCKS_GUARD = threading.Lock()
 
 
-def _socket_vfs_identity(kernel_inode):
-    """Exact bounded UNIX_DIAG_VFS lookup, not a pathname-based socket guess.
+@contextmanager
+def _probe_lock(path):
+    # One process owns admission; serializing this private directory prevents
+    # another adapter from cleaning an in-flight nonce or removing its folder.
+    key = str(Path(path).absolute())
+    with _PROBE_LOCKS_GUARD:
+        lock = _PROBE_LOCKS.setdefault(key, threading.RLock())
+    with lock:
+        yield
 
-    Linux net/unix/diag.c reports d_backing_inode and the kernel dev_t of the
-    actual listener. This also handles systemd's inherited listening socket.
-    """
-    if type(kernel_inode) is not int or not 1 <= kernel_inode <= 2**32 - 1:
-        raise StorageAdapterUnsupported("Kernel listener identity exceeds the qualified ABI")
+
+def _local_endpoint(contexts):
+    """Admit the local root-owned Unix endpoint; bind-path proof is separate."""
     try:
-        with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 4) as diagnostic:
-            diagnostic.settimeout(5)
-            diagnostic.bind((0, 0))
-            diagnostic.connect((0, 0))
-            sequence = secrets.randbits(32)
-            request = struct.pack("=BBHIIIII", socket.AF_UNIX, 0, 0, 0xFFFFFFFF, kernel_inode, 2, 0xFFFFFFFF, 0xFFFFFFFF)
-            diagnostic.send(struct.pack("=IHHII", 16 + len(request), 20, 1, sequence, diagnostic.getsockname()[0]) + request)
-            data, _ancillary, flags, sender = diagnostic.recvmsg(65536)
-            if sender[0] != 0 or flags & socket.MSG_TRUNC:
-                raise StorageAdapterUnsupported("Socket diagnostic reply is not a complete kernel response")
-            return _decode_socket_vfs(data, kernel_inode, sequence)
-    except OSError as exc:
-        raise StorageAdapterUnsupported("Kernel socket identity qualification is unavailable") from exc
-
-
-def _direct_host(contexts):
-    """Bind-source strings are meaningful only in the daemon's mount namespace.
-
-    This deliberately rejects DooD, remote engines and private/remapped Gateway
-    namespaces. Those require a separately qualified daemon-side identity API.
-    """
-    try:
-        override = os.environ.get("DOCKER_HOST")
         endpoints = {"unix:///run/docker.sock", "unix:///var/run/docker.sock"}
+        override = os.environ.get("DOCKER_HOST")
         if override and override not in endpoints:
             raise ValueError("Unqualified Docker endpoint")
-        if not isinstance(contexts, list) or len(contexts) != 1 or contexts[0]["Endpoints"]["docker"]["Host"] not in endpoints:
+        if not isinstance(contexts, list) or len(contexts) != 1:
             raise ValueError("Unqualified Docker context")
-        socket_path = Path("/run/docker.sock")
-        socket_before = socket_path.lstat()
-        if not stat.S_ISSOCK(socket_before.st_mode) or socket_before.st_uid != 0:
+        endpoint = contexts[0]["Endpoints"]["docker"]["Host"]
+        if endpoint not in endpoints:
+            raise ValueError("Unqualified Docker context")
+        socket_path = Path(endpoint[7:])
+        before = socket_path.lstat()
+        if not stat.S_ISSOCK(before.st_mode) or before.st_uid != 0:
             raise ValueError("Untrusted Docker socket")
-        selected = Path((override or contexts[0]["Endpoints"]["docker"]["Host"])[7:]).lstat()
-        if (selected.st_dev, selected.st_ino) != (socket_before.st_dev, socket_before.st_ino):
-            raise ValueError("Docker socket alias identifies another socket")
-        if socket_before.st_ino > 2**32 - 1:
-            raise ValueError("Socket filesystem inode exceeds the qualified kernel ABI")
-        fd = os.open("/run/docker.pid", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
-                raise ValueError("Untrusted daemon PID file")
-            value = os.read(fd, 32).decode("ascii").strip()
-        finally:
-            os.close(fd)
-        if not re.fullmatch(r"[1-9][0-9]{0,9}", value):
-            raise ValueError("Invalid daemon process identity")
-        process = Path("/proc") / value
-        if (process / "exe").resolve().name != "dockerd":
-            raise ValueError("Daemon PID is not dockerd")
-        ours, daemon = os.stat("/proc/self/ns/mnt"), os.stat(process / "ns/mnt")
-        if (ours.st_dev, ours.st_ino) != (daemon.st_dev, daemon.st_ino):
-            raise ValueError("Gateway and daemon have different mount namespaces")
-        # The PID file and selected endpoint must identify the same listener.
-        # A default PID plus a different/proxied Unix socket is no backing proof.
-        listeners = set()
-        for line in (process / "net/unix").read_text(encoding="utf-8", errors="surrogateescape").splitlines()[1:]:
-            fields = line.split()
-            if len(fields) == 8 and fields[3:6] == ["00010000", "0001", "01"] and fields[7] in ("/run/docker.sock", "/var/run/docker.sock"):
-                listeners.add(int(fields[6]))
-        if len(listeners) != 1:
-            raise ValueError("Canonical Docker listener identity is absent or ambiguous")
-        listener = next(iter(listeners))
-        kernel_device = (os.major(socket_before.st_dev) << 20) | os.minor(socket_before.st_dev)
-        if _socket_vfs_identity(listener) != (socket_before.st_ino, kernel_device):
-            raise ValueError("Docker pathname was replaced after its verified listener was bound")
-        held = False
-        for fd in (process / "fd").iterdir():
+        for alias in endpoints:
+            path = Path(alias[7:])
             try:
-                held = os.readlink(fd) == "socket:[" + str(listener) + "]"
+                info = path.lstat()
             except FileNotFoundError:
-                continue  # a closing client FD is not the qualified listener
-            if held:
-                break
-        if not listeners or not held:
-            raise ValueError("Selected listener is not held by the verified daemon")
-        socket_after = socket_path.lstat()
-        if (socket_before.st_dev, socket_before.st_ino) != (socket_after.st_dev, socket_after.st_ino):
+                if alias == override:
+                    raise
+                continue
+            if (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino):
+                raise ValueError("Docker socket alias identifies another socket")
+        after = socket_path.lstat()
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
             raise ValueError("Docker socket identity changed")
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise StorageAdapterUnsupported("Native attachment requires a verified direct host daemon namespace; remote/remapped adapters are unsupported") from exc
+        raise StorageHostUnqualified("Native storage requires one root-owned local Docker Unix endpoint") from exc
+
+
+def _probe_directory(path):
+    """Pin a private directory without following its final path component."""
+    try:
+        path.mkdir(mode=0o700, exist_ok=True)
+        return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        raise StorageAdapterUnsupported("Storage probe directory is unavailable") from exc
+
+
+def _clear_probe(path):
+    fd = _probe_directory(path)
+    try:
+        for name in os.listdir(fd):
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                raise StorageAdapterUnsupported("Unexpected directory in storage probe state")
+            os.unlink(name, dir_fd=fd)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 class DockerStorageAdapter:
-    def __init__(self, *, prepare, runner=subprocess.run, host_verifier=None):
+    def __init__(self, *, prepare, runner=subprocess.run, host_verifier=None, probe_image=None, pool=None, clean_probe=True):
         self._prepare, self._runner = prepare, runner
-        self._host_verifier = host_verifier or (lambda: _direct_host(self._json("context", "inspect")))
+        self._probe_image = probe_image
+        self._execution_guard = None
+        if host_verifier is None and (not probe_image or pool is None):
+            raise StorageHostUnqualified("Native storage requires a probe image and pool")
+        self._host_verifier = host_verifier or (lambda: _local_endpoint(self._json("context", "inspect")))
         self._host_verifier()
         facts = self._json("info", "--format", "{{json .}}")
         if not isinstance(facts, dict) or facts.get("OSType") != "linux" or "docker desktop" in str(facts.get("OperatingSystem", "")).lower():
@@ -161,6 +116,74 @@ class DockerStorageAdapter:
         if not isinstance(host_id, str) or not host_id or len(host_id) > 128:
             raise StorageHostUnqualified("Docker daemon identity is unavailable")
         self.host_id = host_id
+        if pool is not None:
+            if not probe_image:
+                raise StorageHostUnqualified("Native storage requires a probe image")
+            directory = Path(pool) / ".probe"
+            with _probe_lock(directory):
+                if clean_probe:
+                    _clear_probe(directory)
+                self.probe(directory, label="pool")
+
+    def probe(self, directory: Path, *, label: str) -> None:
+        with _probe_lock(directory):
+            self._probe_file(directory, label=label)
+
+    def _probe_file(self, directory: Path, *, label: str) -> None:
+        directory = Path(directory)
+        nonce, content = secrets.token_hex(16), secrets.token_hex(32)
+        fd = _probe_directory(directory)
+        created = False
+        try:
+            file_fd = os.open(nonce, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644, dir_fd=fd)
+            created = True
+            try:
+                os.fchmod(file_fd, 0o644)
+                with os.fdopen(file_fd, "w", encoding="utf-8", closefd=False) as stream:
+                    stream.write(content)
+                    stream.flush()
+                    os.fsync(file_fd)
+            finally:
+                os.close(file_fd)
+            result = self._call(
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--cap-drop=ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--user",
+                "1000:1000",
+                "--read-only",
+                "--name",
+                f"hartmesh-probe-{nonce}",
+                "--label",
+                f"hartmesh.storage.probe={label}",
+                "--mount",
+                f"type=bind,src={directory / nonce},dst=/probe,readonly",
+                "--entrypoint",
+                "cat",
+                self._probe_image,
+                "/probe",
+            )
+            if result.returncode != 0 or result.stdout != content:
+                raise StorageAdapterUnsupported("The Docker daemon does not resolve the storage path to the same files")
+        finally:
+            try:
+                if created:
+                    os.unlink(nonce, dir_fd=fd)
+                    os.fsync(fd)
+                if label != "pool":
+                    try:
+                        directory.rmdir()
+                    except OSError as exc:
+                        if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                            raise
+            except OSError as exc:
+                raise StorageAdapterUnsupported("Storage probe cleanup could not be completed") from exc
+            finally:
+                os.close(fd)
 
     def _call(self, *arguments):
         try:
@@ -208,6 +231,8 @@ class DockerStorageAdapter:
 
     def _validate(self, container, plan, *, active=False):
         self._same_host()
+        if self._execution_guard is not None:
+            self._execution_guard()
         if plan.host_id != self.host_id:
             raise StorageAdapterUnsupported("Attachment was prepared for another host")
         entry = self._inspect(container)
@@ -252,6 +277,12 @@ class DockerStorageAdapter:
 
     def prepare(self, plan):
         self._same_host()
+        if self._execution_guard is not None:
+            self._execution_guard()
+        if self._probe_image is not None:
+            for view in plan.views:
+                directory = Path(view.source).parent / "control" / "probe"
+                self.probe(directory, label=Path(view.source).parent.name.removesuffix(".volume"))
         container = self._prepare(plan)
         if not isinstance(container, str) or not re.fullmatch(r"[0-9a-f]{64}", container):
             raise StorageAdapterUnsupported("Preparation did not return an exact container identity")
@@ -298,12 +329,14 @@ class DockerStorageAdapter:
             raise StorageAdapterUnsupported("Attachment containment remains unconfirmed")
 
     @classmethod
-    def from_local_backend(cls, backend):
+    def from_local_backend(cls, backend, *, pool: Path | None = None, clean_probe: bool = True):
         """Add storage admission to the existing provider's container builder."""
         if backend.runtime != "docker" or any(not mount.read_only for mount in backend._config_mounts):
             raise StorageHostUnqualified("Native views require Docker with read-only configured mounts")
-        if backend._config_mounts or backend.network_mode != "open":
-            raise StorageAdapterUnsupported("Native views require Docker with no unrelated configured mounts")
+
+        def topology():
+            if backend._config_mounts or backend.network_mode != "open":
+                raise StorageAdapterUnsupported("Native views require Docker with no unrelated configured mounts")
 
         def prepare(plan):
             return backend._start_container(
@@ -315,4 +348,8 @@ class DockerStorageAdapter:
                 start=False,
             )
 
-        return cls(prepare=prepare)
+        adapter = cls(prepare=prepare, probe_image=backend._image, pool=pool, clean_probe=clean_probe)
+        # Storage can be qualified before this provider supports its configured
+        # workspace topology. Preparation and resume retain the same guard.
+        adapter._execution_guard = topology
+        return adapter

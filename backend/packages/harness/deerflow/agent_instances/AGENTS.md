@@ -58,6 +58,10 @@ existing AIO SDK. Address immutable Docker IDs, not container IPs. Drain prepara
 and closure across cancellation; unknown outcomes retain native intents. SDK closure,
 leases and ordinary completion never fence or replace physical writers. Children
 inherit the full Home mount; tool filtering is not a narrower filesystem boundary.
+Qualification requires the configured inventory path and probe image. Serialize
+adapter construction per inventory; the first call cleans pool probes, later
+calls preserve markers. Storage qualification alone does not enable an unsupported
+workspace network topology; both preparation and resumed activation check it.
 The exact-container transport establishes fixed compatibility aliases using
 isolated Python and protected directory descriptors. This bounded root setup
 never opens Home targets; the nonroot SDK creates Home children and confirms cwd.

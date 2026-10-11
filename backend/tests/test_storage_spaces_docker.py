@@ -3,7 +3,6 @@
 import copy
 import json
 import subprocess
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -133,80 +132,17 @@ def test_daemon_namespace_must_be_qualified_before_callback_or_start():
     assert called == [] and docker.calls == []
 
 
-def test_remote_endpoint_cannot_self_attest_direct_host(monkeypatch):
-    from deerflow.spaces.docker import _direct_host
+def test_remote_endpoint_cannot_self_attest_local_endpoint(monkeypatch):
+    from deerflow.spaces.docker import _local_endpoint
 
     monkeypatch.setenv("DOCKER_HOST", "tcp://another-host:2376")
     with pytest.raises(StorageAdapterUnsupported):
-        _direct_host([{"Endpoints": {"docker": {"Host": "unix:///var/run/docker.sock"}}}])
+        _local_endpoint([{"Endpoints": {"docker": {"Host": "unix:///var/run/docker.sock"}}}])
 
 
 def test_alternate_unix_endpoint_is_not_verified_by_default_daemon_pid(monkeypatch):
-    from deerflow.spaces.docker import _direct_host
+    from deerflow.spaces.docker import _local_endpoint
 
     monkeypatch.setenv("DOCKER_HOST", "unix:///tmp/other-daemon.sock")
     with pytest.raises(StorageAdapterUnsupported):
-        _direct_host([{"Endpoints": {"docker": {"Host": "unix:///var/run/docker.sock"}}}])
-
-
-def test_restricted_network_provider_cannot_bypass_its_network_controller():
-    backend = SimpleNamespace(runtime="docker", _config_mounts=[], network_mode="allowlist")
-    with pytest.raises(StorageAdapterUnsupported):
-        DockerStorageAdapter.from_local_backend(backend)
-
-
-@pytest.mark.skipif(sys.platform != "linux", reason="Kernel UNIX socket diagnostics are Linux-only")
-def test_real_unix_diag_binds_listener_to_current_filesystem_inode(tmp_path):
-    import os
-    import socket
-
-    from deerflow.spaces.docker import _socket_vfs_identity
-
-    path = tmp_path / "owned.sock"
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
-        listener.bind(str(path))
-        listener.listen()
-        info = path.lstat()
-        kernel_device = (os.major(info.st_dev) << 20) | os.minor(info.st_dev)
-        assert _socket_vfs_identity(os.fstat(listener.fileno()).st_ino) == (info.st_ino, kernel_device)
-
-
-@pytest.mark.skipif(sys.platform != "linux", reason="Kernel UNIX socket diagnostics are Linux-only")
-def test_rebound_socket_does_not_match_old_listener_even_with_same_path(tmp_path):
-    import os
-    import socket
-
-    from deerflow.spaces.docker import _socket_vfs_identity
-
-    path = tmp_path / "owned.sock"
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as old, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as replacement:
-        old.bind(str(path))
-        old.listen()
-        path.unlink()
-        replacement.bind(str(path))
-        replacement.listen()
-        current = path.lstat()
-        identity = (current.st_ino, (os.major(current.st_dev) << 20) | os.minor(current.st_dev))
-        assert _socket_vfs_identity(os.fstat(old.fileno()).st_ino) != identity
-        assert _socket_vfs_identity(os.fstat(replacement.fileno()).st_ino) == identity
-
-
-@pytest.mark.parametrize("fault", ["sequence", "inode", "truncated", "duplicate-vfs", "attribute-size"])
-def test_socket_diagnostic_parser_rejects_ambiguous_or_wrong_identity(fault):
-    import struct
-
-    from deerflow.spaces.docker import _decode_socket_vfs
-
-    attribute = struct.pack("=HHII", 12, 1, 123, 456)
-    message = struct.pack("=BBBBIII", 1, 1, 10, 0, 42, 0, 0)
-    if fault == "inode":
-        message = struct.pack("=BBBBIII", 1, 1, 10, 0, 43, 0, 0)
-    if fault == "duplicate-vfs":
-        attribute *= 2
-    if fault == "attribute-size":
-        attribute = struct.pack("=HHII", 64, 1, 123, 456)
-    packet = struct.pack("=IHHII", 16 + len(message) + len(attribute), 20, 0, 8 if fault == "sequence" else 7, 0) + message + attribute
-    if fault == "truncated":
-        packet = packet[:-2]
-    with pytest.raises(StorageAdapterUnsupported):
-        _decode_socket_vfs(packet, 42, 7)
+        _local_endpoint([{"Endpoints": {"docker": {"Host": "unix:///var/run/docker.sock"}}}])

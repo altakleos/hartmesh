@@ -57,14 +57,16 @@ async def test_repeated_cancellation_drains_native_package_upload_before_close(m
     monkeypatch.setattr(aio_sandbox, "AioSandbox", SDK)
     monkeypatch.setattr(DockerControlTransport, "prepare_home_aliases", lambda self: None)
     monkeypatch.setattr(runtime.httpx, "Client", Ready)
-    monkeypatch.setattr(DockerStorageAdapter, "from_local_backend", lambda backend: SimpleNamespace(host_id="fixture"))
+    monkeypatch.setattr(DockerStorageAdapter, "from_local_backend", lambda backend, **kwargs: SimpleNamespace(host_id="fixture"))
     monkeypatch.setattr(public_skills, "capture_public_skills", lambda *args: public_skills.PublicSkillCapture("e" * 64, frozenset({"fixture"}), (("public/fixture/SKILL.md", b"fixture"),)))
     provider = object.__new__(AioSandboxProvider)
     provider._backend = object.__new__(LocalContainerBackend)
     provider._config = {"ready_timeout": 10}
     bound = execution()
     bound.authority.validate = AsyncMock()
-    bound.authority.instances = SimpleNamespace(files=SimpleNamespace(attachments=SimpleNamespace(provider=SimpleNamespace(host_id="fixture"), resume=AsyncMock(return_value=Attachment("d" * 32, "f" * 32, "fixture", "a" * 64)))))
+    bound.authority.instances = SimpleNamespace(
+        files=SimpleNamespace(inventory_path="/fixture/inventory.json", attachments=SimpleNamespace(provider=SimpleNamespace(host_id="fixture"), resume=AsyncMock(return_value=Attachment("d" * 32, "f" * 32, "fixture", "a" * 64))))
+    )
     task = asyncio.create_task(runtime.prepare_environment(bound, baseline_provider=provider, app_config=SimpleNamespace()))
     try:
         assert await asyncio.to_thread(entered.wait, 3)

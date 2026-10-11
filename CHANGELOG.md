@@ -73,6 +73,13 @@ duplicate mount. A successful retry reverifies the pinned catalogue before
 admission, while stronger inventory/disk failures remain unavailable. No
 additional schema or configuration version changes.
 
+Docker storage admission replaces process-namespace assumptions with a confined,
+UID-1000 read-only nonce-file probe of the pool and each bound view. Endpoint and
+host identity checks remain mandatory; probe cleanup does not touch free-slot
+control folders. Workspace topology guards cover preparation and resume, with
+discovery/fencing retained. Native fixtures accept an explicit writer runtime.
+No additional schema or configuration version changes.
+
 ## [2.2.0+hartmesh.45] - 2026-10-09
 
 ### AI employee Work and supervision
