@@ -96,7 +96,7 @@ requires current ownership; retry uses the committed immutable snapshot. Rename
 must reject pending lifecycle intents. Explicit company targets copy approved
 business data, then use existing resource/memory transfer; no private inheritance.
 
-Managers with current Home ADMIN can abandon an obsolete pending lifecycle operation only after its exact captured environments are confirmed fenced. The intent and original actor remain recorded; grants are unchanged and the agent stays suspended until explicit restore. Existing-chat legacy uploads, browser and sidecar actions require a positive unbound lookup.
+Managers with current Home ADMIN can abandon an obsolete pending lifecycle operation only after its exact captured environments and all current Home attachments are confirmed fenced. Finalization rechecks every current attachment under the Space parent lock without expanding the captured retirement scope. The intent and original actor remain recorded; grants are unchanged and the agent stays suspended until explicit restore. Existing-chat legacy uploads, browser and sidecar actions require a positive unbound lookup.
 
 The authority middleware adds the current AI employee display name only as
 sanitized transient human-role data; never interpolate editable identity into

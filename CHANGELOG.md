@@ -17,6 +17,9 @@ authority before their callback. Lifecycle effects still require all attachments
 fenced, including after adapter loss. Pre-publication capacity failures report
 `SpaceFull`; failures after publication retain an uncertain operation. This change
 adds no database schema changes.
+AI-instance lifecycle retries also recheck every current Home attachment without
+closing views created after the captured scope. Space metadata continues to show
+recovery pending while file outcomes or containment remain unconfirmed.
 
 ### Schema changes
 
