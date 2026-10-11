@@ -8,20 +8,24 @@ writer. Their SQL operation records preserve uncertain outcomes across restart.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+from collections import defaultdict
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
+from pathlib import Path
 
 from deerflow_extension_api.storage import StorageOperationPending
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
 from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperationRow
-from deerflow.persistence.spaces.model import SpaceGrantRow
+from deerflow.persistence.spaces.model import SpaceGrantRow, SpaceRow
 from deerflow.spaces.backings import BackingUnavailable, PreparedVolumeCatalog
 from deerflow.spaces.contract import Custody, FeatureBinding, MutationMode, Permission, PrincipalRef, Space, SpaceConflict, SpaceDenied
 from deerflow.spaces.filesystem import FileConflict, UnsafeSpacePath, _path
+from deerflow.spaces.provision import LAYOUT
 from deerflow.spaces.registry import SpaceRegistry, _stored_permissions
 from deerflow.utils.file_io import await_drained, run_file_io
 
@@ -38,9 +42,12 @@ class SpaceOperationPending(StorageOperationPending, SpaceConflict):
 
 
 class SpaceFiles:
-    def __init__(self, registry: SpaceRegistry, catalog: PreparedVolumeCatalog) -> None:
+    def __init__(self, registry: SpaceRegistry, catalog: PreparedVolumeCatalog, *, inventory_path: Path | None = None, user_spaces: bool = True) -> None:
         self.registry = registry
         self.catalog = catalog
+        self.inventory_path, self.user_spaces = inventory_path, user_spaces
+        self.bound_slots = defaultdict(set)
+        self.unclaimed_slots = defaultdict(set)
         self._verified = {}
         # All resource metadata mutations use this same pending-operation gate.
         registry.operation_guard = self._guard
@@ -71,16 +78,25 @@ class SpaceFiles:
                     raise SpaceOperationPending("Storage attachment provider is required to confirm containment")
 
     @asynccontextmanager
-    async def provisioning(self, *, actor, name, custody, mode, feature=None):
+    async def provisioning(self, *, actor, name, custody, mode, feature=None, kind=None):
         """Host-only atomic provisioning boundary for feature-owned SQL links."""
+        if kind is not None and kind not in LAYOUT:
+            raise ValueError("Unknown storage kind")
         async with self.registry.creating(actor=actor, name=name, custody=custody, mode=mode, feature=feature) as (session, row, permissions):
             used = set((await session.execute(select(SpaceBackingRow.slot_id))).scalars())
             volume = None
-            for slot_id in sorted(set(self.catalog.volumes) - used):
-                candidate = await run_file_io(self.catalog.verify, slot_id)
-                if await run_file_io(self._empty, candidate):
+            for slot_id, candidate_spec in self.catalog.volumes.items():
+                if slot_id in used or getattr(candidate_spec, "kind", None) not in (kind, None):
+                    continue
+                try:
+                    candidate = await run_file_io(self.catalog.verify, slot_id)
+                    empty = await run_file_io(self._empty, candidate)
+                except (BackingUnavailable, OSError):
+                    empty = False
+                if empty:
                     volume = candidate
                     break
+                self.unclaimed_slots[getattr(candidate_spec, "kind", None)].add(slot_id)
             if volume is None:
                 raise SpaceCapacityExhausted("No empty qualified backing capacity remains")
             spec = volume.spec
@@ -97,8 +113,115 @@ class SpaceFiles:
                 )
             )
             await session.flush()
+            if kind is not None:
+                # SQL uniqueness is established before making filesystem effects.
+                # A rolled-back or uncertain publication retains these folders.
+                self.unclaimed_slots[getattr(spec, "kind", None)].add(spec.slot_id)
+                await await_drained(run_file_io(self._layout, volume, kind))
             yield session, self.registry._view(row, int(permissions))
         self._verified[spec.slot_id] = volume
+        self.bound_slots[getattr(spec, "kind", None)].add(spec.slot_id)
+        self.unclaimed_slots[getattr(spec, "kind", None)].discard(spec.slot_id)
+
+    @staticmethod
+    def _layout(volume, kind):
+        with volume.filesystem() as filesystem:
+            for name in LAYOUT[kind][0]:
+                try:
+                    filesystem.mkdir(name)
+                except FileConflict:
+                    filesystem.list_directory(name, limit=1)
+            fd = os.dup(filesystem._control_fd)
+            try:
+                owner = os.fstat(fd)
+                if owner.st_ino != volume.control_inode:
+                    raise BackingUnavailable("Private control incarnation changed")
+                for name in LAYOUT[kind][1]:
+                    try:
+                        os.mkdir(name, mode=0o700, dir_fd=fd)
+                    except FileExistsError:
+                        existing = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                        os.close(existing)
+                    else:
+                        os.chown(name, owner.st_uid, owner.st_gid, dir_fd=fd, follow_symlinks=False)
+                    os.fsync(fd)
+            finally:
+                os.close(fd)
+
+    async def assign(self, *, kind, actor, name, custody, mode):
+        from deerflow.features.resources import StorageFeatureLinkRow
+
+        if kind == "user" and actor.kind != "human":
+            raise SpaceDenied("User storage assignment requires a human identity")
+
+        async def perform():
+            async with self.provisioning(actor=actor, name=name, custody=custody, mode=mode, kind=kind) as (session, space):
+                role = {"user": ("hm.user-space", "human:" + actor.subject_id), "company": ("hm.company-space", "company")}.get(kind)
+                if role is not None:
+                    session.add(StorageFeatureLinkRow(namespace=role[0], key=role[1], space_id=space.id))
+                    await session.flush()
+            return space.id
+
+        return await await_drained(perform())
+
+    async def load_bound_slots(self):
+        async with self.registry._sf() as session:
+            used = set((await session.execute(select(SpaceBackingRow.slot_id))).scalars())
+        self.bound_slots.clear()
+        for slot in used:
+            spec = self.catalog.volumes.get(slot)
+            self.bound_slots[getattr(spec, "kind", None)].add(slot)
+
+    async def refresh_bound_volumes(self):
+        """Prove mounts before a short parent-locked publication of operator growth."""
+        errors = {}
+        async with self.registry._sf() as session:
+            bindings = (await session.execute(select(SpaceBackingRow))).scalars().all()
+        proven = {}
+        for binding in bindings:
+            try:
+                self._binding_spec(binding)
+                volume = await run_file_io(self.catalog.verify, binding.slot_id, previous=self._verified.get(binding.slot_id))
+                self._check_incarnation(binding, volume)
+                proven[binding.backing_handle] = volume
+            except (BackingUnavailable, OSError) as exc:
+                errors[binding.slot_id] = str(exc)
+        # No mount/extent I/O is awaited while holding SQLite's application
+        # writer. Current binding identity is checked again under parent locks.
+        async with self.registry._sf() as session, session.begin():
+            if session.bind.dialect.name == "sqlite":
+                await session.execute(text("BEGIN IMMEDIATE"))
+            rows = (await session.execute(select(SpaceRow, SpaceBackingRow.slot_id).join(SpaceBackingRow, SpaceBackingRow.space_id == SpaceRow.id).order_by(SpaceRow.id).with_for_update(of=SpaceRow))).all()
+            for row, slot in rows:
+                volume = proven.get(row.backing_handle)
+                if volume is None:
+                    continue
+                try:
+                    binding = await session.get(SpaceBackingRow, row.backing_handle)
+                    if binding is None or binding.space_id != row.id:
+                        raise BackingUnavailable("The resource has no qualified filesystem binding")
+                    self._binding_spec(binding)
+                    if binding.slot_id != volume.spec.slot_id or binding.filesystem_uuid != volume.spec.filesystem_uuid:
+                        raise BackingUnavailable("The resource binding changed during verification")
+                    self._check_incarnation(binding, volume)
+                    binding.max_bytes, binding.max_inodes = volume.spec.max_bytes, volume.spec.max_inodes
+                    self._verified[binding.slot_id] = volume
+                except (BackingUnavailable, OSError) as exc:
+                    errors[slot] = str(exc)
+        return errors
+
+    async def load_unclaimed_slots(self):
+        bound = set().union(*self.bound_slots.values())
+        self.unclaimed_slots.clear()
+        for slot, spec in self.catalog.volumes.items():
+            if slot in bound:
+                continue
+            try:
+                empty = await run_file_io(self._empty, await run_file_io(self.catalog.verify, slot))
+            except (BackingUnavailable, OSError):
+                empty = False
+            if not empty:
+                self.unclaimed_slots[getattr(spec, "kind", None)].add(slot)
 
     async def create(self, *, actor: PrincipalRef, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None) -> Space:
         for _attempt in range(len(self.catalog.volumes) + 1):
@@ -120,14 +243,23 @@ class SpaceFiles:
         binding = await session.get(SpaceBackingRow, row.backing_handle)
         if binding is None or binding.space_id != row.id:
             raise BackingUnavailable("The resource has no qualified filesystem binding")
-        spec = self.catalog.volumes.get(binding.slot_id)
-        if spec is None or (spec.filesystem_uuid, spec.max_bytes, spec.max_inodes) != (binding.filesystem_uuid, binding.max_bytes, binding.max_inodes):
-            raise BackingUnavailable("Provider inventory no longer matches the durable resource binding")
+        spec = self._binding_spec(binding)
         volume = await run_file_io(self.catalog.verify, binding.slot_id, previous=self._verified.get(binding.slot_id))
-        if (volume.root_inode, volume.control_inode) != (binding.root_inode, binding.control_inode):
-            raise BackingUnavailable("Durable resource root incarnation changed; preserve provider recovery state")
+        self._check_incarnation(binding, volume)
+        binding.max_bytes, binding.max_inodes = spec.max_bytes, spec.max_inodes
         self._verified[binding.slot_id] = volume
         return volume
+
+    def _binding_spec(self, binding):
+        spec = self.catalog.volumes.get(binding.slot_id)
+        if spec is None or spec.filesystem_uuid != binding.filesystem_uuid or spec.max_bytes < binding.max_bytes or spec.max_inodes < binding.max_inodes:
+            raise BackingUnavailable("Provider inventory no longer matches the durable resource binding")
+        return spec
+
+    @staticmethod
+    def _check_incarnation(binding, volume):
+        if (volume.root_inode, volume.control_inode) != (binding.root_inode, binding.control_inode):
+            raise BackingUnavailable("Durable resource root incarnation changed; preserve provider recovery state")
 
     @staticmethod
     def _io(volume, call: Callable):
@@ -143,10 +275,18 @@ class SpaceFiles:
         return await await_drained(perform())
 
     async def read(self, *, actor: PrincipalRef, space_id: str, path: str, max_bytes: int) -> bytes:
-        return await self._read(actor=actor, space_id=space_id, permission=Permission.READ, call=lambda fs: fs.read_bytes(path, max_bytes=max_bytes))
+        return await self._bounded_read(actor=actor, space_id=space_id, permission=Permission.READ, path=path, max_bytes=max_bytes)
 
     async def export_file(self, *, actor: PrincipalRef, space_id: str, path: str, max_bytes: int = MAX_TRANSFER_BYTES) -> bytes:
-        return await self._read(actor=actor, space_id=space_id, permission=Permission.READ | Permission.EXPORT, call=lambda fs: fs.read_bytes(path, max_bytes=max_bytes))
+        return await self._bounded_read(actor=actor, space_id=space_id, permission=Permission.READ | Permission.EXPORT, path=path, max_bytes=max_bytes)
+
+    async def _bounded_read(self, *, actor, space_id, permission, path, max_bytes):
+        for attempt in range(2):
+            try:
+                return await self._read(actor=actor, space_id=space_id, permission=permission, call=lambda fs: fs.read_bytes(path, max_bytes=max_bytes))
+            except FileConflict as exc:
+                if attempt or str(exc) != "File changed during its bounded read; retry":
+                    raise
 
     async def list_directory(self, *, actor: PrincipalRef, space_id: str, path: str = "", limit: int = 200):
         return await self._read(actor=actor, space_id=space_id, permission=Permission.READ, call=lambda fs: fs.list_directory(path, limit=limit))

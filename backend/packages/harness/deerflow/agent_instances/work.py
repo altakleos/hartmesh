@@ -104,7 +104,7 @@ class AgentWork:
         except (ValueError, TypeError, KeyError):
             raise AgentConflict("Stored Work bindings are invalid; preserve the record for host reconciliation") from None
 
-    async def _project(self, session, actor, parent, snapshot, *, current_attempt=True):
+    async def _project(self, session, actor, parent, snapshot, *, current_attempt=True, execution_state=None):
         await self._validate_snapshot(session, snapshot)
         value = await self._redact(session, actor, snapshot)
         policy = await self._policy(session, parent)
@@ -145,6 +145,9 @@ class AgentWork:
             if attempt
             else None,
         )
+        if execution_state is not None:
+            available = execution_state.execution == "ready"
+            value.update(execution_available=available, availability="explicit_activation" if available else "unavailable", execution_reason=execution_state.reason)
         return value
 
     @staticmethod
@@ -170,13 +173,19 @@ class AgentWork:
             if instance_id is not None:
                 query = query.where(AgentWorkRow.instance_id == instance_id)
             results = (await session.execute(query)).all()
-            return [await self._project(session, actor, parent, self._snapshot(row)) for row, parent in results]
+            states = {}
+            if self.agents.execution_probe is not None:
+                for _row, parent in results:
+                    if parent.id not in states:
+                        states[parent.id] = await self.agents.execution_probe(parent.id)
+            return [await self._project(session, actor, parent, self._snapshot(row), execution_state=states.get(parent.id)) for row, parent in results]
 
     async def get(self, *, actor, instance_id, work_id):
         async with self._sf() as session:
             parent, _ = await self._parent(session, actor, instance_id, INSPECT)
             row = await self._row(session, instance_id, work_id)
-            return await self._project(session, actor, parent, self._snapshot(row))
+            state = await self.agents.execution_probe(parent.id) if self.agents.execution_probe is not None else None
+            return await self._project(session, actor, parent, self._snapshot(row), execution_state=state)
 
     async def history(self, *, actor, instance_id, work_id, limit=50, offset=0):
         self._pagination(limit, offset)

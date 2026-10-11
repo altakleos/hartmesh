@@ -25,6 +25,10 @@ class StorageAdapterUnsupported(FilesystemUnavailable):
     pass
 
 
+class StorageHostUnqualified(StorageAdapterUnsupported):
+    """Static host/provider configuration cannot support native attachments."""
+
+
 def _decode_socket_vfs(data, kernel_inode, sequence):
     if len(data) < 32:
         raise StorageAdapterUnsupported("Socket diagnostic reply is truncated")
@@ -152,10 +156,10 @@ class DockerStorageAdapter:
         self._host_verifier()
         facts = self._json("info", "--format", "{{json .}}")
         if not isinstance(facts, dict) or facts.get("OSType") != "linux" or "docker desktop" in str(facts.get("OperatingSystem", "")).lower():
-            raise StorageAdapterUnsupported("Native storage requires one qualified Linux Docker host")
+            raise StorageHostUnqualified("Native storage requires one qualified Linux Docker host")
         host_id = facts.get("ID")
         if not isinstance(host_id, str) or not host_id or len(host_id) > 128:
-            raise StorageAdapterUnsupported("Docker daemon identity is unavailable")
+            raise StorageHostUnqualified("Docker daemon identity is unavailable")
         self.host_id = host_id
 
     def _call(self, *arguments):
@@ -296,7 +300,9 @@ class DockerStorageAdapter:
     @classmethod
     def from_local_backend(cls, backend):
         """Add storage admission to the existing provider's container builder."""
-        if backend.runtime != "docker" or backend._config_mounts or backend.network_mode != "open":
+        if backend.runtime != "docker" or any(not mount.read_only for mount in backend._config_mounts):
+            raise StorageHostUnqualified("Native views require Docker with read-only configured mounts")
+        if backend._config_mounts or backend.network_mode != "open":
             raise StorageAdapterUnsupported("Native views require Docker with no unrelated configured mounts")
 
         def prepare(plan):

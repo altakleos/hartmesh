@@ -53,6 +53,26 @@ async def test_delegation_is_idempotent_attributed_and_records_only(work):
 
 
 @pytest.mark.asyncio
+async def test_work_reads_keep_records_and_probe_once_per_agent(work):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    service, instance, _ = work
+    first = await delegate(service, instance)
+    await delegate(service, instance)
+    probe = AsyncMock(return_value=SimpleNamespace(execution="unavailable", reason="space-unverified"))
+    service.agents.execution_probe = probe
+    records = await service.list(actor=ALICE, instance_id=instance.id)
+    assert len(records) == 2
+    assert all(record["availability"] == "unavailable" and not record["execution_available"] and record["execution_reason"] == "space-unverified" for record in records)
+    probe.assert_awaited_once_with(instance.id)
+    probe.reset_mock()
+    record = await service.get(actor=ALICE, instance_id=instance.id, work_id=first["id"])
+    assert record["execution_reason"] == "space-unverified" and record["objective"] == first["objective"]
+    probe.assert_awaited_once_with(instance.id)
+
+
+@pytest.mark.asyncio
 async def test_current_grants_filter_work_before_pagination_and_retry(work):
     service, instance, sf = work
     first = await delegate(service, instance)

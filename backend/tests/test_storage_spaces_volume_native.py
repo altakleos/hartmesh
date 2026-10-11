@@ -67,19 +67,59 @@ def test_prepared_pool_has_the_design_owners_and_modes(typed_prepared_pool):
         inventory.verify(spec.slot_id)
 
 
-def test_resized_space_keeps_its_files_and_reports_the_new_bound(typed_prepared_pool):
+@pytest.mark.asyncio
+async def test_resized_space_keeps_its_files_and_reports_the_new_bound(typed_prepared_pool, tmp_path):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.features.resources import StorageFeatureLinkRow
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.spaces.files import SpaceBackingRow
+    from deerflow.persistence.spaces.model import SpaceEventRow, SpaceGrantRow, SpaceRow
+    from deerflow.spaces.contract import Custody, MutationMode, PrincipalRef, ResolvedPrincipal
+    from deerflow.spaces.principals import HostPrincipalResolver
+    from deerflow.spaces.registry import SpaceRegistry
+    from deerflow.spaces.service import SpaceFiles
+
     tool = typed_prepared_pool
-    spec = next(s for s in tool.load().volumes.values() if s.kind == "user")
-    source = spec.mount_path / "data/persistent.txt"
-    source.write_bytes(b"retained across offline ext4 growth")
-    with tool.locked():
-        doc = tool.resize("1", slot=spec.slot_id, capacity_bytes=128 << 20)
-        assert doc["returncode"] == 0, doc
-    grown = tool.load().verify(spec.slot_id)
-    assert grown.spec.filesystem_uuid == spec.filesystem_uuid and grown.spec.kind == "user"
-    assert grown.spec.max_bytes == 128 << 20 and grown.spec.max_inodes == (128 << 20) // 8192
-    assert grown.available_bytes > 64 << 20
-    assert source.read_bytes() == b"retained across offline ext4 growth"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'growth.db'}")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all, tables=[row.__table__ for row in (SpaceRow, SpaceGrantRow, SpaceEventRow, SpaceBackingRow, StorageFeatureLinkRow)])
+        sf = async_sessionmaker(engine, expire_on_commit=False)
+        actor = PrincipalRef("human", "native-fixture")
+
+        async def human(reference):
+            return ResolvedPrincipal(actor) if reference == actor else None
+
+        registry = SpaceRegistry(sf, HostPrincipalResolver(human=human))
+        files = SpaceFiles(registry, tool.load())
+        space_id = await files.assign(kind="user", actor=actor, name="Native fixture", custody=Custody.personal(actor), mode=MutationMode.NATIVE)
+        spec = next(s for s in files.catalog.volumes.values() if s.kind == "user")
+        before = files.catalog.verify(spec.slot_id)
+        for root, names in ((before.data_path, ("files", "projects", "conversations")), (before.control_path, ("my-files", "project-staging", "project-conversion"))):
+            for name in names:
+                meta = (root / name).stat()
+                assert (meta.st_uid, meta.st_gid, meta.st_mode & 0o777) == (1000, 1000, 0o700)
+        source = spec.mount_path / "data/files/persistent.txt"
+        source.write_bytes(b"retained across offline ext4 growth")
+        with tool.locked():
+            doc = tool.resize("1", slot=spec.slot_id, capacity_bytes=128 << 20)
+            assert doc["returncode"] == 0, doc
+        grown = tool.load().verify(spec.slot_id)
+        assert grown.spec.filesystem_uuid == spec.filesystem_uuid and grown.spec.kind == "user"
+        assert (grown.root_inode, grown.control_inode) == (before.root_inode, before.control_inode)
+        assert grown.spec.max_bytes == 128 << 20 and grown.spec.max_inodes == (128 << 20) // 8192
+        assert grown.available_bytes > 64 << 20
+        restarted = SpaceFiles(registry, tool.load())
+        await restarted.load_bound_slots()
+        assert await restarted.refresh_bound_volumes() == {}
+        async with sf() as session:
+            space = await session.get(SpaceRow, space_id)
+            binding = await session.get(SpaceBackingRow, space.backing_handle)
+            assert (binding.max_bytes, binding.max_inodes) == (grown.spec.max_bytes, grown.spec.max_inodes)
+        assert source.read_bytes() == b"retained across offline ext4 growth"
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

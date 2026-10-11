@@ -119,6 +119,31 @@ availability are operator responsibilities; mounts must exist before the host
 loads that inventory. A late durability failure after publishing the inventory
 preserves prepared backings. Existing pools and data are not reformatted.
 
+The Gateway pins the inventory at startup. Missing or malformed inventories and
+individual slot failures retain durable resource and AI employee records; they
+do not stop the Gateway. A durable database is required. Startup records separate
+storage and execution status, including individual unverified slot identities.
+Docker admission has a 30-second wait within the 120-second storage startup
+budget. Timed-out verification and admission remain owned; the minute recheck
+uses their outcome before starting another admission. Static provider failures
+require configuration repair and a restart. Shutdown drains owned initialization
+before database teardown, including when later service startup fails.
+
+Typed assignment selects only its kind or a legacy untyped slot, creates its
+visible and private folder layout after SQL binding uniqueness is established,
+and writes user/company role links in that transaction. Cancelled layout workers
+finish before SQL ownership releases; uncertain folders remain unclaimed.
+Unbound files and failed verification never become another resource's backing.
+Legacy untyped inventories remain supported outside typed Compose pools.
+
+Offline growth takes effect when the Gateway reads the new inventory after a
+restart. The same filesystem UUID and data/control inodes must remain, and both
+bounds must stay the same or grow. Verified larger bounds update the durable
+binding; shrinking or reformatting remains unavailable. One allowance definition
+uses prepared capacity, configured counts and existing use. Disabled human
+accounts still hold seats until explicitly released; AI assistants and AI
+employees count in every status except deleted.
+
 The backend image also includes `python -m app.gateway.storage_init` for typed
 Compose pools. Its verbs are `prepare`, `mount-all`, `fstab-sync`, `verify`,
 `resize`, `forget`, `quiesce` and `status`. It reads `HARTMESH_DATA_DIR` and the

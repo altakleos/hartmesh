@@ -43,6 +43,14 @@ checks the whole plan against disk/inode headroom, and remains off when
 `HARTMESH_USERS` is absent. The existing standalone helper remains compatible.
 There are no additional database schema changes beyond revision 0041 above.
 
+Managed storage startup retains durable records when the inventory, a slot or
+Docker admission is unavailable. Verification and admission respect the startup
+budget, keep unfinished work owned and recheck failed admission every minute.
+Typed assignment adds folder layouts and atomic user/company role links. Verified
+offline growth preserves filesystem identity and updates durable bounds after
+restart. Work reads report current execution availability through the shared
+status probe. This change adds no database schema or configuration version change.
+
 ## [2.2.0+hartmesh.45] - 2026-10-09
 
 ### AI employee Work and supervision

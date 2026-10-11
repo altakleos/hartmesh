@@ -608,8 +608,9 @@ async def _lifespan_resources(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
     from app.gateway.personal_mcp_access import personal_mcp_authority
+    from app.gateway.storage_spaces import storage_spaces_lifecycle
 
-    async with personal_mcp_authority(), _runtime_with_mcp_pool_shutdown(app, startup_config):
+    async with personal_mcp_authority(), _runtime_with_mcp_pool_shutdown(app, startup_config), storage_spaces_lifecycle(app):
         logger.info("LangGraph runtime initialised")
         if getattr(app.state, "provider_keys_applied", False):
             # Keys set in the product were applied and the config reloaded
@@ -1031,6 +1032,11 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     )
 
     # Auth: reject unauthenticated requests to non-public paths (fail-closed safety net)
+    from app.gateway.refusals import refusal_handler
+    from deerflow.agent_instances.contract import Refusal
+
+    app.add_exception_handler(Refusal, refusal_handler)
+
     @app.middleware("http")
     async def bind_customer_policy(request: Request, call_next):
         from app.gateway.customer_administration import request_customer_administration_policy, resolve_customer_management_actor

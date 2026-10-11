@@ -113,7 +113,7 @@ async def qualified_attachments(files, *, baseline_provider=None):
     """Resolve the existing qualified host adapter independently of a first chat."""
     from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
     from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
-    from deerflow.spaces.docker import DockerStorageAdapter, StorageAdapterUnsupported
+    from deerflow.spaces.docker import DockerStorageAdapter, StorageAdapterUnsupported, StorageHostUnqualified
 
     if baseline_provider is None:
         # Resolve before installing the run provider, so no ambient requester
@@ -128,7 +128,7 @@ async def qualified_attachments(files, *, baseline_provider=None):
 
             baseline_provider = await await_drained(run_file_io(get_baseline_sandbox_provider))
     if not isinstance(baseline_provider, AioSandboxProvider) or not isinstance(baseline_provider._backend, LocalContainerBackend):
-        raise StorageAdapterUnsupported("Instance execution requires qualified direct-host Docker AIO storage")
+        raise StorageHostUnqualified("Instance execution requires qualified direct-host Docker AIO storage")
     adapter = await await_drained(run_file_io(DockerStorageAdapter.from_local_backend, baseline_provider._backend))
     # One host adapter service per configured inventory; its guard applies to
     # every ordinary file/membership/lifecycle operation, including restarts.

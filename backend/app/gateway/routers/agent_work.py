@@ -15,8 +15,14 @@ router = APIRouter(prefix="/api/agent-instances", tags=["agent-work"], route_cla
 @router.get("/{instance_id}/work")
 @require_permission("agents", "read")
 async def list_work(instance_id: str, request: Request, limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0, le=100000)):
-    records = await AgentWork(await _service(request)).list(actor=await _actor(request), instance_id=instance_id, limit=limit, offset=offset)
-    return {"work": records, "availability": "explicit_activation", "execution_available": True}
+    agents = await _service(request)
+    records = await AgentWork(agents).list(actor=await _actor(request), instance_id=instance_id, limit=limit, offset=offset)
+    state = await agents.execution_probe(instance_id) if agents.execution_probe is not None else None
+    available = state is None or state.execution == "ready"
+    result = {"work": records, "availability": "explicit_activation" if available else "unavailable", "execution_available": available}
+    if state is not None:
+        result["execution_reason"] = state.reason
+    return result
 
 
 @router.post("/{instance_id}/work", status_code=201)
