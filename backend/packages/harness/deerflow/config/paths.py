@@ -722,6 +722,11 @@ def paths_scope(paths: Paths):
         _scoped_paths.reset(token)
 
 
+def peek_scoped_paths() -> Paths | None:
+    """Inspect the host projection without resolving any default filesystem root."""
+    return _scoped_paths.get()
+
+
 def get_paths() -> Paths:
     """Return the global Paths singleton (lazy-initialized)."""
     scoped = _scoped_paths.get()

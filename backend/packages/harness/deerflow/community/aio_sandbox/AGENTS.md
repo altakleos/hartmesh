@@ -8,7 +8,9 @@ container identity, owner/thread and physical slot labels gate each candidate.
 No qualified User Space means no user-data or ACP bind; Company alone unavailable
 omits Shared. Extra mounts cannot overlay those destinations or expose any pool
 slot, including unassigned slots; check planned mounts before creation and actual
-mounts before return. Policy skill views stay in the operational area.
+mounts before return. Without a scoped native projection, reject storage-on mounts
+before resolving default paths; `peek_scoped_paths()` never creates legacy roots.
+Policy skill views stay in the operational area.
 
 A known mount-profile mismatch may retire a client only through the canonical
 no-holder cleanup reservation and ordinary ownership fencing, then reacquire

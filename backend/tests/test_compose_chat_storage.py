@@ -844,3 +844,21 @@ def test_native_thread_creation_maps_a_racing_directory_quota_failure_to_507(tmp
     with pytest.raises(ChatFilesFull):
         paths.ensure_thread_dirs("chat-a", user_id="alice")
     assert not (tmp_path / "legacy").exists()
+
+
+def test_peeking_a_host_path_scope_never_initializes_legacy_paths(tmp_path, monkeypatch):
+    from deerflow.config import paths
+
+    monkeypatch.setattr(paths, "_paths", None)
+    token = paths._scoped_paths.set(None)
+    try:
+        assert paths.peek_scoped_paths() is None
+        assert paths._paths is None
+        projection = Paths(tmp_path / "legacy")
+        with paths_scope(projection):
+            assert paths.peek_scoped_paths() is projection
+            assert paths._paths is None
+        assert paths.peek_scoped_paths() is None
+        assert paths._paths is None
+    finally:
+        paths._scoped_paths.reset(token)

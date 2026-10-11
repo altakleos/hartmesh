@@ -1676,12 +1676,13 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         from deerflow.config import get_app_config
         from deerflow.config.app_config import peek_loaded_app_config
+        from deerflow.config.paths import peek_scoped_paths
 
         try:
             resource_config = get_app_config()
         except FileNotFoundError:
             resource_config = peek_loaded_app_config()
-        paths = get_paths()
+        paths = peek_scoped_paths()
         effective_user_id = AioSandboxProvider._effective_acquire_user_id(user_id)
         from deerflow.spaces.chat_paths import ChatStoragePaths
 
@@ -1692,7 +1693,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             mounts.validate_sources()
             return list(mounts.binds)
         if getattr(getattr(resource_config, "storage_spaces", None), "enabled", False) is True:
-            raise StorageUnsupported("AIO thread mounts require fresh owning-loop storage admission")
+            raise StorageUnsupported("AIO thread mounts require fresh owning-loop storage admission and filesystem writer fencing")
+        paths = get_paths()
         paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
 
         mounts = [
