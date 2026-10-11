@@ -40,7 +40,7 @@ class PreparedChatStorage:
     protected_roots: tuple[Path, ...] = ()
 
 
-async def _snapshot_in_session(session, files, actor, namespace, key):
+async def _snapshot_in_session(session, files, actor, namespace, key, *, required=None):
     link = await session.get(StorageFeatureLinkRow, (namespace, key))
     if link is None:
         return None
@@ -52,7 +52,8 @@ async def _snapshot_in_session(session, files, actor, namespace, key):
     if (row.custody_kind, row.custodian_kind, row.custodian_id) != expected:
         raise BackingUnavailable("The assigned role has different custody")
     grant = await session.get(SpaceGrantRow, (row.id, actor.kind, actor.subject_id))
-    required = Permission.READ | Permission.WRITE if personal else Permission.READ | Permission.EXPORT
+    if required is None:
+        required = Permission.READ | Permission.WRITE if personal else Permission.READ | Permission.EXPORT
     view = files.registry._view(row, grant.permissions) if grant is not None else None
     if view is None or view.permissions & required != required:
         raise BackingUnavailable("The assigned role is not currently granted")
@@ -66,10 +67,10 @@ async def _snapshot_in_session(session, files, actor, namespace, key):
     return identity, facts
 
 
-async def _snapshot(files, actor, namespace, key):
+async def _snapshot(files, actor, namespace, key, *, required=None):
     await files.registry._actor(actor)
     async with files.registry._sf() as session:
-        return await _snapshot_in_session(session, files, actor, namespace, key)
+        return await _snapshot_in_session(session, files, actor, namespace, key, required=required)
 
 
 async def _admit_verified(files, actor, user_original, company_original=None):
@@ -85,8 +86,8 @@ async def _admit_verified(files, actor, user_original, company_original=None):
             raise BackingUnavailable("Shared storage changed after qualification")
 
 
-async def _verified_role(files, actor, namespace, key):
-    original = await _snapshot(files, actor, namespace, key)
+async def _verified_role(files, actor, namespace, key, *, required=None):
+    original = await _snapshot(files, actor, namespace, key, required=required)
     if original is None:
         return None, "space-not-assigned", None
     _identity, binding = original
@@ -97,7 +98,7 @@ async def _verified_role(files, actor, namespace, key):
     volume = await await_drained(run_file_io(files.catalog.verify, binding.slot_id, previous=files._verified.get(binding.slot_id)))
     files._check_incarnation(binding, volume)
     # Recheck current human eligibility and exact role/grant/binding after I/O.
-    if await _snapshot(files, actor, namespace, key) != original:
+    if await _snapshot(files, actor, namespace, key, required=required) != original:
         raise BackingUnavailable("The assigned role changed during verification")
     files._verified[binding.slot_id] = volume
     return volume, None, original
@@ -263,7 +264,9 @@ async def chat_storage_lifecycle(app, *, enabled):
     app.state.chat_storage_host = None
     app.state.chat_storage_scope = None
     if enabled:
-        host = ChatStorageHost(asyncio.get_running_loop(), partial(prepare_chat_storage, app))
+        from app.gateway.native_screenshots import publish_screenshot
+
+        host = ChatStorageHost(asyncio.get_running_loop(), partial(prepare_chat_storage, app), publish=partial(publish_screenshot, app))
         install_chat_storage_host(host)
         app.state.chat_storage_host = host
         app.state.chat_storage_scope = chat_storage_scope_factory(app)

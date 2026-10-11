@@ -799,18 +799,22 @@ def supports_storage_credentials(request) -> bool:
 
 
 def human_lookup(repository):
-    async def lookup(reference: PrincipalRef) -> ResolvedPrincipal | None:
+    async def lookup(reference: PrincipalRef, *, session=None) -> ResolvedPrincipal | None:
         if reference.kind != "human":
             return None
         # The one synthetic identity is supported only by the explicit local
         # development adapter, never by missing request context or a missing row.
         if reference.subject_id == AUTH_DISABLED_USER_ID and is_auth_disabled():
             return ResolvedPrincipal(reference, can_provision_company=True)
-        user = await repository.get_user_by_id(reference.subject_id)
+        user = await repository.get_user_by_id(reference.subject_id, session=session) if session is not None else await repository.get_user_by_id(reference.subject_id)
         if user is None or str(user.id) != reference.subject_id or account_refusal(user) is not None:
             return None
         return ResolvedPrincipal(reference, can_provision_company=user.system_role == "admin" and getattr(user, "role_limit", None) != "user")
 
+    async def in_session(reference, session):
+        return await lookup(reference, session=session)
+
+    lookup.in_session = in_session
     return lookup
 
 
@@ -862,7 +866,7 @@ async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session
             creation_repository = SQLiteUserRepository(session_factory)
     human = human_lookup(creation_repository)
     directory = InstanceDirectory(session_factory, human=human)
-    registry = SpaceRegistry(session_factory, HostPrincipalResolver(human=human, nonhuman=directory.lookup))
+    registry = SpaceRegistry(session_factory, HostPrincipalResolver(human=human, nonhuman=directory.lookup, nonhuman_in_session=directory.lookup_in_session))
     app.state.storage_spaces = SpaceFiles(registry, catalog, inventory_path=Path(config.inventory_path), user_spaces=config.user_spaces)
     _install_seats(app, session_factory, creation_repository)
     app.state.agent_instances = AgentInstances(app.state.storage_spaces, directory)

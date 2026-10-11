@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Compose file workflows
+
+Managed ordinary chats support Save/Share, project promotion and conversation-file
+listing, run ZIP downloads, browser screenshots and installing a skill from a
+conversation. Sources remain pinned through drained work, publication refreshes
+resource authority and filesystem identity, and private staging counts toward
+the destination's quota. Folder creation failures remove only owned empty
+directories; competing bytes and uncertain outcomes remain available for recovery.
+Shared deduplication and recovery use qualified descriptors, with exact inode
+identity retained privately for new publications. ZIPs keep their existing delivery
+receipt, exclusion and size rules. Browser tools publish on the owning Gateway
+loop and ignore caller-supplied native paths. Source-only operations require
+READ and EXPORT without also requiring WRITE. Borrowed project transactions
+recheck current identity and resource authority on the same database connection.
+Storage defaults remain disabled. There is no database schema change.
+
 ### Compose conversation storage
 
 Opt-in managed ordinary chats use their assigned User Space for conversation
@@ -22,9 +38,6 @@ only conversation files with target reservation and rollback on failure; other
 branches copy history without files. Gateway shutdown drains storage admission
 before closing SQL.
 Defaults remain disabled. This change adds no database schema changes.
-Additional managed file operations fail explicitly until their adapters land:
-Save/Share, project promotion/thread listing, run archives, browser screenshots
-and installing a skill from a conversation. Legacy deployments keep these APIs.
 
 ### Conversation path foundation
 

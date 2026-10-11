@@ -135,7 +135,7 @@ async def test_dedup_hit_staging_cleanup_dispatches_off_the_loop(tmp_path, monke
         result = await add_staged_document(env.docs, env.paths, user_id=_USER, project_id=env.project_id, name="second.txt", staged=duplicate)
         assert result is not None and result[1] is False
         assert not duplicate.staging_path.exists()
-        assert "_remove_staging" in calls
+        assert "_discard_document_stage" in calls
         # No placement happened for the discarded duplicate.
         assert "_place_staging" not in calls
     finally:

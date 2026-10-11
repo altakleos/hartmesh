@@ -209,7 +209,7 @@ async def test_settlement_loads_persisted_facts_and_does_not_resolve_original_hu
 async def test_cancelled_settlement_drains_filesystem_before_unlock_and_host_rollback(feature_app, monkeypatch):
     import threading
 
-    import deerflow.features.publications as publications
+    import deerflow.features.qualified_publications as publications
     from deerflow.spaces.service import SpaceOperationPending
     from deerflow.spaces.workflows import probe
 
@@ -218,11 +218,11 @@ async def test_cancelled_settlement_drains_filesystem_before_unlock_and_host_rol
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
     original = publications.shared_file_holding
 
-    def held(*args):
+    def held(*args, **kwargs):
         entered.set()
         try:
             assert release.wait(10)
-            return original(*args)
+            return original(*args, **kwargs)
         finally:
             finished.set()
 

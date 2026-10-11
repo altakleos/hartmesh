@@ -347,13 +347,13 @@ class QualifiedUploadStage:
         finally:
             os.close(current)
 
-    def publish(self, filename):
+    def publish(self, filename, *, file_mode=0o660):
         name = _path(filename)
         if "/" in name:
             raise UnsafeSpacePath("Uploads require a single filename")
         self._check_parent()
         os.fsync(self.fd)
-        os.fchmod(self.fd, 0o660)
+        os.fchmod(self.fd, file_mode)
         os.link(self.stage_name, name, src_dir_fd=self.filesystem._control_fd, dst_dir_fd=self.parent_fd, follow_symlinks=False)
         self.published_name = name
         os.fsync(self.parent_fd)
@@ -376,7 +376,7 @@ class QualifiedUploadStage:
 
     def rollback_published(self):
         if self.published_name is None:
-            return
+            return True
         name = self.published_name
         # Move first: a public name can change between an inode observation and
         # unlink. Only a private control name can be safely removed by identity.
@@ -385,15 +385,16 @@ class QualifiedUploadStage:
             self.filesystem._rename_no_replace(self.parent_fd, name, self.filesystem._control_fd, private)
         except FileNotFoundError:
             self.published_name = None
-            return
+            return True
         self.published_name = None
         current = os.stat(private, dir_fd=self.filesystem._control_fd, follow_symlinks=False)
         expected = os.fstat(self.fd)
         if (current.st_dev, current.st_ino) == (expected.st_dev, expected.st_ino):
             os.unlink(private, dir_fd=self.filesystem._control_fd)
-            return
+            return True
         try:
             self.filesystem._rename_no_replace(self.filesystem._control_fd, private, self.parent_fd, name)
+            return False
         except BaseException:
             # Preserve the competing writer's bytes in control if another
             # writer claimed the name during restoration. Never erase them.

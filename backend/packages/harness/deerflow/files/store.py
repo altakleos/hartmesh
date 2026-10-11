@@ -21,7 +21,7 @@ import os
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
@@ -31,6 +31,7 @@ __all__ = [
     "StoreError",
     "SafeFileAccessUnavailable",
     "StoredFile",
+    "DescriptorSource",
     "copy_into",
     "delete_under",
     "digest_and_stat",
@@ -64,6 +65,46 @@ class StoreError(ValueError):
 
 class SafeFileAccessUnavailable(StoreError):
     """The host cannot provide the descriptor semantics required for safe reads."""
+
+
+@dataclass(frozen=True)
+class DescriptorSource:
+    """Borrow a host-qualified regular inode; its owner holds it through drainage.
+
+    This selects bytes, not authority. Callers still refresh resource admission
+    before effects. Each reader owns a separate file description so hashing and
+    copying cannot consume each other's offsets or reopen a mutable data path.
+    """
+
+    descriptor: int
+    name: str
+    _identity: tuple[int, int] = field(init=False, repr=False)
+
+    def __post_init__(self):
+        metadata = os.fstat(self.descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise StoreError("The pinned source must be a regular file")
+        object.__setattr__(self, "_identity", (metadata.st_dev, metadata.st_ino))
+
+    def open(self):
+        try:
+            before = os.fstat(self.descriptor)
+        except OSError:
+            raise StoreError("The pinned source is no longer available") from None
+        if not stat.S_ISREG(before.st_mode) or (before.st_dev, before.st_ino) != self._identity:
+            raise StoreError("The pinned source descriptor changed")
+        try:
+            descriptor = os.open(f"/proc/self/fd/{self.descriptor}", os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        except FileNotFoundError:
+            raise SafeFileAccessUnavailable("Independent pinned-source readers require the host descriptor filesystem") from None
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != self._identity:
+                raise StoreError("The pinned source descriptor changed")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
 
 
 @dataclass(frozen=True)
@@ -264,7 +305,7 @@ def open_directory_source(source: Path) -> int:
         walk.close()
 
 
-def open_regular_source(source: Path) -> int:
+def open_regular_source(source: Path | DescriptorSource) -> int:
     """Open a regular file without following a link in any path component.
 
     Keep this descriptor through the operation: a preflighted path alone is
@@ -272,6 +313,8 @@ def open_regular_source(source: Path) -> int:
     The caller owns the descriptor. Platforms without descriptor-relative
     opens fail closed rather than reverting to a check-then-open sequence.
     """
+    if isinstance(source, DescriptorSource):
+        return source.open()
     if not _DIR_FD or not _O_NOFOLLOW:
         raise SafeFileAccessUnavailable("Safe file access requires directory descriptors and no-follow opens")
     absolute = source.absolute()
@@ -322,10 +365,24 @@ def digest_and_stat(source: Path) -> tuple[str, os.stat_result]:
     fd = open_regular_source(source)
     try:
         digest = hashlib.sha256()
+        initial = os.fstat(fd) if isinstance(source, DescriptorSource) else None
         with os.fdopen(fd, "rb", closefd=False) as reader:
-            while chunk := reader.read(_COPY_CHUNK_BYTES):
-                digest.update(chunk)
+            if initial is None:
+                while chunk := reader.read(_COPY_CHUNK_BYTES):
+                    digest.update(chunk)
+            else:
+                remaining = initial.st_size
+                while remaining:
+                    chunk = reader.read(min(_COPY_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        raise StoreError("The pinned source changed while hashing")
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+                if reader.read(1):
+                    raise StoreError("The pinned source changed while hashing")
         metadata = os.fstat(fd)
+        if initial is not None and (metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns) != (initial.st_size, initial.st_mtime_ns, initial.st_ctime_ns):
+            raise StoreError("The pinned source changed while hashing")
     finally:
         os.close(fd)
     return digest.hexdigest(), metadata

@@ -15,6 +15,8 @@ or the tools. Per-thread file caps are reported per group
 from __future__ import annotations
 
 import logging
+import os
+import stat
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -90,6 +92,59 @@ async def _list_thread_files(paths: Paths, *, user_id: str, thread_id: str, file
     ``list_files_in_dir``; outputs use the new ``sandbox_outputs_dir``
     listing this view introduces. Directory scans run in the file-IO worker.
     """
+    from app.gateway.native_file_sources import native_feature_input
+
+    native = native_feature_input()
+    if native is not None:
+        from deerflow.config.paths import _validate_thread_id
+        from deerflow.files.store import MAX_LISTED_FILES
+        from deerflow.spaces.contract import SpaceDenied
+        from deerflow.spaces.filesystem import UnsafeSpacePath
+        from deerflow.uploads.manager import is_upload_staging_file
+
+        _validate_thread_id(thread_id)
+
+        def listing():
+            entries = []
+            truncated = False
+            with native.sources.user.filesystem() as filesystem:
+                for kind, leaf, artifact_url in (("upload", "uploads", upload_artifact_url), ("output", "outputs", output_artifact_url)):
+                    relative = f"conversations/{thread_id}/user-data/{leaf}"
+                    try:
+                        directory = filesystem._open(relative, os.O_RDONLY | os.O_DIRECTORY, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    except UnsafeSpacePath:
+                        raise SpaceDenied("The conversation file area is unavailable") from None
+                    files = []
+                    try:
+                        with os.scandir(directory) as children:
+                            for index, child in enumerate(children):
+                                if index >= MAX_LISTED_FILES or len(files) >= file_limit + 1:
+                                    truncated = True
+                                    break
+                                if is_upload_staging_file(child.name):
+                                    continue
+                                try:
+                                    if not stat.S_ISREG(child.stat(follow_symlinks=False).st_mode):
+                                        continue
+                                    descriptor = filesystem._open(relative + "/" + child.name, os.O_PATH | os.O_NOFOLLOW, follow_symlinks=False)
+                                except FileNotFoundError:
+                                    continue
+                                except UnsafeSpacePath:
+                                    raise SpaceDenied("A conversation file is outside its qualified area") from None
+                                try:
+                                    metadata = os.fstat(descriptor)
+                                    if stat.S_ISREG(metadata.st_mode):
+                                        files.append({"filename": child.name, "size": metadata.st_size, "modified": metadata.st_mtime})
+                                finally:
+                                    os.close(descriptor)
+                    finally:
+                        os.close(directory)
+                    entries.extend(_entry(kind, thread_id, file, artifact_url) for file in sorted(files, key=lambda item: item["filename"]))
+            return entries[:file_limit], truncated or len(entries) > file_limit
+
+        return await run_file_io(listing)
     uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=user_id)
     outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=user_id)
     uploads_listing = await run_file_io(list_files_in_dir, uploads_dir)
@@ -138,6 +193,11 @@ async def list_project_thread_files(
     groups: list[ThreadFileGroup] = []
     for row in page:
         thread_id = row["thread_id"]
+        from app.gateway.agent_conversations import require_conversation
+        from app.gateway.native_file_sources import native_feature_input
+
+        if native_feature_input() is not None and await require_conversation(request, thread_id):
+            continue
         try:
             entries, thread_truncated = await _list_thread_files(paths, user_id=user_id, thread_id=thread_id, file_limit=file_limit)
         except ValueError:

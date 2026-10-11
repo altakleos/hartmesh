@@ -232,9 +232,12 @@ async def publish(body: PublishRequest, request: Request, response: Response) ->
     repo = get_shared_publications_repo(request)
     user_id = acting_user_id(request)
     normalized = "/" + body.path.lstrip("/")
+    from app.gateway.native_file_sources import native_feature_input
+
+    native = native_feature_input()
     thread_id: str | None = None
     if normalized.startswith(USER_FILES_VIRTUAL_PREFIX + "/"):
-        source = await asyncio.to_thread(_own_file_source, user_id, normalized)
+        source = native.source if native is not None else await asyncio.to_thread(_own_file_source, user_id, normalized)
     elif normalized.startswith(_CONVERSATION_PREFIXES):
         if body.thread_id is None:
             raise HTTPException(status_code=400, detail="A conversation's file needs its thread_id")
@@ -253,7 +256,7 @@ async def publish(body: PublishRequest, request: Request, response: Response) ->
         from app.gateway.agent_conversations import reject_legacy_binding
 
         await reject_legacy_binding(request, thread_id)
-        source = await asyncio.to_thread(_keepable_source, thread_id, normalized, user_id)
+        source = native.source if native is not None else await asyncio.to_thread(_keepable_source, thread_id, normalized, user_id)
     else:
         raise HTTPException(status_code=400, detail=f"Only files under {USER_FILES_VIRTUAL_PREFIX}, {' or '.join(prefix.rstrip('/') for prefix in _CONVERSATION_PREFIXES)} can be published")
     service = current_feature_service(request, "hm.shared")
@@ -261,7 +264,16 @@ async def publish(body: PublishRequest, request: Request, response: Response) ->
         from deerflow.features.publications import PublicationUnavailable
 
         try:
-            published, record, created = await service.execute("publish", repo=repo, source=source, name=Path(normalized).name, folder=body.folder, thread_id=thread_id, source_path=normalized)
+            published, record, created = await service.execute(
+                "publish",
+                repo=repo,
+                source=source,
+                name=Path(normalized).name,
+                folder=body.folder,
+                thread_id=thread_id,
+                source_path=normalized,
+                **({"copy_async": native.copy_async, "holding_async": native.holding_async, "rollback_async": native.rollback_async} if native is not None else {}),
+            )
         except SharedFileError as exc:
             raise HTTPException(400, str(exc)) from None
         except PublicationUnavailable as exc:

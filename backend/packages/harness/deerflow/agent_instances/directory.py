@@ -28,10 +28,15 @@ class InstanceDirectory:
             _provisioning.reset(token)
 
     async def lookup(self, reference: PrincipalRef) -> ResolvedPrincipal | None:
+        async with self.session_factory() as session, session.begin():
+            return await self.lookup_in_session(reference, session)
+
+    async def lookup_in_session(self, reference, session):
         if not isinstance(reference, PrincipalRef) or reference.kind != "nonhuman":
             return None
-        async with self.session_factory() as session:
-            row = (await session.execute(select(AgentInstanceRow).where(AgentInstanceRow.principal_id == reference.subject_id))).scalar_one_or_none()
+        if not session.in_transaction() or not session.is_active:
+            raise ValueError("Borrowed instance lookup requires an active transaction")
+        row = (await session.execute(select(AgentInstanceRow).where(AgentInstanceRow.principal_id == reference.subject_id).execution_options(populate_existing=True))).scalar_one_or_none()
         if row is None:
             return None
         try:
@@ -44,7 +49,12 @@ class InstanceDirectory:
         if row.status != "active" and not allowed_pending:
             return None
         if row.custody == "personal":
-            if row.owner_id is None or await self.human(PrincipalRef("human", row.owner_id)) is None:
+            if row.owner_id is None:
+                return None
+            owner = PrincipalRef("human", row.owner_id)
+            borrowed = getattr(self.human, "in_session", None)
+            resolved = await borrowed(owner, session) if callable(borrowed) else await self.human(owner)
+            if resolved is None:
                 return None
         elif row.custody != "company" or row.owner_id is not None:
             return None

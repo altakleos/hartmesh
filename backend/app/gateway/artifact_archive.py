@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from deerflow.constants import BROWSER_FRAMES_DIRNAME, TOOL_RESULTS_DIRNAME
-from deerflow.files.store import SafeFileAccessUnavailable, StoreError, open_regular_source
+from deerflow.files.store import DescriptorSource, SafeFileAccessUnavailable, StoreError, open_regular_source
 
 _VIRTUAL_PREFIX = "mnt/user-data/outputs/"
 _EDIT_TEMP_PREFIX = ".artifact-edit-"
@@ -57,7 +57,7 @@ class ArtifactArchiveResult:
 
 @dataclass(frozen=True)
 class _ArchiveMember:
-    path: Path
+    path: Path | DescriptorSource
     entry: str
     initial: os.stat_result
     components: tuple[tuple[Path, int, int], ...]
@@ -146,15 +146,7 @@ def reserved_dir_names(extra: Iterable[str] = ()) -> frozenset[str]:
     return frozenset(name.casefold() for name in {BROWSER_FRAMES_DIRNAME, TOOL_RESULTS_DIRNAME, *extra})
 
 
-def _member(
-    root: Path,
-    virtual_path: str,
-    reserved: frozenset[str],
-    deadline: float,
-    root_components: tuple[tuple[Path, int, int], ...],
-    cancel_event: threading.Event | None,
-) -> _ArchiveMember:
-    _check_deadline(deadline, cancel_event)
+def _member_entry(virtual_path: str, reserved: frozenset[str]) -> str:
     if not virtual_path or virtual_path.startswith("//") or "\\" in virtual_path or "\x00" in virtual_path:
         raise _reject()
     stripped = virtual_path.removeprefix("/")
@@ -168,6 +160,20 @@ def _member(
     entry = "/".join(parts)
     if len(entry.encode()) > MAX_ENTRY_BYTES:
         raise _too_large("An artifact path is too long to include in an archive")
+    return entry
+
+
+def _member(
+    root: Path,
+    virtual_path: str,
+    reserved: frozenset[str],
+    deadline: float,
+    root_components: tuple[tuple[Path, int, int], ...],
+    cancel_event: threading.Event | None,
+) -> _ArchiveMember:
+    _check_deadline(deadline, cancel_event)
+    entry = _member_entry(virtual_path, reserved)
+    parts = entry.split("/")
 
     candidate = root.joinpath(*parts)
     current = root
@@ -364,6 +370,39 @@ def _validated_members(
     return members
 
 
+def _validated_descriptor_members(virtual_paths, sources, *, extra_reserved_dir_names, deadline, cancel_event):
+    """Use host-owned pinned sources while retaining ZIP limits/exclusions."""
+    paths = list(dict.fromkeys(virtual_paths))
+    if not paths:
+        raise _reject()
+    if len(paths) > MAX_FILES:
+        raise _too_large(f"An artifact archive can contain at most {MAX_FILES} files")
+    reserved = reserved_dir_names(extra_reserved_dir_names)
+    members = []
+    for path in paths:
+        _check_deadline(deadline, cancel_event)
+        entry = _member_entry(path, reserved)
+        source = sources.get(path)
+        if not isinstance(source, DescriptorSource):
+            raise _reject()
+        descriptor = open_regular_source(source)
+        try:
+            initial = os.fstat(descriptor)
+            if initial.st_nlink != 1:
+                raise _reject()
+            members.append(_ArchiveMember(source, entry, initial, ()))
+        finally:
+            os.close(descriptor)
+    collision_keys = [unicodedata.normalize("NFC", member.entry).casefold() for member in members]
+    if len(collision_keys) != len(set(collision_keys)):
+        raise _reject()
+    if any(member.initial.st_size > MAX_FILE_BYTES for member in members):
+        raise _too_large(f"Each archived artifact must be at most {MAX_FILE_BYTES} bytes")
+    if sum(member.initial.st_size for member in members) > MAX_TOTAL_BYTES:
+        raise _too_large(f"Archived artifacts must total at most {MAX_TOTAL_BYTES} bytes")
+    return members
+
+
 @dataclass(frozen=True)
 class CopiedFile:
     """One file as written to an archive: its entry, its size and the SHA-256 of the bytes written."""
@@ -445,17 +484,21 @@ def build_artifact_archive(
     user_data_dir: Path,
     extra_reserved_dir_names: Iterable[str] = (),
     cancel_event: threading.Event | None = None,
+    descriptor_sources: dict[str, DescriptorSource] | None = None,
 ) -> ArtifactArchiveResult:
     deadline = time.monotonic() + BUILD_TIMEOUT_SECONDS
-    members = _validated_members(
-        outputs_dir,
-        virtual_paths,
-        user_data_dir=user_data_dir,
-        extra_reserved_dir_names=extra_reserved_dir_names,
-        deadline=deadline,
-        allow_empty=False,
-        cancel_event=cancel_event,
-    )
+    if descriptor_sources is None:
+        members = _validated_members(
+            outputs_dir,
+            virtual_paths,
+            user_data_dir=user_data_dir,
+            extra_reserved_dir_names=extra_reserved_dir_names,
+            deadline=deadline,
+            allow_empty=False,
+            cancel_event=cancel_event,
+        )
+    else:
+        members = _validated_descriptor_members(virtual_paths, descriptor_sources, extra_reserved_dir_names=extra_reserved_dir_names, deadline=deadline, cancel_event=cancel_event)
 
     _check_deadline(deadline, cancel_event)
     output = tempfile.TemporaryFile("w+b")

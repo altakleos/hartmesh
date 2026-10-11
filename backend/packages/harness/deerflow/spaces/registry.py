@@ -39,10 +39,11 @@ class SpaceRegistry:
         self.operation_guard = None
         self.files = None
 
-    async def _actor(self, actor: PrincipalRef) -> ResolvedPrincipal:
+    async def _actor(self, actor: PrincipalRef, *, session=None) -> ResolvedPrincipal:
         if not isinstance(actor, PrincipalRef):
             raise InvalidPrincipal("Storage requires a host-validated principal")
-        resolved = await self._resolver.resolve(actor)
+        borrowed = getattr(self._resolver, "resolve_in_session", None)
+        resolved = await borrowed(actor, session) if session is not None and callable(borrowed) else await self._resolver.resolve(actor)
         if not isinstance(resolved, ResolvedPrincipal) or resolved.reference != actor or type(resolved.can_provision_company) is not bool:
             raise InvalidPrincipal("Host identity resolution did not match the requested subject")
         return resolved
@@ -86,25 +87,41 @@ class SpaceRegistry:
             async with session.begin():
                 if session.bind.dialect.name == "sqlite":
                     await session.execute(text("BEGIN IMMEDIATE"))
-                admitted = {}
-                for space_id in sorted(requests):
-                    row = (await session.execute(select(SpaceRow).where(SpaceRow.id == space_id).with_for_update())).scalar_one_or_none()
-                    if row is None or row.status not in ("active", "archived"):
-                        raise SpaceNotFound("Space is unavailable")
-                    grant = await self._grant(session, row, actor)
-                    if grant is None:
-                        raise SpaceNotFound("Space is unavailable")
-                    view = self._view(row, grant.permissions)
-                    required, generation = requests[space_id]
-                    if view.permissions & required != required:
-                        raise SpaceDenied("Space operation is not granted")
-                    if generation is not None and row.generation != generation:
-                        raise SpaceConflict("Stale space generation")
-                    admitted[space_id] = (row, grant)
-                await self._actor(actor)
-                if self.operation_guard is not None:
-                    await self.operation_guard(session, admitted, requests, operation_id)
+                admitted = await self.admit_in_session(session, actor=actor, requests=requests, operation_id=operation_id)
                 yield session, admitted
+
+    async def admit_in_session(self, session, *, actor, requests, operation_id=None):
+        """Borrow an active host transaction without starting or committing SQL.
+
+        The owner supplies its writer transaction and drains its file effect
+        before releasing it. This preserves the same resource/operation guards
+        when a domain repository must publish file-before-row under its lock.
+        """
+        if not session.in_transaction() or not session.is_active or not requests:
+            raise ValueError("Borrowed resource admission requires an active transaction and explicit scope")
+        admitted = {}
+        for space_id in sorted(requests):
+            required, generation = requests[space_id]
+            if not isinstance(required, Permission) or not required or int(required) & ~31:
+                raise ValueError("Resource admission requires valid permissions")
+            if generation is not None and (type(generation) is not int or generation < 1):
+                raise ValueError("Expected generation must be a positive integer")
+            row = (await session.execute(select(SpaceRow).where(SpaceRow.id == space_id).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
+            if row is None or row.status not in ("active", "archived"):
+                raise SpaceNotFound("Space is unavailable")
+            grant = await session.get(SpaceGrantRow, (row.id, actor.kind, actor.subject_id), populate_existing=True)
+            if grant is None:
+                raise SpaceNotFound("Space is unavailable")
+            view = self._view(row, grant.permissions)
+            if view.permissions & required != required:
+                raise SpaceDenied("Space operation is not granted")
+            if generation is not None and row.generation != generation:
+                raise SpaceConflict("Stale space generation")
+            admitted[space_id] = (row, grant)
+        await self._actor(actor, session=session)
+        if self.operation_guard is not None:
+            await self.operation_guard(session, admitted, requests, operation_id)
+        return admitted
 
     @asynccontextmanager
     async def _mutation(self, *, actor: PrincipalRef, space_id: str, expected_generation: int, action: str, details: dict):
@@ -159,7 +176,7 @@ class SpaceRegistry:
                 if session.bind.dialect.name == "sqlite":
                     await session.execute(text("BEGIN IMMEDIATE"))
                 if not _host:
-                    current = await self._actor(actor)
+                    current = await self._actor(actor, session=session)
                     if custody.kind == "company" and not current.can_provision_company:
                         raise SpaceDenied("Company provisioning requires current host authority")
                 session.add(row)
@@ -207,7 +224,7 @@ class SpaceRegistry:
             row = rows.get(space_id)
             if row is None:
                 raise SpaceNotFound("Space is unavailable")
-            await self._actor(subject)
+            await self._actor(subject, session=session)
             permissions = validate_permissions(permissions, MutationMode(row.mode))
             if await SpaceAttachments._current(session, [space_id], lock=True):
                 raise SpaceConflict("The storage attachment must be fenced before this operation")
@@ -293,7 +310,7 @@ class SpaceRegistry:
         details = {"subject_kind": subject.kind, "subject_id": subject.subject_id, "permissions": int(permissions)}
         async with self._mutation(actor=actor, space_id=space_id, expected_generation=expected_generation, action="grant" if permissions else "revoke", details=details) as (session, row, actor_grant):
             if permissions:
-                await self._actor(subject)
+                await self._actor(subject, session=session)
             # A host domain condition may fence stale workflows under this
             # resource lock. It never replaces mandatory authority and is not
             # exposed through the public storage/HTTP contract.
@@ -313,7 +330,7 @@ class SpaceRegistry:
                     if reference == subject:
                         continue
                     try:
-                        await self._actor(reference)
+                        await self._actor(reference, session=session)
                     except InvalidPrincipal:
                         continue
                     active_other_admin = True

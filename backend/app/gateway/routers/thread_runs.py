@@ -1672,6 +1672,7 @@ async def _build_archive_without_abandoning_worker(
     presented_paths: list[str],
     *,
     extra_reserved_dir_names: set[str],
+    descriptor_sources=None,
 ) -> ArtifactArchiveResult:
     if _artifact_archive_slots.locked():
         raise ArtifactArchiveError("Too many artifact archives are being created; try again shortly", 429)
@@ -1683,6 +1684,7 @@ async def _build_archive_without_abandoning_worker(
             presented_paths,
             user_data_dir=user_data_dir,
             extra_reserved_dir_names=extra_reserved_dir_names,
+            **({"descriptor_sources": descriptor_sources} if descriptor_sources is not None else {}),
         )
     )
     try:
@@ -1757,6 +1759,10 @@ async def create_run_artifact_archive(
     request: Request,
 ) -> StreamingResponse:
     """Download the current contents of the files presented by one terminal run."""
+    if getattr(request.app.state, "storage_spaces_enabled", False) is True:
+        from app.gateway.native_artifact_archive import native_run_archive
+
+        return await native_run_archive(request, thread_id, run_id)
     from app.gateway.chat_files import require_legacy_file_operation
 
     await require_legacy_file_operation(request, thread_id)

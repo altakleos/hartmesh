@@ -12,6 +12,9 @@ from deerflow.utils.file_io import await_drained, run_file_io
 class MyFilesBehavior:
     async def execute(self, operation, *, user_id, **values):
         if operation == "keep":
+            copy_async = values.pop("copy_async", None)
+            if copy_async is not None:
+                return await copy_async(user_id=user_id, **values)
             return await run_file_io(manager.keep_file, user_id, **values)
         if operation == "list":
             return await run_file_io(manager.list_user_files, user_id)
@@ -41,11 +44,22 @@ class SharedBehavior:
                 folder = normalize_relative_path(values.get("folder") or "", allow_empty=True)
                 digest = await run_file_io(shared.digest_of, source)
                 for record in await repo.live_publications_holding(digest, folder=folder):
-                    held = await run_file_io(shared.shared_file_holding, record["path"], digest)
+                    holding_async = values.get("holding_async")
+                    held = await holding_async(record["path"], digest) if holding_async is not None else await run_file_io(shared.shared_file_holding, record["path"], digest)
                     if held is not None:
                         return held, record, False
                 published, record = await copy_and_record(
-                    repo, source, name=values["name"], folder=folder, user_id=user_id, thread_id=values.get("thread_id"), source_path=values["source_path"], copy=shared.publish_file, remove=shared.remove_shared_file
+                    repo,
+                    source,
+                    name=values["name"],
+                    folder=folder,
+                    user_id=user_id,
+                    thread_id=values.get("thread_id"),
+                    source_path=values["source_path"],
+                    copy=shared.publish_file,
+                    remove=shared.remove_shared_file,
+                    copy_async=values.get("copy_async"),
+                    rollback_async=values.get("rollback_async"),
                 )
                 return published, record, True
             if operation == "remove":
@@ -94,11 +108,17 @@ class ProjectsBehavior:
         if operation in {"archive", "restore"}:
             return await self.repository.set_status(values["project_id"], "archived" if operation == "archive" else "active", user_id=user_id)
         if operation == "stage-document":
+            stage_async = values.pop("stage_async", None)
+            if stage_async is not None:
+                return await stage_async(**values)
             from deerflow.config.paths import get_paths
             from deerflow.projects.documents import stage_document_bytes
 
             return await stage_document_bytes(get_paths(), user_id=user_id, **values)
         if operation == "commit-document":
+            commit_async = values.pop("commit_async", None)
+            if commit_async is not None:
+                return await commit_async(**values)
             from deerflow.config.paths import get_paths
             from deerflow.projects.documents import add_staged_document
 

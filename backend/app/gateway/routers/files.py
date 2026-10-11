@@ -167,10 +167,17 @@ async def keep_thread_file(thread_id: ThreadId, body: KeepFileRequest, request: 
     conversation's own file is untouched.
     """
     user_id = acting_user_id(request)
-    source = await asyncio.to_thread(_keepable_source, thread_id, body.path, user_id)
+    from app.gateway.native_file_sources import native_feature_input
+
+    native = native_feature_input()
+    source = native.source if native is not None else await asyncio.to_thread(_keepable_source, thread_id, body.path, user_id)
     try:
         service = current_feature_service(request, "hm.my-files")
-        kept = await service.execute("keep", source=source, name=Path(body.path).name, folder=body.folder) if service else await asyncio.to_thread(keep_file, user_id, source, name=Path(body.path).name, folder=body.folder)
+        kept = (
+            await service.execute("keep", source=source, name=Path(body.path).name, folder=body.folder, **({"copy_async": native.copy_async} if native is not None else {}))
+            if service
+            else await asyncio.to_thread(keep_file, user_id, source, name=Path(body.path).name, folder=body.folder)
+        )
     except UserFileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     logger.info("Kept %s from thread %s as %s", body.path, thread_id, kept.path)
