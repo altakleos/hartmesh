@@ -18,6 +18,7 @@ class AuthErrorCode(StrEnum):
     TOKEN_INVALID = "token_invalid"
     USER_NOT_FOUND = "user_not_found"
     EMAIL_ALREADY_EXISTS = "email_already_exists"
+    NO_SEATS_LEFT = "no_seats_left"
     PROVIDER_NOT_FOUND = "provider_not_found"
     NOT_AUTHENTICATED = "not_authenticated"
     SYSTEM_ALREADY_INITIALIZED = "system_already_initialized"

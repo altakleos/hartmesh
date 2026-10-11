@@ -13,16 +13,19 @@ construct this after ``init_engine_from_config()`` has run.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import case, delete, func, literal, select, text, tuple_, update
+from sqlalchemy import case, delete, func, literal, or_, select, text, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.gateway.auth.models import User
 from app.gateway.auth.repositories.base import UserNotFoundError, UserRepository
-from deerflow.persistence.user.access import LIMIT_ROLES, ROLES, DisabledIdentityRow, IdentityHoldRow, RoleLimitRow, identity_lock_key, issuer_key, limited_role
+from deerflow.config.auth_config import LOCAL_ACCOUNT_ISSUER
+from deerflow.persistence.user.access import LIMIT_ROLES, ROLES, DisabledIdentityRow, IdentityHoldRow, RoleLimitRow, identity_lock_key, issuer_key, limited_role, local_account
 from deerflow.persistence.user.model import OAUTH_IDENTITY_INDEX_NAME, UserRow
 
 # ``email`` is ``mapped_column(unique=True, index=True)``, which SQLAlchemy
@@ -146,11 +149,28 @@ def _normalize_email(email: str) -> str:
 _FIRST_ADMIN_LOCK_KEY = int.from_bytes(hashlib.sha256(b"deerflow:auth:first-admin-claim").digest()[:8], "big") & 0x7FFFFFFFFFFFFFFF
 
 
+class NoSeatLeft(Exception):
+    """Every seat of this deployment is taken; no account was inserted."""
+
+    def __init__(self, allowed: int, in_use: int):
+        super().__init__("No seat is free for a new account here. Ask your administrator.")
+        self.allowed, self.in_use = allowed, in_use
+
+
+class ReleasedAccount(Exception):
+    """The account is permanently released; a stale operation may not restore it."""
+
+    def __init__(self, account_id):
+        super().__init__("This account's seat has been released")
+        self.account_id = str(account_id)
+
+
 class SQLiteUserRepository(UserRepository):
     """Async user repository backed by the shared SQLAlchemy engine."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
+        self.seats_allowed: Callable[[AsyncSession], Awaitable[int]] | None = None
 
     # ── Converters ────────────────────────────────────────────────────
 
@@ -183,15 +203,16 @@ class SQLiteUserRepository(UserRepository):
     async def _disabled_at(self, session: AsyncSession, row: UserRow) -> datetime | None:
         """Whether the deployer turned this identity off: the one place the fact lives.
 
-        Only a provider account has an identity to look up; a local account
-        cannot be turned off this way and never matches. A provider account
+        Local disablement matches its reserved issuer and immutable account ID,
+        independently of email or provider subject. A provider account
         linked before the issuer was recorded (NULL, see 0039) matches on its
         subject alone: fail closed, since the row will adopt the configured
         issuer at its next sign-in and until then only the subject is known.
         """
-        if not row.oauth_id or not row.oauth_provider:
-            return None
-        stmt = select(DisabledIdentityRow.disabled_at).where(DisabledIdentityRow.subject == row.oauth_id)
+        if local_account(row):
+            fact = await session.get(DisabledIdentityRow, (LOCAL_ACCOUNT_ISSUER, row.id))
+            return fact.disabled_at if fact is not None else None
+        stmt = select(DisabledIdentityRow.disabled_at).where(DisabledIdentityRow.subject == row.oauth_id, DisabledIdentityRow.issuer != LOCAL_ACCOUNT_ISSUER)
         if row.oauth_issuer:
             stmt = stmt.where(DisabledIdentityRow.issuer == issuer_key(row.oauth_issuer))
         return await session.scalar(stmt.limit(1))
@@ -252,13 +273,27 @@ class SQLiteUserRepository(UserRepository):
             await session.commit()
         return user
 
-    async def _insert_user(self, session: AsyncSession, user: User) -> User:
+    async def _insert_user(self, session: AsyncSession, user: User, *, first_admin: bool = False) -> User:
         """Pre-check the email and flush *user*; the caller owns the transaction.
 
         Shared by :meth:`create_user` and :meth:`create_first_admin` so both
         report the same uniqueness conflicts as ``ValueError``.
         """
         user.email = _normalize_email(user.email)
+        if self.seats_allowed is not None:
+            await self.serialize_seats(session)
+        # Preserve duplicate-email classification even when the deployment is full.
+        existing = select(UserRow.id).where(func.lower(UserRow.email) == user.email).limit(1)
+        if await session.scalar(existing) is not None:
+            raise ValueError(f"Email already registered: {user.email}")
+        if self.seats_allowed is not None:
+            allowed = await self.seats_allowed(session)
+            if type(allowed) is not int or allowed < 0:
+                raise RuntimeError("Account seat allowance must be a nonnegative integer")
+            in_use = await self.count_seated_users(session=session)
+            empty_bootstrap = first_admin and not await session.scalar(select(func.count()).select_from(UserRow))
+            if in_use + 1 > allowed and not empty_bootstrap:
+                raise NoSeatLeft(allowed, in_use)
         # A person demoted before their first sign-in is created at the
         # limit, and the account handed back says so. Read under the
         # identity's lock, and applied again after the flush below, so a
@@ -271,11 +306,6 @@ class SQLiteUserRepository(UserRepository):
             user.role_limit = await self._role_limit(session, probe)
             user.system_role = limited_role(user.system_role, user.role_limit)  # type: ignore[assignment]
         row = self._user_to_row(user)
-        # The unique constraint is case-sensitive, so it cannot catch a
-        # canonical address colliding with a mixed-case legacy row.
-        existing = select(UserRow.id).where(func.lower(UserRow.email) == user.email).limit(1)
-        if await session.scalar(existing) is not None:
-            raise ValueError(f"Email already registered: {user.email}")
         session.add(row)
         try:
             await session.flush()
@@ -314,6 +344,19 @@ class SQLiteUserRepository(UserRepository):
         return user
 
     @staticmethod
+    async def serialize_seats(session: AsyncSession) -> None:
+        """Order insert/release counts in their own transaction, before identity locks."""
+        dialect = session.get_bind().dialect.name
+        if dialect == "sqlite":
+            if not session.in_transaction() or session.info.get("account_write_locked") is not session.get_transaction():
+                await session.execute(text("BEGIN IMMEDIATE"))
+                session.info["account_write_locked"] = session.get_transaction()
+        elif dialect == "postgresql":
+            await session.execute(text("SELECT pg_advisory_xact_lock(hashtext('account-seats'))"))
+        else:
+            raise RuntimeError(f"Cannot serialize account seats for SQL dialect {dialect!r}")
+
+    @staticmethod
     async def _serialize_first_admin_claim(session: AsyncSession) -> None:
         """Serialize concurrent first-admin claims before the count is read.
 
@@ -332,6 +375,7 @@ class SQLiteUserRepository(UserRepository):
         dialect = session.get_bind().dialect.name
         if dialect == "sqlite":
             await session.execute(text("BEGIN IMMEDIATE"))
+            session.info["account_write_locked"] = session.get_transaction()
         elif dialect == "postgresql":
             await session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": _FIRST_ADMIN_LOCK_KEY})
         else:
@@ -351,7 +395,7 @@ class SQLiteUserRepository(UserRepository):
             admin_count = await session.scalar(select(func.count()).select_from(UserRow).where(UserRow.system_role == "admin"))
             if admin_count:
                 return None
-            await self._insert_user(session, user)
+            await self._insert_user(session, user, first_admin=True)
             await session.commit()
         return user
 
@@ -374,7 +418,9 @@ class SQLiteUserRepository(UserRepository):
 
     async def update_user(self, user: User) -> User:
         async with self._sf() as session:
-            row = await session.get(UserRow, str(user.id))
+            if session.get_bind().dialect.name == "sqlite":
+                await self.serialize_seats(session)
+            row = await session.get(UserRow, str(user.id), with_for_update=True)
             if row is None:
                 # Hard fail on concurrent delete: callers (reset_admin,
                 # password change handlers, _ensure_admin_user) all
@@ -383,6 +429,8 @@ class SQLiteUserRepository(UserRepository):
                 # success would let the caller log "password reset" for
                 # a row that no longer exists.
                 raise UserNotFoundError(f"User {user.id} no longer exists")
+            if row.released_at is not None:
+                raise ReleasedAccount(str(user.id))
             # Canonicalise the email only when it actually changes, comparing
             # case-insensitively against the stored value, then mirror the
             # persisted value back onto the returned object. Re-lowercasing an
@@ -419,7 +467,9 @@ class SQLiteUserRepository(UserRepository):
         return user
 
     async def rehash_password(self, user_id: str, *, expected_password_hash: str, expected_token_version: int, password_hash: str) -> User | None:
-        stmt = update(UserRow).where(UserRow.id == user_id, UserRow.password_hash == expected_password_hash, UserRow.token_version == expected_token_version).values(password_hash=password_hash).returning(UserRow)
+        stmt = (
+            update(UserRow).where(UserRow.id == user_id, UserRow.released_at.is_(None), UserRow.password_hash == expected_password_hash, UserRow.token_version == expected_token_version).values(password_hash=password_hash).returning(UserRow)
+        )
         async with self._sf() as session:
             row = (await session.execute(stmt)).scalar_one_or_none()
             # Materialize RETURNING before commit. A fresh SELECT afterwards
@@ -438,7 +488,7 @@ class SQLiteUserRepository(UserRepository):
         new_email: str | None = None,
         needs_setup: bool | None = None,
     ) -> User | None:
-        stmt = update(UserRow).where(UserRow.id == user_id)
+        stmt = update(UserRow).where(UserRow.id == user_id, UserRow.released_at.is_(None))
         if expected_password_hash is not None:
             stmt = stmt.where(UserRow.password_hash == expected_password_hash)
         if expected_token_version is not None:
@@ -467,6 +517,21 @@ class SQLiteUserRepository(UserRepository):
         stmt = select(func.count()).select_from(UserRow)
         async with self._sf() as session:
             return await session.scalar(stmt) or 0
+
+    @asynccontextmanager
+    async def _count_session(self, session):
+        if session is not None:
+            if not session.in_transaction() or not session.is_active:
+                raise ValueError("Seat counting requires an active borrowed transaction")
+            yield session
+        else:
+            async with self._sf() as owned:
+                yield owned
+
+    async def count_seated_users(self, *, session: AsyncSession | None = None) -> int:
+        """Disabled accounts retain seats; released accounts retain rows, without seats."""
+        async with self._count_session(session) as reader:
+            return await reader.scalar(select(func.count()).select_from(UserRow).where(UserRow.released_at.is_(None))) or 0
 
     async def list_user_ids(self) -> list[str]:
         stmt = select(UserRow.id).order_by(UserRow.created_at, UserRow.id)
@@ -510,12 +575,22 @@ class SQLiteUserRepository(UserRepository):
         provider is configured for, which is the one that row will adopt at its
         next sign-in.
         """
-        stmt = select(UserRow).where(UserRow.oauth_id == subject, UserRow.oauth_provider.is_not(None)).order_by(UserRow.created_at, UserRow.id)
+        stmt = self._identity_rows(issuer, subject).order_by(UserRow.created_at, UserRow.id)
         async with self._sf() as session:
             rows = (await session.execute(stmt)).scalars().all()
+            if issuer_key(issuer) == LOCAL_ACCOUNT_ISSUER:
+                return [await self._load(session, row) for row in rows]
             recorded = [row for row in rows if row.oauth_issuer and issuer_key(row.oauth_issuer) == issuer_key(issuer)]
             adopting = [row for row in rows if not row.oauth_issuer]
             return [await self._load(session, row) for row in (*recorded, *adopting)]  # type: ignore[misc]
+
+    @staticmethod
+    def _identity_rows(issuer, subject):
+        if issuer_key(issuer) == LOCAL_ACCOUNT_ISSUER:
+            return select(UserRow).where(UserRow.id == subject, or_(UserRow.oauth_provider.is_(None), UserRow.oauth_id.is_(None), UserRow.oauth_provider == "", UserRow.oauth_id == ""))
+        # Issuer matching uses issuer_key in _covered_rows: SQL trim differs
+        # from Python strip for tabs, newlines and Unicode whitespace.
+        return select(UserRow).where(UserRow.oauth_id == subject, UserRow.oauth_provider.is_not(None))
 
     async def end_sessions(self, user_id: str) -> bool:
         """Invalidate every session of the account: one atomic increment of ``token_version``.
@@ -557,10 +632,15 @@ class SQLiteUserRepository(UserRepository):
         """
         stamp: dict[str, object] = {"system_role": self._role_within_limit(system_role, oauth_issuer), "oauth_issuer": oauth_issuer, "last_sign_in_at": last_sign_in_at}
         async with self._sf() as session:
+            if session.get_bind().dialect.name == "sqlite":
+                await self.serialize_seats(session)
             subject = await session.scalar(select(UserRow.oauth_id).where(UserRow.id == user_id))
             identity = (oauth_issuer, subject) if oauth_issuer and subject else None
             if identity is not None:
                 await self._hold_identity(session, *identity)
+            current = await session.get(UserRow, user_id, populate_existing=True, with_for_update=True)
+            if current is not None and current.released_at is not None:
+                raise ReleasedAccount(user_id)
             if email is not None:
                 try:
                     await session.execute(update(UserRow).where(UserRow.id == user_id).values(**stamp, email=_normalize_email(email), email_released_from=None))
@@ -574,8 +654,13 @@ class SQLiteUserRepository(UserRepository):
                     # optional, and the address not following is the same
                     # outcome the caller already has a path for.
                     await session.rollback()
+                    if session.get_bind().dialect.name == "sqlite":
+                        await self.serialize_seats(session)
                     if identity is not None:
                         await self._hold_identity(session, *identity)
+                    current = await session.get(UserRow, user_id, populate_existing=True, with_for_update=True)
+                    if current is not None and current.released_at is not None:
+                        raise ReleasedAccount(user_id)
             await session.execute(update(UserRow).where(UserRow.id == user_id).values(**stamp))
             await session.commit()
             return False
@@ -654,6 +739,9 @@ class SQLiteUserRepository(UserRepository):
         """Record the refusal; returns False when it was already recorded (idempotent)."""
         key = issuer_key(issuer)
         async with self._sf() as session:
+            if session.get_bind().dialect.name == "sqlite":
+                await self.serialize_seats(session)
+            await self._hold_identity(session, key, subject)
             existing = await session.get(DisabledIdentityRow, (key, subject))
             if existing is not None:
                 return False
@@ -667,11 +755,27 @@ class SQLiteUserRepository(UserRepository):
                 return False
             return True
 
-    async def enable_identity(self, issuer: str, subject: str) -> bool:
+    async def enable_identity(self, issuer: str, subject: str, *, account_id=None, discard_holds=False) -> bool:
         """Withdraw the refusal; returns False when there was none (idempotent)."""
         async with self._sf() as session:
-            existing = await session.get(DisabledIdentityRow, (issuer_key(issuer), subject))
+            key = issuer_key(issuer)
+            if session.get_bind().dialect.name == "sqlite":
+                await self.serialize_seats(session)
+            await self._hold_identity(session, key, subject)
+            covered = await self._covered_rows(session, key, subject, lock=True)
+            targets = [row for row in covered if account_id is None or row.id == account_id]
+            if account_id is not None and not targets:
+                raise UserNotFoundError("The selected account no longer belongs to this identity")
+            # Disablement and holds cover the whole identity, including its
+            # accounts under other configured providers.
+            for row in covered:
+                if row.released_at is not None:
+                    raise ReleasedAccount(row.id)
+            if discard_holds:
+                await session.execute(delete(IdentityHoldRow).where(IdentityHoldRow.issuer == key, IdentityHoldRow.subject == subject))
+            existing = await session.get(DisabledIdentityRow, (key, subject), with_for_update=True)
             if existing is None:
+                await session.commit()
                 return False
             await session.delete(existing)
             await session.commit()
@@ -686,12 +790,21 @@ class SQLiteUserRepository(UserRepository):
         """
         async with self._sf() as session:
             refused = {(row.issuer, row.subject) for row in (await session.execute(select(DisabledIdentityRow.issuer, DisabledIdentityRow.subject))).all()}
-            if not refused:
-                return set()
-            subjects = {subject for _, subject in refused}
-            stmt = select(UserRow.id, UserRow.oauth_id, UserRow.oauth_issuer).where(UserRow.oauth_id.in_(subjects), UserRow.oauth_provider.is_not(None))
-            rows = (await session.execute(stmt)).all()
-            return {str(user_id) for user_id, subject, issuer in rows if not issuer or (issuer_key(issuer), subject) in refused}
+            provider_subjects = {subject for issuer, subject in refused if issuer != LOCAL_ACCOUNT_ISSUER}
+            rows = (await session.execute(select(UserRow))).scalars().all()
+            result = set()
+            for row in rows:
+                if row.released_at is not None:
+                    result.add(row.id)
+                elif local_account(row):
+                    if (LOCAL_ACCOUNT_ISSUER, row.id) in refused:
+                        result.add(row.id)
+                elif row.oauth_issuer:
+                    if issuer_key(row.oauth_issuer) != LOCAL_ACCOUNT_ISSUER and (issuer_key(row.oauth_issuer), row.oauth_id) in refused:
+                        result.add(row.id)
+                elif row.oauth_id in provider_subjects:
+                    result.add(row.id)
+            return result
 
     async def list_disabled_identities(self) -> list[tuple[str, str, datetime]]:
         """Every identity turned off, whether or not an account exists for it."""
@@ -753,10 +866,14 @@ class SQLiteUserRepository(UserRepository):
 
     # ── Role limits the deployer holds ────────────────────────────────
 
-    async def _covered_rows(self, session: AsyncSession, issuer: str, subject: str) -> list[UserRow]:
+    async def _covered_rows(self, session: AsyncSession, issuer: str, subject: str, *, lock=False) -> list[UserRow]:
         """The rows :meth:`list_users_by_identity` returns, inside the caller's transaction."""
-        stmt = select(UserRow).where(UserRow.oauth_id == subject, UserRow.oauth_provider.is_not(None))
+        stmt = self._identity_rows(issuer, subject).order_by(UserRow.id)
+        if lock:
+            stmt = stmt.with_for_update()
         rows = (await session.execute(stmt)).scalars().all()
+        if issuer_key(issuer) == LOCAL_ACCOUNT_ISSUER:
+            return rows
         return [row for row in rows if not row.oauth_issuer or issuer_key(row.oauth_issuer) == issuer_key(issuer)]
 
     async def _lower_to(self, session: AsyncSession, issuer: str, subject: str, role: str) -> int:

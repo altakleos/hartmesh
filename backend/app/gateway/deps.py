@@ -903,6 +903,17 @@ _cached_local_provider: LocalAuthProvider | None = None
 _cached_repo: SQLiteUserRepository | None = None
 
 
+def bind_user_repo(session_factory) -> SQLiteUserRepository:
+    """Bind startup account creation to this engine, discarding an earlier lifecycle's cache."""
+    global _cached_repo, _cached_local_provider
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    if _cached_repo is None or _cached_repo._sf.kw.get("bind") is not session_factory.kw.get("bind"):
+        _cached_repo = SQLiteUserRepository(session_factory)
+        _cached_local_provider = None
+    return _cached_repo
+
+
 def get_user_repo() -> SQLiteUserRepository | None:
     """The users table, for turning a stored user id back into a person.
 

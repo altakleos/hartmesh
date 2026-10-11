@@ -369,12 +369,13 @@ async def test_what_is_held_is_recorded_before_it_is_paused_and_held_before_the_
 
 
 @pytest.mark.anyio
-async def test_a_plain_enable_discards_the_record_before_it_lets_the_person_back(stores, monkeypatch) -> None:
-    """Stopped in between, it must not leave a record a later restore would revive."""
+async def test_plain_enable_failure_preserves_the_hold_and_disabled_fact_together(stores, monkeypatch) -> None:
+    """A failure before the atomic enable commits changes neither access nor holds."""
     account = await stores.users.create_user(_account())
     await _schedule(stores, str(account.id))
     command = _command(stores)
     await command.run("disable", email="pat@example.com")
+    before = await stores.users.list_holds(ISSUER, "sub-pat")
 
     async def _stopped(*args, **kwargs):
         raise ConnectionError("the command was stopped")
@@ -383,7 +384,8 @@ async def test_a_plain_enable_discards_the_record_before_it_lets_the_person_back
     with pytest.raises(ConnectionError):
         await command.run("enable", email="pat@example.com")
 
-    assert await stores.users.list_holds(ISSUER, "sub-pat") == []
+    assert await stores.users.list_holds(ISSUER, "sub-pat") == before
+    assert await stores.users.is_identity_disabled(ISSUER, "sub-pat")
 
 
 @pytest.mark.anyio

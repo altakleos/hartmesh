@@ -9,6 +9,9 @@ from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
+# Account-scoped host access facts; never an external identity provider.
+LOCAL_ACCOUNT_ISSUER = "urn:hartmesh:local-account"
+
 
 class OIDCProviderConfig(BaseModel):
     """Configuration for a single OIDC identity provider (Keycloak, Google, Azure AD, etc.)."""
@@ -85,6 +88,8 @@ class OIDCProviderConfig(BaseModel):
         mapping that misses an admitting value would hand that value an
         unspecified role.
         """
+        if self.issuer.strip().rstrip("/") == LOCAL_ACCOUNT_ISSUER:
+            raise ValueError("This issuer is reserved for local account access")
         claim = (self.access_claim or "").strip()
         values = [value.strip() for value in self.access_values]
         if any(not value for value in values):

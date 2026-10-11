@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Literal
 
 from sqlalchemy import func, select
+from sqlalchemy import text as sql_text
 
 from app.gateway.auth.mode import account_refusal
 from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
@@ -106,23 +107,52 @@ async def storage_state(app) -> StorageState:
     return StorageState("ready")
 
 
-async def allowance(app, kind: str) -> Allowance:
+async def allowance(app, kind: str, *, session=None) -> Allowance:
+    files = app.state.storage_spaces
+    return await _allowance(app.state.storage_spaces_config, files.catalog, files.registry._sf, kind, session=session)
+
+
+async def _allowance(config, catalog, session_factory, kind: str, *, session=None) -> Allowance:
+    """One calculation for live metadata and offline account creation."""
     if kind not in KINDS:
         raise ValueError("Unknown storage kind")
-    files = app.state.storage_spaces
-    plan = app.state.storage_spaces_config.plan
+    plan = config.plan
     key = plan_counts(plan)[kind] if plan is not None else 0
-    prepared = sum(getattr(spec, "kind", None) == kind for spec in files.catalog.volumes.values())
-    if kind == "user":
-        query = select(func.count()).select_from(UserRow).where(UserRow.released_at.is_(None))
-    elif kind == "company":
+    prepared = sum(getattr(spec, "kind", None) == kind for spec in catalog.volumes.values())
+    if kind == "company":
         query = select(func.count()).select_from(StorageFeatureLinkRow).where(StorageFeatureLinkRow.namespace == "hm.company-space", StorageFeatureLinkRow.key == "company")
-    else:
+    elif kind != "user":
         query = select(func.count()).select_from(AgentInstanceRow).where(AgentInstanceRow.custody == ("personal" if kind == "assistant" else "company"), AgentInstanceRow.status.in_(("provisioning", "active", "suspended", "archived")))
-    async with files.registry._sf() as session:
+    if kind == "user":
+        in_use = await SQLiteUserRepository(session_factory).count_seated_users(session=session)
+    elif session is not None:
+        if not session.in_transaction() or not session.is_active:
+            raise ValueError("Allowance requires an active borrowed transaction")
         in_use = await session.scalar(query)
+    else:
+        async with session_factory() as reader:
+            in_use = await reader.scalar(query)
     allowed = min(prepared, max(key, in_use))
     return Allowance(allowed, key, prepared, in_use, allowed - in_use)
+
+
+async def install_operator_seats(repository, config: StorageSpacesConfig) -> None:
+    """Offline commands inspect inventory only; they never start or qualify Docker."""
+    if not config.enabled or config.plan is None:
+        return
+
+    def read():
+        try:
+            return PreparedVolumeCatalog.from_manifest(Path(config.inventory_path))
+        except Exception:
+            return PreparedVolumeCatalog([], data_disk=Path(config.inventory_path).parent, reserve_bytes=RESERVE_BYTES, reserve_inodes=RESERVE_INODES)
+
+    catalog = await run_file_io(read)
+
+    async def seats_allowed(session):
+        return (await _allowance(config, catalog, repository._sf, "user", session=session)).allowed
+
+    repository.seats_allowed = seats_allowed
 
 
 async def execution_state(app, instance_id: str | None = None) -> ExecutionState:
@@ -468,6 +498,26 @@ async def _company_role(session):
     return row
 
 
+class _AssignedRole(Exception):
+    def __init__(self, space_id):
+        self.space_id = space_id
+
+
+async def serialize_role_assignment(session):
+    """Application role creation and account release share the caller's transaction."""
+    if not session.in_transaction() or not session.is_active:
+        raise ValueError("Role assignment requires an active transaction")
+    if session.get_bind().dialect.name == "postgresql":
+        await session.execute(sql_text("SELECT pg_advisory_xact_lock(hashtext('hartmesh-space-assignment'))"))
+
+
+async def _company_assignment_admission(session):
+    await serialize_role_assignment(session)
+    existing = await _company_role(session)
+    if existing is not None:
+        raise _AssignedRole(existing.id)
+
+
 async def ensure_company_space(app) -> None:
     """Create the native company role only after this pool has qualified."""
     status = app.state.agent_execution
@@ -482,7 +532,10 @@ async def ensure_company_space(app) -> None:
                 identifier = row.id if row is not None else None
             created = identifier is None
             if created:
-                identifier = await files.registry.host_create(name="Company", custody=Custody.company(), mode=MutationMode.NATIVE, feature=None, kind="company")
+                try:
+                    identifier = await files.registry.host_create(name="Company", custody=Custody.company(), mode=MutationMode.NATIVE, feature=None, kind="company", admission=_company_assignment_admission)
+                except _AssignedRole as existing:
+                    identifier, created = existing.space_id, False
             async with files.registry._sf() as session:
                 row = await _company_role(session)
                 if row is None or row.id != identifier:
@@ -496,6 +549,70 @@ async def ensure_company_space(app) -> None:
                 logger.info("storage: company space created (%s)", slot)
 
     await await_drained(perform())
+
+
+async def _user_assignment_admission(session, account_id, repository):
+    await serialize_role_assignment(session)
+    link = await session.get(StorageFeatureLinkRow, ("hm.user-space", "human:" + account_id))
+    space = await session.get(SpaceRow, link.space_id, with_for_update=True) if link is not None else None
+    account = await session.get(UserRow, account_id, with_for_update=True)
+    if account is None:
+        raise InvalidPrincipal("User storage requires an existing account")
+    user = await repository._load(session, account)
+    if await run_file_io(account_refusal, user) is not None:
+        raise InvalidPrincipal("This account cannot receive user storage")
+    if link is not None:
+        if space is None or (space.status, space.mode, space.custody_kind, space.custodian_kind, space.custodian_id, space.feature_namespace, space.feature_controller, space.feature_metadata_version) != (
+            "active",
+            "native",
+            "personal",
+            "human",
+            account_id,
+            None,
+            None,
+            None,
+        ):
+            raise SpaceConflict("The assigned user Space is unavailable; its identity is retained")
+        raise _AssignedRole(space.id)
+
+
+async def assign_user_space(app, account) -> None:
+    """Post-commit best effort: personal allocation and company grant repair independently."""
+    files = getattr(app.state, "storage_spaces", None)
+    config = getattr(app.state, "storage_spaces_config", None)
+    if files is None or config is None or config.plan is None or (await storage_state(app)).state in ("off", "unavailable"):
+        return
+    account_id = str(account.id)
+    actor = PrincipalRef("human", account_id)
+
+    async def admitted(session):
+        await _user_assignment_admission(session, account_id, SQLiteUserRepository(files.registry._sf))
+
+    async def perform():
+        try:
+            identifier = await files.assign(kind="user", actor=actor, name="Files", custody=Custody.personal(actor), mode=MutationMode.NATIVE, admission=admitted)
+            async with files.registry._sf() as session:
+                row = await session.get(SpaceRow, identifier)
+                backing = await session.get(SpaceBackingRow, row.backing_handle)
+                logger.info("storage: user space of %s assigned (%s)", account_id, backing.slot_id)
+        except _AssignedRole:
+            pass
+        except Exception as exc:
+            logger.warning("storage: user assignment remains pending for %s (%s)", account_id, exc)
+        try:
+            await grant_company_space(app, account_id)
+        except Exception as exc:
+            logger.warning("storage: company grant remains pending for %s (%s)", account_id, exc)
+
+    await await_drained(perform())
+
+
+async def assign_created_account(app, account) -> None:
+    """Creation has committed; storage faults cannot turn it into a failed request."""
+    try:
+        await await_drained(assign_user_space(app, account))
+    except Exception as exc:
+        logger.warning("storage: account storage remains pending for %s (%s)", account.id, exc)
 
 
 async def grant_company_space(app, account_id: str) -> None:
@@ -514,7 +631,9 @@ async def grant_company_space(app, account_id: str) -> None:
         if row is None:
             raise SpaceConflict("The company Space is not assigned")
         identifier = row.id
-    await files.registry.host_grant(identifier, subject, Permission.READ | Permission.EXPORT)
+    changed = await files.registry.host_grant(identifier, subject, Permission.READ | Permission.EXPORT)
+    if changed:
+        logger.info("storage: company grant written for %s", account_id)
 
 
 async def _company_step(app, *, timeout: float) -> bool:
@@ -631,7 +750,33 @@ async def close_storage_spaces(app):
                 else:
                     logger.warning("storage: storage-init cleanup remains unconfirmed (%s)", status.mount_cleanup)
 
-    await await_drained(drain())
+    try:
+        await await_drained(drain())
+    finally:
+        _clear_owned_seats(app)
+
+
+def _clear_owned_seats(app):
+    owned = getattr(app.state, "storage_seat_callback", None)
+    if owned is not None:
+        repository, callback = owned
+        if repository.seats_allowed is callback:
+            repository.seats_allowed = None
+        app.state.storage_seat_callback = None
+
+
+def _install_seats(app, session_factory, repository):
+    """Use the creation repository, including when the typed bundle pool is unavailable."""
+    if app.state.storage_spaces_config.plan is None:
+        return
+    if repository._sf.kw.get("bind") is not session_factory.kw.get("bind"):
+        raise RuntimeError("Account creation and bundle storage must share one engine")
+
+    async def seats_allowed(session):
+        return (await allowance(app, "user", session=session)).allowed
+
+    repository.seats_allowed = seats_allowed
+    app.state.storage_seat_callback = (repository, seats_allowed)
 
 
 @asynccontextmanager
@@ -667,8 +812,9 @@ def human_lookup(repository):
     return lookup
 
 
-async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session_factory) -> None:
+async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session_factory, creation_repository=None) -> None:
     entered = time.monotonic()
+    _clear_owned_seats(app)
     app.state.agent_execution = ExecutionStatus()
     app.state.storage_inventory_task = None
     app.state.storage_spaces_config = config
@@ -701,10 +847,22 @@ async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session
         app.state.storage_inventory_task = read
     if status.mount_pending and status.storage_reason is None:
         status.storage_reason, status.storage_text = mount_reason, mount_text
-    human = human_lookup(SQLiteUserRepository(session_factory))
+    if creation_repository is None:
+        from deerflow.persistence.engine import get_session_factory
+
+        # Isolated harnesses own their repository without changing app singletons.
+        active_factory = get_session_factory()
+        if active_factory is not None and active_factory.kw.get("bind") is session_factory.kw.get("bind"):
+            from app.gateway.deps import bind_user_repo
+
+            creation_repository = bind_user_repo(session_factory)
+        else:
+            creation_repository = SQLiteUserRepository(session_factory)
+    human = human_lookup(creation_repository)
     directory = InstanceDirectory(session_factory, human=human)
     registry = SpaceRegistry(session_factory, HostPrincipalResolver(human=human, nonhuman=directory.lookup))
     app.state.storage_spaces = SpaceFiles(registry, catalog, inventory_path=Path(config.inventory_path), user_spaces=config.user_spaces)
+    _install_seats(app, session_factory, creation_repository)
     app.state.agent_instances = AgentInstances(app.state.storage_spaces, directory)
     app.state.agent_conversations = AgentConversations(app.state.agent_instances)
     if thread_store is not None and hasattr(thread_store, "instance_authority"):

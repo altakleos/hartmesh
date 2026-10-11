@@ -14,7 +14,7 @@ Prints one JSON document on stdout. ``0``: the account was added, and the
 document carries ``one_time_password`` -- the only copy there will ever be;
 hand it to the person, who chooses their own password at first sign-in.
 ``1``: nothing was added, and the document carries ``error`` (a stable code:
-``sign_on_required``, ``email_already_exists``, ``email_invalid``, ``usage``
+``sign_on_required``, ``email_already_exists``, ``no_seats_left``, ``email_invalid``, ``usage``
 or ``failed``) and ``message``. A caller that runs this through a remote
 runner may not see its exit status, so the document is the answer. Nothing
 is logged: the password leaves this process on stdout only.
@@ -57,6 +57,7 @@ def _email(raw: str) -> str:
 async def _run(email: str) -> dict[str, Any]:
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from app.gateway.storage_spaces import install_operator_seats
     from deerflow.config import get_app_config
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 
@@ -71,7 +72,9 @@ async def _run(email: str) -> dict[str, Any]:
         session_factory = get_session_factory()
         if session_factory is None:
             raise CommandError("failed", "persistence engine not available (check config.database)")
-        added = await add_local_account(LocalAuthProvider(SQLiteUserRepository(session_factory)), email)
+        repository = SQLiteUserRepository(session_factory)
+        await install_operator_seats(repository, config.storage_spaces)
+        added = await add_local_account(LocalAuthProvider(repository), email)
     finally:
         await close_engine()
     return {
@@ -107,6 +110,8 @@ def _refusal(code: str, message: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from app.gateway.auth.repositories.sqlite import NoSeatLeft
+
     parser = _Parser(prog="python -m app.gateway.auth.add_user", add_help=False, description="Add a local-password account (role user) whose first sign-in chooses its password. Local-password mode only.")
     parser.add_argument("--email", required=True, help="the person's email address")
     try:
@@ -116,6 +121,9 @@ def main(argv: list[str] | None = None) -> int:
         return _refusal(exc.code, exc.message)
     except AddAccountRefused as exc:
         return _refusal(str(exc.code), exc.message)
+    except NoSeatLeft as exc:
+        print(json.dumps({"command": COMMAND, "error": "no_seats_left", "message": "No user seats are available", "allowed": exc.allowed, "in_use": exc.in_use}, sort_keys=True), flush=True)
+        return 1
     except Exception as exc:  # noqa: BLE001 - the document is the answer, whatever failed
         return _refusal("failed", type(exc).__name__)
     print(json.dumps(document, sort_keys=True), flush=True)
