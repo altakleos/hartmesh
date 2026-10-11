@@ -1,12 +1,14 @@
 """SQLAlchemy-backed publication records for the Shared area.
 
-Each method acquires its own short-lived session. Rows are appended and
-amended, never deleted: a removal is a second fact on the same row.
+By default methods own short-lived sessions. Host settlement may explicitly
+borrow one active transaction: every read/write uses it and no method commits,
+rolls back or closes it. Rows are amended, never deleted; removal is a second fact.
 """
 
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -22,8 +24,26 @@ def _folder_of(path: str) -> str:
 
 
 class SharedPublicationRepository:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, session: AsyncSession | None = None) -> None:
         self._sf = session_factory
+        self._borrowed = session
+
+    @asynccontextmanager
+    async def _session(self):
+        if self._borrowed is not None:
+            if not self._borrowed.in_transaction() or not self._borrowed.is_active:
+                raise ValueError("A borrowed publication session requires an active transaction")
+            yield self._borrowed
+            return
+        async with self._sf() as session:
+            yield session
+
+    async def _persist(self, session, row):
+        if self._borrowed is not None:
+            await session.flush()
+        else:
+            await session.commit()
+        await session.refresh(row)
 
     @staticmethod
     def _row_to_dict(row: SharedPublicationRow) -> dict:
@@ -58,25 +78,24 @@ class SharedPublicationRepository:
             from_thread_id=from_thread_id,
             from_path=from_path,
         )
-        async with self._sf() as session:
+        async with self._session() as session:
             session.add(row)
             from deerflow.spaces.workflows import mark_effect
 
             mark_effect()
-            await session.commit()
-            await session.refresh(row)
+            await self._persist(session, row)
             return self._row_to_dict(row)
 
     async def live_publication(self, path: str) -> dict | None:
         """The record of what is at *path* now: the latest publication not yet removed."""
-        async with self._sf() as session:
+        async with self._session() as session:
             stmt = select(SharedPublicationRow).where(SharedPublicationRow.path == path, SharedPublicationRow.removed_at.is_(None)).order_by(SharedPublicationRow.published_at.desc())
             row = (await session.execute(stmt)).scalars().first()
             return None if row is None else self._row_to_dict(row)
 
     async def publication(self, publication_id: str) -> dict | None:
         """Read one identity including its removal outcome for staging recovery."""
-        async with self._sf() as session:
+        async with self._session() as session:
             row = await session.get(SharedPublicationRow, publication_id)
             return None if row is None else self._row_to_dict(row)
 
@@ -89,14 +108,14 @@ class SharedPublicationRepository:
         not hide a later, intact copy. The same bytes in another folder are
         another publication; a removed one no longer counts.
         """
-        async with self._sf() as session:
+        async with self._session() as session:
             stmt = select(SharedPublicationRow).where(SharedPublicationRow.sha256 == sha256, SharedPublicationRow.removed_at.is_(None)).order_by(SharedPublicationRow.published_at.asc())
             rows = (await session.execute(stmt)).scalars().all()
         return [self._row_to_dict(row) for row in rows if _folder_of(row.path) == folder]
 
     async def live_publications(self) -> dict[str, dict]:
         """Every publication not yet removed, keyed by path."""
-        async with self._sf() as session:
+        async with self._session() as session:
             stmt = select(SharedPublicationRow).where(SharedPublicationRow.removed_at.is_(None)).order_by(SharedPublicationRow.published_at.asc())
             rows = (await session.execute(stmt)).scalars().all()
         # A path published twice without a removal in between is a directory
@@ -111,7 +130,7 @@ class SharedPublicationRepository:
         fresh row marked removed, leaving the new file live with no live
         record and the original row live forever.
         """
-        async with self._sf() as session:
+        async with self._session() as session:
             stmt = select(SharedPublicationRow).where(SharedPublicationRow.publication_id == publication_id, SharedPublicationRow.removed_at.is_(None))
             row = (await session.execute(stmt)).scalars().first()
             if row is None:
@@ -121,6 +140,5 @@ class SharedPublicationRepository:
             from deerflow.spaces.workflows import mark_effect
 
             mark_effect()
-            await session.commit()
-            await session.refresh(row)
+            await self._persist(session, row)
             return self._row_to_dict(row)

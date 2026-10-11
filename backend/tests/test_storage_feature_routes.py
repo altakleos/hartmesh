@@ -20,7 +20,7 @@ from deerflow.persistence.projects.model import ProjectDocumentRow, ProjectRow
 from deerflow.persistence.projects.sql import ProjectDocumentRepository, ProjectRepository
 from deerflow.persistence.shared_publications.model import SharedPublicationRow
 from deerflow.persistence.shared_publications.sql import SharedPublicationRepository
-from deerflow.spaces.contract import Custody, FeatureBinding, MutationMode, Permission, PrincipalRef, ResolvedPrincipal
+from deerflow.spaces.contract import Custody, MutationMode, Permission, PrincipalRef, ResolvedPrincipal
 from deerflow.spaces.facade import HostStorageProvider
 from deerflow.spaces.principals import HostPrincipalResolver
 
@@ -82,13 +82,8 @@ async def feature_app(tmp_path, request, monkeypatch):
         for person in (alice, bob):
             actor = PrincipalRef("human", str(person.id))
             await files.assign(kind="user", actor=actor, name="Files", custody=Custody.personal(actor), mode=MutationMode.NATIVE)
-        # The complete bundled Shared switch is staged in2.4. This injected
-        # controller fixture retains its existing mediated protocol meanwhile.
-        async with files.provisioning(actor=PrincipalRef("human", str(alice.id)), name="Shared", custody=Custody.company(), mode=MutationMode.MEDIATED, feature=FeatureBinding("hm.shared", "publication", 1), kind="company") as (
-            session,
-            company,
-        ):
-            session.add(StorageFeatureLinkRow(namespace="hm.company-space", key="company", space_id=company.id))
+        company_id = await files.registry.host_create(name="Company", custody=Custody.company(), mode=MutationMode.NATIVE, feature=None, kind="company")
+        await files.registry.host_grant(company_id, PrincipalRef("human", str(alice.id)), Permission.READ | Permission.EXPORT)
         paths = Paths(tmp_path / "ordinary")
         monkeypatch.setattr("deerflow.config.paths._paths", paths)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
@@ -151,10 +146,10 @@ async def test_company_custody_requires_explicit_grants_and_current_membership(f
     current[0] = bob
     assert (await client.get("/api/shared")).status_code == 404
     current[0] = alice
-    space = await files.registry.set_grant(actor=actor, space_id=space.id, expected_generation=space.generation, subject=PrincipalRef("human", str(bob.id)), permissions=Permission.READ | Permission.EXPORT, acknowledge_existing_data=True)
+    await files.registry.host_grant(space.id, PrincipalRef("human", str(bob.id)), Permission.READ | Permission.EXPORT)
     current[0] = bob
     assert (await client.get("/api/shared")).status_code == 200
-    assert (await client.delete("/api/shared/nope")).status_code == 403
+    assert (await client.delete("/api/shared/nope")).status_code == 404
 
 
 @pytest.mark.asyncio
@@ -177,12 +172,13 @@ async def test_committed_publication_survives_lost_acknowledgement(feature_app, 
 
 
 @pytest.mark.asyncio
-async def test_unknown_publication_is_retained_and_exact_controller_recovers(feature_app, monkeypatch):
-    from deerflow_extension_api.plugins import ActionContext
+async def test_unknown_publication_is_retained_and_exact_host_settles(feature_app, monkeypatch):
+    from sqlalchemy import select
+    from test_shared_publication_host_transaction import host_settlement
 
     from deerflow.features.plugins import FeatureServices
-    from deerflow.spaces.facade import storage_actor_scope
-    from deerflow.spaces.recovery import SpaceRecovery
+    from deerflow.persistence.spaces.files import SpaceFileOperationRow
+    from deerflow.utils.file_io import run_file_io
 
     client, app, files, _, paths, alice, _, _ = feature_app
     outputs = paths.sandbox_outputs_dir(THREAD, user_id=str(alice.id))
@@ -205,17 +201,16 @@ async def test_unknown_publication_is_retained_and_exact_controller_recovers(fea
     assert (await client.get("/api/shared")).status_code == 200
     actor = PrincipalRef("human", str(alice.id))
     space = next(row for row in await files.registry.list(actor=actor) if row.custody.kind == "company")
-    facts = await SpaceRecovery(files).status(actor=actor, space_id=space.id)
-    pending = next(item for item in facts["operations"] if item["phase"] == "pending")
+    async with files.registry._sf() as session:
+        pending = (await session.execute(select(SpaceFileOperationRow).where(SpaceFileOperationRow.space_id == space.id, SpaceFileOperationRow.phase == "pending"))).scalar_one()
     loaded = app.state.extensions
     service = loaded.app_store.get(FeatureServices).services["hm.shared"]
-    source, plugin = next((source, plugin) for source, plugin in loaded.plugins if plugin is service.contribution)
-    provider = HostStorageProvider(lambda: files).for_plugin(source, plugin, lambda: loaded)
     monkeypatch.setattr(repo, "record_publication", original_write)
     monkeypatch.setattr(repo, "publication", original_probe)
-    with storage_actor_scope(actor):
-        storage = await provider.current()
-        result = await service.recover({"operation_id": pending["operation_id"], "generation": space.generation}, ActionContext(None, {}, actor=storage.actor, storage=storage))
+    async with host_settlement(files, space.id, pending.operation_id) as (session, intent, receipt):
+        result = await service.settle_publication(intent, session=session)
+        intent.phase, intent.result = "complete", result
+    await run_file_io(receipt.remove)
     assert result["published"] is True
     assert (await client.get("/api/shared/uncertain.txt")).content == b"retain"
     assert len(await repo.live_publications_holding(__import__("hashlib").sha256(b"retain").hexdigest(), folder="")) == 1
