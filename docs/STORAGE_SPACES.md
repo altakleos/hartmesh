@@ -602,6 +602,16 @@ mount legacy files/shared directories as fallback. Trusted consumers may use the
 qualified direct Docker attachment API described above; the neutral extension
 facade continues to report native attachments unsupported.
 
+The host path foundation now accepts a pure, opt-in `Paths.thread_root_resolver`.
+It routes conversation directories below a selected data root, preserves the
+existing leaf layout and uses `0770` for projected thread directories. It adds no
+authority or backing qualification; creation pins the existing root and refuses
+symlinked or foreign-filesystem descendants. A trusted integration must qualify
+the backing and admit current authority
+before supplying roots and ensure Docker sees the same source paths. The Gateway
+does not install this resolver yet. Coordinated chat admission, mounts, reuse
+validation and full-files refusals are the next integration change.
+
 The additive `0033_storage_features` migration creates
 `hm_storage_feature_links`. Used relationships cannot be downgraded away.
 Configuration remains version 53; no legacy-directory adoption is implemented.
