@@ -21,6 +21,11 @@ class MissingFeatureResource(SpaceNotFound):
     """The role link is absent, distinct from inaccessible assigned storage."""
 
 
+class _AlreadyLinked(Exception):
+    def __init__(self, space_id):
+        self.space_id = space_id
+
+
 class FeatureResources:
     def __init__(self, files, namespace):
         self.files, self.namespace = files, namespace
@@ -39,6 +44,11 @@ class FeatureResources:
         return await self.files.registry.get(actor=actor, space_id=space_id)
 
     async def ensure(self, *, actor, key, name, custody, mode, feature=None):
+        async def admission(session):
+            existing = await session.get(StorageFeatureLinkRow, (self.namespace, key))
+            if existing is not None:
+                raise _AlreadyLinked(existing.space_id)
+
         async def perform():
             for _ in range(len(self.files.catalog.volumes) + 1):
                 existing = await self.find(key)
@@ -46,10 +56,12 @@ class FeatureResources:
                     # Revocation, archive and deletion never lazily allocate a replacement.
                     return await self.files.registry.get(actor=actor, space_id=existing)
                 try:
-                    async with self.files.provisioning(actor=actor, name=name, custody=custody, mode=mode, feature=feature) as (session, space):
+                    async with self.files.provisioning(actor=actor, name=name, custody=custody, mode=mode, feature=feature, admission=admission) as (session, space):
                         session.add(StorageFeatureLinkRow(namespace=self.namespace, key=key, space_id=space.id))
                         await session.flush()
                     return space
+                except _AlreadyLinked as existing:
+                    return await self.files.registry.get(actor=actor, space_id=existing.space_id)
                 except IntegrityError:
                     continue
             raise SpaceConflict("Concurrent feature provisioning exhausted capacity")

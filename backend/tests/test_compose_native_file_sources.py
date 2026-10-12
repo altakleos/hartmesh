@@ -399,6 +399,38 @@ async def test_native_copy_refuses_replaced_source_root_before_publication(featu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("destination_kind", ["user", "company"])
+async def test_native_copy_refresh_never_strips_expected_binding(feature_app, destination_kind):
+    from app.gateway.native_file_sources import NativeFileSources
+    from deerflow.spaces.backings import BackingUnavailable
+
+    _, app, files, _, _, alice, _, _ = feature_app
+    actor = PrincipalRef("human", str(alice.id))
+    with storage_actor_scope(actor):
+        sources = await NativeFileSources.prepare(native_request(app), actor)
+        if destination_kind == "user":
+            destination, folder = sources.user, "files"
+        else:
+            company = next(space for space in await files.registry.list(actor=actor) if space.custody.kind == "company")
+            async with files.registry._sf() as session:
+                from deerflow.persistence.spaces.model import SpaceRow
+
+                destination = await files._volume(session, await session.get(SpaceRow, company.id))
+            folder = "shared"
+        (sources.user.data_path / "files/input.txt").write_bytes(b"retained source")
+
+        async def admission():
+            (destination.control_path / ".space-binding").write_bytes(b"0" * 32)
+
+        async with sources.open_file("files/input.txt") as source:
+            with pytest.raises(BackingUnavailable):
+                await sources.copy_to(source, destination, root_relative=folder, name="report.txt", admission=admission)
+        assert not (destination.data_path / folder / "report.txt").exists()
+        assert not list(destination.control_path.glob("chat-upload-*"))
+        assert (sources.user.data_path / "files/input.txt").read_bytes() == b"retained source"
+
+
+@pytest.mark.asyncio
 async def test_native_run_zip_download_contains_only_presented_qualified_outputs(feature_app):
     import io
     import zipfile

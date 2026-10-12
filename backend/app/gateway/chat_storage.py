@@ -15,6 +15,7 @@ from deerflow.spaces.backings import BackingUnavailable
 from deerflow.spaces.chat_paths import ChatStoragePaths, ThreadMounts
 from deerflow.spaces.contract import InvalidPrincipal, Permission, PrincipalRef, SpaceConflict, SpaceDenied, SpaceNotFound
 from deerflow.spaces.facade import _bound_principal, _credential_allowed
+from deerflow.spaces.incarnations import verify_bound
 from deerflow.spaces.service import SpaceFiles
 from deerflow.utils.file_io import await_drained, run_file_io
 
@@ -97,11 +98,12 @@ async def _verified_role(files, actor, namespace, key, *, required=None):
         raise BackingUnavailable("The assigned role has the wrong slot kind")
     volume = await await_drained(run_file_io(files.catalog.verify, binding.slot_id, previous=files._verified.get(binding.slot_id)))
     files._check_incarnation(binding, volume)
+    bound = await await_drained(run_file_io(verify_bound, volume, binding.backing_handle))
     # Recheck current human eligibility and exact role/grant/binding after I/O.
     if await _snapshot(files, actor, namespace, key, required=required) != original:
         raise BackingUnavailable("The assigned role changed during verification")
     files._verified[binding.slot_id] = volume
-    return volume, None, original
+    return bound, None, original
 
 
 async def prepare_chat_storage(app, user_id, thread_id):

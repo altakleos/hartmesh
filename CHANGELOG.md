@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Storage binding identity
+
+Bound file views and native attachments verify a private marker against the
+durable backing handle, so stale views refuse a different resource even if inode
+numbers repeat. Catalog refresh and conversation routing retain that expectation.
+Startup alone can add an absent marker to an existing verified binding under
+current ownership; it preserves ordinary data and pending recovery evidence for
+active, archived, deleted and mediated resources. Conflicts remain unavailable,
+unbound folders are never adopted, and readiness retries never recreate a removed
+marker. Failed allocation retains private evidence and excludes uncertain slots.
+Allocation serializes independent callers through transaction completion. Feature
+first-use links recheck before marker publication, so losing concurrent requests
+leave unused slots empty and retain current identity and grant checks.
+Defaults remain disabled. There is no database schema change.
+
 ### Compose storage maintenance
 
 Startup and every 60-second pass repair missing personal storage assignments and

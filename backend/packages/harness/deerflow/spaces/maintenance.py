@@ -12,8 +12,9 @@ from sqlalchemy import select
 from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperationRow
 from deerflow.persistence.spaces.model import SpaceRow
 from deerflow.spaces.attachments import SpaceAttachments
-from deerflow.spaces.filesystem import ConfinedFilesystem, FileConflict, _path
-from deerflow.spaces.workflows import WorkflowReceipt, _owner, _read_only, _receipt, acquire, close
+from deerflow.spaces.filesystem import FileConflict, _path
+from deerflow.spaces.incarnations import BoundVolume, validate_marker
+from deerflow.spaces.workflows import WorkflowLockMissing, WorkflowReceipt, _owner, _read_only, _receipt, acquire, close
 from deerflow.utils.file_io import run_file_io
 
 logger = logging.getLogger(__name__)
@@ -29,14 +30,13 @@ def _facts(row, attributes):
 def _owned(volume, binding):
     filesystem, descriptors = None, []
     try:
-        # Persisted inodes plus qualified device identity pin both roots.
-        device = volume.device
-        filesystem = ConfinedFilesystem(volume.data_path, volume.control_path, expected_data=(device, binding.root_inode), expected_control=(device, binding.control_inode))
-        descriptors = acquire({binding.space_id: volume})
-        lock = os.stat(".host-workflow.lock", dir_fd=filesystem._control_fd, follow_symlinks=False)
-        owned = os.fstat(descriptors[0])
-        if (lock.st_dev, lock.st_ino) != (owned.st_dev, owned.st_ino):
-            raise OSError("Private workflow ownership changed")
+        filesystem = BoundVolume(volume, binding.backing_handle).filesystem()
+        if (os.fstat(filesystem._data_fd).st_ino, os.fstat(filesystem._control_fd).st_ino) != (binding.root_inode, binding.control_inode):
+            raise OSError("Durable binding root changed before ownership")
+        try:
+            descriptors = acquire({binding.space_id: volume}, create=False, control_fds={binding.space_id: filesystem._control_fd})
+        except WorkflowLockMissing:
+            pass  # Creation is permitted only after the fresh parent check.
         return filesystem, descriptors
     except BaseException:
         try:
@@ -128,7 +128,7 @@ async def _settle(files, candidate):
     async with files.registry._sf() as session:
         row = await session.get(SpaceRow, candidate.space_id)
         binding = await session.get(SpaceBackingRow, row.backing_handle) if row is not None else None
-        if binding is None or binding.space_id != candidate.space_id:
+        if binding is None or binding.space_id != candidate.space_id or row.status != "active" or row.mode != "native":
             return False
         binding_facts = _facts(binding, _BINDING)
         row_facts = _facts(row, ("backing_handle", "generation", "status", "mode"))
@@ -140,8 +140,6 @@ async def _settle(files, candidate):
         # Ownership is acquired before the SQL writer and retained through commit.
         filesystem, descriptors = await run_file_io(_owned, volume, binding)
         await run_file_io(_current_roots, filesystem, volume)
-        tokens.append((_owner, _owner.set((files, frozenset((candidate.space_id,))))))
-        tokens.append((_read_only, _read_only.set(False)))
         async with files.registry.host_locked([candidate.space_id]) as (session, rows):
             row = rows.get(candidate.space_id)
             current = await session.get(SpaceFileOperationRow, (candidate.space_id, candidate.operation_id))
@@ -152,6 +150,11 @@ async def _settle(files, candidate):
                 return False
             if await SpaceAttachments._current(session, [row.id], lock=True):
                 return False
+            await run_file_io(validate_marker, filesystem, binding.backing_handle)
+            if not descriptors:
+                descriptors = await run_file_io(acquire, {row.id: volume}, control_fds={row.id: filesystem._control_fd})
+            tokens.append((_owner, _owner.set((files, frozenset((candidate.space_id,))))))
+            tokens.append((_read_only, _read_only.set(False)))
             request = current.request
             if request["action"] == "feature-workflow":
                 handler = files.workflow_settlers.get(request.get("namespace"))

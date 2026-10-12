@@ -98,7 +98,15 @@ class ChatStoragePaths(Paths):
         def identity(volume):
             if volume is None:
                 return None
-            return (volume.spec.slot_id, volume.spec.filesystem_uuid, str(volume.data_path), volume.root_inode, volume.control_inode, *(getattr(volume, name, None) for name in ("device", "mount_id", "image_device", "image_inode")))
+            return (
+                getattr(volume, "backing_handle", None),
+                volume.spec.slot_id,
+                volume.spec.filesystem_uuid,
+                str(volume.data_path),
+                volume.root_inode,
+                volume.control_inode,
+                *(getattr(volume, name, None) for name in ("device", "mount_id", "image_device", "image_inode")),
+            )
 
         return self._chat_owner, (self._chat_user_reference, identity(self._chat_user)), (self._chat_company_reference, identity(self._chat_company))
 

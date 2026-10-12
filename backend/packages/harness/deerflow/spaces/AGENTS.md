@@ -38,6 +38,24 @@ Host-only provisioning admission runs before slot selection/layout, borrowing th
 allocation transaction. It never bypasses custody or principal validation. The
 Gateway serializes role assignment with seat release; business rules stay in app.
 
+`incarnations.py` layers an immutable backing-handle expectation over physical
+catalog facts. Bound consumers prove the private `.space-binding` marker through
+pinned control descriptors before file/attachment use; raw refresh must retain
+the expectation. The marker grants no authority. Allocation publishes it after
+binding uniqueness flush and retains uncertainty on rollback. Startup-only
+`incarnation_backfill.py` can add an absent marker to any existing verified binding
+(including archived/deleted/mediated), under exact parent/binding/root ownership.
+It preserves data/receipts, never overwrites conflict or adopts unbound roots.
+Runtime admission/readiness never repairs absence. Gateway owns and drains the
+one startup task after initial mount verification, separately from recurring
+metadata verification.
+Allocation owns SQLite's writer or a schema-scoped PostgreSQL transaction advisory
+lock before current principal validation and slot selection, through caller commit
+or rollback. Acquire allocation ownership before application admission locks;
+never acquire it while retaining those locks in a release. Feature first-use links
+recheck within that transaction before marker effects; existing links return only
+after rollback and fresh grant admission. Losing requests leave unused slots empty.
+
 `spaces/` owns generic resource identity and mandatory access, independent of
 chats, agent definitions and feature installation. `storage/` remains the
 separate content-addressed blob store. Product workflows do not belong here.

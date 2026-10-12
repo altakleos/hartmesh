@@ -261,10 +261,12 @@ class NativeFileSources:
         def reverify():
             current_source = self.files.catalog.verify(self.user.spec.slot_id, previous=self.user)
             self.files._check_incarnation(self.snapshot[1], current_source)
-            with current_source.filesystem():
+            from deerflow.spaces.incarnations import BoundVolume
+
+            with BoundVolume(current_source, self.snapshot[1].backing_handle).filesystem():
                 pass
             current_destination = self.files.catalog.verify(destination.spec.slot_id, previous=destination)
-            with current_destination.filesystem() as filesystem:
+            with BoundVolume(current_destination, destination.backing_handle).filesystem() as filesystem:
                 for current_fd, held_fd in ((filesystem._data_fd, stage.filesystem._data_fd), (filesystem._control_fd, stage.filesystem._control_fd)):
                     current, held = os.fstat(current_fd), os.fstat(held_fd)
                     if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
