@@ -97,7 +97,11 @@ class SpaceFiles:
         """Host-only atomic provisioning boundary for feature-owned SQL links."""
         if kind is not None and kind not in LAYOUT:
             raise ValueError("Unknown storage kind")
-        creation = self.registry._host_creating(name=name, custody=custody, mode=mode, feature=feature) if actor is None else self.registry.creating(actor=actor, name=name, custody=custody, mode=mode, feature=feature)
+        creation = (
+            self.registry._host_creating(name=name, custody=custody, mode=mode, feature=feature, _allocation=self._serialize_allocation)
+            if actor is None
+            else self.registry.creating(actor=actor, name=name, custody=custody, mode=mode, feature=feature, _allocation=self._serialize_allocation)
+        )
         async with creation as (session, row, permissions):
             if admission is not None:
                 await admission(session)
@@ -142,6 +146,13 @@ class SpaceFiles:
         self._verified[spec.slot_id] = volume
         self.bound_slots[getattr(spec, "kind", None)].add(spec.slot_id)
         self.unclaimed_slots[getattr(spec, "kind", None)].discard(spec.slot_id)
+
+    @staticmethod
+    async def _serialize_allocation(session):
+        # SQLite already owns its writer. PostgreSQL must retain shared pool
+        # ownership through filesystem effects and the caller's commit/rollback.
+        if session.get_bind().dialect.name == "postgresql":
+            await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(current_schema() || '/hartmesh-space-allocation'))"))
 
     @staticmethod
     def _layout(volume, kind):

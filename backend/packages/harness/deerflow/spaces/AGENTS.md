@@ -49,6 +49,12 @@ It preserves data/receipts, never overwrites conflict or adopts unbound roots.
 Runtime admission/readiness never repairs absence. Gateway owns and drains the
 one startup task after initial mount verification, separately from recurring
 metadata verification.
+Allocation owns SQLite's writer or a schema-scoped PostgreSQL transaction advisory
+lock before current principal validation and slot selection, through caller commit
+or rollback. Acquire allocation ownership before application admission locks;
+never acquire it while retaining those locks in a release. Feature first-use links
+recheck within that transaction before marker effects; existing links return only
+after rollback and fresh grant admission. Losing requests leave unused slots empty.
 
 `spaces/` owns generic resource identity and mandatory access, independent of
 chats, agent definitions and feature installation. `storage/` remains the

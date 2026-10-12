@@ -135,17 +135,17 @@ class SpaceRegistry:
             session.add(SpaceEventRow(space_id=row.id, generation=row.generation, action=action, actor_kind=actor.kind, actor_id=actor.subject_id, details=details))
 
     @asynccontextmanager
-    async def creating(self, *, actor: PrincipalRef, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None):
-        async with self._creating(actor=actor, name=name, custody=custody, mode=mode, feature=feature) as value:
+    async def creating(self, *, actor: PrincipalRef, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None, _allocation=None):
+        async with self._creating(actor=actor, name=name, custody=custody, mode=mode, feature=feature, _allocation=_allocation) as value:
             yield value
 
     @asynccontextmanager
-    async def _host_creating(self, *, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None):
-        async with self._creating(actor=None, name=name, custody=custody, mode=mode, feature=feature, _host=True) as value:
+    async def _host_creating(self, *, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None, _allocation=None):
+        async with self._creating(actor=None, name=name, custody=custody, mode=mode, feature=feature, _host=True, _allocation=_allocation) as value:
             yield value
 
     @asynccontextmanager
-    async def _creating(self, *, actor: PrincipalRef, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None, _host=False):
+    async def _creating(self, *, actor: PrincipalRef, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None, _host=False, _allocation=None):
         resolved = None if _host else await self._actor(actor)
         name = validate_name(name)
         if not isinstance(custody, Custody) or not isinstance(mode, MutationMode) or (feature is not None and not isinstance(feature, FeatureBinding)):
@@ -175,6 +175,8 @@ class SpaceRegistry:
             async with session.begin():
                 if session.bind.dialect.name == "sqlite":
                     await session.execute(text("BEGIN IMMEDIATE"))
+                if _allocation is not None:
+                    await _allocation(session)
                 if not _host:
                     current = await self._actor(actor, session=session)
                     if custody.kind == "company" and not current.can_provision_company:

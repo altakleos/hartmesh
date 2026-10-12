@@ -124,6 +124,8 @@ Qualified bound roots also verify a private marker against their durable backing
 identity before file or attachment use. Missing or conflicting markers make the
 Space unavailable. Startup can add an absent marker to an existing verified
 binding without changing data; ordinary requests and readiness retries cannot.
+Concurrent resource allocation rechecks ownership before publishing private state;
+requests that find an existing feature resource use its current access grants.
 Installed extensions can negotiate storage contract v1 with plugin contract v4.
 Actions, model tools and services use host-bound resource capabilities and typed
 actors; nonhuman callers never impersonate a human owner. Resource pages request
