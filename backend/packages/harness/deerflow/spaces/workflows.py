@@ -96,14 +96,19 @@ _receipt = ContextVar("storage_host_workflow_receipt", default=None)
 
 
 class WorkflowReceipt:
-    def __init__(self, volume, operation_id, request):
+    def __init__(self, volume, operation_id, request, *, control_fd=None):
         self.root = volume.control_path
+        self._control_fd = control_fd
+        self._identity = None
         self.operation_id = operation_id
         self.value = {"schema_version": 1, "operation_id": operation_id, "request": request, "facts": {}}
 
     @property
     def path(self):
         return self.root / f"host-workflow-{self.operation_id}.json"
+
+    def _root(self):
+        return os.dup(self._control_fd) if self._control_fd is not None else open_directory_source(self.root)
 
     def save(self):
         import json
@@ -112,7 +117,7 @@ class WorkflowReceipt:
         raw = json.dumps(self.value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(raw) > 65536:
             raise ValueError("Host workflow receipt exceeds64KiB")
-        root = open_directory_source(self.root)
+        root = self._root()
         temporary = f".host-workflow-{uuid4().hex}.tmp"
         try:
             fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=root)
@@ -122,6 +127,8 @@ class WorkflowReceipt:
                 os.fsync(target.fileno())
             os.replace(temporary, self.path.name, src_dir_fd=root, dst_dir_fd=root)
             os.fsync(root)
+            metadata = os.stat(self.path.name, dir_fd=root, follow_symlinks=False)
+            self._identity = (metadata.st_dev, metadata.st_ino)
         finally:
             try:
                 os.unlink(temporary, dir_fd=root)
@@ -132,26 +139,33 @@ class WorkflowReceipt:
     def load(self):
         import json
 
-        root = open_directory_source(self.root)
+        root = self._root()
         try:
-            fd = os.open(self.path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
+            fd = os.open(self.path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=root)
             with os.fdopen(fd, "rb") as source:
                 metadata = os.fstat(source.fileno())
                 if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_nlink != 1:
                     raise ValueError("Invalid private host workflow receipt")
                 raw = source.read(65537)
+                after = os.fstat(source.fileno())
+                if (metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                    raise ValueError("Private host workflow receipt changed during proof")
             if len(raw) > 65536:
                 raise ValueError("Host workflow receipt exceeds64KiB")
             value = json.loads(raw)
             if value.get("schema_version") != 1 or value.get("operation_id") != self.operation_id or value.get("request") != self.value["request"] or not isinstance(value.get("facts"), dict):
                 raise ValueError("Host workflow receipt does not match its durable intent")
             self.value = value
+            self._identity = (metadata.st_dev, metadata.st_ino)
         finally:
             os.close(root)
 
     def remove(self):
-        root = open_directory_source(self.root)
+        root = self._root()
         try:
+            metadata = os.stat(self.path.name, dir_fd=root, follow_symlinks=False)
+            if self._identity is None or (metadata.st_dev, metadata.st_ino) != self._identity:
+                raise ValueError("Private workflow receipt changed before cleanup")
             os.unlink(self.path.name, dir_fd=root)
             os.fsync(root)
         finally:

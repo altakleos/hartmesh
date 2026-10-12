@@ -44,8 +44,14 @@ class FeatureService:
             self.behavior.bind(deps.session_factory)
         self.store.get_or_init(FeatureServices, FeatureServices).services[self.namespace] = self
         self.healthy = True
+        files = self.provider._get_files()
+        if files is not None:
+            files.workflow_settlers[self.namespace] = self.settle_workflow
 
     async def stop(self):
+        files = self.provider._get_files() if self.provider is not None else None
+        if files is not None and files.workflow_settlers.get(self.namespace) == self.settle_workflow:
+            del files.workflow_settlers[self.namespace]
         self.healthy = False
         if self.store is not None:
             state = self.store.get(FeatureServices)
@@ -95,6 +101,29 @@ class FeatureService:
             if effect is not None and effect[0] is False:
                 raise WorkflowRejected(exc) from None
             raise
+
+    async def settle_workflow(self, intent, *, session):
+        """Trusted generic recovery callback; domain reconciliation stays here."""
+        from deerflow.spaces.contract import SpaceDenied
+        from deerflow.spaces.workflows import _owner, _read_only, _receipt
+
+        files = self.resources().files
+        owner, receipt = _owner.get(), _receipt.get()
+        if (
+            owner is None
+            or owner[0] is not files
+            or intent.space_id not in owner[1]
+            or _read_only.get()
+            or receipt is None
+            or receipt.operation_id != intent.operation_id
+            or receipt.value["request"] != intent.request
+            or intent.request.get("namespace") != self.namespace
+        ):
+            raise SpaceDenied("Workflow settlement requires exact owned evidence")
+        if self.host_written:
+            await self.settle_publication(intent, session=session)
+            return "host-reconciled"
+        return "host-settled"
 
     async def settle_publication(self, intent, *, session):
         """Reconcile one exact host workflow inside its caller's transaction.

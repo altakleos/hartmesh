@@ -57,6 +57,7 @@ class SpaceFiles:
         registry.operation_guard = self._guard
         registry.files = self
         self.attachment_guard = None
+        self.workflow_settlers = {}
 
     async def _guard(self, session, admitted, requests, operation_id):
         from deerflow.spaces.workflows import _owner, probe
@@ -359,7 +360,22 @@ class SpaceFiles:
         if generation is None:
             raise ValueError("Mutations require the current lifecycle generation")
 
-        async def perform():
+        from deerflow.spaces.workflows import _owner, _read_only, acquire, close
+
+        descriptors = []
+        token = None
+
+        async def own(volumes):
+            nonlocal descriptors, token
+            owner = _owner.get()
+            if owner is not None:
+                if owner[0] is not self or not set(volumes).issubset(owner[1]) or _read_only.get():
+                    raise SpaceDenied("Mutation requires compatible exclusive host ownership")
+                return
+            descriptors = await run_file_io(acquire, volumes)
+            token = _owner.set((self, frozenset(volumes)))
+
+        async def mutate():
             async with self.registry.admitted(actor=actor, requests=requests, operation_id=(destination_id, operation_id)) as (session, rows):
                 if controller_admission is not None:
                     await controller_admission(session, rows)
@@ -370,8 +386,8 @@ class SpaceFiles:
                         return existing.result["value"]
                     raise SpaceOperationPending("This operation has an unconfirmed or failed outcome; inspect recovery status")
                 # Validate provider and audience before writing a durable intent.
-                for row, _grant in rows.values():
-                    await self._volume(session, row)
+                volumes = {key: await self._volume(session, row) for key, (row, _) in rows.items()}
+                await own(volumes)
                 if request["action"] == "copy":
                     await self._transfer_audience(session, rows, actor, request)
                 session.add(SpaceFileOperationRow(space_id=destination_id, operation_id=operation_id, actor_kind=actor.kind, actor_id=actor.subject_id, generation=generation, phase="pending", request=request))
@@ -379,6 +395,8 @@ class SpaceFiles:
                 async with self.registry.admitted(actor=actor, requests=requests, operation_id=(destination_id, operation_id)) as (session, rows):
                     operation = await session.get(SpaceFileOperationRow, (destination_id, operation_id))
                     self._same_operation(operation, actor, generation, request)
+                    if operation.phase != "pending":
+                        raise SpaceOperationPending("The operation was settled before publication")
                     volumes = {key: await self._volume(session, row) for key, (row, _) in rows.items()}
                     if controller_admission is not None:
                         await controller_admission(session, rows)
@@ -400,6 +418,14 @@ class SpaceFiles:
                 # transaction. Never erase an intent or automatically replay it
                 # when the publication/commit result is uncertain.
                 raise SpaceOperationPending("File operation outcome is pending; retain data and request provider recovery") from exc
+
+        async def perform():
+            try:
+                return await mutate()
+            finally:
+                if token is not None:
+                    _owner.reset(token)
+                await run_file_io(close, descriptors)
 
         # This drains the entire admitted mutation, including its final SQL
         # commit, before a cancelled caller can release host ownership.
@@ -557,13 +583,27 @@ class SpaceFiles:
 
         return await await_drained(perform())
 
-    async def write(self, *, actor: PrincipalRef, space_id: str, expected_generation: int, operation_id: str, path: str, content: bytes, expected_sha256: str | None = None, create: bool = False) -> str:
+    async def settle_interrupted(self) -> int:
+        from deerflow.spaces.maintenance import settle_interrupted
+
+        return await await_drained(settle_interrupted(self))
+
+    @staticmethod
+    def _provenance(request, on_behalf_of, *, size=None):
+        if on_behalf_of is None:
+            return request
+        if not isinstance(on_behalf_of, str) or not 1 <= len(on_behalf_of) <= 128:
+            raise ValueError("Provenance requires a bounded human account ID")
+        return {"destination": None, "sha256": None, "size": size, **request, "on_behalf_of": on_behalf_of}
+
+    async def write(self, *, actor: PrincipalRef, space_id: str, expected_generation: int, operation_id: str, path: str, content: bytes, expected_sha256: str | None = None, create: bool = False, on_behalf_of: str | None = None) -> str:
         _path(path)
         if not isinstance(content, bytes) or len(content) > MAX_TRANSFER_BYTES or type(create) is not bool:
             raise ValueError("File import/edit must contain at most64MiB")
         if (create and expected_sha256 is not None) or (not create and (not isinstance(expected_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256))):
             raise ValueError("Edits require the loaded SHA-256; creates require no previous revision")
         request = {"action": "write", "path": path, "sha256": hashlib.sha256(content).hexdigest(), "expected_sha256": expected_sha256, "create": create}
+        request = self._provenance(request, on_behalf_of, size=len(content))
         return await self._mutate(
             actor=actor,
             requests={space_id: (Permission.WRITE, expected_generation)},
@@ -573,18 +613,18 @@ class SpaceFiles:
             call=lambda volumes: self._io(volumes[space_id], lambda fs: fs.write_atomic(path, content, expected_sha256=expected_sha256, create=create)),
         )
 
-    async def mkdir(self, *, actor, space_id, expected_generation, operation_id, path):
+    async def mkdir(self, *, actor, space_id, expected_generation, operation_id, path, on_behalf_of: str | None = None):
         _path(path)
         return await self._mutate(
             actor=actor,
             requests={space_id: (Permission.WRITE, expected_generation)},
             destination_id=space_id,
             operation_id=operation_id,
-            request={"action": "mkdir", "path": path},
+            request=self._provenance({"action": "mkdir", "path": path}, on_behalf_of),
             call=lambda volumes: self._io(volumes[space_id], lambda fs: fs.mkdir(path)),
         )
 
-    async def rename(self, *, actor, space_id, expected_generation, operation_id, path, destination):
+    async def rename(self, *, actor, space_id, expected_generation, operation_id, path, destination, on_behalf_of: str | None = None):
         _path(path)
         _path(destination)
         return await self._mutate(
@@ -592,18 +632,18 @@ class SpaceFiles:
             requests={space_id: (Permission.WRITE, expected_generation)},
             destination_id=space_id,
             operation_id=operation_id,
-            request={"action": "rename", "path": path, "destination": destination},
+            request=self._provenance({"action": "rename", "path": path, "destination": destination}, on_behalf_of),
             call=lambda volumes: self._io(volumes[space_id], lambda fs: fs.rename(path, destination)),
         )
 
-    async def remove(self, *, actor, space_id, expected_generation, operation_id, path):
+    async def remove(self, *, actor, space_id, expected_generation, operation_id, path, on_behalf_of: str | None = None):
         _path(path)
         return await self._mutate(
             actor=actor,
             requests={space_id: (Permission.WRITE, expected_generation)},
             destination_id=space_id,
             operation_id=operation_id,
-            request={"action": "remove", "path": path},
+            request=self._provenance({"action": "remove", "path": path}, on_behalf_of),
             call=lambda volumes: self._io(volumes[space_id], lambda fs: fs.remove(path)),
         )
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pytest
 from sqlalchemy import event
@@ -29,6 +29,10 @@ class FixtureVolume:
     spec: object
     data_path: object
     control_path: object
+    device: int = field(init=False)
+
+    def __post_init__(self):
+        self.device = self.data_path.stat().st_dev
 
     @property
     def root_inode(self):

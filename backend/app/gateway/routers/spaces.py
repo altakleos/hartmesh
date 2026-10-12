@@ -20,7 +20,7 @@ from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceMount
 from deerflow.spaces.contract import Custody, InvalidPrincipal, MutationMode, Permission, PrincipalRef, SpaceConflict, SpaceDenied, SpaceNotFound
 from deerflow.spaces.filesystem import FilesystemUnavailable, _path
 from deerflow.spaces.recovery import SpaceRecovery
-from deerflow.spaces.service import MAX_TRANSFER_BYTES, SpaceFiles
+from deerflow.spaces.service import MAX_TRANSFER_BYTES, SpaceFiles, SpaceOperationPending
 from deerflow.utils.file_io import await_drained, run_file_io
 
 
@@ -31,6 +31,8 @@ def _http_error(exc):
         return HTTPException(401, "A current host identity is required")
     if isinstance(exc, SpaceDenied):
         return HTTPException(403, str(exc))
+    if isinstance(exc, SpaceOperationPending):
+        return HTTPException(409, {"code": "storage-busy", "cause": exc.cause, "message": str(exc)})
     if isinstance(exc, SpaceConflict):
         return HTTPException(409, str(exc))
     if isinstance(exc, FilesystemUnavailable):

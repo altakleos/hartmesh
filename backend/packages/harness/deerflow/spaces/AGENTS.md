@@ -143,20 +143,19 @@ filesystem locks outside SQL while the feature repository commits. Every core
 ADMIN/OPERATE admission probes those locks. Read workflows wait up to five seconds
 for shared locks outside SQL, then revalidate grants, generations, backings and
 controller admission; writing workflows use immediate exclusive locks.
-Accepting a live callback as retired is forbidden. Direct writes do not flock.
+Direct writes retain exclusive locks across intent/effect/commit; reuse only a
+compatible owned writable scope. Never settle a live callback.
 Drain cancellation, preserve unknown results, and distinguish confirmed pre-effect
 rejections. Bounded exact-ID receipts live in private control, never data mounts.
 Default first-party contributions/compatibility/context adapters are under
 `features/` and Gateway `storage_features.py`; see the [feature contract](../../../../../docs/STORAGE_SPACES.md#default-first-party-features).
 Migration `0033` persists their opaque unique relationships; no legacy adoption.
-Bundled features now look up role links: `hm.user-space/human:<id>` serves My
-Files and Projects; `hm.company-space/company` serves Shared. They never call
-`ensure`. Namespace folders are under data; staging remains under control.
-Missing links have a distinct structured 503, separate from revoked access.
-`host_locked` is explicit host authority: sorted parent locks, no principal,
-grant or operation admission. Actorless company provisioning uses a private
-boundary and writes no human grant/event. Ordinary creation still requires a
-typed resolving principal. `host_grant` resolves a human, validates nonzero
+Bundled features use `hm.user-space/human:<id>` for My Files/Projects and
+`hm.company-space/company` for Shared; never `ensure`. Missing roles return 503.
+Namespaces stay in data; stages stay private.
+`host_locked` sorts parents without principal/grant/operation admission. Actorless
+company provisioning writes no human grant/event; ordinary creation still resolves
+a typed principal. `host_grant` resolves a human, validates nonzero
 mode-specific permissions, requires every attachment fenced and awaits its
 callback under the same transaction, including no-op grants.
 Host-written workflows require active native destinations and still reject
@@ -174,7 +173,13 @@ can require READ/EXPORT; ordinary chat projection keeps READ/WRITE.
 intent snapshot, verified company receipt and fenced attachments. Borrowed
 publication repositories flush without committing/closing the caller; completion
 and receipt cleanup belong to the caller after confirmed commit. Drain workers
-before cancellation releases the host transaction. Periodic settlement is deferred.
+before cancellation releases the host transaction. `maintenance.py` owns actorless
+settlement: qualify outside SQL, retain nonblocking locks before `host_locked`,
+compare exact intent/binding snapshots and require fenced attachments. Pin roots
+and receipts; failed inspections stay pending. Generic domain callbacks register
+after storage starts. Historical intent generation can differ from current grants.
+Cleanup follows confirmed commit; unknown pending intents preserve generic stages.
+Startup/60-second repair counts committed assignments/grants and drains owned tasks.
 
 Consumer readiness: [the handoff](../../../../../docs/STORAGE_SPACES_CONSUMER.md)
 maps the public API to functional SQL and mandatory native evidence. The native
