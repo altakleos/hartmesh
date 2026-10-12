@@ -60,11 +60,38 @@ def test_prepared_pool_has_the_design_owners_and_modes(typed_prepared_pool):
     assert [s.kind for s in inventory.volumes.values()] == ["company", "user"]
     for spec in inventory.volumes.values():
         assert (spec.image_path.stat().st_uid, spec.image_path.stat().st_gid, stat.S_IMODE(spec.image_path.stat().st_mode)) == (0, 1000, 0o640)
+        parent = spec.mount_path.stat()
+        assert (parent.st_uid, parent.st_gid, stat.S_IMODE(parent.st_mode)) == (0, 1000, 0o770)
         assert spec.image_path.stat().st_blocks * 512 >= 64 << 20
         for name, mode in (("data", 0o770), ("control", 0o700)):
             meta = (spec.mount_path / name).stat()
             assert (meta.st_uid, meta.st_gid, stat.S_IMODE(meta.st_mode)) == (1000, 1000, mode)
         inventory.verify(spec.slot_id)
+
+
+def test_gateway_identity_can_rename_private_siblings(typed_prepared_pool):
+    spec = next(spec for spec in typed_prepared_pool.load().volumes.values() if spec.kind == "user")
+    root = os.open(spec.mount_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    first, second = ".parent-proof-" + uuid.uuid4().hex, ".parent-proof-" + uuid.uuid4().hex
+    try:
+        child = os.fork()
+        if child == 0:
+            try:
+                os.setgroups([])
+                os.setgid(1000)
+                os.setuid(1000)
+                assert os.getuid() == os.getgid() == 1000
+                os.mkdir(first, mode=0o700, dir_fd=root)
+                os.rename(first, second, src_dir_fd=root, dst_dir_fd=root)
+                os.rmdir(second, dir_fd=root)
+            except BaseException:
+                os._exit(1)
+            os._exit(0)
+        _, status = os.waitpid(child, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
+        assert not (spec.mount_path / first).exists() and not (spec.mount_path / second).exists()
+    finally:
+        os.close(root)
 
 
 @pytest.mark.asyncio

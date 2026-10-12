@@ -29,6 +29,7 @@ from deerflow.spaces.backings import (
     BackingUnavailable,
     FixedVolumeSpec,
     PreparedVolumeCatalog,
+    _ext4_identity,
     mounted_ext4_identity,
     read_ext4_identity,
     validate_loop_range,
@@ -329,13 +330,15 @@ class StorageInitializer:
         inventory = self.load()
         mounted, failed, already = [], [], 0
         for spec in inventory.volumes.values():
-            if os.path.ismount(spec.mount_path):
-                already += 1
-                continue
             try:
-                self.mount(spec)
-                mounted.append(spec.slot_id)
-            except (Refused, OSError, subprocess.TimeoutExpired) as exc:
+                if os.path.ismount(spec.mount_path):
+                    already += 1
+                else:
+                    self.mount(spec)
+                    mounted.append(spec.slot_id)
+                with self._qualified_parent(spec) as (root, _image):
+                    self._set_mode(root, 0, 1000, 0o770)
+            except (Refused, OSError, BackingUnavailable, subprocess.TimeoutExpired) as exc:
                 failed.append(dict(slot_id=spec.slot_id, error=str(exc)))
         return self.document("mount-all", f"{len(inventory.volumes)} spaces: {len(mounted)} mounted now, {already} already mounted, {len(failed)} failed", 2 if failed else 0, mounted=mounted, already=already, failed=failed)
 
@@ -391,18 +394,67 @@ sync -f "$(dirname -- "$p")"
         return fit, fields
 
     def layout(self, spec):
-        # Own descriptors prevent a symlink in a data/control name from making
-        # a privileged mode repair escape the filesystem root.
-        for path, uid, gid, mode in ((spec.image_path, 0, 1000, 0o640), (spec.mount_path, 0, 0, 0o755), (spec.mount_path / "data", 1000, 1000, 0o770), (spec.mount_path / "control", 1000, 1000, 0o700)):
-            no_symlinks(path)
-            if path.name in ("data", "control"):
-                path.mkdir(exist_ok=True, mode=mode)
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | (0 if path == spec.image_path else os.O_DIRECTORY))
+        with self._qualified_parent(spec) as (root, image):
+            self._set_mode(image, 0, 1000, 0o640)
+            self._set_mode(root, 0, 1000, 0o770)
+            for name, mode in (("data", 0o770), ("control", 0o700)):
+                try:
+                    os.mkdir(name, mode=mode, dir_fd=root)
+                except FileExistsError:
+                    pass
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_DIRECTORY, dir_fd=root)
+                try:
+                    self._set_mode(fd, 1000, 1000, mode)
+                finally:
+                    os.close(fd)
+            os.fsync(root)
+
+    @staticmethod
+    def _set_mode(fd, uid, gid, mode):
+        before = os.fstat(fd)
+        if (before.st_uid, before.st_gid, stat.S_IMODE(before.st_mode)) != (uid, gid, mode):
+            os.fchown(fd, uid, gid)
+            os.fchmod(fd, mode)
+            os.fsync(fd)
+
+    @contextlib.contextmanager
+    def _qualified_parent(self, spec):
+        """Retain the exact image and mounted root through permission repair."""
+        image = root = None
+        try:
+            no_symlinks(spec.image_path)
+            no_symlinks(spec.mount_path)
+            image = os.open(spec.image_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            metadata = os.fstat(image)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size != spec.max_bytes:
+                raise Refused(f"slot {spec.slot_id} has an unqualified image")
+            verify_image_extents(image, spec.max_bytes)
+            identity = _ext4_identity(image)
+            if identity != spec.filesystem_uuid:
+                raise Refused(f"slot {spec.slot_id} has another image UUID")
+            root = os.open(spec.mount_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            facts = self._mounted_root_facts(spec, root, image_uuid=identity)
+            if not {"rw", "nodev", "nosuid"} <= facts["options"] or "ro" in facts["options"]:
+                raise Refused(f"slot {spec.slot_id} is not a qualified writable mount")
+            if mounted_ext4_identity(root) != identity:
+                raise Refused(f"slot {spec.slot_id} has another mounted UUID")
+            self._current_parent_names(spec, root, image)
+            yield root, image
+            self._current_parent_names(spec, root, image)
+        finally:
             try:
-                os.fchown(fd, uid, gid)
-                os.fchmod(fd, mode)
+                if root is not None:
+                    os.close(root)
             finally:
-                os.close(fd)
+                if image is not None:
+                    os.close(image)
+
+    @staticmethod
+    def _current_parent_names(spec, root, image):
+        for path, fd in ((spec.mount_path, root), (spec.image_path, image)):
+            current, held = path.lstat(), os.fstat(fd)
+            if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
+                raise Refused(f"slot {spec.slot_id} changed during parent qualification")
 
     def prepare_slot(self, kind):
         slot = uuid.uuid4().hex
@@ -562,11 +614,18 @@ sync -f "$(dirname -- "$p")"
         Permission repair and emptiness checks use this before trusting any
         mounted directory. It also works for unlisted slots without a UUID claim.
         """
-        from deerflow.spaces.backings import _mount_record
 
         no_symlinks(spec.mount_path)
         no_symlinks(spec.image_path)
         root = os.open(spec.mount_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            return self._mounted_root_facts(spec, root, full=full)
+        finally:
+            os.close(root)
+
+    def _mounted_root_facts(self, spec, root, *, full=True, image_uuid=None):
+        from deerflow.spaces.backings import _mount_record
+
         try:
             facts = _mount_record(root)
             meta = os.fstat(root)
@@ -579,13 +638,11 @@ sync -f "$(dirname -- "$p")"
                 raise Refused(f"slot {spec.slot_id} is mounted from another image")
             if full:
                 validate_loop_range({name: int((loop / name).read_text(encoding="utf-8").strip()) for name in ("offset", "sizelimit", "autoclear")})
-            if full and spec.image_path.exists() and mounted_ext4_identity(root) != read_ext4_identity(spec.image_path):
+            if full and (image_uuid is not None or spec.image_path.exists()) and mounted_ext4_identity(root) != (image_uuid if image_uuid is not None else read_ext4_identity(spec.image_path)):
                 raise Refused(f"slot {spec.slot_id} has another mounted filesystem UUID")
             return facts
         except (OSError, BackingUnavailable, ValueError) as exc:
             raise Refused(f"cannot verify mount identity of slot {spec.slot_id}: {exc}") from exc
-        finally:
-            os.close(root)
 
     def detach(self, spec):
         if os.path.ismount(spec.mount_path):
@@ -835,7 +892,7 @@ sync -f "$(dirname -- "$p")"
                 (self.pool, 0, 1000, 0o750),
                 (self.manifest, 1000, 1000, 0o440),
                 (spec.image_path, 0, 1000, 0o640),
-                (spec.mount_path, 0, 0, 0o755),
+                (spec.mount_path, 0, 1000, 0o770),
                 (spec.mount_path / "data", 1000, 1000, 0o770),
                 (spec.mount_path / "control", 1000, 1000, 0o700),
             )
