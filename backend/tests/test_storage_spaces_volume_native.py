@@ -1090,3 +1090,53 @@ def test_gateway_uid_1000_owns_stable_operator_lock(typed_prepared_pool):
     _, status = os.waitpid(child, 0)
     assert os.waitstatus_to_exitcode(status) == 0
     assert (pool / RUNTIME_LOCK).stat().st_ino == metadata.st_ino
+
+
+def test_gateway_uid_1000_can_persist_and_reopen_native_create_evidence(typed_prepared_pool):
+    """Real operator ownership supports durable private Gateway journal IO."""
+    import stat
+    import traceback
+
+    from deerflow.spaces.native_create_evidence import DIRECTORY, NativeContainerIdentity, NativeCreateEvidence
+    from deerflow.spaces.runtime_owner import PoolRuntimeOwner
+
+    pool = typed_prepared_pool.pool
+    metadata = (pool / DIRECTORY).stat()
+    assert (metadata.st_uid, metadata.st_gid, stat.S_IMODE(metadata.st_mode)) == (1000, 1000, 0o700)
+    slot = next(spec.slot_id for spec in typed_prepared_pool.load().volumes.values() if spec.kind == "user")
+    child = os.fork()
+    if child == 0:
+        owner, evidence = PoolRuntimeOwner(pool), None
+        try:
+            os.setgroups([])
+            os.setgid(1000)
+            os.setuid(1000)
+            owner.acquire()
+            evidence = NativeCreateEvidence(pool, daemon_id="native-journal-fixture")
+            attempt = evidence.begin(owner_id="journal-fixture", thread_id="chat", name="hartmesh-journal-fixture", slots=(slot,))
+            evidence.close()
+            evidence = NativeCreateEvidence(pool, daemon_id="native-journal-fixture")
+            assert evidence.pending(slots=(slot,)) == (attempt,)
+            record = pool / DIRECTORY / (attempt.id + ".json")
+            facts = record.stat()
+            assert (facts.st_uid, facts.st_gid, stat.S_IMODE(facts.st_mode), facts.st_nlink) == (1000, 1000, 0o600, 1)
+            # This case proves journal permissions/durability, not Docker
+            # identity. The bridge must supply actual inspected identity.
+            verified = NativeContainerIdentity(attempt.id, attempt.daemon_id, attempt.owner_id, attempt.thread_id, attempt.name, attempt.slots, "c" * 64)
+            evidence.acknowledge(attempt, verified)
+            assert evidence.pending() == ()
+            evidence.close()
+            owner.close()
+            try:
+                (pool / DIRECTORY).rmdir()
+            except PermissionError:
+                pass
+            else:
+                os._exit(2)
+        except BaseException:
+            os.write(2, traceback.format_exc().encode("utf-8"))
+            os._exit(1)
+        os._exit(0)
+    _, status = os.waitpid(child, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
+    assert (pool / DIRECTORY).stat().st_ino == metadata.st_ino

@@ -1,5 +1,19 @@
 # Storage Spaces
 
+Private `native_create_evidence.py` supplies an unused durable-create foundation.
+The operator atomically publishes `.native-creates` as 1000:1000/0700 outside
+`.probe` and reclaimable roots; never repair a published conflict or erase stages.
+Retain exact pool/directory/stage FDs and validate the named published record after
+fsync. Strict bounded 0600 single-link versioned records correlate immutable
+attempt/daemon/name/owner/thread/slots, never permission. Pending survives restart;
+only same-daemon acknowledged facts may be pruned after file and directory fsync.
+Unknown/malformed/staging evidence fails closed, never evicted at capacity. `ready`
+is memory-only; every other method performs blocking IO and belongs off-loop.
+The following runtime bridge must record before every managed native submission,
+inspect exact actual Docker identity, quarantine unacknowledged returned containers,
+reserve capacity for identity-less pending and retain/drain this exact helper under
+pool ownership. Do not activate reclamation using an empty inventory alone.
+
 Private `runtime_owner.py` qualifies one participating native runtime per managed
 pool before baseline provider lookup/construction. The operator creates its
 stable empty 1000:1000/0600 file outside `.probe`; the Gateway never repairs or

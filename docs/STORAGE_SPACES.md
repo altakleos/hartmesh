@@ -288,6 +288,24 @@ filesystem identity; it requires the Gateway and other holders to be stopped.
 `forget --discard` explicitly destroys a slot's contents. Every successful or
 partial verb prints one sorted JSON document; a refusal carries its reason.
 
+Managed preparation also publishes `.native-creates`, a private 1000:1000/0700
+directory outside `.probe` and every reclaimable data/control root. Publication
+uses a private staged directory, descriptor proof, no-replace rename and directory
+fsync. Published ownership, permissions or identity conflicts are refused without
+repair; interrupted staging directories and existing bytes are preserved.
+
+The private journal foundation is currently unused by chat creation. Its version-1
+records are bounded single-link 0600 files containing attempt, daemon, container
+name, owner/thread and exact slot correlation facts; these facts grant no authority.
+Pending records survive restart and never disappear because inventory is empty or
+time has elapsed. Only an exact same-daemon verified acknowledgment can retire a
+record, after durable publication. Unknown records, interrupted writes and record
+limits refuse admission without eviction. Runtime integration must retain this
+helper under pool ownership, qualify actual Docker identity, preserve conservative
+capacity and drain workers before close. It follows in a separate change, before
+account-release containment or activation. Preserve the directory with the pool;
+no browser/model force-clear API is provided. There is no database schema change.
+
 Managed-plan qualification requires one participating Gateway runtime per pool.
 `prepare` and `mount-all` maintain `.gateway-owner.lock`, a stable empty regular
 single-link file owned by 1000:1000 with mode 0600, outside temporary probes.

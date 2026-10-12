@@ -621,6 +621,12 @@ typed storage pools. It checks disk headroom before preparation and supports
 offline growth that preserves files; see [Storage Spaces](docs/STORAGE_SPACES.md)
 for its privilege requirements and current scope.
 
+Preparation also publishes a private `.native-creates` directory outside storage
+views and temporary probes. It will retain unresolved container creation requests
+across restarts when the runtime bridge is connected. Operators must preserve it
+alongside the pool; preparation refuses unsafe existing ownership or permissions.
+This foundation leaves storage defaults and chat behavior unchanged.
+
 With managed storage enabled, missing or unverified backings leave the Gateway
 running with durable history and Work records available. Startup logs report
 storage and execution availability; failed Docker admission is retried every

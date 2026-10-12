@@ -86,7 +86,25 @@ def operator(tmp_path, monkeypatch):
     mounted, commands, trees = set(), [], {}
     monkeypatch.setattr(si.os, "geteuid", lambda: 0)
     monkeypatch.setattr(si.os, "chown", lambda *args, **kwargs: None)
-    monkeypatch.setattr(si.os, "fchown", lambda *args, **kwargs: None)
+    original_fstat, original_stat = os.fstat, os.stat
+    owners = {}
+
+    def projected(metadata):
+        key = metadata.st_dev, metadata.st_ino
+        if key not in owners:
+            return metadata
+        values = list(metadata)
+        values[4], values[5] = owners[key]
+        extras = {name: getattr(metadata, name) for name in dir(metadata) if name.startswith("st_") and name not in ("st_uid", "st_gid")}
+        return os.stat_result(values, extras)
+
+    def chown(descriptor, uid, gid):
+        metadata = original_fstat(descriptor)
+        owners[metadata.st_dev, metadata.st_ino] = uid, gid
+
+    monkeypatch.setattr(si.os, "fchown", chown)
+    monkeypatch.setattr(si.os, "fstat", lambda fd: projected(original_fstat(fd)))
+    monkeypatch.setattr(si.os, "stat", lambda *args, **kwargs: projected(original_stat(*args, **kwargs)))
     monkeypatch.setattr(si.os, "posix_fallocate", lambda fd, offset, length: si.os.ftruncate(fd, offset + length))
     monkeypatch.setattr(si.os.path, "ismount", lambda p: Path(p) in mounted)
     monkeypatch.setattr(si.StorageInitializer, "preflight", lambda self: None)
