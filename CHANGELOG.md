@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Managed storage administration
+
+Generic grant updates now refuse with `owned-space` when `user_spaces` is false.
+User and Company storage refuse generic destructive lifecycle and recovery
+acceptance with `mounts-unrecorded`; recovery status remains available. These
+refusals preserve current caller grants and lifecycle generation checks.
+Exact ADMIN metadata admission can proceed when backing verification fails,
+without bypassing attachment containment or granting file access. Failed marker
+verification no longer publishes speculative capacity growth with metadata edits.
+Storage defaults remain disabled. There is no database schema change.
+
 ### Host storage reclamation foundation
 
 Trusted host cleanup can reclaim an already-deleted native Space when its latest

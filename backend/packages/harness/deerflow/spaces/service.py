@@ -74,12 +74,20 @@ class SpaceFiles:
         from deerflow.spaces.workflows import _owner, probe
 
         owner = _owner.get()
+        unverified_admin = set()
         for key, (row, _grant) in admitted.items():
             if requests[key][0] & (Permission.ADMIN | Permission.OPERATE) and (owner is None or owner[0] is not self or key not in owner[1]):
-                await run_file_io(probe, await self._volume(session, row))
+                try:
+                    volume = await self._volume(session, row)
+                except BackingUnavailable:
+                    if requests[key][0] != Permission.ADMIN:
+                        raise
+                    unverified_admin.add(key)
+                else:
+                    await run_file_io(probe, volume)
         pending = (await session.execute(select(SpaceFileOperationRow).where(SpaceFileOperationRow.space_id.in_(admitted), SpaceFileOperationRow.phase == "pending"))).scalars().all()
         for operation in pending:
-            if (operation.space_id, operation.operation_id) == operation_id:
+            if operation.space_id in unverified_admin or (operation.space_id, operation.operation_id) == operation_id:
                 continue
             action = operation.request.get("action") if isinstance(operation.request, dict) else None
             file_action = isinstance(action, str) and action in {"write", "put", "mkdir", "rename", "remove", "feature-workflow"}
@@ -359,8 +367,8 @@ class SpaceFiles:
         spec = self._binding_spec(binding)
         volume = await run_file_io(self.catalog.verify, binding.slot_id, previous=self._verified.get(binding.slot_id))
         self._check_incarnation(binding, volume)
-        binding.max_bytes, binding.max_inodes = spec.max_bytes, spec.max_inodes
         bound = await run_file_io(verify_bound, volume, binding.backing_handle)
+        binding.max_bytes, binding.max_inodes = spec.max_bytes, spec.max_inodes
         self._cache_bound(binding.slot_id, self._binding_claim(claims, binding.slot_id), binding.backing_handle, volume)
         return bound
 

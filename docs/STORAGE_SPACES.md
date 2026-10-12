@@ -238,7 +238,23 @@ only storage/agent state words, preserving its existing fields. Storage failure
 precedes the `none` agent state. It exposes no counts, paths or exception text.
 
 `storage_spaces.user_spaces: false` refuses generic API creation with HTTP 403.
-Host provisioning/assignment remains available. Feature and quota projections
+It also refuses generic grant additions, changes and removals with HTTP 409
+`owned-space`. Host provisioning, assignment and trusted grants remain available.
+The User and Company links identify storage whose chat mounts are not attachment
+records: their generic backup, restore, archive, delete and recovery-acceptance
+requests return HTTP 409 `mounts-unrecorded`. Restore the data disk from an
+operator snapshot instead. `GET /api/spaces/{id}/recovery` remains available.
+These refusals use the central `{detail, reason}` response, after current ADMIN
+grant and generation checks; unowned resources retain their generic lifecycle.
+
+When backing verification fails, an exact ADMIN admission may inspect or change
+metadata without probing its unavailable workflow lock or resolving pending file
+operations. Current principal, grant, generation and attachment checks still
+apply. Any request that also includes file permissions still requires physical
+verification, and recovery verifies the volume before filesystem mutation.
+Accepting uncertain state may quiesce a workspace before verification refuses.
+Unverified geometry is never published by a metadata edit.
+Feature and quota projections
 use the `shared` editor label; native attachments remain separately advertised.
 
 The backend image also includes `python -m app.gateway.storage_init` for typed
