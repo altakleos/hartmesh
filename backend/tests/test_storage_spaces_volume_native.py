@@ -992,7 +992,9 @@ async def test_host_reclaims_full_private_control_and_renews_roots(backing, tmp_
                 assert catalog.verify(before.spec.slot_id).available_inodes == 0
             else:
                 held = os.open(before.control_path / "full-private-backup", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                chunk = bytes(1 << 20)
+                # Large ext4 writes can fail while smaller allocations still fit.
+                # Exhaust one filesystem block at a time to deny journal creation.
+                chunk = bytes(os.statvfs(before.control_path).f_frsize)
                 for _ in range(before.spec.max_bytes // len(chunk) + 2):
                     try:
                         os.write(held, chunk)
