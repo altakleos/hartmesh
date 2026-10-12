@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Native creation evidence foundation
+
+Managed pool preparation now atomically publishes a private `.native-creates`
+directory for durable container creation evidence. The host journal preserves
+unreturned requests across restart, validates exact acknowledgment identity and
+refuses malformed or interrupted evidence without erasing it. Runtime integration
+follows separately; this foundation changes no chat admission or reclamation.
+Storage defaults remain disabled. There is no database schema change; private
+journal JSON uses schema version 1.
+
 ### Managed pool runtime ownership
 
 Managed Compose native storage admits one participating Gateway runtime per

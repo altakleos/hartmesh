@@ -329,6 +329,7 @@ class StorageInitializer:
     def mount_all(self):
         inventory = self.load()
         self._prepare_runtime_owner()
+        self._prepare_native_creates()
         mounted, failed, already = [], [], 0
         for spec in inventory.volumes.values():
             try:
@@ -384,6 +385,76 @@ class StorageInitializer:
             if descriptor is not None:
                 os.close(descriptor)
             os.close(parent)
+
+    def _prepare_native_creates(self):
+        """Publish the private durable journal namespace once, never repair it.
+
+        Staging remains distinguishable outside the published directory after
+        interruption. Existing records and unrecognized stages are preserved.
+        """
+        from deerflow.files.store import StoreError, open_directory_source
+        from deerflow.spaces.filesystem import ConfinedFilesystem, FileConflict, FilesystemUnavailable
+        from deerflow.spaces.native_create_evidence import DIRECTORY
+
+        parent = descriptor = None
+        try:
+            parent = open_directory_source(self.pool)
+            pool_identity = os.fstat(parent)
+            if (pool_identity.st_uid, pool_identity.st_gid, stat.S_IMODE(pool_identity.st_mode)) != (0, 1000, 0o750):
+                raise Refused("native creation evidence requires the private root:1000/0750 pool")
+
+            def current_parent():
+                current = open_directory_source(self.pool)
+                try:
+                    facts = os.fstat(current)
+                    if (facts.st_dev, facts.st_ino) != (pool_identity.st_dev, pool_identity.st_ino):
+                        raise Refused("native creation evidence pool changed; retained evidence was not replaced")
+                    if (facts.st_uid, facts.st_gid, stat.S_IMODE(facts.st_mode)) != (0, 1000, 0o750):
+                        raise Refused("native creation evidence pool permissions changed")
+                finally:
+                    os.close(current)
+
+            def qualify(name):
+                opened = os.fstat(descriptor)
+                named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                if (
+                    not stat.S_ISDIR(opened.st_mode)
+                    or not stat.S_ISDIR(named.st_mode)
+                    or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+                    or opened.st_dev != pool_identity.st_dev
+                    or (opened.st_uid, opened.st_gid, stat.S_IMODE(opened.st_mode)) != (1000, 1000, 0o700)
+                    or (named.st_uid, named.st_gid, stat.S_IMODE(named.st_mode)) != (1000, 1000, 0o700)
+                ):
+                    raise Refused("native creation evidence must remain a private 1000:1000/0700 directory; no repair was made")
+                current_parent()
+
+            try:
+                descriptor = os.open(DIRECTORY, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+            except FileNotFoundError:
+                stage = DIRECTORY + "-stage-" + uuid.uuid4().hex
+                os.mkdir(stage, mode=0o700, dir_fd=parent)
+                created = os.stat(stage, dir_fd=parent, follow_symlinks=False)
+                descriptor = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+                opened = os.fstat(descriptor)
+                if (opened.st_dev, opened.st_ino) != (created.st_dev, created.st_ino):
+                    raise Refused("native creation evidence stage changed before ownership setup")
+                self._set_mode(descriptor, 1000, 1000, 0o700)
+                os.fsync(descriptor)
+                qualify(stage)
+                ConfinedFilesystem._rename_no_replace(parent, stage, parent, DIRECTORY)
+            qualify(DIRECTORY)
+            # Retrying an interrupted publication must establish durability
+            # even when the rename already left the valid directory visible.
+            os.fsync(descriptor)
+            os.fsync(parent)
+            qualify(DIRECTORY)
+        except (OSError, StoreError, FileConflict, FilesystemUnavailable) as exc:
+            raise Refused("native creation evidence is unavailable; retained files and stages were not replaced") from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            if parent is not None:
+                os.close(parent)
 
     @staticmethod
     def fstab_line(spec):

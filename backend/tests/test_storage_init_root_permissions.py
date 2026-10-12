@@ -33,7 +33,13 @@ def parent_operator(operator, monkeypatch):
 def test_prepare_gives_gateway_group_parent_write_permission(operator, monkeypatch):
     tool, _, _ = operator
     owners = {}
-    monkeypatch.setattr(si.os, "fchown", lambda fd, uid, gid: owners.setdefault(Path(os.readlink(f"/proc/self/fd/{fd}")), (uid, gid)))
+    chown = si.os.fchown
+
+    def record_chown(fd, uid, gid):
+        chown(fd, uid, gid)
+        owners.setdefault(Path(os.readlink(f"/proc/self/fd/{fd}")), (uid, gid))
+
+    monkeypatch.setattr(si.os, "fchown", record_chown)
     tool.prepare()
     for spec in tool.load().volumes.values():
         assert owners[spec.mount_path] == (0, 1000)
