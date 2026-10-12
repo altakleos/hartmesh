@@ -31,6 +31,12 @@ class SpaceRecovery:
         self.files, self.registry = files, files.registry
         self.attachments = attachments or getattr(files, "attachments", None)
 
+    async def host_release(self, space_id, *, admission=None, publication=None, lock_admission=None):
+        """Trusted deletion cleanup; domain containment stays with its caller."""
+        from deerflow.spaces.host_release import host_release
+
+        return await host_release(self, space_id, admission=admission, publication=publication, lock_admission=lock_admission)
+
     async def _quiesce(self, actor, space_id, generation, operation_id=None, attachment_ids=None):
         # Lifecycle actions explicitly close RO handles as well as writers.
         # Ordinary ADMIN admission no longer proves writer exclusion.

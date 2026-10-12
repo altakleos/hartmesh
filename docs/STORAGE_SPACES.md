@@ -1,5 +1,37 @@
 # Storage Spaces
 
+## Host reclamation foundation
+
+The private host recovery method reclaims already-deleted native Spaces only
+when the latest delete event records `retained_backups` as JSON false and every
+attachment is fenced. It does not resolve a principal or grant permissions.
+Trusted domain callbacks recheck their own eligibility in borrowed SQL sessions;
+callers own external containment through the entire operation. Account release,
+Docker discovery and periodic scheduling join in the next Compose category.
+
+Reclamation commits an immutable intent before filesystem effects. A private
+sibling journal records exact replacement roots; cleanup exchanges both public
+roots, purges the retired trees through descriptors checked against their durable
+identity, then removes the retired directories. Old opened and unopened views
+refuse the replacement. Full control storage can bootstrap under the resource
+lock, retaining the binding marker and any existing workflow lock until ownership
+is established. A held unlinked file can keep reclamation pending until it closes.
+
+A filesystem-complete checkpoint commits while the original binding remains.
+Journal removal precedes the final binding/domain transaction commit. A failed
+commit or callback can retry that checkpoint even after journal removal, without
+adopting another root. Unexpected journal paths, identities, contents, private
+records or authority changes preserve pending state. An unwritable mounted parent
+refuses before intent creation and requires operator repair. Read-only capacity
+checks exclude unresolved sibling journals without requiring renewal permissions.
+
+This corrects the design's CONTRACT 8.6 assumption that host release needs no
+operation row: durable crash recovery uses the existing operation table's private,
+versioned `host-release` JSON and the writer label `nonhuman/host:space-release`.
+That label is provenance, never a directory identity. There is no database schema
+change and storage defaults remain disabled. Native byte/inode/held-descriptor
+qualification runs only in the mandatory Linux Docker CI tier.
+
 ## Extension storage contract
 
 The dependency-free `deerflow-extension-api` 0.2.7 adds `StorageActor`,

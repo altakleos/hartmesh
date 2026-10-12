@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Host storage reclamation foundation
+
+Trusted host cleanup can reclaim an already-deleted native Space when its latest
+deletion explicitly permits discarding backups and every attachment is fenced.
+Cleanup renews both roots, rejects stale views and retains durable progress across
+interrupted initialization, full private control storage and failed commits.
+Unknown evidence stays pending. Physical verification failure before cleanup
+leaves the slot untouched and reserved as uncertain. The following Compose stage
+connects this mechanism to account release and confirmed sandbox containment.
+Storage defaults remain disabled. There is no database schema change; private
+operation/checkpoint JSON is versioned.
+
 ### Storage capacity snapshots
 
 Delayed metadata and filesystem checks can no longer overwrite a newer slot

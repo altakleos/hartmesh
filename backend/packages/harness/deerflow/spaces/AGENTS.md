@@ -44,6 +44,30 @@ an allocating claim from binding flush through caller commit or rollback; reader
 cannot clear or promote it. Refresh publishes only after confirmed SQL commit.
 These caches never replace current resource, grant, root or marker admission.
 
+`host_release.py` owns actorless reclamation of already-deleted native resources,
+only with the latest delete event's exact JSON false retention flag and fenced
+attachments. Domain eligibility/containment is supplied by trusted callers,
+never imported. Lock-only `host_locked(..., _before_lock=...)` prerequisites borrow
+the transaction after SQLite writer reservation and before sorted Space locks.
+Fresh admission and final domain publication callbacks borrow that same session;
+external provider reservations must outlive workers and commit. No extra checkout,
+commit, provider work or allocation lock belongs in the prerequisite hook.
+
+Immutable intent and versioned progress use the existing operation table with
+private nonhuman writer label `host:space-release`; never resolve it as a principal
+or grant it authority. This corrects CONTRACT 8.6's no-operation-row retry plan.
+Only dedicated release interprets these records; ordinary settlement excludes
+them. `release_filesystem.py` pins qualified descriptors, refuses an unwritable
+parent before intent, and keeps its named private journal tied to the owned inode.
+Bootstrap holds the resource parent until filesystem ownership exists, can purge
+full data/control after intent, and preserves the marker/existing workflow lock.
+Exchanges keep public roots present; exact opened root FDs govern purge. Commit
+filesystem completion while retaining the binding before removing the journal.
+Final rollback resumes that checkpoint even after partial journal unlink. All
+path effects precede binding/domain publication commit; postcommit caches use CAS.
+Capacity's read-only prefix check excludes unresolved sibling journals. Domain
+scheduling and managed route guards arrive in the following Compose category.
+
 `binding_verified` projects facts after closing its SQL session; it grants no
 admission. Assignable-slot snapshots exclude bound/unclaimed/unverified slots,
 independently of account-seat occupancy. `user_spaces` gates `create` only;
@@ -215,7 +239,8 @@ Startup/60-second repair counts committed assignments/grants and drains owned ta
 
 Consumer readiness: [the handoff](../../../../../docs/STORAGE_SPACES_CONSUMER.md)
 maps the public API to functional SQL and mandatory native evidence. The native
-tier requires 16 cases without skips, including real AIO two-chat persistence;
+tier rejects every skip and includes real AIO two-chat persistence and full
+private-control reclamation (bytes, inodes and held file descriptors);
 directory fixtures never qualify quotas. `resume` rechecks exact mounts, current
 generations, audience and immutable container identity without prepare/start.
 

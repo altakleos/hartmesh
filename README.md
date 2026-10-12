@@ -626,7 +626,10 @@ running with durable history and Work records available. Startup logs report
 storage and execution availability; failed Docker admission is retried every
 minute. Delayed capacity checks preserve newer slot bindings and allocations
 awaiting commit; uncertain slots remain reserved. Inventory changes and offline
-growth take effect after a Gateway restart.
+growth take effect after a Gateway restart. Host reclamation has durable retry
+support for deleted native Spaces authorized to discard backups; it renews roots
+and preserves uncertain capacity. Account-release integration follows in the
+next Compose stage.
 
 Ordinary chats in an enabled, qualified storage deployment keep workspace,
 uploads and outputs in the person's assigned User Space. My Files uses that

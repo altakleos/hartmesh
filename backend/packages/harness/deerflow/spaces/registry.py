@@ -189,7 +189,7 @@ class SpaceRegistry:
                 yield session, row, permissions
 
     @asynccontextmanager
-    async def host_locked(self, space_ids):
+    async def host_locked(self, space_ids, *, _before_lock=None):
         """Trusted host transaction; no principal, grant or operation admission."""
         if isinstance(space_ids, str):
             raise ValueError("Resource admission requires an explicit scope")
@@ -200,6 +200,9 @@ class SpaceRegistry:
             async with session.begin():
                 if session.bind.dialect.name == "sqlite":
                     await session.execute(text("BEGIN IMMEDIATE"))
+                if _before_lock is not None:
+                    # Trusted prerequisite locks, using only this transaction.
+                    await _before_lock(session)
                 rows = {}
                 for identifier in identifiers:
                     row = (await session.execute(select(SpaceRow).where(SpaceRow.id == identifier).with_for_update())).scalar_one_or_none()
