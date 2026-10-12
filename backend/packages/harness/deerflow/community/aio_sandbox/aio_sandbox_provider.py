@@ -74,6 +74,7 @@ from deerflow.sandbox.lease import cleanup_unheld_sandbox, run_sync_lifecycle_op
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 from deerflow.skills.types import SkillCategory
+from deerflow.spaces.docker import StorageHostUnqualified
 from deerflow.utils.file_io import await_drained
 
 from .aio_sandbox import AioSandbox
@@ -470,6 +471,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self._ownership_config.type,
             )
         self._backend: SandboxBackend = self._create_backend()
+        self._managed_runtime_required = self._managed_pool_required()
 
         # Register shutdown handler
         atexit.register(self.shutdown)
@@ -1339,6 +1341,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         store state loss, the teardown lease excludes peers, and the local
         reservation excludes this provider's own acquire/reaper paths.
         """
+        if self._managed_pool_required() and not self._pool_runtime_current():
+            return False
         if not info.requires_replacement:
             return False
         if not self._adoptable_after_grace(info.sandbox_id, now):
@@ -1388,6 +1392,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         recovery grace first, so a store that lost its state cannot be mistaken
         for a fleet of dead owners (see ``_adoptable_after_grace``).
         """
+        if self._managed_pool_required() and not self._pool_runtime_current():
+            return
         try:
             running = self._backend.list_running()
         except Exception as e:
@@ -1446,10 +1452,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 logger.debug("Skipping container %s during reconciliation: owned by another instance", info.sandbox_id)
                 continue
 
+            self._assert_managed_container(info)
+
             # Single lock acquisition per container: atomic check-and-insert.
             # Avoids a TOCTOU window between the "already tracked?" check and the
             # warm-pool insert.
             with self._lock:
+                if self._managed_runtime_required and not self._pool_runtime_current():
+                    continue
                 if info.sandbox_id in self._sandboxes or info.sandbox_id in self._warm_pool or info.sandbox_id in self._starting:
                     # `_starting` re-checked here, not only at the loop head:
                     # a create can mark the id between the two, and parking a
@@ -2247,6 +2257,17 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     # ── Thread locking (in-process) ──────────────────────────────────────
 
     def _sandbox_id_for_thread(self, thread_id: str | None, user_id: str | None) -> str:
+        from deerflow.spaces.chat_paths import ChatStoragePaths
+
+        sandbox_id = self._sandbox_id_for_thread_base(thread_id, user_id)
+        paths = get_paths()
+        if self._managed_pool_required() and isinstance(paths, ChatStoragePaths) and not paths.has_personal_files:
+            # An unqualified peer's mountless chat must never collide with a
+            # native container, including between discovery and Docker create.
+            return hashlib.sha256(f"mountless:{self._owner_id}:{sandbox_id}".encode()).hexdigest()[:16]
+        return sandbox_id
+
+    def _sandbox_id_for_thread_base(self, thread_id: str | None, user_id: str | None) -> str:
         """Return deterministic IDs for thread sandboxes and random IDs otherwise."""
         if not thread_id:
             return str(uuid.uuid4())[:8]
@@ -2366,7 +2387,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._forget_lost_sandbox(existing_id)
             return None
 
+        self._assert_managed_container(info)
         with self._lock:
+            self._assert_managed_publication(info)
             if self._being_torn_down_locally(existing_id):
                 # The first reservation check ran before the backend health
                 # check and ownership round trip. A local reaper can win while
@@ -2447,6 +2470,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._forget_lost_sandbox(sandbox_id)
             return None
 
+        self._assert_managed_container(info)
         with self._lock:
             if self._being_torn_down_locally(sandbox_id):
                 # Re-checked, because the first check was before the round trip.
@@ -2459,6 +2483,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 logger.info("Warm-pool sandbox %s was claimed for teardown while publishing ownership; not reclaiming it", sandbox_id)
                 return None
             self._assert_warm_identity_available_locked(sandbox_id, key)
+            current = self._warm_pool.get(sandbox_id)
+            if current is not None:
+                self._assert_managed_publication(current[0])
             warm_item = self._warm_pool.pop(sandbox_id, None)
             if warm_item is None:
                 return None
@@ -2511,6 +2538,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 prevent. The window is a peer's in-flight container stop, so the
                 thread's next turn discovers nothing and cold-starts cleanly.
         """
+        self._assert_managed_container(info)
         if info.requires_replacement:
             raise SandboxPolicyReplacementDeferredError(info.sandbox_id)
         key = self._thread_key(thread_id, user_id)
@@ -2536,7 +2564,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # same close-on-failure as `_register_created_sandbox`.
         try:
             self._publish_ownership(info.sandbox_id)
+            self._assert_managed_container(info)
             with self._lock:
+                self._assert_managed_publication(info)
                 if self._being_torn_down_locally(info.sandbox_id):
                     # The pre-publish reservation check is only an early-out: a
                     # local reaper can reserve the id during the store round
@@ -2563,6 +2593,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             OwnershipBackendError,
             SandboxBeingDestroyedError,
             SandboxIdentityCollisionError,
+            StorageHostUnqualified,
         ):
             try:
                 sandbox.close()
@@ -2598,6 +2629,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # mid-stop leaves a teardown marker until its TTL lapses. Roll back on
         # both, or the container we just started is leaked.
         try:
+            self._assert_managed_container(info, teardown=True)
             with self._lock:
                 if self._being_torn_down_locally(sandbox_id):
                     # A reaper reserved this id after the create started (the
@@ -2607,8 +2639,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     self._assert_active_identity_available_locked(sandbox_id, key)
                     self._assert_warm_identity_available_locked(sandbox_id, key)
             self._publish_ownership(sandbox_id)
+            self._assert_managed_container(info)
 
             with self._lock:
+                self._assert_managed_publication(info)
                 if self._being_torn_down_locally(sandbox_id):
                     # Re-checked after the store round trip, as on the discover
                     # and warm paths: the reservation can land during `take()`.
@@ -2631,6 +2665,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             OwnershipBackendError,
             SandboxBeingDestroyedError,
             SandboxIdentityCollisionError,
+            StorageHostUnqualified,
         ):
             logger.error(
                 "Could not register new sandbox %s; attempting ownership-fenced cleanup",
@@ -2640,7 +2675,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 sandbox.close()
             except Exception as e:
                 logger.warning(f"Error closing sandbox {sandbox_id} during ownership rollback: {e}")
-            self._destroy_unready_sandbox(sandbox_id, info)
+            self._cleanup_failed_creation(sandbox_id, info)
             raise
 
         logger.info(f"Created sandbox {sandbox_id} for thread {thread_id} at {info.sandbox_url}")
@@ -2762,6 +2797,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         says nothing about which members are gone.
         """
         try:
+            self._assert_managed_container(info, teardown=True)
             result = self._backend.destroy(info)
         except Exception as e:
             logger.error("Destroy of sandbox %s raised; its resource set is not confirmed absent: %s", info.sandbox_id, type(e).__name__)
@@ -3003,6 +3039,55 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 return self._chat_storage_host
         return None
 
+    def _managed_pool_required(self):
+        required = getattr(self, "_managed_runtime_required", None)
+        if required is None:
+            from deerflow.config.app_config import peek_loaded_app_config
+
+            config = getattr(peek_loaded_app_config(), "storage_spaces", None)
+            host = self._storage_host()
+            required = getattr(host, "pool_runtime_owner", None) is not None or (getattr(config, "enabled", False) is True and getattr(config, "plan", None) is not None)
+            self._managed_runtime_required = required
+        return required
+
+    def _pool_runtime_current(self):
+        owner = getattr(self, "_pool_runtime_owner", None)
+        return owner is not None and owner.accepts(self)
+
+    def _assert_managed_publication(self, info):
+        """Memory-only check safe inside provider/lease metadata locks."""
+        if not getattr(self, "_managed_runtime_required", False):
+            return
+        host_owner = getattr(getattr(self, "_chat_storage_host", None), "pool_runtime_owner", None)
+        if (host_owner is not None and host_owner.closing) or not (self._pool_runtime_current() or getattr(info, "mountless_provider", None) is self):
+            raise StorageHostUnqualified("Managed chat client lacks its live runtime ownership")
+
+    def _assert_managed_container(self, info, *, teardown=False):
+        if not self._managed_pool_required():
+            return
+        if getattr(info, "mountless_provider", None) is self:
+            if not teardown:
+                self._assert_managed_publication(info)
+            return
+        owner = getattr(self, "_pool_runtime_owner", None)
+        if owner is None:
+            raise StorageHostUnqualified("Unqualified runtime cannot adopt or remove a managed container")
+        owner.assert_provider(self, teardown=teardown)
+
+    def _assert_chat_runtime(self, paths):
+        if not self._managed_pool_required():
+            return
+        from deerflow.spaces.chat_paths import ChatStoragePaths
+
+        host_owner = getattr(self._storage_host(), "pool_runtime_owner", None)
+        if host_owner is not None and host_owner.closing:
+            raise StorageHostUnqualified("Managed storage runtime is closing")
+        if not isinstance(paths, ChatStoragePaths) or paths.has_personal_files:
+            owner = getattr(self, "_pool_runtime_owner", None)
+            if owner is None:
+                raise StorageHostUnqualified("Native chat storage requires its qualified provider")
+            owner.assert_provider(self)
+
     @property
     def requires_chat_storage_validation(self):
         from deerflow.config.app_config import peek_loaded_app_config
@@ -3035,6 +3120,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if host is None or thread_id is None:
             raise StorageUnsupported("Chat storage requires its live host and conversation identity")
         prepared = self._fresh_projection(host.prepare_sync(user_id, thread_id), thread_id, user_id)
+        self._assert_chat_runtime(prepared.paths)
         prepared.paths.check_thread_capacity(thread_id, user_id=user_id)
         with paths_scope(prepared.paths):
             yield prepared
@@ -3053,6 +3139,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if host is None or thread_id is None:
             raise StorageUnsupported("Chat storage requires its live host and conversation identity")
         prepared = self._fresh_projection(await host.prepare_async(user_id, thread_id), thread_id, user_id)
+        await await_drained(run_sync_lifecycle_operation(self._assert_chat_runtime, prepared.paths))
         await await_drained(run_file_io(prepared.paths.check_thread_capacity, thread_id, user_id=user_id))
         with paths_scope(prepared.paths):
             yield prepared
@@ -3075,6 +3162,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             raise BackingUnavailable("Chat storage requires the qualified local Docker backend")
         prepared.mounts.validate_sources()
         container_id = self._backend.validate_thread_mounts(info, mounts=prepared.mounts, protected_roots=getattr(prepared, "protected_roots", ()))
+        self._assert_managed_container(info)
         with self._lock:
             if self._sandboxes.get(sandbox_id) is not client or self._sandbox_infos.get(sandbox_id) is not info or self._active_sandbox_identity.get(sandbox_id) != identity:
                 raise BackingUnavailable("Chat client incarnation changed during inspection")
@@ -3090,6 +3178,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if not isinstance(candidate, _ChatCandidate) or candidate.provider is not self:
             return False
         with self._lock:
+            try:
+                self._assert_managed_publication(candidate.info)
+            except StorageHostUnqualified:
+                return False
             return (
                 candidate.sandbox_id not in getattr(self, "_cleanup_pending", {})
                 and self._sandboxes.get(candidate.sandbox_id) is candidate.client
@@ -3170,6 +3262,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         if client is None or info is None or not info.container_id:
             raise BackingUnavailable("The previous chat client identity is unknown")
+        self._assert_managed_container(info, teardown=True)
 
         def cleanup():
             with self._lock:
@@ -3209,6 +3302,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             known = {sid for sid, owner in (*self._active_sandbox_identity.items(), *self._warm_pool_identity.items()) if owner == key}
         for sandbox_id in sorted(known | observed.keys()):
             actual = observed.get(sandbox_id)
+            if actual is not None:
+                self._assert_managed_container(actual, teardown=True)
 
             def cleanup():
                 with self._lock:
@@ -3702,7 +3797,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             finally:
                 await run_sync_lifecycle_operation(lock_file.close)
 
-    def _destroy_unready_sandbox(self, sandbox_id: str, info: SandboxInfo) -> None:
+    def _destroy_unready_sandbox(self, sandbox_id: str, info: SandboxInfo) -> DestroyOutcome:
         """Tear down a freshly-created container whose readiness check failed.
 
         The container was started by the backend but never reached ready, so it
@@ -3745,7 +3840,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 "Not destroying unready sandbox %s: adopted or being torn down by this instance",
                 sandbox_id,
             )
-            return
+            return DestroyOutcome.UNKNOWN
         try:
             if not self._claim_ownership(sandbox_id, for_destroy=True):
                 record_teardown_refusal()
@@ -3753,7 +3848,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     "Not destroying unready sandbox %s: owned by another instance or ownership unavailable",
                     sandbox_id,
                 )
-                return
+                return DestroyOutcome.UNKNOWN
             with self._held_teardown_lease(sandbox_id):
                 outcome, _error = self._backend_destroy(info)
             if outcome is DestroyOutcome.ABSENT:
@@ -3762,8 +3857,21 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 # Never handed out, but started by us: a set that did not go
                 # away is still ours to finish, so it is tracked for retry.
                 self._quarantine_after_failed_destroy(sandbox_id, info, outcome, identity=None)
+            return outcome
         finally:
             self._finish_local_teardown(sandbox_id)
+
+    def _cleanup_failed_creation(self, sandbox_id, info):
+        """Retain exact fresh creation when fenced cleanup cannot prove absence."""
+        try:
+            outcome = self._destroy_unready_sandbox(sandbox_id, info)
+        except Exception:
+            if not self._managed_pool_required() or info.provenance != PROVENANCE_CREATED:
+                raise
+            logger.warning("Managed post-create cleanup is unconfirmed for %s", sandbox_id, exc_info=True)
+            outcome = DestroyOutcome.UNKNOWN
+        if self._managed_pool_required() and info.provenance == PROVENANCE_CREATED and outcome is not DestroyOutcome.ABSENT:
+            self._quarantine_after_failed_destroy(sandbox_id, info, DestroyOutcome.UNKNOWN, identity=info.owner)
 
     def _create_sandbox(
         self,
@@ -3791,6 +3899,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             RuntimeError: If sandbox creation or readiness check fails.
         """
         effective_user_id = self._effective_acquire_user_id(user_id)
+        self._assert_chat_runtime(get_paths())
         extra_mounts = self._get_extra_mounts(thread_id, user_id=effective_user_id)
         provision_lark_cli_runtime = self._lark_integration_active(effective_user_id)
         provision_lark_cli_broker = self._lark_broker_active(effective_user_id)
@@ -3907,11 +4016,17 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         refuse if the store still cannot answer) and the acquisition fails now
         rather than after a wait that cannot succeed.
         """
+        from deerflow.spaces.chat_paths import ChatStoragePaths
+
+        paths = get_paths()
+        if self._managed_pool_required() and isinstance(paths, ChatStoragePaths) and not paths.has_personal_files and info.provenance == PROVENANCE_CREATED and info.chat_storage_enabled is True:
+            info.mountless_provider = self
         try:
+            self._assert_managed_container(info, teardown=True)
             self._publish_ownership(sandbox_id)
-        except (OwnershipBackendError, SandboxBeingDestroyedError):
+        except (OwnershipBackendError, SandboxBeingDestroyedError, StorageHostUnqualified):
             logger.error("Could not take ownership of new sandbox %s before its readiness wait; attempting ownership-fenced cleanup", sandbox_id)
-            self._destroy_unready_sandbox(sandbox_id, info)
+            self._cleanup_failed_creation(sandbox_id, info)
             raise
 
     async def _rollback_unready_after_cancellation(self, sandbox_id: str, info: SandboxInfo) -> None:
@@ -3952,6 +4067,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     async def _create_sandbox_async(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
         """Async counterpart to ``_create_sandbox``."""
         effective_user_id = self._effective_acquire_user_id(user_id)
+        await run_sync_lifecycle_operation(self._assert_chat_runtime, get_paths())
         extra_mounts = await run_sync_lifecycle_operation(self._get_extra_mounts, thread_id, user_id=effective_user_id)
         provision_lark_cli_runtime = await run_sync_lifecycle_operation(self._lark_integration_active, effective_user_id)
         provision_lark_cli_broker = await run_sync_lifecycle_operation(self._lark_broker_active, effective_user_id)

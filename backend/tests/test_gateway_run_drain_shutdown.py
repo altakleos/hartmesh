@@ -147,8 +147,9 @@ async def test_shutdown_is_noop_without_inflight_runs():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("startup_failure", [False, True])
-async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeypatch, startup_failure):
+@pytest.mark.parametrize("startup_failure", [False, True, "cancel"])
+@pytest.mark.parametrize("managed", [False, True])
+async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeypatch, startup_failure, managed, tmp_path):
     """Drain runs before services, then close runtime resources in stack order.
 
     Patches every ``langgraph_runtime`` collaborator down to trivial stand-ins so
@@ -216,6 +217,8 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
         events.append("engine_initialized")
         if startup_failure:
             start_owned_storage()
+            if startup_failure == "cancel":
+                raise asyncio.CancelledError()
             raise RuntimeError("partial engine startup failed")
 
     def fake_session_factory():
@@ -223,6 +226,10 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
         return None
 
     async def fake_close_engine():
+        if managed:
+            assert app.state.pool_runtime_owner._closing
+            with pytest.raises(StorageHostUnqualified):
+                peer.acquire()
         events.append("engine_closed")
 
     async def spy_shutdown(self, *, timeout):  # noqa: ANN001
@@ -266,9 +273,21 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     app.state.extensions = registry.build()
     startup_config = SimpleNamespace(database=SimpleNamespace(backend="memory", checkpoint_channel_mode="full", checkpoint_delta=SimpleNamespace(snapshot_frequency=10)), run_events=None)
 
-    async def scenario():
+    if managed:
+        from app.gateway.pool_runtime import managed_pool_runtime
+        from deerflow.spaces.docker import StorageHostUnqualified
+        from deerflow.spaces.runtime_owner import PoolRuntimeOwner
+
+        pool = tmp_path / "pool"
+        pool.mkdir(mode=0o750)
+        (pool / ".gateway-owner.lock").touch(mode=0o600)
+        startup_config.storage_spaces = SimpleNamespace(enabled=True, plan=object(), inventory_path=str(pool / "inventory.json"))
+        peer = PoolRuntimeOwner(pool)
+
+    async def run_runtime():
         if startup_failure:
-            with pytest.raises(RuntimeError, match="partial engine startup failed"):
+            error = asyncio.CancelledError if startup_failure == "cancel" else RuntimeError
+            with pytest.raises(error):
                 async with langgraph_runtime(app, startup_config):
                     pytest.fail("Failed startup admitted runtime work")
         else:
@@ -276,17 +295,31 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
                 start_owned_storage()
                 await metadata_entered.wait()
 
+    async def scenario():
+        if managed:
+            async with managed_pool_runtime(app, startup_config.storage_spaces):
+                await asyncio.to_thread(app.state.pool_runtime_owner.acquire)
+                await run_runtime()
+        else:
+            await run_runtime()
+
     task = asyncio.create_task(scenario())
     try:
         await asyncio.wait_for(metadata_entered.wait(), 2)
         await asyncio.wait_for(maintenance_entered.wait(), 2)
         await asyncio.sleep(0.03)
         assert not task.done() and "engine_closed" not in events
+        if managed:
+            with pytest.raises(StorageHostUnqualified):
+                peer.acquire()
         metadata_release.set()
         await asyncio.wait_for(metadata_finished.wait(), 2)
         assert not task.done() and "engine_closed" not in events
         maintenance_release.set()
         await asyncio.wait_for(task, 2)
+        if managed:
+            peer.acquire()
+            peer.close()
     finally:
         metadata_release.set()
         maintenance_release.set()

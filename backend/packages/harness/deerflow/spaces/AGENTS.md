@@ -1,5 +1,21 @@
 # Storage Spaces
 
+Private `runtime_owner.py` qualifies one participating native runtime per managed
+pool before baseline provider lookup/construction. The operator creates its
+stable empty 1000:1000/0600 file outside `.probe`; the Gateway never repairs or
+replaces it. Retain the exact provider/host binding and inode through qualification
+retry. Lifecycle-owned Docker runners inherit a duplicate FD; close only, never
+`LOCK_UN`. Mark closing before producers/drains, then close after all workers,
+provider shutdown and SQL disposal. `accepts`/publication checks are memory-only
+under metadata locks; fresh physical proof runs off-loop before native effects.
+Constructor reconciliation stays inert until binding. Unknown post-create
+outcomes retain exact container identity in quarantine; never free capacity from
+lost proof. A newly prepared NoUser chat may run mountless without qualification,
+using provider-specific names and only its own fresh mountless client incarnation;
+it cannot adopt, replace or remove foreign/native/unknown containers. This lock
+does not qualify container absence or replace strict inventory/holder fencing.
+Gateway transient ownership failures retry; generic unsupported hosts do not.
+
 Ordinary chat routing uses private `chat_paths.py`, `chat_bridge.py` and
 `chat_snapshots.py` adapters. `ChatStoragePaths` carries trusted role/root facts
 and exact mount projections, never a cached grant. The Gateway owns async

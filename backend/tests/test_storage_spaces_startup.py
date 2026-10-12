@@ -523,3 +523,18 @@ async def test_disabled_storage_startup_installs_tombstone_authority(instances):
     await initialize_storage_spaces(app, StorageSpacesConfig(), session_factory=sf)
     assert app.state.agent_instances is None and threads.instance_authority is app.state.agent_conversations
     assert await threads.get(chat["thread_id"], user_id="alice") is None
+
+
+@pytest.mark.asyncio
+async def test_managed_runtime_ownership_failure_retries_without_losing_history(startup):
+    from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
+
+    ss, app, config, sf, _, adapter, _ = startup
+    adapter.side_effect = StorageRuntimeUnavailable("Pool owned by another Gateway")
+    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    assert (await ss.storage_state(app)).reason == "host-unqualified"
+    assert app.state.agent_instances is not None
+    adapter.side_effect = None
+    await ss.storage_recheck(app)
+    assert (await ss.storage_state(app)).state == "ready"
+    assert adapter.await_count >= 2

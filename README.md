@@ -631,6 +631,13 @@ support for deleted native Spaces authorized to discard backups; it renews roots
 and preserves uncertain capacity. Account-release integration follows in the
 next Compose stage.
 
+A managed Compose pool admits one native Gateway runtime at a time. Startup
+retains an operator-created ownership lock until sandbox workers, storage tasks
+and database shutdown finish. A missing or busy lock leaves native storage
+unavailable and retries qualification; history and mountless text chats remain
+available. Stop the existing Gateway before starting another against its pool.
+This ownership requirement applies to deployments with a managed storage plan.
+
 Managed deployments refuse generic Space grant changes. User and Company storage
 also refuse generic backup, restore, archive, delete and acceptance of uncertain
 file state: their chat mounts require host containment. Recovery status remains

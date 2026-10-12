@@ -499,7 +499,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Registration last, so a check written against the earlier line still matches.
         logger.info("auth mode: sign_on_only (local passwords off; provider %s; registration %s)", providers, registration_state())
 
-    async with AsyncExitStack() as stack:
+    from app.gateway.pool_runtime import mark_pool_runtime_closing, pool_runtime_shutdown_boundary
+
+    async with AsyncExitStack() as stack, pool_runtime_shutdown_boundary(app):
         # Lifecycle and system-model hooks can originate on isolated subagent
         # loops. Bind them to the Gateway's serving loop before any runtime
         # dependency starts, then reset the binding last through the exit
@@ -743,6 +745,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         try:
             yield
         finally:
+            mark_pool_runtime_closing(app)
             # Drain in-flight run tasks BEFORE the AsyncExitStack tears down the
             # checkpointer (and its connection pool). A run still mid-graph would
             # otherwise leak into asyncio.run() shutdown, where langgraph's

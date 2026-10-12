@@ -1040,3 +1040,61 @@ async def test_host_reclaims_full_private_control_and_renews_roots(backing, tmp_
         if held is not None:
             os.close(held)
         await engine.dispose()
+
+
+def test_gateway_uid_1000_owns_stable_operator_lock(typed_prepared_pool):
+    """Actual unprivileged Gateway identity can lock, but cannot replace, it."""
+    import stat
+
+    from deerflow.spaces.docker import StorageHostUnqualified
+    from deerflow.spaces.runtime_owner import RUNTIME_LOCK, PoolRuntimeOwner
+
+    pool = typed_prepared_pool.pool
+    metadata = (pool / RUNTIME_LOCK).stat()
+    assert (metadata.st_uid, metadata.st_gid, stat.S_IMODE(metadata.st_mode), metadata.st_nlink, metadata.st_size) == (1000, 1000, 0o600, 1, 0)
+    # Pytest's private temporary ancestors are unlike the production data path.
+    # Give only traversal to this isolated fixture, then restore every mode.
+    import tempfile
+
+    temporary = Path(tempfile.gettempdir()).resolve()
+    assert pool.is_relative_to(temporary)
+    ancestors = []
+    for parent in pool.parents:
+        if parent == temporary:
+            break
+        mode = stat.S_IMODE(parent.stat().st_mode)
+        ancestors.append((parent, mode))
+        parent.chmod(mode | 0o111)
+    try:
+        child = os.fork()
+        if child == 0:
+            first, second = PoolRuntimeOwner(pool), PoolRuntimeOwner(pool)
+            try:
+                os.setgroups([])
+                os.setgid(1000)
+                os.setuid(1000)
+                first.acquire()
+                try:
+                    second.acquire()
+                except StorageHostUnqualified:
+                    pass
+                else:
+                    os._exit(2)
+                try:
+                    (pool / RUNTIME_LOCK).unlink()
+                except PermissionError:
+                    pass
+                else:
+                    os._exit(3)
+                first.close()
+                second.acquire()
+                second.close()
+            except BaseException:
+                os._exit(1)
+            os._exit(0)
+        _, status = os.waitpid(child, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
+        assert (pool / RUNTIME_LOCK).stat().st_ino == metadata.st_ino
+    finally:
+        for parent, mode in ancestors:
+            parent.chmod(mode)

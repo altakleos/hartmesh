@@ -287,6 +287,25 @@ may rise or fall without removing existing slots. Growth preserves files and
 filesystem identity; it requires the Gateway and other holders to be stopped.
 `forget --discard` explicitly destroys a slot's contents. Every successful or
 partial verb prints one sorted JSON document; a refusal carries its reason.
+
+Managed-plan qualification requires one participating Gateway runtime per pool.
+`prepare` and `mount-all` maintain `.gateway-owner.lock`, a stable empty regular
+single-link file owned by 1000:1000 with mode 0600, outside temporary probes.
+A valid file held by a Gateway is left untouched; repair requires exclusive
+nonblocking ownership, and unknown bytes or inode types are refused. The Gateway
+never creates, replaces or repairs it. Acquisition precedes baseline provider
+construction and binds that exact provider to the owning Gateway lifetime.
+Qualification retries retain the same file descriptor and provider. Closing
+refuses new native admission and publication while owned teardown drains; final
+close follows storage workers, provider shutdown and database disposal. Native
+Docker commands inherit a duplicate of that descriptor, preserving exclusion
+if their launcher exits. The lock does not prove container or daemon-request
+absence; destructive cleanup still needs strict inventory and holder fencing.
+Missing or busy ownership reports `host-unqualified` and retries every minute.
+History and freshly prepared mountless chats stay available. Unqualified runtimes
+cannot adopt, replace or remove native or unknown containers; mountless creations
+use provider-specific names and never reuse cached native routing.
+
 Host commands run through `nsenter -m -t 1`. Every verb holds the pool's exclusive
 lock, inherited by host tools so it remains held if the CLI process dies during
 offline repair or growth. `prepare --at-start` bounds its entire child process group at 600 seconds;

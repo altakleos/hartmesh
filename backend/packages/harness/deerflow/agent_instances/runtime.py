@@ -116,7 +116,17 @@ async def qualified_attachments(files, *, baseline_provider=None):
     from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
     from deerflow.spaces.docker import DockerStorageAdapter, StorageAdapterUnsupported, StorageHostUnqualified
 
-    if baseline_provider is None:
+    owner = getattr(files, "_pool_runtime_owner", None)
+    if getattr(files, "_managed_runtime_required", False):
+        if owner is None:
+            raise StorageHostUnqualified("Managed storage requires its owning Gateway lifetime")
+        if baseline_provider is None:
+            from deerflow.sandbox.sandbox_provider import get_baseline_sandbox_provider
+
+            baseline_provider = await await_drained(run_file_io(owner.resolve_provider, get_baseline_sandbox_provider))
+        else:
+            await await_drained(run_file_io(owner.assert_provider, baseline_provider))
+    elif baseline_provider is None:
         # Resolve before installing the run provider, so no ambient requester
         # environment can ever become the instance's fallback.
         from deerflow.sandbox.sandbox_provider import get_initialized_sandbox_provider
@@ -132,6 +142,10 @@ async def qualified_attachments(files, *, baseline_provider=None):
         raise StorageHostUnqualified("Instance execution requires qualified direct-host Docker AIO storage")
     if getattr(files, "inventory_path", None) is None:
         raise StorageHostUnqualified("Native execution requires a configured inventory path")
+    if owner is not None:
+        baseline_provider._managed_runtime_required = True
+        baseline_provider._pool_runtime_owner = owner
+        baseline_provider._backend._runtime_runner = owner.run
     lock = getattr(files, "_qualification_lock", None)
     if lock is None:
         lock = files._qualification_lock = asyncio.Lock()
@@ -142,6 +156,9 @@ async def qualified_attachments(files, *, baseline_provider=None):
             mounts = SpaceAttachments(files, adapter)
         elif mounts.provider.host_id != adapter.host_id:
             raise StorageAdapterUnsupported("The home attachment belongs to another qualified host")
+        if owner is not None:
+            await await_drained(run_file_io(owner.assert_provider, baseline_provider))
+            await await_drained(run_file_io(baseline_provider._reconcile_orphans))
         return baseline_provider, mounts
 
 

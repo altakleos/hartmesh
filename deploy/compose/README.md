@@ -2290,17 +2290,29 @@ Each refusal follows `render_config: refusing to render: `:
 | Pool directory | root:1000 | 0750 | Pool boundary. |
 | `inventory.v2.json` | 1000:1000 | 0440 | Slot identities, kinds and bounds. |
 | `.storage-init.lock` | root:root | 0600 | Exclusive operator lock. |
+| `.gateway-owner.lock` | 1000:1000 | 0600 | Stable empty runtime ownership file. |
 | `.probe/` | 1000:1000 | 0700 | Temporary Docker nonce probes. |
 | `<slot>.img` | root:1000 | 0640 | Fully allocated ext4 image. |
 | `<slot>.volume` mount point | root:1000 | 0750 | Mount point beneath the mounted root. |
 | `<slot>.volume/data/` | 1000:1000 | 0770 | Visible files. |
 | `<slot>.volume/control/` | 1000:1000 | 0700 | Private staging, receipts and restore points. |
 
-Slot IDs have 32 hexadecimal characters. The mounted filesystem root retains
-root:root 0755. Visible and private bytes consume the same fixed capacity;
+Slot IDs have 32 hexadecimal characters. The mounted filesystem parent is
+root:1000 0770; its unmounted mount point stays root:1000 0750. Visible and private bytes consume the same fixed capacity;
 an empty 1 GiB slot already occupies 1 GiB of the data disk. Inventory schema 2
 adds a kind to every slot; the standalone helper still writes schema 1.
 Never edit the inventory by hand.
+
+One participating native Gateway runtime may own a managed pool. `prepare` and
+`mount-all` create or qualify the stable `.gateway-owner.lock`; a valid file held
+by a live Gateway is untouched. Do not delete or replace this file. The Gateway
+acquires it before native provider construction and holds it through sandbox,
+storage and database shutdown. Docker commands inherit ownership, so an in-flight
+child can retain it after its launcher exits. A missing, busy or unverifiable
+file leaves native storage unavailable; the Gateway keeps history and mountless
+text chats available and retries qualification every minute. Stop the existing
+Gateway before starting a replacement against the same pool. This is runtime
+exclusion, not evidence that every storage container has been removed.
 
 Assignment creates kind-specific folders at 0700: user `files/`, `projects/`,
 `conversations/`; company `shared/`, `projects/`; agent `uploads/`, `outputs/`,

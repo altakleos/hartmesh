@@ -328,6 +328,7 @@ class StorageInitializer:
 
     def mount_all(self):
         inventory = self.load()
+        self._prepare_runtime_owner()
         mounted, failed, already = [], [], 0
         for spec in inventory.volumes.values():
             try:
@@ -341,6 +342,48 @@ class StorageInitializer:
             except (Refused, OSError, BackingUnavailable, subprocess.TimeoutExpired) as exc:
                 failed.append(dict(slot_id=spec.slot_id, error=str(exc)))
         return self.document("mount-all", f"{len(inventory.volumes)} spaces: {len(mounted)} mounted now, {already} already mounted, {len(failed)} failed", 2 if failed else 0, mounted=mounted, already=already, failed=failed)
+
+    def _prepare_runtime_owner(self):
+        from deerflow.spaces.runtime_owner import RUNTIME_LOCK
+
+        no_symlinks(self.pool)
+        parent = os.open(self.pool, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        descriptor = None
+        try:
+            flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+            try:
+                descriptor = os.open(RUNTIME_LOCK, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent)
+                created = True
+            except FileExistsError:
+                descriptor = os.open(RUNTIME_LOCK, flags, dir_fd=parent)
+                created = False
+
+            def qualify():
+                opened = os.fstat(descriptor)
+                named = os.stat(RUNTIME_LOCK, dir_fd=parent, follow_symlinks=False)
+                if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or opened.st_size != 0 or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                    raise Refused("runtime ownership must be a stable empty single-link regular file; retained evidence was not changed")
+                return opened
+
+            metadata = qualify()
+            if created or (metadata.st_uid, metadata.st_gid, stat.S_IMODE(metadata.st_mode)) != (1000, 1000, 0o600):
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise Refused("runtime ownership metadata cannot be repaired while a Gateway holds it") from exc
+                qualify()
+                self._set_mode(descriptor, 1000, 1000, 0o600)
+                qualify()
+                os.fsync(descriptor)
+                os.fsync(parent)
+            # Valid metadata needs no exclusive acquisition or modification:
+            # prepare/mount-all can retain the file of a running Gateway.
+        except OSError as exc:
+            raise Refused("runtime ownership file is unavailable; no replacement was made") from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            os.close(parent)
 
     @staticmethod
     def fstab_line(spec):

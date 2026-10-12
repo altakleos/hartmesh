@@ -348,7 +348,7 @@ class DockerStorageAdapter:
                 start=False,
             )
 
-        adapter = cls(prepare=prepare, probe_image=backend._image, pool=pool, clean_probe=clean_probe)
+        adapter = cls(prepare=prepare, runner=backend._run, probe_image=backend._image, pool=pool, clean_probe=clean_probe)
         # Storage can be qualified before this provider supports its configured
         # workspace topology. Preparation and resume retain the same guard.
         adapter._execution_guard = topology
