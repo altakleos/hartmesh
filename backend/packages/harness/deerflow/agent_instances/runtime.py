@@ -146,20 +146,35 @@ async def qualified_attachments(files, *, baseline_provider=None):
         baseline_provider._managed_runtime_required = True
         baseline_provider._pool_runtime_owner = owner
         baseline_provider._backend._runtime_runner = owner.run
+        baseline_provider._backend._managed_native_required = True
     lock = getattr(files, "_qualification_lock", None)
     if lock is None:
         lock = files._qualification_lock = asyncio.Lock()
     async with lock:
-        mounts = getattr(files, "attachments", None)
-        adapter = await await_drained(run_file_io(DockerStorageAdapter.from_local_backend, baseline_provider._backend, pool=Path(files.inventory_path).parent, clean_probe=mounts is None))
-        if mounts is None:
-            mounts = SpaceAttachments(files, adapter)
-        elif mounts.provider.host_id != adapter.host_id:
-            raise StorageAdapterUnsupported("The home attachment belongs to another qualified host")
-        if owner is not None:
-            await await_drained(run_file_io(owner.assert_provider, baseline_provider))
-            await await_drained(run_file_io(baseline_provider._reconcile_orphans))
-        return baseline_provider, mounts
+        previous = getattr(baseline_provider, "_native_creation", None)
+        try:
+            mounts = getattr(files, "attachments", None)
+            adapter = await await_drained(run_file_io(DockerStorageAdapter.from_local_backend, baseline_provider._backend, pool=Path(files.inventory_path).parent, clean_probe=mounts is None))
+            if mounts is None:
+                mounts = SpaceAttachments(files, adapter)
+            elif mounts.provider.host_id != adapter.host_id:
+                raise StorageAdapterUnsupported("The home attachment belongs to another qualified host")
+            if owner is not None:
+                evidence = await await_drained(run_file_io(owner.qualify_native_evidence, baseline_provider, daemon_id=adapter.host_id))
+                await await_drained(run_file_io(baseline_provider._install_native_creation, evidence, adapter))
+                await await_drained(run_file_io(owner.assert_provider, baseline_provider))
+                await await_drained(run_file_io(baseline_provider._reconcile_orphans))
+            return baseline_provider, mounts
+        except BaseException as exc:
+            from deerflow.community.aio_sandbox.native_creation import NativeCreateBridge
+            from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
+
+            bridge = getattr(baseline_provider, "_native_creation", None)
+            if isinstance(bridge, NativeCreateBridge):
+                bridge.invalidate()
+            if isinstance(previous, NativeCreateBridge) and isinstance(exc, StorageAdapterUnsupported):
+                raise StorageRuntimeUnavailable("Previously qualified native runtime is unavailable; its evidence and provider are retained") from exc
+            raise
 
 
 async def prepare_environment(execution, *, baseline_provider=None, app_config=None):

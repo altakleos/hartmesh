@@ -1,5 +1,16 @@
 # AIO Sandbox
 
+Managed native primaries require installed `native_creation.py` accounting and the
+exact owner-held journal. Persist pending before submission; preserve the existing
+run/create timeout policy. Strict actual daemon/ID/name/attempt/slot inspection
+precedes verified handoff then durable ACK. Opaque worker reservations fence
+starting/count transfer across sync, async and prewarm cancellation. No metadata
+lock encloses journal/Docker/store IO. Partial journal publication restores pending
+accounting or closes admission. Pending denies guessed adoption/replacement/removal;
+known exact returned or live tracked IDs may use canonical fenced cleanup.
+Confirmed absence retires acknowledged handoffs only; unacknowledged evidence stays
+reserved. SDK-less quarantine retains actual identity, never a guessed client.
+
 With managed storage off, `_get_thread_mounts` retains the release-45 binds and
 does not resolve a Space. Storage-on ordinary chats use a Gateway-owned
 `ChatStorageHost` callback before acquire, prewarm, cache/warm/discovery adoption,

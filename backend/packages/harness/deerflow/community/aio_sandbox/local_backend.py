@@ -26,9 +26,11 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 from deerflow.spaces.backings import BackingUnavailable
+from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
 from deerflow.utils.network import get_free_port, release_port
 
 from .backend import DestroyOutcome, SandboxBackend, wait_for_sandbox_ready
+from .native_creation import NATIVE_CREATE_HANDOFF, NativeCreateBridge, NativeCreateUnconfirmed
 from .network_proxy import RELAY_AUTH_HEADER, RELAY_TOKEN_ENV
 from .sandbox_info import PROVENANCE_CREATED, PROVENANCE_REDISCOVERED, SandboxInfo
 
@@ -675,6 +677,8 @@ class LocalContainerBackend(SandboxBackend):
         self._network_mode = str(self._network_config.get("mode", "open"))
         self._allow_synthetic_dns = False
         self._runtime = self._detect_runtime()
+        self._managed_native_required = False
+        self._native_creation = None
 
         if self._network_mode != "open":
             if self._runtime != "docker":
@@ -690,6 +694,14 @@ class LocalContainerBackend(SandboxBackend):
     def _run(self, *args, **kwargs):
         """Use the retained pool owner for managed native child commands."""
         return getattr(self, "_runtime_runner", subprocess.run)(*args, **kwargs)
+
+    def _managed_native_bridge(self, labels):
+        if not getattr(self, "_managed_native_required", False) or not labels or not any(isinstance(key, str) and key.startswith("hartmesh.storage.space.") for key in labels):
+            return None
+        bridge = getattr(self, "_native_creation", None)
+        if self._runtime != "docker" or not isinstance(bridge, NativeCreateBridge) or not bridge.ready:
+            raise StorageRuntimeUnavailable("Managed native creation requires its completely installed owning journal bridge")
+        return bridge
 
     @property
     def network_mode(self) -> str:
@@ -1010,6 +1022,10 @@ class LocalContainerBackend(SandboxBackend):
             if not isinstance(storage_labels, dict) or any(not isinstance(key, str) or re.fullmatch(r"hartmesh\.storage\.space\.[0-9a-f]{32}", key) is None or value != "1" for key, value in storage_labels.items()):
                 raise ValueError("Chat storage labels must be exact host slot identities")
             owner_labels.update({**storage_labels, "hartmesh.chat.storage": "on"})
+        native_bridge = self._managed_native_bridge(owner_labels)
+        if native_bridge is not None:
+            native_bridge._requested({**self._sandbox_labels(sandbox_id), **owner_labels})
+            native_bridge.require_admissible(name=container_name, owner_id=user_id)
 
         # Retry loop: if Docker rejects the port (e.g. a stale container still
         # holds the binding after a process restart), skip that port and try the
@@ -1043,6 +1059,11 @@ class LocalContainerBackend(SandboxBackend):
                         owner_labels=owner_labels,
                     )
                 break
+            except NativeCreateUnconfirmed:
+                release_port(port)
+                # A nonzero CLI reply is never permission to submit another
+                # request or adopt a conflicting name past pending evidence.
+                raise
             except _ExistingRestrictedSandbox as exc:
                 release_port(port)
                 # Found, not started: the provider must not roll this back as
@@ -1079,6 +1100,7 @@ class LocalContainerBackend(SandboxBackend):
             container_id=container_id,
             request_headers={RELAY_AUTH_HEADER: relay_token} if relay_token is not None else {},
             provenance=PROVENANCE_CREATED,
+            owner=self._owner_from_labels(owner_labels),
             chat_storage_enabled=storage_labels is not None,
         )
 
@@ -1108,6 +1130,14 @@ class LocalContainerBackend(SandboxBackend):
                 raise _ExistingRestrictedSandbox(existing)
             raise RuntimeError(f"Restricted sandbox {sandbox_id} already exists but is not ready for adoption")
 
+        native_bridge = self._managed_native_bridge(owner_labels)
+        handoff = None
+        context = None
+        if native_bridge is not None:
+            # Count uncertainty before any sidecar/network effect, including
+            # failure before the primary container can return an identity.
+            handoff = native_bridge.begin(name=container_name, labels={**self._restricted_labels(sandbox_id, "sandbox"), **(owner_labels or {})})
+            context = NATIVE_CREATE_HANDOFF.set(handoff)
         try:
             self._create_internal_network(network_name, sandbox_id)
             self._create_egress_network(egress_network_name, sandbox_id)
@@ -1151,6 +1181,10 @@ class LocalContainerBackend(SandboxBackend):
                 labels={**self._restricted_labels(sandbox_id, "sandbox"), **(owner_labels or {})},
             )
         except BaseException as exc:
+            if handoff is not None:
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+                raise NativeCreateUnconfirmed(handoff) from exc
             message = str(exc).lower()
             if "is already in use by container" in message or "conflict. the container name" in message:
                 existing = self.discover(sandbox_id)
@@ -1163,6 +1197,9 @@ class LocalContainerBackend(SandboxBackend):
                     raise
             self._cleanup_restricted_resources(sandbox_id)
             raise
+        finally:
+            if context is not None:
+                NATIVE_CREATE_HANDOFF.reset(context)
 
     def _create_internal_network(self, network_name: str, sandbox_id: str) -> None:
         existing = self._inspect_network(network_name)
@@ -2240,6 +2277,9 @@ class LocalContainerBackend(SandboxBackend):
         logger.info(f"Starting container using {self._runtime}: {log_cmd}")
 
         try:
+            native_bridge = self._managed_native_bridge(labels)
+            if native_bridge is not None:
+                return native_bridge.submit(name=container_name, labels=labels, command=cmd, runner=self._run, handoff=NATIVE_CREATE_HANDOFF.get())
             result = self._run(cmd, capture_output=True, text=True, check=True, **({"timeout": 30} if not start else {}))
             container_id = result.stdout.strip()
             logger.info(f"Started container {container_name} (ID: {container_id}) using {self._runtime}")
