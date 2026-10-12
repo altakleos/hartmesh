@@ -159,16 +159,26 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     from fastapi import FastAPI
 
     from app.gateway.deps import langgraph_runtime
+    from app.gateway.storage_spaces import ExecutionStatus
     from deerflow.extensions.registry import ExtensionRegistry
 
     events: list[str] = []
     metadata_entered, metadata_release = asyncio.Event(), asyncio.Event()
+    maintenance_entered, maintenance_release = asyncio.Event(), asyncio.Event()
+    metadata_finished = asyncio.Event()
 
     async def held_metadata():
         metadata_entered.set()
         await metadata_release.wait()
         assert "engine_closed" not in events
         events.append("metadata_drained")
+        metadata_finished.set()
+
+    async def held_maintenance():
+        maintenance_entered.set()
+        await maintenance_release.wait()
+        assert "engine_closed" not in events
+        events.append("maintenance_drained")
 
     async def recheck():
         try:
@@ -178,7 +188,7 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
             events.append("recheck_drained")
 
     def start_owned_storage():
-        app.state.agent_execution = SimpleNamespace(adapter_task=None, metadata_task=asyncio.create_task(held_metadata()), company_task=None, mount_task=None, mount_cleanup_task=None, mount_verify_task=None, mount_cleanup=None)
+        app.state.agent_execution = ExecutionStatus(metadata_task=asyncio.create_task(held_metadata()), maintenance_task=asyncio.create_task(held_maintenance()))
         app.state.storage_recheck_task = asyncio.create_task(recheck())
 
     @asynccontextmanager
@@ -269,14 +279,20 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     task = asyncio.create_task(scenario())
     try:
         await asyncio.wait_for(metadata_entered.wait(), 2)
+        await asyncio.wait_for(maintenance_entered.wait(), 2)
         await asyncio.sleep(0.03)
         assert not task.done() and "engine_closed" not in events
         metadata_release.set()
+        await asyncio.wait_for(metadata_finished.wait(), 2)
+        assert not task.done() and "engine_closed" not in events
+        maintenance_release.set()
         await asyncio.wait_for(task, 2)
     finally:
         metadata_release.set()
+        maintenance_release.set()
         await asyncio.gather(task, return_exceptions=True)
     assert events.index("metadata_drained") < events.index("engine_closed")
+    assert events.index("maintenance_drained") < events.index("engine_closed")
     assert events.index("recheck_drained") < events.index("engine_closed")
     if startup_failure:
         assert "service_started" not in events
