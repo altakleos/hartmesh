@@ -34,8 +34,16 @@ def mark_effect():
         effect[0] = True
 
 
-def _open(volume, *, create, shared=False):
-    root = open_directory_source(volume.control_path)
+class WorkflowLockMissing(Exception):
+    """No existing ownership file; creation needs fresh SQL binding admission."""
+
+
+def _open(volume, *, create, shared=False, control_fd=None):
+    if control_fd is None:
+        with volume.filesystem() as filesystem:
+            root = os.dup(filesystem._control_fd)
+    else:
+        root = os.dup(control_fd)
     try:
         try:
             fd = os.open(_LOCK, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_CREAT if create else 0), 0o600, dir_fd=root)
@@ -63,7 +71,7 @@ def probe(volume):
         os.close(fd)
 
 
-def acquire(volumes, *, shared=False):
+def acquire(volumes, *, shared=False, create=True, control_fds=None):
     from deerflow.spaces.service import SpaceOperationPending
 
     descriptors = []
@@ -72,7 +80,9 @@ def acquire(volumes, *, shared=False):
         for key in sorted(volumes):
             while True:
                 try:
-                    descriptor = _open(volumes[key], create=True, shared=shared)
+                    descriptor = _open(volumes[key], create=create, shared=shared, control_fd=control_fds[key] if control_fds is not None else None)
+                    if descriptor is None:
+                        raise WorkflowLockMissing("The private ownership file is absent")
                     descriptors.append(descriptor)
                     break
                 except SpaceOperationPending:

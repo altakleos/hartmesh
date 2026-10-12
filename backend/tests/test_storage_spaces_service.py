@@ -97,7 +97,7 @@ async def test_typed_assignment_creates_layout_and_atomic_role_link(space_file_s
     volume = catalog.verified[binding.slot_id]
     assert volume.spec.kind == kind
     for root, names in zip((volume.data_path, volume.control_path), LAYOUT[kind], strict=True):
-        assert {p.name for p in root.iterdir()} == set(names)
+        assert {p.name for p in root.iterdir()} == set(names) | ({".space-binding"} if root == volume.control_path else set())
         for name in names:
             metadata = (root / name).stat()
             assert stat.S_IMODE(metadata.st_mode) == 0o700

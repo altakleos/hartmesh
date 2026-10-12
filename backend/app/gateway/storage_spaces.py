@@ -32,7 +32,7 @@ from deerflow.persistence.agent_instances.model import AgentInstanceRow
 from deerflow.persistence.spaces.files import SpaceBackingRow
 from deerflow.persistence.spaces.model import SpaceRow
 from deerflow.persistence.user.model import UserRow
-from deerflow.spaces.backings import RESERVE_BYTES, RESERVE_INODES, PreparedVolumeCatalog
+from deerflow.spaces.backings import RESERVE_BYTES, RESERVE_INODES, BackingUnavailable, PreparedVolumeCatalog
 from deerflow.spaces.contract import Custody, InvalidPrincipal, MutationMode, Permission, PrincipalRef, ResolvedPrincipal, SpaceConflict
 from deerflow.spaces.docker import StorageHostUnqualified
 from deerflow.spaces.principals import HostPrincipalResolver
@@ -88,6 +88,8 @@ class ExecutionStatus:
     mount_retry_at: float = 0
     adapter_task: asyncio.Future | None = None
     metadata_task: asyncio.Future | None = None
+    marker_backfill_task: asyncio.Future | None = None
+    marker_backfill_started: bool = False
     company_task: asyncio.Future | None = None
     maintenance_task: asyncio.Future | None = None
     company_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -398,7 +400,19 @@ async def _adapter_step(app, *, timeout=ADAPTER_LIMIT_SECONDS):
 async def _load_metadata(app):
     files = app.state.storage_spaces
     await files.load_bound_slots()
-    errors = await files.refresh_bound_volumes()
+    errors = {}
+    status = app.state.agent_execution
+    if status.mount_pending or status.mount_reverify:
+        raise BackingUnavailable("Initial mount verification is still pending")
+    if not status.marker_backfill_started:
+        status.marker_backfill_started = True
+        status.marker_backfill_task = asyncio.create_task(files.backfill_binding_markers())
+        status.marker_backfill_task.add_done_callback(_observe)
+    backfill = getattr(status, "marker_backfill_task", None)
+    if backfill is not None:
+        errors.update(await asyncio.shield(backfill))
+        status.marker_backfill_task = None
+    errors.update(await files.refresh_bound_volumes())
     await files.load_unclaimed_slots()
     counts = {kind: await allowance(app, kind) for kind in KINDS}
     return errors, counts
@@ -798,7 +812,7 @@ async def close_storage_spaces(app):
         status = getattr(app.state, "agent_execution", None)
         owned = [getattr(app.state, "storage_inventory_task", None)]
         if status is not None:
-            owned.extend((status.adapter_task, status.metadata_task, status.company_task, status.maintenance_task, status.mount_task, status.mount_cleanup_task, status.mount_verify_task))
+            owned.extend((status.adapter_task, status.metadata_task, getattr(status, "marker_backfill_task", None), status.company_task, status.maintenance_task, status.mount_task, status.mount_cleanup_task, status.mount_verify_task))
         owned = [task for task in owned if task is not None]
         if owned:
             await asyncio.gather(*owned, return_exceptions=True)

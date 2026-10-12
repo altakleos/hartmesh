@@ -120,6 +120,10 @@ Host recovery proves interrupted file effects or reconciles exact feature receip
 when attachments are fenced and storage verifies. Live writes hold private locks;
 unprovable outcomes stay pending. Busy responses include their workflow or
 lifecycle cause.
+Qualified bound roots also verify a private marker against their durable backing
+identity before file or attachment use. Missing or conflicting markers make the
+Space unavailable. Startup can add an absent marker to an existing verified
+binding without changing data; ordinary requests and readiness retries cannot.
 Installed extensions can negotiate storage contract v1 with plugin contract v4.
 Actions, model tools and services use host-bound resource capabilities and typed
 actors; nonhuman callers never impersonate a human owner. Resource pages request

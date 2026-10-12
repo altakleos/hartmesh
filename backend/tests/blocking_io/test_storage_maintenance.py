@@ -46,3 +46,14 @@ async def test_direct_and_receipt_settlement_do_not_block_the_event_loop(tmp_pat
         files.workflow_settlers["fixture-domain"] = settle
         assert await files.settle_interrupted() == 1
         assert not await asyncio.to_thread(receipt.path.exists)
+
+        from deerflow.spaces.filesystem import FilesystemUnavailable
+
+        physical = next(iter(files._verified.values()))
+        marker = physical.control_path / ".space-binding"
+        await asyncio.to_thread(marker.unlink)
+        with pytest.raises(FilesystemUnavailable):
+            await files.list_directory(actor=ALICE, space_id=space.id)
+        assert await files.backfill_binding_markers() == {}
+        assert await asyncio.to_thread(marker.exists)
+        assert await files.list_directory(actor=ALICE, space_id=space.id) != ([], False)

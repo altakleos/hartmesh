@@ -25,6 +25,7 @@ from deerflow.persistence.spaces.model import SpaceGrantRow, SpaceRow
 from deerflow.spaces.backings import BackingUnavailable, PreparedVolumeCatalog
 from deerflow.spaces.contract import Custody, FeatureBinding, InvalidPrincipal, MutationMode, Permission, PrincipalRef, Space, SpaceConflict, SpaceDenied
 from deerflow.spaces.filesystem import FileConflict, UnsafeSpacePath, _path
+from deerflow.spaces.incarnations import prepare_marker, verify_bound
 from deerflow.spaces.provision import LAYOUT
 from deerflow.spaces.registry import SpaceRegistry, _stored_permissions
 from deerflow.utils.file_io import await_drained, run_file_io
@@ -130,6 +131,8 @@ class SpaceFiles:
                 )
             )
             await session.flush()
+            self.unclaimed_slots[getattr(spec, "kind", None)].add(spec.slot_id)
+            await await_drained(run_file_io(prepare_marker, volume, row.backing_handle))
             if kind is not None:
                 # SQL uniqueness is established before making filesystem effects.
                 # A rolled-back or uncertain publication retains these folders.
@@ -181,6 +184,11 @@ class SpaceFiles:
 
         return await await_drained(perform())
 
+    async def backfill_binding_markers(self):
+        from deerflow.spaces.incarnation_backfill import backfill_binding_markers
+
+        return await await_drained(backfill_binding_markers(self))
+
     async def load_bound_slots(self):
         async with self.registry._sf() as session:
             used = set((await session.execute(select(SpaceBackingRow.slot_id))).scalars())
@@ -200,6 +208,7 @@ class SpaceFiles:
                 self._binding_spec(binding)
                 volume = await run_file_io(self.catalog.verify, binding.slot_id, previous=self._verified.get(binding.slot_id))
                 self._check_incarnation(binding, volume)
+                await run_file_io(verify_bound, volume, binding.backing_handle)
                 proven[binding.backing_handle] = volume
             except (BackingUnavailable, OSError) as exc:
                 errors[binding.slot_id] = str(exc)
@@ -269,7 +278,7 @@ class SpaceFiles:
         self._check_incarnation(binding, volume)
         binding.max_bytes, binding.max_inodes = spec.max_bytes, spec.max_inodes
         self._verified[binding.slot_id] = volume
-        return volume
+        return await run_file_io(verify_bound, volume, binding.backing_handle)
 
     def _binding_spec(self, binding):
         spec = self.catalog.volumes.get(binding.slot_id)
@@ -298,6 +307,7 @@ class SpaceFiles:
             self._binding_spec(binding)
             volume = await run_file_io(self.catalog.verify, binding.slot_id, previous=self._verified.get(binding.slot_id))
             self._check_incarnation(binding, volume)
+            await run_file_io(verify_bound, volume, binding.backing_handle)
         except (BackingUnavailable, OSError):
             return False
         return True
