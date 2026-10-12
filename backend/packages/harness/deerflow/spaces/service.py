@@ -347,7 +347,9 @@ class SpaceFiles:
     def _empty(volume) -> bool:
         # Provider roots are host-controlled and must be entirely unclaimed,
         # including private recovery state; dotfiles are ordinary existing data.
-        return not any(volume.data_path.iterdir()) and not any(volume.control_path.iterdir())
+        from deerflow.spaces.release_filesystem import unresolved_journals
+
+        return not any(volume.data_path.iterdir()) and not any(volume.control_path.iterdir()) and not unresolved_journals(volume)
 
     async def _volume(self, session, row):
         claims = self._claim_snapshot()

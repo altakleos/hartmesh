@@ -942,3 +942,99 @@ async def test_resource_http_and_durable_binding_use_the_qualified_volume(backin
             assert quota["max_inodes"] == backing[1].spec.max_inodes
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exhaustion", ["bytes", "inodes", "held-bytes"])
+async def test_host_reclaims_full_private_control_and_renews_roots(backing, tmp_path, exhaustion):
+    """Real ENOSPC, root renewal and fresh native writes; mandatory CI only."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperationRow
+    from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceBackupRow, SpaceMountRow
+    from deerflow.persistence.spaces.model import SpaceEventRow, SpaceGrantRow, SpaceRow
+    from deerflow.spaces.contract import Custody, MutationMode, PrincipalRef, ResolvedPrincipal
+    from deerflow.spaces.incarnations import BoundVolume
+    from deerflow.spaces.principals import HostPrincipalResolver
+    from deerflow.spaces.recovery import SpaceRecovery
+    from deerflow.spaces.registry import SpaceRegistry
+    from deerflow.spaces.service import SpaceFiles, SpaceOperationPending
+
+    catalog, volume, _image, _containment = backing
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'release.db'}")
+    sf = async_sessionmaker(engine, expire_on_commit=False)
+    actor = PrincipalRef("human", "native-release")
+    held = None
+
+    async def lookup(reference):
+        return ResolvedPrincipal(reference) if reference == actor else None
+
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all, tables=[model.__table__ for model in (SpaceRow, SpaceGrantRow, SpaceEventRow, SpaceBackingRow, SpaceFileOperationRow, SpaceAttachmentRow, SpaceMountRow, SpaceBackupRow)])
+        files = SpaceFiles(SpaceRegistry(sf, HostPrincipalResolver(human=lookup)), catalog)
+        space = await files.create(actor=actor, name="Retiring", custody=Custody.personal(actor), mode=MutationMode.NATIVE)
+        before = catalog.verify(volume.spec.slot_id)
+        stale = BoundVolume(before, space.backing_handle)
+        owned = stale.filesystem()
+        try:
+            assert not any(before.data_path.iterdir())
+            if exhaustion == "inodes":
+                for index in range(before.spec.max_inodes + 1):
+                    try:
+                        (before.control_path / f"full-{index}").touch(exist_ok=False)
+                    except OSError as exc:
+                        assert exc.errno == errno.ENOSPC
+                        break
+                else:
+                    pytest.fail("Prepared filesystem did not enforce its inode bound")
+                assert catalog.verify(before.spec.slot_id).available_inodes == 0
+            else:
+                held = os.open(before.control_path / "full-private-backup", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                chunk = bytes(1 << 20)
+                for _ in range(before.spec.max_bytes // len(chunk) + 2):
+                    try:
+                        os.write(held, chunk)
+                    except OSError as exc:
+                        assert exc.errno == errno.ENOSPC
+                        break
+                else:
+                    pytest.fail("Prepared filesystem did not enforce its byte bound")
+                if exhaustion != "held-bytes":
+                    os.close(held)
+                    held = None
+                assert catalog.verify(before.spec.slot_id).available_bytes < 4096
+            async with sf() as session, session.begin():
+                row = await session.get(SpaceRow, space.id)
+                row.status, row.generation = "deleted", 2
+                session.add(SpaceEventRow(space_id=space.id, generation=2, action="delete", actor_kind="human", actor_id=actor.subject_id, details={"retained_backups": False, "retained_binding": True, "cause": "seat-released"}))
+            if exhaustion == "held-bytes":
+                with pytest.raises(SpaceOperationPending):
+                    await SpaceRecovery(files).host_release(space.id)
+                async with sf() as session:
+                    assert await session.get(SpaceBackingRow, space.backing_handle) is not None
+                assert os.fstat(held).st_nlink == 0
+                os.close(held)
+                held = None
+            result = await SpaceRecovery(files).host_release(space.id)
+            assert result["newly_reclaimed"] and result["slot_released"]
+            renewed = catalog.verify(before.spec.slot_id)
+            assert renewed.spec.filesystem_uuid == before.spec.filesystem_uuid
+            assert renewed.root_inode != before.root_inode and renewed.control_inode != before.control_inode
+            assert not any(renewed.data_path.iterdir()) and not any(renewed.control_path.iterdir())
+            assert renewed.available_bytes > 1 << 20 and renewed.available_inodes > 16
+            with pytest.raises(OSError):
+                os.mkdir("late-write", dir_fd=owned._data_fd)
+            with pytest.raises(BackingUnavailable):
+                stale.filesystem()
+            replacement = await files.create(actor=actor, name="Replacement", custody=Custody.personal(actor), mode=MutationMode.NATIVE)
+            assert replacement.backing_handle != space.backing_handle
+            outcome = _native(backing, "import pathlib,json; p=pathlib.Path('/data/new-resource'); p.write_text('fresh native view'); print(json.dumps({'value':p.read_text()}))")
+            assert outcome == {"value": "fresh native view"}
+        finally:
+            owned.close()
+    finally:
+        if held is not None:
+            os.close(held)
+        await engine.dispose()
