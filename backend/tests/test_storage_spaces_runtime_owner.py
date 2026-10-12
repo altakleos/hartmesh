@@ -298,3 +298,24 @@ def test_existing_provider_is_never_recorded_or_rebound_by_another_owner(pool, t
     finally:
         first.close()
         second.close()
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason="Permission denial requires an unprivileged process; native CI uses actual UID 1000")
+def test_pool_walk_requires_read_permission_on_fixture_ancestors(tmp_path):
+    """The nofollow O_RDONLY directory walk needs read as well as traversal."""
+    ancestor = tmp_path / "private-fixture"
+    pool = ancestor / "pool"
+    pool.mkdir(parents=True, mode=0o750)
+    (pool / ".gateway-owner.lock").touch(mode=0o600)
+    from deerflow.spaces.runtime_owner import PoolRuntimeOwner
+
+    runtime = PoolRuntimeOwner(pool)
+    try:
+        ancestor.chmod(0o111)
+        with pytest.raises(StorageHostUnqualified):
+            runtime.acquire()
+        ancestor.chmod(0o555)
+        runtime.acquire()
+    finally:
+        ancestor.chmod(0o700)
+        runtime.close()

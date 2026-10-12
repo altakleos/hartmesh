@@ -1045,6 +1045,7 @@ async def test_host_reclaims_full_private_control_and_renews_roots(backing, tmp_
 def test_gateway_uid_1000_owns_stable_operator_lock(typed_prepared_pool):
     """Actual unprivileged Gateway identity can lock, but cannot replace, it."""
     import stat
+    import traceback
 
     from deerflow.spaces.docker import StorageHostUnqualified
     from deerflow.spaces.runtime_owner import RUNTIME_LOCK, PoolRuntimeOwner
@@ -1053,19 +1054,20 @@ def test_gateway_uid_1000_owns_stable_operator_lock(typed_prepared_pool):
     metadata = (pool / RUNTIME_LOCK).stat()
     assert (metadata.st_uid, metadata.st_gid, stat.S_IMODE(metadata.st_mode), metadata.st_nlink, metadata.st_size) == (1000, 1000, 0o600, 1, 0)
     # Pytest's private temporary ancestors are unlike the production data path.
-    # Give only traversal to this isolated fixture, then restore every mode.
+    # The nofollow directory walk uses O_RDONLY, so it needs read plus traversal
+    # on these isolated fixture ancestors. Restore every original mode afterward.
     import tempfile
 
     temporary = Path(tempfile.gettempdir()).resolve()
     assert pool.is_relative_to(temporary)
     ancestors = []
-    for parent in pool.parents:
-        if parent == temporary:
-            break
-        mode = stat.S_IMODE(parent.stat().st_mode)
-        ancestors.append((parent, mode))
-        parent.chmod(mode | 0o111)
     try:
+        for parent in pool.parents:
+            if parent == temporary:
+                break
+            mode = stat.S_IMODE(parent.stat().st_mode)
+            ancestors.append((parent, mode))
+            parent.chmod(mode | 0o555)
         child = os.fork()
         if child == 0:
             first, second = PoolRuntimeOwner(pool), PoolRuntimeOwner(pool)
@@ -1090,6 +1092,7 @@ def test_gateway_uid_1000_owns_stable_operator_lock(typed_prepared_pool):
                 second.acquire()
                 second.close()
             except BaseException:
+                os.write(2, traceback.format_exc().encode("utf-8"))
                 os._exit(1)
             os._exit(0)
         _, status = os.waitpid(child, 0)
