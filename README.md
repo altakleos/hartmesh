@@ -96,8 +96,9 @@ through host workflows with members holding READ/EXPORT only; direct edits and
 writable attachments remain denied. Creating a new account assigns its personal
 Space and company READ/EXPORT grant after the account commits. Typed Compose
 plans enforce user seats across local and SSO creation; the operator can release
-a disabled account's seat. Background repair and released-volume cleanup arrive
-in later integration changes. Qualified ordinary chats use the assigned User Space
+a disabled account's seat. Startup and each 60-second pass repair missing personal
+assignments and company grants, oldest account first. Released-volume cleanup
+arrives in a later integration change. Qualified ordinary chats use the assigned User Space
 for conversation files and My Files, with Shared mounted read-only. Legacy folders
 are not adopted or moved. Shared access requires explicit resource grants; company
 custody does not grant access. Disable a convenience feature without deleting its
@@ -115,6 +116,10 @@ publication preserves revision and collision checks; applications coordinate
 their own concurrent writes. Backups, restores and deletion still require every
 attachment to be fenced. Pending file writes block further mutations while
 ordinary reads remain available; pending lifecycle operations block all access.
+Host recovery proves interrupted file effects or reconciles exact feature receipts
+when attachments are fenced and storage verifies. Live writes hold private locks;
+unprovable outcomes stay pending. Busy responses include their workflow or
+lifecycle cause.
 Installed extensions can negotiate storage contract v1 with plugin contract v4.
 Actions, model tools and services use host-bound resource capabilities and typed
 actors; nonhuman callers never impersonate a human owner. Resource pages request

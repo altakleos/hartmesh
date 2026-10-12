@@ -89,6 +89,7 @@ class ExecutionStatus:
     adapter_task: asyncio.Future | None = None
     metadata_task: asyncio.Future | None = None
     company_task: asyncio.Future | None = None
+    maintenance_task: asyncio.Future | None = None
     company_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     pending_reconcile: list[str] = field(default_factory=list)
     attachments_fenced: int = 0
@@ -462,6 +463,7 @@ async def _startup_lines(app, *, counts=None):
         else:
             capacity = f"{fit.free_bytes / (1 << 30):.1f} GiB free of {fit.disk_bytes / (1 << 30):.1f}" if fit is not None else "disk figures unavailable"
             logger.info("storage: ready (%s %s prepared, %s verified; %s; %.1f GiB reserved; %s; runtime %s)", n, noun, verified, details, reserved, capacity, os.environ.get("DEER_FLOW_SANDBOX_RUNTIME", "default"))
+        logger.info("storage: file operations settled %s", status.file_operations_settled)
         config = await run_file_io(get_agents_api_config)
         if config.ai_assistants_per_user == config.ai_employees == 0:
             logger.info("agents: none (HARTMESH_AI_ASSISTANTS_PER_USER=0, HARTMESH_AI_EMPLOYEES=0)")
@@ -576,12 +578,12 @@ async def _user_assignment_admission(session, account_id, repository):
         raise _AssignedRole(space.id)
 
 
-async def assign_user_space(app, account) -> None:
+async def _assign_user_space(app, account) -> tuple[int, int]:
     """Post-commit best effort: personal allocation and company grant repair independently."""
     files = getattr(app.state, "storage_spaces", None)
     config = getattr(app.state, "storage_spaces_config", None)
     if files is None or config is None or config.plan is None or (await storage_state(app)).state in ("off", "unavailable"):
-        return
+        return 0, 0
     account_id = str(account.id)
     actor = PrincipalRef("human", account_id)
 
@@ -589,8 +591,10 @@ async def assign_user_space(app, account) -> None:
         await _user_assignment_admission(session, account_id, SQLiteUserRepository(files.registry._sf))
 
     async def perform():
+        assigned = granted = 0
         try:
             identifier = await files.assign(kind="user", actor=actor, name="Files", custody=Custody.personal(actor), mode=MutationMode.NATIVE, admission=admitted)
+            assigned = 1
             async with files.registry._sf() as session:
                 row = await session.get(SpaceRow, identifier)
                 backing = await session.get(SpaceBackingRow, row.backing_handle)
@@ -600,11 +604,42 @@ async def assign_user_space(app, account) -> None:
         except Exception as exc:
             logger.warning("storage: user assignment remains pending for %s (%s)", account_id, exc)
         try:
-            await grant_company_space(app, account_id)
+            granted = int(await _grant_company_space(app, account_id))
         except Exception as exc:
             logger.warning("storage: company grant remains pending for %s (%s)", account_id, exc)
 
-    await await_drained(perform())
+        return assigned, granted
+
+    return await await_drained(perform())
+
+
+async def assign_user_space(app, account) -> None:
+    await _assign_user_space(app, account)
+
+
+async def assign_spaces(app) -> tuple[int, int]:
+    """Repair oldest current seated accounts; count only committed changes."""
+    files = getattr(app.state, "storage_spaces", None)
+    config = getattr(app.state, "storage_spaces_config", None)
+    if files is None or config is None or config.plan is None or (await storage_state(app)).state in ("off", "unavailable"):
+        return 0, 0
+    async with files.registry._sf() as session:
+        if await _company_role(session) is None:
+            return 0, 0
+        identifiers = (await session.scalars(select(UserRow.id).where(UserRow.released_at.is_(None)).order_by(UserRow.created_at, UserRow.id))).all()
+    repository = SQLiteUserRepository(files.registry._sf)
+    assigned = granted = 0
+    for identifier in identifiers:
+        try:
+            account = await repository.get_user_by_id(identifier)
+            if account is None or await run_file_io(account_refusal, account) is not None:
+                continue
+            changes = await _assign_user_space(app, account)
+            assigned += changes[0]
+            granted += changes[1]
+        except Exception as exc:
+            logger.warning("storage: account storage remains pending for %s (%s)", identifier, exc)
+    return assigned, granted
 
 
 async def assign_created_account(app, account) -> None:
@@ -615,11 +650,11 @@ async def assign_created_account(app, account) -> None:
         logger.warning("storage: account storage remains pending for %s (%s)", account.id, exc)
 
 
-async def grant_company_space(app, account_id: str) -> None:
+async def _grant_company_space(app, account_id: str) -> bool:
     """Grant one currently resolving human READ/EXPORT, never mutation rights."""
     files = app.state.storage_spaces
     if files is None or (await storage_state(app)).state in ("off", "unavailable"):
-        return
+        return False
     subject = PrincipalRef("human", account_id)
     async with files.registry._sf() as session:
         account = await session.get(UserRow, account_id)
@@ -634,6 +669,42 @@ async def grant_company_space(app, account_id: str) -> None:
     changed = await files.registry.host_grant(identifier, subject, Permission.READ | Permission.EXPORT)
     if changed:
         logger.info("storage: company grant written for %s", account_id)
+
+    return changed
+
+
+async def grant_company_space(app, account_id: str) -> None:
+    await _grant_company_space(app, account_id)
+
+
+async def _maintenance_step(app, *, timeout: float) -> bool:
+    status = app.state.agent_execution
+    if getattr(app.state, "storage_spaces", None) is None or (await storage_state(app)).state in ("off", "unavailable"):
+        return False
+
+    async def perform():
+        try:
+            await assign_spaces(app)
+        except Exception:
+            logger.exception("storage: assignment repair failed; existing facts are kept")
+        try:
+            status.file_operations_settled += await app.state.storage_spaces.settle_interrupted()
+        except Exception:
+            logger.exception("storage: operation settlement failed; existing facts are kept")
+
+    if status.maintenance_task is not None and status.maintenance_task.done():
+        status.maintenance_task.result()
+        status.maintenance_task = None
+    if status.maintenance_task is None:
+        status.maintenance_task = asyncio.create_task(perform())
+        status.maintenance_task.add_done_callback(_observe)
+    task = status.maintenance_task
+    done, _pending = await asyncio.wait({task}, timeout=max(0, timeout))
+    if not done:
+        return False
+    status.maintenance_task = None
+    task.result()
+    return True
 
 
 async def _company_step(app, *, timeout: float) -> bool:
@@ -657,10 +728,14 @@ async def _company_step(app, *, timeout: float) -> bool:
 
 
 async def storage_recheck(app):
-    await _admission_recheck(app)
+    try:
+        await _admission_recheck(app)
+    except Exception:
+        logger.exception("storage: availability recheck failed; existing facts are kept")
     status = app.state.agent_execution
     if status.host_id is not None and (await storage_state(app)).state not in ("off", "unavailable"):
         await _company_step(app, timeout=0)
+    await _maintenance_step(app, timeout=0)
 
 
 async def _admission_recheck(app):
@@ -697,11 +772,10 @@ async def _admission_recheck(app):
 
 async def _recheck_loop(app):
     stop = app.state.storage_recheck_stop
-    if app.state.agent_execution.storage_reason == "admission-failed":
-        try:
-            await storage_recheck(app)
-        except Exception:
-            logger.exception("storage: availability recheck failed; existing facts are kept")
+    try:
+        await storage_recheck(app)
+    except Exception:
+        logger.exception("storage: availability recheck failed; existing facts are kept")
     while not stop.is_set():
         try:
             await asyncio.wait_for(stop.wait(), timeout=RECHECK_SECONDS)
@@ -724,7 +798,7 @@ async def close_storage_spaces(app):
         status = getattr(app.state, "agent_execution", None)
         owned = [getattr(app.state, "storage_inventory_task", None)]
         if status is not None:
-            owned.extend((status.adapter_task, status.metadata_task, status.company_task, status.mount_task, status.mount_cleanup_task, status.mount_verify_task))
+            owned.extend((status.adapter_task, status.metadata_task, status.company_task, status.maintenance_task, status.mount_task, status.mount_cleanup_task, status.mount_verify_task))
         owned = [task for task in owned if task is not None]
         if owned:
             await asyncio.gather(*owned, return_exceptions=True)
@@ -868,6 +942,15 @@ async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session
     directory = InstanceDirectory(session_factory, human=human)
     registry = SpaceRegistry(session_factory, HostPrincipalResolver(human=human, nonhuman=directory.lookup, nonhuman_in_session=directory.lookup_in_session))
     app.state.storage_spaces = SpaceFiles(registry, catalog, inventory_path=Path(config.inventory_path), user_spaces=config.user_spaces)
+    app.state.storage_spaces.maintenance_logger = logger
+    from deerflow.features.plugins import FeatureServices
+
+    extensions = getattr(app.state, "extensions", None)
+    feature_services = extensions.app_store.get(FeatureServices) if extensions is not None else None
+    if feature_services is not None:
+        for namespace, service in feature_services.services.items():
+            if service.healthy:
+                app.state.storage_spaces.workflow_settlers[namespace] = service.settle_workflow
     _install_seats(app, session_factory, creation_repository)
     app.state.agent_instances = AgentInstances(app.state.storage_spaces, directory)
     app.state.agent_conversations = AgentConversations(app.state.agent_instances)
@@ -879,6 +962,8 @@ async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session
     if status.storage_reason is None and status.metadata_task is None and not status.mount_pending:
         await _adapter_step(app, timeout=min(ADAPTER_LIMIT_SECONDS, max(0, entered + STARTUP_BUDGET_SECONDS - time.monotonic())))
     if await _company_step(app, timeout=max(0, entered + STARTUP_BUDGET_SECONDS - time.monotonic())):
+        counts = None
+    if await _maintenance_step(app, timeout=max(0, entered + STARTUP_BUDGET_SECONDS - time.monotonic())):
         counts = None
     await _startup_lines(app, counts=counts)
     app.state.storage_recheck_stop = asyncio.Event()

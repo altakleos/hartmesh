@@ -495,8 +495,11 @@ New-account requests assign the personal user Space after committing the account
 then grant company READ/EXPORT independently. Setup-pending accounts qualify;
 allocation or grant failures are logged and preserve successful account creation.
 The assignment is idempotent and retains incompatible or inactive role links.
-Offline-created accounts and failed assignments await periodic repair, which is
-still deferred. Trusted hosts grant resolving, unreleased humans READ/EXPORT; setup-pending
+Startup and each 60-second pass repair offline-created accounts and failed
+assignments, in account creation order with ID ties. Company grants repair even
+when no User slot remains; released/refused accounts receive neither. Each owned
+maintenance task survives a startup timeout and drains before database teardown.
+Trusted hosts grant resolving, unreleased humans READ/EXPORT; setup-pending
 accounts remain eligible. Company custody itself grants no access. Shared uses
 those permissions for publication/removal, including READ/EXPORT on a My Files
 source. Generic writes and writable resource attachments remain denied to those
@@ -615,3 +618,19 @@ validation and full-files refusals are the next integration change.
 The additive `0033_storage_features` migration creates
 `hm_storage_feature_links`. Used relationships cannot be downgraded away.
 Configuration remains version 53; no legacy-directory adoption is implemented.
+
+
+Host maintenance settles interrupted write/put/mkdir/rename/remove intents from
+bounded confined proof, with every attachment fenced and exact current backings.
+It never replays bytes or invents a human actor. Live direct writes and feature
+workflows retain private locks through their final commit. Domain callbacks bind
+after storage initialization even when extensions start first. Shared uses its
+borrowed publication transaction; other installed feature callbacks confirm exact
+private receipts. Missing receipts, unavailable callbacks and failed inspections
+remain pending. Historical intent generations need not equal today's generation;
+the intent and current binding snapshots must remain exact. Receipts and unused
+generic stages are removed only after confirmed completion, through pinned control
+descriptors, with unrelated stages/links/directories preserved. An unresolved
+operation on the same Space preserves generic stages. Copy/lifecycle/unknown
+intents require operator inspection. HTTP 409 `storage-busy` carries `cause` as
+`workflow` or `lifecycle`; provenance never changes the actor or mandatory grants.

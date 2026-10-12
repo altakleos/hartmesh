@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Compose storage maintenance
+
+Startup and every 60-second pass repair missing personal storage assignments and
+company READ/EXPORT grants for eligible seated accounts, oldest first. Interrupted
+file operations settle only from verified filesystem proof or exact feature
+receipts with fenced attachments; Shared reconciliation keeps publication facts
+in the owning transaction. Live writes retain private locks through commit,
+uncertain outcomes remain pending, and cleanup preserves unrelated evidence.
+Recovery and assignment tasks drain before shutdown. Busy responses include a
+workflow/lifecycle cause; trusted writes can record human provenance without
+changing authorization. Defaults remain disabled. There is no database schema
+change.
+
 ### Compose account export
 
 Managed account exports include owned conversation files, My Files and live

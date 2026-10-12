@@ -135,6 +135,21 @@ async def seed_publication(feature_app):
 
 
 @pytest.mark.asyncio
+async def test_periodic_host_settlement_reconciles_shared_after_grant_generation_change(feature_app):
+    _service, space_id, operation_id, publication_id, receipt, target = await seed_publication(feature_app)
+    _client, app, files, *_ = feature_app
+    async with files.registry._sf() as session, session.begin():
+        (await session.get(SpaceRow, space_id)).generation += 1
+    assert await files.settle_interrupted() == 1
+    async with files.registry._sf() as session:
+        intent = await session.get(SpaceFileOperationRow, (space_id, operation_id))
+        assert intent.phase == "complete" and intent.result["resolution"] == "host-reconciled"
+        assert intent.result["facts"] == receipt.value["facts"]
+    assert (await app.state.shared_publications_repo.publication(publication_id))["sha256"] == sha256(target.read_bytes()).hexdigest()
+    assert not receipt.path.exists()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("changed", ["request", "actor_id", "generation"])
 async def test_settlement_rejects_same_session_stale_intent(feature_app, changed):
     service, space_id, operation_id, publication_id, _receipt_on_disk, _target = await seed_publication(feature_app)
