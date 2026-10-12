@@ -56,6 +56,9 @@ class SandboxInfo:
     default_shell_state: tuple[str, str | None] | None = field(default=None, repr=False, compare=False)
     # Actual Docker profile; never inferred from a persisted/client sandbox ID.
     chat_storage_enabled: bool | None = field(default=None, repr=False, compare=False)
+    # Only this provider's fresh, mountless creation may bypass native pool
+    # qualification. Never reconstruct or serialize this process-local fact.
+    mountless_provider: object | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> dict:
         return {

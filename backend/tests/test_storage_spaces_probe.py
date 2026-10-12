@@ -188,14 +188,17 @@ def test_socket_owner_alias_and_replacement_are_checked(monkeypatch, fault):
 
 
 def test_restricted_network_provider_cannot_bypass_preparation_or_resume(tmp_path, monkeypatch):
+    from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
     from deerflow.spaces import docker as module
 
     docker = ProbeDocker()
     monkeypatch.setattr(module, "_local_endpoint", lambda _contexts: None)
-    monkeypatch.setattr(DockerStorageAdapter, "_call", lambda self, *args: docker(["docker", *args], timeout=30))
-    backend = SimpleNamespace(runtime="docker", _config_mounts=[], network_mode="open", _image=IMAGE, _start_container=lambda *_a, **_k: pytest.fail("restricted creation must not reach the callback"))
+    backend = LocalContainerBackend.__new__(LocalContainerBackend)
+    backend._runtime, backend._config_mounts, backend._network_mode, backend._image = "docker", [], "open", IMAGE
+    backend._runtime_runner = docker
+    backend._start_container = lambda *_a, **_k: pytest.fail("restricted creation must not reach the callback")
     adapter = DockerStorageAdapter.from_local_backend(backend, pool=tmp_path)
-    backend.network_mode = "allowlist"
+    backend._network_mode = "allowlist"
     with pytest.raises(StorageAdapterUnsupported):
         adapter.prepare(PLAN)
     with pytest.raises(StorageAdapterUnsupported):

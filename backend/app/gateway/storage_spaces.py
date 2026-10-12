@@ -38,6 +38,7 @@ from deerflow.spaces.docker import StorageHostUnqualified
 from deerflow.spaces.principals import HostPrincipalResolver
 from deerflow.spaces.provision import KINDS, StorageFit, plan_counts, storage_fit
 from deerflow.spaces.registry import SpaceRegistry
+from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
 from deerflow.spaces.service import SpaceFiles
 from deerflow.utils.file_io import await_drained, run_file_io
 
@@ -75,6 +76,7 @@ class Allowance:
 class ExecutionStatus:
     storage_reason: str | None = None
     storage_text: str | None = None
+    runtime_retry: bool = False
     fit: StorageFit | None = None
     host_id: str | None = None
     unverified: dict[str, str] = field(default_factory=dict)
@@ -389,10 +391,12 @@ async def _adapter_step(app, *, timeout=ADAPTER_LIMIT_SECONDS):
     try:
         _baseline, attachments = task.result()
     except Exception as exc:
+        status.runtime_retry = isinstance(exc, StorageRuntimeUnavailable)
         status.storage_reason = "host-unqualified" if isinstance(exc, StorageHostUnqualified) else "admission-failed"
         status.storage_text = str(exc)
         return False
     status.host_id = attachments.provider.host_id
+    status.runtime_retry = False
     status.storage_reason, status.storage_text = None, None
     return True
 
@@ -754,7 +758,7 @@ async def storage_recheck(app):
 
 async def _admission_recheck(app):
     status = app.state.agent_execution
-    if status.storage_reason != "admission-failed":
+    if status.storage_reason != "admission-failed" and not (status.storage_reason == "host-unqualified" and status.runtime_retry):
         return
     counts = None
     if status.metadata_task is not None:
@@ -956,6 +960,8 @@ async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session
     directory = InstanceDirectory(session_factory, human=human)
     registry = SpaceRegistry(session_factory, HostPrincipalResolver(human=human, nonhuman=directory.lookup, nonhuman_in_session=directory.lookup_in_session))
     app.state.storage_spaces = SpaceFiles(registry, catalog, inventory_path=Path(config.inventory_path), user_spaces=config.user_spaces)
+    app.state.storage_spaces._managed_runtime_required = config.plan is not None
+    app.state.storage_spaces._pool_runtime_owner = getattr(app.state, "pool_runtime_owner", None)
     app.state.storage_spaces.maintenance_logger = logger
     from deerflow.features.plugins import FeatureServices
 

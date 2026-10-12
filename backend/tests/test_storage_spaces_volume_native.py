@@ -24,13 +24,18 @@ from deerflow.spaces.backings import BackingUnavailable, PreparedVolumeCatalog
 
 
 @pytest.fixture(scope="module")
-def typed_prepared_pool(tmp_path_factory):
+def typed_prepared_pool():
     if os.environ.get("HARTMESH_REQUIRE_MANAGED_STORAGE") != "1":
         pytest.skip("Typed pool qualification runs in its mandatory Linux CI job")
+    import tempfile
+
     from app.gateway.storage_init import KINDS, StorageInitializer
     from deerflow.config.storage_spaces_config import StoragePlan
 
-    data_dir = tmp_path_factory.mktemp("typed-storage")
+    # UID 1000 must reach the pool through ordinary readable ancestors. The
+    # runner's private home is outside pytest's fixture ownership; do not chmod it.
+    data_dir = Path(tempfile.mkdtemp(prefix="hartmesh-native-typed-", dir="/tmp"))
+    data_dir.chmod(0o755)
     fstab = data_dir / "test-fstab"
     fstab.write_text("# native fixture only\n", encoding="utf-8")
     plan = StoragePlan(users=1, user_gib=1, ai_assistants_per_user=0, ai_assistant_gib=1, ai_employees=0, ai_employee_gib=1, company_gib=1)
@@ -44,6 +49,8 @@ def typed_prepared_pool(tmp_path_factory):
         with tool.locked():
             doc = tool.quiesce()
             assert doc["returncode"] == 0, doc
+        # Remove only after confirmed unmount; uncertain backings stay on disk.
+        shutil.rmtree(data_dir)
 
 
 def test_prepared_pool_has_the_design_owners_and_modes(typed_prepared_pool):
@@ -1040,3 +1047,46 @@ async def test_host_reclaims_full_private_control_and_renews_roots(backing, tmp_
         if held is not None:
             os.close(held)
         await engine.dispose()
+
+
+def test_gateway_uid_1000_owns_stable_operator_lock(typed_prepared_pool):
+    """Actual unprivileged Gateway identity can lock, but cannot replace, it."""
+    import stat
+    import traceback
+
+    from deerflow.spaces.docker import StorageHostUnqualified
+    from deerflow.spaces.runtime_owner import RUNTIME_LOCK, PoolRuntimeOwner
+
+    pool = typed_prepared_pool.pool
+    metadata = (pool / RUNTIME_LOCK).stat()
+    assert (metadata.st_uid, metadata.st_gid, stat.S_IMODE(metadata.st_mode), metadata.st_nlink, metadata.st_size) == (1000, 1000, 0o600, 1, 0)
+    child = os.fork()
+    if child == 0:
+        first, second = PoolRuntimeOwner(pool), PoolRuntimeOwner(pool)
+        try:
+            os.setgroups([])
+            os.setgid(1000)
+            os.setuid(1000)
+            first.acquire()
+            try:
+                second.acquire()
+            except StorageHostUnqualified:
+                pass
+            else:
+                os._exit(2)
+            try:
+                (pool / RUNTIME_LOCK).unlink()
+            except PermissionError:
+                pass
+            else:
+                os._exit(3)
+            first.close()
+            second.acquire()
+            second.close()
+        except BaseException:
+            os.write(2, traceback.format_exc().encode("utf-8"))
+            os._exit(1)
+        os._exit(0)
+    _, status = os.waitpid(child, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
+    assert (pool / RUNTIME_LOCK).stat().st_ino == metadata.st_ino

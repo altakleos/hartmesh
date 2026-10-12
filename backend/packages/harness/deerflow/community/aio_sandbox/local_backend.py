@@ -687,6 +687,10 @@ class LocalContainerBackend(SandboxBackend):
         """The detected container runtime ("docker" or "container")."""
         return self._runtime
 
+    def _run(self, *args, **kwargs):
+        """Use the retained pool owner for managed native child commands."""
+        return getattr(self, "_runtime_runner", subprocess.run)(*args, **kwargs)
+
     @property
     def network_mode(self) -> str:
         return self._network_mode
@@ -812,7 +816,7 @@ class LocalContainerBackend(SandboxBackend):
 
     def _inspect_network(self, network_name: str) -> _NetworkInspection | None:
         try:
-            result = subprocess.run(
+            result = self._run(
                 ["docker", "network", "inspect", network_name],
                 capture_output=True,
                 text=True,
@@ -882,7 +886,7 @@ class LocalContainerBackend(SandboxBackend):
 
     def _require_restricted_network_support(self) -> None:
         try:
-            result = subprocess.run(
+            result = self._run(
                 ["docker", "version", "--format", "{{.Server.Version}}"],
                 capture_output=True,
                 text=True,
@@ -909,7 +913,7 @@ class LocalContainerBackend(SandboxBackend):
         prefix overlaps their names.
         """
         try:
-            result = subprocess.run(
+            result = self._run(
                 [
                     "docker",
                     "ps",
@@ -942,7 +946,7 @@ class LocalContainerBackend(SandboxBackend):
         """
         if platform.system() == "Darwin" and self._network_mode == "open":
             try:
-                result = subprocess.run(
+                result = self._run(
                     ["container", "--version"],
                     capture_output=True,
                     text=True,
@@ -1167,7 +1171,7 @@ class LocalContainerBackend(SandboxBackend):
                 return
             raise RuntimeError(f"Restricted sandbox network {network_name} exists with incompatible policy or isolation settings")
         labels = self._restricted_labels(sandbox_id, "network")
-        result = subprocess.run(
+        result = self._run(
             [
                 "docker",
                 "network",
@@ -1196,7 +1200,7 @@ class LocalContainerBackend(SandboxBackend):
                 return
             raise RuntimeError(f"Restricted sandbox egress network {network_name} exists with incompatible policy or isolation settings")
         labels = self._restricted_labels(sandbox_id, "egress-network")
-        result = subprocess.run(
+        result = self._run(
             [
                 "docker",
                 "network",
@@ -1275,10 +1279,10 @@ class LocalContainerBackend(SandboxBackend):
         ]
         # First use may pull the sidecar image. Match the sandbox create path's
         # tolerance for an image download instead of killing Docker mid-pull.
-        created = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        created = self._run(cmd, capture_output=True, text=True, timeout=300)
         if created.returncode != 0:
             raise RuntimeError(f"Failed to create sandbox network proxy: {created.stderr.strip()}")
-        connected = subprocess.run(
+        connected = self._run(
             ["docker", "network", "connect", network_name, proxy_name],
             capture_output=True,
             text=True,
@@ -1286,11 +1290,11 @@ class LocalContainerBackend(SandboxBackend):
         )
         if connected.returncode != 0:
             raise RuntimeError(f"Failed to connect sandbox network proxy: {connected.stderr.strip()}")
-        started = subprocess.run(["docker", "start", proxy_name], capture_output=True, text=True, timeout=15)
+        started = self._run(["docker", "start", proxy_name], capture_output=True, text=True, timeout=15)
         if started.returncode != 0:
             raise RuntimeError(f"Failed to start sandbox network proxy: {started.stderr.strip()}")
         source = Path(__file__).with_name("network_proxy.py")
-        copied = subprocess.run(
+        copied = self._run(
             [
                 "docker",
                 "exec",
@@ -1311,7 +1315,7 @@ class LocalContainerBackend(SandboxBackend):
     def _container_network_address(self, container_name: str, network_name: str) -> str | None:
         """Return the IPv4 address Docker assigned to ``container_name`` on ``network_name``."""
         try:
-            result = subprocess.run(
+            result = self._run(
                 ["docker", "inspect", "--format", "{{(index .NetworkSettings.Networks " + json.dumps(network_name) + ").IPAddress}}", container_name],
                 capture_output=True,
                 text=True,
@@ -1420,7 +1424,7 @@ class LocalContainerBackend(SandboxBackend):
         that still answers ``inspect`` was not removed.
         """
         try:
-            result = subprocess.run(
+            result = self._run(
                 [self._runtime, "inspect", "-f", "{{.Id}}", container_ref],
                 capture_output=True,
                 text=True,
@@ -1606,7 +1610,7 @@ class LocalContainerBackend(SandboxBackend):
         """
         # Step 1: enumerate container names via docker ps
         try:
-            result = subprocess.run(
+            result = self._run(
                 [
                     self._runtime,
                     "ps",
@@ -1764,7 +1768,7 @@ class LocalContainerBackend(SandboxBackend):
         # not one left in Docker's Created state by a failure before start.
         # An explicit remove closes that lifecycle gap and is harmless after a
         # normal stop (Docker reports the already-removed name as not found).
-        removed = subprocess.run(
+        removed = self._run(
             ["docker", "rm", "-f", proxy_name],
             capture_output=True,
             text=True,
@@ -1773,7 +1777,7 @@ class LocalContainerBackend(SandboxBackend):
         if removed.returncode != 0 and "no such container" not in (removed.stderr or "").lower():
             logger.warning("Failed to remove sandbox network proxy %s: %s", proxy_name, removed.stderr.strip())
         for current_network_name in (network_name, egress_network_name):
-            result = subprocess.run(
+            result = self._run(
                 ["docker", "network", "rm", current_network_name],
                 capture_output=True,
                 text=True,
@@ -1786,7 +1790,7 @@ class LocalContainerBackend(SandboxBackend):
         if self._network_mode != "allowlist" or self._network_config.get("approval", "prompt") != "prompt":
             return []
         proxy_name, _ = self._resource_names(sandbox_id)
-        result = subprocess.run(
+        result = self._run(
             ["docker", "exec", proxy_name, "python", _NETWORK_PROXY_CONTAINER_SCRIPT, "pending"],
             capture_output=True,
             text=True,
@@ -1807,7 +1811,7 @@ class LocalContainerBackend(SandboxBackend):
         if self._network_mode != "allowlist" or self._network_config.get("approval", "prompt") != "prompt":
             return True
         proxy_name, _ = self._resource_names(sandbox_id)
-        result = subprocess.run(
+        result = self._run(
             ["docker", "exec", proxy_name, "python", _NETWORK_PROXY_CONTAINER_SCRIPT, "deny-pending"],
             capture_output=True,
             text=True,
@@ -1823,7 +1827,7 @@ class LocalContainerBackend(SandboxBackend):
             return False
         proxy_name, _ = self._resource_names(sandbox_id)
         ttl = int(self._network_config.get("temporary_grant_ttl", 300))
-        result = subprocess.run(
+        result = self._run(
             [
                 "docker",
                 "exec",
@@ -1851,7 +1855,7 @@ class LocalContainerBackend(SandboxBackend):
         if not container_names:
             return {}
         try:
-            result = subprocess.run(
+            result = self._run(
                 [self._runtime, "inspect", *container_names],
                 capture_output=True,
                 text=True,
@@ -2236,7 +2240,7 @@ class LocalContainerBackend(SandboxBackend):
         logger.info(f"Starting container using {self._runtime}: {log_cmd}")
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True, **({"timeout": 30} if not start else {}))
+            result = self._run(cmd, capture_output=True, text=True, check=True, **({"timeout": 30} if not start else {}))
             container_id = result.stdout.strip()
             logger.info(f"Started container {container_name} (ID: {container_id}) using {self._runtime}")
             return container_id
@@ -2264,7 +2268,7 @@ class LocalContainerBackend(SandboxBackend):
         # The grace period is sent only to Docker, where it was measured.
         grace = ["-t", str(self._STOP_GRACE_SECONDS)] if self._runtime == "docker" else []
         try:
-            subprocess.run(
+            self._run(
                 [self._runtime, "stop", *grace, container_id],
                 capture_output=True,
                 text=True,
@@ -2294,7 +2298,7 @@ class LocalContainerBackend(SandboxBackend):
                 daemon failures.
         """
         try:
-            result = subprocess.run(
+            result = self._run(
                 [self._runtime, "inspect", "-f", "{{.State.Running}}", container_name],
                 capture_output=True,
                 text=True,
@@ -2319,7 +2323,7 @@ class LocalContainerBackend(SandboxBackend):
             The host port mapped to container port 8080, or None if not found.
         """
         try:
-            result = subprocess.run(
+            result = self._run(
                 [self._runtime, "port", container_name, "8080"],
                 capture_output=True,
                 text=True,

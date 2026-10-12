@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Managed pool runtime ownership
+
+Managed Compose native storage admits one participating Gateway runtime per
+pool, before provider construction or native container adoption. The stable
+operator-created ownership file is retained through sandbox and storage drainage
+and SQL disposal; Docker child commands inherit ownership. Unavailable ownership
+keeps history and mountless text chats usable, without adopting or replacing
+native containers. Qualification retries retain the same provider and lock.
+Unmanaged storage remains supported. Defaults remain disabled. There is no
+database schema change.
+
 ### Managed storage administration
 
 Generic grant updates now refuse with `owned-space` when `user_spaces` is false.
