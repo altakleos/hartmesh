@@ -14,6 +14,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 
 from deerflow_extension_api.storage import StorageOperationPending
@@ -46,6 +47,14 @@ class SpaceOperationPending(StorageOperationPending, SpaceConflict):
         self.cause = cause
 
 
+@dataclass(frozen=True, eq=False)
+class _SlotClaim:
+    """Identity token for cache publication; never resource authority."""
+
+    handle: str | None = None
+    phase: str = "unknown"
+
+
 class SpaceFiles:
     def __init__(self, registry: SpaceRegistry, catalog: PreparedVolumeCatalog, *, inventory_path: Path | None = None, user_spaces: bool = True) -> None:
         self.registry = registry
@@ -54,6 +63,7 @@ class SpaceFiles:
         self.bound_slots = defaultdict(set)
         self.unclaimed_slots = defaultdict(set)
         self._verified = {}
+        self._claims = {}
         # All resource metadata mutations use this same pending-operation gate.
         registry.operation_guard = self._guard
         registry.files = self
@@ -102,50 +112,54 @@ class SpaceFiles:
             if actor is None
             else self.registry.creating(actor=actor, name=name, custody=custody, mode=mode, feature=feature, _allocation=self._serialize_allocation)
         )
-        async with creation as (session, row, permissions):
-            if admission is not None:
-                await admission(session)
-            used = set((await session.execute(select(SpaceBackingRow.slot_id))).scalars())
-            volume = None
-            for slot_id, candidate_spec in self.catalog.volumes.items():
-                if slot_id in used or getattr(candidate_spec, "kind", None) not in (kind, None):
-                    continue
-                try:
-                    candidate = await run_file_io(self.catalog.verify, slot_id)
-                    empty = await run_file_io(self._empty, candidate)
-                except (BackingUnavailable, OSError):
-                    empty = False
-                if empty:
-                    volume = candidate
-                    break
-                self.unclaimed_slots[getattr(candidate_spec, "kind", None)].add(slot_id)
-            if volume is None:
-                raise SpaceCapacityExhausted("No empty qualified backing capacity remains")
-            spec = volume.spec
-            session.add(
-                SpaceBackingRow(
-                    backing_handle=row.backing_handle,
-                    space_id=row.id,
-                    slot_id=spec.slot_id,
-                    filesystem_uuid=spec.filesystem_uuid,
-                    max_bytes=spec.max_bytes,
-                    max_inodes=spec.max_inodes,
-                    root_inode=volume.root_inode,
-                    control_inode=volume.control_inode,
+        claimed = None
+        try:
+            async with creation as (session, row, permissions):
+                if admission is not None:
+                    await admission(session)
+                used = set((await session.execute(select(SpaceBackingRow.slot_id))).scalars())
+                volume = None
+                for slot_id, candidate_spec in self.catalog.volumes.items():
+                    if slot_id in used or getattr(candidate_spec, "kind", None) not in (kind, None):
+                        continue
+                    expected = self._claim(slot_id)
+                    try:
+                        candidate = await run_file_io(self.catalog.verify, slot_id)
+                        empty = await run_file_io(self._empty, candidate)
+                    except (BackingUnavailable, OSError):
+                        empty = False
+                    if empty:
+                        volume = candidate
+                        break
+                    self._publish_claim(slot_id, expected, expected.handle, "unclaimed")
+                if volume is None:
+                    raise SpaceCapacityExhausted("No empty qualified backing capacity remains")
+                spec = volume.spec
+                session.add(
+                    SpaceBackingRow(
+                        backing_handle=row.backing_handle,
+                        space_id=row.id,
+                        slot_id=spec.slot_id,
+                        filesystem_uuid=spec.filesystem_uuid,
+                        max_bytes=spec.max_bytes,
+                        max_inodes=spec.max_inodes,
+                        root_inode=volume.root_inode,
+                        control_inode=volume.control_inode,
+                    )
                 )
-            )
-            await session.flush()
-            self.unclaimed_slots[getattr(spec, "kind", None)].add(spec.slot_id)
-            await await_drained(run_file_io(prepare_marker, volume, row.backing_handle))
-            if kind is not None:
-                # SQL uniqueness is established before making filesystem effects.
-                # A rolled-back or uncertain publication retains these folders.
-                self.unclaimed_slots[getattr(spec, "kind", None)].add(spec.slot_id)
-                await await_drained(run_file_io(self._layout, volume, kind))
-            yield session, self.registry._view(row, int(permissions), allow_empty=actor is None)
-        self._verified[spec.slot_id] = volume
-        self.bound_slots[getattr(spec, "kind", None)].add(spec.slot_id)
-        self.unclaimed_slots[getattr(spec, "kind", None)].discard(spec.slot_id)
+                await session.flush()
+                claimed = self._publish_claim(spec.slot_id, self._claim(spec.slot_id), row.backing_handle, "allocating", force=True)
+                await await_drained(run_file_io(prepare_marker, volume, row.backing_handle))
+                if kind is not None:
+                    # SQL uniqueness is established before making filesystem effects.
+                    # A rolled-back or uncertain publication retains these folders.
+                    await await_drained(run_file_io(self._layout, volume, kind))
+                yield session, self.registry._view(row, int(permissions), allow_empty=actor is None)
+        except BaseException:
+            if claimed is not None:
+                self._publish_claim(spec.slot_id, claimed, claimed.handle, "unclaimed")
+            raise
+        self._publish_claim(spec.slot_id, claimed, claimed.handle, "bound", volume=volume)
 
     @staticmethod
     async def _serialize_allocation(session):
@@ -200,21 +214,72 @@ class SpaceFiles:
 
         return await await_drained(backfill_binding_markers(self))
 
+    def _claim(self, slot):
+        # Keep free/unknown tombstones: deleting them would reintroduce ABA.
+        return self._claims.setdefault(slot, _SlotClaim())
+
+    def _claim_snapshot(self):
+        for slot in self.catalog.volumes:
+            self._claim(slot)
+        return dict(self._claims)
+
+    def _binding_claim(self, claims, slot):
+        # A SQL-only slot cannot be allocated from this inventory. Register its
+        # first observation only if no competing observer already claimed it.
+        if slot not in claims and slot not in self._claims:
+            claims[slot] = self._claim(slot)
+        return claims.get(slot)
+
+    def _publish_claim(self, slot, expected, handle, phase, *, volume=None, force=False):
+        """Synchronous compare-and-swap of one claim and all derived caches."""
+        if self._claim(slot) is not expected:
+            return None
+        claim = expected if not force and (expected.handle, expected.phase) == (handle, phase) else _SlotClaim(handle, phase)
+        if claim is not expected:
+            self._verified.pop(slot, None)
+        self._claims[slot] = claim
+        kind = getattr(self.catalog.volumes.get(slot), "kind", None)
+        for slots in self.bound_slots.values():
+            slots.discard(slot)
+        for slots in self.unclaimed_slots.values():
+            slots.discard(slot)
+        if phase == "bound":
+            self.bound_slots[kind].add(slot)
+        elif phase in ("unknown", "allocating", "unclaimed"):
+            self.unclaimed_slots[kind].add(slot)
+        if volume is not None:
+            self._verified[slot] = volume
+        return claim
+
+    def _cache_bound(self, slot, expected, handle, volume):
+        if expected is None or expected.phase == "allocating" or expected.handle not in (None, handle):
+            return False
+        return self._publish_claim(slot, expected, handle, "bound", volume=volume) is not None
+
     async def load_bound_slots(self):
+        claims = self._claim_snapshot()
         async with self.registry._sf() as session:
-            used = set((await session.execute(select(SpaceBackingRow.slot_id))).scalars())
-        self.bound_slots.clear()
+            bindings = (await session.execute(select(SpaceBackingRow))).scalars().all()
+        used = {binding.slot_id: binding.backing_handle for binding in bindings}
         for slot in used:
-            spec = self.catalog.volumes.get(slot)
-            self.bound_slots[getattr(spec, "kind", None)].add(slot)
+            self._binding_claim(claims, slot)
+        for slot, expected in claims.items():
+            if expected.phase == "allocating":
+                continue
+            handle = used.get(slot)
+            self._publish_claim(slot, expected, handle or expected.handle, "bound" if handle is not None else "unclaimed")
 
     async def refresh_bound_volumes(self):
         """Prove mounts before a short parent-locked publication of operator growth."""
+        claims = self._claim_snapshot()
         errors = {}
         async with self.registry._sf() as session:
             bindings = (await session.execute(select(SpaceBackingRow))).scalars().all()
         proven = {}
         for binding in bindings:
+            expected = self._binding_claim(claims, binding.slot_id)
+            if expected is None or expected.phase == "allocating" or self._claim(binding.slot_id) is not expected:
+                continue
             try:
                 self._binding_spec(binding)
                 volume = await run_file_io(self.catalog.verify, binding.slot_id, previous=self._verified.get(binding.slot_id))
@@ -222,16 +287,19 @@ class SpaceFiles:
                 await run_file_io(verify_bound, volume, binding.backing_handle)
                 proven[binding.backing_handle] = volume
             except (BackingUnavailable, OSError) as exc:
-                errors[binding.slot_id] = str(exc)
+                if self._claim(binding.slot_id) is expected:
+                    errors[binding.slot_id] = str(exc)
         # No mount/extent I/O is awaited while holding SQLite's application
         # writer. Current binding identity is checked again under parent locks.
+        publications = []
         async with self.registry._sf() as session, session.begin():
             if session.bind.dialect.name == "sqlite":
                 await session.execute(text("BEGIN IMMEDIATE"))
             rows = (await session.execute(select(SpaceRow, SpaceBackingRow.slot_id).join(SpaceBackingRow, SpaceBackingRow.space_id == SpaceRow.id).order_by(SpaceRow.id).with_for_update(of=SpaceRow))).all()
             for row, slot in rows:
                 volume = proven.get(row.backing_handle)
-                if volume is None:
+                expected = claims.get(slot)
+                if volume is None or self._claim(slot) is not expected or expected.phase == "allocating":
                     continue
                 try:
                     binding = await session.get(SpaceBackingRow, row.backing_handle)
@@ -242,23 +310,24 @@ class SpaceFiles:
                         raise BackingUnavailable("The resource binding changed during verification")
                     self._check_incarnation(binding, volume)
                     binding.max_bytes, binding.max_inodes = volume.spec.max_bytes, volume.spec.max_inodes
-                    self._verified[binding.slot_id] = volume
+                    publications.append((slot, expected, binding.backing_handle, volume))
                 except (BackingUnavailable, OSError) as exc:
                     errors[slot] = str(exc)
-        return errors
+        # A failed or uncertain SQL commit must never publish cache facts.
+        for slot, expected, handle, volume in publications:
+            self._cache_bound(slot, expected, handle, volume)
+        return {slot: error for slot, error in errors.items() if self._claim(slot) is claims[slot]}
 
     async def load_unclaimed_slots(self):
-        bound = set().union(*self.bound_slots.values())
-        self.unclaimed_slots.clear()
-        for slot, spec in self.catalog.volumes.items():
-            if slot in bound:
+        claims = self._claim_snapshot()
+        for slot, expected in claims.items():
+            if expected.phase in ("bound", "allocating") or slot not in self.catalog.volumes:
                 continue
             try:
                 empty = await run_file_io(self._empty, await run_file_io(self.catalog.verify, slot))
             except (BackingUnavailable, OSError):
                 empty = False
-            if not empty:
-                self.unclaimed_slots[getattr(spec, "kind", None)].add(slot)
+            self._publish_claim(slot, expected, None if empty else expected.handle, "free" if empty else "unclaimed")
 
     async def create(self, *, actor: PrincipalRef, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None) -> Space:
         if not self.user_spaces:
@@ -281,6 +350,7 @@ class SpaceFiles:
         return not any(volume.data_path.iterdir()) and not any(volume.control_path.iterdir())
 
     async def _volume(self, session, row):
+        claims = self._claim_snapshot()
         binding = await session.get(SpaceBackingRow, row.backing_handle)
         if binding is None or binding.space_id != row.id:
             raise BackingUnavailable("The resource has no qualified filesystem binding")
@@ -288,8 +358,9 @@ class SpaceFiles:
         volume = await run_file_io(self.catalog.verify, binding.slot_id, previous=self._verified.get(binding.slot_id))
         self._check_incarnation(binding, volume)
         binding.max_bytes, binding.max_inodes = spec.max_bytes, spec.max_inodes
-        self._verified[binding.slot_id] = volume
-        return await run_file_io(verify_bound, volume, binding.backing_handle)
+        bound = await run_file_io(verify_bound, volume, binding.backing_handle)
+        self._cache_bound(binding.slot_id, self._binding_claim(claims, binding.slot_id), binding.backing_handle, volume)
+        return bound
 
     def _binding_spec(self, binding):
         spec = self.catalog.volumes.get(binding.slot_id)

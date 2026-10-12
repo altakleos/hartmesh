@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Storage capacity snapshots
+
+Delayed metadata and filesystem checks can no longer overwrite a newer slot
+binding or clear an allocation awaiting commit. Failed allocation retains
+uncertain capacity; failed metadata commits publish no verified cache facts.
+Current resource and filesystem admission remains mandatory. Storage defaults
+remain disabled. There is no database schema change.
+
 ### Compose mounted parent permissions
 
 Typed mounted filesystem parents use root:1000 mode 0770, allowing the Gateway

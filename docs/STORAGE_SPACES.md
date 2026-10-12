@@ -178,7 +178,11 @@ Legacy untyped inventories remain supported outside typed Compose pools.
 Offline growth takes effect when the Gateway reads the new inventory after a
 restart. The same filesystem UUID and data/control inodes must remain, and both
 bounds must stay the same or grow. Verified larger bounds update the durable
-binding; shrinking or reformatting remains unavailable. One allowance definition
+binding; shrinking or reformatting remains unavailable. Private slot claims prevent delayed metadata or filesystem results from
+overwriting a newer allocation. An allocation remains reserved through its
+caller's commit or rollback, and failed refresh commits publish no cache facts.
+Claims are operational bookkeeping; current resource, grant, root and private
+marker verification remain mandatory. One allowance definition
 uses prepared capacity, configured counts and existing use. Disabled human
 accounts still hold seats until explicitly released; AI assistants and AI
 employees count in every status except deleted.

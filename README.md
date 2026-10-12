@@ -624,7 +624,9 @@ for its privilege requirements and current scope.
 With managed storage enabled, missing or unverified backings leave the Gateway
 running with durable history and Work records available. Startup logs report
 storage and execution availability; failed Docker admission is retried every
-minute. Inventory changes and offline growth take effect after a Gateway restart.
+minute. Delayed capacity checks preserve newer slot bindings and allocations
+awaiting commit; uncertain slots remain reserved. Inventory changes and offline
+growth take effect after a Gateway restart.
 
 Ordinary chats in an enabled, qualified storage deployment keep workspace,
 uploads and outputs in the person's assigned User Space. My Files uses that
