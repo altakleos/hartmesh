@@ -37,6 +37,13 @@ the short SQL publication lock, so stalled startup verification never retains
 SQLite's application writer. Startup ownership and availability
 are documented in [the guide](../../../../../docs/STORAGE_SPACES.md).
 
+Private per-slot identity claims fence every bound/unclaimed/verified cache
+publication. Snapshot claims before awaited metadata or filesystem proof, compare
+by object identity, and retain free tombstones to prevent ABA. Allocation owns
+an allocating claim from binding flush through caller commit or rollback; readers
+cannot clear or promote it. Refresh publishes only after confirmed SQL commit.
+These caches never replace current resource, grant, root or marker admission.
+
 `binding_verified` projects facts after closing its SQL session; it grants no
 admission. Assignable-slot snapshots exclude bound/unclaimed/unverified slots,
 independently of account-seat occupancy. `user_spaces` gates `create` only;

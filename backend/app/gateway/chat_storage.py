@@ -88,6 +88,7 @@ async def _admit_verified(files, actor, user_original, company_original=None):
 
 
 async def _verified_role(files, actor, namespace, key, *, required=None):
+    claims = files._claim_snapshot()
     original = await _snapshot(files, actor, namespace, key, required=required)
     if original is None:
         return None, "space-not-assigned", None
@@ -102,7 +103,7 @@ async def _verified_role(files, actor, namespace, key, *, required=None):
     # Recheck current human eligibility and exact role/grant/binding after I/O.
     if await _snapshot(files, actor, namespace, key, required=required) != original:
         raise BackingUnavailable("The assigned role changed during verification")
-    files._verified[binding.slot_id] = volume
+    files._cache_bound(binding.slot_id, files._binding_claim(claims, binding.slot_id), binding.backing_handle, volume)
     return bound, None, original
 
 
