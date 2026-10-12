@@ -2,6 +2,7 @@
 
 import asyncio
 import sys
+from threading import Lock
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -23,14 +24,16 @@ async def test_gateway_pool_owner_qualification_and_child_are_drained_off_loop(t
     def prepare():
         pool.mkdir(mode=0o750)
         (pool / ".gateway-owner.lock").touch(mode=0o600)
+        (pool / ".native-creates").mkdir(mode=0o700)
 
     await asyncio.to_thread(prepare)
     provider = AioSandboxProvider.__new__(AioSandboxProvider)
+    provider._lock = Lock()
     provider._backend = LocalContainerBackend.__new__(LocalContainerBackend)
     provider._reconcile_orphans = Mock()
     monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_baseline_sandbox_provider", lambda: provider)
     monkeypatch.setattr("deerflow.sandbox.sandbox_provider.shutdown_sandbox_provider", lambda **kwargs: None)
-    monkeypatch.setattr(DockerStorageAdapter, "from_local_backend", lambda *_args, **_kwargs: SimpleNamespace(host_id="fixture"))
+    monkeypatch.setattr(DockerStorageAdapter, "from_local_backend", lambda *_args, **_kwargs: SimpleNamespace(host_id="fixture", _same_host=Mock()))
     monkeypatch.setattr(runtime, "SpaceAttachments", lambda _files, adapter: SimpleNamespace(provider=adapter))
     app = SimpleNamespace(state=SimpleNamespace())
     config = SimpleNamespace(enabled=True, plan=object(), inventory_path=str(pool / "inventory.json"))
@@ -40,6 +43,8 @@ async def test_gateway_pool_owner_qualification_and_child_are_drained_off_loop(t
             files = SimpleNamespace(inventory_path=config.inventory_path, _managed_runtime_required=True, _pool_runtime_owner=app.state.pool_runtime_owner)
             baseline, _ = await runtime.qualified_attachments(files)
             assert baseline is provider
+            assert provider._pool_runtime_current()
+            assert await run_file_io(app.state.pool_runtime_owner.native_create_evidence.pending) == ()
             result = await await_drained(run_file_io(provider._backend._run, [sys.executable, "-c", "print('owned')"], check=True, capture_output=True, text=True, timeout=5))
             assert result.stdout.strip() == "owned"
             with pytest.raises(StorageRuntimeUnavailable):

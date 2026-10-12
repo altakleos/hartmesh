@@ -46,6 +46,7 @@ def typed_prepared_pool():
     try:
         yield tool
     finally:
+        assert getattr(tool, "_native_bridge_contained", True), "Unconfirmed managed primary; retain its pool"
         with tool.locked():
             doc = tool.quiesce()
             assert doc["returncode"] == 0, doc
@@ -1140,3 +1141,103 @@ def test_gateway_uid_1000_can_persist_and_reopen_native_create_evidence(typed_pr
     _, status = os.waitpid(child, 0)
     assert os.waitstatus_to_exitcode(status) == 0
     assert (pool / DIRECTORY).stat().st_ino == metadata.st_ino
+
+
+def test_gateway_uid_1000_submits_and_acknowledges_actual_managed_primary(typed_prepared_pool, monkeypatch):
+    """CI-only real builder, daemon inspection, private journal and UID-1000 IO."""
+    import traceback
+    from threading import Lock
+
+    from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
+    from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
+    from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
+    from deerflow.spaces.docker import DockerStorageAdapter
+    from deerflow.spaces.native_create_evidence import ATTEMPT_LABEL
+    from deerflow.spaces.runtime_owner import PoolRuntimeOwner
+
+    tool = typed_prepared_pool
+    image = os.environ.get("HARTMESH_INSTANCE_AIO_IMAGE")
+    assert image and "@sha256:" in image
+    if runtime := os.environ.get("HARTMESH_NATIVE_WRITER_RUNTIME"):
+        monkeypatch.setenv("DEER_FLOW_SANDBOX_RUNTIME", runtime)
+    for key, value in {"DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS": "0", "DEER_FLOW_SANDBOX_MEMORY": "768m", "DEER_FLOW_SANDBOX_CPUS": "1", "DEER_FLOW_SANDBOX_PIDS_LIMIT": "128", "DEER_FLOW_SANDBOX_CONTAINER_USER": "1000:1000"}.items():
+        monkeypatch.setenv(key, value)
+    config = tool.pool.parent / ("docker-config-" + uuid.uuid4().hex)
+    config.mkdir(mode=0o700)
+    os.chown(config, 1000, 1000)
+    monkeypatch.setenv("DOCKER_CONFIG", str(config))
+    socket_group = Path("/var/run/docker.sock").stat().st_gid
+    spec = next(s for s in tool.load().volumes.values() if s.kind == "user")
+    sandbox = uuid.uuid4().hex
+    name = "hartmesh-bridge-native-" + sandbox
+    tool._native_bridge_contained = False
+    child = os.fork()
+    if child == 0:
+        owner = PoolRuntimeOwner(tool.pool)
+        handoff = adapter = backend = None
+        exit_code = 0
+        try:
+            os.setgroups([socket_group])
+            os.setgid(1000)
+            os.setuid(1000)
+            provider = AioSandboxProvider.__new__(AioSandboxProvider)
+            provider._lock = Lock()
+            backend = provider._backend = LocalContainerBackend(
+                image=image,
+                base_port=0,
+                container_prefix="hartmesh-bridge-native",
+                config_mounts=[],
+                environment={key: "true" for key in ("DISABLE_BROWSER", "DISABLE_JUPYTER", "DISABLE_CODE_SERVER", "DISABLE_VNC", "DISABLE_MCP_BROWSER", "DISABLE_NODEJS_REPL")},
+            )
+            owner.resolve_provider(lambda: provider)
+            backend._runtime_runner = owner.run
+            adapter = DockerStorageAdapter.from_local_backend(backend, pool=tool.pool, clean_probe=False)
+            evidence = owner.qualify_native_evidence(provider, daemon_id=adapter.host_id)
+            provider._install_native_creation(evidence, adapter)
+            assert provider._pool_runtime_current()
+            bridge = provider._native_creation
+            labels = {**backend._sandbox_labels(sandbox), **backend._owner_labels("native-bridge-fixture", "chat"), "hartmesh.chat.storage": "on", "hartmesh.storage.space." + spec.slot_id: "1"}
+            container_id = backend._start_container(name, 0, [(str(spec.mount_path / "data"), "/mnt/user-data", False)], publish_port=False, labels=labels)
+            with provider._lock:
+                (handoff,) = tuple(bridge.handoffs._items.values())
+                assert handoff.acknowledged and handoff.verified.container_id == container_id
+                assert bridge.handoffs.extra_slots_locked(starting={}, known_container_ids=set()) == 1
+            assert evidence.pending() == ()
+            actual = adapter._inspect(container_id)
+            assert actual["Config"]["Labels"][ATTEMPT_LABEL] == handoff.attempt.id
+            assert actual["Config"]["User"] == "1000:1000"
+            assert any(mount["Source"] == str(spec.mount_path / "data") and mount["Destination"] == "/mnt/user-data" and mount["RW"] for mount in actual["Mounts"])
+            result = backend._run(
+                ["docker", "exec", "--user", "1000:1000", container_id, "python3", "-c", "import os; assert os.getuid()==os.getgid()==1000; open('/mnt/user-data/native-bridge-proof','wb').write(b'actual managed primary')"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            assert result.returncode == 0
+            backend._run(["docker", "rm", "-f", container_id], check=True, capture_output=True, text=True, timeout=30)
+            assert adapter._inspect(container_id) is None
+            bridge.handoffs.confirmed_absent(SandboxInfo(sandbox, "", container_name=name, container_id=container_id))
+            with provider._lock:
+                assert bridge.handoffs.extra_slots_locked(starting={}, known_container_ids=set()) == 0
+            assert evidence.pending() == ()
+        except BaseException:
+            os.write(2, traceback.format_exc().encode("utf-8"))
+            exit_code = 1
+        finally:
+            if handoff is not None and handoff.verified is not None and adapter is not None:
+                try:
+                    if adapter._inspect(handoff.verified.container_id) is not None:
+                        backend._run(["docker", "rm", "-f", handoff.verified.container_id], check=True, capture_output=True, text=True, timeout=30)
+                    assert adapter._inspect(handoff.verified.container_id) is None
+                except BaseException:
+                    os.write(2, traceback.format_exc().encode("utf-8"))
+                    exit_code = 2
+            owner.close()
+        os._exit(exit_code)
+    _, status = os.waitpid(child, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
+    tool._native_bridge_contained = True
+    assert (spec.mount_path / "data/native-bridge-proof").read_bytes() == b"actual managed primary"
+    (spec.mount_path / "data/native-bridge-proof").unlink()
+    shutil.rmtree(config)

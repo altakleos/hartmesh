@@ -71,7 +71,7 @@ class NativeContainerIdentity:
 class NativeCreateEvidence:
     """One lifecycle retains its exact qualified directory, never repairs it."""
 
-    def __init__(self, pool: Path, *, daemon_id: str):
+    def __init__(self, pool: Path, *, daemon_id: str, _expected_directory=None):
         if not _text(daemon_id, 128):
             raise StorageHostUnqualified("Native creation requires a qualified daemon identity")
         self.pool, self.daemon_id = Path(pool), daemon_id
@@ -82,6 +82,8 @@ class NativeCreateEvidence:
         try:
             self._pool_fd = open_directory_source(self.pool)
             self._directory_fd = os.open(DIRECTORY, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self._pool_fd)
+            if _expected_directory is not None and _identity(os.fstat(self._directory_fd)) != _expected_directory:
+                raise StorageHostUnqualified("Native create evidence changed before namespace qualification")
             self._assert_current()
             records, _ = self._scan()
             self._prune_acknowledged(records)

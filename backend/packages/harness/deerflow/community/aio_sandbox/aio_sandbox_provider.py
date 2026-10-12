@@ -80,6 +80,7 @@ from deerflow.utils.file_io import await_drained
 from .aio_sandbox import AioSandbox
 from .backend import SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, DestroyOutcome, SandboxBackend, normalize_ready_timeout, wait_for_sandbox_ready, wait_for_sandbox_ready_async
 from .local_backend import ChatMountMismatch, LocalContainerBackend
+from .native_creation import NATIVE_CREATE_RESERVATION, NativeCreateBridge, NativeCreateHandoffs
 from .ownership import (
     OwnershipBackendError,
     RenewOutcome,
@@ -431,6 +432,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # readiness wait is the one long window in which a running container is
         # neither tracked nor warm; see _mark_starting.
         self._starting: set[str] = set()
+        self._native_creation = None
+        self._native_start_reservations = {}
         # Event-loop waiters for a replica slot: (loop, future) pairs woken
         # from whichever thread frees one. The sync half of the same wait is
         # the condition in `_capacity_gate`; both are signalled together by
@@ -867,7 +870,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def _counted_slots_locked(self) -> tuple[int, int, int, int]:
         """``(replicas, active, parked, reserved)`` as the budget counts them."""
         replicas = int(self._config.get("replicas", DEFAULT_REPLICAS))
-        return replicas, self._active_count_locked(), len(self._warm_pool), len(self._starting)
+        bridge = getattr(self, "_native_creation", None)
+        extra = 0
+        if isinstance(bridge, NativeCreateBridge):
+            known = {info.container_id for info in self._sandbox_infos.values() if info.container_id}
+            known.update(info.container_id for info, _parked in self._warm_pool.values() if info.container_id)
+            starting = {sandbox_id: token for sandbox_id, token in getattr(self, "_native_start_reservations", {}).items() if sandbox_id in self._starting}
+            extra = bridge.handoffs.extra_slots_locked(starting=starting, known_container_ids=known)
+        return replicas, self._active_count_locked(), len(self._warm_pool), len(self._starting) + extra
 
     def _try_reserve_slot_locked(self, sandbox_id: str) -> bool:
         """Take a replica slot for *sandbox_id*, or report that there is none.
@@ -1072,7 +1082,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 raise SandboxBeingDestroyedError(sandbox_id)
             self._starting.add(sandbox_id)
 
-    def _unmark_starting(self, sandbox_id: str) -> None:
+    def _unmark_starting(self, sandbox_id: str, *, native_reservation=None) -> None:
         """Drop the starting mark once the container is tracked or destroyed.
 
         Ordering matters on the failure path: the mark must outlive the
@@ -1086,6 +1096,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         wakes simply finds the count unchanged.
         """
         with self._lock:
+            if native_reservation is not None:
+                reservations = getattr(self, "_native_start_reservations", {})
+                if reservations.get(sandbox_id) is not native_reservation:
+                    return
+                reservations.pop(sandbox_id)
             self._starting.discard(sandbox_id)
             self._wake_capacity_waiters_locked()
 
@@ -1343,6 +1358,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """
         if self._managed_pool_required() and not self._pool_runtime_current():
             return False
+        try:
+            self._assert_managed_container(info)
+        except StorageHostUnqualified:
+            return False
         if not info.requires_replacement:
             return False
         if not self._adoptable_after_grace(info.sandbox_id, now):
@@ -1426,6 +1445,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 # none, and the released profile's budget is one TTL).
                 deferred += 1
                 logger.debug("Deferring container %s during reconciliation: this instance is still waiting for it to become ready", info.sandbox_id)
+                continue
+            try:
+                self._assert_managed_container(info)
+            except StorageHostUnqualified:
+                deferred += 1
                 continue
             if info.requires_replacement:
                 if self._replace_incompatible_sandbox(info, current_time):
@@ -3052,7 +3076,73 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def _pool_runtime_current(self):
         owner = getattr(self, "_pool_runtime_owner", None)
-        return owner is not None and owner.accepts(self)
+        bridge = getattr(self, "_native_creation", None)
+        return owner is not None and owner.accepts(self) and isinstance(bridge, NativeCreateBridge) and bridge.ready and bridge.evidence is owner.native_create_evidence and getattr(self._backend, "_native_creation", None) is bridge
+
+    def _install_native_creation(self, evidence, adapter):
+        """Qualification owns this operation; no provider metadata lock or SQL."""
+        owner = getattr(self, "_pool_runtime_owner", None)
+        if owner is None or evidence is not owner.native_create_evidence or evidence.daemon_id != adapter.host_id:
+            raise StorageHostUnqualified("Native bridge requires its exact pool lifetime journal and daemon")
+        owner.assert_provider(self)
+        bridge = getattr(self, "_native_creation", None)
+        if bridge is None:
+            bridge = NativeCreateBridge(
+                evidence=evidence,
+                handoffs=NativeCreateHandoffs(daemon_id=evidence.daemon_id, lock=self._lock),
+                check_owner=partial(owner.assert_provider, self),
+                owner_accepts=partial(owner.accepts, self),
+                check_daemon=adapter._same_host,
+            )
+            self._native_creation = bridge
+            self._backend._native_creation = bridge
+            self._backend._managed_native_required = True
+        elif bridge.evidence is not evidence or getattr(self._backend, "_native_creation", None) is not bridge:
+            raise StorageHostUnqualified("Native bridge binding changed during runtime qualification")
+        bridge.qualify()
+        owner.assert_provider(self)
+
+    def _begin_native_creation_call(self, sandbox_id):
+        if not isinstance(getattr(self, "_native_creation", None), NativeCreateBridge):
+            return None
+        with self._lock:
+            reservations = getattr(self, "_native_start_reservations", None)
+            if reservations is None:
+                reservations = self._native_start_reservations = {}
+            if sandbox_id not in self._starting or sandbox_id in reservations:
+                raise StorageHostUnqualified("Native creation must own one exact worker starting reservation")
+            token = object()
+            reservations[sandbox_id] = token
+            return token
+
+    def _finish_native_creation_call(self, sandbox_id, reservation):
+        """Retain an unreturned verified result before its starting mark clears."""
+        bridge = getattr(self, "_native_creation", None)
+        if reservation is None or not isinstance(bridge, NativeCreateBridge):
+            return
+
+        def transfer_if_counted(handoff):
+            with self._lock:
+                active = self._sandbox_infos.get(sandbox_id)
+                parked = self._warm_pool.get(sandbox_id)
+                warm = parked[0] if parked is not None else None
+                if any(info is not None and info.container_id == handoff.verified.container_id for info in (active, warm)):
+                    bridge.handoffs.transferred_locked(handoff)
+                    return True
+            return False
+
+        for handoff in bridge.handoffs.for_reservation(sandbox_id, reservation):
+            if handoff.verified is None or transfer_if_counted(handoff):
+                continue
+            actual = handoff.verified
+            info = SandboxInfo(sandbox_id, "", container_name=actual.name, container_id=actual.container_id, provenance=PROVENANCE_CREATED, owner=(actual.owner_id, actual.thread_id), chat_storage_enabled=True)
+            try:
+                # This is actual inspected identity, with no fabricated client
+                # or endpoint. Canonical fenced cleanup retries from quarantine.
+                self._quarantine_after_failed_destroy(sandbox_id, info, DestroyOutcome.UNKNOWN, identity=info.owner)
+            except Exception:
+                logger.warning("Native creation handoff could not enter quarantine for %s; identity and capacity retained", sandbox_id, exc_info=True)
+            transfer_if_counted(handoff)
 
     def _assert_managed_publication(self, info):
         """Memory-only check safe inside provider/lease metadata locks."""
@@ -3073,6 +3163,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if owner is None:
             raise StorageHostUnqualified("Unqualified runtime cannot adopt or remove a managed container")
         owner.assert_provider(self, teardown=teardown)
+        bridge = getattr(self, "_native_creation", None)
+        if not isinstance(bridge, NativeCreateBridge):
+            raise StorageHostUnqualified("Native container lacks its installed creation evidence")
+        with self._lock:
+            active = self._sandbox_infos.get(info.sandbox_id)
+            parked = self._warm_pool.get(info.sandbox_id)
+            known_live = active is info or (parked is not None and parked[0] is info)
+        bridge.assert_candidate_current(info, teardown=teardown, known_live=known_live)
 
     def _assert_chat_runtime(self, paths):
         if not self._managed_pool_required():
@@ -3087,6 +3185,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if owner is None:
                 raise StorageHostUnqualified("Native chat storage requires its qualified provider")
             owner.assert_provider(self)
+            bridge = getattr(self, "_native_creation", None)
+            if not isinstance(bridge, NativeCreateBridge):
+                raise StorageHostUnqualified("Native chat storage requires its completely installed creation evidence")
+            bridge.assert_current()
 
     @property
     def requires_chat_storage_validation(self):
@@ -3853,6 +3955,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 outcome, _error = self._backend_destroy(info)
             if outcome is DestroyOutcome.ABSENT:
                 record_resource_teardown()
+                bridge = getattr(self, "_native_creation", None)
+                if isinstance(bridge, NativeCreateBridge):
+                    bridge.handoffs.confirmed_absent(info)
             else:
                 # Never handed out, but started by us: a set that did not go
                 # away is still ours to finish, so it is tracked for retry.
@@ -3914,6 +4019,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # container is asked for, an unrelated warm set is stopped for it, or
         # an attempt is journaled.
         self._admit_create(sandbox_id, allow_eviction=allow_eviction)
+        native_reservation = self._begin_native_creation_call(sandbox_id)
+        native_context = NATIVE_CREATE_RESERVATION.set(native_reservation) if native_reservation is not None else None
         try:
             create_kwargs = {}
             from deerflow.spaces.chat_paths import ChatStoragePaths
@@ -3979,7 +4086,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
             return self._register_created_sandbox(thread_id, sandbox_id, info, user_id=effective_user_id)
         finally:
-            self._unmark_starting(sandbox_id)
+            try:
+                self._finish_native_creation_call(sandbox_id, native_reservation)
+            finally:
+                self._unmark_starting(sandbox_id, native_reservation=native_reservation)
+                if native_context is not None:
+                    NATIVE_CREATE_RESERVATION.reset(native_context)
 
     def _record_create_provenance(self, info: SandboxInfo) -> None:
         """Classify one create result by the backend's own word for it.
@@ -4083,6 +4195,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # evicted if it could and created regardless, so two concurrent async
         # creates could each find the last slot and each take it.
         await self._admit_create_async(sandbox_id)
+        native_reservation = self._begin_native_creation_call(sandbox_id)
+        native_context = NATIVE_CREATE_RESERVATION.set(native_reservation) if native_reservation is not None else None
         try:
             create_kwargs = {}
             from deerflow.spaces.chat_paths import ChatStoragePaths
@@ -4139,7 +4253,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             # like every other blocking step on this path.
             return await run_sync_lifecycle_operation(self._register_created_sandbox, thread_id, sandbox_id, info, user_id=effective_user_id)
         finally:
-            self._unmark_starting(sandbox_id)
+            try:
+                await await_drained(run_sync_lifecycle_operation(self._finish_native_creation_call, sandbox_id, native_reservation))
+            finally:
+                self._unmark_starting(sandbox_id, native_reservation=native_reservation)
+                if native_context is not None:
+                    NATIVE_CREATE_RESERVATION.reset(native_context)
 
     def get(self, sandbox_id: str) -> Sandbox | None:
         """Get a sandbox by ID. Updates last activity timestamp.

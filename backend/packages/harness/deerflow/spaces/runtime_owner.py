@@ -35,12 +35,49 @@ class PoolRuntimeOwner:
         self.pool = Path(pool)
         self._lock = RLock()
         self._pool_fd = self._fd = None
+        self._native_namespace_fd = None
+        self._native_create_evidence = None
         self._provider = None
         self._closing = self._closed = False
 
     @property
     def provider(self):
         return self._provider
+
+    @property
+    def native_create_evidence(self):
+        """Memory-only snapshot of the lifecycle's exact private journal."""
+        return self._native_create_evidence
+
+    def qualify_native_evidence(self, provider, *, daemon_id):
+        """Retain the namespace even when its first contents cannot qualify.
+
+        A failed load must not permit a later retry to substitute an empty
+        directory and forget detached unresolved evidence. O_PATH pins even
+        an unreadable or malformed published node, without following links.
+        """
+        from deerflow.spaces.native_create_evidence import DIRECTORY, NativeCreateEvidence
+
+        with self._lock:
+            self.assert_provider(provider)
+            try:
+                if self._native_namespace_fd is None:
+                    self._native_namespace_fd = os.open(DIRECTORY, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self._pool_fd)
+                named = os.stat(DIRECTORY, dir_fd=self._pool_fd, follow_symlinks=False)
+                if _identity(named) != _identity(os.fstat(self._native_namespace_fd)):
+                    raise StorageRuntimeUnavailable("Native creation evidence namespace changed during runtime qualification")
+                if self._native_create_evidence is None:
+                    self._native_create_evidence = NativeCreateEvidence(self.pool, daemon_id=daemon_id, _expected_directory=_identity(os.fstat(self._native_namespace_fd)))
+                journal = self._native_create_evidence
+                if journal.daemon_id != daemon_id:
+                    raise StorageRuntimeUnavailable("Native creation evidence belongs to another qualified daemon")
+                journal.pending()
+                if _identity(os.stat(DIRECTORY, dir_fd=self._pool_fd, follow_symlinks=False)) != _identity(os.fstat(self._native_namespace_fd)):
+                    raise StorageRuntimeUnavailable("Native creation evidence namespace changed after qualification")
+                self.assert_provider(provider)
+                return journal
+            except (OSError, StorageHostUnqualified) as exc:
+                raise StorageRuntimeUnavailable("Native creation evidence qualification is unavailable; retained facts were not replaced") from exc
 
     def mark_closing(self):
         # Publication checks this again after construction. Do not wait for a
@@ -167,8 +204,12 @@ class PoolRuntimeOwner:
     def close(self):
         with self._lock:
             self._closing = self._closed = True
-            for name in ("_fd", "_pool_fd"):
-                descriptor = getattr(self, name)
-                if descriptor is not None:
-                    setattr(self, name, None)
-                    os.close(descriptor)
+            try:
+                if self._native_create_evidence is not None:
+                    self._native_create_evidence.close()
+            finally:
+                for name in ("_native_namespace_fd", "_fd", "_pool_fd"):
+                    descriptor = getattr(self, name)
+                    if descriptor is not None:
+                        setattr(self, name, None)
+                        os.close(descriptor)

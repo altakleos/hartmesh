@@ -1,6 +1,7 @@
 """Private managed ownership precedes provider construction and native effects."""
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -15,11 +16,17 @@ def pool(tmp_path):
     root = tmp_path / "pool"
     root.mkdir(mode=0o750)
     (root / ".gateway-owner.lock").touch(mode=0o600)
+    (root / ".native-creates").mkdir(mode=0o700)
     return root
 
 
 def files(pool, owner):
     return SimpleNamespace(inventory_path=pool / "inventory.json", _managed_runtime_required=True, _pool_runtime_owner=owner)
+
+
+def qualify_native(provider, owner):
+    evidence = owner.qualify_native_evidence(provider, daemon_id="fixture-host")
+    provider._install_native_creation(evidence, SimpleNamespace(host_id="fixture-host", _same_host=Mock()))
 
 
 @pytest.mark.asyncio
@@ -51,13 +58,14 @@ async def test_managed_probe_retry_reuses_exact_provider_and_owned_runner(pool, 
 
     owner = PoolRuntimeOwner(pool)
     provider = AioSandboxProvider.__new__(AioSandboxProvider)
+    provider._lock = threading.RLock()
     provider._backend = LocalContainerBackend.__new__(LocalContainerBackend)
     provider._reconcile_orphans = Mock()
     getter = Mock(return_value=provider)
     monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_baseline_sandbox_provider", getter)
     monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_initialized_sandbox_provider", lambda: None)
     calls = []
-    adapter = SimpleNamespace(host_id="host")
+    adapter = SimpleNamespace(host_id="host", _same_host=Mock())
 
     def probe(backend, **kwargs):
         assert backend is provider._backend and owner.accepts(provider)
@@ -215,6 +223,7 @@ async def test_post_create_proof_failure_keeps_exact_unknown_container(pool, tmp
     provider._pool_runtime_owner = runtime
     info = SandboxInfo("native", "http://native", container_id="a" * 64, provenance=PROVENANCE_CREATED)
     provider._backend = SimpleNamespace(create=Mock(), destroy=Mock())
+    qualify_native(provider, runtime)
     for method in ("_lark_integration_active", "_lark_broker_active"):
         monkeypatch.setattr(provider, method, lambda *_args: False)
     monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_args, **_kwargs: [])
@@ -282,11 +291,16 @@ def test_closing_during_warm_ownership_roundtrip_prevents_promotion(pool, tmp_pa
     runtime.resolve_provider(lambda: provider)
     provider._pool_runtime_owner = runtime
     info = SandboxInfo("native", "http://native", container_id="a" * 64)
+    provider._backend = SimpleNamespace()
+    qualify_native(provider, runtime)
     provider._warm_pool["native"] = (info, 0)
     provider._warm_pool_identity["native"] = ("alice", "chat-a")
     monkeypatch.setattr(provider, "_check_tracked_sandbox_alive", lambda *_args: True)
 
+    publications = []
+
     def changed(*_args):
+        publications.append("native")
         if closing:
             runtime.mark_closing()
         else:
@@ -299,6 +313,7 @@ def test_closing_during_warm_ownership_roundtrip_prevents_promotion(pool, tmp_pa
             provider._reclaim_warm_pool_sandbox("chat-a", "native", user_id="alice")
         assert provider._warm_pool["native"][0] is info
         assert not provider._sandboxes
+        assert publications == ["native"]
     finally:
         runtime.close()
         provider._acquire_serializer.close()

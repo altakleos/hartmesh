@@ -622,10 +622,12 @@ offline growth that preserves files; see [Storage Spaces](docs/STORAGE_SPACES.md
 for its privilege requirements and current scope.
 
 Preparation also publishes a private `.native-creates` directory outside storage
-views and temporary probes. It will retain unresolved container creation requests
-across restarts when the runtime bridge is connected. Operators must preserve it
-alongside the pool; preparation refuses unsafe existing ownership or permissions.
-This foundation leaves storage defaults and chat behavior unchanged.
+views and temporary probes. Managed native chats now record each container request
+before submission and verify its actual Docker identity before acknowledging it.
+Unresolved requests survive restart, reserve capacity and block another native
+create for the same account or container name. Cancellation retains verified
+containers for fenced cleanup. Operators must preserve the directory alongside
+the pool; unsafe or unknown evidence refuses admission. Defaults remain disabled.
 
 With managed storage enabled, missing or unverified backings leave the Gateway
 running with durable history and Work records available. Startup logs report

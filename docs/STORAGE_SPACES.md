@@ -294,17 +294,30 @@ uses a private staged directory, descriptor proof, no-replace rename and directo
 fsync. Published ownership, permissions or identity conflicts are refused without
 repair; interrupted staging directories and existing bytes are preserved.
 
-The private journal foundation is currently unused by chat creation. Its version-1
-records are bounded single-link 0600 files containing attempt, daemon, container
-name, owner/thread and exact slot correlation facts; these facts grant no authority.
-Pending records survive restart and never disappear because inventory is empty or
-time has elapsed. Only an exact same-daemon verified acknowledgment can retire a
-record, after durable publication. Unknown records, interrupted writes and record
-limits refuse admission without eviction. Runtime integration must retain this
-helper under pool ownership, qualify actual Docker identity, preserve conservative
-capacity and drain workers before close. It follows in a separate change, before
-account-release containment or activation. Preserve the directory with the pool;
-no browser/model force-clear API is provided. There is no database schema change.
+Managed native chat creation uses version-1 bounded single-link 0600 records
+containing immutable attempt, daemon, container name, owner/thread and exact slot
+correlation facts; these facts grant no authority. Qualification restores retained
+pending capacity before orphan reconciliation or native publication. The exact
+journal stays owned through retry and worker drainage, alongside the pool lock.
+
+Each primary request is recorded and fsynced before submission. Acknowledgment
+requires actual same-daemon inspection of the full Docker ID, exact name, private
+attempt label and all requested labels/slots. The provider retains verified
+identity before acknowledgment or worker return, so cancellation and failed
+acknowledgment cannot lose the container. Canonical fenced cleanup retries unknown
+returned results from quarantine; identity-less requests consume capacity without
+fabricated clients. Confirmed absence releases an acknowledged result's capacity,
+but never settles an unacknowledged request.
+
+Pending survives restart and is never erased because inventory is empty or time
+has elapsed. The same owner or name cannot submit again while its request is
+unresolved; unrelated owners remain admissible within the normal replica budget.
+Partial record publication must restore accounting or disable native publication.
+Malformed records, interrupted stages and limits refuse admission without eviction.
+Preserve this directory with the pool; no browser/model force-clear API is provided.
+Mountless chats and existing durable attachment preparation retain their own
+lifecycles. Account-release containment follows separately. Defaults remain off.
+There is no database schema change; private journal JSON remains version 1.
 
 Managed-plan qualification requires one participating Gateway runtime per pool.
 `prepare` and `mount-all` maintain `.gateway-owner.lock`, a stable empty regular
