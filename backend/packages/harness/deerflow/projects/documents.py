@@ -29,14 +29,15 @@ import shutil
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from deerflow.config.paths import Paths, get_paths
+from deerflow.files.store import DescriptorSource, StoreError
 from deerflow.uploads.manager import is_upload_staging_file
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
-from deerflow.utils.file_io import run_file_io
+from deerflow.utils.file_io import await_drained, run_file_io
 from deerflow.utils.text_detection import is_text_file_by_content
 
 if TYPE_CHECKING:
@@ -139,6 +140,7 @@ class StagedDocument:
     staging_path: Path
     sha256: str
     size_bytes: int
+    placement: Any | None = field(default=None, repr=False, compare=False)
 
 
 def _open_staging(staging_dir: Path, staging_path: Path):
@@ -210,6 +212,13 @@ def _remove_staging(staging_path: Path) -> None:
     staging_path.unlink(missing_ok=True)
 
 
+def _discard_document_stage(staged):
+    if staged.placement is not None:
+        staged.placement.discard_private()
+    else:
+        _remove_staging(staged.staging_path)
+
+
 def _remove_namespace(paths: Paths, *, user_id: str, relpath: str) -> None:
     """Best-effort removal of one document's exclusive namespace (never another row's)."""
     shutil.rmtree(paths.project_document_path(user_id, relpath), ignore_errors=True)
@@ -239,76 +248,87 @@ async def add_staged_document(
     success, and an indeterminate liveness check leaves the namespace for
     the reference-aware sweep (§8.3).
     """
-    document_id = uuid.uuid4().hex
-    relpath = shelf_relpath(project_id, staged.sha256, document_id)
-    # Symlink-resolving lookup — offloaded like every filesystem touch here.
-    final_path = (await run_file_io(resolve_document_paths, paths, user_id=user_id, relpath=relpath, name=name))[0]
-
-    async def _place() -> None:
-        await run_file_io(_place_staging, staged.staging_path, final_path)
-
     try:
-        row = await repo.insert_active(
-            project_id,
-            document_id=document_id,
-            name=name,
-            relpath=relpath,
-            sha256=staged.sha256,
-            size_bytes=staged.size_bytes,
-            source_thread_id=source_thread_id,
-            source_kind=source_kind,
-            source_name=source_name,
-            place_file=_place,
-            user_id=user_id,
-        )
-    except Exception:
-        # ``insert_active`` owns its commit: a failure may surface AFTER the
-        # row committed (e.g. its trailing refresh), so the placed namespace
-        # is removed only when the row PROVABLY does not exist. When the row
-        # is live the insert effectively succeeded — the shelf already serves
-        # these bytes — so return it instead of raising; when liveness cannot
-        # be determined, leave the namespace for the reference-aware
-        # retention sweep (§8.3), which only collects unreferenced files and
-        # protects any row's namespace. The probe includes TRASHED rows: a
-        # row raced into trash (or a trashing project deletion) before the
-        # re-check still owns the placed bytes — trash is recoverable, so
-        # deleting the namespace would destroy a recoverable document.
-        await run_file_io(_remove_staging, staged.staging_path)
-        committed: dict | None
+        document_id = uuid.uuid4().hex
+        relpath = shelf_relpath(project_id, staged.sha256, document_id)
+        # Symlink-resolving lookup — offloaded like every filesystem touch here.
+        final_path = (await run_file_io(resolve_document_paths, paths, user_id=user_id, relpath=relpath, name=name))[0] if staged.placement is None else None
+
+        async def _place() -> None:
+            await run_file_io(_place_staging, staged.staging_path, final_path)
+
+        async def _place_in_session(session):
+            await staged.placement.place(session, relpath=relpath, name=name)
+
         try:
-            committed = await repo.get(document_id, include_trashed=True, user_id=user_id)
-        except Exception:
-            committed = None
-            row_provably_absent = False
-            logger.warning(
-                "Shelf insert of %s failed and the liveness re-check failed too; leaving the namespace for the retention sweep",
-                document_id,
-                exc_info=True,
+            row = await repo.insert_active(
+                project_id,
+                document_id=document_id,
+                name=name,
+                relpath=relpath,
+                sha256=staged.sha256,
+                size_bytes=staged.size_bytes,
+                source_thread_id=source_thread_id,
+                source_kind=source_kind,
+                source_name=source_name,
+                **({"place_file": _place} if staged.placement is None else {"place_file_in_session": _place_in_session}),
+                user_id=user_id,
             )
-        else:
-            row_provably_absent = committed is None
-        if committed is not None:
-            if committed.get("trashed_at") is None:
-                logger.warning("Shelf insert of %s raised after commit; the row is live — keeping its namespace and reporting success", document_id)
-                return committed, True
-            # Committed but raced into trash before the re-check: keep the
-            # bytes recoverable in trash and surface the failure rather than
-            # presenting a trashed row as created.
-            logger.warning("Shelf insert of %s raised after commit and the row was trashed meanwhile; keeping its namespace in trash", document_id)
-        elif row_provably_absent:
-            # Confirmed rollback: the bytes are unreferenced — clean up only
-            # this document's own namespace (§6.3).
-            await run_file_io(_remove_namespace, paths, user_id=user_id, relpath=relpath)
-        raise
-    if row is None:
-        # Missing/foreign/archived project: nothing was placed or inserted.
-        await run_file_io(_remove_staging, staged.staging_path)
-        return None
-    if row["id"] != document_id:
-        # Dedup hit: the existing row wins; discard the staged duplicate.
-        await run_file_io(_remove_staging, staged.staging_path)
-        return row, False
-    return row, True
+        except Exception:
+            # ``insert_active`` owns its commit: a failure may surface AFTER the
+            # row committed (e.g. its trailing refresh), so the placed namespace
+            # is removed only when the row PROVABLY does not exist. When the row
+            # is live the insert effectively succeeded — the shelf already serves
+            # these bytes — so return it instead of raising; when liveness cannot
+            # be determined, leave the namespace for the reference-aware
+            # retention sweep (§8.3), which only collects unreferenced files and
+            # protects any row's namespace. The probe includes TRASHED rows: a
+            # row raced into trash (or a trashing project deletion) before the
+            # re-check still owns the placed bytes — trash is recoverable, so
+            # deleting the namespace would destroy a recoverable document.
+            await run_file_io(_discard_document_stage, staged)
+            committed: dict | None
+            try:
+                committed = await repo.get(document_id, include_trashed=True, user_id=user_id)
+            except Exception:
+                committed = None
+                row_provably_absent = False
+                logger.warning(
+                    "Shelf insert of %s failed and the liveness re-check failed too; leaving the namespace for the retention sweep",
+                    document_id,
+                    exc_info=True,
+                )
+            else:
+                row_provably_absent = committed is None
+            if committed is not None:
+                if committed.get("trashed_at") is None:
+                    logger.warning("Shelf insert of %s raised after commit; the row is live — keeping its namespace and reporting success", document_id)
+                    return committed, True
+                # Committed but raced into trash before the re-check: keep the
+                # bytes recoverable in trash and surface the failure rather than
+                # presenting a trashed row as created.
+                logger.warning("Shelf insert of %s raised after commit and the row was trashed meanwhile; keeping its namespace in trash", document_id)
+            elif row_provably_absent:
+                # Confirmed rollback: the bytes are unreferenced — clean up only
+                # this document's own namespace (§6.3).
+                if staged.placement is not None:
+                    await run_file_io(staged.placement.rollback)
+                else:
+                    await run_file_io(_remove_namespace, paths, user_id=user_id, relpath=relpath)
+            raise
+        if row is None:
+            # Missing/foreign/archived project: nothing was placed or inserted.
+            await run_file_io(_discard_document_stage, staged)
+            return None
+        if row["id"] != document_id:
+            # Dedup hit: the existing row wins; discard the staged duplicate.
+            await run_file_io(_discard_document_stage, staged)
+            return row, False
+        return row, True
+
+    finally:
+        if staged.placement is not None:
+            await await_drained(run_file_io(staged.placement.close))
 
 
 def _convert_in_thread(original: Path, output_path: Path) -> Path | None:
@@ -524,15 +544,33 @@ async def read_file_chunks(path: Path, *, chunk_size: int = 65536) -> AsyncItera
     the attach path (staged shelf copy → thread-upload ingestion).
     """
 
-    def _open() -> Any:
-        return open(path, "rb")
+    handle = None
 
-    handle = await run_file_io(_open)
+    def _open() -> None:
+        nonlocal handle
+        handle = os.fdopen(path.open(), "rb") if isinstance(path, DescriptorSource) else open(path, "rb")
+
     try:
-        while chunk := await run_file_io(handle.read, chunk_size):
-            yield chunk
+        await await_drained(run_file_io(_open))
+        if isinstance(path, DescriptorSource):
+            initial = await await_drained(run_file_io(os.fstat, handle.fileno()))
+            remaining = initial.st_size
+            while remaining:
+                chunk = await await_drained(run_file_io(handle.read, min(chunk_size, remaining)))
+                if not chunk:
+                    raise StoreError("The source changed while copying")
+                remaining -= len(chunk)
+                yield chunk
+            extra = await await_drained(run_file_io(handle.read, 1))
+            current = await await_drained(run_file_io(os.fstat, handle.fileno()))
+            if extra or (current.st_size, current.st_mtime_ns, current.st_ctime_ns) != (initial.st_size, initial.st_mtime_ns, initial.st_ctime_ns):
+                raise StoreError("The source changed while copying")
+        else:
+            while chunk := await await_drained(run_file_io(handle.read, chunk_size)):
+                yield chunk
     finally:
-        await run_file_io(handle.close)
+        if handle is not None:
+            await await_drained(run_file_io(handle.close))
 
 
 def _copy_original_under_lock(paths: Paths, staging_path: Path, *, user_id: str, row: dict) -> None:

@@ -250,6 +250,7 @@ class ProjectDocumentRepository:
         source_kind: str | None = None,
         source_name: str | None = None,
         place_file: Callable[[], Awaitable[None]] | None = None,
+        place_file_in_session: Callable[[AsyncSession], Awaitable[None]] | None = None,
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> dict | None:
         """Insert one shelf row under the active-project lock, or return the dedup hit.
@@ -265,6 +266,8 @@ class ProjectDocumentRepository:
         hit by ``row["id"] != document_id``.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.insert_active")
+        if place_file is not None and place_file_in_session is not None:
+            raise ValueError("Select one owned document placement callback")
         async with self._sf() as session:
             await self._begin_immediate_if_sqlite(session)
             if await self._lock_active_project(session, project_id, resolved_user_id) is None:
@@ -284,7 +287,9 @@ class ProjectDocumentRepository:
                 mark_effect()
                 await session.commit()
                 return self._row_to_dict(existing)
-            if place_file is not None:
+            if place_file_in_session is not None:
+                await await_drained(place_file_in_session(session))
+            elif place_file is not None:
                 # Drained: cancellation waits for the placement worker instead of
                 # releasing the project lock over in-flight filesystem work.
                 await await_drained(place_file())

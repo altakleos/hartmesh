@@ -11,9 +11,9 @@ class PublicationUnavailable(Exception):
     pass
 
 
-async def copy_and_record(repo, source, *, name, folder, user_id, thread_id, source_path, copy, remove):
+async def copy_and_record(repo, source, *, name, folder, user_id, thread_id, source_path, copy, remove, copy_async=None, rollback_async=None):
     publication_id = str(uuid.uuid4())
-    published = await run_file_io(copy, source, name=name, folder=folder)
+    published = await copy_async(source, name=name, folder=folder) if copy_async is not None else await run_file_io(copy, source, name=name, folder=folder)
     fact = {"publication_id": publication_id, "path": published.path, "size": published.size, "sha256": published.sha256 or "", "published_by": user_id, "from_thread_id": thread_id, "from_path": source_path}
     await run_file_io(record_fact, "publication", fact)
     try:
@@ -28,10 +28,13 @@ async def copy_and_record(repo, source, *, name, folder, user_id, thread_id, sou
             if any(committed.get(key) != value for key, value in fact.items()) or committed.get("removed_at") is not None:
                 raise PublicationUnavailable("Publication identity changed; preserve bytes for controller recovery") from exc
             return published, committed
-        held = await run_file_io(shared_file_holding, published.path, fact["sha256"])
-        if held is None:
-            raise PublicationUnavailable("Uncommitted publication bytes changed; preserve them for recovery") from exc
-        await run_file_io(remove, published.path)
+        if rollback_async is not None:
+            await rollback_async(published)
+        else:
+            held = await run_file_io(shared_file_holding, published.path, fact["sha256"])
+            if held is None:
+                raise PublicationUnavailable("Uncommitted publication bytes changed; preserve them for recovery") from exc
+            await run_file_io(remove, published.path)
         await run_file_io(record_fact, "publication_rolled_back", publication_id)
         raise PublicationUnavailable("The publication record was not committed; the owned copy was removed") from exc
     return published, record
@@ -61,7 +64,7 @@ async def recover_removals(repo, state):
             await run_file_io(pending.close)
 
 
-async def reconcile_publication(repo, receipt, intent):
+async def reconcile_publication(repo, receipt, intent, *, holding=shared_file_holding):
     """Reconcile this operation's exact known receipt; never infer a new copy."""
     from deerflow.files.shared import shared_mutation_state
     from deerflow.spaces.workflows import mark_effect
@@ -76,7 +79,7 @@ async def reconcile_publication(repo, receipt, intent):
             if record is not None:
                 raise PublicationUnavailable("A rolled-back publication unexpectedly has a record")
             return {"publication_id": fact["publication_id"], "published": False}
-        held = await run_file_io(shared_file_holding, fact["path"], fact["sha256"])
+        held = await run_file_io(holding, fact["path"], fact["sha256"])
         if held is None:
             raise PublicationUnavailable("Publication bytes no longer match their receipt")
         if record is None:

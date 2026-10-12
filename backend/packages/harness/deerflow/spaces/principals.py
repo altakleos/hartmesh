@@ -24,9 +24,10 @@ class HostPrincipalResolver:
     No identity is projected through another person's user/thread ID.
     """
 
-    def __init__(self, *, human: Lookup, nonhuman: Lookup | None = None) -> None:
+    def __init__(self, *, human: Lookup, nonhuman: Lookup | None = None, nonhuman_in_session=None) -> None:
         self._human = human
         self._nonhuman = nonhuman
+        self._nonhuman_in_session = nonhuman_in_session
 
     async def resolve(self, reference: PrincipalRef) -> ResolvedPrincipal:
         if not isinstance(reference, PrincipalRef):
@@ -35,6 +36,18 @@ class HostPrincipalResolver:
         if lookup is None:
             raise InvalidPrincipal("No host adapter supports this principal kind")
         result = await lookup(reference)
+        return self._validated(reference, result)
+
+    async def resolve_in_session(self, reference, session):
+        if not isinstance(reference, PrincipalRef):
+            raise InvalidPrincipal("Storage requires a host-validated principal")
+        lookup = getattr(self._human, "in_session", None) if reference.kind == "human" else self._nonhuman_in_session
+        if lookup is None:
+            return await self.resolve(reference)
+        return self._validated(reference, await lookup(reference, session))
+
+    @staticmethod
+    def _validated(reference, result):
         if not isinstance(result, ResolvedPrincipal) or result.reference != reference or type(result.can_provision_company) is not bool:
             raise InvalidPrincipal("Unknown, retired or incorrectly resolved storage principal")
         return result

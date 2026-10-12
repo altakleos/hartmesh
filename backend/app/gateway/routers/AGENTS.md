@@ -5,20 +5,13 @@ Own-file status closes SQL before kernel proof and uses assignable slots, not
 seat vacancy. Failed projection returns unavailable defaults; public health
 reports storage/agent state words only, without counts, bytes or paths. Unsupported identities never project a synthetic owner.
 
-Installed artifact declarations additionally dispatch `preview=namespace/id`
-through `_artifact_projection.py` after the same read/owner fence. Match only
-installed, enabled literal suffix declarations and registered compatibility
-queries. Public descriptors expose budgets/markers, never callback or source
-configuration. Projectors receive one bounded immutable bytes snapshot in a
-drained worker; the ETag hashes the original captured bytes. Unsupported preview
-capabilities return 501 for bounded source fallback. Ordinary/download reads do
-not project. Registration bounds remain 16 MiB source / 1 MiB response maximum.
-
-Artifact `report_preview=true` projects output report JSON behind the existing
-thread read/owner gate. Read at most 16 MiB through one no-follow descriptor;
-return at most 1 MiB of card fields with the original bytes' SHA-256 and size.
-Keep parsing/serialization off-loop and drain it on cancellation. No projection
-cache or stored report mutation; `download=true` always returns the original.
+Artifact `preview=namespace/id` uses `_artifact_projection.py`: match installed,
+enabled literal suffixes/compatibility queries after the read/owner fence.
+`report_preview=true` uses that fence for output reports. Public descriptors expose
+budgets/markers only. Capture one bounded no-follow snapshot; project/serialize
+in a drained worker, with original-byte SHA-256 ETags. Source/response limits are
+16/1 MiB. No cache, report mutation or ordinary/download projection. Unsupported
+capabilities return 501 for bounded source fallback.
 Managed chat file effects use `chat_files.py`/`ChatUploadSession`: fresh human
 User admission, pinned descriptors and private quota-counted stages; Shared reads
 also refresh Company admission. Keep ranges, ZIP-member/projector budgets and
@@ -39,9 +32,15 @@ revisions detect source changes. Failure/cancellation drains rollback of exact-o
 files and target stores. Historical/NoUser copies history only; legacy/AgentHome
 branching keeps its existing behavior. Unsupported credentials never gain general
 Space access.
-Pending native Keep/Share, project promotion/listing, archives, screenshots and
-skill installation call `require_legacy_file_operation` before file effects;
-managed chats refuse explicitly, with no legacy fallback or activation flip.
+Native file adapters use `NativeFileSources` before workflow intent: source
+READ/EXPORT, joint destination rights, borrowed SQL guards, pinned roots and
+fresh admission before quota-private publication. `NativeDirectoryChanges`
+removes only owned empty directories; preserve competing bytes and uncertainty.
+Shared recovery pins receipts to inode identity; project placement borrows its
+writer and preserves file-before-row outcomes. ZIPs retain exclusions/budgets
+and refresh before headers. Skill installation retains private-owner delegation.
+Browser REST/tools use the owning Gateway publisher, ignoring caller paths;
+AI employees cannot use human User storage. NoUser has no legacy file fallback.
 
 Malformed/oversized/unsupported projections retain a bounded source-preview
 fallback in the UI; ownership and path denials do not. Platforms without safe

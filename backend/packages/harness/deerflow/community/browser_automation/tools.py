@@ -188,18 +188,20 @@ async def _capture_step_screenshot(runtime: Runtime, session: BrowserSession, ac
     it stays out of the workspace-changes review), or ``None`` when outputs are
     unavailable or capture fails — a failed capture must never break the action.
     """
-    outputs_path = _thread_outputs_path(runtime)
-    if isinstance(outputs_path, str):
-        return None
     try:
+        from deerflow.spaces.chat_screenshots import native_screenshot_writer
+
+        writer = await native_screenshot_writer(_thread_id(runtime))
+        outputs_path = _thread_outputs_path(runtime) if writer is None else None
+        if isinstance(outputs_path, str):
+            return None
         content = await session.screenshot_bytes(
             full_page=False,
             image_type=_PROGRESS_SCREENSHOT_ENCODING.image_type,
             quality=_PROGRESS_SCREENSHOT_ENCODING.quality,
         )
         name = _step_screenshot_name(action)
-        frames_dir = outputs_path / _BROWSER_FRAMES_DIRNAME
-        final_name = await asyncio.to_thread(_write_screenshot, frames_dir, name, content)
+        final_name = await writer(name, content, frames=True) if writer is not None else await asyncio.to_thread(_write_screenshot, outputs_path / _BROWSER_FRAMES_DIRNAME, name, content)
         with contextlib.suppress(Exception):
             session.schedule_live_frames()
         return f"{_FRAMES_VIRTUAL_PREFIX}/{final_name}"
@@ -232,7 +234,7 @@ def _snapshot_command(
     return Command(update=update)
 
 
-async def navigate_and_capture(*, thread_id: str | None, url: str, outputs_path: Path) -> dict:
+async def navigate_and_capture(*, thread_id: str | None, url: str, outputs_path: Path | None, screenshot_writer=None) -> dict:
     """Drive the per-thread browser session to *url* and capture a screenshot.
 
     Used by the Gateway browser router so a user can steer the live session from
@@ -242,6 +244,10 @@ async def navigate_and_capture(*, thread_id: str | None, url: str, outputs_path:
     Returns ``{"screenshot": virtual_path|None, "url": str, "title": str}``.
     Raises :class:`ValueError` when the URL fails SSRF validation.
     """
+    if screenshot_writer is None:
+        from deerflow.spaces.chat_screenshots import native_screenshot_writer
+
+        screenshot_writer = await native_screenshot_writer(thread_id)
     url_error = _validate_url("browser_navigate", url)
     if url_error:
         raise ValueError(url_error)
@@ -265,10 +271,11 @@ async def navigate_and_capture(*, thread_id: str | None, url: str, outputs_path:
                 quality=_PROGRESS_SCREENSHOT_ENCODING.quality,
             )
             name = _step_screenshot_name("navigate")
-            frames_dir = outputs_path / _BROWSER_FRAMES_DIRNAME
-            final_name = await asyncio.to_thread(_write_screenshot, frames_dir, name, content)
+            final_name = await screenshot_writer(name, content, frames=True) if screenshot_writer is not None else await asyncio.to_thread(_write_screenshot, outputs_path / _BROWSER_FRAMES_DIRNAME, name, content)
             screenshot_path = f"{_FRAMES_VIRTUAL_PREFIX}/{final_name}"
         except Exception as e:
+            if screenshot_writer is not None:
+                raise
             logger.warning(f"browser gateway navigate screenshot failed: {e}")
     return {"screenshot": screenshot_path, "url": snapshot.url, "title": snapshot.title}
 
@@ -435,13 +442,16 @@ async def browser_screenshot_tool(
         full_page: Capture the full scrollable page instead of just the viewport.
     """
     try:
-        outputs_path = _thread_outputs_path(runtime)
+        from deerflow.spaces.chat_screenshots import native_screenshot_writer
+
+        writer = await native_screenshot_writer(_thread_id(runtime))
+        outputs_path = _thread_outputs_path(runtime) if writer is None else None
         if isinstance(outputs_path, str):
             return _tool_message(outputs_path, tool_call_id)
         with _resolve_session(runtime, "browser_screenshot") as session:
             content = await session.screenshot_bytes(full_page=full_page)
             name = _safe_screenshot_name(filename)
-            final_name = await asyncio.to_thread(_write_screenshot, outputs_path, name, content)
+            final_name = await writer(name, content, frames=False) if writer is not None else await asyncio.to_thread(_write_screenshot, outputs_path, name, content)
         virtual_path = f"{_OUTPUTS_VIRTUAL_PREFIX}/{final_name}"
         return Command(
             update={

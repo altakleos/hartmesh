@@ -163,6 +163,13 @@ Host-written workflows require active native destinations and still reject
 pending destination intents, despite admitting the human with READ/EXPORT.
 Only the exact own reconciliation intent is exempt. The flag is host-only;
 bundled Shared uses it without a mediated controller/public recover action.
+`admit_in_session` borrows an active host writer without starting/committing or
+closing SQL and retains the ordinary resource, generation and operation guards.
+Host principal adapters explicitly support the borrowed session: human lookup
+loads current account eligibility in it, and the instance directory checks its
+current owner there. Never silently drop identity checks or perform another pool
+checkout while the owning writer is held. Source-only User role verification
+can require READ/EXPORT; ordinary chat projection keeps READ/WRITE.
 `settle_publication(intent, session=...)` requires an owned workflow, exact pending
 intent snapshot, verified company receipt and fenced attachments. Borrowed
 publication repositories flush without committing/closing the caller; completion

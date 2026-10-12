@@ -35,26 +35,23 @@ async def test_feature_save_full_maps_to_structured_507_without_leaving_a_pendin
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("door", ["keep", "share", "promote", "project-list"])
-@pytest.mark.parametrize("qualified", [False, True])
-async def test_deferred_native_feature_http_refuses_before_workflow_and_does_not_block_later_writes(feature_app, monkeypatch, door, qualified):
+async def test_native_feature_without_user_role_refuses_before_workflow_and_keeps_generic_access(feature_app, door):
     from uuid import uuid4
 
-    from sqlalchemy import select
+    from sqlalchemy import delete, select
+    from test_compose_native_file_sources import native_request
 
-    from app.gateway import chat_storage
     from app.gateway.routers import project_thread_files, spaces
+    from deerflow.features.resources import StorageFeatureLinkRow
     from deerflow.persistence.spaces.files import SpaceFileOperationRow
-    from deerflow.spaces.chat_paths import ChatStoragePaths
     from deerflow.spaces.contract import PrincipalRef
 
-    client, app, files, catalog, base, alice, _, _ = feature_app
+    client, app, files, _, base, alice, _, _ = feature_app
+    native_request(app)
     actor = PrincipalRef("human", str(alice.id))
     resource = next(space for space in await files.registry.list(actor=actor) if space.custody.kind == "personal")
-    volume = next(volume for volume in catalog.verified.values() if (volume.data_path / "conversations").exists())
-    paths = ChatStoragePaths(base, user_id=actor.subject_id, user=volume if qualified else None)
-    prepared = chat_storage.PreparedChatStorage(paths, paths.mounts(THREAD, user_id=actor.subject_id), reason=None if qualified else "space-not-assigned")
-    monkeypatch.setattr(chat_storage, "prepare_chat_request", AsyncMock(return_value=prepared))
-    app.state.storage_spaces_enabled = True
+    async with files.registry._sf() as session, session.begin():
+        await session.execute(delete(StorageFeatureLinkRow).where(StorageFeatureLinkRow.namespace == "hm.user-space", StorageFeatureLinkRow.key == "human:" + actor.subject_id))
     app.include_router(spaces.router)
     app.include_router(project_thread_files.router)
     if door == "keep":
@@ -65,7 +62,8 @@ async def test_deferred_native_feature_http_refuses_before_workflow_and_does_not
         response = await client.post("/api/projects/project-a/documents/from-thread", json={"thread_id": THREAD, "kind": "output", "name": "report.txt"})
     else:
         response = await client.get("/api/projects/project-a/thread-files")
-    assert response.status_code == (501 if qualified or door == "project-list" else 503), response.text
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"]["reason"] == "space-not-assigned"
     async with files.registry._sf() as session:
         assert not (await session.execute(select(SpaceFileOperationRow).where(SpaceFileOperationRow.phase == "pending"))).scalars().all()
     following = await client.put(f"/api/spaces/{resource.id}/content", params={"path": "files/after.txt", "generation": resource.generation, "operation_id": uuid4().hex, "create": "true"}, content=b"still writable")

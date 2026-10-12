@@ -83,13 +83,14 @@ class FeatureService:
 
     async def execute(self, operation, **values):
         from deerflow.files.store import StoreError
+        from deerflow.spaces.backings import BackingUnavailable
         from deerflow.spaces.contract import SpaceConflict, SpaceDenied
         from deerflow.spaces.workflows import WorkflowRejected, _effect
 
         behavior, actor = self.admitted_behavior()
         try:
             return await behavior.execute(operation, user_id=actor.subject_id, **values)
-        except (SpaceConflict, SpaceDenied, StoreError, FileNotFoundError, ValueError) as exc:
+        except (BackingUnavailable, SpaceConflict, SpaceDenied, StoreError, FileNotFoundError, ValueError) as exc:
             effect = _effect.get()
             if effect is not None and effect[0] is False:
                 raise WorkflowRejected(exc) from None
@@ -146,7 +147,12 @@ class FeatureService:
                 raise SpaceDenied("The exact publication receipt is unavailable")
             await run_file_io(receipt.load)
             with paths_scope(FeaturePaths(get_paths(), current.actor_id, {self.namespace: volume})):
-                return await reconcile_publication(SharedPublicationRepository(files.registry._sf, session=session), receipt, current)
+                from functools import partial
+
+                from deerflow.features.qualified_publications import shared_file_holding as qualified_holding
+
+                holding = partial(qualified_holding, volume, expected_identity=receipt.value["facts"].get("publication_identity"))
+                return await reconcile_publication(SharedPublicationRepository(files.registry._sf, session=session), receipt, current, holding=holding)
 
         return await await_drained(perform())
 

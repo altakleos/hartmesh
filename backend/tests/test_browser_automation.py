@@ -65,6 +65,12 @@ class TestSnapshotRendering:
 
 @pytest.mark.asyncio
 class TestBrowserTools:
+    @pytest.fixture(autouse=True)
+    def legacy_storage_config(self, monkeypatch):
+        # These standalone browser tests exercise the storage-disabled paths.
+        # A contributor's ignored config.yaml must not determine their mode.
+        monkeypatch.setattr("deerflow.spaces.chat_screenshots.get_app_config", lambda: SimpleNamespace(storage_spaces=SimpleNamespace(enabled=False)))
+
     async def _patch_session(self, session):
         manager = MagicMock()
         manager.get_session.return_value = session
@@ -233,6 +239,7 @@ class TestBrowserTools:
                 tool_call_id="t1",
                 filename="Login Page.png",
             )
+        assert "artifacts" in result.update, result.update
         artifact = result.update["artifacts"][0]
         assert artifact == "/mnt/user-data/outputs/Login_Page.png"
         assert (outputs / "Login_Page.png").read_bytes() == b"\x89PNG\r\n\x1a\npng-bytes"

@@ -1,46 +1,38 @@
-"""Staged native file integrations refuse instead of touching legacy directories."""
+"""Native file integrations refuse NoUser before touching legacy directories."""
 
-import inspect
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import HTTPException
+from test_storage_feature_routes import THREAD
+from test_storage_feature_routes import feature_app as feature_app
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("qualified", [False, True])
 @pytest.mark.parametrize("door", ["browser", "archive", "skill"])
-async def test_pending_native_file_doors_refuse_before_any_legacy_file_effect(monkeypatch, door, qualified):
-    from app.gateway import chat_storage
+async def test_native_file_doors_without_user_role_refuse_before_legacy_effect(feature_app, monkeypatch, door):
+    from sqlalchemy import delete
+    from test_compose_native_file_sources import native_request
+
     from app.gateway.routers import browser, skills, thread_runs
-    from deerflow.config.paths import Paths
-    from deerflow.spaces.chat_paths import ChatStoragePaths
+    from deerflow.features.resources import StorageFeatureLinkRow
+    from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
 
-    paths = ChatStoragePaths(Paths("/tmp/unused-native-chat-test"), user_id="alice", user=object() if qualified else None)
-    prepared = chat_storage.PreparedChatStorage(paths, paths.mounts("chat-a", user_id="alice"), reason="space-not-assigned")
-    admission = AsyncMock(return_value=prepared)
-    monkeypatch.setattr(chat_storage, "prepare_chat_request", admission)
-    monkeypatch.setattr(skills, "require_customer_management_for_request", lambda *_: None)
-    monkeypatch.setattr(skills, "require_private_skill_owner", AsyncMock())
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(storage_spaces_enabled=True)))
-
-    def legacy(*args, **kwargs):
-        pytest.fail("A staged native file route used a legacy filesystem path")
-
-    for module in (browser, skills, thread_runs):
-        if hasattr(module, "get_paths"):
-            monkeypatch.setattr(module, "get_paths", legacy)
+    client, app, files, _, base, alice, _, _ = feature_app
+    native_request(app)
+    app.state.customer_administration_policy = CustomerAdministrationPolicy(local_skill_management=True)
+    app.state.thread_store.get = AsyncMock(return_value={"thread_id": THREAD, "user_id": str(alice.id)})
+    app.include_router(browser.router)
+    app.include_router(skills.router)
+    app.include_router(thread_runs.router)
+    monkeypatch.setattr(browser, "_browser_tools_enabled", lambda: True)
+    async with files.registry._sf() as session, session.begin():
+        await session.execute(delete(StorageFeatureLinkRow).where(StorageFeatureLinkRow.namespace == "hm.user-space", StorageFeatureLinkRow.key == "human:" + str(alice.id)))
     if door == "browser":
-        call = inspect.unwrap(browser.navigate_browser)("chat-a", browser.BrowserNavigateRequest(url="https://example.com"), request)
+        response = await client.post(f"/api/threads/{THREAD}/browser/navigate", json={"url": "https://example.com/"})
     elif door == "archive":
-        call = inspect.unwrap(thread_runs.create_run_artifact_archive)("chat-a", "run-id", request)
+        response = await client.post(f"/api/threads/{THREAD}/runs/run-id/artifacts/archive")
     else:
-        call = inspect.unwrap(skills.install_skill)(request, skills.SkillInstallRequest(thread_id="chat-a", path="/mnt/user-data/outputs/file.skill"), SimpleNamespace())
-    with pytest.raises(HTTPException) as caught:
-        await call
-    if qualified:
-        assert caught.value.status_code == 501 and "managed conversations" in caught.value.detail
-    else:
-        assert caught.value.status_code == 503 and caught.value.detail["reason"] == "space-not-assigned"
-        admission.assert_awaited_once_with(request, "chat-a")
+        response = await client.post("/api/skills/install", json={"thread_id": THREAD, "path": "/mnt/user-data/outputs/file.skill"})
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"]["reason"] == "space-not-assigned"
+    assert not base.sandbox_user_data_dir(THREAD, user_id=str(alice.id)).exists()

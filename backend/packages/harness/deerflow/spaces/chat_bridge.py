@@ -23,16 +23,20 @@ class _Request:
     user_id: str
     thread_id: str
     context: Context
+    publication: dict | None = None
     completion: Future = field(default_factory=Future)
     task: asyncio.Task | None = None
     cancelled: bool = False
 
 
 class ChatStorageHost:
-    def __init__(self, loop, prepare):
+    def __init__(self, loop, prepare, *, publish=None):
         if not callable(prepare):
             raise TypeError("Chat storage admission requires a host callback")
         self._loop, self._prepare = loop, prepare
+        if publish is not None and not callable(publish):
+            raise TypeError("Screenshot publication requires a host callback")
+        self._publish = publish
         self._lock = threading.RLock()
         self._closed = False
         self._requests: set[_Request] = set()
@@ -44,8 +48,8 @@ class ChatStorageHost:
         except RuntimeError:
             return False
 
-    def _submit(self, user_id, thread_id):
-        request = _Request(user_id, thread_id, copy_context())
+    def _submit(self, user_id, thread_id, *, publication=None):
+        request = _Request(user_id, thread_id, copy_context(), publication=publication)
         with self._lock:
             if self._closed or not self._loop.is_running() or self._loop.is_closed():
                 raise StorageUnsupported("The chat storage host is unavailable")
@@ -67,7 +71,7 @@ class ChatStorageHost:
                 return
             coroutine = None
             try:
-                coroutine = self._prepare(request.user_id, request.thread_id)
+                coroutine = self._prepare(request.user_id, request.thread_id) if request.publication is None else self._publish(request.user_id, request.thread_id, **request.publication)
                 request.task = self._loop.create_task(coroutine, context=request.context)
             except BaseException as exc:
                 if coroutine is not None and hasattr(coroutine, "close"):
@@ -112,6 +116,19 @@ class ChatStorageHost:
     async def prepare_async(self, user_id, thread_id) -> Any:
         self._refuse_file_worker()
         request = self._submit(user_id, thread_id)
+        return await self._await_request(request)
+
+    async def publish_async(self, user_id, thread_id, *, name, content, frames, expected_reference=None):
+        self._refuse_file_worker()
+        if self._publish is None:
+            raise StorageUnsupported("The owning host has no screenshot publisher")
+        publication = {"name": name, "content": content, "frames": frames}
+        if expected_reference is not None:
+            publication["expected_reference"] = expected_reference
+        request = self._submit(user_id, thread_id, publication=publication)
+        return await self._await_request(request)
+
+    async def _await_request(self, request):
         completion = asyncio.wrap_future(request.completion)
         try:
             return await asyncio.shield(completion)

@@ -86,7 +86,9 @@ async def _browser_thread_owned_by(thread_store, thread_id: str, user_id: str) -
 async def navigate_browser(thread_id: ThreadId, body: BrowserNavigateRequest, request: Request) -> BrowserNavigateResponse:
     from app.gateway.chat_files import require_legacy_file_operation
 
-    await require_legacy_file_operation(request, thread_id)
+    native = getattr(request.app.state, "storage_spaces_enabled", False) is True
+    if not native:
+        await require_legacy_file_operation(request, thread_id)
     user_id = str(request.state.auth.user.id)
     thread_store = getattr(request.app.state, "thread_store", None)
     if thread_store is None or not await _browser_thread_owned_by(thread_store, thread_id, user_id):
@@ -104,13 +106,48 @@ async def navigate_browser(thread_id: ThreadId, body: BrowserNavigateRequest, re
     if not url:
         raise HTTPException(status_code=400, detail="URL is required")
 
-    outputs_path = get_paths().sandbox_outputs_dir(thread_id, user_id=get_effective_user_id())
+    screenshot_writer = None
+    if native:
+        from app.gateway.agent_conversations import reject_legacy_binding
+        from app.gateway.native_file_sources import NativeFileSources
+        from app.gateway.native_screenshots import publish_screenshot
+        from app.gateway.routers.spaces import _actor
+        from deerflow.spaces.chat_paths import ChatStoragePaths
+        from deerflow.spaces.contract import Permission
+        from deerflow.spaces.facade import storage_actor_scope
+
+        actor = await _actor(request)
+        with storage_actor_scope(actor):
+            await reject_legacy_binding(request, thread_id)
+            sources = await NativeFileSources.prepare(request, actor, required=Permission.READ | Permission.WRITE)
+        paths = ChatStoragePaths(get_paths(), user_id=user_id, user=sources.user, user_reference=sources.snapshot[0][:2])
+        reference = paths.routing_signature()[:2]
+
+        async def screenshot_writer(name, content, *, frames):
+            with storage_actor_scope(actor):
+                return await publish_screenshot(request.app, user_id, thread_id, name=name, content=content, frames=frames, expected_reference=reference)
+
+    outputs_path = None if native else get_paths().sandbox_outputs_dir(thread_id, user_id=get_effective_user_id())
     try:
-        result = await navigate_and_capture(thread_id=thread_id, url=url, outputs_path=outputs_path)
+        result = await navigate_and_capture(thread_id=thread_id, url=url, outputs_path=outputs_path, **({"screenshot_writer": screenshot_writer} if native else {}))
+    except HTTPException:
+        raise
     except ValueError as exc:
         # SSRF / URL validation failure.
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
+        if native:
+            from app.gateway.chat_files import files_unavailable
+            from app.gateway.routers.spaces import _ERRORS, _http_error
+            from deerflow.agent_instances.contract import Refusal
+            from deerflow.spaces.backings import BackingUnavailable
+
+            if isinstance(exc, Refusal):
+                raise
+            if isinstance(exc, BackingUnavailable):
+                raise files_unavailable("space-unverified") from None
+            if isinstance(exc, _ERRORS):
+                raise _http_error(exc) from None
         logger.error(
             "Browser navigate failed: thread_id=%s url=%s err_type=%s",
             thread_id,

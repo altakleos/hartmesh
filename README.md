@@ -615,10 +615,12 @@ Branching the latest turn copies workspace, uploads and outputs into a separate
 quota-counted conversation; historical turns and chats without personal storage
 copy message history without files. A failed branch rolls back its new files and
 conversation records.
-Managed-chat integration currently refuses Save/Share, project file promotion
-and listing, run ZIP archives, browser screenshot navigation and skill installation
-from a conversation. These operations keep working in ordinary deployments with
-managed storage disabled; their managed adapters follow in a separate change.
+Managed chats also support Save/Share, project file promotion and listing, run
+ZIP downloads, browser screenshots and skill installation from a conversation.
+These operations use qualified storage and preserve existing files when names
+collide. Sharing from My Files needs no conversation. Skill installation still
+requires the provider's delegation for private skill management. Chats without
+assigned personal storage report files as unavailable for these operations.
 
 `/api/features` reports storage readiness, account seats, AI assistant/AI employee
 allowances and the caller's file readiness. `/health` reports storage and agent

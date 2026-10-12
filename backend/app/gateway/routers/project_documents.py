@@ -87,11 +87,21 @@ class ProjectDocumentUploadResponse(BaseModel):
 
 
 async def _stage_feature_document(request, paths, *, user_id, **values):
+    from app.gateway.native_file_sources import native_feature_input
+
+    native = native_feature_input()
+    if native is not None and native.stage_async is not None:
+        values["stage_async"] = native.stage_async
     service = current_feature_service(request, "hm.projects")
     return await service.execute("stage-document", **values) if service else await stage_document_bytes(paths, user_id=user_id, **values)
 
 
 async def _add_feature_document(request, repo, paths, *, user_id, **values):
+    from app.gateway.native_file_sources import native_feature_input
+
+    native = native_feature_input()
+    if native is not None and native.commit_async is not None:
+        values["commit_async"] = native.commit_async
     service = current_feature_service(request, "hm.projects")
     return await service.execute("commit-document", **values) if service else await add_staged_document(repo, paths, user_id=user_id, **values)
 
@@ -315,7 +325,10 @@ async def promote_thread_file_to_shelf(
 
     user_id = get_effective_user_id()
     paths = get_paths()
-    source = await run_file_io(_resolve_thread_source, paths, user_id=user_id, thread_id=body.thread_id, kind=body.kind, name=body.name)
+    from app.gateway.native_file_sources import native_feature_input
+
+    native = native_feature_input()
+    source = native.source if native is not None else await run_file_io(_resolve_thread_source, paths, user_id=user_id, thread_id=body.thread_id, kind=body.kind, name=body.name)
     if source is None:
         raise _not_found()
 

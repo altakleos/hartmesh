@@ -399,7 +399,11 @@ class SQLiteUserRepository(UserRepository):
             await session.commit()
         return user
 
-    async def get_user_by_id(self, user_id: str) -> User | None:
+    async def get_user_by_id(self, user_id: str, *, session: AsyncSession | None = None) -> User | None:
+        if session is not None:
+            if not session.in_transaction() or not session.is_active:
+                raise ValueError("Borrowed account lookup requires an active transaction")
+            return await self._load(session, await session.get(UserRow, user_id, populate_existing=True))
         async with self._sf() as session:
             return await self._load(session, await session.get(UserRow, user_id))
 
