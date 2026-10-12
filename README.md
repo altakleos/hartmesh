@@ -631,6 +631,12 @@ support for deleted native Spaces authorized to discard backups; it renews roots
 and preserves uncertain capacity. Account-release integration follows in the
 next Compose stage.
 
+Managed deployments refuse generic Space grant changes. User and Company storage
+also refuse generic backup, restore, archive, delete and acceptance of uncertain
+file state: their chat mounts require host containment. Recovery status remains
+readable. An authorized administrator can rename storage or change its metadata
+when its backing is unavailable; file operations still require verified storage.
+
 Ordinary chats in an enabled, qualified storage deployment keep workspace,
 uploads and outputs in the person's assigned User Space. My Files uses that
 same Space; Shared uses a read-only company bind. Missing or unverified personal

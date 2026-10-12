@@ -10,17 +10,24 @@ from _storage_spaces_test_support import ALICE, BOB, home, make_storage_fixture,
 
 @pytest_asyncio.fixture(params=["sqlite", "postgres"])
 async def space_file_storage(tmp_path, request):
+    from deerflow.features.resources import StorageFeatureLinkRow
+
     async for value in make_storage_fixture(tmp_path, request):
+        async with value[1].kw["bind"].begin() as connection:
+            await connection.run_sync(StorageFeatureLinkRow.__table__.create)
         yield value
 
 
 def request_app(service, actor=ALICE, source="session"):
     from fastapi import FastAPI
 
+    from app.gateway.refusals import refusal_handler
     from app.gateway.routers.spaces import router
+    from deerflow.agent_instances.contract import Refusal
 
     app = FastAPI()
     app.state.storage_spaces = service
+    app.add_exception_handler(Refusal, refusal_handler)
 
     @app.middleware("http")
     async def bind(request, call_next):

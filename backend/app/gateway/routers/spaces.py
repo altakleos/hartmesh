@@ -15,6 +15,8 @@ from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL, AUTH_SOURCE_PAT
 from app.gateway.deps import get_current_user_from_request
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.routers._file_http import DescriptorFileResponse
+from deerflow.agent_instances.contract import Refusal
+from deerflow.features.resources import StorageFeatureLinkRow
 from deerflow.persistence.spaces.files import SpaceFileOperationRow
 from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceMountRow
 from deerflow.spaces.contract import Custody, InvalidPrincipal, MutationMode, Permission, PrincipalRef, SpaceConflict, SpaceDenied, SpaceNotFound
@@ -81,6 +83,16 @@ async def _actor(request: Request) -> PrincipalRef:
     if getattr(user, "id", None) is None:
         raise HTTPException(401, "Storage requires authenticated host context")
     return PrincipalRef("human", str(user.id))
+
+
+async def _chat_lifecycle_guard(service, actor, space_id, generation):
+    # Refusal needs current metadata authority, not a filesystem or workflow.
+    # The actual generic operation still performs its own fresh admission.
+    await service.registry.get(actor=actor, space_id=space_id, permission=Permission.ADMIN, expected_generation=generation)
+    async with service.registry._sf() as session:
+        role = await session.scalar(select(StorageFeatureLinkRow.namespace).where(StorageFeatureLinkRow.space_id == space_id, StorageFeatureLinkRow.namespace.in_(("hm.user-space", "hm.company-space"))))
+    if role is not None:
+        raise Refusal("This storage is mounted by chat sandboxes that are not recorded, so it cannot be quiesced; restore the data disk from a snapshot instead.", reason="mounts-unrecorded")
 
 
 class StrictRequest(BaseModel):
@@ -182,9 +194,9 @@ async def recovery_status(space_id: str, request: Request):
 
 @router.post("/{space_id}/recovery")
 async def accept_observed_state(space_id: str, body: RecoveryRequest, request: Request):
-    await SpaceRecovery(_service(request)).accept_current_state(
-        actor=await _actor(request), space_id=space_id, expected_generation=body.generation, operation_id=body.operation_id, acknowledge_uncertain_outcome=body.acknowledge_uncertain_outcome
-    )
+    service, actor = _service(request), await _actor(request)
+    await _chat_lifecycle_guard(service, actor, space_id, body.generation)
+    await SpaceRecovery(service).accept_current_state(actor=actor, space_id=space_id, expected_generation=body.generation, operation_id=body.operation_id, acknowledge_uncertain_outcome=body.acknowledge_uncertain_outcome)
     return {"complete": True, "resolution": "owner-accepted-current-state"}
 
 
@@ -192,8 +204,10 @@ async def accept_observed_state(space_id: str, body: RecoveryRequest, request: R
 async def resource_lifecycle(space_id: str, body: LifecycleRequest, request: Request):
     if (body.action == "restore") != (body.backup_id is not None):
         raise ValueError("Only restore requires a resource backup identity")
-    recovery = SpaceRecovery(_service(request))
-    arguments = {"actor": await _actor(request), "space_id": space_id, "expected_generation": body.generation, "operation_id": body.operation_id}
+    service, actor = _service(request), await _actor(request)
+    await _chat_lifecycle_guard(service, actor, space_id, body.generation)
+    recovery = SpaceRecovery(service)
+    arguments = {"actor": actor, "space_id": space_id, "expected_generation": body.generation, "operation_id": body.operation_id}
     if body.action == "restore":
         arguments["backup_id"] = body.backup_id
     result = await getattr(recovery, body.action)(**arguments)
@@ -217,8 +231,12 @@ async def rename_space(space_id: str, body: RenameSpace, request: Request):
 
 @router.put("/{space_id}/grants")
 async def set_grant(space_id: str, body: GrantRequest, request: Request):
-    space = await _service(request).registry.set_grant(
-        actor=await _actor(request),
+    service, actor = _service(request), await _actor(request)
+    if service.user_spaces is False:
+        await service.registry.get(actor=actor, space_id=space_id, permission=Permission.ADMIN, expected_generation=body.generation)
+        raise Refusal("This storage belongs to a person, an AI assistant, an AI employee or the company; who may use it, and whether it is kept, is decided in the product", reason="owned-space")
+    space = await service.registry.set_grant(
+        actor=actor,
         space_id=space_id,
         subject=PrincipalRef(body.subject_kind, body.subject_id),
         permissions=Permission(body.permissions),

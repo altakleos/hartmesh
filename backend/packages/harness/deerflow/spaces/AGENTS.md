@@ -66,12 +66,16 @@ filesystem completion while retaining the binding before removing the journal.
 Final rollback resumes that checkpoint even after partial journal unlink. All
 path effects precede binding/domain publication commit; postcommit caches use CAS.
 Capacity's read-only prefix check excludes unresolved sibling journals. Domain
-scheduling and managed route guards arrive in the following Compose category.
+scheduling arrives after provider containment qualification.
 
 `binding_verified` projects facts after closing its SQL session; it grants no
 admission. Assignable-slot snapshots exclude bound/unclaimed/unverified slots,
 independently of account-seat occupancy. `user_spaces` gates `create` only;
-host assignment remains ungated. Availability uses one shared allowance formula.
+the Gateway also refuses generic grant changes when it is false. User/Company
+application links refuse destructive generic lifecycle/recovery POSTs, using
+metadata-only current ADMIN/generation admission before the central refusal.
+GET recovery and unowned generic lifecycle stay available. Host assignment
+remains ungated. Availability uses one shared allowance formula.
 Host-only provisioning admission runs before slot selection/layout, borrowing the
 allocation transaction. It never bypasses custody or principal validation. The
 Gateway serializes role assignment with seat release; business rules stay in app.
@@ -149,6 +153,13 @@ File intents commit before filesystem work; uncertain file/feature-workflow
 outcomes block WRITE/OPERATE/ADMIN, while other pending actions block all access.
 Busy refusals carry workflow/lifecycle cause. Completed IDs bind exact actor,
 generation and request. Drain the entire owned mutation before cancellation.
+Only exact ADMIN may catch `_volume`'s `BackingUnavailable`, skipping that
+resource's workflow probe and pending-operation gate. Principal/grant/generation
+and attachment guards remain mandatory; combined file rights and workflow lock
+contention still refuse. Recovery retains its own volume proof before filesystem
+mutation; accepting state may quiesce before refusing. Publish growth bounds only
+after `verify_bound` succeeds, so the narrow
+metadata fallback cannot commit unverified inventory geometry.
 Cross-space copy needs source READ/EXPORT, destination WRITE, and source ADMIN
 plus explicit acknowledgement when destination readers broaden the audience.
 
