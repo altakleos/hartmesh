@@ -81,8 +81,10 @@ from deerflow.config.account_export_config import AccountExportConfig
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.paths import Paths
 from deerflow.constants import MCP_INTERNAL_DIRNAME
+from deerflow.files.store import DescriptorSource
 from deerflow.persistence.agents import get_agent_store
 from deerflow.persistence.agents.file import FileAgentStore
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -270,6 +272,7 @@ class ExportJob:
     #: Downloads of this export's parts still streaming; it never expires under one.
     streams: int = 0
     stage: str = "listing"
+    native_sources: Any = field(default=None, repr=False)
 
     def document(self) -> dict[str, Any]:
         """What the page shows: the state, how far it got, and each part to download."""
@@ -308,6 +311,7 @@ class _Found:
     components: tuple[tuple[Path, int, int], ...]
     #: Immutable shelf originals must still match their database content address.
     sha256: str | None = None
+    native_relative: str | None = None
 
 
 @dataclass
@@ -447,11 +451,11 @@ class _Parts:
         self._written += len(data)
         return {"path": entry, "size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "part": self.number}
 
-    def add_file(self, found: _Found, cancel: threading.Event) -> dict[str, Any]:
+    def add_file(self, found: _Found, cancel: threading.Event, *, source: DescriptorSource | None = None) -> dict[str, Any]:
         self._room(found.size)
         assert self._archive is not None
-        expected = {"expected_size": found.size, "expected_sha256": found.sha256} if found.sha256 is not None else {}
-        copied = copy_file(self._archive, Path(found.path), found.entry, identity=found.identity, components=found.components, cancel_event=cancel, **expected)
+        expected = {"expected_size": found.size, "expected_sha256": found.sha256} if found.sha256 is not None or source is not None else {}
+        copied = copy_file(self._archive, source if source is not None else Path(found.path), found.entry, identity=found.identity, components=found.components, cancel_event=cancel, **expected)
         self._written += copied.size
         return {"path": copied.entry, "size": copied.size, "sha256": copied.sha256, "part": self.number}
 
@@ -599,16 +603,24 @@ class AccountExportService:
         self._config = config
         self._spill_dir_name = spill_dir_name
         self._jobs: dict[str, ExportJob] = {}
+        self._builders: set[asyncio.Task] = set()
         self._removals: set[asyncio.Future] = set()
         remove_left_exports(paths)
 
     def status(self, user_id: str) -> ExportJob | None:
         return self._jobs.get(user_id)
 
-    def start(self, user: Any) -> ExportJob:
+    def start(self, user: Any, *, native_sources=None) -> ExportJob:
         """Start the person's export, or return the one they already have."""
         user_id = str(user.id)
+        if getattr(self._app.state, "storage_spaces_enabled", False) is True and native_sources is None:
+            raise ExportRefused("Managed export requires current personal storage admission")
+        if native_sources is not None and native_sources.actor.subject_id != user_id:
+            raise ExportRefused("Managed export requires its authenticated owner")
         existing = self._jobs.get(user_id)
+        if existing is not None and (existing.native_sources is None) != (native_sources is None):
+            self.discard(user_id)
+            existing = None
         if existing is not None and existing.state in ("building", "ready"):
             return existing
         config = self._config()
@@ -621,9 +633,11 @@ class AccountExportService:
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         directory = root / secrets.token_hex(16)
         directory.mkdir(mode=0o700)
-        job = ExportJob(user_id=user_id, directory=directory, started_at=datetime.now(UTC))
+        job = ExportJob(user_id=user_id, directory=directory, started_at=datetime.now(UTC), native_sources=native_sources)
         self._jobs[user_id] = job
         job.task = asyncio.get_running_loop().create_task(self._run(job, user, config))
+        self._builders.add(job.task)
+        job.task.add_done_callback(self._builders.discard)
         return job
 
     def discard(self, user_id: str) -> bool:
@@ -686,12 +700,17 @@ class AccountExportService:
             self._arm_expiry(job, min(REDOWNLOAD_SECONDS, idle) if job.state == "downloaded" else idle)
 
     async def close(self) -> None:
-        tasks = [job.task for job in self._jobs.values() if job.task is not None and not job.task.done()]
         for user_id in list(self._jobs):
             self.discard(user_id)
-        if tasks:
-            await asyncio.wait(tasks, timeout=10)
-        await self.settled()
+
+        async def drain_builders():
+            if self._builders:
+                await asyncio.gather(*list(self._builders), return_exceptions=True)
+
+        try:
+            await await_drained(drain_builders())
+        finally:
+            await await_drained(self.settled())
 
     async def settled(self) -> None:
         """Wait for the deletions already started."""
@@ -716,7 +735,11 @@ class AccountExportService:
             return await asyncio.shield(work)
         except asyncio.CancelledError:
             job.cancel.set()
-            await asyncio.wait([work])
+            while not work.done():
+                try:
+                    await asyncio.wait([work])
+                except asyncio.CancelledError:
+                    continue
             if not work.cancelled():
                 work.exception()
             raise
@@ -724,7 +747,15 @@ class AccountExportService:
     async def _run(self, job: ExportJob, user: Any, config: AccountExportConfig) -> None:
         started = time.monotonic()
         try:
-            await self._build(job, user, config)
+            if job.native_sources is None:
+                await self._build(job, user, config)
+            else:
+                from deerflow.spaces.facade import storage_actor_scope
+
+                with storage_actor_scope(job.native_sources.actor):
+                    await job.native_sources.refresh()
+                    await self._build(job, user, config)
+                    await self.validate_job(job)
         except ExportRefused as exc:
             self._settle_failure(job, exc.code, exc.detail, config)
             logger.info("Account export for user %s refused while %s: %s", job.user_id, job.stage, exc.code)
@@ -737,6 +768,8 @@ class AccountExportService:
             self._settle_failure(job, "failed", "the export could not be prepared; try again", config)
             logger.warning("Account export for user %s failed while %s: %s", job.user_id, job.stage, type(exc).__name__)
             return
+        if self._jobs.get(job.user_id) is not job or job.cancel.is_set():
+            raise asyncio.CancelledError
         job.state = "ready"
         self._arm_expiry(job, config.expires_after_seconds)
         progress = job.progress
@@ -773,7 +806,25 @@ class AccountExportService:
         """What the other exports being prepared still have to write to the same disk."""
         return sum(max(other.progress.bytes_total - other.progress.bytes_done, 0) for other in self._jobs.values() if other is not job and other.state == "building")
 
-    def _fit(self, job: ExportJob, plan: _Plan, config: AccountExportConfig) -> None:
+    async def validate_job(self, job):
+        """Recheck the exact retained job and its native authority before release."""
+        from app.gateway.chat_files import files_unavailable
+        from deerflow.spaces.facade import storage_actor_scope
+
+        def current():
+            if self._jobs.get(job.user_id) is not job or job.cancel.is_set():
+                raise files_unavailable("admission-failed")
+            enabled = getattr(self._app.state, "storage_spaces_enabled", False) is True
+            if enabled != (job.native_sources is not None):
+                raise files_unavailable("space-unverified")
+
+        current()
+        if job.native_sources is not None:
+            with storage_actor_scope(job.native_sources.actor):
+                await job.native_sources.refresh()
+            current()
+
+    def _fit(self, job: ExportJob, plan: _Plan, config: AccountExportConfig, others_to_write: int) -> None:
         """Leave out what can never fit, and refuse an export the disk has no room for now."""
         usage = shutil.disk_usage(job.directory)
         # Larger than the whole disk (a sparse file, say): no administrator can make room for it.
@@ -781,11 +832,11 @@ class AccountExportService:
         if too_large:
             plan.files = [found for found in plan.files if found.size <= usage.total - config.min_free_bytes]
             plan.skipped += [{"path": found.entry, "reason": "too_large"} for found in too_large]
-        if sum(found.size for found in plan.files) > usage.free - self._others_to_write(job) - config.min_free_bytes:
+        if sum(found.size for found in plan.files) > usage.free - others_to_write - config.min_free_bytes:
             raise _no_space()
 
-    def _check_room(self, job: ExportJob, size: int, config: AccountExportConfig) -> None:
-        if size > shutil.disk_usage(job.directory).free - self._others_to_write(job) - config.min_free_bytes:
+    def _check_room(self, job: ExportJob, size: int, config: AccountExportConfig, others_to_write: int) -> None:
+        if size > shutil.disk_usage(job.directory).free - others_to_write - config.min_free_bytes:
             raise _no_space()
 
     @staticmethod
@@ -905,7 +956,7 @@ class AccountExportService:
             reason = "name_collision"
         plan.skipped.append({"path": entry, "reason": reason})
 
-    def _plan_projects(self, user_id: str, projects: list[dict[str, Any]], plan: _Plan, cancel: threading.Event) -> None:
+    def _plan_projects(self, user_id: str, projects: list[dict[str, Any]], plan: _Plan, cancel: threading.Event, *, native=None) -> None:
         """Only live row-referenced originals and converted Markdown; never scan trash or orphan storage."""
         seen: set[str] = set()
         root = self._paths.user_dir(user_id)
@@ -924,8 +975,15 @@ class AccountExportService:
                 if len(relative) != 5 or relative[1:] != ["documents", document["sha256"][:2], document["sha256"], document["id"]]:
                     plan.skipped.append({"path": prefix, "reason": "unsafe_name"})
                     continue
-                self._project_file(root, ["projects", *relative, "original", document["name"]], f"{prefix}/original/{document['name']}", plan, seen, size=document["size_bytes"], sha256=document["sha256"])
-                self._project_file(root, ["projects", *relative, "derived", "converted.md"], f"{prefix}/derived/converted.md", plan, seen, optional=True)
+
+                def add_file(relative, entry, **expected):
+                    if native is None:
+                        self._project_file(root, relative, entry, plan, seen, **expected)
+                    else:
+                        native.project_file("/".join(relative), entry, plan, seen, **expected)
+
+                add_file(["projects", *relative, "original", document["name"]], f"{prefix}/original/{document['name']}", size=document["size_bytes"], sha256=document["sha256"])
+                add_file(["projects", *relative, "derived", "converted.md"], f"{prefix}/derived/converted.md", optional=True)
 
     @staticmethod
     def _project_definitions(projects: list[dict[str, Any]], records: list[dict[str, Any]], written: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1000,10 +1058,38 @@ class AccountExportService:
         records = await self._conversations(user_id)
         projects = await self._projects(user_id)
         job.stage = "finding files"
-        plan = await self._off_loop(job, self._plan, user_id, job.cancel)
+        native = None
+        if job.native_sources is None:
+            plan = await self._off_loop(job, self._plan, user_id, job.cancel)
+        else:
+            from app.gateway.native_account_export import NativeAccountFiles
+
+            await self.validate_job(job)
+            native = NativeAccountFiles(job.native_sources, self._spill_dir_name())
+            authority = getattr(self._app.state, "agent_conversations", None)
+            from deerflow.agent_instances.conversations import AgentConversations
+
+            ordinary = []
+            for record in records:
+                if isinstance(authority, AgentConversations) and await authority.binding(str(record["thread_id"])) is not None:
+                    continue
+                ordinary.append(record)
+            plan = await self._off_loop(job, native.plan, ordinary, job.cancel)
+            # Skills have independent storage; no legacy chat directory is required.
+            skills = self._paths.user_custom_skills_dir(user_id)
+            user_root = self._paths.user_dir(user_id)
+            parents = [parent for parent in skills.parents if parent.is_relative_to(user_root) and parent != user_root]
+            chain = await self._off_loop(job, self._directory_chain, [user_root, *reversed(parents)])
+            if chain is not None:
+                await self._off_loop(job, _walk, skills, "my-skills", chain, plan, set(), native.reserved, job.cancel)
         if projects is not None:
-            await self._off_loop(job, self._plan_projects, user_id, projects, plan, job.cancel)
-        self._fit(job, plan, config)
+            if native is None:
+                await self._off_loop(job, self._plan_projects, user_id, projects, plan, job.cancel)
+            else:
+                from functools import partial
+
+                await self._off_loop(job, partial(self._plan_projects, native=native), user_id, projects, plan, job.cancel)
+        await self._off_loop(job, self._fit, job, plan, config, self._others_to_write(job))
         progress.conversations_total = len(records)
         progress.files_total = len(plan.files)
         progress.bytes_total = sum(found.size for found in plan.files)
@@ -1030,9 +1116,21 @@ class AccountExportService:
                 found = plan.files.pop()
                 if job.cancel.is_set():
                     raise asyncio.CancelledError
-                self._check_room(job, found.size, config)
+                await self._off_loop(job, self._check_room, job, found.size, config, self._others_to_write(job))
+                if found.native_relative is not None:
+                    # Authority/root failures must never become file-level skips.
+                    await self.validate_job(job)
                 try:
-                    copied = await self._off_loop(job, parts.add_file, found, job.cancel)
+                    if found.native_relative is None:
+                        copied = await self._off_loop(job, parts.add_file, found, job.cancel)
+                    else:
+                        from functools import partial
+
+                        def file_error(_exc):
+                            return ArtifactArchiveError("A planned export file changed or became unreadable", code="artifact_changed")
+
+                        async with job.native_sources.open_file(found.native_relative, file_error=file_error) as source:
+                            copied = await self._off_loop(job, partial(parts.add_file, source=source), found, job.cancel)
                 except ArtifactArchiveError as exc:
                     reason = _left_out(exc)
                     if reason is None:
@@ -1096,8 +1194,8 @@ class AccountExportService:
             await self._off_loop(job, parts.add_last, MANIFEST_NAME, lambda count: json.dumps({**manifest, "parts": count}, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8"))
             await self._off_loop(job, parts.close)
         except BaseException:
-            parts.abandon()
+            await await_drained(self._off_loop(job, parts.abandon))
             raise
         job.parts = list(parts.paths)
-        job.part_sizes = [path.stat().st_size for path in job.parts]
+        job.part_sizes = await self._off_loop(job, lambda: [path.stat().st_size for path in job.parts])
         job.skipped = len(skipped)

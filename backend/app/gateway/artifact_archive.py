@@ -71,7 +71,7 @@ class _ArchiveMember:
 class _VettedFile:
     """A file a caller found and checked itself, as ``copy_file`` copies it."""
 
-    path: Path
+    path: Path | DescriptorSource
     entry: str
     identity: tuple[int, int]
     components: tuple[tuple[Path, int, int], ...]
@@ -414,7 +414,7 @@ class CopiedFile:
 
 def copy_file(
     archive: zipfile.ZipFile,
-    path: Path,
+    path: Path | DescriptorSource,
     entry: str,
     *,
     identity: tuple[int, int],

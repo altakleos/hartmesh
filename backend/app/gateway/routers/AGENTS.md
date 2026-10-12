@@ -32,15 +32,15 @@ revisions detect source changes. Failure/cancellation drains rollback of exact-o
 files and target stores. Historical/NoUser copies history only; legacy/AgentHome
 branching keeps its existing behavior. Unsupported credentials never gain general
 Space access.
-Native file adapters use `NativeFileSources` before workflow intent: source
-READ/EXPORT, joint destination rights, borrowed SQL guards, pinned roots and
-fresh admission before quota-private publication. `NativeDirectoryChanges`
-removes only owned empty directories; preserve competing bytes and uncertainty.
-Shared recovery pins receipts to inode identity; project placement borrows its
-writer and preserves file-before-row outcomes. ZIPs retain exclusions/budgets
-and refresh before headers. Skill installation retains private-owner delegation.
-Browser REST/tools use the owning Gateway publisher, ignoring caller paths;
-AI employees cannot use human User storage. NoUser has no legacy file fallback.
+Native adapters prepare `NativeFileSources` before intent: READ/EXPORT sources,
+union destination rights, borrowed SQL guards and fresh pinned-root admission.
+Stages/`NativeDirectoryChanges` remove only owned files/empty dirs. Shared receipts
+pin inodes; project placement borrows its writer with file-before-row outcomes.
+Keep ZIP budgets/private-skill delegation. Browser REST/tools use the Gateway;
+AI employees cannot use human User storage. Account exports select owned chats,
+My Files/live shelf rows plus legacy skills; exclude Company/Homes/control/orphans.
+Refresh exact job/authority before ready/headers; drain builders/download work.
+NoUser has no legacy fallback.
 
 Malformed/oversized/unsupported projections retain a bounded source-preview
 fallback in the UI; ownership and path denials do not. Platforms without safe

@@ -245,6 +245,14 @@ and agents. Deleted projects, trashed documents and other users' work are
 excluded. The archive's README and manifest identify skipped files and the
 contents of each download part.
 
+With managed Compose storage enabled, the export reads conversation files,
+My Files and current project documents from your assigned personal storage.
+Custom skills and saved settings retain their existing storage. Company files,
+AI employee Home files, orphan folders and private processing files are excluded.
+The export requires current personal-storage access through preparation and
+download; missing or unverified storage refuses the export without using legacy
+file folders.
+
 ## Sister Projects
 
 <img width="446" height="280" alt="image" align="middle" src="https://github.com/user-attachments/assets/077edef4-d560-41af-bb0d-d0a5f14fcc20" />
