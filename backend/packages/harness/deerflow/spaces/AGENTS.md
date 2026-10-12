@@ -19,6 +19,13 @@ carry user/assistant/employee/company kinds; schema-1 slots remain untyped.
 Preparation never runs in a request. The Compose CLI validates confined paths,
 holds one pool lock and publishes each completed slot atomically. Retained plus
 missing slots must stay within `MAX_SPACES`; lowering counts never erases slots.
+Typed mounted parents are root:1000 0770; unmounted mount points remain 0750.
+Gateway group access permits host root renewal; sandbox binds never include the
+parent. `storage_init` retains qualified image/root descriptors through repairs.
+Startup `mount-all` repairs only parent permissions after allocation, three-way
+UUID and writable loop-mount proof; it never recreates data/control. Full layout
+repair remains in preparation and explicit repair. This corrects the design's
+mounted root:root 0755 prerequisite; ordinary older file views remain admissible.
 
 Typed `provisioning` keeps inventory order, skips unavailable/nonempty slots and
 creates `LAYOUT` only after binding uniqueness flushes. Drain layout workers

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Compose mounted parent permissions
+
+Typed mounted filesystem parents use root:1000 mode 0770, allowing the Gateway
+to renew retired data/control roots. Unmounted mount points retain mode 0750.
+Preparation and explicit repair retain qualified descriptors through permission
+changes. Startup `mount-all` repairs only the parent after exact image allocation,
+inventory/image/mounted UUID agreement and writable loop-mount proof; it creates
+no missing data/control roots and changes no fstab or fsck behavior. Containers
+still receive data roots or admitted descendants. This corrects the design's
+mounted root:root 0755 layout, which prevented safe root renewal. Defaults remain
+disabled. There is no database schema change.
+
 ### Storage binding identity
 
 Bound file views and native attachments verify a private marker against the

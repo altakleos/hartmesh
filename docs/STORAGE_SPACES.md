@@ -216,7 +216,15 @@ startup; see [the operator runbook](../deploy/compose/README.md#storage-and-agen
 Typed pools use `inventory.v2.json` with a kind on every slot and
 `max_inodes = max_bytes // 8192`. Schema 1 remains supported by the standalone
 helper. The pool is root:1000 0750; images root:1000 0640; inventory 1000:1000
-0440; visible data 1000:1000 0770 and private control 1000:1000 0700. A marked
+0440; visible data 1000:1000 0770 and private control 1000:1000 0700.
+The mounted filesystem parent is root:1000 0770, allowing host root renewal;
+the underlying unmounted mount point remains root:1000 0750. This corrects
+the Compose design's original mounted root:root 0755 requirement. Parent access
+is host-only: sandbox binds contain data roots or admitted descendants.
+`mount-all` repairs only this parent after exact allocated image, three-way UUID,
+loop-source/geometry and writable mount proof. The same image/root descriptors
+remain pinned through changes. Missing data/control roots stay missing during
+startup; full layout repair belongs to preparation or explicit repair. A marked
 fstab block orders mounts before Docker, and `.storage-init.lock` serializes
 operator verbs. `host_image_path` stays unset when pool paths match inside and
 outside the Gateway. Preparation checks

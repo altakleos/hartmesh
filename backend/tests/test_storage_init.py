@@ -16,6 +16,7 @@ from app.gateway import storage_init as si
 
 PREFLIGHT = si.StorageInitializer.preflight
 MOUNT_FACTS = si.StorageInitializer.mounted_image_facts
+MOUNT_ROOT_FACTS = si.StorageInitializer._mounted_root_facts
 
 
 @pytest.mark.parametrize("argv", [[], ["unknown"], ["resize"], ["forget"]])
@@ -90,11 +91,23 @@ def operator(tmp_path, monkeypatch):
     monkeypatch.setattr(si.os.path, "ismount", lambda p: Path(p) in mounted)
     monkeypatch.setattr(si.StorageInitializer, "preflight", lambda self: None)
     monkeypatch.setattr(si.StorageInitializer, "mounted_image_facts", lambda self, spec, **kwargs: {"type": "ext4", "root": "/", "path": str(spec.mount_path), "options": {"rw", "nodev", "nosuid"}})
+    monkeypatch.setattr(si.StorageInitializer, "_mounted_root_facts", lambda self, spec, root, **kwargs: {"type": "ext4", "root": "/", "path": str(spec.mount_path), "options": {"rw", "nodev", "nosuid"}})
+    monkeypatch.setattr(si, "verify_image_extents", lambda *_args: None)
+    monkeypatch.setattr(si, "mounted_ext4_identity", lambda fd: si.read_ext4_identity(Path(os.readlink(f"/proc/self/fd/{fd}")).with_suffix(".img")))
     monkeypatch.setattr(si, "container_holders", lambda *args, **kwargs: [])
     monkeypatch.setattr(si.PreparedVolumeCatalog, "verify", lambda self, slot: None)
 
     def host_run(self, *args, **kwargs):
         commands.append(args)
+        if args[0] == "mkfs.ext4":
+            header = bytearray(1024)
+            header[56:58] = b"\x53\xef"
+            from uuid import UUID
+
+            header[104:120] = UUID(args[args.index("-U") + 1]).bytes
+            with Path(args[-1]).open("r+b") as stream:
+                stream.seek(1024)
+                stream.write(header)
         if args[0] == "mount":
             mount = Path(args[-1])
             mounted.add(mount)
@@ -429,6 +442,7 @@ def test_mount_identity_rejects_other_kernel_backing_file(operator, monkeypatch)
     meta = spec.mount_path.stat()
     facts = dict(type="ext4", root="/", path=str(spec.mount_path), device=f"{os.major(meta.st_dev)}:{os.minor(meta.st_dev)}")
     monkeypatch.setattr(backings, "_mount_record", lambda fd: facts)
+    monkeypatch.setattr(si.StorageInitializer, "_mounted_root_facts", MOUNT_ROOT_FACTS)
     original = Path.read_text
     monkeypatch.setattr(Path, "read_text", lambda path, *args, **kwargs: "/unrelated/image.img\n" if path.name == "backing_file" else original(path, *args, **kwargs))
     with pytest.raises(si.Refused, match="another image"):
@@ -442,7 +456,7 @@ def verified_operator(operator, monkeypatch):
     tool.prepare()
     inventory = tool.load()
     spec = next(iter(inventory.volumes.values()))
-    owners = {tool.pool: (0, 1000), tool.manifest: (1000, 1000), spec.image_path: (0, 1000), spec.mount_path: (0, 0), spec.mount_path / "data": (1000, 1000), spec.mount_path / "control": (1000, 1000)}
+    owners = {tool.pool: (0, 1000), tool.manifest: (1000, 1000), spec.image_path: (0, 1000), spec.mount_path: (0, 1000), spec.mount_path / "data": (1000, 1000), spec.mount_path / "control": (1000, 1000)}
     original = Path.lstat
 
     def metadata(path, *args, **kwargs):
