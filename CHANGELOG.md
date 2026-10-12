@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Compose account export
+
+Managed account exports include owned conversation files, My Files and live
+project-document originals and converted Markdown from the assigned User Space,
+even when no legacy user directory exists. Skills and settings remain independent.
+Company files, AI employee Homes, orphan namespaces, private stages and trash are
+excluded. Source authority and backing identity are refreshed before preparation,
+copying and download; discarded or replaced exports refuse before headers.
+Individual changed or unreadable files remain visible as manifest skips, while
+storage-authority failures stop the export. Shutdown drains discarded builders;
+download acquisition, reads and closure drain through cancellation. Defaults
+remain disabled. There is no database schema change.
+
 ### Compose file workflows
 
 Managed ordinary chats support Save/Share, project promotion and conversation-file

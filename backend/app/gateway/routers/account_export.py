@@ -9,8 +9,6 @@ The archive and its limits are ``app.gateway.account_export``.
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -20,6 +18,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.gateway.account_export import AccountExportService, ExportRefused
 from app.gateway.auth.mode import require_live_account
 from app.gateway.routers.auth import require_session_source
+from deerflow.utils.file_io import await_drained, run_file_io
 
 router = APIRouter(prefix="/api/account/export", tags=["account-export"], dependencies=[Depends(require_session_source)])
 
@@ -46,8 +45,21 @@ def _person(request: Request) -> Any:
 async def start_export(request: Request) -> Any:
     """Start preparing the caller's export, or answer with the one they already have."""
     person = _person(request)
+    from app.gateway.native_file_sources import NativeFileSources
+    from app.gateway.routers.spaces import _ERRORS, _http_error
+    from deerflow.spaces.contract import PrincipalRef
+    from deerflow.spaces.facade import storage_actor_scope
+
+    sources = None
+    if getattr(request.app.state, "storage_spaces_enabled", False) is True:
+        actor = PrincipalRef("human", str(person.id))
+        try:
+            with storage_actor_scope(actor):
+                sources = await NativeFileSources.prepare(request, actor)
+        except _ERRORS as exc:
+            raise _http_error(exc) from None
     try:
-        job = _service(request).start(person)
+        job = _service(request).start(person, native_sources=sources) if sources is not None else _service(request).start(person)
     except ExportRefused as exc:
         return JSONResponse(status_code=status.HTTP_429_TOO_MANY_REQUESTS, content={"detail": exc.detail, "code": exc.code}, headers={"Retry-After": "60"})
     return job.document()
@@ -66,15 +78,17 @@ async def export_status(request: Request) -> Any:
 class _PartResponse(StreamingResponse):
     """A part's download, which ends the download however the response ends, even before its first byte."""
 
-    def __init__(self, content: Any, *, finish: Callable[[], None], **kwargs: Any) -> None:
+    def __init__(self, content: Any, *, finish, validate, **kwargs: Any) -> None:
         super().__init__(content, **kwargs)
         self._finish = finish
+        self._validate = validate
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         try:
+            await self._validate()
             await super().__call__(scope, receive, send)
         finally:
-            self._finish()
+            await self._finish()
 
 
 @router.get("/parts/{number}")
@@ -85,36 +99,70 @@ async def download_part(number: int, request: Request) -> StreamingResponse:
     download = service.open_part(str(person.id), number)
     if download is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such part to download")
+    handle = None
+    complete = finished = False
+
+    async def validate():
+        from app.gateway.chat_files import files_unavailable
+        from app.gateway.routers.spaces import _ERRORS, _http_error
+        from deerflow.spaces.backings import BackingUnavailable
+
+        try:
+            await service.validate_job(download.job)
+        except BackingUnavailable:
+            raise files_unavailable("space-unverified") from None
+        except _ERRORS as exc:
+            raise _http_error(exc) from None
+
+    def open_owned():
+        nonlocal handle
+        handle = download.path.open("rb")
+
+    async def finish():
+        nonlocal finished
+        if not finished:
+            finished = True
+            try:
+                if handle is not None:
+                    await await_drained(run_file_io(handle.close))
+            finally:
+                service.close_part(download, complete=complete)
+
     try:
-        handle = await asyncio.to_thread(download.path.open, "rb")
+        await validate()
+        await await_drained(run_file_io(open_owned))
+        await validate()
     except BaseException as exc:
-        service.close_part(download, complete=False)
+        await finish()
         if isinstance(exc, FileNotFoundError):
             # Deleted since it was found: discarded, or its time ran out.
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such part to download") from None
         raise
-    complete = finished = False
 
     async def _stream():
         nonlocal complete
-        while chunk := await asyncio.to_thread(handle.read, _CHUNK_BYTES):
-            yield chunk
-        # Reached only once every byte went out: a dropped download keeps its part.
-        complete = True
 
-    def _finish() -> None:
-        nonlocal finished
-        if not finished:
-            finished = True
-            handle.close()
-            service.close_part(download, complete=complete)
+        def current():
+            job = download.job
+            enabled = getattr(request.app.state, "storage_spaces_enabled", False) is True
+            return service.status(job.user_id) is job and not job.cancel.is_set() and enabled == (job.native_sources is not None)
+
+        while current():
+            chunk = await await_drained(run_file_io(handle.read, _CHUNK_BYTES))
+            if not current():
+                return
+            if not chunk:
+                complete = True
+                return
+            yield chunk
 
     count = len(download.job.parts)
     stamp = datetime.now(UTC).strftime("%Y-%m-%d")
     suffix = f"-part-{number}-of-{count}" if count > 1 else ""
     return _PartResponse(
         _stream(),
-        finish=_finish,
+        finish=finish,
+        validate=validate,
         media_type="application/zip",
         headers={
             "Content-Disposition": f'attachment; filename="account-export-{stamp}{suffix}.zip"',

@@ -16,7 +16,7 @@ from deerflow.spaces.backings import BackingUnavailable, VerifiedVolume
 from deerflow.spaces.chat_paths import ChatFilesFull
 from deerflow.spaces.contract import InvalidPrincipal, Permission, PrincipalRef, SpaceDenied
 from deerflow.spaces.facade import _bound_principal, _credential_allowed
-from deerflow.spaces.filesystem import SpaceFull
+from deerflow.spaces.filesystem import SpaceFull, UnsafeSpacePath
 from deerflow.spaces.service import SpaceFiles
 from deerflow.spaces.workflows import mark_effect
 from deerflow.uploads.manager import claim_unique_filename, normalize_filename
@@ -181,14 +181,19 @@ class NativeFileSources:
             await self.guard(session, rows)
 
     @asynccontextmanager
-    async def open_file(self, relative):
+    async def open_file(self, relative, *, file_error=None):
         """Own a confined source through the caller's drained workflow."""
         filesystem = descriptor = None
 
         def acquire():
             nonlocal filesystem, descriptor
             filesystem = self.user.filesystem()
-            descriptor = filesystem.open_regular(relative, follow_symlinks=False)
+            try:
+                descriptor = filesystem.open_regular(relative, follow_symlinks=False)
+            except (OSError, UnsafeSpacePath) as exc:
+                if file_error is not None:
+                    raise file_error(exc) from exc
+                raise
             return DescriptorSource(descriptor, name=relative.rsplit("/", 1)[-1])
 
         def close():
