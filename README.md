@@ -628,6 +628,8 @@ Unresolved requests survive restart, reserve capacity and block another native
 create for the same account or container name. Cancellation retains verified
 containers for fenced cleanup. Operators must preserve the directory alongside
 the pool; unsafe or unknown evidence refuses admission. Defaults remain disabled.
+Unconfirmed creation logs include bounded source locations, error codes and
+attempt/submission facts, without exception text or subprocess payloads.
 
 Managed native cleanup now reserves the opaque owner and exact physical slot
 through final absence verification. Running and stopped containers across all

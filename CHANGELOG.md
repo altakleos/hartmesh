@@ -17,6 +17,8 @@ optional, strictly validated tenant-class receipt; its operator tool requires al
 27 named acceptance cases, derives runtime/mount evidence from passed tests and
 preserves authenticated image-acceptance fields. The backend runtime image now
 explicitly installs the namespace and privilege-drop tools required by the bundle.
+Unconfirmed sandbox creation reports bounded causal locations and error codes
+without exposing exception text, command arguments or subprocess output.
 Storage defaults remain disabled.
 There is no database schema change.
 

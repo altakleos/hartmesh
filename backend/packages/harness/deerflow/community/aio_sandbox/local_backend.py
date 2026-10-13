@@ -43,6 +43,36 @@ _AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
 _NATIVE_SLOT_INVENTORY_DEADLINE = ContextVar("native_slot_inventory_deadline", default=None)
 
 
+def _native_creation_diagnostic(error: NativeCreateUnconfirmed) -> str:
+    """Log bounded causal locations, never exception text or subprocess payloads."""
+
+    def bounded_name(value):
+        return value[:64].encode("ascii", errors="replace").decode("ascii")
+
+    handoff = error.handoff
+    attempt_id = getattr(getattr(handoff, "attempt", None), "id", None)
+    if not isinstance(attempt_id, str) or re.fullmatch(r"[0-9a-f]{32}", attempt_id) is None:
+        attempt_id = None
+    causes, seen = [], set()
+    current = error
+    while current is not None and len(causes) < 8 and id(current) not in seen:
+        seen.add(id(current))
+        frames, traceback = [], current.__traceback__
+        while traceback is not None:
+            code = traceback.tb_frame.f_code
+            frames.append({"file": bounded_name(Path(code.co_filename).name), "function": bounded_name(code.co_name), "line": traceback.tb_lineno})
+            frames = frames[-2:]
+            traceback = traceback.tb_next
+        cause = {"type": bounded_name(type(current).__name__), "origin": frames}
+        for field in ("errno", "returncode"):
+            value = getattr(current, field, None)
+            if type(value) is int and -(2**31) <= value < 2**31:
+                cause[field] = value
+        causes.append(cause)
+        current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
+    return json.dumps({"attempt_id": attempt_id, "primary_submitted": getattr(handoff, "submitted", False) is True, "causes": causes, "truncated": current is not None}, separators=(",", ":"))
+
+
 class ChatMountMismatch(BackingUnavailable):
     """A known container for this owner requires a different mount profile."""
 
@@ -1179,8 +1209,9 @@ class LocalContainerBackend(SandboxBackend):
                         owner_labels=owner_labels,
                     )
                 break
-            except NativeCreateUnconfirmed:
+            except NativeCreateUnconfirmed as exc:
                 release_port(port)
+                logger.warning("Managed native sandbox creation unconfirmed: %s", _native_creation_diagnostic(exc))
                 # A nonzero CLI reply is never permission to submit another
                 # request or adopt a conflicting name past pending evidence.
                 raise

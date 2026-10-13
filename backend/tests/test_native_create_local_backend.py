@@ -114,3 +114,64 @@ def test_restricted_early_failure_retains_pending_before_sidecar_effect_and_neve
     assert len(observed) == 1 and len(journal.pending()) == 1
     local._cleanup_restricted_resources.assert_not_called()
     assert state.pending_for(owner_id="alice")
+
+
+def test_unconfirmed_creation_logs_origin_and_errno_without_exception_payload(fixture, monkeypatch, caplog):
+    import errno
+
+    journal, state, bridge, _owner = fixture
+    local = backend(bridge)
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda **kwargs: 19080)
+
+    def fail_stage(raw):
+        raise OSError(errno.ENOSPC, "private journal payload must stay private")
+
+    monkeypatch.setattr(journal, "_write_stage", fail_stage)
+    local._runtime_runner = Mock(side_effect=AssertionError("No primary submission expected"))
+    with caplog.at_level("WARNING"), pytest.raises(StorageHostUnqualified):
+        local.create("chat", "a", user_id="alice", storage_labels={"hartmesh.storage.space." + SLOT: "1"})
+    (message,) = [record.getMessage() for record in caplog.records if "Managed native sandbox creation unconfirmed:" in record.getMessage()]
+    details = json.loads(message.split(": ", 1)[1])
+    assert any(cause.get("errno") == errno.ENOSPC and cause["type"] == "OSError" for cause in details["causes"])
+    assert "fail_stage" in message
+    assert "private journal payload" not in message
+    assert details["attempt_id"] is None and details["primary_submitted"] is False
+    assert len(message) < 4096
+    local._runtime_runner.assert_not_called()
+    assert journal.pending() == () and not state.pending_for(owner_id="alice")
+
+
+def test_unconfirmed_primary_logs_return_code_and_retained_attempt_without_argv_or_stderr(fixture, monkeypatch, caplog):
+    journal, state, bridge, _owner = fixture
+    local = backend(bridge)
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda **kwargs: 19080)
+
+    def fail(cmd, **kwargs):
+        raise subprocess.CalledProcessError(125, [*cmd, "PRIVATE_ARG", "RELAY_TOKEN=PRIVATE_TOKEN"], stderr="PRIVATE_STDERR")
+
+    local._runtime_runner = fail
+    with caplog.at_level("WARNING"), pytest.raises(StorageHostUnqualified):
+        local.create("chat", "a", user_id="alice", storage_labels={"hartmesh.storage.space." + SLOT: "1"})
+    (message,) = [record.getMessage() for record in caplog.records if "Managed native sandbox creation unconfirmed:" in record.getMessage()]
+    details = json.loads(message.split(": ", 1)[1])
+    assert any(cause.get("returncode") == 125 and cause["type"] == "CalledProcessError" for cause in details["causes"])
+    assert "fail" in message and "PRIVATE_" not in message
+    (pending,) = journal.pending()
+    assert details["attempt_id"] == pending.id and details["primary_submitted"] is True
+    assert state.pending_for(owner_id="alice")
+
+
+def test_native_creation_diagnostic_bounds_deep_and_cyclic_cause_chains():
+    from deerflow.community.aio_sandbox.local_backend import _native_creation_diagnostic
+    from deerflow.community.aio_sandbox.native_creation import NativeCreateUnconfirmed
+
+    error = NativeCreateUnconfirmed()
+    current = error
+    for _ in range(40):
+        current.__cause__ = RuntimeError("PRIVATE_MESSAGE")
+        current = current.__cause__
+    current.__cause__ = error
+    encoded = _native_creation_diagnostic(error)
+    details = json.loads(encoded)
+    assert len(details["causes"]) == 8 and details["truncated"] is True
+    assert len(encoded) < 4096 and "PRIVATE_MESSAGE" not in encoded
