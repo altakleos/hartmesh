@@ -1,5 +1,25 @@
 # AIO Sandbox
 
+`owner_admission.py` shares only the provider metadata lock. Distinct live borrows
+retain growing actual slot sets; prewarm holds a separate reference through actual
+Future completion, with callbacks registered outside that lock. Reserve owner AND
+target slot before native retirement's first await; pending evidence matches owner
+OR slot. Cache, warm, discovery, orphan and final publication retain/recheck admission.
+No provider lock encloses Docker/journal/store IO or the global lease holder gate.
+Positively unrelated starts and provider-owned mountless clients remain usable.
+
+`native_retirement.py` retains reservation through caller work and drained final
+proof; expired scopes refuse. Strict all-prefix/all-state inventory is correlation,
+never cleanup authority. Reuse canonical holder/local/store/heartbeat teardown.
+Qualified open sets use full-ID stop/removal and positive CID+name absence, including
+retries after lost proof. If auto-removal finishes between post-stop inventory
+reads, require fresh CID AND name absence with current host proof and the same
+deadline; send no additional destructive command from an ambiguous inventory.
+Never derive foreign restricted resource names; unsupported
+sets refuse. Unknown tracking, held/foreign owners and untransferred results stay
+reserved. Process-local slot/containment facts never serialize. Host eligibility
+belongs outside this generic provider and no provider callback runs under SQL.
+
 Managed native primaries require installed `native_creation.py` accounting and the
 exact owner-held journal. Persist pending before submission; preserve the existing
 run/create timeout policy. Strict actual daemon/ID/name/attempt/slot inspection

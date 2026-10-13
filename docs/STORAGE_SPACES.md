@@ -319,6 +319,33 @@ Mountless chats and existing durable attachment preparation retain their own
 lifecycles. Account-release containment follows separately. Defaults remain off.
 There is no database schema change; private journal JSON remains version 1.
 
+The private AIO native-retirement scope reserves an opaque owner and the exact
+retiring physical slot before any worker starts. Its reservation lasts through
+the host caller's filesystem work, final absence proof, publication and cancellation
+drainage. The provider defines no released-account, role, retention or business
+eligibility rules; the Gateway must supply that policy in the following stage.
+
+Native create, speculative futures and cached/warm/discovered candidates retain
+live admission references and register actual slots before publication. Shared
+Company use and positively unrelated owners remain admissible. A copied expired
+reference grants nothing. Unresolved creation evidence refuses containment when
+the owner OR target slot matches, even with empty Docker inventory.
+
+Containment reads all prefixes and running/stopped states by the exact slot label,
+under a bounded same-daemon inspection budget. Unknown attribution, conflicting
+tracking, foreign ownership and held executions refuse reclamation. Cleanup uses
+the existing global holder reservation, provider teardown reservation, ownership
+store and heartbeat. Qualified open-mode primaries are stopped and, if still
+present, removed by their exact full Docker ID. The configured prefix/network mode
+never supplies missing resource identity. Unsupported restricted sets refuse;
+their sidecars and networks must be positively contained before release is enabled.
+
+Stop alone is insufficient. Re-enumeration and the caller's drained final proof
+must establish absence. Failed cleanup retains the exact result in quarantine;
+an already-removed result can settle only after canonical fresh CID AND name
+absence proof. Neither absence nor time clears an unacknowledged request. Correlation
+facts stay process-local and are excluded from persisted sandbox metadata.
+
 Managed-plan qualification requires one participating Gateway runtime per pool.
 `prepare` and `mount-all` maintain `.gateway-owner.lock`, a stable empty regular
 single-link file owned by 1000:1000 with mode 0600, outside temporary probes.

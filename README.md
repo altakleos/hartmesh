@@ -629,6 +629,14 @@ create for the same account or container name. Cancellation retains verified
 containers for fenced cleanup. Operators must preserve the directory alongside
 the pool; unsafe or unknown evidence refuses admission. Defaults remain disabled.
 
+Managed native cleanup now reserves the opaque owner and exact physical slot
+through final absence verification. Running and stopped containers across all
+prefixes are checked; a held execution, foreign owner, unresolved request or lost
+cleanup reply keeps the backing reserved. Qualified open-mode containers use the
+existing fenced cleanup path with immutable Docker IDs. Unsupported restricted
+resource sets require containment to be resolved before reclamation. Account
+release will connect to this foundation in the next implementation stage.
+
 With managed storage enabled, missing or unverified backings leave the Gateway
 running with durable history and Work records available. Startup logs report
 storage and execution availability; failed Docker admission is retried every

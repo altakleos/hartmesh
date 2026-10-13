@@ -271,6 +271,9 @@ def serve_gateway(home: Path, *, config_yaml: str = _MINIMAL_CONFIG_YAML) -> Ite
         monkeypatch.undo()
         raise
     cfg.database.sqlite_dir = str(home / "deer-flow-home" / "db")
+    # The graph passes this resolved config directly into MemoryMiddleware;
+    # patching legacy accessors alone cannot disable its writes.
+    cfg.memory.enabled = False
 
     import uvicorn
 
@@ -568,6 +571,12 @@ def test_a_silent_turn_manufactures_no_text_timestamps(gateway: _Gateway) -> Non
     assert wire["outcome"] == "success"
 
 
+def test_the_probe_gateway_disables_resolved_memory_updates(gateway: _Gateway) -> None:
+    from deerflow.config.app_config import get_app_config
+
+    assert get_app_config().memory.enabled is False, "the probe Gateway must not queue external memory inference"
+
+
 def test_a_cancelled_turn_manufactures_no_text_timestamps(gateway: _Gateway) -> None:
     cancelled_at: dict[str, float] = {}
 
@@ -637,6 +646,7 @@ class _TcpForwarder:
         self._listener.settimeout(0.2)
         self.port = self._listener.getsockname()[1]
         self._stop = threading.Event()
+        self._connections: list[socket.socket] = []
         self._threads: list[threading.Thread] = []
         self._accept_thread = threading.Thread(target=self._accept_loop, name="turn-phase-e2e-forwarder", daemon=True)
         self._accept_thread.start()
@@ -654,6 +664,14 @@ class _TcpForwarder:
             except OSError:
                 client.close()
                 continue
+            # The timeout bounds connection establishment, not an SSE
+            # response's idle time while the Gateway finishes a turn.
+            upstream.settimeout(None)
+            if self._stop.is_set():
+                client.close()
+                upstream.close()
+                return
+            self._connections.extend((client, upstream))
             for source, sink in ((client, upstream), (upstream, client)):
                 thread = threading.Thread(target=self._pump, args=(source, sink), daemon=True)
                 thread.start()
@@ -677,7 +695,62 @@ class _TcpForwarder:
         self._stop.set()
         with contextlib.suppress(OSError):
             self._listener.close()
-        self._accept_thread.join(timeout=2)
+        self._accept_thread.join(timeout=6)
+        for connection in self._connections:
+            with contextlib.suppress(OSError):
+                connection.shutdown(socket.SHUT_RDWR)
+            with contextlib.suppress(OSError):
+                connection.close()
+        for thread in self._threads:
+            thread.join(timeout=2)
+
+
+def test_tcp_relay_preserves_delayed_stream_bytes_and_drains_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    connect = socket.create_connection
+
+    def short_connect(address, timeout=5):
+        return connect(address, timeout=0.03)
+
+    def read_exact(connection: socket.socket, size: int) -> bytes:
+        result = b""
+        deadline = time.monotonic() + 2
+        while len(result) < size:
+            connection.settimeout(max(0.001, deadline - time.monotonic()))
+            chunk = connection.recv(size - len(result))
+            if not chunk:
+                break
+            result += chunk
+        return result
+
+    monkeypatch.setattr(socket, "create_connection", short_connect)
+    with socket.socket() as upstream_listener:
+        upstream_listener.bind(("127.0.0.1", 0))
+        upstream_listener.listen()
+        upstream_listener.settimeout(2)
+        forwarder = _TcpForwarder("127.0.0.1", upstream_listener.getsockname()[1])
+        try:
+            with connect(("127.0.0.1", forwarder.port), timeout=2) as client:
+                upstream, _ = upstream_listener.accept()
+                with upstream:
+                    upstream.settimeout(2)
+                    upstream.sendall(b"first text\n")
+                    assert read_exact(client, len(b"first text\n")) == b"first text\n"
+                    # A quiet Gateway can take longer to finish than the
+                    # connection deadline. Its next bytes must still arrive.
+                    time.sleep(0.12)
+                    upstream.sendall(b"event: end\n\n")
+                    assert read_exact(client, len(b"event: end\n\n")) == b"event: end\n\n"
+            # Also drain an open, completely idle connection at teardown.
+            with connect(("127.0.0.1", forwarder.port), timeout=2) as idle_client:
+                idle_upstream, _ = upstream_listener.accept()
+                with idle_upstream:
+                    idle_upstream.settimeout(2)
+                    forwarder.close()
+                    assert idle_client.recv(65536) == b""
+                    assert idle_upstream.recv(65536) == b""
+                    assert all(not thread.is_alive() for thread in forwarder._threads)
+        finally:
+            forwarder.close()
 
 
 def _docker(*args: str, timeout: float = 60) -> subprocess.CompletedProcess[str]:
