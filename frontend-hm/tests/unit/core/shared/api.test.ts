@@ -6,6 +6,7 @@ rs.mock("@/core/api/fetcher", () => ({
 
 import { fetch as fetcher } from "@/core/api/fetcher";
 import { installedFileCollection } from "@/core/extensions/filing";
+import { readStorageRefusal } from "@/core/file-areas/storage-state";
 import {
   canPublishToShared,
   publishToShared,
@@ -53,6 +54,31 @@ const entry = {
 describe("publishToShared", () => {
   beforeEach(() => {
     mockedFetch.mockReset();
+  });
+
+  it("carries shared capacity, busy and unchecked refusals without changing publication", async () => {
+    for (const [status, detail] of [
+      [507, { code: "files-full", message: "server text" }],
+      [409, { code: "storage-busy", message: "server text" }],
+      [
+        503,
+        {
+          code: "storage-unavailable",
+          reason: "space-unverified",
+          message: "server text",
+        },
+      ],
+    ] as const) {
+      mockedFetch.mockResolvedValueOnce(jsonResponse(status, { detail }));
+      const error = await publishToShared({
+        path: "/mnt/user-data/outputs/file.pdf",
+      }).catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(SharedRequestError);
+      expect(readStorageRefusal(error)).toMatchObject({
+        status,
+        code: detail.code,
+      });
+    }
   });
 
   it("reports a fresh publication as newly shared", async () => {

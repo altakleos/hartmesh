@@ -433,3 +433,27 @@ human decision or uncertain retry. Linked Work controls lead to Attention, whose
 canonical decision includes every reviewed response ID. Read is independent and
 no response invokes run/resume. Generic inputs survive optional plugin absence;
 file references use existing Spaces and never imply upload or mounting.
+
+Managed storage UX uses the existing account-and-role-scoped features query:
+`useStorage` fails closed for absent/malformed/failed answers and polls personal
+preparation every 15 seconds; `useSeats` ignores the actual storage-off zero-seat
+envelope. HTTP clients retain structured refusal metadata and presentation maps
+it with the current locale. Personal readiness never closes Shared. Files retries
+busy reads every five seconds and retries recovery at most once per failure
+episode, with manual Retry available. First-message capacity refusal remains
+sticky; other send refusals retire after newer valid discovery. Composer recovery
+restores only the captured attempt, preserves subsequent edits and excludes
+failed attachment chips without blocking text-only Send. Native download frames
+capture the account `FileActionLifetime` signal; component retirement fences
+notices without canceling same-account navigation's streamed transfer. Unknown
+download responses/deadlines are inconclusive and require a manual ordinary-link
+retry, never a second automatic GET or a buffered Blob. Auth-enabled registration
+browser coverage uses `playwright.auth.config.ts`, because the replay workspace
+fixture deliberately SSR-redirects Login in auth-disabled mode.
+Ordinary sends retain an admission outcome independently of SDK `submit()`'s
+early resolution. Private input/empty-metadata object identities track both
+thread-create and run errors without wire tokens. Stop captures its original
+attempt; failed cancellation preserves uncertainty and all new sends wait while
+Stop is pending. Text and file submissions propagate admission rejection to the
+existing PromptInput cleanup boundary. Draft/reference cleanup happens only on
+confirmed admission; accepted attempts release captured browser File objects.

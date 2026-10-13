@@ -13,8 +13,9 @@ import { getBackendBaseURL } from "../config";
 import {
   encodeRelativePath,
   FileAreaRequestError,
-  readErrorDetail,
+  readFileAreaFailure,
 } from "../file-areas";
+import type { StorageRefusal } from "../file-areas/storage-state";
 
 /** Where every sandbox sees the Shared area. */
 export const SHARED_VIRTUAL_PREFIX = "/mnt/user-data/shared";
@@ -70,8 +71,12 @@ export interface PublishOutcome {
 }
 
 export class SharedRequestError extends FileAreaRequestError {
-  constructor(status: number, message: string) {
-    super(status, message, "SharedRequestError");
+  constructor(
+    status: number,
+    message: string,
+    refusal: StorageRefusal | null = null,
+  ) {
+    super(status, message, "SharedRequestError", refusal);
   }
 }
 
@@ -85,9 +90,14 @@ export async function listSharedFiles(): Promise<SharedFilesListResponse> {
     cache: "no-store",
   });
   if (!response.ok) {
+    const failure = await readFileAreaFailure(
+      response,
+      "Failed to list shared files",
+    );
     throw new SharedRequestError(
       response.status,
-      await readErrorDetail(response, "Failed to list shared files"),
+      failure.message,
+      failure.refusal,
     );
   }
   return response.json() as Promise<SharedFilesListResponse>;
@@ -105,9 +115,14 @@ export async function removeSharedFile(
     method: "DELETE",
   });
   if (!response.ok) {
+    const failure = await readFileAreaFailure(
+      response,
+      "Failed to remove shared file",
+    );
     throw new SharedRequestError(
       response.status,
-      await readErrorDetail(response, "Failed to remove shared file"),
+      failure.message,
+      failure.refusal,
     );
   }
 }
@@ -121,9 +136,14 @@ export async function publishToShared(
     body: JSON.stringify(request),
   });
   if (!response.ok) {
+    const failure = await readFileAreaFailure(
+      response,
+      "Failed to publish file",
+    );
     throw new SharedRequestError(
       response.status,
-      await readErrorDetail(response, "Failed to publish file"),
+      failure.message,
+      failure.refusal,
     );
   }
   return {

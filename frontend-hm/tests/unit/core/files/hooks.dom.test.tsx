@@ -18,6 +18,14 @@ const router = rs.hoisted(() => ({ push: rs.fn() }));
 
 rs.mock("sonner", () => ({ toast }));
 rs.mock("next/navigation", () => ({ useRouter: () => router }));
+rs.mock("@/core/auth/AuthProvider", () => ({
+  useAuth: () => ({ user: { id: "alice", system_role: "user" } }),
+}));
+const storageState = rs.hoisted(() => ({ state: "off", own: "ready" }));
+rs.mock("@/core/features", () => ({
+  useBranding: () => ({ providerName: "Acme", supportURL: null }),
+  useStorage: () => storageState,
+}));
 rs.mock("@/core/files/api", () => ({
   keepInMyFiles: rs.fn(),
   listMyFiles: rs.fn(),
@@ -25,6 +33,8 @@ rs.mock("@/core/files/api", () => ({
 }));
 
 import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
+import { FileAreaRequestError } from "@/core/file-areas/http";
+import { readStorageRefusal } from "@/core/file-areas/storage-state";
 import { keepInMyFiles } from "@/core/files/api";
 import { useSaveToMyFiles } from "@/core/files/hooks";
 import { I18nContext } from "@/core/i18n/context";
@@ -64,6 +74,8 @@ function kept(name: string) {
 
 describe("useSaveToMyFiles", () => {
   beforeEach(() => {
+    storageState.state = "off";
+    storageState.own = "ready";
     mockedKeep.mockReset();
     toast.success.mockReset();
     toast.error.mockReset();
@@ -72,6 +84,57 @@ describe("useSaveToMyFiles", () => {
   });
 
   afterEach(cleanup);
+
+  it("withholds Save while personal files are unavailable and leaves legacy storage usable", async () => {
+    storageState.state = "unavailable";
+    const { result, rerender } = renderHook(
+      () => useSaveToMyFiles("thread-1"),
+      { wrapper: createWrapper() },
+    );
+    expect(result.current.available).toBe(false);
+    expect(result.current.unavailableTooltip).toBe(enUS.chat.filesUnavailable);
+    await act(async () => {
+      expect(
+        await result.current.save(["/mnt/user-data/outputs/file.pdf"]),
+      ).toEqual([]);
+    });
+    expect(mockedKeep).not.toHaveBeenCalled();
+    storageState.state = "off";
+    rerender();
+    expect(result.current.available).toBe(true);
+  });
+
+  it("explains full and busy personal files", async () => {
+    const { result } = renderHook(() => useSaveToMyFiles("thread-1"), {
+      wrapper: createWrapper(),
+    });
+    mockedKeep.mockRejectedValueOnce(
+      new FileAreaRequestError(
+        507,
+        "raw",
+        "fixture",
+        readStorageRefusal({ status: 507, code: "files-full" }),
+      ),
+    );
+    await act(async () => {
+      await result.current.save(["/mnt/user-data/outputs/file.pdf"]);
+    });
+    expect(toast.error).toHaveBeenLastCalledWith(
+      enUS.files.saveFull("an administrator"),
+    );
+    mockedKeep.mockRejectedValueOnce(
+      new FileAreaRequestError(
+        409,
+        "raw",
+        "fixture",
+        readStorageRefusal({ status: 409, code: "storage-busy" }),
+      ),
+    );
+    await act(async () => {
+      await result.current.save(["/mnt/user-data/outputs/file.pdf"]);
+    });
+    expect(toast.error).toHaveBeenLastCalledWith(enUS.files.busy);
+  });
 
   it("finishes a save batch during same-account navigation away from its card", async () => {
     let resolve!: (value: ReturnType<typeof kept>) => void;

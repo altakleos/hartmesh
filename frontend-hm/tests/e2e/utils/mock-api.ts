@@ -793,8 +793,12 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   // Thread create — called when user sends first message in a new chat
   void page.route("**/api/langgraph/threads", (route) => {
     if (route.request().method() === "POST") {
+      const requested = route.request().postDataJSON() as {
+        thread_id?: string;
+      };
+      const createdThreadId = requested.thread_id ?? MOCK_THREAD_ID;
       upsertThread({
-        thread_id: MOCK_THREAD_ID,
+        thread_id: createdThreadId,
         title: "New Chat",
         updated_at: new Date().toISOString(),
         messages: options?.createdThreadMessages ?? mockStreamMessages(),
@@ -803,7 +807,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          thread_id: MOCK_THREAD_ID,
+          thread_id: createdThreadId,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
           metadata: {},
@@ -1403,6 +1407,14 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           agents_api: { enabled: featureFlags.agentsApiEnabled },
           browser_control: { enabled: featureFlags.browserControlEnabled },
           mcp_tasks: { enabled: featureFlags.mcpTasksEnabled },
+          storage_spaces: {
+            enabled: false,
+            state: "off",
+            reason: null,
+            own: "ready",
+            user_spaces: false,
+          },
+          accounts: { seats: { allowed: 0, in_use: 0 } },
         }),
       });
     }

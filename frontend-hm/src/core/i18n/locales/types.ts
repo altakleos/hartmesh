@@ -1,6 +1,25 @@
 import type { LucideIcon } from "lucide-react";
 
+export interface StorageUnavailableTranslations {
+  diskTooSmall: (provider: string) => string;
+  storageMissing: (provider: string) => string;
+  storageUnreadable: (provider: string) => string;
+  serverNotReadyFiles: (provider: string) => string;
+  serverCheckFailedFiles: (provider: string) => string;
+  next: (provider: string) => string;
+  reference: (code: string) => string;
+  askAdmin: string;
+}
+
 export interface Translations {
+  chat: {
+    filesFull: (support: string) => string;
+    filesPreparing: (support: string) => string;
+    filesNoSeat: (administrator: boolean, provider: string) => string;
+    filesUnavailable: string;
+    myFilesUnchecked: string;
+  };
+  auth: { noSeats: string };
   attention: Record<
     | "title"
     | "pending"
@@ -163,7 +182,8 @@ export interface Translations {
   agentInstances: Record<
     | "title"
     | "description"
-    | "unavailable"
+    | "legacyUnavailable"
+    | "administratorSupport"
     | "name"
     | "custody"
     | "personal"
@@ -224,7 +244,7 @@ export interface Translations {
     | "source"
     | "memoryUnavailable",
     string
-  >;
+  > & { providerFallback: string; unavailable: StorageUnavailableTranslations };
   storageSpaces: {
     confirmAction: string;
     recovery: string;
@@ -571,6 +591,8 @@ export interface Translations {
 
   // My files: what the person kept, across conversations
   files: {
+    saveFull: (support: string) => string;
+    busy: string;
     title: string;
     filterLabel: string;
     filterPlaceholder: string;
@@ -614,6 +636,9 @@ export interface Translations {
 
   // The company's Shared area: what anyone published, readable by everyone.
   shared: {
+    full: (support: string) => string;
+    busy: string;
+    unchecked: string;
     title: string;
     description: string;
     empty: string;
@@ -1088,6 +1113,7 @@ export interface Translations {
 
   // Uploads
   uploads: {
+    filesFull: (file: string, support: string) => string;
     uploading: string;
     uploadingFiles: string;
     limitsHint: (
@@ -1487,6 +1513,9 @@ export interface Translations {
       disableNotification: string;
     };
     account: {
+      seats: (count: number, max: number) => string;
+      noSeats: (max: number | null, provider: string) => string;
+      noSeatsSignOn: (max: number, provider: string) => string;
       profileTitle: string;
       email: string;
       role: string;

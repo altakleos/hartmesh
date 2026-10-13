@@ -46,7 +46,7 @@ export default function InstancesPage() {
           {agentsLoading || spaces.isLoading ? (
             <p role="status">{t.common.loading}</p>
           ) : !agentsEnabled || !spaces.enabled ? (
-            <p role="status">{t.agentInstances.unavailable}</p>
+            <p role="status">{t.agentInstances.legacyUnavailable}</p>
           ) : (
             <InstanceControls
               key={`${user?.id}:${user?.system_role}:${user?.permissions?.join(",")}:${search.get("instance")}`}

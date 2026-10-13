@@ -2,7 +2,14 @@
 
 import { DownloadIcon, FolderIcon, Trash2Icon, UsersIcon } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useId, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -24,22 +31,31 @@ import {
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatArtifactBytes } from "@/components/workspace/artifacts/artifact-file-preview";
+import { NativeDownloadLink } from "@/components/workspace/artifacts/native-download-link";
+import { FilesStateNotice } from "@/components/workspace/chats/files-state-notice";
 import {
   WorkspaceBody,
   WorkspaceContainer,
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
+import { useAuth } from "@/core/auth/AuthProvider";
 import {
   installedFileCollection,
   isFileFilingReady,
 } from "@/core/extensions/filing";
 import { useFrontendExtensions } from "@/core/extensions/hooks";
-import { useDocumentTitle } from "@/core/features";
-import { messageForFileAreaError } from "@/core/file-areas";
+import { useDocumentTitle, useStorage } from "@/core/features";
+import { STORAGE_REASONS, type StorageReason } from "@/core/features/api";
 import {
   selectLoadedFiles,
   type FileListOrder,
 } from "@/core/file-areas/selection";
+import { useStorageCopy } from "@/core/file-areas/storage-copy";
+import {
+  fileAreaNotice,
+  readStorageRefusal,
+  type StorageRefusal,
+} from "@/core/file-areas/storage-state";
 import {
   MY_FILES_VIRTUAL_PREFIX,
   urlOfMyFile,
@@ -59,6 +75,64 @@ import { formatTimeAgo } from "@/core/utils/datetime";
 
 type FilesTab = "mine" | "shared";
 const EMPTY_FILES: readonly never[] = [];
+type StorageObservation = ReturnType<typeof useStorage>;
+
+function useDeploymentRefusal(
+  error: unknown,
+  report: (refusal: StorageRefusal) => void,
+) {
+  useEffect(() => {
+    const refusal = readStorageRefusal(error);
+    if (
+      refusal?.code === "storage-unavailable" &&
+      STORAGE_REASONS.includes(refusal.reason as StorageReason)
+    )
+      report(refusal);
+  }, [error, report]);
+}
+
+function useBusyRetry(error: unknown, refetch: () => unknown) {
+  useEffect(() => {
+    if (readStorageRefusal(error)?.code !== "storage-busy") return;
+    const timer = setInterval(() => {
+      void refetch();
+    }, 5_000);
+    return () => clearInterval(timer);
+  }, [error, refetch]);
+}
+
+function useStorageRecovery(
+  error: unknown,
+  storage: StorageObservation,
+  area: "files" | "shared",
+  refetch: () => unknown,
+) {
+  const revision = useRef(storage.dataUpdatedAt);
+  const retried = useRef(false);
+  useEffect(() => {
+    if (!error) retried.current = false;
+    if (revision.current === storage.dataUpdatedAt) return;
+    revision.current = storage.dataUpdatedAt;
+    if (
+      !retried.current &&
+      readStorageRefusal(error)?.code === "storage-unavailable" &&
+      storage.known &&
+      storage.state !== "unavailable" &&
+      (area === "shared" || storage.state === "off" || storage.own === "ready")
+    ) {
+      retried.current = true;
+      void refetch();
+    }
+  }, [
+    error,
+    storage.known,
+    storage.state,
+    storage.own,
+    storage.dataUpdatedAt,
+    area,
+    refetch,
+  ]);
+}
 
 /** The folder a file sits in, or nothing for the root. */
 function folderOf(file: { path: string }) {
@@ -75,6 +149,35 @@ export default function FilesPage() {
   const { t } = useI18n();
   const router = useRouter();
   const searchParams = useSearchParams();
+  const discovered = useStorage();
+  const { user } = useAuth();
+  const identity = `${user?.id ?? ""}:${user?.system_role ?? ""}`;
+  const latest = useRef({ discovered, identity });
+  latest.current = { discovered, identity };
+  const [failure, setFailure] = useState<{
+    refusal: StorageRefusal;
+    observedAt: number;
+    identity: string;
+  } | null>(null);
+  const reportFailure = useCallback((refusal: StorageRefusal) => {
+    const { discovered, identity } = latest.current;
+    if (!STORAGE_REASONS.includes(refusal.reason as StorageReason)) return;
+    setFailure({
+      refusal,
+      observedAt: discovered.dataUpdatedAt ?? 0,
+      identity,
+    });
+    void discovered.refetch?.();
+  }, []);
+  const storage: StorageObservation =
+    failure?.identity === identity &&
+    (discovered.dataUpdatedAt ?? 0) <= failure.observedAt
+      ? {
+          ...discovered,
+          state: "unavailable",
+          reason: failure.refusal.reason as StorageReason,
+        }
+      : discovered;
   const tab = tabOf(searchParams?.get("tab") ?? null);
   // The tab is also written back to the URL, so a person who copies the link
   // sends their colleague to the tab they were looking at.
@@ -125,9 +228,17 @@ export default function FilesPage() {
           </Tabs>
 
           {tab === "shared" ? (
-            <SharedFiles onChanged={() => headingRef.current?.focus()} />
+            <SharedFiles
+              storage={storage}
+              onGlobalFailure={reportFailure}
+              onChanged={() => headingRef.current?.focus()}
+            />
           ) : (
-            <MyFiles onChanged={() => headingRef.current?.focus()} />
+            <MyFiles
+              storage={storage}
+              onGlobalFailure={reportFailure}
+              onChanged={() => headingRef.current?.focus()}
+            />
           )}
         </div>
       </WorkspaceBody>
@@ -199,10 +310,22 @@ function FileListControls({
   );
 }
 
-function MyFiles({ onChanged }: { onChanged: () => void }) {
+function MyFiles({
+  onChanged,
+  storage,
+  onGlobalFailure,
+}: {
+  onChanged: () => void;
+  storage: StorageObservation;
+  onGlobalFailure: (refusal: StorageRefusal) => void;
+}) {
   const pluginQuery = useFrontendExtensions();
   const { t, locale } = useI18n();
   const { data, error, isPending, refetch } = useMyFiles();
+  useDeploymentRefusal(error, onGlobalFailure);
+  const copy = useStorageCopy("files");
+  useBusyRetry(error, refetch);
+  useStorageRecovery(error, storage, "files", refetch);
   const deleteFile = useDeleteMyFile();
   // The empty state tells people they can share one of their own files; this
   // is where they do it. No conversation is involved, so no thread.
@@ -215,6 +338,22 @@ function MyFiles({ onChanged }: { onChanged: () => void }) {
     () => selectLoadedFiles(loadedFiles, { query, order, locale }),
     [loadedFiles, query, order, locale],
   );
+
+  const notice = fileAreaNotice(storage, error, "files");
+  if (notice)
+    return (
+      <div
+        className="space-y-3 rounded-lg border p-4"
+        data-testid="my-files-storage-notice"
+      >
+        <FilesStateNotice refusal={notice} />
+        {
+          <Button size="sm" variant="outline" onClick={() => void refetch()}>
+            {t.files.retry}
+          </Button>
+        }
+      </div>
+    );
 
   return (
     <>
@@ -340,14 +479,16 @@ function MyFiles({ onChanged }: { onChanged: () => void }) {
                   </td>
                   <td className="px-2 py-1 text-right whitespace-nowrap">
                     <Button asChild size="icon-sm" variant="ghost">
-                      <a
+                      <NativeDownloadLink
                         aria-label={`${t.files.download} ${file.name}`}
+                        area="files"
+                        onGlobalFailure={onGlobalFailure}
                         href={urlOfMyFile(file.path, { download: true })}
                         rel="noopener noreferrer"
                         target="_blank"
                       >
                         <DownloadIcon className="size-4" />
-                      </a>
+                      </NativeDownloadLink>
                     </Button>
                     <Button
                       aria-label={`${t.shared.shareWithEveryone} ${file.name}`}
@@ -428,7 +569,7 @@ function MyFiles({ onChanged }: { onChanged: () => void }) {
                   },
                   onError: (failure) => {
                     console.error("Delete from My files failed:", failure);
-                    toast.error(t.files.deleteFailed);
+                    toast.error(copy.message(failure, t.files.deleteFailed));
                   },
                 });
               }}
@@ -443,9 +584,21 @@ function MyFiles({ onChanged }: { onChanged: () => void }) {
   );
 }
 
-function SharedFiles({ onChanged }: { onChanged: () => void }) {
+function SharedFiles({
+  onChanged,
+  storage,
+  onGlobalFailure,
+}: {
+  onChanged: () => void;
+  storage: StorageObservation;
+  onGlobalFailure: (refusal: StorageRefusal) => void;
+}) {
   const { t, locale } = useI18n();
   const { data, error, isPending, refetch } = useSharedFiles();
+  useDeploymentRefusal(error, onGlobalFailure);
+  const copy = useStorageCopy("shared");
+  useBusyRetry(error, refetch);
+  useStorageRecovery(error, storage, "shared", refetch);
   const removeFile = useRemoveSharedFile();
   const [pendingRemove, setPendingRemove] = useState<SharedFileInfo | null>(
     null,
@@ -457,6 +610,22 @@ function SharedFiles({ onChanged }: { onChanged: () => void }) {
     () => selectLoadedFiles(loadedFiles, { query, order, locale }),
     [loadedFiles, query, order, locale],
   );
+
+  const notice = fileAreaNotice(storage, error, "shared");
+  if (notice)
+    return (
+      <div
+        className="space-y-3 rounded-lg border p-4"
+        data-testid="shared-files-storage-notice"
+      >
+        <FilesStateNotice refusal={notice} area="shared" />
+        {
+          <Button size="sm" variant="outline" onClick={() => void refetch()}>
+            {t.files.retry}
+          </Button>
+        }
+      </div>
+    );
 
   return (
     <>
@@ -592,14 +761,16 @@ function SharedFiles({ onChanged }: { onChanged: () => void }) {
                     </td>
                     <td className="px-2 py-1 text-right whitespace-nowrap">
                       <Button asChild size="icon-sm" variant="ghost">
-                        <a
+                        <NativeDownloadLink
                           aria-label={`${t.files.download} ${file.name}`}
+                          area="shared"
+                          onGlobalFailure={onGlobalFailure}
                           href={urlOfSharedFile(file.path, { download: true })}
                           rel="noopener noreferrer"
                           target="_blank"
                         >
                           <DownloadIcon className="size-4" />
-                        </a>
+                        </NativeDownloadLink>
                       </Button>
                       {file.can_remove && (
                         <Button
@@ -659,9 +830,7 @@ function SharedFiles({ onChanged }: { onChanged: () => void }) {
                   },
                   onError: (failure) => {
                     console.error("Remove from Shared failed:", failure);
-                    toast.error(
-                      messageForFileAreaError(failure, t.shared.removeFailed),
-                    );
+                    toast.error(copy.message(failure, t.shared.removeFailed));
                   },
                 });
               }}

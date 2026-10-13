@@ -8,6 +8,10 @@ import {
   isRunNotCancellableError,
   StreamReplayGapError,
 } from "@/core/api/api-client";
+import {
+  observeSubmission,
+  submissionErrorOrigin,
+} from "@/core/api/submission-lifecycle";
 
 function makeSessionStorage() {
   const values = new Map<string, string>();
@@ -22,6 +26,48 @@ function makeSessionStorage() {
   };
 }
 
+test("a first-message thread creation refusal retains its submission origin without wire tokens", async () => {
+  rs.stubGlobal("window", { location: { origin: "http://localhost:2026" } });
+  const metadata = {};
+  const origin = {
+    threadId: "create-refusal-thread",
+    sequence: 7,
+    retired: false,
+  };
+  const failed = rs.fn();
+  observeSubmission({ messages: [] }, metadata, {
+    origin,
+    created: rs.fn(),
+    failed,
+  });
+  const fetchFn = rs.fn(async () =>
+    Response.json({ detail: { code: "files-full" } }, { status: 507 }),
+  );
+  rs.stubGlobal("fetch", fetchFn);
+  let error: unknown;
+  try {
+    await getAPIClient().threads.create({
+      threadId: origin.threadId,
+      metadata,
+    });
+  } catch (failure) {
+    error = failure;
+  }
+  expect(error).toMatchObject({ status: 507 });
+  expect(submissionErrorOrigin(error)).toBe(origin);
+  expect(failed).toHaveBeenCalledWith(error);
+  expect(fetchFn).toHaveBeenCalledTimes(1);
+  const init = fetchFn.mock.calls[0] as unknown as [unknown, RequestInit];
+  const body = init[1].body;
+  if (typeof body !== "string")
+    throw new Error("Expected the SDK JSON request body");
+  expect(JSON.parse(body)).toMatchObject({
+    thread_id: origin.threadId,
+    metadata: {},
+  });
+  expect(Object.keys(metadata)).toEqual([]);
+});
+
 function makeSSEResponse(body: string, headers?: HeadersInit) {
   return new Response(body, {
     status: 200,
@@ -35,6 +81,39 @@ function makeSSEResponse(body: string, headers?: HeadersInit) {
 afterEach(() => {
   rs.unstubAllGlobals();
 });
+
+test.each([507, 503])(
+  "does not retry a structured storage admission refusal with HTTP %s",
+  async (status) => {
+    rs.stubGlobal("window", { location: { origin: "http://localhost:2026" } });
+    const code = status === 507 ? "files-full" : "storage-unavailable";
+    const fetchFn = rs.fn(async () =>
+      Response.json(
+        {
+          detail: {
+            code,
+            reason: status === 503 ? "space-not-assigned" : undefined,
+          },
+        },
+        { status },
+      ),
+    );
+    rs.stubGlobal("fetch", fetchFn);
+    const consume = async () => {
+      for await (const event of getAPIClient().runs.stream(
+        `storage-refusal-${status}`,
+        "lead_agent",
+        { input: { messages: [] } },
+      ))
+        void event;
+    };
+    await expect(consume()).rejects.toMatchObject({
+      status,
+      refusal: { code },
+    });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  },
+);
 
 test("identifies inactive run stream errors", () => {
   const error = Object.assign(

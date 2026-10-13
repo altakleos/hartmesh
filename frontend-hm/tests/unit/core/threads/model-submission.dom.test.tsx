@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 
+import { submissionCreated } from "@/core/api/submission-lifecycle";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 import { DEFAULT_LOCAL_SETTINGS } from "@/core/settings/local";
@@ -11,11 +12,18 @@ const sdk = rs.hoisted(() => ({
   submit: rs.fn(async (_input: unknown, _options: unknown) => undefined),
 }));
 rs.mock("@langchain/langgraph-sdk/react", () => ({
-  useStream: () => ({
+  useStream: (options: {
+    onCreated?: (meta: { thread_id: string; run_id: string }) => void;
+  }) => ({
     isLoading: false,
     messages: [],
     values: {},
-    submit: sdk.submit,
+    submit: async (input: unknown, submitOptions: unknown) => {
+      const meta = { thread_id: "model-refresh", run_id: "model-run" };
+      submissionCreated((submitOptions as { metadata: object }).metadata, meta);
+      options.onCreated?.(meta);
+      return sdk.submit(input, submitOptions);
+    },
     stop: () => undefined,
   }),
 }));

@@ -262,9 +262,11 @@ test.describe("Chat workspace", () => {
     const uploadHeld = new Promise<void>((resolve) => {
       releaseUpload = resolve;
     });
+    let uploadStarted = false;
     let submittedText: string | undefined;
 
     await page.route("**/api/threads/*/uploads", async (route) => {
+      uploadStarted = true;
       await uploadHeld;
       return route.fulfill({
         status: 200,
@@ -306,12 +308,14 @@ test.describe("Chat workspace", () => {
     await textarea.fill("Send this immediately");
     await textarea.press("Enter");
 
+    await expect.poll(() => uploadStarted).toBe(true);
     await page.waitForTimeout(500);
+    expect(submittedText).toBeUndefined();
     expect(
       await page.evaluate(() =>
         Object.values(window.sessionStorage).join("\n"),
       ),
-    ).not.toContain("Send this immediately");
+    ).toContain("Send this immediately");
 
     releaseUpload();
     await expect
@@ -320,6 +324,20 @@ test.describe("Chat workspace", () => {
     await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
       timeout: 10_000,
     });
+
+    // A pending upload retains the draft. Once the send is admitted, neither
+    // its old debounce nor the new conversation's persistence key may save it.
+    await expect
+      .poll(() =>
+        page.evaluate(() => Object.values(window.sessionStorage).join("\n")),
+      )
+      .not.toContain("Send this immediately");
+    await page.waitForTimeout(500);
+    expect(
+      await page.evaluate(() =>
+        Object.values(window.sessionStorage).join("\n"),
+      ),
+    ).not.toContain("Send this immediately");
 
     await page.reload();
     await expect(page.getByPlaceholder(/how can i assist you/i)).toHaveValue(

@@ -3,7 +3,9 @@ import { useRouter } from "next/navigation";
 import { useCallback } from "react";
 import { toast } from "sonner";
 
+import { useStorage } from "../features";
 import { useFileActionLifetime } from "../file-areas/file-action-lifetime";
+import { useStorageCopy } from "../file-areas/storage-copy";
 import { useI18n } from "../i18n/hooks";
 
 import {
@@ -57,10 +59,17 @@ export function useSaveToMyFiles(threadId: string) {
   const router = useRouter();
   const keep = useKeepInMyFiles(threadId);
   const lifetime = useFileActionLifetime();
+  const copy = useStorageCopy("files");
+  const storage = useStorage();
+  const available =
+    storage.state === "off" ||
+    (storage.state !== "unavailable" && storage.own === "ready");
   const save = useCallback(
     async (paths: readonly string[], folder?: string) => {
+      if (!available) return [];
       const kept: MyFileInfo[] = [];
       let failed = 0;
+      let lastFailure: unknown = null;
       // Every path gets its try: a render a rebuild deleted must not stop
       // the ones that exist from being kept.
       for (const path of paths) {
@@ -72,16 +81,19 @@ export function useSaveToMyFiles(threadId: string) {
           // The Gateway's reason names paths and rules in system words; the
           // person gets what happened and what to do, the console the rest.
           console.error("Save to My files failed:", path, error);
+          lastFailure = error;
           failed += 1;
         }
       }
       if (!lifetime.active) return kept;
       if (failed > 0) {
         lifetime.toasts.add(
-          toast.error(
+          copy.error(
+            lastFailure,
+            t.files.saveFailed,
             kept.length > 0
               ? t.files.savedSome(kept.length, paths.length)
-              : t.files.saveFailed,
+              : undefined,
           ),
         );
         return kept;
@@ -113,7 +125,12 @@ export function useSaveToMyFiles(threadId: string) {
       );
       return kept;
     },
-    [keep, lifetime, router, t.files],
+    [available, copy, keep, lifetime, router, t.files],
   );
-  return { save, isPending: keep.isPending };
+  return {
+    save,
+    isPending: keep.isPending,
+    available,
+    unavailableTooltip: t.chat.filesUnavailable,
+  };
 }

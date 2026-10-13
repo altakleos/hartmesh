@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 
+import { submissionCreated } from "@/core/api/submission-lifecycle";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 import { DEFAULT_LOCAL_SETTINGS } from "@/core/settings/local";
@@ -21,13 +22,19 @@ const streamMockState = rs.hoisted(() => ({
 rs.mock("@langchain/langgraph-sdk/react", () => ({
   useStream: (options: {
     onFinish?: (state: { values: { messages: Message[] } }) => void;
+    onCreated?: (meta: { thread_id: string; run_id: string }) => void;
   }) => {
     streamMockState.onFinish = options.onFinish;
     return {
       isLoading: streamMockState.isLoading,
       messages: streamMockState.messages,
       stop: streamMockState.stop,
-      submit: streamMockState.submit,
+      submit: async (_input: unknown, submitOptions: { metadata: object }) => {
+        const meta = { thread_id: "thread-1", run_id: "turn-run" };
+        submissionCreated(submitOptions.metadata, meta);
+        options.onCreated?.(meta);
+        return streamMockState.submit();
+      },
       values: {
         artifacts: [],
         messages: streamMockState.messages,

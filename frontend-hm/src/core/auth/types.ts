@@ -50,6 +50,7 @@ const AUTH_ERROR_CODES = [
   "registration_disabled",
   "sign_on_required",
   "setup_required",
+  "no_seats_left",
 ] as const;
 
 export type AuthErrorCode = (typeof AUTH_ERROR_CODES)[number];

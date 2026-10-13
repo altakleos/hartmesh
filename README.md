@@ -685,6 +685,18 @@ collide. Sharing from My Files needs no conversation. Skill installation still
 requires the provider's delegation for private skill management. Chats without
 assigned personal storage report files as unavailable for these operations.
 
+The Files page and ordinary chats explain whether files are being prepared,
+unavailable or full. Personal file problems leave Shared usable; text-only chats
+remain available while files are unavailable. A refused first message caused by
+full files keeps its draft and closes that new chat's composer. A refused
+attachment keeps the text and marks the file; removing it permits a text-only
+send. Save and Share preserve files already copied when another file fails.
+Administrators see the configured provider support link and a short diagnostic
+reference where appropriate. Native downloads stream through the browser;
+unrecognized responses leave the ordinary download link available for a manual
+retry. Settings shows managed account seats and explains a full deployment;
+storage-off deployments retain the existing account controls.
+
 `/api/features` reports storage readiness, account seats, AI assistant/AI employee
 allowances and the caller's file readiness. `/health` reports storage and agent
 status without exposing counts or paths. Deployments can disable generic Space

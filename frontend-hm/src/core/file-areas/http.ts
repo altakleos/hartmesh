@@ -8,15 +8,45 @@
  * `app/gateway/routers/_file_http.py` are shared on the server.
  */
 
+import { readStorageRefusal, type StorageRefusal } from "./storage-state";
+
 /** A file request that came back with a reason. `detail` is the server's own words. */
 export class FileAreaRequestError extends Error {
   readonly status: number;
+  readonly refusal: StorageRefusal | null;
 
-  constructor(status: number, message: string, name = "FileAreaRequestError") {
+  constructor(
+    status: number,
+    message: string,
+    name = "FileAreaRequestError",
+    refusal: StorageRefusal | null = null,
+  ) {
     super(message);
     this.name = name;
     this.status = status;
+    this.refusal = refusal;
   }
+}
+
+/** Decode once; leave known-code localization to the mounted UI. */
+export async function readFileAreaFailure(
+  response: Response,
+  fallback: string,
+) {
+  const data: unknown = await response.json().catch(() => null);
+  const object =
+    typeof data === "object" && data !== null && !Array.isArray(data)
+      ? (data as Record<string, unknown>)
+      : {};
+  const refusal = readStorageRefusal({ ...object, status: response.status });
+  const detail = object.detail;
+  const message =
+    typeof detail === "string"
+      ? detail
+      : refusal && refusal.message.length > 0
+        ? refusal.message
+        : fallback;
+  return { message, refusal, detail };
 }
 
 /** The server's `detail` for a failed response, or *fallback* when it said nothing useful. */

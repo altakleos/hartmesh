@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Managed storage and account seat notices
+
+Files, ordinary chats, Save/Share and attachments show localized storage
+readiness and capacity refusals with role-appropriate support. First-message
+capacity refusals retain the draft without opening a phantom chat; attachment
+refusals preserve text and successful independent files. Personal failures
+leave Shared usable, preparation polls while mounted and list recovery retries
+are bounded. Native downloads retain browser streaming and account-owned
+cleanup. Settings displays managed seats, handles concurrent seat refusals and
+keeps storage-off account controls; registration uses the same localized seat
+remedy. Storage defaults remain disabled. There is no database schema change.
+
 ### Released-account storage reclamation
 
 Startup and periodic maintenance reclaim a released account's exact deleted

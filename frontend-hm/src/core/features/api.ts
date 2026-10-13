@@ -14,7 +14,15 @@ export interface WorkspacePresentation {
 }
 
 export interface FeaturesResponse {
-  storage_spaces?: { enabled?: boolean; native_attachments?: boolean };
+  storage_spaces?: {
+    enabled?: boolean;
+    native_attachments?: boolean;
+    state?: unknown;
+    reason?: unknown;
+    own?: unknown;
+    user_spaces?: unknown;
+  };
+  accounts?: { seats?: { allowed?: unknown; in_use?: unknown } };
   customer_administration?: {
     plugin_management?: boolean;
     local_skill_management?: boolean;
@@ -94,6 +102,87 @@ export function selectStorageSpacesEnabled(
   return features.storage_spaces?.enabled === true;
 }
 
+export const STORAGE_REASONS = [
+  "disk-too-small",
+  "storage-pool-missing",
+  "inventory-unreadable",
+  "host-unqualified",
+  "admission-failed",
+] as const;
+export type StorageReason = (typeof STORAGE_REASONS)[number];
+export type StorageState = "off" | "ready" | "incomplete" | "unavailable";
+export type OwnFilesState = "ready" | "not-assigned" | "no-seat" | "unverified";
+export interface StorageFeature {
+  known: boolean;
+  enabled: boolean;
+  state: StorageState;
+  reason: StorageReason | null;
+  own: OwnFilesState;
+  userSpaces: boolean;
+}
+export interface SeatsFeature {
+  allowed: number;
+  inUse: number;
+}
+
+/** Failed, absent or malformed discovery never grants file availability. */
+export function selectStorageState(
+  features: FeaturesResponse | undefined,
+): StorageFeature {
+  const storage = features?.storage_spaces;
+  const states: readonly unknown[] = [
+    "off",
+    "ready",
+    "incomplete",
+    "unavailable",
+  ];
+  if (
+    !storage ||
+    typeof storage.enabled !== "boolean" ||
+    !states.includes(storage.state)
+  ) {
+    return {
+      known: false,
+      enabled: false,
+      state: "unavailable",
+      reason: null,
+      own: "ready",
+      userSpaces: false,
+    };
+  }
+  const own: readonly unknown[] = [
+    "ready",
+    "not-assigned",
+    "no-seat",
+    "unverified",
+  ];
+  return {
+    known: true,
+    enabled: storage.enabled,
+    state: storage.state as StorageState,
+    reason: STORAGE_REASONS.includes(storage.reason as StorageReason)
+      ? (storage.reason as StorageReason)
+      : null,
+    own: own.includes(storage.own) ? (storage.own as OwnFilesState) : "ready",
+    userSpaces: storage.user_spaces === true,
+  };
+}
+
+export function selectSeats(
+  features: FeaturesResponse | undefined,
+): SeatsFeature | null {
+  const storage = selectStorageState(features);
+  // The legacy off envelope reports zero counts. Those are not managed seats.
+  if (!storage.known || !storage.enabled || storage.state === "off")
+    return null;
+  const seats = features?.accounts?.seats;
+  const whole = (value: unknown): value is number =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  return whole(seats?.allowed) && whole(seats?.in_use)
+    ? { allowed: seats.allowed, inUse: seats.in_use }
+    : null;
+}
+
 export async function fetchMcpTasksEnabled(): Promise<boolean> {
   return selectMcpTasksEnabled(await fetchFeatures());
 }
@@ -124,7 +213,7 @@ function color(value: unknown): string | null {
   return typeof value === "string" && HEX_COLOR.test(value) ? value : null;
 }
 
-function supportURL(value: unknown): string | null {
+export function validateProviderSupportURL(value: unknown): string | null {
   if (
     typeof value !== "string" ||
     value.length > 2048 ||
@@ -178,7 +267,7 @@ export function selectBranding(features: FeaturesResponse): Branding {
       !/[\p{Cc}\p{Cf}]/u.test(providerName)
         ? providerName
         : null,
-    supportURL: supportURL(provider?.support_url),
+    supportURL: validateProviderSupportURL(provider?.support_url),
   };
 }
 

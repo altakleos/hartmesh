@@ -36,9 +36,10 @@ import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { Welcome } from "@/components/workspace/welcome";
 import { useConversationInstance } from "@/core/agent-instances/hooks";
 import { useAgentsApiEnabled } from "@/core/agents";
-import { useBrowserControlEnabled } from "@/core/features";
+import { useBrowserControlEnabled, useStorage } from "@/core/features";
 import { useStorageSpacesEnabled } from "@/core/features";
 import { useFeatures } from "@/core/features/hooks";
+import { fileAreaNotice } from "@/core/file-areas/storage-state";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildHumanInputResponseText,
@@ -65,6 +66,7 @@ import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 import { ChatBox } from "./chat-box";
+import { FilesStateNotice } from "./files-state-notice";
 import { useSpecificChatMode } from "./use-chat-mode";
 import { usePrewarmWorkspace } from "./use-prewarm-workspace";
 import { useThreadChat } from "./use-thread-chat";
@@ -89,6 +91,7 @@ export default function ChatPage() {
   const { enabled: instancesApiEnabled } = useAgentsApiEnabled();
   const { enabled: spacesEnabled } = useStorageSpacesEnabled();
   const discovery = useFeatures((features) => features);
+  const storage = useStorage();
   const bindingRequired =
     !isNewThread && !isMock && instancesApiEnabled && spacesEnabled;
   const resident = useConversationInstance(threadId, bindingRequired);
@@ -141,6 +144,7 @@ export default function ChatPage() {
     isHistoryLoading,
     hasMoreHistory,
     loadMoreHistory,
+    runRefusal,
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     displayThreadId: threadId,
@@ -177,6 +181,27 @@ export default function ChatPage() {
   });
 
   const hasThreadMessages = thread.messages.length > 0;
+  const firstConversationFull =
+    runRefusal?.newThread === true &&
+    runRefusal.phase === "send" &&
+    runRefusal.refusal.code === "files-full";
+  const fileNotice =
+    legacyCapabilities && !isMock
+      ? firstConversationFull
+        ? runRefusal.refusal
+        : fileAreaNotice(
+            storage,
+            runRefusal?.phase === "send" &&
+              !(
+                storage.known &&
+                storage.dataUpdatedAt > (runRefusal.storageObservedAt ?? 0)
+              )
+              ? runRefusal.refusal
+              : null,
+            "chat",
+          )
+      : null;
+  const filesUnavailable = fileNotice?.code === "storage-unavailable";
 
   useEffect(() => {
     if (
@@ -209,11 +234,9 @@ export default function ChatPage() {
         toast.error(t.agentInstances.home);
         return;
       }
-      const sendPromise = sendMessage(threadId, message, undefined, options);
-      if (message.files.length > 0) {
-        return sendPromise;
-      }
-      void sendPromise;
+      // PromptInput preserves both text and files for a rejected admission,
+      // and clears only the captured submission after the server admits it.
+      return sendMessage(threadId, message, undefined, options);
     },
     [sendMessage, threadId, legacyCapabilities, t.agentInstances.home],
   );
@@ -478,42 +501,50 @@ export default function ChatPage() {
                     </div>
                   )}
                   {mountedRef.current ? (
-                    <InputBox
-                      allowAttachments={legacyCapabilities}
-                      className={cn(
-                        "bg-background/5 w-full",
-                        isWelcomeMode && "-translate-y-2 sm:-translate-y-4",
+                    <>
+                      {fileNotice && (
+                        <FilesStateNotice refusal={fileNotice} area="chat" />
                       )}
-                      isWelcomeMode={isWelcomeMode}
-                      threadId={threadId}
-                      draftThreadId={isNewThread ? "new" : threadId}
-                      autoFocus={isWelcomeMode}
-                      status={
-                        thread.error
-                          ? "error"
-                          : thread.isLoading
-                            ? "streaming"
-                            : "ready"
-                      }
-                      context={settings.context}
-                      extraHeader={
-                        isWelcomeMode &&
-                        !hasGoal &&
-                        !hasTodos && <Welcome mode={settings.context.mode} />
-                      }
-                      disabled={
-                        isMock ||
-                        env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
-                        isUploading ||
-                        (!isNewThread && isHistoryLoading)
-                      }
-                      onContextChange={(context) =>
-                        setSettings("context", context)
-                      }
-                      onGoalChange={setLocalGoal}
-                      onSubmit={handleSubmit}
-                      onStop={handleStop}
-                    />
+                      <InputBox
+                        allowAttachments={legacyCapabilities}
+                        attachmentsUnavailable={filesUnavailable}
+                        storageRefusal={runRefusal}
+                        className={cn(
+                          "bg-background/5 w-full",
+                          isWelcomeMode && "-translate-y-2 sm:-translate-y-4",
+                        )}
+                        isWelcomeMode={isWelcomeMode}
+                        threadId={threadId}
+                        draftThreadId={isNewThread ? "new" : threadId}
+                        autoFocus={isWelcomeMode}
+                        status={
+                          thread.error
+                            ? "error"
+                            : thread.isLoading
+                              ? "streaming"
+                              : "ready"
+                        }
+                        context={settings.context}
+                        extraHeader={
+                          isWelcomeMode &&
+                          !hasGoal &&
+                          !hasTodos && <Welcome mode={settings.context.mode} />
+                        }
+                        disabled={
+                          isMock ||
+                          env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
+                          isUploading ||
+                          firstConversationFull ||
+                          (!isNewThread && isHistoryLoading)
+                        }
+                        onContextChange={(context) =>
+                          setSettings("context", context)
+                        }
+                        onGoalChange={setLocalGoal}
+                        onSubmit={handleSubmit}
+                        onStop={handleStop}
+                      />
+                    </>
                   ) : (
                     <div
                       aria-hidden="true"
