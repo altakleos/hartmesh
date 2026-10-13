@@ -2,6 +2,12 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+The real-Gateway probe fixture in `test_turn_phase_gateway_stream_e2e.py`
+disables memory on the resolved app config so offline turns cannot enqueue
+external inference. Its TCP relay bounds connection establishment only;
+quiet SSE streams remain open until HTTP completion or explicit teardown.
+Teardown closes connected sockets and drains relay workers.
+
 `test_migration_chain_head.py` compares Alembic's fresh and previous-release
 upgrade plans and pins published ancestry from release fixtures. Keep old
 fixtures immutable; add a new one for a new published head. A single current

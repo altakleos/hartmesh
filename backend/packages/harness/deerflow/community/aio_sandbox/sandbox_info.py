@@ -59,6 +59,9 @@ class SandboxInfo:
     # Only this provider's fresh, mountless creation may bypass native pool
     # qualification. Never reconstruct or serialize this process-local fact.
     mountless_provider: object | None = field(default=None, repr=False, compare=False)
+    # Fresh inspected containment correlation, never persisted or authority.
+    native_container: object | None = field(default=None, repr=False, compare=False)
+    native_slots: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> dict:
         return {

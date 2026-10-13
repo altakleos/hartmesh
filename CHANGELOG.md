@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Native owner and slot containment
+
+The managed Compose provider can retain an owner and physical-slot reservation
+through container cleanup and a caller's final storage publication. Creation,
+prewarming and cached or discovered clients register actual slot facts before
+publication. Strict inventory includes stopped containers across all prefixes;
+held executions, foreign or unresolved requests and uncertain cleanup preserve
+the backing. Canonical fenced cleanup removes qualified open-mode primaries by
+immutable ID and can retry a lost absence reply. Unsupported restricted resource
+sets refuse automatic reclamation. Account-release integration follows separately.
+Storage defaults remain disabled. There is no database schema change; private
+journal JSON remains version 1.
+
 ### Managed native creation evidence
 
 Managed pool preparation now atomically publishes a private `.native-creates`

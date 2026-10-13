@@ -21,11 +21,14 @@ import shlex
 import socket
 import subprocess
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 from deerflow.spaces.backings import BackingUnavailable
+from deerflow.spaces.docker import StorageHostUnqualified
+from deerflow.spaces.native_create_evidence import _unique_object
 from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
 from deerflow.utils.network import get_free_port, release_port
 
@@ -37,10 +40,62 @@ from .sandbox_info import PROVENANCE_CREATED, PROVENANCE_REDISCOVERED, SandboxIn
 logger = logging.getLogger(__name__)
 
 _AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
+_NATIVE_SLOT_INVENTORY_DEADLINE = ContextVar("native_slot_inventory_deadline", default=None)
 
 
 class ChatMountMismatch(BackingUnavailable):
     """A known container for this owner requires a different mount profile."""
+
+
+@dataclass(frozen=True)
+class NativeSlotContainer:
+    """Actual containment correlation only; never admission or cleanup authority."""
+
+    container_id: str
+    container_name: str
+    sandbox_id: str
+    owner: tuple[str, str]
+    slots: tuple[str, ...]
+    daemon_id: str
+    running: bool
+    auto_remove: bool
+    created_at: str
+    network_mode: str = "open"
+
+
+def _native_inspection(entry, identifier, daemon_id, *, slot_id=None, require_open=False):
+    prefix = "hartmesh.storage.space."
+    name, created = entry.get("Name"), entry.get("Created")
+    labels = entry["Config"]["Labels"]
+    running, auto_remove = entry["State"]["Running"], entry["HostConfig"]["AutoRemove"]
+    if (
+        entry.get("Id") != identifier
+        or not isinstance(name, str)
+        or re.fullmatch(r"/[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", name) is None
+        or not isinstance(created, str)
+        or len(created) > 128
+        or datetime.fromisoformat(created).tzinfo is None
+        or not isinstance(labels, dict)
+        or any(not isinstance(key, str) or not isinstance(value, str) for key, value in labels.items())
+        or type(running) is not bool
+        or type(auto_remove) is not bool
+        or labels.get("deerflow.role") != "sandbox"
+        or labels.get("hartmesh.chat.storage") != "on"
+        or (slot_id is not None and labels.get(prefix + slot_id) != "1")
+        or any(re.fullmatch(r"[0-9a-f]{32}", key[len(prefix) :]) is None or value != "1" for key, value in labels.items() if key.startswith(prefix))
+    ):
+        raise ValueError("Slot container lacks exact immutable inspection facts")
+    owner, thread, sandbox = (labels.get(key) for key in ("deerflow.owner_user_id", "deerflow.thread_id", "deerflow.sandbox_id"))
+    if any(not isinstance(value, str) or not value.strip() or len(value) > 512 for value in (owner, thread, sandbox)):
+        raise ValueError("Slot container attribution is unavailable")
+    if labels.get("deerflow.network_mode") not in {"open", "blocked", "allowlist"} or (require_open and labels.get("deerflow.network_mode") != "open"):
+        # Do not derive another prefix's paired network resources
+        # or self-attest a complete restricted resource set.
+        raise ValueError("Native slot inventory cannot qualify this restricted resource set")
+    slots = tuple(sorted(key[len(prefix) :] for key in labels if key.startswith(prefix)))
+    if not slots:
+        raise ValueError("Native candidate has no exact physical slots")
+    return NativeSlotContainer(identifier, name[1:], sandbox, (owner, thread), slots, daemon_id, running, auto_remove, created, labels["deerflow.network_mode"])
 
 
 class _ExistingRestrictedSandbox(RuntimeError):
@@ -693,6 +748,13 @@ class LocalContainerBackend(SandboxBackend):
 
     def _run(self, *args, **kwargs):
         """Use the retained pool owner for managed native child commands."""
+        deadline = _NATIVE_SLOT_INVENTORY_DEADLINE.get()
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise StorageHostUnqualified("Native slot inventory exhausted its overall command budget")
+            timeout = kwargs.get("timeout")
+            kwargs["timeout"] = remaining if timeout is None else min(timeout, remaining)
         return getattr(self, "_runtime_runner", subprocess.run)(*args, **kwargs)
 
     def _managed_native_bridge(self, labels):
@@ -706,6 +768,64 @@ class LocalContainerBackend(SandboxBackend):
     @property
     def network_mode(self) -> str:
         return self._network_mode
+
+    def _slot_containers(self, slot_id: str) -> tuple[NativeSlotContainer, ...]:
+        """Read all states/prefixes on the exact host; never adopt or mutate."""
+        bridge = getattr(self, "_native_creation", None)
+        if self._runtime != "docker" or not isinstance(bridge, NativeCreateBridge) or not isinstance(slot_id, str) or re.fullmatch(r"[0-9a-f]{32}", slot_id) is None:
+            raise StorageHostUnqualified("Native slot inventory requires its qualified runtime and exact slot")
+        prefix = "hartmesh.storage.space."
+        inherited = _NATIVE_SLOT_INVENTORY_DEADLINE.get()
+        deadline = _NATIVE_SLOT_INVENTORY_DEADLINE.set(min(time.monotonic() + 30, inherited) if inherited is not None else time.monotonic() + 30)
+        try:
+            bridge.assert_current(teardown=True)
+            listed = self._run(["docker", "ps", "--all", "--no-trunc", "--filter", "label=" + prefix + slot_id + "=1", "--format", "{{.ID}}"], capture_output=True, text=True, check=True, timeout=15)
+            ids = listed.stdout.splitlines()
+            if listed.returncode or len(ids) > 256 or len(set(ids)) != len(ids) or any(re.fullmatch(r"[0-9a-f]{64}", identifier) is None for identifier in ids):
+                raise ValueError("Malformed or duplicate slot inventory")
+            result, names = [], set()
+            for identifier in ids:
+                inspected = self._run(["docker", "inspect", identifier], capture_output=True, text=True, check=True, timeout=15)
+                payload = json.loads(inspected.stdout, object_pairs_hook=_unique_object)
+                if inspected.returncode or not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
+                    raise ValueError("Missing or ambiguous slot inspection")
+                actual = _native_inspection(payload[0], identifier, bridge.evidence.daemon_id, slot_id=slot_id, require_open=True)
+                if actual.container_name in names:
+                    raise ValueError("Native inventory observed two container incarnations with one name")
+                names.add(actual.container_name)
+                result.append(actual)
+            bridge.assert_current(teardown=True)
+            if time.monotonic() >= _NATIVE_SLOT_INVENTORY_DEADLINE.get():
+                raise ValueError("Native inventory proof arrived after its overall deadline")
+            return tuple(result)
+        except Exception as exc:
+            raise StorageHostUnqualified("Native slot inventory is unconfirmed; preserve its backing and containers") from exc
+        finally:
+            _NATIVE_SLOT_INVENTORY_DEADLINE.reset(deadline)
+
+    def _native_candidate_container(self, info):
+        """Strict actual candidate facts for admission; no lifecycle effects."""
+        bridge = getattr(self, "_native_creation", None)
+        if self._runtime != "docker" or not isinstance(bridge, NativeCreateBridge) or not isinstance(info.container_id, str) or re.fullmatch(r"[0-9a-f]{64}", info.container_id) is None:
+            raise StorageHostUnqualified("Native candidate lacks its installed runtime and immutable ID")
+        deadline = _NATIVE_SLOT_INVENTORY_DEADLINE.set(time.monotonic() + 30)
+        try:
+            bridge.assert_current()
+            result = self._run(["docker", "inspect", info.container_id], capture_output=True, text=True, check=True, timeout=15)
+            payload = json.loads(result.stdout, object_pairs_hook=_unique_object)
+            if result.returncode or not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
+                raise ValueError("Native candidate inspection is missing or ambiguous")
+            actual = _native_inspection(payload[0], info.container_id, bridge.evidence.daemon_id)
+            if (actual.container_name, actual.sandbox_id, actual.owner) != (info.container_name, info.sandbox_id, info.owner):
+                raise ValueError("Native candidate identity conflicts with tracking")
+            bridge.assert_current()
+            if time.monotonic() >= _NATIVE_SLOT_INVENTORY_DEADLINE.get():
+                raise ValueError("Native candidate proof exceeded its overall deadline")
+            return actual
+        except Exception as exc:
+            raise StorageHostUnqualified("Native candidate is unconfirmed; refuse publication") from exc
+        finally:
+            _NATIVE_SLOT_INVENTORY_DEADLINE.reset(deadline)
 
     def _resource_names(self, sandbox_id: str) -> tuple[str, str]:
         digest = hashlib.sha256(f"{self._container_prefix}:{sandbox_id}".encode()).hexdigest()[:16]
@@ -1387,6 +1507,15 @@ class LocalContainerBackend(SandboxBackend):
         sidecar or container may still hold it, handing it to a new container
         would only fail that start.
         """
+        if info.native_container is not None:
+            outcome = self._destroy_native_primary(info)
+            if outcome is DestroyOutcome.ABSENT:
+                from urllib.parse import urlparse
+
+                port = urlparse(info.sandbox_url).port
+                if port:
+                    release_port(port)
+            return outcome
         # Prefer container_id, fall back to container_name (both accepted by docker stop).
         # This ensures containers discovered via list_running() (which only has the name)
         # can also be stopped.
@@ -1426,6 +1555,53 @@ class LocalContainerBackend(SandboxBackend):
         else:
             logger.warning("Sandbox %s resource set is not confirmed absent after destroy: %s", info.sandbox_id, outcome)
         return outcome
+
+    def _destroy_native_primary(self, info):
+        """Called by canonical provider fencing; correlation alone grants nothing."""
+        expected = info.native_container
+        bridge = getattr(self, "_native_creation", None)
+        if not isinstance(expected, NativeSlotContainer) or not expected.slots or expected.network_mode != "open" or self._runtime != "docker" or not isinstance(bridge, NativeCreateBridge):
+            return DestroyOutcome.UNKNOWN
+        deadline = _NATIVE_SLOT_INVENTORY_DEADLINE.set(time.monotonic() + 60)
+        try:
+            if (info.container_id, info.container_name, info.sandbox_id, info.owner) != (expected.container_id, expected.container_name, expected.sandbox_id, expected.owner):
+                raise StorageHostUnqualified("Native cleanup correlation changed")
+            bridge.assert_current(teardown=True)
+            matches = tuple(entry for entry in self._slot_containers(expected.slots[0]) if entry.container_id == expected.container_id)
+            if not matches:
+                bridge.assert_current(teardown=True)
+                absent = self._container_absent(expected.container_id) is True and self._container_absent(expected.container_name) is True
+                bridge.assert_current(teardown=True)
+                if time.monotonic() >= _NATIVE_SLOT_INVENTORY_DEADLINE.get():
+                    raise StorageHostUnqualified("Native absence proof arrived after its deadline")
+                return DestroyOutcome.ABSENT if absent else DestroyOutcome.UNKNOWN
+            if len(matches) != 1 or dataclasses.replace(matches[0], running=False) != dataclasses.replace(expected, running=False):
+                raise StorageHostUnqualified("Native cleanup lacks the same inspected immutable resource set")
+            # Never derive restricted resources from this process's prefix or
+            # configured network mode. Strict inventory qualified an open set.
+            self._stop_container(expected.container_id)
+            absent = self._container_absent(expected.container_id)
+            if absent is False:
+                matches = tuple(entry for entry in self._slot_containers(expected.slots[0]) if entry.container_id == expected.container_id)
+                if len(matches) != 1 or matches[0].running or dataclasses.replace(matches[0], running=False) != dataclasses.replace(expected, running=False):
+                    raise StorageHostUnqualified("Stopped native incarnation cannot be positively removed")
+                self._run(["docker", "rm", expected.container_id], capture_output=True, text=True, check=True, timeout=15)
+            elif absent is not True:
+                raise StorageHostUnqualified("Native stop has no qualified absence result")
+            bridge.assert_current(teardown=True)
+            # A reused name is never removed or counted as the old set's absence.
+            absent = self._container_absent(expected.container_id) is True and self._container_absent(expected.container_name) is True
+            bridge.assert_current(teardown=True)
+            if time.monotonic() >= _NATIVE_SLOT_INVENTORY_DEADLINE.get():
+                raise StorageHostUnqualified("Native absence proof arrived after its deadline")
+            if absent:
+                return DestroyOutcome.ABSENT
+            return DestroyOutcome.UNKNOWN
+        except Exception:
+            logger.warning("Native immutable resource set remains unconfirmed for %s", info.sandbox_id)
+            return DestroyOutcome.UNKNOWN
+        finally:
+            _NATIVE_SLOT_INVENTORY_DEADLINE.reset(deadline)
 
     def _destroy_outcome(self, info: SandboxInfo, *, restricted: bool) -> DestroyOutcome:
         """Inspect every member of *info*'s resource set and classify what remains."""

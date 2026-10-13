@@ -7,6 +7,7 @@ including when the awaiting caller is cancelled after its worker completes.
 
 import json
 import re
+from contextlib import nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
@@ -178,6 +179,11 @@ class NativeCreateHandoffs:
                 for handoff in self._items.values()
             )
 
+    def retained_for_retirement(self, *, owner_id, slot_id):
+        """An ACK still retained before tracking transfer consumes its owner/slot."""
+        with self.lock:
+            return any(handoff.attempt.owner_id == owner_id or slot_id in handoff.attempt.slots for handoff in self._items.values())
+
     def for_reservation(self, sandbox_id, reservation):
         with self.lock:
             return tuple(handoff for handoff in self._items.values() if handoff.sandbox_id == sandbox_id and handoff.reservation is reservation)
@@ -210,9 +216,10 @@ class NativeCreateUnconfirmed(StorageHostUnqualified):
 class NativeCreateBridge:
     """Owned blocking journal/Docker protocol; never called under metadata locks."""
 
-    def __init__(self, *, evidence, handoffs, check_owner, owner_accepts, check_daemon):
+    def __init__(self, *, evidence, handoffs, check_owner, owner_accepts, check_daemon, admit_native=None):
         self.evidence, self.handoffs = evidence, handoffs
         self._check_owner, self._owner_accepts, self._check_daemon = check_owner, owner_accepts, check_daemon
+        self._admit_native = admit_native or (lambda _owner, _slots: nullcontext())
         self._installed = False
         self._ever_installed = False
 
@@ -305,6 +312,16 @@ class NativeCreateBridge:
         return owner, thread, sandbox, slots
 
     def begin(self, *, name, labels):
+        try:
+            owner, _thread, _sandbox, slots = self._requested(labels)
+            with self._admit_native(owner, slots):
+                return self._begin_admitted(name=name, labels=labels)
+        except NativeCreateUnconfirmed:
+            raise
+        except Exception as exc:
+            raise NativeCreateUnconfirmed() from exc
+
+    def _begin_admitted(self, *, name, labels):
         handoff = None
         try:
             owner, thread, sandbox, slots = self._requested(labels)
@@ -318,6 +335,16 @@ class NativeCreateBridge:
             raise NativeCreateUnconfirmed(handoff) from exc
 
     def submit(self, *, name, labels, command, runner, handoff=None):
+        try:
+            owner, _thread, _sandbox, slots = self._requested(labels)
+            with self._admit_native(owner, slots):
+                return self._submit_admitted(name=name, labels=labels, command=command, runner=runner, handoff=handoff)
+        except NativeCreateUnconfirmed:
+            raise
+        except Exception as exc:
+            raise NativeCreateUnconfirmed(handoff) from exc
+
+    def _submit_admitted(self, *, name, labels, command, runner, handoff=None):
         try:
             if not isinstance(command, list) or len(command) < 4 or command[0] != "docker" or command[1] not in ("run", "create") or command.count("--name") != 1 or command[command.index("--name") + 1] != name:
                 raise StorageHostUnqualified("Native submission requires the exact existing primary Docker builder")

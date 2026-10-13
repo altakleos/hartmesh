@@ -79,8 +79,10 @@ from deerflow.utils.file_io import await_drained
 
 from .aio_sandbox import AioSandbox
 from .backend import SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, DestroyOutcome, SandboxBackend, normalize_ready_timeout, wait_for_sandbox_ready, wait_for_sandbox_ready_async
-from .local_backend import ChatMountMismatch, LocalContainerBackend
+from .local_backend import ChatMountMismatch, LocalContainerBackend, NativeSlotContainer
 from .native_creation import NATIVE_CREATE_RESERVATION, NativeCreateBridge, NativeCreateHandoffs
+from .native_retirement import NativeRetirementScope
+from .owner_admission import OWNER_ADMISSION, OwnerAdmissions
 from .ownership import (
     OwnershipBackendError,
     RenewOutcome,
@@ -907,6 +909,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if active + parked + reserved >= replicas:
             return False
         self._starting.add(sandbox_id)
+        self._record_start_admission_locked(sandbox_id)
         return True
 
     def _capacity_refusal(self, sandbox_id: str, *, waited: float) -> SandboxCapacityExceededError:
@@ -1081,6 +1084,13 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if self._being_torn_down_locally(sandbox_id):
                 raise SandboxBeingDestroyedError(sandbox_id)
             self._starting.add(sandbox_id)
+            self._record_start_admission_locked(sandbox_id)
+
+    def _record_start_admission_locked(self, sandbox_id):
+        references = getattr(self, "_starting_admissions", None)
+        if references is None:
+            references = self._starting_admissions = {}
+        references[sandbox_id] = OWNER_ADMISSION.get()
 
     def _unmark_starting(self, sandbox_id: str, *, native_reservation=None) -> None:
         """Drop the starting mark once the container is tracked or destroyed.
@@ -1102,6 +1112,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     return
                 reservations.pop(sandbox_id)
             self._starting.discard(sandbox_id)
+            getattr(self, "_starting_admissions", {}).pop(sandbox_id, None)
             self._wake_capacity_waiters_locked()
 
     def _reserve_local_teardown(self, sandbox_id: str, still_reapable: Callable[[], bool]) -> bool:
@@ -1346,6 +1357,13 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         return now - first_seen >= compute_lease_ttl(self._ownership_config)
 
     def _replace_incompatible_sandbox(self, info: SandboxInfo, now: float) -> bool:
+        try:
+            with self._candidate_owner_scope(info):
+                return self._replace_incompatible_sandbox_in_owner(info, now)
+        except StorageHostUnqualified:
+            return False
+
+    def _replace_incompatible_sandbox_in_owner(self, info: SandboxInfo, now: float) -> bool:
         """Destroy an incompatible sandbox only after both ownership fences.
 
         Backends report policy mismatches through ``SandboxInfo`` without
@@ -1435,81 +1453,92 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         deferred = 0
 
         for info in running:
-            age = current_time - info.created_at if info.created_at > 0 else float("inf")
-            with self._lock:
-                starting = info.sandbox_id in self._starting
-            if starting:
-                # This process started it and is waiting for it to become
-                # ready: not an orphan, not replaceable, not adoptable. The
-                # grace below cannot say so on its own (the memory store has
-                # none, and the released profile's budget is one TTL).
-                deferred += 1
-                logger.debug("Deferring container %s during reconciliation: this instance is still waiting for it to become ready", info.sandbox_id)
-                continue
             try:
-                self._assert_managed_container(info)
+                with self._candidate_owner_scope(info):
+                    age = current_time - info.created_at if info.created_at > 0 else float("inf")
+                    with self._lock:
+                        starting = info.sandbox_id in self._starting
+                    if starting:
+                        # This process started it and is waiting for it to become
+                        # ready: not an orphan, not replaceable, not adoptable. The
+                        # grace below cannot say so on its own (the memory store has
+                        # none, and the released profile's budget is one TTL).
+                        deferred += 1
+                        logger.debug("Deferring container %s during reconciliation: this instance is still waiting for it to become ready", info.sandbox_id)
+                        continue
+                    try:
+                        self._assert_managed_container(info)
+                    except StorageHostUnqualified:
+                        deferred += 1
+                        continue
+                    if info.requires_replacement:
+                        if self._replace_incompatible_sandbox(info, current_time):
+                            replaced += 1
+                        else:
+                            deferred += 1
+                            logger.debug(
+                                "Deferring replacement of container %s during reconciliation: owned, locally tracked, or not yet past the recovery grace",
+                                info.sandbox_id,
+                            )
+                        continue
+
+                    if not self._adoptable_after_grace(info.sandbox_id, current_time):
+                        deferred += 1
+                        logger.debug("Deferring container %s during reconciliation: owned, or not yet past the recovery grace", info.sandbox_id)
+                        continue
+                    # Claim second: a successful claim proves the container is not a
+                    # peer's and locks peers out. It says nothing about *us* — it
+                    # succeeds against our own lease by design — so it is not a substitute
+                    # for the local teardown check below. The grace above is likewise a
+                    # precondition, not a substitute; only the claim is atomic.
+                    if not self._claim_ownership(info.sandbox_id):
+                        skipped_live += 1
+                        logger.debug("Skipping container %s during reconciliation: owned by another instance", info.sandbox_id)
+                        continue
+
+                    self._assert_managed_container(info)
+
+                    # Single lock acquisition per container: atomic check-and-insert.
+                    # Avoids a TOCTOU window between the "already tracked?" check and the
+                    # warm-pool insert.
+                    with self._lock:
+                        if self._managed_runtime_required and not self._pool_runtime_current():
+                            continue
+                        try:
+                            self._assert_managed_publication(info)
+                        except StorageHostUnqualified:
+                            deferred += 1
+                            continue
+                        if info.sandbox_id in self._sandboxes or info.sandbox_id in self._warm_pool or info.sandbox_id in self._starting:
+                            # `_starting` re-checked here, not only at the loop head:
+                            # a create can mark the id between the two, and parking a
+                            # container mid-readiness hands eviction a live start.
+                            continue
+                        if self._being_torn_down_locally(info.sandbox_id):
+                            # Adoption is a promote, so it needs the same reservation
+                            # check as the other three. A container being torn down here
+                            # is untracked and still running, which is exactly the shape
+                            # this loop adopts — and neither the claim nor the grace
+                            # excludes it. On `memory` the grace is skipped outright
+                            # (`supports_cross_process = False`), so nothing else stands
+                            # in the way there at all; adopting would park a container
+                            # into the warm pool moments before its stop lands, leaving a
+                            # dead entry for the next reclaim to hand out.
+                            deferred += 1
+                            logger.debug("Deferring container %s during reconciliation: this instance is tearing it down", info.sandbox_id)
+                            continue
+                        self._warm_pool[info.sandbox_id] = (info, current_time)
+                        # Whose it is, as the backend recorded it on the container at
+                        # creation, so a refused owner's adopted sandbox can be ended;
+                        # ``None`` (an older container) stays unattributed.
+                        self._warm_pool_identity[info.sandbox_id] = info.owner
+                    self._unowned_since.pop(info.sandbox_id, None)
+                    adopted += 1
+                    logger.info(f"Adopted container {info.sandbox_id} into warm pool (age: {age:.0f}s)")
+
             except StorageHostUnqualified:
                 deferred += 1
                 continue
-            if info.requires_replacement:
-                if self._replace_incompatible_sandbox(info, current_time):
-                    replaced += 1
-                else:
-                    deferred += 1
-                    logger.debug(
-                        "Deferring replacement of container %s during reconciliation: owned, locally tracked, or not yet past the recovery grace",
-                        info.sandbox_id,
-                    )
-                continue
-
-            if not self._adoptable_after_grace(info.sandbox_id, current_time):
-                deferred += 1
-                logger.debug("Deferring container %s during reconciliation: owned, or not yet past the recovery grace", info.sandbox_id)
-                continue
-            # Claim second: a successful claim proves the container is not a
-            # peer's and locks peers out. It says nothing about *us* — it
-            # succeeds against our own lease by design — so it is not a substitute
-            # for the local teardown check below. The grace above is likewise a
-            # precondition, not a substitute; only the claim is atomic.
-            if not self._claim_ownership(info.sandbox_id):
-                skipped_live += 1
-                logger.debug("Skipping container %s during reconciliation: owned by another instance", info.sandbox_id)
-                continue
-
-            self._assert_managed_container(info)
-
-            # Single lock acquisition per container: atomic check-and-insert.
-            # Avoids a TOCTOU window between the "already tracked?" check and the
-            # warm-pool insert.
-            with self._lock:
-                if self._managed_runtime_required and not self._pool_runtime_current():
-                    continue
-                if info.sandbox_id in self._sandboxes or info.sandbox_id in self._warm_pool or info.sandbox_id in self._starting:
-                    # `_starting` re-checked here, not only at the loop head:
-                    # a create can mark the id between the two, and parking a
-                    # container mid-readiness hands eviction a live start.
-                    continue
-                if self._being_torn_down_locally(info.sandbox_id):
-                    # Adoption is a promote, so it needs the same reservation
-                    # check as the other three. A container being torn down here
-                    # is untracked and still running, which is exactly the shape
-                    # this loop adopts — and neither the claim nor the grace
-                    # excludes it. On `memory` the grace is skipped outright
-                    # (`supports_cross_process = False`), so nothing else stands
-                    # in the way there at all; adopting would park a container
-                    # into the warm pool moments before its stop lands, leaving a
-                    # dead entry for the next reclaim to hand out.
-                    deferred += 1
-                    logger.debug("Deferring container %s during reconciliation: this instance is tearing it down", info.sandbox_id)
-                    continue
-                self._warm_pool[info.sandbox_id] = (info, current_time)
-                # Whose it is, as the backend recorded it on the container at
-                # creation, so a refused owner's adopted sandbox can be ended;
-                # ``None`` (an older container) stays unattributed.
-                self._warm_pool_identity[info.sandbox_id] = info.owner
-            self._unowned_since.pop(info.sandbox_id, None)
-            adopted += 1
-            logger.info(f"Adopted container {info.sandbox_id} into warm pool (age: {age:.0f}s)")
 
         logger.info(
             "Startup reconciliation complete: %s adopted into warm pool, %s incompatible orphan(s) replaced, %s skipped (live peer ownership), %s deferred (owned, locally tracked, or within recovery grace), %s total found",
@@ -2314,7 +2343,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             )
         return self._deterministic_sandbox_id(thread_id, effective_user_id)
 
-    def _reuse_in_process_sandbox(self, thread_id: str | None, *, user_id: str | None = None, post_lock: bool = False) -> str | None:
+    def _reuse_in_process_sandbox(self, thread_id, *, user_id=None, post_lock=False):
+        with self._owner_admission_scope(self._effective_acquire_user_id(user_id)):
+            return self._reuse_in_process_sandbox_in_owner(thread_id, user_id=user_id, post_lock=post_lock)
+
+    def _reuse_in_process_sandbox_in_owner(self, thread_id: str | None, *, user_id: str | None = None, post_lock: bool = False) -> str | None:
         """Reuse an active in-process sandbox for a thread if one is still tracked."""
         if thread_id is None:
             return None
@@ -2379,6 +2412,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self._retire_chat_candidate(existing_id, client, info)
                 return None
 
+        self._assert_managed_container(info)
         alive = self._check_tracked_sandbox_alive(existing_id, info) if info is not None else True
         if alive is False:
             self._drop_unhealthy_sandbox(
@@ -2436,7 +2470,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         record_acquisition_source(AcquisitionSource.IN_PROCESS)
         return existing_id
 
-    def _reclaim_warm_pool_sandbox(
+    def _reclaim_warm_pool_sandbox(self, thread_id, sandbox_id, *, user_id=None, post_lock=False):
+        with self._owner_admission_scope(self._effective_acquire_user_id(user_id)):
+            return self._reclaim_warm_pool_sandbox_in_owner(thread_id, sandbox_id, user_id=user_id, post_lock=post_lock)
+
+    def _reclaim_warm_pool_sandbox_in_owner(
         self,
         thread_id: str | None,
         sandbox_id: str,
@@ -2474,6 +2512,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
             info, _ = self._warm_pool[sandbox_id]
 
+        self._assert_managed_container(info)
         alive = self._check_tracked_sandbox_alive(sandbox_id, info)
         if alive is False:
             self._drop_unhealthy_sandbox(
@@ -2550,7 +2589,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             post_lock=True,
         )
 
-    def _register_discovered_sandbox(self, thread_id: str, info: SandboxInfo, *, user_id: str) -> str:
+    def _register_discovered_sandbox(self, thread_id, info, *, user_id):
+        with self._owner_admission_scope(user_id):
+            return self._register_discovered_sandbox_in_owner(thread_id, info, user_id=user_id)
+
+    def _register_discovered_sandbox_in_owner(self, thread_id: str, info: SandboxInfo, *, user_id: str) -> str:
         """Track a sandbox discovered through the backend.
 
         Raises:
@@ -2629,7 +2672,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         record_acquisition_source(AcquisitionSource.DISCOVERED)
         return info.sandbox_id
 
-    def _register_created_sandbox(self, thread_id: str | None, sandbox_id: str, info: SandboxInfo, *, user_id: str | None = None) -> str:
+    def _register_created_sandbox(self, thread_id, sandbox_id, info, *, user_id=None):
+        with self._owner_admission_scope(self._effective_acquire_user_id(user_id)):
+            return self._register_created_sandbox_in_owner(thread_id, sandbox_id, info, user_id=user_id)
+
+    def _register_created_sandbox_in_owner(self, thread_id: str | None, sandbox_id: str, info: SandboxInfo, *, user_id: str | None = None) -> str:
         """Track a newly-created sandbox in the active maps."""
         sandbox = AioSandbox(
             id=sandbox_id,
@@ -3093,6 +3140,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 check_owner=partial(owner.assert_provider, self),
                 owner_accepts=partial(owner.accepts, self),
                 check_daemon=adapter._same_host,
+                admit_native=self._native_admission,
             )
             self._native_creation = bridge
             self._backend._native_creation = bridge
@@ -3101,6 +3149,131 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             raise StorageHostUnqualified("Native bridge binding changed during runtime qualification")
         bridge.qualify()
         owner.assert_provider(self)
+
+    def _owner_admission_gate(self):
+        with self._lock:
+            gate = getattr(self, "_owner_admissions", None)
+            if gate is None:
+                gate = self._owner_admissions = OwnerAdmissions(lock=self._lock)
+            return gate
+
+    @contextlib.contextmanager
+    def _owner_admission_scope(self, owner_id):
+        if not self._managed_pool_required():
+            yield None
+            return
+        gate = self._owner_admission_gate()
+        reference = gate.enter(owner_id, borrow=OWNER_ADMISSION.get())
+        context = OWNER_ADMISSION.set(reference)
+        try:
+            yield reference
+        finally:
+            OWNER_ADMISSION.reset(context)
+            gate.end(reference)
+
+    @contextlib.contextmanager
+    def _native_admission(self, owner_id, slots):
+        with self._owner_admission_scope(owner_id) as reference:
+            if reference is not None:
+                self._owner_admission_gate().register_slots(reference, slots)
+            yield
+
+    @contextlib.asynccontextmanager
+    async def _native_retirement_scope(self, owner_id, slot_id):
+        """Fence one opaque owner and physical slot through the caller's commit."""
+        if not self._managed_pool_required() or not isinstance(self._backend, LocalContainerBackend) or self._backend._runtime != "docker" or not self._pool_runtime_current():
+            raise StorageHostUnqualified("Native containment requires its installed local owning runtime")
+        gate = self._owner_admission_gate()
+        # Pure reservation precedes the first await. No dropped worker can
+        # acquire a reservation after its cancelled caller has exited.
+        reservation = gate.reserve(owner_id, slot_id)
+        scope = NativeRetirementScope(self, gate, reservation, self._native_creation)
+        try:
+            await await_drained(run_sync_lifecycle_operation(self._retire_native_owner, scope))
+            scope.assert_current()
+            yield scope
+        finally:
+            gate.end_retirement(reservation)
+
+    def _native_retirement_check(self, scope):
+        scope.assert_current()
+        pending = scope.bridge.assert_current()
+        reservation = scope.reservation
+        if any(record.owner_id == reservation.owner_id or reservation.slot_id in record.slots for record in pending) or scope.bridge.handoffs.retained_for_retirement(owner_id=reservation.owner_id, slot_id=reservation.slot_id):
+            raise StorageHostUnqualified("Unresolved native owner or slot requests prevent containment")
+        scope.assert_current()
+
+    def _native_retirement_known(self, scope, observed, *, allow_retained=False):
+        """Memory snapshot only; unknown attribution cannot prove absence."""
+        owner_id = scope.reservation.owner_id
+        if any(not isinstance(entry, NativeSlotContainer) or entry.owner[0] != owner_id or entry.daemon_id != scope.bridge.evidence.daemon_id for entry in observed):
+            raise StorageHostUnqualified("Native slot inventory has foreign or ambiguous attribution")
+        actual = {entry.sandbox_id: entry for entry in observed}
+        if len(actual) != len(observed):
+            raise StorageHostUnqualified("Native slot inventory has duplicate sandbox attribution")
+        with self._lock:
+            if set(self._sandbox_infos) & set(self._warm_pool) or set(self._sandboxes) - set(self._sandbox_infos) or set(getattr(self, "_cleanup_pending", {})) - (set(self._sandbox_infos) | set(self._warm_pool)):
+                raise StorageHostUnqualified("Native containment has incomplete or conflicting tracking")
+            references = getattr(self, "_starting_admissions", {})
+            for sid in self._starting:
+                reference = references.get(sid)
+                if not scope.gate.admission_current_locked(reference) or reference.owner_id == owner_id or scope.reservation.slot_id in reference._group.slots:
+                    raise StorageHostUnqualified("Native containment has unresolved owner or slot starting work")
+            entries = {**{sid: item[0] for sid, item in self._warm_pool.items()}, **self._sandbox_infos}
+            identities = {**self._warm_pool_identity, **self._active_sandbox_identity}
+            for sid, info in entries.items():
+                if info.mountless_provider is self and info.chat_storage_enabled is False and not info.native_slots and info.native_container is None:
+                    # Only the current provider's positively mountless profile
+                    # has no native writer. Persisted absence proves nothing.
+                    continue
+                identity = identities.get(sid) or info.owner
+                if identity is None and getattr(info, "mountless_provider", None) is not self:
+                    raise StorageHostUnqualified("Native containment cannot attribute a tracked container")
+                relevant = identity is not None and (identity[0] == owner_id or scope.reservation.slot_id in (info.native_slots or ()))
+                if relevant:
+                    if identity[0] != owner_id:
+                        raise StorageHostUnqualified("Foreign tracked container intersects the retiring slot")
+                    entry = actual.get(sid)
+                    if entry is None and allow_retained and isinstance(info.native_container, NativeSlotContainer):
+                        # Correlation only: canonical backend teardown must
+                        # freshly prove the exact CID AND name already absent.
+                        entry = actual[sid] = info.native_container
+                    if entry is None or identity != entry.owner or info.container_id != entry.container_id or info.container_name != entry.container_name:
+                        raise StorageHostUnqualified("Tracked owner container is missing exact native inventory proof")
+        return actual
+
+    def _retire_native_owner(self, scope):
+        try:
+            self._native_retirement_check(scope)
+            observed = self._backend._slot_containers(scope.reservation.slot_id)
+            actual = self._native_retirement_known(scope, observed, allow_retained=True)
+            self._native_retirement_check(scope)
+            for sid, entry in sorted(actual.items()):
+                scope.assert_current()
+                info = SandboxInfo(sid, "", container_name=entry.container_name, container_id=entry.container_id, owner=entry.owner, chat_storage_enabled=True, native_container=entry, native_slots=entry.slots)
+                self._retire_unheld_container(sid, info, entry.owner)
+            self._prove_native_retirement_absent(scope)
+        except Exception as exc:
+            raise StorageHostUnqualified("Native containment is unconfirmed; preserve the backing") from exc
+
+    def _prove_native_retirement_absent(self, scope):
+        self._native_retirement_check(scope)
+        observed = self._backend._slot_containers(scope.reservation.slot_id)
+        self._native_retirement_known(scope, observed)
+        if observed:
+            raise StorageHostUnqualified("Native slot containers remain; absence is unconfirmed")
+        self._native_retirement_check(scope)
+
+    @contextlib.contextmanager
+    def _candidate_owner_scope(self, info):
+        if not self._managed_pool_required():
+            yield
+            return
+        if info.owner is None:
+            raise StorageHostUnqualified("Native lifecycle candidate has no opaque owner")
+        with self._owner_admission_scope(info.owner[0]):
+            self._assert_managed_container(info)
+            yield
 
     def _begin_native_creation_call(self, sandbox_id):
         if not isinstance(getattr(self, "_native_creation", None), NativeCreateBridge):
@@ -3135,7 +3308,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if handoff.verified is None or transfer_if_counted(handoff):
                 continue
             actual = handoff.verified
-            info = SandboxInfo(sandbox_id, "", container_name=actual.name, container_id=actual.container_id, provenance=PROVENANCE_CREATED, owner=(actual.owner_id, actual.thread_id), chat_storage_enabled=True)
+            info = SandboxInfo(sandbox_id, "", container_name=actual.name, container_id=actual.container_id, provenance=PROVENANCE_CREATED, owner=(actual.owner_id, actual.thread_id), chat_storage_enabled=True, native_slots=actual.slots)
             try:
                 # This is actual inspected identity, with no fabricated client
                 # or endpoint. Canonical fenced cleanup retries from quarantine.
@@ -3151,6 +3324,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         host_owner = getattr(getattr(self, "_chat_storage_host", None), "pool_runtime_owner", None)
         if (host_owner is not None and host_owner.closing) or not (self._pool_runtime_current() or getattr(info, "mountless_provider", None) is self):
             raise StorageHostUnqualified("Managed chat client lacks its live runtime ownership")
+        gate = getattr(self, "_owner_admissions", None)
+        if isinstance(self._backend, LocalContainerBackend) and getattr(info, "mountless_provider", None) is not self and (info.owner is None or info.native_slots is None):
+            raise StorageHostUnqualified("Native publication has no fresh actual owner and slot facts")
+        if gate is not None and info.owner is not None and not gate.allowed_locked(info.owner[0], info.native_slots or ()):
+            raise StorageHostUnqualified("Native publication intersects a live owner or slot retirement")
 
     def _assert_managed_container(self, info, *, teardown=False):
         if not self._managed_pool_required():
@@ -3171,6 +3349,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             parked = self._warm_pool.get(info.sandbox_id)
             known_live = active is info or (parked is not None and parked[0] is info)
         bridge.assert_candidate_current(info, teardown=teardown, known_live=known_live)
+        if not teardown and isinstance(self._backend, LocalContainerBackend):
+            if info.owner is None:
+                raise StorageHostUnqualified("Native candidate has no actual owner attribution")
+            with self._owner_admission_scope(info.owner[0]) as reference:
+                actual = self._backend._native_candidate_container(info)
+                self._owner_admission_gate().register_slots(reference, actual.slots)
+                with self._lock:
+                    info.native_slots = actual.slots
 
     def _assert_chat_runtime(self, paths):
         if not self._managed_pool_required():
@@ -3211,6 +3397,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     @contextlib.contextmanager
     def _chat_scope(self, thread_id, user_id):
+        with self._owner_admission_scope(user_id):
+            with self._chat_scope_in_owner(thread_id, user_id) as prepared:
+                yield prepared
+
+    @contextlib.contextmanager
+    def _chat_scope_in_owner(self, thread_id, user_id):
         from deerflow_extension_api.storage import StorageUnsupported
 
         from deerflow.config.paths import paths_scope
@@ -3229,6 +3421,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     @contextlib.asynccontextmanager
     async def _chat_scope_async(self, thread_id, user_id):
+        with self._owner_admission_scope(user_id):
+            async with self._chat_scope_async_in_owner(thread_id, user_id) as prepared:
+                yield prepared
+
+    @contextlib.asynccontextmanager
+    async def _chat_scope_async_in_owner(self, thread_id, user_id):
         from deerflow_extension_api.storage import StorageUnsupported
 
         from deerflow.config.paths import paths_scope
@@ -3240,7 +3438,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         host = self._storage_host()
         if host is None or thread_id is None:
             raise StorageUnsupported("Chat storage requires its live host and conversation identity")
-        prepared = self._fresh_projection(await host.prepare_async(user_id, thread_id), thread_id, user_id)
+        prepared = self._fresh_projection(await await_drained(host.prepare_async(user_id, thread_id)), thread_id, user_id)
         await await_drained(run_sync_lifecycle_operation(self._assert_chat_runtime, prepared.paths))
         await await_drained(run_file_io(prepared.paths.check_thread_capacity, thread_id, user_id=user_id))
         with paths_scope(prepared.paths):
@@ -3407,33 +3605,43 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if actual is not None:
                 self._assert_managed_container(actual, teardown=True)
 
-            def cleanup():
-                with self._lock:
-                    warm = self._warm_pool.get(sandbox_id)
-                    current = self._sandbox_infos.get(sandbox_id) or (warm[0] if warm is not None else None)
-                    identity = self._active_sandbox_identity.get(sandbox_id) or self._warm_pool_identity.get(sandbox_id)
-                if current is None:
-                    if actual is None:
-                        return
-                    if not self._claim_ownership(sandbox_id, for_destroy=True):
-                        raise BackingUnavailable("Conversation container belongs to another Gateway")
-                    with self._lock:
-                        if sandbox_id in self._sandbox_infos or sandbox_id in self._warm_pool or sandbox_id in self._starting:
-                            raise BackingUnavailable("Conversation container changed during cleanup")
-                        self._warm_pool[sandbox_id] = (actual, time.time())
-                        self._warm_pool_identity[sandbox_id] = key
-                        current, identity = actual, key
-                if identity != key or not current.container_id or (actual is not None and current.container_id != actual.container_id):
-                    raise BackingUnavailable("Conversation container incarnation is unknown or changed")
-                with self._lock:
-                    self._mark_cleanup_pending_locked(sandbox_id, DestroyOutcome.UNKNOWN)
-                self._destroy_tracked(sandbox_id, still_reapable=lambda: self._sandbox_infos.get(sandbox_id) is current or self._warm_pool.get(sandbox_id, (None, 0.0))[0] is current)
-
-            if not cleanup_unheld_sandbox(self, sandbox_id, cleanup, defer_release=False):
-                raise BackingUnavailable("Conversation container is retained by another execution")
-            self._assert_chat_cleanup_absent(sandbox_id)
+            self._retire_unheld_container(sandbox_id, actual, key)
         if any(info.owner == key for info in self._backend.list_running(strict=True)):
             raise BackingUnavailable("Conversation container absence is not confirmed")
+
+    def _retire_unheld_container(self, sandbox_id, actual, key):
+        """One canonical holder/local/store-fenced path for inspected identity."""
+        from deerflow.spaces.backings import BackingUnavailable
+
+        def cleanup():
+            with self._lock:
+                warm = self._warm_pool.get(sandbox_id)
+                current = self._sandbox_infos.get(sandbox_id) or (warm[0] if warm is not None else None)
+                identity = self._active_sandbox_identity.get(sandbox_id) or self._warm_pool_identity.get(sandbox_id)
+            if current is None:
+                if actual is None:
+                    return
+                if not self._claim_ownership(sandbox_id, for_destroy=True):
+                    raise BackingUnavailable("Conversation container belongs to another Gateway")
+                with self._lock:
+                    if sandbox_id in self._sandbox_infos or sandbox_id in self._warm_pool or sandbox_id in self._starting:
+                        raise BackingUnavailable("Conversation container changed during cleanup")
+                    self._warm_pool[sandbox_id] = (actual, time.time())
+                    self._warm_pool_identity[sandbox_id] = key
+                    current, identity = actual, key
+            if identity != key or not current.container_id or (actual is not None and current.container_id != actual.container_id):
+                raise BackingUnavailable("Conversation container incarnation is unknown or changed")
+            with self._lock:
+                if actual is not None and isinstance(actual.native_container, NativeSlotContainer):
+                    if current.container_name != actual.container_name or (current.owner is not None and current.owner != key):
+                        raise BackingUnavailable("Native cleanup correlation changed before reservation")
+                    current.native_container, current.native_slots, current.owner = actual.native_container, actual.native_slots, key
+                self._mark_cleanup_pending_locked(sandbox_id, DestroyOutcome.UNKNOWN)
+            self._destroy_tracked(sandbox_id, still_reapable=lambda: self._sandbox_infos.get(sandbox_id) is current or self._warm_pool.get(sandbox_id, (None, 0.0))[0] is current)
+
+        if not cleanup_unheld_sandbox(self, sandbox_id, cleanup, defer_release=False):
+            raise BackingUnavailable("Conversation container is retained by another execution")
+        self._assert_chat_cleanup_absent(sandbox_id)
 
     def _assert_chat_cleanup_absent(self, sandbox_id):
         from deerflow.spaces.backings import BackingUnavailable
@@ -3527,18 +3735,36 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def _submit_prewarm(self, thread_id: str, *, user_id: str | None) -> tuple[Future[str | None], threading.Event] | None:
         effective_user_id = self._effective_acquire_user_id(user_id)
-        with self._lock:
-            future = getattr(self, "_prewarm_future", None)
-            if self._shutdown_called or getattr(self, "_prewarm_closed", False) or (future is not None and not future.done()):
+        gate = self._owner_admission_gate() if self._managed_pool_required() else None
+        reference = gate.enter(effective_user_id, borrow=OWNER_ADMISSION.get()) if gate is not None else None
+        admitted = None
+        try:
+            with self._lock:
+                future = getattr(self, "_prewarm_future", None)
+                if not (self._shutdown_called or getattr(self, "_prewarm_closed", False) or (future is not None and not future.done())):
+                    executor = getattr(self, "_prewarm_executor", None)
+                    if executor is None:
+                        executor = self._prewarm_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aio-sandbox-prewarm")
+                    stop = self._prewarm_stop = threading.Event()
+                    context = contextvars.copy_context()
+                    context.run(_ACQUISITION_CANCELLED.set, stop)
+                    if reference is not None:
+                        context.run(OWNER_ADMISSION.set, reference)
+                    future = self._prewarm_future = executor.submit(context.run, self._prewarm, thread_id, user_id=effective_user_id)
+                    admitted = (future, stop)
+            if admitted is None:
+                if reference is not None:
+                    gate.end(reference)
                 return None
-            executor = getattr(self, "_prewarm_executor", None)
-            if executor is None:
-                executor = self._prewarm_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aio-sandbox-prewarm")
-            stop = self._prewarm_stop = threading.Event()
-            context = contextvars.copy_context()
-            context.run(_ACQUISITION_CANCELLED.set, stop)
-            future = self._prewarm_future = executor.submit(context.run, self._prewarm, thread_id, user_id=effective_user_id)
-            return future, stop
+            # Already-complete futures invoke this immediately; never register
+            # it under the provider lock. This reference spans actual completion.
+            if reference is not None:
+                admitted[0].add_done_callback(lambda _future: gate.end(reference))
+            return admitted
+        except BaseException:
+            if reference is not None:
+                gate.end(reference)
+            raise
 
     def _stop_prewarm_worker(self) -> None:
         # Admission may be waiting for the host loop. The lifecycle guard keeps
@@ -3978,7 +4204,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if self._managed_pool_required() and info.provenance == PROVENANCE_CREATED and outcome is not DestroyOutcome.ABSENT:
             self._quarantine_after_failed_destroy(sandbox_id, info, DestroyOutcome.UNKNOWN, identity=info.owner)
 
-    def _create_sandbox(
+    def _create_sandbox(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None, allow_eviction: bool = True) -> str:
+        effective_user_id = self._effective_acquire_user_id(user_id)
+        with self._owner_admission_scope(effective_user_id):
+            return self._create_sandbox_in_owner(thread_id, sandbox_id, user_id=effective_user_id, allow_eviction=allow_eviction)
+
+    def _create_sandbox_in_owner(
         self,
         thread_id: str | None,
         sandbox_id: str,
@@ -4177,6 +4408,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._backend.validate_planned_thread_mounts(extra_mounts, mounts=mounts, protected_roots=paths.protected_roots, config_mount_exclusion_root=exclusion_root)
 
     async def _create_sandbox_async(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
+        effective_user_id = self._effective_acquire_user_id(user_id)
+        with self._owner_admission_scope(effective_user_id):
+            return await self._create_sandbox_async_in_owner(thread_id, sandbox_id, user_id=effective_user_id)
+
+    async def _create_sandbox_async_in_owner(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
         """Async counterpart to ``_create_sandbox``."""
         effective_user_id = self._effective_acquire_user_id(user_id)
         await run_sync_lifecycle_operation(self._assert_chat_runtime, get_paths())

@@ -1148,9 +1148,11 @@ def test_gateway_uid_1000_submits_and_acknowledges_actual_managed_primary(typed_
     import traceback
     from threading import Lock
 
-    from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
+    from test_aio_sandbox_provider import _make_provider
+
     from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
     from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
+    from deerflow.sandbox.lease import discard_sandbox_lease_manager
     from deerflow.spaces.docker import DockerStorageAdapter
     from deerflow.spaces.native_create_evidence import ATTEMPT_LABEL
     from deerflow.spaces.runtime_owner import PoolRuntimeOwner
@@ -1174,14 +1176,15 @@ def test_gateway_uid_1000_submits_and_acknowledges_actual_managed_primary(typed_
     child = os.fork()
     if child == 0:
         owner = PoolRuntimeOwner(tool.pool)
-        handoff = adapter = backend = None
+        handoff = adapter = backend = provider = None
         exit_code = 0
         try:
             os.setgroups([socket_group])
             os.setgid(1000)
             os.setuid(1000)
-            provider = AioSandboxProvider.__new__(AioSandboxProvider)
+            provider = _make_provider(tool.pool.parent)
             provider._lock = Lock()
+            provider._managed_runtime_required = True
             backend = provider._backend = LocalContainerBackend(
                 image=image,
                 base_port=0,
@@ -1215,9 +1218,47 @@ def test_gateway_uid_1000_submits_and_acknowledges_actual_managed_primary(typed_
                 timeout=30,
             )
             assert result.returncode == 0
-            backend._run(["docker", "rm", "-f", container_id], check=True, capture_output=True, text=True, timeout=30)
+            # Publish actual tracking through the ordinary accounting transfer,
+            # then exercise the production retained scope and canonical cleanup.
+            info = SandboxInfo(sandbox, "", container_name=name, container_id=container_id, owner=("native-bridge-fixture", "chat"), chat_storage_enabled=True, native_slots=(spec.slot_id,))
+            with provider._lock:
+                provider._warm_pool[sandbox] = (info, 0)
+                provider._warm_pool_identity[sandbox] = info.owner
+                bridge.handoffs.transferred_locked(handoff)
+
+            async def contain():
+                async with provider._native_retirement_scope(info.owner[0], spec.slot_id) as scope:
+                    await scope.prove_absent()
+                    assert not provider._warm_pool and not provider._sandboxes
+                assert await asyncio.to_thread(backend._slot_containers, spec.slot_id) == ()
+
+            asyncio.run(contain())
             assert adapter._inspect(container_id) is None
-            bridge.handoffs.confirmed_absent(SandboxInfo(sandbox, "", container_name=name, container_id=container_id))
+            # Exercise a real stopped, non-auto-remove primary too. The actual
+            # builder and durable request stay intact; this CI-only runner
+            # omits auto-removal from Docker create so canonical rm is required.
+            retained_sid = uuid.uuid4().hex
+            retained_name = "hartmesh-bridge-stopped-" + retained_sid
+
+            def retained_runner(command, **kwargs):
+                if command[:2] == ["docker", "create"]:
+                    command = [value for value in command if value != "--rm"]
+                return owner.run(command, **kwargs)
+
+            backend._runtime_runner = retained_runner
+            retained_labels = {**labels, "deerflow.sandbox_id": retained_sid}
+            retained_id = backend._start_container(retained_name, 0, [(str(spec.mount_path / "data"), "/mnt/user-data", False)], publish_port=False, labels=retained_labels, start=False)
+            retained = adapter._inspect(retained_id)
+            assert retained["State"]["Running"] is False and retained["HostConfig"]["AutoRemove"] is False
+            info = SandboxInfo(retained_sid, "", container_name=retained_name, container_id=retained_id, owner=("native-bridge-fixture", "chat"), chat_storage_enabled=True, native_slots=(spec.slot_id,))
+            with provider._lock:
+                (handoff,) = tuple(bridge.handoffs._items.values())
+                assert handoff.acknowledged and handoff.verified.container_id == retained_id
+                provider._warm_pool[retained_sid] = (info, 0)
+                provider._warm_pool_identity[retained_sid] = info.owner
+                bridge.handoffs.transferred_locked(handoff)
+            asyncio.run(contain())
+            assert adapter._inspect(retained_id) is None
             with provider._lock:
                 assert bridge.handoffs.extra_slots_locked(starting={}, known_container_ids=set()) == 0
             assert evidence.pending() == ()
@@ -1233,6 +1274,11 @@ def test_gateway_uid_1000_submits_and_acknowledges_actual_managed_primary(typed_
                 except BaseException:
                     os.write(2, traceback.format_exc().encode("utf-8"))
                     exit_code = 2
+            if provider is not None:
+                discard_sandbox_lease_manager(provider)
+                provider._acquire_serializer.close()
+                provider._acquire_worker_executor.shutdown(wait=True)
+                provider._ownership.close()
             owner.close()
         os._exit(exit_code)
     _, status = os.waitpid(child, 0)
