@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import subprocess
@@ -13,6 +14,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 import zlib
+from datetime import datetime
 
 RECORD = "deploy/compose/acceptance.json"
 WORKFLOW = ".github/workflows/docker-acceptance.yml"
@@ -54,6 +56,135 @@ class AcceptanceError(ValueError):
 
 def positive(value: object) -> bool:
     return type(value) is int and value > 0
+
+
+TENANT_STEPS = frozenset(
+    (
+        "fresh_install",
+        "runtime",
+        "rprivate",
+        "cold_start",
+        "enospc",
+        "egress_denial",
+        "transfer_64_mib",
+        "two_runs_one_workspace",
+        "reboot",
+        "restore",
+    )
+)
+TENANT_SECONDS = frozenset(
+    (
+        "prepare",
+        "cold_start",
+        "pending",
+        "fence_pending",
+        "idle_eviction",
+        "transfer_64_mib",
+    )
+)
+
+
+def exact_keys(value, keys, label):
+    if not isinstance(value, dict) or set(value) != set(keys):
+        raise AcceptanceError(f"tenant-class {label} has an invalid shape")
+
+
+def validate_tenant_class(entry, version: str, candidates: dict | None = None) -> None:
+    """Validate the optional, human-produced receipt without bypassing image admission."""
+    exact_keys(
+        entry,
+        (
+            "schema",
+            "version",
+            "recorded_at",
+            "guest",
+            "images",
+            "native",
+            "acceptance",
+            "steps",
+            "seconds",
+        ),
+        "receipt",
+    )
+    if (
+        type(entry["schema"]) is not int
+        or entry["schema"] != 1
+        or entry["version"] != version
+    ):
+        raise AcceptanceError("tenant-class receipt names another version or schema")
+    stamp = entry["recorded_at"]
+    if not isinstance(stamp, str) or not re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z",
+        stamp,
+    ):
+        raise AcceptanceError("tenant-class timestamp must be ISO 8601 UTC")
+    try:
+        datetime.fromisoformat(stamp[:-1] + "+00:00")
+    except ValueError as error:
+        raise AcceptanceError("tenant-class timestamp is invalid") from error
+    guest = entry["guest"]
+    exact_keys(
+        guest,
+        (
+            "vcpus",
+            "memory_mib",
+            "data_disk_gib",
+            "kernel",
+            "docker_engine",
+            "compose",
+            "runsc",
+        ),
+        "guest",
+    )
+    if any(
+        not positive(guest[key]) for key in ("vcpus", "memory_mib", "data_disk_gib")
+    ):
+        raise AcceptanceError("tenant-class guest quantities must be positive integers")
+    if any(
+        not isinstance(guest[key], str)
+        or not 0 < len(guest[key]) <= 256
+        or any(ord(c) < 32 for c in guest[key])
+        for key in ("kernel", "docker_engine", "compose", "runsc")
+    ):
+        raise AcceptanceError("tenant-class guest versions are invalid")
+    images = entry["images"]
+    exact_keys(images, ("backend", "sandbox"), "images")
+    if any(
+        not isinstance(value, str) or not DIGEST.fullmatch(value)
+        for value in images.values()
+    ):
+        raise AcceptanceError("tenant-class image digests are invalid")
+    if candidates is not None:
+        for name in ("backend", "sandbox"):
+            reference = candidates.get(name)
+            if (
+                not isinstance(reference, str)
+                or not REFERENCE.fullmatch(reference)
+                or reference.rsplit("@", 1)[1] != images[name]
+            ):
+                raise AcceptanceError(
+                    "tenant-class image digest differs from the pinned candidate"
+                )
+    for name in ("native", "acceptance"):
+        evidence = entry[name]
+        exact_keys(evidence, ("cases", "junit_sha256"), name)
+        if (
+            not positive(evidence["cases"])
+            or not isinstance(evidence["junit_sha256"], str)
+            or not DIGEST.fullmatch(evidence["junit_sha256"])
+        ):
+            raise AcceptanceError("tenant-class JUnit evidence is invalid")
+    if entry["acceptance"]["cases"] != 27:
+        raise AcceptanceError("tenant-class receipt requires all 27 acceptance cases")
+    exact_keys(entry["steps"], TENANT_STEPS, "steps")
+    if any(value != "passed" for value in entry["steps"].values()):
+        raise AcceptanceError("tenant-class step did not pass")
+    exact_keys(entry["seconds"], TENANT_SECONDS, "seconds")
+    if any(
+        type(value) not in (int, float) or not math.isfinite(value) or value < 0
+        for value in entry["seconds"].values()
+    ):
+        raise AcceptanceError("tenant-class timings must be finite nonnegative numbers")
 
 
 def read_json(data: bytes) -> dict:
@@ -508,7 +639,11 @@ def verify_acceptance(
 ) -> dict:
     record = read_json(git_file(revision, RECORD, 8192))
     if (
-        set(record) != {"schema", "version", "run_id", "run_attempt", "artifacts"}
+        set(record)
+        not in (
+            {"schema", "version", "run_id", "run_attempt", "artifacts"},
+            {"schema", "version", "run_id", "run_attempt", "artifacts", "tenant_class"},
+        )
         or type(record["schema"]) is not int
         or record["schema"] != 1
         or not positive(record["run_id"])
@@ -527,7 +662,9 @@ def verify_acceptance(
         )
     ):
         raise AcceptanceError("acceptance record artifact digests are invalid")
-    return check(
+    if "tenant_class" in record:
+        validate_tenant_class(record["tenant_class"], version, candidates)
+    verified = check(
         repository,
         version,
         revision,
@@ -537,3 +674,6 @@ def verify_acceptance(
         hashes,
         client,
     )
+    if "tenant_class" in record:
+        verified["tenant_class"] = record["tenant_class"]
+    return verified

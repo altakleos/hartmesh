@@ -172,3 +172,23 @@ package over the canonical human facade). Keep business formats in consumer
 packages. Native proof stays in the mandatory no-skip storage tier; deterministic
 fixtures and model smoke are separate evidence. No consumer path selects host
 identity or bypasses native containment.
+
+
+## Shipped Compose qualification
+
+`test_compose_instance_acceptance.py` is opt-in live, gated by
+`HARTMESH_REQUIRE_BUNDLE_INSTANCES=1`; missing prerequisites fail when requested.
+The `bundle-instances` CI job requires all ten named storage cases in file order
+with zero skips and disk-backed `TMPDIR`/pytest basetemp. Never run or collect this
+suite locally. Ordinary coverage reads its AST/workflow through
+`test_compose_instance_acceptance_contract.py`; receipt tests use synthetic files
+and do not qualify a tenant host. Case four stops the Gateway and takes the pool
+runtime ownership lock for isolated orphan-fixture cleanup; it preserves the new
+allocation and unrelated bindings. Case seven proves automatic released-account
+reclamation. Case nine exercises exact-ID Undo sharing and explicit republication,
+matching existing product behavior; removal has no Undo. Keep CI stack evidence
+separate from the complete human-performed tenant qualification receipt.
+The missing-role observation holds the production allocation advisory lock on a
+separate test-owned PostgreSQL session. Drain that exact session and any owned
+cleanup one-off before allowing maintenance or restarting the Gateway; failure
+to confirm drainage leaves the Gateway stopped and fails qualification.

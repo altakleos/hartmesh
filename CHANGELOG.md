@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Compose storage qualification and tenant receipts
+
+A dedicated Linux/Docker CI job starts the shipped Compose bundle and verifies
+ten storage journeys, including typed mounts, missing assignments, account seats,
+reclamation, Shared publication and full-files refusal/recovery. Qualification
+fixtures use disk-backed temporary directories. Release admission accepts an
+optional, strictly validated tenant-class receipt; its operator tool requires all
+27 named acceptance cases, derives runtime/mount evidence from passed tests and
+preserves authenticated image-acceptance fields. Storage defaults remain disabled.
+There is no database schema change.
+
 ### Managed storage and account seat notices
 
 Files, ordinary chats, Save/Share and attachments show localized storage

@@ -697,6 +697,14 @@ unrecognized responses leave the ordinary download link available for a manual
 retry. Settings shows managed account seats and explains a full deployment;
 storage-off deployments retain the existing account controls.
 
+Provider qualification includes a CI job that installs the pinned Compose
+bundle, verifies its prepared storage and runs ten real storage journeys through
+its public entry point. Full-suite fixtures use disk-backed temporary storage.
+Release tooling can carry an optional receipt of a human-performed tenant-class
+run alongside authenticated image acceptance; that receipt requires the full
+27-case qualification. Storage defaults remain disabled until the remaining
+design stages and qualification are complete.
+
 `/api/features` reports storage readiness, account seats, AI assistant/AI employee
 allowances and the caller's file readiness. `/health` reports storage and agent
 status without exposing counts or paths. Deployments can disable generic Space
