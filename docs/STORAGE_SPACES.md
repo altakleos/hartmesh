@@ -27,8 +27,7 @@ records or authority changes preserve pending state. An unwritable mounted paren
 refuses before intent creation and requires operator repair. Read-only capacity
 checks exclude unresolved sibling journals without requiring renewal permissions.
 
-This corrects the design's CONTRACT 8.6 assumption that host release needs no
-operation row: durable crash recovery uses the existing operation table's private,
+Durable host-release crash recovery uses the existing operation table's private,
 versioned `host-release` JSON and the writer label `nonhuman/host:space-release`.
 That label is provenance, never a directory identity. There is no database schema
 change and storage defaults remain disabled. Native byte/inode/held-descriptor
@@ -419,8 +418,10 @@ this is not a snapshot of arbitrary concurrent native/database writes.
 HTML, SVG, XML and other active content are downloads. The editor displays
 literal text and never executes file contents in the HartMesh origin. Access is
 checked on the resource, including when optional authorization is off. Host
-edits can coexist with active native attachments. The default Gateway has no native execution consumer; a trusted
-host consumer installs the separately qualified attachment adapter.
+edits can coexist with active native attachments. Managed ordinary
+chats use host projections from verified User/company roles and labelled plain
+binds without an attachment row. Persistent native execution uses the separate
+trusted attachment contract.
 
 Browser saves use the loaded SHA-256 and verify the original inode before replacement. A
 stale file, generation or grant fails without silently overwriting or merging
@@ -428,6 +429,30 @@ the draft. This is not a general concurrent shell/SQLite transaction
 protocol. Explicit cross-space copy requires source READ/EXPORT and destination
 WRITE. A broader destination audience additionally requires source ADMIN and
 explicit disclosure acknowledgement. A read grant alone cannot disclose bytes.
+
+### Managed ordinary chats
+
+One User Space holds `files/`, `projects/` and `conversations/<thread>/` under
+`data/`; the company Space holds `shared/` and reserves an empty `projects/`.
+The Gateway binds conversation workspace/uploads/outputs and My Files read-write,
+Shared read-only and ACP read-only. Physical slot labels, current roles and
+actual mounts are verified before creation and reuse. No attachment row records
+these chat mounts. Policy skill projections stay in operational storage.
+
+Without a qualified User role, text chat runs with no user-data or ACP bind;
+without a qualified company role it retains personal binds and omits Shared.
+There is no legacy fallback in managed mode. New-conversation capacity is checked
+before metadata/durable run admission; full files return HTTP 507 with root-level
+`reason: files-full`. Recorded idempotent retries retain their existing run.
+The worker checks again for changes after admission. Old history remains readable.
+
+In the Compose profile, generic grants refuse managed roles with `owned-space`.
+Lifecycle/recovery refuses User/company roles with `mounts-unrecorded`, because
+plain chat binds cannot prove per-Space quiescence. Restore the whole data disk
+from one platform snapshot. The account tool releases a disabled account's seat;
+private host reclamation qualifies exact owned sandboxes before freeing its
+binding. Used allowlist sandbox sets currently remain reserved when their
+containment cannot be qualified; the bundle case proves unused-account reuse.
 
 ## Resource API
 
@@ -635,7 +660,7 @@ New-account requests assign the personal user Space after committing the account
 then grant company READ/EXPORT independently. Setup-pending accounts qualify;
 allocation or grant failures are logged and preserve successful account creation.
 The assignment is idempotent and retains incompatible or inactive role links.
-Startup and each 60-second pass repair offline-created accounts and failed
+Startup and each 60-second pass attempt repair of offline-created accounts and failed
 assignments, in account creation order with ID ties. Company grants repair even
 when no User slot remains; released/refused accounts receive neither. Each owned
 maintenance task survives a startup timeout and drains before database teardown.
@@ -745,31 +770,28 @@ committing or closing it. The caller completes the intent in that transaction an
 removes the receipt only after confirmed commit. Rollback/cancellation retain the
 pending intent and receipt; insertion rollback preserves published bytes. Removal
 reconciliation finishes or restores staged bytes according to its already committed
-publication record. The automatic caller arrives in a later change.
+publication record. Startup and each retained maintenance pass call this settlement after assignment repair.
 No public recovery action or generic native recovery downgrade bypasses this. Live host-operation locks
 prevent recovery from declaring a still-running callback retired. Disabling or
 removing the feature keeps resources, grants, rows and bytes; affected behavior
 is unavailable, while settled generic reads/export obey the persisted core floor.
 
-AIO thread mounts and local path mappings do not implement qualified resource
-attachment admission/fencing and explicitly reject resource mode. They never
-mount legacy files/shared directories as fallback. Trusted consumers may use the
-qualified direct Docker attachment API described above; the neutral extension
-facade continues to report native attachments unsupported.
+Ordinary AIO chat mounts use the host-owned `ChatStoragePaths` projection and
+`ChatStorageHost` bridge. Gateway verification and the Docker nonce probe qualify
+the User/company roots; fresh checks precede prewarm, creation, cache adoption,
+lease reuse and tool-client return. These labelled plain chat binds are distinct
+from qualified persistent native attachments. The neutral extension facade still
+reports native attachments unsupported; restricted resident topology remains
+outside the current attachment builder.
 
-The host path foundation now accepts a pure, opt-in `Paths.thread_root_resolver`.
-It routes conversation directories below a selected data root, preserves the
-existing leaf layout and uses `0770` for projected thread directories. It adds no
-authority or backing qualification; creation pins the existing root and refuses
-symlinked or foreign-filesystem descendants. A trusted integration must qualify
-the backing and admit current authority
-before supplying roots and ensure Docker sees the same source paths. The Gateway
-does not install this resolver yet. Coordinated chat admission, mounts, reuse
-validation and full-files refusals are the next integration change.
+`Paths.thread_root_resolver` remains a pure opt-in host callback for generic
+consumers. Managed chat projection resolves conversation directories under the
+verified User Space, preserves leaf layout and `0770` modes, and supplies no file
+root when the User role is unavailable. Source paths never confer authority.
 
 The additive `0033_storage_features` migration creates
 `hm_storage_feature_links`. Used relationships cannot be downgraded away.
-Configuration remains version 53; no legacy-directory adoption is implemented.
+Configuration version 54 carries the managed plan; no legacy-directory adoption is implemented.
 
 
 Host maintenance settles interrupted write/put/mkdir/rename/remove intents from

@@ -713,6 +713,11 @@ run alongside authenticated image acceptance; that receipt requires the full
 27-case qualification. Storage defaults remain disabled until the remaining
 design stages and qualification are complete.
 
+The [Compose runbook](deploy/compose/README.md#storage-and-agents) describes
+account assignment, seat release, pending cleanup and whole-disk snapshot restore.
+Turning an account off retains its seat and files; permanent release uses the
+operator account tool, and storage becomes reusable only after verified cleanup.
+
 `/api/features` reports storage readiness, account seats, AI assistant/AI employee
 allowances and the caller's file readiness. `/health` reports storage and agent
 status without exposing counts or paths. Deployments can disable generic Space

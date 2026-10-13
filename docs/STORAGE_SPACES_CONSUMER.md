@@ -3,8 +3,8 @@
 The consumer contract is extension storage API **1**, shipped by
 `deerflow-extension-api` **0.2.7**. Persistent resource IDs, current typed
 principals and explicit grants are independent of chats and optional feature
-plugins. This contract supplies storage to a future execution system; it does
-not define agent creation, memory, scheduling or service hosting.
+plugins. Execution consumers use this storage contract; it does not define agent
+creation, memory, scheduling or service hosting.
 
 ## Bind identity at the trusted host boundary
 
@@ -25,8 +25,8 @@ aliases do not authenticate it. No human user or AgentInstance row is required.
 
 The Gateway configures human resolution and the persistent agent-instance
 directory when Storage Spaces is enabled. Instance creation and management are
-described in [Agent Execution](AGENT_EXECUTION.md); conversation execution binding
-is a subsequent stage. Other embedding consumers supply their own nonhuman
+described in [Agent Execution](AGENT_EXECUTION.md); conversation execution uses its host-owned instance binding. The Compose profile
+keeps AI assistant/AI employee execution disabled while its topology is qualified. Other embedding consumers supply their own nonhuman
 directory and trusted authentication adapter. Advertised
 `actor_kinds` includes `nonhuman` only when that resolver exists. First-party
 My Files/Shared/Projects convenience features remain human workflows. PATs have
@@ -155,7 +155,9 @@ The supported backing is a provider-prepared fully allocated **fixed ext4
 filesystem**, with verified image/loop/mount identity on the private ext4 data
 disk. Configure its trusted inventory before Gateway startup. No ordinary-folder
 or legacy-adoption fallback qualifies a resource. Provisioning consumes a new
-empty prepared slot; deleted backing bindings and tombstones are not reused.
+empty prepared slot. Ordinary deleted resources retain bindings and tombstones;
+qualified released-account host reclamation can empty and free its exact User
+binding, preserving the tombstone. Unknown containment never frees capacity.
 
 The filesystem bounds bytes and inodes for data, private staging, snapshots,
 retained backups and displaced restore trees together. The provider retains a
@@ -177,6 +179,21 @@ structured 503 `storage-unavailable` with reason `space-not-assigned`. `FeatureP
 selects each visible folder under `data/` and its private folder under `control/`.
 
 
+Managed first-party layout uses one User role for My Files (`data/files`),
+Projects (`data/projects`) and conversation directories (`data/conversations`),
+and the native company role for Shared (`data/shared`). The host assigns roles
+at account creation/startup and attempts maintenance repair; plugins read them
+and allocate nothing. Shared publication/removal is host-written under a member's
+READ/EXPORT, retaining that member's attribution and exact-ID Undo.
+
+Ordinary chats use verified plain binds and physical slot labels without an
+attachment row; missing User storage permits mountless text chat, and missing
+company storage omits Shared. Managed generic grants return `owned-space`, and
+User/company lifecycle/recovery returns `mounts-unrecorded`. Restore the complete
+data disk rather than infer quiescence from attachment discovery. Seat release
+and verified host reclamation are separate: an unused account's reuse is qualified,
+while used allowlist sandbox containment currently retains its binding.
+
 | Requirement | Executable coverage |
 | --- | --- |
 | Async validated nonhuman actor, disclosure, stale calls, retirement and company custody | `test_storage_spaces_consumer.py` on SQLite/PostgreSQL; functional injected catalog |
@@ -185,12 +202,13 @@ selects each visible folder under `data/` and its private folder under `control/
 | SQLite locking/rollback, committed-data integrity at real ENOSPC | `test_storage_spaces_volume_native.py::test_sqlite_transactions_and_committed_rows_survive_real_disk_exhaustion` |
 | Actual source-chat deletion and zero-feature retained reads/edits | `test_storage_feature_routes.py::test_saved_bytes_survive_actual_thread_deletion_and_optional_feature_removal` on SQLite/PostgreSQL |
 | Kernel byte/inode bounds, reserve, private growth, exact fencing and quiesced WAL restore | Existing cases in mandatory `test_storage_spaces_volume_native.py` |
+| Shipped Compose bundle: ten account/seat, ordinary chat, file/publication and full-storage journeys | Required `bundle-instances` CI job; scripted inference and runc alias, unused-account reclamation only |
 | Test-fixture creation acknowledgement loss preserves its backing until exact absence | Native real-create-then-error case and `test_storage_spaces_native_fixture_ownership.py` |
 | Missing controller, private state and current grants | Existing facade, workflow, feature-control/publication and attachment tests |
 
-The mandatory Linux Docker merge job executes all 15 storage cases plus the
-instance AIO persistence case (16 total) and rejects
-skips. Ordinary directory/SQL fixtures prove functional contracts, not native
+The mandatory Linux Docker merge job executes all 25 native cases, including
+instance AIO persistence, managed chat scope and private-control reclamation,
+and rejects every skip. Ordinary directory/SQL fixtures prove functional contracts, not native
 mounts or quotas. Unsupported contributor hosts skip only the separately
 qualified tier and must not self-attest native readiness. The complete default
 offline suite runs in four CI shards; strict blocking-I/O, frontend/isolation and
