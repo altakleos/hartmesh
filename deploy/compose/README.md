@@ -2178,6 +2178,7 @@ Examples use these shell functions, defined in the operator's shell:
 ```bash
 hm() { docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env "$@"; }
 si() { hm run --rm -T storage-init "$@"; }
+accounts() { hm exec -T --user 1000:1000 --workdir /app/backend -e PYTHONPATH=. gateway /app/backend/.venv/bin/python -m app.gateway.auth.accounts "$@"; }
 ```
 
 Supply `HARTMESH_PROVIDER_KEYS_SECRET` in the command environment for `hm up`
@@ -2220,8 +2221,27 @@ the configured backing with an ordinary directory.
 With keys set, the one-shot checks the complete missing plan, prepares slots
 one at a time in company/user/assistant/employee order, mounts existing slots,
 and updates its fstab block. The Gateway verifies the inventory and backing,
-then probes whether Docker sees the same bytes. Automatic account assignment
-and chat mounts from Spaces are not part of this release.
+then probes whether Docker sees the same bytes. It creates the company Space
+and assigns one User Space per eligible account. Startup and each 60-second
+maintenance pass attempt released-account reclamation, missing assignments and
+company grants, then interrupted-operation settlement. A failed or uncertain
+operation remains pending; the interval is not a completion guarantee.
+
+My Files and Projects are `data/files` and `data/projects` of that person's
+Space. Every chat uses `data/conversations/<thread>` for its working directory,
+uploads, outputs and ACP workspace. Shared is `data/shared` of the company
+Space; its `data/projects` is reserved and empty. Each member has READ/EXPORT
+on Shared, while the Gateway writes publications and removals in that member's
+name. Company custody itself grants no access.
+
+An ordinary chat binds its own workspace/uploads/outputs and My Files read-write,
+the company Shared folder read-only, and its ACP workspace read-only. The Gateway
+verifies the backing and current roles before creation and reuse; labels
+`hartmesh.storage.space.<slot>` record each mounted Space. These chat binds have
+no storage attachment row. An unavailable User Space permits mountless text chat
+with no personal or Shared bind and no legacy-folder fallback. An unavailable
+company Space omits Shared while personal files remain usable. First-party file
+routes return a structured refusal when their own role is unavailable.
 
 ### The keys
 
@@ -2252,19 +2272,32 @@ max_inodes     = max_bytes // 8192  per Space
 
 `U`, `A`, `E` and `C` are the capacities converted from GiB to bytes.
 Missing bytes/counts include only slots still to prepare. Explicitly setting
-`HARTMESH_USERS=10`, `HARTMESH_AI_ASSISTANTS_PER_USER=1` and
-`HARTMESH_AI_EMPLOYEES=10`, with capacities of 1 GiB, reserves 31 GiB:
+all seven values below reserves 31 GiB:
+
+```dotenv
+HARTMESH_USERS=10
+HARTMESH_USER_STORAGE_GIB=1
+HARTMESH_AI_ASSISTANTS_PER_USER=1
+HARTMESH_AI_ASSISTANT_STORAGE_GIB=1
+HARTMESH_AI_EMPLOYEES=10
+HARTMESH_AI_EMPLOYEE_STORAGE_GIB=1
+HARTMESH_COMPANY_STORAGE_GIB=1
+```
+
+This prepares
 ten user, ten assistant, ten employee and one company slot. On a 50 GiB data
 disk it also requires 5 GiB left free. About 48 GiB initially free would leave
 about 12 GiB beyond that reserve. This is arithmetic, not a measured workload.
 Setting only `HARTMESH_USERS=10` prepares eleven 1 GiB slots in this release.
 
-With the keys set, this release prepares and verifies Spaces, but My Files,
-Shared and Projects return `storage-unavailable`/`space-not-assigned` until a
-role is assigned, and ordinary conversations do not start with this storage
-configuration. Both rendered agent counts remain zero even when nonzero counts
-reserve agent slots. A successful qualification writes `storage: ready (…)`
-and `agents: none (…)`; it does not offer account storage or agents yet.
+With the keys set for operator qualification, people's files, Shared and Projects
+live in Spaces and ordinary chats mount them. Missing or unverified assignments
+remain visible without preventing text chat. Both rendered agent counts remain zero.
+Nonzero planning counts reserve agent slots. AI assistant and AI employee execution
+support is not offered while qualification continues. A successful qualification
+writes `storage: ready (…)` and `agents: none (…)`.
+The bytes and inodes per conversation are unmeasured;
+the allocation example is not a workload-sizing recommendation.
 
 Each refusal follows `render_config: refusing to render: `:
 
@@ -2317,7 +2350,8 @@ exclusion, not evidence that every storage container has been removed.
 Assignment creates kind-specific folders at 0700: user `files/`, `projects/`,
 `conversations/`; company `shared/`, `projects/`; agent `uploads/`, `outputs/`,
 `.agent-skill-packages/`. Feature plugins only look up assigned roles and folders.
-This release does not automatically assign accounts or the company.
+The Gateway assigns the company and eligible accounts, retaining failed assignments
+for maintenance repair.
 
 The fstab block, derived only from inventory, lies between
 `# hartmesh-storage begin` and `# hartmesh-storage end`. Entries use
@@ -2362,6 +2396,11 @@ missing slots and does not cure a Gateway helper failure.
 | `storage: ready, … spaces short (…)` | Incomplete plan; inspect whether the missing allocation fits. |
 | `storage: unavailable (…)` | Inventory, data-disk, mount helper or Docker admission failed. |
 | `storage: space … unverified (…)` | One slot could not be verified; its existing identity is retained. |
+| `storage: company space created (<slot>)` | The exact company role was committed. |
+| `storage: user space of <account id> assigned (<slot>)` | That account's User role was committed. |
+| `storage: company grant written for <account id>` | That member's READ/EXPORT grant was committed. |
+| `storage: file operations settled <n>` | Confirmed interrupted intents settled; unknown outcomes remain pending. |
+| `storage: user space reclaimed (<slot>)` | Verified cleanup freed a released account's binding. |
 | `agents: none (…)` | Both rendered agent counts are zero. |
 
 The renderer reports `spaces=off` with the key absent, otherwise the planned
@@ -2385,7 +2424,18 @@ Before replacing a bundle:
 findmnt -no TARGET,PROPAGATION --target /srv/hartmesh
 findmnt -no FSTYPE --target /srv/hartmesh
 uname -r
+df -B1 --output=size,avail /srv/hartmesh | tail -n 1
+du -sh /srv/hartmesh/home/users /srv/hartmesh/home/shared /srv/hartmesh/postgres
+accounts list
 ```
+
+Read these while the old Gateway still runs. Count accounts, including disabled
+ones, before choosing `HARTMESH_USERS`; disabling an account keeps its seat.
+For an enabled plan, free bytes less the missing allocation must leave the larger
+of 4 GiB and 10% of the disk size. The explicit 31 GiB example needs at least
+36 GiB free on a 50 GiB disk. If existing accounts exceed the configured seats,
+the Gateway still starts; excess accounts work without personal files until the
+key is raised and assignment succeeds.
 
 1. Agree the maintenance window and snapshot the data disk at the platform.
    Keep the snapshot: it is the supported way back to release 45.
@@ -2403,6 +2453,24 @@ uname -r
 The snapshot is taken before the database upgrade. No user-file transfer is
 performed by this foundation. For the additive table/columns and guarded
 technical downgrade, see the [schema notes](../../CHANGELOG.md#schema-changes).
+
+**Qualification with HARTMESH_USERS set.** Keep all seven planning keys explicit
+on the provider's qualification guest. This mode assigns the new layout; the
+following legacy-directory note applies only with storage enabled. With the key
+absent, the existing paths remain in use.
+
+**The directories of release 45 stay on the disk, and nothing reads them.** After this upgrade My Files, Shared and Projects are folders inside each person's Space and the company's, and they start empty. What people kept before the upgrade is still on the data disk, untouched, at `/srv/hartmesh/home/users/<id>/files/` (each person's earlier My Files), `/srv/hartmesh/home/shared/` (the earlier Shared) and `/srv/hartmesh/home/users/<id>/projects/` (each person's earlier project documents). The product does not read them and does not copy them: a person who had files in My Files opens an empty My Files. Tell the customer's administrator before the upgrade. Once the snapshot taken before the upgrade is kept, you may remove the three directories; `du -sh` on each says what returns to the data disk. The conversations' own directories of release 45, `/srv/hartmesh/home/users/<id>/threads/<thread>/` with everything under them, are likewise left unread: a conversation that existed before the upgrade opens with an empty working directory, and its earlier uploads, produced files, skills projection and ACP workspace stay on the data disk until you remove `threads/` as a whole. Removing the directories is the only action this release offers for them; there is no copy into a Space.
+
+Once storage is enabled, first-party file and chat paths resolve through verified
+roles rather than those legacy directories. Account, conversation and schedule
+metadata remain. Snapshot restore is the way back.
+
+**How long it takes.** The first start allocates, formats and mounts the plan one
+slot at a time. The 31-slot example's 94 seconds is illustrative, not a measurement
+on the supported tenant VM class. A later start mounts existing images.
+Preparation has a 600-second limit; a partial plan continues at the next `up` or
+`si prepare`, with missing allocation reported. Inspect actual `seconds` and
+Gateway readiness instead of promising a fixed outage.
 
 ### Rolling back
 
@@ -2445,6 +2513,22 @@ Stop the Gateway and every actual holder before those offline operations.
 `forget --discard` destroys files; it cannot establish that an image is unused
 by an application binding. Inspect durable bindings before removing a slot.
 
+The account helper uses the image's Python environment, uid/gid 1000 and its
+backend working directory; it does not synchronize or install packages.
+
+| Account command | Effect |
+| --- | --- |
+| `accounts list` | Account identities, disablement and release facts. |
+| `accounts disable --email ADDRESS` | Turn off access while retaining the seat and files. |
+| `accounts release-seat --email ADDRESS` | Release an existing disabled account; preserve account/history rows and mark its User Space deleted. |
+| `accounts release-seat --id ACCOUNT_UUID` | Retry unfinished cleanup after email release using the stable ID. |
+
+Each invocation emits the account tool's own JSON document. `release-seat`
+refuses an enabled account with `error: not_disabled` and exit 1. Exit 2 with
+`cleanup_pending: true` means release committed while cleanup is unconfirmed;
+retry the same account ID. Its current `assistants` is 0 because this profile
+does not activate AI assistants.
+
 ### Changing the counts and capacities
 
 Raising a count prepares missing slots on the next `up` if the complete addition
@@ -2453,7 +2537,49 @@ existing slots require offline `resize` and a Gateway restart. A smaller capacit
 affects future preparation only. An interrupted growth is continued with the
 same command; a smaller target cannot truncate an already extended image.
 
+### Seats, and the account of a person who has left
+
+Every new account takes one seat, including setup-pending accounts, whether
+created in Settings, registration, sign-on or the `add_user` tool. Creation past
+the allowance returns `no_seats_left`. Settings explains the count and provider
+support; existing accounts are not removed when the configured count is lower.
+Each eligible account receives its User Space and company READ/EXPORT grant
+after account commit; assignment failure preserves the account and is retried
+by maintenance.
+
+Turning an account off keeps its seat and Space. Releasing it is permanent:
+confirm the administrator's intent and retain needed files or a platform snapshot
+first. Capture the stable ID from `accounts list`, then run:
+
+```bash
+accounts disable --id ACCOUNT_UUID
+accounts release-seat --id ACCOUNT_UUID
+# Retry unfinished cleanup by the same ID, never by the released email:
+accounts release-seat --id ACCOUNT_UUID
+```
+
+The release transaction records `released_at`, releases the address and marks
+the exact User Space deleted. Sessions and running-work cleanup follow commit;
+a released account cannot be enabled again. Its account/history rows and Shared
+publications remain. Maintenance attempts to remove positively owned chat
+sandboxes before emptying the Space and freeing its binding for another account.
+Unverified or uncontained storage stays reserved. Qualification currently proves
+reclamation for an unused account; automatic cleanup of a used allowlist sandbox
+is not yet qualified and retains its storage. A free seat does not guarantee an
+immediately reusable User slot.
+
 ### Full Spaces, the data disk, and unverified Spaces
+
+A person's My Files, Projects and conversation files share one capacity.
+Uploads, Save and Share preserve existing successful files and explain a refusal
+with the current support contact. A new conversation requires at least 16 MiB
+and 256 free inodes; a refused first message keeps its draft. Its first run returns
+HTTP 507 before admission or streaming. Recorded retries still recover their run.
+Old conversations and history remain readable. Commands in a running chat can
+receive `No space left on device`; the model explains how to free room.
+An unavailable User Space instead permits text chat without files. Company
+capacity/refusal affects Shared without closing personal file access.
+
 
 Each filesystem enforces bytes and inodes. `si status` separates prepared,
 missing and reserved capacity; `si verify` identifies unverified slots. Freeing
@@ -2468,6 +2594,35 @@ unverified; ordinary directories and matching path strings are no substitute.
 Use repair only for the reported repairable fact, or restore the platform
 snapshot for lost data. Unassigned slots containing files are never silently
 claimed by another resource.
+
+### Backup and restore
+
+The platform snapshot of the complete data disk is the backup of record: it keeps
+the database, pool image identities, people’s files and Shared at one moment.
+A running snapshot is crash-consistent, not proof that a file or database writer
+was idle. For a clean unmounted snapshot, stop the stack and inspect/remove the
+old Gateway's exact sandbox/relay/bridge holders using the upgrade procedure,
+then run `si quiesce`. Its confirmed no-holder/no-busy-loop result precedes the
+snapshot. Start again with `hm up -d --wait`.
+
+Restore the whole data disk from one snapshot with the stack stopped, every
+holder removed, Spaces quiesced and the data-disk filesystem unmounted. Remove
+only inspected tenant-owned orphan probes and sandbox networks when restoring;
+never prune the daemon. A busy unmount means containment is incomplete. Restore
+the matching pinned bundle, mount the disk with shared propagation, complete
+preflight and read storage-init/Gateway readiness after start.
+
+A tar of `data/`, a sparse image copy, or images from one moment beside a database
+from another cannot restore the binding identities. Do not copy directories over
+a live disk. Generic per-Space lifecycle/recovery refuses managed User and company
+roles with `mounts-unrecorded`; chat binds have no attachment records to establish
+quiescence. Restore their data disk instead.
+
+The Gateway attempts interrupted ordinary file and feature-workflow settlement
+at startup and in minute-based maintenance. It confirms private receipts and
+current binding identities; it never replays an unknown write or claims success
+from elapsed time. Uncertain copy/lifecycle/controller outcomes remain pending
+for inspection. There is no agent operator `settle` command in this profile.
 
 ## Durability
 

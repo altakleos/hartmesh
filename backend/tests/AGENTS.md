@@ -184,8 +184,8 @@ suite locally. Ordinary coverage reads its AST/workflow through
 `test_compose_instance_acceptance_contract.py`; receipt tests use synthetic files
 and do not qualify a tenant host. Case four stops the Gateway and takes the pool
 runtime ownership lock for isolated orphan-fixture cleanup; it preserves the new
-allocation and unrelated bindings. Case seven proves automatic released-account
-reclamation. Case nine exercises exact-ID Undo sharing and explicit republication,
+allocation and unrelated bindings. Case seven proves automatic reclamation of an
+unused account; used allowlist sandbox containment remains unqualified. Case nine exercises exact-ID Undo sharing and explicit republication,
 matching existing product behavior; removal has no Undo. Keep CI stack evidence
 separate from the complete human-performed tenant qualification receipt.
 The missing-role observation holds the production allocation advisory lock on a

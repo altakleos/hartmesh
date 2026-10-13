@@ -45,6 +45,8 @@ slot, including unassigned slots; check planned mounts before creation and actua
 mounts before return. Without a scoped native projection, reject storage-on mounts
 before resolving default paths; `peek_scoped_paths()` never creates legacy roots.
 Policy skill views stay in the operational area.
+First-conversation capacity is checked before any sandbox build; existing thread
+directories keep history readable, and unassigned User storage stays mountless.
 
 A known mount-profile mismatch may retire a client only through the canonical
 no-holder cleanup reservation and ordinary ownership fencing, then reacquire

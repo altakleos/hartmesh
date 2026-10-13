@@ -18,7 +18,9 @@ sets `0770` on the thread, `user-data` and four leaves; legacy leaves retain
 no-follow descriptors, checks their device and changes modes through `fchmod`.
 Root selection is neither permission nor backing proof: admit and verify
 on the owning async loop before installing a scoped adapter. Docker sources must
-see the returned root at that same host path. Compose wiring arrives separately.
+see the returned root at that same host path. Managed Compose chats install
+`ChatStoragePaths` from verified User/company roles; missing User storage supplies
+no file root, never a legacy fallback. Worker/native admission owns that scope.
 
 Operator prompt overlays: `lead_prompt_overlay` on AppConfig and
 `subagents.agents.<name>.prompt_overlay` accept literal `prepend`/`append` strings.

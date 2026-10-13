@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Compose storage operations
+
+The operator runbook now describes User/company assignment, ordinary chat mounts,
+mountless degradation, seats and release retries, full-files notices and complete
+data-disk backup/restore. It distinguishes unused-account reclamation proof from
+the remaining used allowlist sandbox containment work. Legacy-folder notes apply
+only to storage-enabled qualification, and timing/capacity examples identify
+unmeasured assumptions. Consumer documentation records the ten-case bundle gate
+and current native evidence. Storage/agent defaults remain disabled. There is no
+database schema change.
+
 ### Compose storage qualification and tenant receipts
 
 A dedicated Linux/Docker CI job starts the shipped Compose bundle and verifies

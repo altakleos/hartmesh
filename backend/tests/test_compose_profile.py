@@ -1587,4 +1587,45 @@ def test_readme_says_spaces_and_agents_are_not_offered_while_the_default_is_off(
     assert "HARTMESH_USERS" in section and "storage: off (HARTMESH_USERS absent)" in section
     assert '"storage": "off"' in section and '"agents": "off"' in section
     assert "Both rendered agent counts remain zero" in section
-    assert "ai()" not in section and "release-seat" not in section
+    assert "ai()" not in section and "release-seat" in section
+
+
+def test_readme_carries_the_legacy_directories_note_and_the_three_preflight_lines():
+    section = (PROFILE / "README.md").read_text(encoding="utf-8").split("## Storage and agents\n", 1)[1].split("\n## ", 1)[0]
+    expected_note = (
+        "**The directories of release 45 stay on the disk, and nothing reads them.** After this upgrade My "
+        "Files, Shared and Projects are folders inside each person's Space and the company's, and they start "
+        "empty. What people kept before the upgrade is still on the data disk, untouched, at "
+        "`/srv/hartmesh/home/users/<id>/files/` (each person's earlier My Files), "
+        "`/srv/hartmesh/home/shared/` (the earlier Shared) and `/srv/hartmesh/home/users/<id>/projects/` "
+        "(each person's earlier project documents). The product does not read them and does not copy them: a "
+        "person who had files in My Files opens an empty My Files. Tell the customer's administrator before "
+        "the upgrade. Once the snapshot taken before the upgrade is kept, you may remove the three "
+        "directories; `du -sh` on each says what returns to the data disk. The conversations' own directories "
+        "of release 45, `/srv/hartmesh/home/users/<id>/threads/<thread>/` with everything under them, are "
+        "likewise left unread: a conversation that existed before the upgrade opens with an empty working "
+        "directory, and its earlier uploads, produced files, skills projection and ACP workspace stay on the "
+        "data disk until you remove `threads/` as a whole. Removing the directories is the only action this "
+        "release offers for them; there is no copy into a Space."
+    )
+    assert " ".join(expected_note.split()) in " ".join(section.split())
+    preflight = section.split("### Upgrading from release 45", 1)[1].split("### Rolling back", 1)[0]
+    for command in ("df -B1 --output=size,avail /srv/hartmesh | tail -n 1", "du -sh /srv/hartmesh/home/users /srv/hartmesh/home/shared /srv/hartmesh/postgres", "accounts list"):
+        assert command in preflight
+        assert preflight.index(command) < preflight.index("hm down")
+    assert "Qualification with HARTMESH_USERS set" in preflight
+    assert "snapshot" in section and "restore" in section.split("### Rolling back", 1)[1].lower()
+    assert "--user 1000:1000 --workdir /app/backend -e PYTHONPATH=." in section
+    assert "/app/backend/.venv/bin/python -m app.gateway.auth.accounts" in section
+
+
+def test_readme_describes_current_chat_storage_and_reclamation_limits():
+    section = (PROFILE / "README.md").read_text(encoding="utf-8").split("## Storage and agents\n", 1)[1].split("\n## ", 1)[0]
+    assert "data/conversations/<thread>" in section
+    assert "mountless text chat" in section
+    assert "used allowlist" in section
+    assert "unused account" in section
+    assert "94 seconds" in section and "illustrative" in section
+    assert "bytes and inodes per conversation are unmeasured" in section
+    for key in {"HARTMESH_USERS", "HARTMESH_USER_STORAGE_GIB", "HARTMESH_AI_ASSISTANTS_PER_USER", "HARTMESH_AI_ASSISTANT_STORAGE_GIB", "HARTMESH_AI_EMPLOYEES", "HARTMESH_AI_EMPLOYEE_STORAGE_GIB", "HARTMESH_COMPANY_STORAGE_GIB"}:
+        assert key + "=" in section
