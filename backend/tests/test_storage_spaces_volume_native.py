@@ -315,7 +315,7 @@ async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(bac
         assert "retained" in await await_drained(run_file_io(third.sandbox.execute_command, "python3 -c \"import sqlite3; print(sqlite3.connect('/mnt/spaces/home/catalog.sqlite').execute('select value from work').fetchone()[0])\""))
         await await_drained(run_file_io(third.close))
         home = await files.registry.get(actor=alice, space_id=instance.home_id)
-        await files.attachments.retire(actor=alice, space_id=home.id, expected_generation=home.generation)
+        await files.attachments.retire(reason="storage-recovery", actor=alice, space_id=home.id, expected_generation=home.generation)
         containment["confirmed"] = True
     finally:
         if first is not None:
@@ -326,7 +326,7 @@ async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(bac
             await await_drained(run_file_io(third.close))
         if not containment["confirmed"] and getattr(files, "attachments", None) is not None:
             home = await files.registry.get(actor=alice, space_id=instance.home_id)
-            await files.attachments.retire(actor=alice, space_id=home.id, expected_generation=home.generation)
+            await files.attachments.retire(reason="storage-recovery", actor=alice, space_id=home.id, expected_generation=home.generation)
             containment["confirmed"] = True
         await engine.dispose()
 
@@ -438,7 +438,7 @@ while True: time.sleep(.1)
             assert restored.execute("SELECT body FROM pages").fetchall() == [("committed",)]
         # A new environment sees persisted files under the same resource ID.
         await mounts.attach(actor=actor, incarnation=uuid.uuid4().hex, resources=[ResourceMount(space.id, 2, "home", writable=True)])
-        await mounts.retire(actor=actor, space_id=space.id, expected_generation=2)
+        await mounts.retire(reason="storage-recovery", actor=actor, space_id=space.id, expected_generation=2)
     finally:
         try:
             for container, attachment_id in containers:
@@ -527,7 +527,7 @@ db.commit(); db.close()
         with storage_actor_scope(worker):
             await consumer.write(space_id=resource.id, generation=resource.generation, operation_id=uuid.uuid4().hex, path="host-edit", content=b"x", create=True)
         assert (volume.data_path / "host-edit").read_bytes() == b"x"
-        await attachments.retire(actor=owner, space_id=resource.id, expected_generation=resource.generation, attachment_ids=[attachment.id])
+        await attachments.retire(reason="storage-recovery", actor=owner, space_id=resource.id, expected_generation=resource.generation, attachment_ids=[attachment.id])
         program[0] = (
             "import sqlite3,json,time,pathlib; root=pathlib.Path('/mnt/spaces/wiki'); db=sqlite3.connect(root/'index.sqlite'); "
             "body=db.execute('SELECT body FROM pages WHERE path=?',('home.md',)).fetchone()[0]; db.close(); "
@@ -538,7 +538,7 @@ db.commit(); db.close()
         while not (volume.data_path / "replacement.json").exists():
             assert asyncio.get_running_loop().time() < deadline, "Replacement did not read retained wiki data"
             await asyncio.sleep(0.05)
-        await attachments.retire(actor=owner, space_id=resource.id, expected_generation=resource.generation, attachment_ids=[replacement.id])
+        await attachments.retire(reason="storage-recovery", actor=owner, space_id=resource.id, expected_generation=resource.generation, attachment_ids=[replacement.id])
         with storage_actor_scope(worker):
             independent = await provider.current()
             assert json.loads(await independent.read(space_id=resource.id, path="replacement.json", max_bytes=1000)) == {"body": "# Home\nSecond\n", "source": source_reference}

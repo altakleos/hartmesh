@@ -41,7 +41,7 @@ class SpaceRecovery:
         # Lifecycle actions explicitly close RO handles as well as writers.
         # Ordinary ADMIN admission no longer proves writer exclusion.
         if self.attachments is not None and attachment_ids != []:
-            await self.attachments.retire(actor=actor, space_id=space_id, expected_generation=generation, operation_id=operation_id, attachment_ids=attachment_ids)
+            await self.attachments.retire(reason="storage-recovery", actor=actor, space_id=space_id, expected_generation=generation, operation_id=operation_id, attachment_ids=attachment_ids)
 
     @staticmethod
     async def _require_fenced(session, space_id):

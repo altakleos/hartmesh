@@ -111,6 +111,9 @@ the fixed filesystem byte/inode bounds and platform reserve. Administrators can
 create quiesced backups, restore with current grants, archive and delete through
 the generic recovery controls. A trusted consumer can attach native roots on the
 qualified local Linux Docker host; lifecycle changes require confirmed containment.
+Closures record who began them and why. Trusted host code can contain a workspace
+without advancing its Space generation; confirmed closures notify consumers after
+commit. Uncertain creation or Docker replies keep the attachment pending.
 Multiple native attachments and Gateway file writes can share a Space. File
 publication preserves revision and collision checks; applications coordinate
 their own concurrent writes. Backups, restores and deletion still require every

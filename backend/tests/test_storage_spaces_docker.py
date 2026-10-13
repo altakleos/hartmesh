@@ -146,3 +146,69 @@ def test_alternate_unix_endpoint_is_not_verified_by_default_daemon_pid(monkeypat
     monkeypatch.setenv("DOCKER_HOST", "unix:///tmp/other-daemon.sock")
     with pytest.raises(StorageAdapterUnsupported):
         _local_endpoint([{"Endpoints": {"docker": {"Host": "unix:///var/run/docker.sock"}}}])
+
+
+@pytest.mark.parametrize("running,expected", [(True, "running"), (False, "gone"), (None, "unknown"), (0, "unknown"), (1, "unknown"), ("false", "unknown")])
+def test_container_liveness_requires_a_strict_boolean_and_never_removes(running, expected):
+    docker = Docker()
+    docker.entry["State"]["Running"] = running
+    provider = adapter(docker)
+    docker.calls.clear()
+    assert provider.container_state(ID, TOKEN) == expected
+    assert [call[1] for call in docker.calls] == ["info", "inspect", "info"]
+
+
+@pytest.mark.parametrize("state", [None, {}, [], "running"])
+def test_malformed_container_state_is_unknown(state):
+    docker = Docker()
+    docker.entry["State"] = state
+    assert adapter(docker).container_state(ID, TOKEN) == "unknown"
+
+
+def test_liveness_absence_requires_current_daemon_after_inspection():
+    docker = Docker()
+    provider = adapter(docker)
+    docker.entry = None
+    assert provider.container_state(ID, TOKEN) == "gone"
+
+    def changed_after_inspection(command, **kwargs):
+        reply = docker(command, **kwargs)
+        if command[1] == "inspect":
+            docker.unknown = True
+        return reply
+
+    provider._runner = changed_after_inspection
+    assert provider.container_state(ID, TOKEN) == "unknown"
+
+
+def test_removal_requires_current_daemon_after_absence_reply():
+    docker = Docker()
+    provider = adapter(docker)
+
+    def changed_after_removal(command, **kwargs):
+        reply = docker(command, **kwargs)
+        if command[1] == "inspect" and docker.entry is None:
+            docker.unknown = True
+        return reply
+
+    provider._runner = changed_after_removal
+    with pytest.raises(StorageAdapterUnsupported):
+        provider.fence(ID, TOKEN)
+
+
+def test_foreign_container_liveness_is_unknown():
+    docker = Docker()
+    docker.entry["Config"]["Labels"]["hartmesh.storage.attachment"] = "e" * 32
+    assert adapter(docker).container_state(ID, TOKEN) == "unknown"
+
+
+def test_cleanup_is_inert_until_trusted_provider_wires_it():
+    docker = Docker()
+    provider = adapter(docker)
+    docker.calls.clear()
+    provider.cleanup(TOKEN)
+    assert not docker.calls
+    called = []
+    provider._cleanup = called.append
+    provider.cleanup(TOKEN)
+    assert called == [TOKEN]

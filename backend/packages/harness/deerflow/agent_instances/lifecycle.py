@@ -251,7 +251,7 @@ class InstanceLifecycle:
             try:
                 # An empty committed scope must never become an all-current retry.
                 if ids is None or ids:
-                    await attachments.retire(actor=actor, space_id=view.home_id, expected_generation=home_generation, attachment_ids=ids, admission=withdraw)
+                    await attachments.retire(reason="lifecycle", actor=actor, space_id=view.home_id, expected_generation=home_generation, attachment_ids=ids, admission=withdraw)
             except _Complete as terminal:
                 return {"instance": await self.agents.get(actor=actor, instance_id=instance_id, permission=AgentPermission.MANAGE, include_deleted=True), "complete": True, "abandoned": terminal.args[0], "operation_id": operation_id}
             except AttachmentPending:

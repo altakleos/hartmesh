@@ -301,3 +301,17 @@ inside its first ADMIN transaction, before pending/effects. Domain conditions ad
 to mandatory resource checks. A rejected callback rolls back and propagates its
 effect-free failure; uncertain provider/commit outcomes remain pending. Never pass
 callbacks from HTTP/plugin data or convert an empty captured scope to all-current.
+
+`retire` requires a human reason (`lifecycle`/`storage-recovery`); `contain_host`
+accepts only `HOST_FENCE_REASONS` without a principal, event or generation change.
+Capture/recheck the complete mount scope under sorted Space locks before attachment
+locks. Preserve first attribution with `fence_pending`; timestamp only confirmed
+closure. Drain removal/cleanup through commit. Unknown prepare identity remains
+pending even after removing discovered containers or an empty census. Only a
+recorded host replacement permits cross-host containment. The optional adapter
+cleanup callback is unwired until topology integration. Postcommit `on_contained`
+runs outside SQL and the retirement guard, including exact fenced retries; hook
+failure cannot reopen closure. Fully empty legacy fenced metadata stays unchanged;
+partial attribution refuses. `uncontained` holds valid host retry inputs, distinct
+from durable first attribution. Read-only liveness proves the current daemon before
+and after inspection; malformed Running is unknown, and stopped still needs removal.

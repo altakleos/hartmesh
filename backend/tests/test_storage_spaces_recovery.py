@@ -199,6 +199,8 @@ async def test_invalid_lifecycle_generation_never_performs_containment(storage):
             kwargs = {"actor": ALICE, "space_id": space.id, "expected_generation": invalid}
             if action != mounts.retire:
                 kwargs["operation_id"] = operation()
+            else:
+                kwargs["reason"] = "storage-recovery"
             with pytest.raises(ValueError):
                 await action(**kwargs)
         assert attached.container_id in provider.containers
