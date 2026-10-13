@@ -1,6 +1,8 @@
 """Inspect CI qualification contracts without importing or invoking the live suite."""
 
 import ast
+import inspect
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -195,3 +197,27 @@ def test_bundle_gate_requires_disk_backed_fixtures_and_exact_named_cases():
     shutdown = steps["14 Check that the stack stops cleanly"]
     assert shutdown.index("compose-before-down.log") < shutdown.index("$C down")
     assert "storage-init quiesce" in shutdown
+
+
+def test_scripted_model_host_port_stays_outside_the_container_port_allocator_range():
+    from deerflow.utils.network import PortAllocator
+
+    document = yaml.safe_load((ROOT / ".github/workflows/compose-instances.yml").read_text(encoding="utf-8"))
+    steps = {step.get("name"): step.get("run", "") for step in document["jobs"]["bundle-instances"]["steps"]}
+    start = steps["5 Start the scripted model"]
+    tokens = shlex.split(next(line for line in start.splitlines() if line.startswith("nohup ")))
+    assert tokens[:3] == ["nohup", "python3", "-c"], "Use the existing Handler at a separate runner-host port"
+    tree = ast.parse(tokens[3])
+    server = next(node for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "ThreadingHTTPServer")
+    host, port = ast.literal_eval(server.args[0])
+    assert host == "0.0.0.0"
+    handler = server.args[1]
+    assert isinstance(handler, ast.Subscript) and ast.literal_eval(handler.slice) == "Handler"
+    assert isinstance(handler.value, ast.Call) and isinstance(handler.value.func, ast.Name) and handler.value.func.id == "run_path"
+    assert ast.literal_eval(handler.value.args[0]) == "docker/acceptance/provider.py"
+    profile = yaml.safe_load((ROOT / "deploy/compose/config.yaml").read_text(encoding="utf-8"))
+    first = profile["sandbox"]["port"]
+    count = inspect.signature(PortAllocator.allocate).parameters["max_range"].default
+    assert port not in range(first, first + count), "Gateway-container socket checks cannot observe runner-host listeners"
+    assert start.count(f"http://127.0.0.1:{port}/health") == 2
+    assert f"base_url: http://host.docker.internal:{port}/v1" in steps["9 Write the data directory, the model file and the .env contract"]

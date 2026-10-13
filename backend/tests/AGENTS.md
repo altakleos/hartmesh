@@ -198,3 +198,5 @@ Each synthetic run preserves bounded SSE and terminal JSON evidence before its
 success assertion. Exclude cookies and auth headers. Skill category binds may
 come from caller/global projections or operational `chat-runtime` projections;
 neither changes the six admitted data/ACP binds or caller-owned integration binds.
+The scripted model listens on a runner-host port outside the shipped sandbox's
+allocation range; Gateway-container socket checks cannot observe host listeners.
