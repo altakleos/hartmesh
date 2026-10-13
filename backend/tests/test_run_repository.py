@@ -80,6 +80,15 @@ class _CustomRunStoreWithoutProgress(RunStore):
 
 
 @pytest.mark.anyio
+async def test_custom_store_idempotency_lookup_reports_unsupported_without_blocking_legacy_use():
+    store = _CustomRunStoreWithoutProgress()
+    with pytest.raises(NotImplementedError, match="cannot look up idempotency keys"):
+        await store.get_by_idempotency_key("key")
+    await store.create_thread_operation_atomic("r1", thread_id="t1", owner_worker_id="worker-1", lease_expires_at=None)
+    assert store.legacy_atomic_calls == 1
+
+
+@pytest.mark.anyio
 async def test_update_run_progress_defaults_to_noop_for_custom_store():
     store = _CustomRunStoreWithoutProgress()
 

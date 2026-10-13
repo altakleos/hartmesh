@@ -97,6 +97,20 @@ async def test_admitted_key_retry_bypasses_full_storage_and_compares_input(monke
 
 
 @pytest.mark.asyncio
+async def test_unsupported_key_lookup_does_not_seed_or_admit(monkeypatch, tmp_path):
+    from deerflow.runtime.runs.store.base import RunStore
+
+    request, store, _threads, preparation, seed, worker = capacity_context(monkeypatch, tmp_path)
+    monkeypatch.setattr(store, "get_by_idempotency_key", lambda key: RunStore.get_by_idempotency_key(store, key))
+    with pytest.raises(NotImplementedError, match="cannot look up idempotency keys"):
+        await services.start_run(_run_create_request(), "empty-chat", request, idempotency_key="retry")
+    preparation.assert_not_awaited()
+    seed.assert_not_awaited()
+    worker.assert_not_awaited()
+    assert await store.list_by_thread("empty-chat") == []
+
+
+@pytest.mark.asyncio
 async def test_peer_admits_same_key_during_capacity_refusal(monkeypatch, tmp_path):
     request, store, _threads, _preparation, seed, worker = capacity_context(monkeypatch, tmp_path)
     owner = RunManager(store=store, worker_id="owner")
