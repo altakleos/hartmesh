@@ -195,6 +195,23 @@ export function createEnUS(product: string): Translations {
       nonhuman: "AI employee",
     },
     agentInstances: {
+      administratorSupport: "an administrator",
+      providerFallback: "your service provider",
+      unavailable: {
+        diskTooSmall: (provider) =>
+          `Files are not available right now: the storage of this deployment is smaller than what is set for it. Chats work without files until ${provider} has fixed this.`,
+        storageMissing: (provider) =>
+          `Files are not available right now: the storage has not been set up. Chats work without files until ${provider} has fixed this.`,
+        storageUnreadable: (provider) =>
+          `Files are not available right now: the storage could not be read. Everything in it is kept. Chats work without files until ${provider} has fixed this.`,
+        serverNotReadyFiles: (provider) =>
+          `Files are not available right now: the server is not yet set up to keep files safely. Chats work without files until ${provider} has fixed this.`,
+        serverCheckFailedFiles: (provider) =>
+          `Files are not available right now: a safety check on the server failed. Every file is kept. Chats work without files until ${provider} has fixed this.`,
+        next: (provider) => `Ask ${provider} to fix this.`,
+        reference: (code) => `Reference for support: ${code}`,
+        askAdmin: "Ask an administrator.",
+      },
       unconfirmed:
         "The request outcome is not confirmed. Refresh or retry the same request to check its state.",
       abandon: "Abandon contained operation",
@@ -204,7 +221,7 @@ export function createEnUS(product: string): Translations {
       title: "Agent instances",
       description:
         "Persistent personal and company agents with their own Home and memory.",
-      unavailable:
+      legacyUnavailable:
         "Persistent instances require enabled agent management and qualified Storage Spaces.",
       name: "Name",
       custody: "Custody",
@@ -695,6 +712,25 @@ export function createEnUS(product: string): Translations {
       pleaseWaitStreaming: "Please wait for the current response to finish.",
     },
 
+    chat: {
+      filesFull: (support) =>
+        `Your files are full, so a new conversation cannot start. Delete files in My files or delete old conversations, then start the conversation again. If that is not enough, ask ${support} for more room.`,
+      filesPreparing: (support) =>
+        `Your files are being prepared. Chats run without them for now. If this lasts longer than an hour, ask ${support}.`,
+      filesNoSeat: (administrator, provider) =>
+        administrator
+          ? `Files are not available for your account: more accounts exist here than seats. Ask ${provider} for more seats.`
+          : "Files are not available for your account, so chats run without them. Ask an administrator.",
+      filesUnavailable:
+        "Files are not available right now. Chats work without files until this is fixed.",
+      myFilesUnchecked:
+        "Your files did not pass the safety check, so chats run without them. Everything in them is kept.",
+    },
+    auth: {
+      noSeats:
+        "No seat is free for a new account here. Ask your administrator.",
+    },
+
     // Sidebar
     sidebar: {
       newChat: "New chat",
@@ -709,6 +745,9 @@ export function createEnUS(product: string): Translations {
     },
 
     files: {
+      saveFull: (support) =>
+        `Your files are full, so the file could not be saved to My files. Delete files in My files or delete old conversations, then try again. If that is not enough, ask ${support} for more room.`,
+      busy: "Your files are being changed right now. Try again in a moment.",
       title: "My files",
       filterLabel: "Find loaded files",
       filterPlaceholder: "Name or folder",
@@ -757,6 +796,11 @@ export function createEnUS(product: string): Translations {
     },
 
     shared: {
+      full: (support) =>
+        `The company's shared files are full, so the file could not be shared. Remove what you shared and no longer need, or ask ${support} for more room.`,
+      busy: "Shared is being changed right now. Try again in a moment.",
+      unchecked:
+        "Shared did not pass the safety check and cannot be opened. Everything in it is kept.",
       title: "Shared",
       description:
         "What anyone at the company published. Everyone here can open these, in any chat.",
@@ -1312,6 +1356,8 @@ export function createEnUS(product: string): Translations {
 
     // Subtasks
     uploads: {
+      filesFull: (file, support) =>
+        `Your files are full, so ${file} was not added. Delete files in My files or delete old conversations, then try again. If that is not enough, ask ${support} for more room.`,
       uploading: "Uploading...",
       uploadingFiles: "Uploading files, please wait...",
       limitsHint: (
@@ -1852,6 +1898,14 @@ export function createEnUS(product: string): Translations {
         disableNotification: "Disable notification",
       },
       account: {
+        seats: (count, max) =>
+          count > max
+            ? `${count.toLocaleString()} accounts, ${max.toLocaleString()} seats. Each account takes one seat, and the accounts beyond the seats work without files.`
+            : `${count.toLocaleString()} of ${max.toLocaleString()} seats are in use. Each account takes one seat.`,
+        noSeats: (max, provider) =>
+          `All ${max === null ? "" : max.toLocaleString() + " "}seats are in use, so no account can be added. Ask ${provider} for more seats, or tell ${provider} whose account is no longer needed.`,
+        noSeatsSignOn: (max, provider) =>
+          `All ${max.toLocaleString()} seats are in use, so nobody new can sign in. Ask ${provider} for more seats, or tell ${provider} whose account is no longer needed.`,
         profileTitle: "Profile",
         email: "Email",
         role: "Role",

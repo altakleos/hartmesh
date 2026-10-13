@@ -64,12 +64,14 @@ test("keeps the composer busy and preserves the next draft until Stop drains", a
   expect(result.current.thread.isLoading).toBe(true);
   const onSent = rs.fn();
   await act(async () => {
-    await result.current.sendMessage(
-      "thread-stop",
-      { text: "My next message", files: [] },
-      undefined,
-      { onSent },
-    );
+    await expect(
+      result.current.sendMessage(
+        "thread-stop",
+        { text: "My next message", files: [] },
+        undefined,
+        { onSent },
+      ),
+    ).rejects.toMatchObject({ name: "ThreadSendNotAdmittedError" });
   });
   expect(onSent).not.toHaveBeenCalled();
   expect(sdk.submit).not.toHaveBeenCalled();

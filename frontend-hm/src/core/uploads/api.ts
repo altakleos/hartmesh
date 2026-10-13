@@ -4,6 +4,18 @@
 
 import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
+import { FileAreaRequestError, readFileAreaFailure } from "../file-areas/http";
+import type { StorageRefusal } from "../file-areas/storage-state";
+
+export class UploadRequestError extends FileAreaRequestError {
+  constructor(
+    status: number,
+    message: string,
+    refusal: StorageRefusal | null = null,
+  ) {
+    super(status, message, "UploadRequestError", refusal);
+  }
+}
 
 export interface UploadedFileInfo {
   filename: string;
@@ -142,7 +154,14 @@ export async function uploadFiles(
   );
 
   if (!response.ok) {
-    throw new Error(await readErrorDetail(response, "Upload failed"));
+    const failure = await readFileAreaFailure(response, "Upload failed");
+    throw new UploadRequestError(
+      response.status,
+      failure.refusal
+        ? failure.message
+        : (formatErrorDetail(failure.detail) ?? "Upload failed"),
+      failure.refusal,
+    );
   }
 
   return response.json();

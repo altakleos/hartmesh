@@ -3,6 +3,8 @@
 import { Client as LangGraphClient } from "@langchain/langgraph-sdk/client";
 
 import { getLangGraphBaseURL } from "../config";
+import { FileAreaRequestError, readFileAreaFailure } from "../file-areas/http";
+import type { StorageRefusal } from "../file-areas/storage-state";
 import { isStaticWebsiteOnly } from "../static-mode";
 import {
   loadStaticDemoThread,
@@ -13,6 +15,7 @@ import type { AgentThreadState } from "../threads/types";
 
 import { isStateChangingMethod, readCsrfCookie } from "./fetcher";
 import { forceChatRunStreamOptions } from "./stream-mode";
+import { submissionCreated, submissionFailed } from "./submission-lifecycle";
 
 /**
  * SDK ``onRequest`` hook that mints the ``X-CSRF-Token`` header from the
@@ -344,12 +347,46 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
   }
 
   const apiUrl = getLangGraphBaseURL(isMock);
+  const admissionRefusals = new WeakMap<Response, StorageRefusal>();
   const client = new LangGraphClient({
     apiUrl,
     onRequest: injectCsrfHeader,
+    callerOptions: {
+      async fetch(input, init) {
+        const response = await globalThis.fetch(input, init);
+        if (response.status === 507 || response.status === 503) {
+          const failure = await readFileAreaFailure(response.clone(), "");
+          if (failure.refusal) admissionRefusals.set(response, failure.refusal);
+        }
+        return response;
+      },
+      async onFailedResponseHook(response) {
+        if (!response) return false;
+        const refusal = admissionRefusals.get(response);
+        // Throwing from the SDK's public retry hook stops this admission's
+        // retries. Unrelated failures retain the SDK's existing policy.
+        if (refusal)
+          throw new FileAreaRequestError(
+            refusal.status,
+            refusal.message,
+            "StorageAdmissionError",
+            refusal,
+          );
+        return false;
+      },
+    },
   });
 
   const originalRunStream = client.runs.stream.bind(client.runs);
+  const originalThreadCreate = client.threads.create.bind(client.threads);
+  client.threads.create = async (...args) => {
+    try {
+      return await originalThreadCreate(...args);
+    } catch (error) {
+      submissionFailed(args[0]?.metadata, error);
+      throw error;
+    }
+  };
   const originalJoinStream = client.runs.joinStream.bind(client.runs);
   // Preserve the SDK's lazy AsyncIterable contract. Its StreamManager consumes
   // this return value with `for await`, so run creation still starts on first
@@ -362,6 +399,10 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
       ...sanitizedPayload,
       onRunCreated(meta) {
         runId = meta.run_id;
+        submissionCreated(payload?.metadata ?? payload?.input, {
+          thread_id: meta.thread_id ?? threadId ?? "",
+          run_id: meta.run_id,
+        });
         originalOnRunCreated?.(meta);
       },
     });
@@ -382,11 +423,16 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
         });
       },
     });
-    yield* handleInactiveRunStream({
-      threadId,
-      expectedRunId: () => runId,
-      stream: recoveredStream,
-    });
+    try {
+      yield* handleInactiveRunStream({
+        threadId,
+        expectedRunId: () => runId,
+        stream: recoveredStream,
+      });
+    } catch (error) {
+      submissionFailed(payload?.metadata ?? payload?.input, error);
+      throw error;
+    }
   } as typeof client.runs.stream;
 
   const originalCancel = client.runs.cancel.bind(client.runs);

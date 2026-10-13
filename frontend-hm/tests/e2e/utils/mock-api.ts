@@ -219,7 +219,7 @@ function mockStreamMessages(
   ];
 }
 
-function runStreamThreadId(route: Route) {
+export function runStreamThreadId(route: Route) {
   const pathThreadId = /\/threads\/([^/]+)\/runs\/stream/.exec(
     new URL(route.request().url()).pathname,
   )?.[1];
@@ -793,20 +793,31 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   // Thread create — called when user sends first message in a new chat
   void page.route("**/api/langgraph/threads", (route) => {
     if (route.request().method() === "POST") {
-      upsertThread({
-        thread_id: MOCK_THREAD_ID,
-        title: "New Chat",
-        updated_at: new Date().toISOString(),
-        messages: options?.createdThreadMessages ?? mockStreamMessages(),
-      });
+      const requested = route.request().postDataJSON() as {
+        thread_id?: string;
+      };
+      const createdThreadId = requested.thread_id ?? MOCK_THREAD_ID;
+      const existingThread = threads.find(
+        (thread) => thread.thread_id === createdThreadId,
+      );
+      // Gateway creation is idempotent and preserves an existing thread's
+      // metadata, including the side-chat relationship used when reopening.
+      if (!existingThread) {
+        upsertThread({
+          thread_id: createdThreadId,
+          title: "New Chat",
+          updated_at: new Date().toISOString(),
+          messages: options?.createdThreadMessages ?? mockStreamMessages(),
+        });
+      }
       return route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          thread_id: MOCK_THREAD_ID,
+          thread_id: createdThreadId,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
-          metadata: {},
+          metadata: existingThread?.metadata ?? {},
           status: "idle",
           values: {},
         }),
@@ -1403,6 +1414,14 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           agents_api: { enabled: featureFlags.agentsApiEnabled },
           browser_control: { enabled: featureFlags.browserControlEnabled },
           mcp_tasks: { enabled: featureFlags.mcpTasksEnabled },
+          storage_spaces: {
+            enabled: false,
+            state: "off",
+            reason: null,
+            own: "ready",
+            user_spaces: false,
+          },
+          accounts: { seats: { allowed: 0, in_use: 0 } },
         }),
       });
     }

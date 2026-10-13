@@ -11,8 +11,9 @@ import { getBackendBaseURL } from "../config";
 import {
   encodeRelativePath,
   FileAreaRequestError,
-  readErrorDetail,
+  readFileAreaFailure,
 } from "../file-areas";
+import type { StorageRefusal } from "../file-areas/storage-state";
 
 /** Where the sandbox sees the person's files. */
 export const MY_FILES_VIRTUAL_PREFIX = "/mnt/user-data/files";
@@ -43,8 +44,12 @@ export interface KeepInMyFilesRequest {
 }
 
 export class MyFilesRequestError extends FileAreaRequestError {
-  constructor(status: number, message: string) {
-    super(status, message, "MyFilesRequestError");
+  constructor(
+    status: number,
+    message: string,
+    refusal: StorageRefusal | null = null,
+  ) {
+    super(status, message, "MyFilesRequestError", refusal);
   }
 }
 
@@ -58,9 +63,11 @@ export async function listMyFiles(): Promise<MyFilesListResponse> {
     cache: "no-store",
   });
   if (!response.ok) {
+    const failure = await readFileAreaFailure(response, "Failed to list files");
     throw new MyFilesRequestError(
       response.status,
-      await readErrorDetail(response, "Failed to list files"),
+      failure.message,
+      failure.refusal,
     );
   }
   return response.json() as Promise<MyFilesListResponse>;
@@ -69,9 +76,14 @@ export async function listMyFiles(): Promise<MyFilesListResponse> {
 export async function deleteMyFile(path: string): Promise<void> {
   const response = await fetch(urlOfMyFile(path), { method: "DELETE" });
   if (!response.ok) {
+    const failure = await readFileAreaFailure(
+      response,
+      "Failed to delete file",
+    );
     throw new MyFilesRequestError(
       response.status,
-      await readErrorDetail(response, "Failed to delete file"),
+      failure.message,
+      failure.refusal,
     );
   }
 }
@@ -89,9 +101,11 @@ export async function keepInMyFiles(
     },
   );
   if (!response.ok) {
+    const failure = await readFileAreaFailure(response, "Failed to keep file");
     throw new MyFilesRequestError(
       response.status,
-      await readErrorDetail(response, "Failed to keep file"),
+      failure.message,
+      failure.refusal,
     );
   }
   return response.json() as Promise<MyFileInfo>;

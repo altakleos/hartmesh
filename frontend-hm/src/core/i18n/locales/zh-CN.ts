@@ -183,13 +183,30 @@ export function createZhCN(product: string): Translations {
       nonhuman: "AI 员工",
     },
     agentInstances: {
+      administratorSupport: "管理员",
+      providerFallback: "服务提供方",
+      unavailable: {
+        diskTooSmall: (provider) =>
+          `文件暂时不可用：部署的存储小于配置要求。在 ${provider} 修复前，对话可以继续，但无法使用文件。`,
+        storageMissing: (provider) =>
+          `文件暂时不可用：存储尚未设置。在 ${provider} 修复前，对话可以继续，但无法使用文件。`,
+        storageUnreadable: (provider) =>
+          `文件暂时不可用：无法读取存储。其中的所有内容都已保留。在 ${provider} 修复前，对话可以继续，但无法使用文件。`,
+        serverNotReadyFiles: (provider) =>
+          `文件暂时不可用：服务器尚未完成安全保存文件的设置。在 ${provider} 修复前，对话可以继续，但无法使用文件。`,
+        serverCheckFailedFiles: (provider) =>
+          `文件暂时不可用：服务器安全检查未通过。所有文件都已保留。在 ${provider} 修复前，对话可以继续，但无法使用文件。`,
+        next: (provider) => `请联系 ${provider} 修复此问题。`,
+        reference: (code) => `支持参考：${code}`,
+        askAdmin: "请联系管理员。",
+      },
       unconfirmed: "尚未确认请求结果。请刷新或重试同一请求以检查状态。",
       abandon: "放弃已隔离的操作",
       abandoned: "已放弃过时的操作，未更改权限或重新激活智能体。",
 
       title: "智能体实例",
       description: "拥有独立主目录和记忆的持久化个人与公司智能体。",
-      unavailable: "持久化实例需要启用智能体管理并配置合格的存储空间。",
+      legacyUnavailable: "持久化实例需要启用智能体管理并配置合格的存储空间。",
       name: "名称",
       custody: "归属",
       personal: "个人",
@@ -637,6 +654,22 @@ export function createZhCN(product: string): Translations {
       pleaseWaitStreaming: "请等待当前响应完成。",
     },
 
+    chat: {
+      filesFull: (support) =>
+        `您的文件存储已满，无法开始新对话。请删除“我的文件”中的文件或旧对话，然后重新开始对话。如果仍然不够，请联系${support}增加存储。`,
+      filesPreparing: (support) =>
+        `您的文件正在准备中。目前对话可以继续，但无法使用这些文件。如果超过一小时仍未完成，请联系${support}。`,
+      filesNoSeat: (administrator, provider) =>
+        administrator
+          ? `您的账号无法使用文件：这里的账号数超过了席位数。请联系 ${provider} 增加席位。`
+          : "您的账号无法使用文件，因此对话可以继续，但无法使用文件。请联系管理员。",
+      filesUnavailable:
+        "文件暂时不可用。修复前，对话可以继续，但无法使用文件。",
+      myFilesUnchecked:
+        "您的文件未通过安全检查，因此对话可以继续，但无法使用这些文件。其中的所有内容都已保留。",
+    },
+    auth: { noSeats: "这里没有空闲席位可供新账号使用。请联系管理员。" },
+
     // Sidebar
     sidebar: {
       newChat: "新对话",
@@ -651,6 +684,9 @@ export function createZhCN(product: string): Translations {
     },
 
     files: {
+      saveFull: (support) =>
+        `您的文件存储已满，无法保存到“我的文件”。请删除“我的文件”中的文件或旧对话，然后重试。如果仍然不够，请联系${support}增加存储。`,
+      busy: "您的文件正在更改中。请稍后重试。",
       title: "我的文件",
       filterLabel: "查找已加载的文件",
       filterPlaceholder: "名称或文件夹",
@@ -698,6 +734,10 @@ export function createZhCN(product: string): Translations {
     },
 
     shared: {
+      full: (support) =>
+        `公司的共享文件存储已满，无法共享此文件。请移除您共享且不再需要的文件，或联系${support}增加存储。`,
+      busy: "共享文件正在更改中。请稍后重试。",
+      unchecked: "共享文件未通过安全检查，无法打开。其中的所有内容都已保留。",
       title: "共享",
       description:
         "公司里任何人共享的文件。这里的每个人都能在任何对话中打开它们。",
@@ -1225,6 +1265,8 @@ export function createZhCN(product: string): Translations {
     },
 
     uploads: {
+      filesFull: (file, support) =>
+        `您的文件存储已满，未添加 ${file}。请删除“我的文件”中的文件或旧对话，然后重试。如果仍然不够，请联系${support}增加存储。`,
       uploading: "上传中...",
       uploadingFiles: "文件上传中，请稍候...",
       limitsHint: (
@@ -1731,6 +1773,14 @@ export function createZhCN(product: string): Translations {
         disableNotification: "关闭通知",
       },
       account: {
+        seats: (count, max) =>
+          count > max
+            ? `${count.toLocaleString()} 个账号，${max.toLocaleString()} 个席位。每个账号占用一个席位，超过席位数的账号可以继续对话，但无法使用文件。`
+            : `已使用 ${max.toLocaleString()} 个席位中的 ${count.toLocaleString()} 个。每个账号占用一个席位。`,
+        noSeats: (max, provider) =>
+          `全部${max === null ? "" : " " + max.toLocaleString() + " 个"}席位都已使用，无法添加账号。请联系 ${provider} 增加席位，或告知 ${provider} 哪些人的账号已不再需要。`,
+        noSeatsSignOn: (max, provider) =>
+          `全部 ${max.toLocaleString()} 个席位都已使用，新用户无法登录。请联系 ${provider} 增加席位，或告知 ${provider} 哪些人的账号已不再需要。`,
         profileTitle: "个人信息",
         email: "邮箱",
         role: "角色",

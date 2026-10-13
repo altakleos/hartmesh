@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
 import { useEffect } from "react";
 
 import { useAuth } from "@/core/auth/AuthProvider";
@@ -12,11 +12,19 @@ import {
   selectMcpTasksEnabled,
   selectSubagentBatchesCapability,
   selectStorageSpacesEnabled,
+  selectStorageState,
+  selectSeats,
   selectWorkspacePresentation,
 } from "./api";
 
 /** All feature observers share transport, retries and the identity's cache. */
-export function useFeatures<T>(select: (features: FeaturesResponse) => T) {
+export function useFeatures<T>(
+  select: (features: FeaturesResponse) => T,
+  options: Pick<
+    UseQueryOptions<FeaturesResponse, Error, T>,
+    "refetchInterval"
+  > = {},
+) {
   const { user } = useAuth();
   return useQuery({
     queryKey: ["features", user?.id ?? null, user?.system_role ?? null],
@@ -27,6 +35,7 @@ export function useFeatures<T>(select: (features: FeaturesResponse) => T) {
     staleTime: 0,
     refetchOnMount: true,
     retry: 2,
+    ...options,
   });
 }
 
@@ -84,6 +93,31 @@ export function useMcpTasksEnabled() {
 export function useStorageSpacesEnabled() {
   const { data, isPending, isError } = useFeatures(selectStorageSpacesEnabled);
   return { enabled: !isError && data === true, isLoading: isPending };
+}
+
+export function useStorage() {
+  const query = useFeatures(selectStorageState, {
+    refetchInterval: (query) =>
+      !query.state.error &&
+      selectStorageState(query.state.data).own === "not-assigned"
+        ? 15_000
+        : false,
+  });
+  return {
+    ...(query.isError
+      ? selectStorageState(undefined)
+      : (query.data ?? selectStorageState(undefined))),
+    isLoading: query.isPending,
+    dataUpdatedAt: query.dataUpdatedAt,
+    refetch: query.refetch,
+  };
+}
+
+export function useSeats() {
+  const query = useFeatures(selectSeats);
+  return !query.isError && query.data
+    ? { ...query.data, isLoading: query.isPending }
+    : null;
 }
 
 export function useSubagentBatchesCapability() {

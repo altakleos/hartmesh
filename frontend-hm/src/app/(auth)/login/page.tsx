@@ -50,8 +50,11 @@ export default function LoginPage() {
 
   // Extract error from query params (e.g., ?error=sso_failed)
   const errorParam = searchParams.get("error");
+  const [noSeatsError, setNoSeatsError] = useState(
+    errorParam === "no_seats_left",
+  );
   const [error, setError] = useState(
-    errorParam
+    errorParam && errorParam !== "no_seats_left"
       ? (t.login.errors[errorParam as keyof typeof t.login.errors] ??
           t.login.authFailed)
       : "",
@@ -155,6 +158,7 @@ export default function LoginPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setNoSeatsError(false);
     setShowSsoHint(false);
     setLoading(true);
 
@@ -190,7 +194,8 @@ export default function LoginPage() {
       if (!res.ok) {
         const data = await res.json();
         const authError = parseAuthError(data);
-        setError(authError.message);
+        setNoSeatsError(authError.code === "no_seats_left");
+        setError(authError.code === "no_seats_left" ? "" : authError.message);
         // On a failed login with SSO configured, surface a hint pointing at the
         // SSO buttons — the "wrong password" may really mean "this is an SSO account".
         if (isLogin && ssoProviders.length > 0) {
@@ -283,13 +288,15 @@ export default function LoginPage() {
           </p>
         )}
 
-        {signOnOnly && error && (
+        {signOnOnly && (error || noSeatsError) && (
           <p role="alert" className="text-sm text-red-500">
-            {(errorParam &&
-              t.login.signOnOnlyErrors[
-                errorParam as keyof typeof t.login.signOnOnlyErrors
-              ]) ??
-              error}
+            {noSeatsError
+              ? t.auth.noSeats
+              : ((errorParam &&
+                  t.login.signOnOnlyErrors[
+                    errorParam as keyof typeof t.login.signOnOnlyErrors
+                  ]) ??
+                error)}
           </p>
         )}
 
@@ -328,7 +335,11 @@ export default function LoginPage() {
               onCheckedChange={setRememberMe}
             />
 
-            {error && <p className="text-sm text-red-500">{error}</p>}
+            {(error || noSeatsError) && (
+              <p className="text-sm text-red-500">
+                {noSeatsError ? t.auth.noSeats : error}
+              </p>
+            )}
 
             <Button type="submit" className="w-full" disabled={loading}>
               {loading
@@ -383,6 +394,7 @@ export default function LoginPage() {
               onClick={() => {
                 setIsLogin(!isLogin);
                 setError("");
+                setNoSeatsError(false);
                 setShowSsoHint(false);
               }}
               className="text-blue-500 hover:underline"

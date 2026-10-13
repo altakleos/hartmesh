@@ -3,8 +3,9 @@ import { useRouter } from "next/navigation";
 import { useCallback } from "react";
 import { toast } from "sonner";
 
-import { messageForFileAreaError } from "../file-areas";
+import { useStorage } from "../features";
 import { useFileActionLifetime } from "../file-areas/file-action-lifetime";
+import { useStorageCopy } from "../file-areas/storage-copy";
 import { useI18n } from "../i18n/hooks";
 
 import {
@@ -71,11 +72,15 @@ export function useShareWithEveryone(threadId?: string) {
   const publish = usePublishToShared();
   const remove = useRemoveSharedFile();
   const lifetime = useFileActionLifetime();
+  const copy = useStorageCopy("shared");
+  const storage = useStorage();
+  const available = storage.state !== "unavailable";
   const openShared = useCallback(() => {
     if (lifetime.active) router.push("/workspace/files?tab=shared");
   }, [lifetime, router]);
   const share = useCallback(
     async (paths: readonly string[], folder?: string) => {
+      if (!available) return [];
       const outcomes: { path: string; outcome: PublishOutcome }[] = [];
       let failed = 0;
       let lastFailure: unknown = null;
@@ -101,10 +106,12 @@ export function useShareWithEveryone(threadId?: string) {
       if (!lifetime.active) return published;
       if (failed > 0) {
         lifetime.toasts.add(
-          toast.error(
+          copy.error(
+            lastFailure,
+            t.shared.shareFailed,
             published.length > 0
               ? t.shared.sharedSome(published.length, paths.length)
-              : messageForFileAreaError(lastFailure, t.shared.shareFailed),
+              : undefined,
           ),
         );
         return published;
@@ -166,9 +173,7 @@ export function useShareWithEveryone(threadId?: string) {
                     if (!lifetime.active) return;
                     console.error("Undo share failed:", error);
                     lifetime.toasts.add(
-                      toast.error(
-                        messageForFileAreaError(error, t.shared.removeFailed),
-                      ),
+                      toast.error(copy.message(error, t.shared.removeFailed)),
                     );
                   }
                 })();
@@ -179,11 +184,22 @@ export function useShareWithEveryone(threadId?: string) {
       );
       return published;
     },
-    [lifetime, openShared, publish, remove, t.shared, threadId],
+    [
+      available,
+      copy,
+      lifetime,
+      openShared,
+      publish,
+      remove,
+      t.shared,
+      threadId,
+    ],
   );
   return {
     share,
     openShared,
     isPending: publish.isPending,
+    available,
+    unavailableTooltip: t.chat.filesUnavailable,
   };
 }

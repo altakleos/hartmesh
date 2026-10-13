@@ -9,6 +9,7 @@ rs.mock("@/core/config", () => ({
 }));
 
 import { fetch as fetcher } from "@/core/api/fetcher";
+import { readStorageRefusal } from "@/core/file-areas/storage-state";
 import { deleteUploadedFile, uploadFiles } from "@/core/uploads/api";
 
 const mockedFetch = rs.mocked(fetcher);
@@ -40,6 +41,27 @@ beforeEach(() => {
 });
 
 describe("uploads api", () => {
+  test("carries capacity and no-seat refusals without turning them into JSON text", async () => {
+    for (const [status, detail] of [
+      [507, { code: "files-full", message: "server text" }],
+      [
+        503,
+        {
+          code: "storage-unavailable",
+          reason: "space-not-assigned",
+          detail_code: "no-seat",
+          message: "server text",
+        },
+      ],
+    ] as const) {
+      const error = await uploadError(jsonResponse(status, { detail }));
+      expect(readStorageRefusal(error)).toMatchObject({
+        status,
+        code: detail.code,
+        message: "server text",
+      });
+    }
+  });
   test("preserves string error details", async () => {
     const error = await uploadError(
       jsonResponse(413, { detail: "File exceeds the upload limit" }),

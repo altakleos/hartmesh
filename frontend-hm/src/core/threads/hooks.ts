@@ -18,6 +18,11 @@ import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { cancelActiveThreadRun, getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
 import {
+  observeSubmission,
+  submissionErrorOrigin,
+  type SubmissionOrigin,
+} from "../api/submission-lifecycle";
+import {
   parseArtifactDeliveryFailure,
   parseArtifactDeliveryUnverified,
   threadDeliveryQueryKey,
@@ -25,6 +30,10 @@ import {
 } from "../artifact-delivery";
 import { getBackendBaseURL } from "../config";
 import { useFileActionLifetime } from "../file-areas/file-action-lifetime";
+import {
+  readStorageRefusal,
+  type StorageRefusal,
+} from "../file-areas/storage-state";
 import { useI18n } from "../i18n/hooks";
 import { getMessageRunId } from "../messages/run-duration";
 import {
@@ -93,13 +102,30 @@ export type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
   /**
-   * Invoked exactly once when the send passes the in-flight guard and is
-   * genuinely dispatched. It never fires on the early-return path, so callers
+   * Invoked exactly once when the server admits this send. It never fires
+   * for a blocked or refused submission, so callers
    * can safely perform one-time cleanup (e.g. clearing quoted references)
    * without losing state when a concurrent send is dropped.
    */
   onSent?: () => void;
 };
+
+export interface ThreadRunRefusal {
+  sequence: number;
+  threadId: string;
+  phase: "upload" | "send";
+  message?: PromptInputMessage;
+  newThread: boolean;
+  storageObservedAt?: number;
+  refusal: StorageRefusal;
+}
+
+export class ThreadSendNotAdmittedError extends Error {
+  constructor() {
+    super("A send or Stop is still awaiting confirmation.");
+    this.name = "ThreadSendNotAdmittedError";
+  }
+}
 
 type ThreadDeleteClient = {
   threads: {
@@ -1686,6 +1712,33 @@ export function useThreadStream({
   const [pendingSupersededMessageIds, setPendingSupersededMessageIds] =
     useState<ReadonlySet<string>>(() => new Set());
   const [isUploading, setIsUploading] = useState(false);
+  const [runRefusal, setRunRefusal] = useState<ThreadRunRefusal | null>(null);
+  const refusalSequence = useRef(0);
+  const pendingSend = useRef<
+    | (Omit<ThreadRunRefusal, "refusal"> & {
+        accepted: boolean;
+        reported: boolean;
+        failure?: unknown;
+        admission: Promise<void>;
+        settleAdmission: () => void;
+        runId?: string;
+        retired: boolean;
+      })
+    | null
+  >(null);
+  const admittedSubmissions = useRef(
+    new Map<string, NonNullable<typeof pendingSend.current>>(),
+  );
+  useEffect(
+    () => () => {
+      const pending = pendingSend.current;
+      if (pending) {
+        pending.retired = true;
+        pending.settleAdmission();
+      }
+    },
+    [],
+  );
   const [stoppingThreadId, setStoppingThreadId] = useState<string | null>(null);
   const stoppingThreadIdRef = useRef<string | null>(null);
   // Track the thread ID that is currently streaming to handle thread changes during streaming
@@ -1763,6 +1816,58 @@ export function useThreadStream({
   }, []);
 
   const queryClient = useQueryClient();
+  const recordStorageRefusal = useCallback(
+    (
+      error: unknown,
+      phase?: "upload" | "send",
+      meta?: { run_id: string; thread_id: string },
+      captured?: SubmissionOrigin,
+    ) => {
+      const refusal = readStorageRefusal(error);
+      if (!refusal) return false;
+      const origin =
+        captured ??
+        submissionErrorOrigin(error) ??
+        (meta ? admittedSubmissions.current.get(meta.run_id) : undefined);
+      if (origin && (origin.retired || origin !== pendingSend.current))
+        return true;
+      const pending = origin ? pendingSend.current : null;
+      if (pending) pending.failure = error;
+      const failedThreadId =
+        pending?.threadId ??
+        meta?.thread_id ??
+        threadIdRef.current ??
+        currentViewThreadIdRef.current;
+      if (!failedThreadId || failedThreadId !== currentViewThreadIdRef.current)
+        return true;
+      if (pending?.reported) return true;
+      if (pending) pending.reported = true;
+      const sequence = pending?.sequence ?? ++refusalSequence.current;
+      const storageObservedAt = Math.max(
+        0,
+        ...queryClient
+          .getQueryCache()
+          .findAll({ queryKey: ["features"] })
+          .map((query) => query.state.dataUpdatedAt),
+      );
+      setRunRefusal((previous) =>
+        previous?.sequence === sequence
+          ? previous
+          : {
+              sequence,
+              threadId: failedThreadId,
+              phase: phase ?? pending?.phase ?? "send",
+              message: pending?.message,
+              newThread: pending?.newThread === true && !pending.accepted,
+              storageObservedAt,
+              refusal,
+            },
+      );
+      void queryClient.invalidateQueries({ queryKey: ["features"] });
+      return true;
+    },
+    [queryClient],
+  );
   const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
   const { recordFailure: recordDeliveryFailure } = useArtifactDeliveryContext();
@@ -1801,6 +1906,14 @@ export function useThreadStream({
     // Keep explicit: SDK types claim @default true, but runtime uses throttle ?? false.
     throttle: true,
     onCreated(meta) {
+      const origin = admittedSubmissions.current.get(meta.run_id);
+      if (origin && (origin.retired || origin !== pendingSend.current)) return;
+      if (pendingSend.current && origin !== pendingSend.current) return;
+      if (
+        currentViewThreadIdRef.current &&
+        meta.thread_id !== currentViewThreadIdRef.current
+      )
+        return;
       handleStreamStart(meta.thread_id, meta.run_id);
       const now = new Date().toISOString();
       upsertThreadInSearchCache(queryClient, {
@@ -1985,7 +2098,17 @@ export function useThreadStream({
         }
       }
     },
-    onError(error) {
+    onError(error, meta) {
+      const origin =
+        submissionErrorOrigin(error) ??
+        (meta ? admittedSubmissions.current.get(meta.run_id) : undefined);
+      if (origin && (origin.retired || origin !== pendingSend.current)) return;
+      if (
+        meta &&
+        currentViewThreadIdRef.current &&
+        meta.thread_id !== currentViewThreadIdRef.current
+      )
+        return;
       if (threadIdRef.current) clearTurnProgress(threadIdRef.current);
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
@@ -1993,7 +2116,8 @@ export function useThreadStream({
       pendingPreparedReplayRef.current = null;
       setPendingSupersededRunIds(new Set());
       setPendingSupersededMessageIds(new Set());
-      toast.error(getStreamErrorMessage(error));
+      if (!recordStorageRefusal(error, undefined, meta))
+        toast.error(getStreamErrorMessage(error));
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
           .map(messageIdentity)
@@ -2008,7 +2132,17 @@ export function useThreadStream({
         });
       }
     },
-    onFinish(state) {
+    onFinish(state, meta) {
+      const origin = meta
+        ? admittedSubmissions.current.get(meta.run_id)
+        : undefined;
+      if (origin && (origin.retired || origin !== pendingSend.current)) return;
+      if (
+        meta &&
+        currentViewThreadIdRef.current &&
+        meta.thread_id !== currentViewThreadIdRef.current
+      )
+        return;
       if (threadIdRef.current) clearTurnProgress(threadIdRef.current);
       listeners.current.onFinish?.(state.values);
       pendingPreparedReplayRef.current = null;
@@ -2029,6 +2163,7 @@ export function useThreadStream({
     setStoppingThreadId(stoppedThreadId);
     if (stoppedThreadId) clearTurnProgress(stoppedThreadId);
     const pendingReplay = pendingPreparedReplayRef.current;
+    const stoppedSubmission = pendingSend.current;
     try {
       await stopThreadAndInvalidateCaches(
         queryClient,
@@ -2036,6 +2171,14 @@ export function useThreadStream({
         stoppedThreadId,
         isMock,
       );
+      if (stoppedSubmission) {
+        stoppedSubmission.retired = true;
+        stoppedSubmission.failure = new DOMException(
+          "The submission was stopped",
+          "AbortError",
+        );
+        stoppedSubmission.settleAdmission();
+      }
       if (pendingReplay) {
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
@@ -2123,7 +2266,8 @@ export function useThreadStream({
   // optimistic messages and in-flight guards do not leak across chat views.
   useEffect(() => {
     startedRef.current = false;
-    sendInFlightRef.current = false;
+    if (!pendingSend.current || pendingSend.current.accepted)
+      sendInFlightRef.current = false;
     messagesRef.current = [];
     transientHistoryBridgeRef.current = [];
     transientHistoryOrderRef.current = [];
@@ -2222,14 +2366,35 @@ export function useThreadStream({
       extraContext?: Record<string, unknown>,
       options?: SendMessageOptions,
     ) => {
-      if (sendInFlightRef.current || stoppingThreadIdRef.current === threadId) {
-        return;
+      if (sendInFlightRef.current || stoppingThreadIdRef.current !== null) {
+        throw new ThreadSendNotAdmittedError();
       }
       sendInFlightRef.current = true;
+      let settleAdmission!: () => void;
+      const admission = new Promise<void>((resolve) => {
+        settleAdmission = resolve;
+      });
+      const pending = {
+        sequence: ++refusalSequence.current,
+        threadId,
+        phase: "send" as "upload" | "send",
+        message: { ...message, files: [...message.files] } as
+          | PromptInputMessage
+          | undefined,
+        newThread: !startedRef.current && !onStreamThreadId,
+        accepted: false,
+        reported: false,
+        failure: undefined as unknown,
+        admission,
+        settleAdmission,
+        runId: undefined as string | undefined,
+        retired: false,
+      };
+      pendingSend.current = pending;
+      setRunRefusal(null);
 
       // The send has genuinely proceeded past the in-flight guard, so callers
       // can now run one-time cleanup that must not fire on the dropped path.
-      options?.onSent?.();
 
       const text = message.text.trim();
 
@@ -2290,6 +2455,7 @@ export function useThreadStream({
       try {
         // Upload files first if any
         if (message.files && message.files.length > 0) {
+          pending.phase = "upload";
           setIsUploading(true);
           try {
             const filePromises = message.files.map((fileUIPart) =>
@@ -2336,7 +2502,8 @@ export function useThreadStream({
               error instanceof Error
                 ? error.message
                 : "Failed to upload files.";
-            toast.error(errorMessage);
+            if (!recordStorageRefusal(error, "upload", undefined, pending))
+              toast.error(errorMessage);
             setOptimisticMessages([]);
             setOptimisticThreadId(null);
             setLiveMessagesThreadId(null);
@@ -2347,6 +2514,7 @@ export function useThreadStream({
         }
 
         // Build files metadata for submission (included in additional_kwargs)
+        pending.phase = "send";
         const filesForSubmit: FileInMessage[] = uploadedFileInfo.map(
           (info) => ({
             filename: info.filename,
@@ -2356,42 +2524,86 @@ export function useThreadStream({
           }),
         );
 
-        await thread.submit(
-          {
-            messages: buildThreadSubmitMessages({
-              text,
-              additionalKwargs: options?.additionalKwargs,
-              additionalInputMessages: options?.additionalInputMessages,
-              filesForSubmit,
-            }),
+        const input = {
+          messages: buildThreadSubmitMessages({
+            text,
+            additionalKwargs: options?.additionalKwargs,
+            additionalInputMessages: options?.additionalInputMessages,
+            filesForSubmit,
+          }),
+        };
+        const metadata = {};
+        observeSubmission(input, metadata, {
+          origin: pending,
+          created(meta) {
+            admittedSubmissions.current.set(meta.run_id, pending);
+            if (admittedSubmissions.current.size > 64)
+              admittedSubmissions.current.delete(
+                admittedSubmissions.current.keys().next().value!,
+              );
+            if (pending.retired) return;
+            if (meta.thread_id !== pending.threadId) {
+              pending.failure = new Error(
+                "Run admission did not match the submitted conversation.",
+              );
+            } else {
+              pending.accepted = true;
+              pending.runId = meta.run_id;
+              // Admission owns these bytes now. A later run error must not
+              // restore an accepted draft or retain its browser File objects.
+              pending.message = undefined;
+            }
+            pending.settleAdmission();
           },
-          {
-            threadId: threadId,
-            // No streamSubgraphs: subtask progress arrives via root-namespace
-            // custom events, while subgraph frames would leak a delegated
-            // subagent's values/messages into the thread view (#4399).
-            streamResumable: true,
-            config: {
-              recursion_limit: 1000,
-            },
-            context: {
-              ...extraContext,
-              ...context,
-              ...options?.modelContext,
-              ...runFlagsForMode(
-                options?.modelContext?.mode ?? context.mode,
-                options?.modelContext?.reasoning_effort ??
-                  context.reasoning_effort,
-              ),
-              thread_id: threadId,
-            },
+          failed(error) {
+            if (pending.retired) return;
+            pending.failure = error;
+            pending.settleAdmission();
           },
-        );
+        });
+        await thread.submit(input, {
+          threadId: threadId,
+          metadata,
+          // No streamSubgraphs: subtask progress arrives via root-namespace
+          // custom events, while subgraph frames would leak a delegated
+          // subagent's values/messages into the thread view (#4399).
+          streamResumable: true,
+          config: {
+            recursion_limit: 1000,
+          },
+          context: {
+            ...extraContext,
+            ...context,
+            ...options?.modelContext,
+            ...runFlagsForMode(
+              options?.modelContext?.mode ?? context.mode,
+              options?.modelContext?.reasoning_effort ??
+                context.reasoning_effort,
+            ),
+            thread_id: threadId,
+          },
+        });
+        // submit can resolve before its HTTP callback. Admission, rather than
+        // stream completion, owns the draft/attachments and the send guard.
+        await pending.admission;
+        // The SDK reports failures through onError and still resolves submit.
+        // Reject this request so the composer retains its submitted attachments.
+        if (pending.failure !== undefined)
+          throw pending.failure instanceof Error
+            ? pending.failure
+            : Object.assign(new Error("File operation refused"), {
+                refusal: readStorageRefusal(pending.failure),
+              });
+        if (pending.retired || !pending.accepted)
+          throw new ThreadSendNotAdmittedError();
+        options?.onSent?.();
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
         void queryClient.invalidateQueries({
           queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
         });
       } catch (error) {
+        recordStorageRefusal(error, pending.phase, undefined, pending);
+        if (pending.retired || pendingSend.current !== pending) throw error;
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
@@ -2399,7 +2611,13 @@ export function useThreadStream({
         localTurnOrderBaselineIdentitiesRef.current = null;
         throw error;
       } finally {
-        sendInFlightRef.current = false;
+        pending.settleAdmission();
+        // Retain admitted run identity until the next send. An older run's
+        // callbacks cannot refuse or settle that later admission.
+        if (pendingSend.current === pending) {
+          if (!pending.accepted || pending.retired) pendingSend.current = null;
+          sendInFlightRef.current = false;
+        }
       }
     },
     [
@@ -2409,6 +2627,8 @@ export function useThreadStream({
       queryClient,
       humanMessageCount,
       persistedMessages,
+      recordStorageRefusal,
+      onStreamThreadId,
     ],
   );
 
@@ -2424,11 +2644,16 @@ export function useThreadStream({
       getSupersededMessageIds: (prepared: TPrepared) => string[];
       getOptimisticMessages?: (prepared: TPrepared) => Message[];
     }) => {
-      if (sendInFlightRef.current || !threadId) {
+      if (
+        sendInFlightRef.current ||
+        stoppingThreadIdRef.current !== null ||
+        !threadId
+      ) {
         return false;
       }
       sendInFlightRef.current = true;
       prevHumanMsgCountRef.current = humanMessageCount;
+      pendingSend.current = null;
       pendingUsageBaselineMessageIdsRef.current = new Set(
         persistedMessages
           .map(messageIdentity)
@@ -2742,6 +2967,8 @@ export function useThreadStream({
     isHistoryLoading,
     hasMoreHistory,
     loadMoreHistory,
+    runRefusal:
+      runRefusal?.threadId === currentViewThreadId ? runRefusal : null,
   } as const;
 }
 

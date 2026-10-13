@@ -17,6 +17,14 @@ const pluginState = rs.hoisted(() => ({
 rs.mock("@/core/extensions/hooks", () => ({
   useFrontendExtensions: () => pluginState,
 }));
+const lifetime = rs.hoisted(() => ({
+  active: true,
+  signal: new AbortController().signal,
+  toasts: new Set<string | number>(),
+}));
+rs.mock("@/core/file-areas/file-action-lifetime", () => ({
+  useFileActionLifetime: () => lifetime,
+}));
 
 /**
  * The Files page: what the person kept, from every conversation.
@@ -68,7 +76,28 @@ rs.mock("next/navigation", () => ({
 }));
 rs.mock("sonner", () => ({ toast: { success: rs.fn(), error: rs.fn() } }));
 // The tab title asks the deployment whose workspace this is; not what this is about.
-rs.mock("@/core/features", () => ({ useDocumentTitle: () => undefined }));
+const storage = rs.hoisted(() => ({
+  known: true,
+  enabled: false,
+  state: "off",
+  reason: null as string | null,
+  own: "ready",
+  userSpaces: false,
+  isLoading: false,
+  dataUpdatedAt: 0,
+}));
+const viewer = rs.hoisted(() => ({
+  user: { id: "default", system_role: "user" as "user" | "admin" },
+}));
+rs.mock("@/core/auth/AuthProvider", () => ({ useAuth: () => viewer }));
+rs.mock("@/core/features", () => ({
+  useDocumentTitle: () => undefined,
+  useStorage: () => storage,
+  useBranding: () => ({
+    providerName: "Acme",
+    supportURL: "https://support.example.com/help",
+  }),
+}));
 rs.mock("@/components/workspace/workspace-container", () => ({
   WorkspaceContainer: ({ children }: { children: React.ReactNode }) => (
     <div>{children}</div>
@@ -142,8 +171,11 @@ rs.mock("@/core/files/hooks", () => ({
 
 import FilesPage from "@/app/workspace/files/page";
 import type { LoadedContribution } from "@/core/extensions/registry";
+import { readStorageRefusal } from "@/core/file-areas/storage-state";
+import { MyFilesRequestError } from "@/core/files/api";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
+import { SharedRequestError } from "@/core/shared/api";
 
 import { legacyReportContribution } from "../../../helpers/legacy-report";
 
@@ -207,6 +239,18 @@ function openSharedTab() {
 
 describe("FilesPage", () => {
   beforeEach(() => {
+    Object.assign(storage, {
+      known: true,
+      enabled: false,
+      state: "off",
+      reason: null,
+      own: "ready",
+      userSpaces: false,
+      isLoading: false,
+      dataUpdatedAt: 0,
+    });
+    viewer.user.id = "default";
+    viewer.user.system_role = "user";
     pluginState.data = [legacyReportContribution()];
     pluginState.isPending = false;
     pluginState.isError = false;
@@ -227,7 +271,227 @@ describe("FilesPage", () => {
     window.history.replaceState(null, "", "/workspace/files");
   });
 
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    rs.restoreAllMocks();
+  });
+
+  it.each(["not-assigned", "no-seat", "unverified"])(
+    "keeps Shared usable when personal files are %s",
+    (own) => {
+      Object.assign(storage, { enabled: true, state: "incomplete", own });
+      renderPage();
+      const text =
+        own === "not-assigned"
+          ? enUS.chat.filesPreparing("an administrator")
+          : own === "no-seat"
+            ? enUS.chat.filesNoSeat(false, "Acme")
+            : enUS.chat.myFilesUnchecked;
+      expect(screen.getByText(text)).toBeTruthy();
+      expect(screen.queryByTestId("my-files-list")).toBeNull();
+      openSharedTab();
+      expect(screen.getByTestId("shared-files-list")).toBeTruthy();
+    },
+  );
+
+  it("replaces both lists for deployment storage failure without hiding the tabs", () => {
+    Object.assign(storage, {
+      enabled: true,
+      state: "unavailable",
+      reason: "storage-pool-missing",
+    });
+    renderPage();
+    expect(screen.getByText(enUS.chat.filesUnavailable)).toBeTruthy();
+    expect(screen.queryByTestId("my-files-list")).toBeNull();
+    openSharedTab();
+    expect(screen.getByText(enUS.chat.filesUnavailable)).toBeTruthy();
+    expect(screen.queryByTestId("shared-files-list")).toBeNull();
+    expect(screen.getAllByRole("tab")).toHaveLength(2);
+    expect(screen.queryByRole("link", { name: /support/ })).toBeNull();
+  });
+
+  it("gives an administrator the provider and safe reference in place of raw list error text", () => {
+    viewer.user.system_role = "admin";
+    const refusal = readStorageRefusal({
+      status: 503,
+      code: "storage-unavailable",
+      reason: "storage-pool-missing",
+      message: "raw pool geometry",
+    });
+    files.error = new MyFilesRequestError(503, "raw pool geometry", refusal);
+    renderPage();
+    expect(
+      screen.getByText(enUS.agentInstances.unavailable.storageMissing("Acme")),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        enUS.agentInstances.unavailable.reference("storage-missing"),
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText("raw pool geometry")).toBeNull();
+  });
+
+  it("retains a deployment-wide list refusal across tabs until fresh discovery", () => {
+    files.error = new MyFilesRequestError(
+      503,
+      "raw",
+      readStorageRefusal({
+        status: 503,
+        code: "storage-unavailable",
+        reason: "disk-too-small",
+      }),
+    );
+    renderPage();
+    expect(screen.getByText(enUS.chat.filesUnavailable)).toBeTruthy();
+    openSharedTab();
+    expect(screen.queryByTestId("shared-files-list")).toBeNull();
+    expect(screen.getByText(enUS.chat.filesUnavailable)).toBeTruthy();
+  });
+
+  it("clears a retained deployment refusal after fresh discovery", () => {
+    files.error = new MyFilesRequestError(
+      503,
+      "raw",
+      readStorageRefusal({
+        status: 503,
+        code: "storage-unavailable",
+        reason: "disk-too-small",
+      }),
+    );
+    const view = renderPage();
+    openSharedTab();
+    expect(screen.queryByTestId("shared-files-list")).toBeNull();
+    storage.dataUpdatedAt = 1;
+    view.rerender(
+      <I18nContext.Provider
+        value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+      >
+        <FilesPage />
+      </I18nContext.Provider>,
+    );
+    expect(screen.getByTestId("shared-files-list")).toBeTruthy();
+  });
+
+  it("clears a deployment refusal when the account changes without inheriting its cached files", () => {
+    files.error = new MyFilesRequestError(
+      503,
+      "raw",
+      readStorageRefusal({
+        status: 503,
+        code: "storage-unavailable",
+        reason: "disk-too-small",
+      }),
+    );
+    const view = renderPage();
+    openSharedTab();
+    expect(screen.queryByTestId("shared-files-list")).toBeNull();
+    viewer.user.id = "another-account";
+    shared.data = { files: [], count: 0, truncated: false };
+    view.rerender(
+      <I18nContext.Provider
+        value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+      >
+        <FilesPage />
+      </I18nContext.Provider>,
+    );
+    expect(screen.getByTestId("shared-files-empty")).toBeTruthy();
+    expect(screen.queryByText(enUS.chat.filesUnavailable)).toBeNull();
+  });
+
+  it("retries a retained preparing list after newer readiness and bounds retries when discovery disagrees", () => {
+    Object.assign(storage, {
+      enabled: true,
+      state: "incomplete",
+      own: "not-assigned",
+    });
+    files.error = new MyFilesRequestError(
+      503,
+      "preparing",
+      readStorageRefusal({
+        status: 503,
+        code: "storage-unavailable",
+        reason: "space-not-assigned",
+      }),
+    );
+    const view = renderPage();
+    files.refetch.mockClear();
+    Object.assign(storage, { state: "ready", own: "ready", dataUpdatedAt: 1 });
+    const tree = () => (
+      <I18nContext.Provider
+        value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+      >
+        <FilesPage />
+      </I18nContext.Provider>
+    );
+    view.rerender(tree());
+    expect(files.refetch).toHaveBeenCalledTimes(1);
+    for (let revision = 2; revision < 8; revision++) {
+      storage.dataUpdatedAt = revision;
+      files.error = new MyFilesRequestError(
+        503,
+        "still refused",
+        readStorageRefusal({
+          status: 503,
+          code: "storage-unavailable",
+          reason: "disk-too-small",
+        }),
+      );
+      view.rerender(tree());
+    }
+    expect(files.refetch).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: enUS.files.retry }));
+    expect(files.refetch).toHaveBeenCalledTimes(2);
+    files.error = null;
+    storage.dataUpdatedAt = 8;
+    view.rerender(tree());
+    expect(screen.getByTestId("my-files-list")).toBeTruthy();
+  });
+
+  it("schedules five-second busy retries and clears the actual timer on tab retirement", () => {
+    const scheduled = rs.spyOn(globalThis, "setInterval");
+    const cleared = rs.spyOn(globalThis, "clearInterval");
+    files.error = new MyFilesRequestError(
+      409,
+      "raw",
+      readStorageRefusal({ status: 409, code: "storage-busy" }),
+    );
+    renderPage();
+    const index = scheduled.mock.calls.findIndex((call) => call[1] === 5_000);
+    expect(index).toBeGreaterThanOrEqual(0);
+    const callback = scheduled.mock.calls[index]![0] as () => void;
+    act(() => callback());
+    expect(files.refetch).toHaveBeenCalledTimes(1);
+    openSharedTab();
+    expect(cleared).toHaveBeenCalledWith(scheduled.mock.results[index]!.value);
+  });
+
+  it("keeps Shared unverified and busy errors local to their tab", () => {
+    const refusal = readStorageRefusal({
+      status: 503,
+      code: "storage-unavailable",
+      reason: "space-unverified",
+    });
+    shared.error = new SharedRequestError(503, "raw", refusal);
+    renderPage();
+    expect(screen.getByTestId("my-files-list")).toBeTruthy();
+    openSharedTab();
+    expect(screen.getByText(enUS.shared.unchecked)).toBeTruthy();
+    expect(screen.queryByTestId("shared-files-list")).toBeNull();
+  });
+
+  it("shows busy and Retry in place of the affected personal list", () => {
+    files.error = new MyFilesRequestError(
+      409,
+      "raw",
+      readStorageRefusal({ status: 409, code: "storage-busy" }),
+    );
+    renderPage();
+    expect(screen.getByText(enUS.files.busy)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: enUS.files.retry }));
+    expect(files.refetch).toHaveBeenCalledTimes(1);
+    openSharedTab();
+    expect(screen.getByTestId("shared-files-list")).toBeTruthy();
+  });
 
   it("opens on the person's own files, and a link can ask for Shared", () => {
     renderPage();

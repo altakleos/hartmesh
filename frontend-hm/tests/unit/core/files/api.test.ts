@@ -9,6 +9,7 @@ rs.mock("@/core/config", () => ({
 }));
 
 import { fetch as fetcher } from "@/core/api/fetcher";
+import { readStorageRefusal } from "@/core/file-areas/storage-state";
 import {
   canKeepInMyFiles,
   deleteMyFile,
@@ -42,6 +43,30 @@ beforeEach(() => {
 });
 
 describe("my files api", () => {
+  it("preserves structured storage refusal metadata for the active locale", async () => {
+    for (const [status, detail] of [
+      [507, { code: "files-full", message: "server text" }],
+      [409, { code: "storage-busy", message: "server text" }],
+      [
+        503,
+        {
+          code: "storage-unavailable",
+          reason: "space-not-assigned",
+          detail_code: "no-seat",
+          message: "server text",
+        },
+      ],
+    ] as const) {
+      mockedFetch.mockResolvedValueOnce(jsonResponse(status, { detail }));
+      const error = await listMyFiles().catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(MyFilesRequestError);
+      expect(readStorageRefusal(error)).toMatchObject({
+        status,
+        code: detail.code,
+        message: "server text",
+      });
+    }
+  });
   it("addresses a file segment by segment", () => {
     expect(urlOfMyFile("Reports/Q3 report #2.pdf")).toBe(
       "/backend/api/files/Reports/Q3%20report%20%232.pdf",

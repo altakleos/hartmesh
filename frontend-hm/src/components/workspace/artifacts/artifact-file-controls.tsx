@@ -177,7 +177,16 @@ function FileControlsSession({
               <Button
                 variant="outline"
                 size="sm"
-                disabled={pending || selected.length === 0}
+                disabled={
+                  pending ||
+                  selected.length === 0 ||
+                  myFiles.available === false
+                }
+                title={
+                  myFiles.available === false
+                    ? myFiles.unavailableTooltip
+                    : undefined
+                }
                 onClick={() =>
                   void myFiles.save(
                     selected.map((item) => item.path),
@@ -195,7 +204,14 @@ function FileControlsSession({
               <Button
                 variant="outline"
                 size="sm"
-                disabled={pending || selected.length === 0}
+                disabled={
+                  pending || selected.length === 0 || shared.available === false
+                }
+                title={
+                  shared.available === false
+                    ? shared.unavailableTooltip
+                    : undefined
+                }
                 onClick={() =>
                   void shared.share(
                     selected.map((item) => item.path),

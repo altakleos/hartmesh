@@ -744,8 +744,16 @@ export function ArtifactFileDetail({
               <ArtifactAction
                 icon={myFiles.isPending ? LoaderIcon : FolderPlusIcon}
                 label={t.files.saveToMyFiles}
-                tooltip={t.files.saveToMyFiles}
-                disabled={myFiles.isPending || !isFileFilingReady(pluginQuery)}
+                tooltip={
+                  myFiles.available === false
+                    ? myFiles.unavailableTooltip
+                    : t.files.saveToMyFiles
+                }
+                disabled={
+                  myFiles.isPending ||
+                  myFiles.available === false ||
+                  !isFileFilingReady(pluginQuery)
+                }
                 onClick={() =>
                   void myFiles.save(
                     [filepath],
@@ -763,8 +771,16 @@ export function ArtifactFileDetail({
                 icon={everyone.isPending ? LoaderIcon : UsersIcon}
                 label={t.shared.shareWithEveryone}
                 // The tooltip answers what the label cannot: who "everyone" is.
-                tooltip={t.shared.description}
-                disabled={everyone.isPending || !isFileFilingReady(pluginQuery)}
+                tooltip={
+                  everyone.available === false
+                    ? everyone.unavailableTooltip
+                    : t.shared.description
+                }
+                disabled={
+                  everyone.isPending ||
+                  everyone.available === false ||
+                  !isFileFilingReady(pluginQuery)
+                }
                 onClick={() =>
                   void everyone.share(
                     [filepath],

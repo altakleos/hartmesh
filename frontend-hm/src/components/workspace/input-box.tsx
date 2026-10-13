@@ -95,7 +95,11 @@ import {
   type ComposerDraft,
   writeComposerDraft,
 } from "@/core/threads/composer-draft";
-import type { SendMessageOptions } from "@/core/threads/hooks";
+import { useComposerStorageRefusal } from "@/core/threads/composer-storage";
+import type {
+  SendMessageOptions,
+  ThreadRunRefusal,
+} from "@/core/threads/hooks";
 import {
   offersReasoningMode,
   reasoningEffortForMode,
@@ -141,6 +145,7 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
+import { FilesStateNotice } from "./chats/files-state-notice";
 import { ComposerFocusProvider } from "./composer-focus";
 import {
   abortGoalRequest,
@@ -276,6 +281,8 @@ function buildHiddenConversationQuoteMessage({
 export function InputBox({
   className,
   allowAttachments = true,
+  attachmentsUnavailable = false,
+  storageRefusal,
   disabled,
   autoFocus,
   status = "ready",
@@ -297,6 +304,8 @@ export function InputBox({
 }: Omit<ComponentProps<typeof PromptInput>, "onSubmit"> & {
   assistantId?: string | null;
   allowAttachments?: boolean;
+  attachmentsUnavailable?: boolean;
+  storageRefusal?: ThreadRunRefusal | null;
   status?: ChatStatus;
   disabled?: boolean;
   context: Omit<
@@ -359,6 +368,18 @@ export function InputBox({
   const { thread, isMock } = useThread();
   const { attachments, textInput } = usePromptInputController();
   const setTextInput = textInput.setInput;
+  const latestInputText = useRef(textInput.value);
+  latestInputText.current = textInput.value;
+  const editRevision = useRef(0);
+  const readInputText = useCallback(() => latestInputText.current, []);
+  const readEditRevision = useCallback(() => editRevision.current, []);
+  const refused = useComposerStorageRefusal({
+    refusal: storageRefusal,
+    threadId,
+    getText: readInputText,
+    getEditRevision: readEditRevision,
+    setText: setTextInput,
+  });
   const sidecar = useMaybeSidecar();
   const attachmentParts = attachments.files;
   const removeAttachment = attachments.remove;
@@ -618,6 +639,26 @@ export function InputBox({
       ),
     [skills],
   );
+  const draftScopeRef = useRef<{
+    owner: string;
+    key: string;
+    draftThreadId?: string;
+  } | null>(null);
+  const draftRenderRef = useRef({
+    owner: "",
+    text: "",
+    skillName: undefined as string | undefined,
+  });
+  draftRenderRef.current = {
+    owner: JSON.stringify([
+      user?.id,
+      user?.system_role,
+      draftAgentName ?? context.agent_name ?? null,
+      threadId,
+    ]),
+    text: textInput.value,
+    skillName: selectedSlashSkill?.name,
+  };
   const cancelDraftSaveTimer = useCallback(() => {
     if (draftSaveTimerRef.current === null) {
       return;
@@ -703,6 +744,33 @@ export function InputBox({
   }, [thread.messages]);
 
   useLayoutEffect(() => {
+    const previous = draftScopeRef.current;
+    const current = draftRenderRef.current;
+    draftScopeRef.current = {
+      owner: current.owner,
+      key: draftKey,
+      draftThreadId,
+    };
+    if (
+      previous?.owner === current.owner &&
+      previous.draftThreadId === "new" &&
+      draftThreadId === threadId &&
+      previous.key !== draftKey
+    ) {
+      // Admission changes this same conversation's persistence key. Carry a
+      // later unsent draft instead of resetting it as if navigation occurred.
+      const draft = {
+        text: current.text,
+        skillName: current.skillName ?? null,
+      };
+      invalidateDraftSaveTimer();
+      clearComposerDraft(getSessionComposerDraftStorage(), previous.key);
+      writeComposerDraft(getSessionComposerDraftStorage(), draftKey, draft);
+      latestDraftRef.current = { key: draftKey, draft };
+      pendingDraftSubmissionKeyRef.current = null;
+      setHydratedDraftKey(draftKey);
+      return () => flushLatestDraft(draftKey);
+    }
     promptHistoryIndexRef.current = null;
     promptHistoryDraftRef.current = "";
     setTextInput("");
@@ -713,7 +781,14 @@ export function InputBox({
     latestDraftRef.current = null;
     invalidateDraftSaveTimer();
     return () => flushLatestDraft(draftKey);
-  }, [draftKey, flushLatestDraft, invalidateDraftSaveTimer, setTextInput]);
+  }, [
+    draftKey,
+    draftThreadId,
+    threadId,
+    flushLatestDraft,
+    invalidateDraftSaveTimer,
+    setTextInput,
+  ]);
 
   useLayoutEffect(() => {
     const handlePageHide = () => flushLatestDraft();
@@ -1052,6 +1127,10 @@ export function InputBox({
 
   const submitThreadMessage = useCallback(
     (message: PromptInputMessage) => {
+      message = {
+        ...message,
+        files: refused.eligibleFiles(message.files, attachmentParts),
+      };
       if (modelSubmitError) {
         toast.error(modelSubmitError);
         return Promise.reject(new Error("No available model"));
@@ -1123,6 +1202,12 @@ export function InputBox({
       };
       // Carry the resolved selection with this submission. Waiting for a
       // settings effect cannot update an already captured onSubmit callback.
+      refused.capture(
+        message,
+        textInput.value,
+        attachmentParts,
+        editRevision.current,
+      );
       return onSubmit?.(message, submitOptions);
     },
     [
@@ -1130,6 +1215,9 @@ export function InputBox({
       draftKey,
       invalidateDraftSaveTimer,
       onSubmit,
+      refused,
+      textInput.value,
+      attachmentParts,
       reportUploadLimitViolations,
       modelSubmitError,
       selectedModel,
@@ -1211,9 +1299,15 @@ export function InputBox({
       if (submitAction.kind === "empty") {
         return;
       }
+      const submittedEditRevision = editRevision.current;
       await submitThreadMessage(messageWithSlashSkill);
-      if (selectedSlashSkill) {
-        setSelectedSlashSkill(null);
+      if (
+        selectedSlashSkill &&
+        editRevision.current === submittedEditRevision
+      ) {
+        setSelectedSlashSkill((current) =>
+          current?.name === selectedSlashSkill.name ? null : current,
+        );
       }
     },
     [
@@ -2199,9 +2293,9 @@ export function InputBox({
           className,
         )}
         disabled={composerLocked}
-        globalDrop={allowAttachments}
+        globalDrop={allowAttachments && !attachmentsUnavailable}
         onDropCapture={
-          allowAttachments
+          allowAttachments && !attachmentsUnavailable
             ? undefined
             : (event) => {
                 if (Array.from(event.dataTransfer.types).includes("Files")) {
@@ -2211,7 +2305,7 @@ export function InputBox({
               }
         }
         onPasteCapture={
-          allowAttachments
+          allowAttachments && !attachmentsUnavailable
             ? undefined
             : (event) => {
                 if (event.clipboardData.files.length) {
@@ -2223,6 +2317,16 @@ export function InputBox({
         multiple
         onSubmit={handleSubmit}
         {...props}
+        onInputCapture={(event) => {
+          const target = event.target;
+          if (
+            target instanceof HTMLElement &&
+            (target.tagName === "TEXTAREA" ||
+              target.closest('[role="textbox"]'))
+          )
+            editRevision.current++;
+          props.onInputCapture?.(event);
+        }}
       >
         {polishingInput && (
           <div
@@ -2263,6 +2367,15 @@ export function InputBox({
             {(attachment) => (
               <div className="max-w-60">
                 <PromptInputAttachment data={attachment} />
+                {refused.failures[attachment.id] && (
+                  <div className="text-destructive mt-1 text-xs">
+                    <FilesStateNotice
+                      refusal={refused.failures[attachment.id]!}
+                      area="upload"
+                      filename={attachment.filename}
+                    />
+                  </div>
+                )}
               </div>
             )}
           </PromptInputAttachments>
@@ -2359,7 +2472,8 @@ export function InputBox({
             {allowAttachments && (
               <AddAttachmentsButton
                 className="px-2!"
-                disabled={composerLocked}
+                disabled={composerLocked || attachmentsUnavailable}
+                unavailable={attachmentsUnavailable}
                 uploadLimits={uploadLimits}
               />
             )}
@@ -2944,31 +3058,37 @@ function AddAttachmentsButton({
   className,
   disabled,
   uploadLimits,
+  unavailable,
 }: {
   className?: string;
   disabled?: boolean;
   uploadLimits?: UploadLimits;
+  unavailable?: boolean;
 }) {
   const { t } = useI18n();
   const attachments = usePromptInputAttachments();
-  const tooltipContent = uploadLimits
-    ? t.uploads.limitsHint(
-        uploadLimits.max_files,
-        formatUploadSize(uploadLimits.max_file_size),
-        formatUploadSize(uploadLimits.max_total_size),
-      )
-    : t.inputBox.addAttachments;
+  const tooltipContent = unavailable
+    ? t.chat.filesUnavailable
+    : uploadLimits
+      ? t.uploads.limitsHint(
+          uploadLimits.max_files,
+          formatUploadSize(uploadLimits.max_file_size),
+          formatUploadSize(uploadLimits.max_total_size),
+        )
+      : t.inputBox.addAttachments;
   return (
     <Tooltip content={<span className="block max-w-80">{tooltipContent}</span>}>
-      <PromptInputButton
-        aria-label={t.inputBox.addAttachments}
-        className={cn("px-2!", className)}
-        data-testid="add-attachments-button"
-        disabled={disabled}
-        onClick={() => attachments.openFileDialog()}
-      >
-        <PaperclipIcon className="size-3" />
-      </PromptInputButton>
+      <span>
+        <PromptInputButton
+          aria-label={t.inputBox.addAttachments}
+          className={cn("px-2!", className)}
+          data-testid="add-attachments-button"
+          disabled={disabled}
+          onClick={() => attachments.openFileDialog()}
+        >
+          <PaperclipIcon className="size-3" />
+        </PromptInputButton>
+      </span>
     </Tooltip>
   );
 }
