@@ -99,6 +99,8 @@ class ExecutionStatus:
     attachments_fenced: int = 0
     attempts_settled: int = 0
     file_operations_settled: int = 0
+    qualified_provider: object | None = field(default=None, repr=False)
+    user_spaces_reclaimed: int = 0
 
 
 async def storage_state(app) -> StorageState:
@@ -389,13 +391,14 @@ async def _adapter_step(app, *, timeout=ADAPTER_LIMIT_SECONDS):
         return False
     status.adapter_task = None
     try:
-        _baseline, attachments = task.result()
+        baseline, attachments = task.result()
     except Exception as exc:
         status.runtime_retry = isinstance(exc, StorageRuntimeUnavailable)
         status.storage_reason = "host-unqualified" if isinstance(exc, StorageHostUnqualified) else "admission-failed"
         status.storage_text = str(exc)
         return False
     status.host_id = attachments.provider.host_id
+    status.qualified_provider = baseline
     status.runtime_retry = False
     status.storage_reason, status.storage_text = None, None
     return True
@@ -695,12 +698,22 @@ async def grant_company_space(app, account_id: str) -> None:
     await _grant_company_space(app, account_id)
 
 
+async def reclaim_released_user_spaces(app) -> int:
+    from app.gateway.storage_reclamation import reclaim_released_user_spaces as reclaim
+
+    return await reclaim(app)
+
+
 async def _maintenance_step(app, *, timeout: float) -> bool:
     status = app.state.agent_execution
     if getattr(app.state, "storage_spaces", None) is None or (await storage_state(app)).state in ("off", "unavailable"):
         return False
 
     async def perform():
+        try:
+            status.user_spaces_reclaimed += await reclaim_released_user_spaces(app)
+        except Exception:
+            logger.exception("storage: released-account reclamation failed; existing facts are kept")
         try:
             await assign_spaces(app)
         except Exception:

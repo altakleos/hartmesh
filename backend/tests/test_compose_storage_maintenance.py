@@ -151,6 +151,71 @@ async def test_completed_background_work_does_not_skip_the_next_periodic_pass(ma
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, "reclamation", "assignment"])
+async def test_release_assignment_settlement_share_one_failure_isolated_pass(maintenance, monkeypatch, failure):
+    app, _repo, _sf = maintenance
+    calls = []
+
+    async def release(_app):
+        calls.append("reclamation")
+        if failure == "reclamation":
+            raise RuntimeError("Reclamation remains pending")
+        return 2
+
+    async def assignment(_app):
+        calls.append("assignment")
+        if failure == "assignment":
+            raise RuntimeError("Assignment remains pending")
+        return 0, 0
+
+    async def settlement():
+        calls.append("settlement")
+        return 3
+
+    monkeypatch.setattr(ss, "reclaim_released_user_spaces", release)
+    monkeypatch.setattr(ss, "assign_spaces", assignment)
+    monkeypatch.setattr(app.state.storage_spaces, "settle_interrupted", settlement)
+    assert await ss._maintenance_step(app, timeout=5)
+    assert calls == ["reclamation", "assignment", "settlement"]
+    assert app.state.agent_execution.user_spaces_reclaimed == (0 if failure == "reclamation" else 2)
+    assert app.state.agent_execution.file_operations_settled == 3
+
+
+@pytest.mark.asyncio
+async def test_pending_reclamation_reuses_maintenance_task_and_shutdown_drains_it(maintenance, monkeypatch):
+    app, _repo, _sf = maintenance
+    entered, resume = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def release(_app):
+        calls.append("reclamation")
+        entered.set()
+        await resume.wait()
+        return 1
+
+    async def assignment(_app):
+        calls.append("assignment")
+        return 0, 0
+
+    monkeypatch.setattr(ss, "reclaim_released_user_spaces", release)
+    monkeypatch.setattr(ss, "assign_spaces", assignment)
+    assert not await ss._maintenance_step(app, timeout=0.01)
+    await entered.wait()
+    owned = app.state.agent_execution.maintenance_task
+    assert not await ss._maintenance_step(app, timeout=0)
+    assert app.state.agent_execution.maintenance_task is owned and calls == ["reclamation"]
+    stop = asyncio.create_task(ss.close_storage_spaces(app))
+    try:
+        await asyncio.sleep(0)
+        assert not stop.done() and not owned.cancelled()
+    finally:
+        resume.set()
+        await stop
+    assert calls == ["reclamation", "assignment"]
+    assert owned.done() and app.state.agent_execution.user_spaces_reclaimed == 1
+
+
+@pytest.mark.asyncio
 async def test_feature_callbacks_bind_when_services_start_before_storage(startup):
     from deerflow_extension_api import ExtensionRuntimeDeps
 

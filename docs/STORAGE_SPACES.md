@@ -6,8 +6,10 @@ The private host recovery method reclaims already-deleted native Spaces only
 when the latest delete event records `retained_backups` as JSON false and every
 attachment is fenced. It does not resolve a principal or grant permissions.
 Trusted domain callbacks recheck their own eligibility in borrowed SQL sessions;
-callers own external containment through the entire operation. Account release,
-Docker discovery and periodic scheduling join in the next Compose category.
+callers own external containment through the entire operation. The Gateway's
+released-account maintenance supplies that policy and the qualified native scope.
+Trusted callers can retain unverified bindings and provide a final proof callback
+outside SQL; that callback also runs on filesystem-complete checkpoint retries.
 
 Reclamation commits an immutable intent before filesystem effects. A private
 sibling journal records exact replacement roots; cleanup exchanges both public
@@ -316,14 +318,15 @@ Partial record publication must restore accounting or disable native publication
 Malformed records, interrupted stages and limits refuse admission without eviction.
 Preserve this directory with the pool; no browser/model force-clear API is provided.
 Mountless chats and existing durable attachment preparation retain their own
-lifecycles. Account-release containment follows separately. Defaults remain off.
+lifecycles. The Gateway retains this qualified provider for account-release
+containment. Defaults remain off.
 There is no database schema change; private journal JSON remains version 1.
 
 The private AIO native-retirement scope reserves an opaque owner and the exact
 retiring physical slot before any worker starts. Its reservation lasts through
 the host caller's filesystem work, final absence proof, publication and cancellation
 drainage. The provider defines no released-account, role, retention or business
-eligibility rules; the Gateway must supply that policy in the following stage.
+eligibility rules; the Gateway supplies released-account eligibility separately.
 
 Native create, speculative futures and cached/warm/discovered candidates retain
 live admission references and register actual slots before publication. Shared
@@ -679,8 +682,20 @@ cleanup. Released accounts cannot be enabled or reclaim their email through stal
 credential writes. Enablement changes an entire provider identity: if any covered
 account was released, it refuses before changing disablement or held work.
 The existing `released` operator field still denotes email release; `released_at`
-distinguishes a seat release. Physical volume emptying and AI-assistant release are
-subsequent integration changes; a released slot is not yet recycled.
+distinguishes a seat release.
+
+Startup and minute-based maintenance attempt physical reclamation before User
+assignment and ordinary operation settlement, using one retained maintenance task.
+Only the exact deleted native personal-human User role of a currently released
+account qualifies, with a typed User binding and a latest delete event that
+discards backups. Preflight closes SQL before native containment. Every recovery
+transaction rechecks the captured account, role, generation and complete binding;
+PostgreSQL acquires seat and role locks before Space parents, while SQLite reuses
+the kernel's writer reservation. Final strict native proof occurs outside SQL
+before publishing binding and role deletion together. Unknown or unverified facts
+remain pending; only newly confirmed reclamation counts as freed capacity.
+Account provenance and the Space tombstone remain. Human retained-backup release
+and AI-assistant Home release have separate lifecycle stages.
 Privileged personal MCP discovery and cached calls also recheck current account
 eligibility, so a retained administrator role cannot restore disabled access.
 
