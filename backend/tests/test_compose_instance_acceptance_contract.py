@@ -120,12 +120,26 @@ def test_bundle_login_uses_the_public_form_contract():
 def test_chat_mount_proof_includes_managed_and_configured_binds():
     tree = ast.parse((ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8"))
     chat = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == STORAGE_TESTS[1])
-    assignments = {target.id: node.value for node in chat.body if isinstance(node, ast.Assign) for target in node.targets if isinstance(target, ast.Name)}
-    assert ast.literal_eval(assignments["managed"]) == {"/mnt/user-data/workspace", "/mnt/user-data/uploads", "/mnt/user-data/outputs", "/mnt/user-data/files", "/mnt/user-data/shared", "/mnt/acp-workspace", "/mnt/skills"}
+    assignments = {target.id: node.value for node in ast.walk(chat) if isinstance(node, ast.Assign) for target in node.targets if isinstance(target, ast.Name)}
+    assert ast.literal_eval(assignments["managed"]) == {"/mnt/user-data/workspace", "/mnt/user-data/uploads", "/mnt/user-data/outputs", "/mnt/user-data/files", "/mnt/user-data/shared", "/mnt/acp-workspace"}
     assert "configured" in assignments
     source = ast.unparse(chat)
     assert "read_only" in source and "container_path" in source and "host_path" in source
     assert "len(binds) == 7" not in source
+    assert "skills" in assignments and "integrations" in assignments
+    assert all(category in source for category in ("public", "custom", "legacy", "integrations"))
+    assert "chat-runtime" in source and "operational_root" in assignments
+
+
+def test_synthetic_run_evidence_precedes_terminal_success_assertions():
+    tree = ast.parse((ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8"))
+    person = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Person")
+    run = next(node for node in person.body if isinstance(node, ast.FunctionDef) and node.name == "run")
+    source = ast.unparse(run)
+    assert source.index(".sse") < source.index("eventually(terminal")
+    assert source.index(".json") < source.index("if success:")
+    assert "TRUNCATED" in source and "1048576" in source
+    assert "response.headers)" not in source and "self.client.cookies)" not in source
 
 
 def test_maintenance_proof_waits_for_logs_after_sql_commit():

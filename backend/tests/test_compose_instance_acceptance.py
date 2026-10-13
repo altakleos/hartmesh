@@ -292,12 +292,21 @@ class Person:
             },
         )
         run_id = response.headers["Content-Location"].rstrip("/").rsplit("/", 1)[-1]
+        assert re.fullmatch(r"[0-9a-f-]{36}", run_id)
+        evidence = Path(os.environ.get("EVIDENCE", os.environ["TMPDIR"]))
+        evidence.mkdir(parents=True, exist_ok=True)
+        prefix = evidence / ("run-" + run_id)
+        payload = response.content
+        (prefix.with_suffix(".sse")).write_bytes(payload[:1048576] + (b"\nTRUNCATED: synthetic SSE evidence exceeded 1048576 bytes\n" if len(payload) > 1048576 else b""))
+        (prefix.with_suffix(".identity.json")).write_text(json.dumps({"thread_id": thread_id, "run_id": run_id}), encoding="utf-8")
 
         def terminal():
             value = self.request("GET", f"/api/langgraph/threads/{thread_id}/runs/{run_id}").json()
             return value if value["status"] in ("success", "error", "timeout", "interrupted") else None
 
         result = eventually(terminal, timeout=120, interval=2)
+        payload = json.dumps(result, indent=2).encode("utf-8")
+        (prefix.with_suffix(".json")).write_bytes(payload[:1048576] + (b"\nTRUNCATED: synthetic run evidence exceeded 1048576 bytes\n" if len(payload) > 1048576 else b""))
         if success:
             assert result["status"] == "success", result
         return result
@@ -509,18 +518,41 @@ def test_ordinary_chat_works_with_storage_spaces_on(compose, session):
     role = eventually(lambda: compose.role(session.user["id"]))
     user_mounts(compose, entry, thread_id, role)
     binds = [mount for mount in entry["Mounts"] if mount["Type"] == "bind"]
-    managed = {"/mnt/user-data/workspace", "/mnt/user-data/uploads", "/mnt/user-data/outputs", "/mnt/user-data/files", "/mnt/user-data/shared", "/mnt/acp-workspace", "/mnt/skills"}
-    configured = json.loads(
-        compose.gateway("python", "-c", "import json, os, yaml; from pathlib import Path; print(json.dumps(yaml.safe_load(Path(os.environ['DEER_FLOW_CONFIG_PATH']).read_text(encoding='utf-8'))['sandbox'].get('mounts', [])))")
+    managed = {"/mnt/user-data/workspace", "/mnt/user-data/uploads", "/mnt/user-data/outputs", "/mnt/user-data/files", "/mnt/user-data/shared", "/mnt/acp-workspace"}
+    settings = json.loads(
+        compose.gateway(
+            "python",
+            "-c",
+            "import json, os, sys, yaml; from pathlib import Path; "
+            "print(json.dumps({'configured': yaml.safe_load(Path(os.environ['DEER_FLOW_CONFIG_PATH']).read_text(encoding='utf-8'))['sandbox'].get('mounts', []), "
+            "'home': os.environ['DEER_FLOW_HOST_BASE_DIR'], 'projection': (Path(os.environ['DEER_FLOW_HOME'])/'chat-runtime'/sys.argv[1]/sys.argv[2]/'skills_view').is_dir(), "
+            "'lark_runtime': (Path(os.environ['DEER_FLOW_HOME'])/'integrations/lark-cli/sandbox-cli').is_dir()}))",
+            session.user["id"],
+            thread_id,
+        )
     )
+    configured = settings["configured"]
+    categories = ("public", "custom", "legacy", "integrations")
+    operational_root = settings["home"] + "/chat-runtime/" + session.user["id"] + "/" + thread_id
+    if settings["projection"]:
+        skills = {"/mnt/skills/" + category: (operational_root + "/skills_view/" + category, False) for category in categories}
+    else:
+        skills = {"/mnt/skills/" + category: (settings["home"] + "/users/" + session.user["id"] + "/skills_view/" + category, False) for category in categories}
+        skills["/mnt/skills/public"] = (settings["home"] + "/skills_view/public", False)
+    lark_root = settings["home"] + "/users/" + session.user["id"] + "/integrations/lark-cli"
+    integrations = {"/mnt/integrations/lark-cli/config": (lark_root + "/config", False), "/mnt/integrations/lark-cli/config/locks": (lark_root + "/config/locks", True), "/mnt/integrations/lark-cli/data": (lark_root + "/data", True)}
+    if settings["lark_runtime"]:
+        integrations["/mnt/integrations/lark-cli/runtime"] = (settings["home"] + "/integrations/lark-cli/sandbox-cli", False)
     destinations = {mount["Destination"] for mount in binds}
-    assert destinations == managed | {mount["container_path"] for mount in configured}
+    assert destinations == managed | set(skills) | set(integrations) | {mount["container_path"] for mount in configured}
     assert len(binds) == len(destinations)
     for configuration in configured:
-        assert configuration["read_only"] is True and configuration["container_path"] not in managed
+        assert configuration["read_only"] is True and configuration["container_path"] not in managed | set(skills) | set(integrations)
         bind = mounted(entry, configuration["container_path"])
         assert bind["Source"] == configuration["host_path"] and bind["RW"] is False
-    assert mounted(entry, "/mnt/skills")["RW"] is False
+    for destination, (source, writable) in {**skills, **integrations}.items():
+        bind = mounted(entry, destination)
+        assert bind["Source"] == source and bind["RW"] is writable
     compose.state["admin_thread"] = thread_id
 
 

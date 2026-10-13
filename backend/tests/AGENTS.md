@@ -194,3 +194,7 @@ cleanup one-off before allowing maintenance or restarting the Gateway; failure
 to confirm drainage leaves the Gateway stopped and fails qualification.
 The offline contract pins runtime-stage provisioning of the bundle's `nsenter`
 and `setpriv` tools; builder-only packages do not reach the final slim image.
+Each synthetic run preserves bounded SSE and terminal JSON evidence before its
+success assertion. Exclude cookies and auth headers. Skill category binds may
+come from caller/global projections or operational `chat-runtime` projections;
+neither changes the six admitted data/ACP binds or caller-owned integration binds.
