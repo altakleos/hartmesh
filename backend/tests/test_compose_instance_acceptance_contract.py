@@ -117,6 +117,30 @@ def test_bundle_login_uses_the_public_form_contract():
     assert {ast.literal_eval(key) for key in form.keys} == {"username", "password"}
 
 
+def test_chat_mount_proof_includes_managed_and_configured_binds():
+    tree = ast.parse((ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8"))
+    chat = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == STORAGE_TESTS[1])
+    assignments = {target.id: node.value for node in chat.body if isinstance(node, ast.Assign) for target in node.targets if isinstance(target, ast.Name)}
+    assert ast.literal_eval(assignments["managed"]) == {"/mnt/user-data/workspace", "/mnt/user-data/uploads", "/mnt/user-data/outputs", "/mnt/user-data/files", "/mnt/user-data/shared", "/mnt/acp-workspace", "/mnt/skills"}
+    assert "configured" in assignments
+    source = ast.unparse(chat)
+    assert "read_only" in source and "container_path" in source and "host_path" in source
+    assert "len(binds) == 7" not in source
+
+
+def test_maintenance_proof_waits_for_logs_after_sql_commit():
+    tree = ast.parse((ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8"))
+    for name in (STORAGE_TESTS[3], STORAGE_TESTS[6], STORAGE_TESTS[7]):
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+        assert any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "eventually"
+            and any(isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute) and child.func.attr == "logs" for child in ast.walk(node))
+            for node in ast.walk(function)
+        )
+
+
 def test_bundle_acceptance_is_opt_in_and_keeps_the_prescribed_file_order():
     source = (ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8")
     tree = ast.parse(source)

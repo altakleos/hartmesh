@@ -509,9 +509,18 @@ def test_ordinary_chat_works_with_storage_spaces_on(compose, session):
     role = eventually(lambda: compose.role(session.user["id"]))
     user_mounts(compose, entry, thread_id, role)
     binds = [mount for mount in entry["Mounts"] if mount["Type"] == "bind"]
-    assert len(binds) == 7
-    skills = [mount for mount in binds if mount["Destination"].startswith("/mnt/skills")]
-    assert len(skills) == 1 and skills[0]["RW"] is False
+    managed = {"/mnt/user-data/workspace", "/mnt/user-data/uploads", "/mnt/user-data/outputs", "/mnt/user-data/files", "/mnt/user-data/shared", "/mnt/acp-workspace", "/mnt/skills"}
+    configured = json.loads(
+        compose.gateway("python", "-c", "import json, os, yaml; from pathlib import Path; print(json.dumps(yaml.safe_load(Path(os.environ['DEER_FLOW_CONFIG_PATH']).read_text(encoding='utf-8'))['sandbox'].get('mounts', [])))")
+    )
+    destinations = {mount["Destination"] for mount in binds}
+    assert destinations == managed | {mount["container_path"] for mount in configured}
+    assert len(binds) == len(destinations)
+    for configuration in configured:
+        assert configuration["read_only"] is True and configuration["container_path"] not in managed
+        bind = mounted(entry, configuration["container_path"])
+        assert bind["Source"] == configuration["host_path"] and bind["RW"] is False
+    assert mounted(entry, "/mnt/skills")["RW"] is False
     compose.state["admin_thread"] = thread_id
 
 
@@ -550,7 +559,7 @@ def test_chat_without_files_mounts_nothing_of_the_user(compose, member):
             assert not any(mount["Destination"].startswith("/mnt/user-data") or mount["Destination"] == "/mnt/acp-workspace" for mount in entry["Mounts"])
         new = eventually(lambda: compose.role(account))
         assert new["space"] != old["space"] and new["slot"] not in before_bindings
-        assert f"storage: user space of {account} assigned ({new['slot']})" in compose.logs()
+        eventually(lambda: f"storage: user space of {account} assigned ({new['slot']})" in compose.logs())
         member.request("GET", "/api/files")
         ready_thread = member.thread()
         member.upload(ready_thread)
@@ -647,7 +656,7 @@ def test_release_seat_frees_the_seat_and_empties_the_users_space(compose, sessio
     code, result = compose.accounts("release-seat", account["email"])
     assert code == 0 and result["returncode"] == 0
     eventually(lambda: old["slot"] not in compose.bindings())
-    assert f"storage: user space reclaimed ({old['slot']})" in compose.logs()
+    eventually(lambda: f"storage: user space reclaimed ({old['slot']})" in compose.logs())
     assert session.request("GET", "/api/features").json()["accounts"]["seats"] == {"allowed": before["allowed"], "in_use": before["allowed"] - 1}
     path = compose.state["inventory"][old["slot"]]["mount_path"]
     compose.gateway("python", "-c", "from pathlib import Path; import sys; p=Path(sys.argv[1]); assert not any((p/'data').iterdir()) and not any((p/'control').iterdir())", path)
@@ -665,7 +674,7 @@ def test_company_grant_is_written_for_an_account_that_had_none(compose, member):
     compose.psql("DELETE FROM storage_space_grants WHERE space_id=" + sql(shared["space"]) + " AND principal_kind='human' AND subject_id=" + sql(account))
     try:
         eventually(lambda: compose.psql("SELECT permissions FROM storage_space_grants WHERE space_id=" + sql(shared["space"]) + " AND principal_kind='human' AND subject_id=" + sql(account)) == "17")
-        assert compose.logs().count(line) == before + 1
+        eventually(lambda: compose.logs().count(line) == before + 1)
         member.request("GET", "/api/shared")
     finally:
         # A failed repair remains a failed test, while restoring its fixture
