@@ -315,7 +315,7 @@ def session(compose):
     person = Person(compose)
     email, password = required("HARTMESH_BUNDLE_ADMIN_EMAIL"), required("HARTMESH_BUNDLE_ADMIN_PASSWORD")
     person.request("POST", "/api/v1/auth/initialize", json={"email": email, "password": password}, expected=(201, 409))
-    person.request("POST", "/api/v1/auth/login/local", json={"email": email, "password": password})
+    person.request("POST", "/api/v1/auth/login/local", data={"username": email, "password": password})
     person.user = person.request("GET", "/api/v1/auth/me").json()
     yield person
     person.client.close()

@@ -108,6 +108,15 @@ def test_bundle_prefetches_every_pinned_image_before_the_gateway_starts():
     assert 'docker image ls --digests --no-trunc > "$EVIDENCE/images.txt"' in by_name["Collect logs"]
 
 
+def test_bundle_login_uses_the_public_form_contract():
+    tree = ast.parse((ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8"))
+    fixture = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "session")
+    login = next(node for node in ast.walk(fixture) if isinstance(node, ast.Call) and any(isinstance(argument, ast.Constant) and argument.value == "/api/v1/auth/login/local" for argument in node.args))
+    assert not any(keyword.arg == "json" for keyword in login.keywords)
+    form = next(keyword.value for keyword in login.keywords if keyword.arg == "data")
+    assert {ast.literal_eval(key) for key in form.keys} == {"username", "password"}
+
+
 def test_bundle_acceptance_is_opt_in_and_keeps_the_prescribed_file_order():
     source = (ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
