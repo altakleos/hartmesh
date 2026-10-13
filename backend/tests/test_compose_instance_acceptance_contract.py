@@ -83,6 +83,18 @@ def test_backend_runtime_provisions_and_checks_bundle_host_tools():
     assert "wc -l" not in probe
 
 
+def test_startup_failures_keep_readable_evidence_and_report_service_logs():
+    document = yaml.safe_load((ROOT / ".github/workflows/compose-instances.yml").read_text(encoding="utf-8"))
+    steps = {step.get("name"): step.get("run", "") for step in document["jobs"]["bundle-instances"]["steps"]}
+    startup = steps["11 Start the bundle, whose first start prepares every Space"]
+    assert "trap '" in startup and "gateway storage-init >&2" in startup and " ERR" in startup
+    assert startup.index("trap '") < startup.index("$C up -d --wait")
+    collection = steps["Collect logs"]
+    assert 'sudo cat /srv/hartmesh/spaces/inventory.v2.json > "$EVIDENCE/inventory.v2.json"' in collection
+    assert 'sudo cat /etc/fstab > "$EVIDENCE/fstab.txt"' in collection
+    assert "sudo cp" not in collection
+
+
 def test_bundle_acceptance_is_opt_in_and_keeps_the_prescribed_file_order():
     source = (ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8")
     tree = ast.parse(source)

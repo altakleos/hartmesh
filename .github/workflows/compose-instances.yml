@@ -146,6 +146,7 @@ jobs:
 
       - name: 11 Start the bundle, whose first start prepares every Space
         run: |
+          trap '$C logs --no-color gateway storage-init >&2 || true' ERR
           $C up -d --wait
           test "$(docker inspect --format '{{.State.Health.Status}}' hartmesh-gateway-1)" = healthy
           test "$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' hartmesh-storage-init-1)" = "exited 0"
@@ -213,8 +214,8 @@ jobs:
           mkdir -p "$EVIDENCE"
           $C logs --no-color > "$EVIDENCE/compose.log" 2>&1 || true
           docker ps -a --no-trunc > "$EVIDENCE/containers.txt" 2>&1 || true
-          sudo cp /etc/fstab "$EVIDENCE/fstab.txt" || true
-          sudo cp /srv/hartmesh/spaces/inventory.v2.json "$EVIDENCE/inventory.v2.json" || true
+          sudo cat /etc/fstab > "$EVIDENCE/fstab.txt" || true
+          sudo cat /srv/hartmesh/spaces/inventory.v2.json > "$EVIDENCE/inventory.v2.json" || true
 
       - name: Upload evidence
         if: always()
