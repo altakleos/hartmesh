@@ -19,6 +19,8 @@ preserves authenticated image-acceptance fields. The backend runtime image now
 explicitly installs the namespace and privilege-drop tools required by the bundle.
 Unconfirmed sandbox creation reports bounded causal locations and error codes
 without exposing exception text, command arguments or subprocess output.
+Chats without assigned personal files clear upload context before the model runs;
+CI failure evidence includes bounded physical image and binding facts.
 Storage defaults remain disabled.
 There is no database schema change.
 

@@ -221,3 +221,19 @@ def test_scripted_model_host_port_stays_outside_the_container_port_allocator_ran
     assert port not in range(first, first + count), "Gateway-container socket checks cannot observe runner-host listeners"
     assert start.count(f"http://127.0.0.1:{port}/health") == 2
     assert f"base_url: http://host.docker.internal:{port}/v1" in steps["9 Write the data directory, the model file and the .env contract"]
+
+
+def test_failure_evidence_captures_physical_image_facts_and_role_bindings():
+    document = yaml.safe_load((ROOT / ".github/workflows/compose-instances.yml").read_text(encoding="utf-8"))
+    step = next(step for step in document["jobs"]["bundle-instances"]["steps"] if step.get("name") == "Collect logs")
+    assert step["if"] == "always()"
+    source = step["run"]
+    assert "sudo python3 - <<'PY' > \"$EVIDENCE/storage-facts.json\"" in source
+    diagnostic = source.split("sudo python3 - <<'PY'", 1)[1].split("\n", 1)[1].split("\nPY\n", 1)[0]
+    tree = ast.parse(diagnostic)
+    compile(tree, "<CI storage facts>", "exec")
+    constants = {node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+    assert {"st_mode", "st_dev", "st_nlink", "st_size", "st_blocks", "st_uid", "st_gid", "data", "control"} <= constants
+    assert "256" in diagnostic and "islice" in diagnostic and "follow_symlinks=False" in diagnostic
+    assert "storage_space_backings" in source and "hm_storage_feature_links" in source
+    assert "timeout 30 $C exec -T postgres psql" in source

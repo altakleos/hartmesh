@@ -226,6 +226,53 @@ jobs:
           docker image ls --digests --no-trunc > "$EVIDENCE/images.txt" 2>&1 || true
           sudo cat /etc/fstab > "$EVIDENCE/fstab.txt" || true
           sudo cat /srv/hartmesh/spaces/inventory.v2.json > "$EVIDENCE/inventory.v2.json" || true
+          sudo python3 - <<'PY' > "$EVIDENCE/storage-facts.json"
+          import itertools
+          import json
+          import os
+          import re
+          from pathlib import Path
+          pool = Path('/srv/hartmesh/spaces')
+          def facts(path):
+              try:
+                  value = path.stat(follow_symlinks=False)
+                  return {key: getattr(value, key) for key in ('st_mode', 'st_dev', 'st_ino', 'st_nlink', 'st_size', 'st_blocks', 'st_uid', 'st_gid')}
+              except OSError as error:
+                  return {'error_type': type(error).__name__, 'errno': error.errno}
+          result = {'data_disk': facts(pool.parent), 'pool': facts(pool), 'slots': []}
+          try:
+              with (pool / 'inventory.v2.json').open('rb') as source:
+                  raw = source.read(1048577)
+              assert len(raw) <= 1048576
+              volumes = json.loads(raw)['volumes']
+              assert isinstance(volumes, list) and len(volumes) <= 256
+              for volume in volumes:
+                  slot = volume['slot_id']
+                  assert isinstance(slot, str) and re.fullmatch(r'[0-9a-f]{32}', slot)
+                  mount = pool / (slot + '.volume')
+                  entry = {'slot_id': slot, 'kind': volume['kind'], 'max_bytes': volume['max_bytes'], 'image': facts(pool / (slot + '.img')), 'mount': facts(mount)}
+                  for leaf in ('data', 'control'):
+                      root = mount / leaf
+                      entry[leaf] = facts(root)
+                      try:
+                          descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                          try:
+                              with os.scandir(descriptor) as children:
+                                  names = [child.name[:128] for child in itertools.islice(children, 33)]
+                              entry[leaf]['entries'] = names[:32]
+                              entry[leaf]['truncated'] = len(names) > 32
+                          finally:
+                              os.close(descriptor)
+                      except OSError as error:
+                          entry[leaf].update(error_type=type(error).__name__, errno=error.errno)
+                  result['slots'].append(entry)
+          except Exception as error:
+              result['error_type'] = type(error).__name__
+          print(json.dumps(result, sort_keys=True))
+          PY
+          timeout 30 $C exec -T postgres psql -U deerflow -d deerflow -v ON_ERROR_STOP=1 -Atc \
+            "SELECT json_agg(row_to_json(facts)) FROM (SELECT space_id, backing_handle, slot_id, filesystem_uuid, max_bytes, root_inode, control_inode FROM storage_space_backings ORDER BY slot_id LIMIT 256) facts; SELECT json_agg(row_to_json(facts)) FROM (SELECT namespace, key, space_id FROM hm_storage_feature_links ORDER BY namespace, key LIMIT 256) facts;" \
+            > "$EVIDENCE/storage-bindings.jsonl" || true
 
       - name: Upload evidence
         if: always()

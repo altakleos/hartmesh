@@ -16,7 +16,7 @@ from langchain_core.runnables import run_in_executor
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
-from deerflow.config.paths import Paths, get_paths
+from deerflow.config.paths import Paths, get_paths, peek_scoped_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.search import is_binary_file
 from deerflow.uploads.manager import is_upload_staging_file
@@ -74,6 +74,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         super().__init__()
         if max_files_per_context_section < 1:
             raise ValueError("max_files_per_context_section must be at least 1")
+        self._explicit_paths = bool(base_dir)
         self._paths = Paths(base_dir) if base_dir else get_paths()
         self._max_files_per_context_section = max_files_per_context_section
 
@@ -262,6 +263,13 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         if not isinstance(last_message, HumanMessage):
             return {"uploaded_files": []}
 
+        from deerflow.spaces.chat_paths import ChatStoragePaths
+
+        current = peek_scoped_paths()
+        locations = current if not self._explicit_paths and isinstance(current, ChatStoragePaths) else self._paths
+        if isinstance(locations, ChatStoragePaths) and not locations.has_personal_files:
+            return {"uploaded_files": []}
+
         # Resolve uploads directory for existence checks
         thread_id = (runtime.context or {}).get("thread_id")
         if thread_id is None:
@@ -271,7 +279,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 thread_id = get_config().get("configurable", {}).get("thread_id")
             except RuntimeError:
                 pass
-        uploads_dir = self._paths.sandbox_uploads_dir(thread_id, user_id=resolve_runtime_user_id(runtime)) if thread_id else None
+        uploads_dir = locations.sandbox_uploads_dir(thread_id, user_id=resolve_runtime_user_id(runtime)) if thread_id else None
 
         # Get newly uploaded files from the current message's additional_kwargs.files
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []

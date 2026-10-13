@@ -671,6 +671,8 @@ Ordinary chats in an enabled, qualified storage deployment keep workspace,
 uploads and outputs in the person's assigned User Space. My Files uses that
 same Space; Shared uses a read-only company bind. Missing or unverified personal
 storage lets the chat continue with text and reports files as unavailable.
+Such chats clear prior upload context before calling the model, preserving text
+without resolving personal file paths.
 Unsupported storage credentials also run chats without files. Uploads and edits
 stage privately on the qualified volume and report `files-full` with HTTP 507
 when capacity or inode headroom is exhausted. Free room by deleting files or old

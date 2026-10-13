@@ -200,3 +200,6 @@ come from caller/global projections or operational `chat-runtime` projections;
 neither changes the six admitted data/ACP binds or caller-owned integration binds.
 The scripted model listens on a runner-host port outside the shipped sandbox's
 allocation range; Gateway-container socket checks cannot observe host listeners.
+Failure artifacts include bounded numeric image/root facts and role/backing
+mappings. Keep file contents and credentials out; physical failures must remain
+diagnosable without relaxing admission or repairing an image during the test.

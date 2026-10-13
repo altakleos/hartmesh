@@ -901,3 +901,77 @@ class TestBeforeAgent:
         refusal = content.index("This file is not text")
         assert text_entry < binary_entry < refusal, "the refusal belongs to the workbook, not the note"
         assert "Use `grep` to search for keywords" in content, "the note is still readable"
+
+
+@pytest.mark.parametrize("metadata", [None, [{"filename": "old.txt", "size": 7}]])
+@pytest.mark.parametrize("async_hook", [False, True])
+@pytest.mark.asyncio
+async def test_managed_chat_without_personal_files_preserves_text_and_clears_stale_uploads(tmp_path, monkeypatch, metadata, async_hook):
+    from deerflow.config.paths import paths_scope
+    from deerflow.spaces.chat_paths import ChatStoragePaths
+
+    base = Paths(str(tmp_path))
+    no_files = ChatStoragePaths(base, user_id="alice")
+    with paths_scope(no_files):
+        middleware = UploadsMiddleware()
+    message = _human("Continue with text", files=metadata)
+    state = {"messages": [message], "uploaded_files": [{"filename": "earlier.txt"}]}
+    runtime = _runtime(user_id="alice")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("A text-only managed chat must not resolve or inspect personal uploads")
+
+    monkeypatch.setattr(no_files, "sandbox_uploads_dir", forbidden)
+    monkeypatch.setattr(base, "sandbox_uploads_dir", forbidden)
+    with paths_scope(no_files):
+        result = await middleware.abefore_agent(state, runtime) if async_hook else middleware.before_agent(state, runtime)
+    assert result == {"uploaded_files": []}
+    assert state["messages"][0] is message and message.content == "Continue with text"
+    assert message.additional_kwargs.get("files") == metadata
+    assert not (tmp_path / "users").exists()
+
+
+@pytest.mark.asyncio
+async def test_cached_upload_middleware_uses_current_managed_projection(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from deerflow.config.paths import paths_scope
+    from deerflow.spaces.chat_paths import ChatStoragePaths
+
+    cached = ChatStoragePaths(Paths(str(tmp_path / "cached")), user_id="alice", user=SimpleNamespace(data_path=tmp_path / "old-personal"))
+    current = ChatStoragePaths(Paths(str(tmp_path / "current")), user_id="alice")
+    with paths_scope(cached):
+        middleware = UploadsMiddleware()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("A cached middleware attempted the previous invocation's file projection")
+
+    monkeypatch.setattr(cached, "sandbox_uploads_dir", forbidden)
+    with paths_scope(current):
+        result = await middleware.abefore_agent({"messages": [_human("hi", files=[{"filename": "old.txt"}])]}, _runtime(user_id="alice"))
+    assert result == {"uploaded_files": []}
+    assert not (tmp_path / "cached" / "users").exists()
+    assert not (tmp_path / "current" / "users").exists()
+
+
+@pytest.mark.asyncio
+async def test_cached_upload_middleware_can_use_restored_personal_files(tmp_path):
+    from types import SimpleNamespace
+
+    from deerflow.config.paths import paths_scope
+    from deerflow.spaces.chat_paths import ChatStoragePaths
+
+    base = Paths(str(tmp_path / "operational"))
+    absent = ChatStoragePaths(base, user_id="alice")
+    with paths_scope(absent):
+        middleware = UploadsMiddleware()
+    current = ChatStoragePaths(base, user_id="alice", user=SimpleNamespace(data_path=tmp_path / "personal"))
+    uploads = current.sandbox_uploads_dir(THREAD_ID, user_id="alice")
+    uploads.mkdir(parents=True)
+    (uploads / "restored.txt").write_text("Available again", encoding="utf-8")
+    message = _human("Read it", files=[{"filename": "restored.txt", "size": 15}])
+    with paths_scope(current):
+        result = await middleware.abefore_agent({"messages": [message]}, _runtime(user_id="alice"))
+    assert [item["filename"] for item in result["uploaded_files"]] == ["restored.txt"]
+    assert "restored.txt" in _current_uploads_block(result["messages"][0].content)
+    assert not (base.base_dir / "users").exists()

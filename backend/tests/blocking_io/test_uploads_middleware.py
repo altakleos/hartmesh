@@ -54,3 +54,25 @@ async def test_before_agent_uploads_scan_does_not_block_event_loop(tmp_path: Pat
     )
 
     assert result["messages"]
+
+
+async def test_text_only_managed_chat_reaches_the_model_without_personal_directories(tmp_path: Path) -> None:
+    from langchain.agents import create_agent
+
+    from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
+    from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
+    from deerflow.config.paths import Paths, paths_scope
+    from deerflow.spaces.chat_paths import ChatStoragePaths
+
+    projection = await asyncio.to_thread(lambda: ChatStoragePaths(Paths(str(tmp_path)), user_id="alice"))
+    with paths_scope(projection):
+        agent = await asyncio.to_thread(lambda: create_agent(model=_FakeModel(responses=[AIMessage(content="Text remains available")]), tools=[], middleware=[ThreadDataMiddleware(), UploadsMiddleware()]))
+        result = await agent.ainvoke(
+            {"messages": [HumanMessage(content="Continue with text", additional_kwargs={"files": [{"filename": "stale.txt", "size": 42}]})], "uploaded_files": [{"filename": "prior.txt"}]},
+            {"configurable": {"thread_id": "no-files"}},
+            context={"thread_id": "no-files", "user_id": "alice"},
+        )
+    assert result["messages"][-1].content == "Text remains available"
+    assert result["messages"][0].content == "Continue with text"
+    assert result["uploaded_files"] == [] and result["thread_data"] == {}
+    assert not (tmp_path / "users").exists()
