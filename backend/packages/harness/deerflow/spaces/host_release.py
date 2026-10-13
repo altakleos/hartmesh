@@ -133,7 +133,7 @@ async def _discard(session, space_id, operation_id=None):
             operation.result = {"resolution": "host-discarded"}
 
 
-async def host_release(recovery, space_id, *, admission=None, publication=None, lock_admission=None):
+async def host_release(recovery, space_id, *, admission=None, publication=None, lock_admission=None, retain_unverified=False, before_publication=None):
     files, registry = recovery.files, recovery.registry
 
     async def perform():
@@ -175,6 +175,8 @@ async def host_release(recovery, space_id, *, admission=None, publication=None, 
             except (BackingUnavailable, OSError):
                 if request is not None:
                     raise SpaceOperationPending("Release physical proof is unavailable; retain its intent") from None
+                if retain_unverified:
+                    return dict(_REFUSAL)
                 # Effect-free branch is selected before creating any release
                 # intent. The physical slot stays uncertain and is not counted.
                 async with registry.host_locked([space_id], _before_lock=lock_admission) as (session, rows):
@@ -231,6 +233,10 @@ async def host_release(recovery, space_id, *, admission=None, publication=None, 
                     checkpoint = await run_file_io(owner.checkpoint)
                     operation.result = checkpoint
                 # Confirmed checkpoint precedes every journal-removal effect.
+            if before_publication is not None:
+                # Includes checkpoint retries. External containment proof must
+                # finish before borrowing the final SQL writer/parent locks.
+                await before_publication()
             async with registry.host_locked([space_id], _before_lock=lock_admission) as (session, rows):
                 current = await _current(session, rows, request, admission)
                 operation = await _intent(session, space_id)

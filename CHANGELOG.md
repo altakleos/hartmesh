@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Released-account storage reclamation
+
+Startup and periodic maintenance reclaim a released account's exact deleted
+native User Space before assigning storage to waiting accounts. The Gateway
+retains the qualified provider and detached account/role/backing facts, rechecks
+them in borrowed transactions and holds containment through worker drainage and
+commit. Unverified slots, busy or unknown cleanup and changed eligibility preserve
+bindings and role links for retry. Final native proof runs outside SQL; confirmed
+publication removes only the exact User role with its binding. Failures remain
+isolated by resource and maintenance phase. Storage defaults remain disabled.
+There is no database schema change; private journal JSON remains version 1.
+
 ### Native owner and slot containment
 
 The managed Compose provider can retain an owner and physical-slot reservation
@@ -16,7 +28,7 @@ publication. Strict inventory includes stopped containers across all prefixes;
 held executions, foreign or unresolved requests and uncertain cleanup preserve
 the backing. Canonical fenced cleanup removes qualified open-mode primaries by
 immutable ID and can retry a lost absence reply. Unsupported restricted resource
-sets refuse automatic reclamation. Account-release integration follows separately.
+sets refuse automatic reclamation. The Gateway supplies account-release policy.
 Storage defaults remain disabled. There is no database schema change; private
 journal JSON remains version 1.
 
@@ -30,7 +42,7 @@ creation now records before Docker submission and acknowledges only after exact
 actual identity inspection. Verified results survive sync/async/prewarm cancellation;
 unknown results remain quarantined or conservatively counted. Qualification restores
 pending capacity before native publication and refuses repeat requests for the same
-account or name. Account-release containment follows separately. Storage defaults
+account or name. Account-release containment uses the retained provider scope. Storage defaults
 remain disabled. There is no database schema change; private
 journal JSON uses schema version 1.
 

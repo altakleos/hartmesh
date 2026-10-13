@@ -1040,8 +1040,12 @@ async def test_redis_bridge_rejects_oversized_subscription_heartbeat_before_io()
 
 
 @pytest.mark.anyio
-async def test_make_stream_bridge_defaults():
+async def test_make_stream_bridge_defaults(monkeypatch):
     """make_stream_bridge() with no config yields a MemoryStreamBridge."""
+    # AppConfig loading in another test may leave a configured Redis bridge;
+    # establish this test's no-config precondition without changing defaults.
+    monkeypatch.setattr("deerflow.config.stream_bridge_config._stream_bridge_config", None)
+    monkeypatch.delenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", raising=False)
     async with make_stream_bridge() as bridge:
         assert isinstance(bridge, MemoryStreamBridge)
         assert bridge.heartbeat_interval == 15.0

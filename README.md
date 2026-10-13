@@ -634,8 +634,13 @@ through final absence verification. Running and stopped containers across all
 prefixes are checked; a held execution, foreign owner, unresolved request or lost
 cleanup reply keeps the backing reserved. Qualified open-mode containers use the
 existing fenced cleanup path with immutable Docker IDs. Unsupported restricted
-resource sets require containment to be resolved before reclamation. Account
-release will connect to this foundation in the next implementation stage.
+resource sets require containment to be resolved before reclamation.
+
+After the operator releases an account's seat, startup and minute-based maintenance
+can reclaim its deleted User Space before assigning storage to waiting accounts.
+Held work, unverified storage or unconfirmed cleanup keeps the binding and role
+reserved for a later retry. Confirmed reclamation empties that Space and makes its
+slot available while preserving account provenance and the Space tombstone.
 
 With managed storage enabled, missing or unverified backings leave the Gateway
 running with durable history and Work records available. Startup logs report
@@ -644,8 +649,8 @@ minute. Delayed capacity checks preserve newer slot bindings and allocations
 awaiting commit; uncertain slots remain reserved. Inventory changes and offline
 growth take effect after a Gateway restart. Host reclamation has durable retry
 support for deleted native Spaces authorized to discard backups; it renews roots
-and preserves uncertain capacity. Account-release integration follows in the
-next Compose stage.
+and preserves uncertain capacity. Account-release eligibility stays in the Gateway;
+the storage and sandbox layers provide reusable containment and recovery primitives.
 
 A managed Compose pool admits one native Gateway runtime at a time. Startup
 retains an operator-created ownership lock until sandbox workers, storage tasks

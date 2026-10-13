@@ -87,6 +87,12 @@ the transaction after SQLite writer reservation and before sorted Space locks.
 Fresh admission and final domain publication callbacks borrow that same session;
 external provider reservations must outlive workers and commit. No extra checkout,
 commit, provider work or allocation lock belongs in the prerequisite hook.
+Trusted callers may set `retain_unverified=True` to refuse effect-free forgetting
+before operation discard, binding deletion or domain publication. The generic
+default remains unchanged. `before_publication()` runs outside SQL after the
+filesystem-complete checkpoint, including retries, before final writer/parent
+admission. A failed hook preserves checkpoint and binding. Domain eligibility and
+native provider semantics stay in the caller.
 
 Immutable intent and versioned progress use the existing operation table with
 private nonhuman writer label `host:space-release`; never resolve it as a principal

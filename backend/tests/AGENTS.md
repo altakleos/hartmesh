@@ -2,6 +2,11 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Factory default tests establish their own absent-config precondition and restore
+ambient configuration afterward. AppConfig loading can set stream-bridge globals;
+the no-config bridge test clears that global and its Redis environment fallback
+with `monkeypatch`, preserving configured Redis tests and application defaults.
+
 The real-Gateway probe fixture in `test_turn_phase_gateway_stream_e2e.py`
 disables memory on the resolved app config so offline turns cannot enqueue
 external inference. Its TCP relay bounds connection establishment only;
