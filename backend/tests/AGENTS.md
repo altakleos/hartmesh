@@ -192,3 +192,5 @@ The missing-role observation holds the production allocation advisory lock on a
 separate test-owned PostgreSQL session. Drain that exact session and any owned
 cleanup one-off before allowing maintenance or restarting the Gateway; failure
 to confirm drainage leaves the Gateway stopped and fails qualification.
+The offline contract pins runtime-stage provisioning of the bundle's `nsenter`
+and `setpriv` tools; builder-only packages do not reach the final slim image.

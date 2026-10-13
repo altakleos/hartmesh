@@ -69,6 +69,20 @@ def test_gateway_restart_requires_confirmed_container_and_pg_session_drainage():
     assert "backend_start" in source and "self.identity" in source
 
 
+def test_backend_runtime_provisions_and_checks_bundle_host_tools():
+    # Builder packages do not survive the independent final Python slim stage.
+    runtime = (ROOT / "backend/Dockerfile").read_text(encoding="utf-8").rsplit("\nFROM ", 1)[1]
+    instructions = runtime.replace("\\\n", " ")
+    assert any(line.startswith("RUN ") and "apt-get install" in line and "util-linux" in line for line in instructions.splitlines())
+    assert "ARG APT_MIRROR" in runtime
+    assert 'if [ -n "${APT_MIRROR}" ]' in runtime
+    assert "/etc/apt/sources.list.d/debian.sources" in runtime and "/etc/apt/sources.list" in runtime
+    document = yaml.safe_load((ROOT / ".github/workflows/compose-instances.yml").read_text(encoding="utf-8"))
+    probe = next(step["run"] for step in document["jobs"]["bundle-instances"]["steps"] if step.get("name") == "7 Give the image a digest reference")
+    assert "command -v nsenter; command -v setpriv" in probe
+    assert "wc -l" not in probe
+
+
 def test_bundle_acceptance_is_opt_in_and_keeps_the_prescribed_file_order():
     source = (ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8")
     tree = ast.parse(source)

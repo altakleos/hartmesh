@@ -15,7 +15,9 @@ reclamation, Shared publication and full-files refusal/recovery. Qualification
 fixtures use disk-backed temporary directories. Release admission accepts an
 optional, strictly validated tenant-class receipt; its operator tool requires all
 27 named acceptance cases, derives runtime/mount evidence from passed tests and
-preserves authenticated image-acceptance fields. Storage defaults remain disabled.
+preserves authenticated image-acceptance fields. The backend runtime image now
+explicitly installs the namespace and privilege-drop tools required by the bundle.
+Storage defaults remain disabled.
 There is no database schema change.
 
 ### Managed storage and account seat notices
