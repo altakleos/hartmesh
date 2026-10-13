@@ -1,5 +1,6 @@
 """Stopped native primaries are removed only by qualified immutable-ID teardown."""
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -105,6 +106,59 @@ def test_changed_daemon_refuses_before_mutation(fixture):
     bridge._check_daemon = changed
     assert local.destroy(info) is DestroyOutcome.UNKNOWN
     assert all(command[1] not in {"stop", "rm"} for command in calls)
+
+
+@pytest.mark.parametrize("disappearance", ["empty-inventory", "inspect-disappears"])
+@pytest.mark.parametrize("terminal", ["absent", "name-reused", "unavailable", "daemon-changed", "late"])
+def test_auto_remove_after_stop_requires_fresh_terminal_identity_proof(fixture, monkeypatch, disappearance, terminal):
+    from deerflow.community.aio_sandbox import local_backend as module
+
+    local, bridge, info, state, calls = prepare(fixture)
+    state["entry"]["State"]["Running"] = True
+    state["entry"]["HostConfig"]["AutoRemove"] = True
+    info.native_container = replace(info.native_container, running=True, auto_remove=True)
+    original = local._runtime_runner
+    now = [0.0]
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    stopped = False
+    first_inspection = True
+
+    def unavailable_daemon():
+        raise RuntimeError("The original daemon is unavailable")
+
+    def run(command, **kwargs):
+        nonlocal stopped, first_inspection
+        if command[1] == "stop":
+            result = original(command, **kwargs)
+            stopped = True
+            return result
+        if stopped and command[1] == "inspect" and "-f" in command:
+            if first_inspection:
+                first_inspection = False
+                state["gone"] = True
+                return SimpleNamespace(stdout=CID, stderr="", returncode=0)
+            if terminal == "name-reused" and command[-1] == info.container_name:
+                return SimpleNamespace(stdout="d" * 64, stderr="", returncode=0)
+            if terminal == "unavailable":
+                return SimpleNamespace(stdout="", stderr="daemon unavailable", returncode=1)
+        if stopped and command[1] == "ps":
+            if terminal == "daemon-changed":
+                bridge._check_daemon = unavailable_daemon
+            if terminal == "late":
+                now[0] = 61.0
+            if disappearance == "inspect-disappears":
+                calls.append(command)
+                return SimpleNamespace(stdout=CID + "\n", stderr="", returncode=0)
+        if stopped and command[1] == "inspect" and "-f" not in command:
+            calls.append(command)
+            return SimpleNamespace(stdout="", stderr="No such object: " + CID, returncode=1)
+        return original(command, **kwargs)
+
+    local._runtime_runner = run
+    expected = DestroyOutcome.ABSENT if terminal == "absent" else DestroyOutcome.UNKNOWN
+    assert local.destroy(info) is expected
+    assert stopped and state["gone"]
+    assert not any(command[1] == "rm" for command in calls)
 
 
 def test_correlation_is_process_only_and_never_reconstructed(fixture):

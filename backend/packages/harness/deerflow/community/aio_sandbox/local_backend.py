@@ -1569,12 +1569,7 @@ class LocalContainerBackend(SandboxBackend):
             bridge.assert_current(teardown=True)
             matches = tuple(entry for entry in self._slot_containers(expected.slots[0]) if entry.container_id == expected.container_id)
             if not matches:
-                bridge.assert_current(teardown=True)
-                absent = self._container_absent(expected.container_id) is True and self._container_absent(expected.container_name) is True
-                bridge.assert_current(teardown=True)
-                if time.monotonic() >= _NATIVE_SLOT_INVENTORY_DEADLINE.get():
-                    raise StorageHostUnqualified("Native absence proof arrived after its deadline")
-                return DestroyOutcome.ABSENT if absent else DestroyOutcome.UNKNOWN
+                return DestroyOutcome.ABSENT if self._native_primary_absent(expected, bridge) else DestroyOutcome.UNKNOWN
             if len(matches) != 1 or dataclasses.replace(matches[0], running=False) != dataclasses.replace(expected, running=False):
                 raise StorageHostUnqualified("Native cleanup lacks the same inspected immutable resource set")
             # Never derive restricted resources from this process's prefix or
@@ -1582,26 +1577,38 @@ class LocalContainerBackend(SandboxBackend):
             self._stop_container(expected.container_id)
             absent = self._container_absent(expected.container_id)
             if absent is False:
-                matches = tuple(entry for entry in self._slot_containers(expected.slots[0]) if entry.container_id == expected.container_id)
-                if len(matches) != 1 or matches[0].running or dataclasses.replace(matches[0], running=False) != dataclasses.replace(expected, running=False):
-                    raise StorageHostUnqualified("Stopped native incarnation cannot be positively removed")
+                try:
+                    matches = tuple(entry for entry in self._slot_containers(expected.slots[0]) if entry.container_id == expected.container_id)
+                    if len(matches) != 1 or matches[0].running or dataclasses.replace(matches[0], running=False) != dataclasses.replace(expected, running=False):
+                        raise StorageHostUnqualified("Stopped native incarnation cannot be positively removed")
+                except StorageHostUnqualified:
+                    # --rm can finish between the first presence check and
+                    # this inventory. It permits no further destructive
+                    # command; only fresh terminal ID AND name absence can
+                    # establish completion under the retained host proof.
+                    if self._native_primary_absent(expected, bridge):
+                        return DestroyOutcome.ABSENT
+                    raise
                 self._run(["docker", "rm", expected.container_id], capture_output=True, text=True, check=True, timeout=15)
             elif absent is not True:
                 raise StorageHostUnqualified("Native stop has no qualified absence result")
-            bridge.assert_current(teardown=True)
             # A reused name is never removed or counted as the old set's absence.
-            absent = self._container_absent(expected.container_id) is True and self._container_absent(expected.container_name) is True
-            bridge.assert_current(teardown=True)
-            if time.monotonic() >= _NATIVE_SLOT_INVENTORY_DEADLINE.get():
-                raise StorageHostUnqualified("Native absence proof arrived after its deadline")
-            if absent:
+            if self._native_primary_absent(expected, bridge):
                 return DestroyOutcome.ABSENT
             return DestroyOutcome.UNKNOWN
         except Exception:
-            logger.warning("Native immutable resource set remains unconfirmed for %s", info.sandbox_id)
+            logger.warning("Native immutable resource set remains unconfirmed for %s", info.sandbox_id, exc_info=True)
             return DestroyOutcome.UNKNOWN
         finally:
             _NATIVE_SLOT_INVENTORY_DEADLINE.reset(deadline)
+
+    def _native_primary_absent(self, expected, bridge):
+        bridge.assert_current(teardown=True)
+        absent = self._container_absent(expected.container_id) is True and self._container_absent(expected.container_name) is True
+        bridge.assert_current(teardown=True)
+        if time.monotonic() >= _NATIVE_SLOT_INVENTORY_DEADLINE.get():
+            raise StorageHostUnqualified("Native absence proof arrived after its deadline")
+        return absent
 
     def _destroy_outcome(self, info: SandboxInfo, *, restricted: bool) -> DestroyOutcome:
         """Inspect every member of *info*'s resource set and classify what remains."""

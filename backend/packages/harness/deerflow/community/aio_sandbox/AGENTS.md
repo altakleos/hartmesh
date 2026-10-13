@@ -12,7 +12,10 @@ Positively unrelated starts and provider-owned mountless clients remain usable.
 proof; expired scopes refuse. Strict all-prefix/all-state inventory is correlation,
 never cleanup authority. Reuse canonical holder/local/store/heartbeat teardown.
 Qualified open sets use full-ID stop/removal and positive CID+name absence, including
-retries after lost proof. Never derive foreign restricted resource names; unsupported
+retries after lost proof. If auto-removal finishes between post-stop inventory
+reads, require fresh CID AND name absence with current host proof and the same
+deadline; send no additional destructive command from an ambiguous inventory.
+Never derive foreign restricted resource names; unsupported
 sets refuse. Unknown tracking, held/foreign owners and untransferred results stay
 reserved. Process-local slot/containment facts never serialize. Host eligibility
 belongs outside this generic provider and no provider callback runs under SQL.

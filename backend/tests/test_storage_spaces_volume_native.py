@@ -1145,6 +1145,7 @@ def test_gateway_uid_1000_can_persist_and_reopen_native_create_evidence(typed_pr
 
 def test_gateway_uid_1000_submits_and_acknowledges_actual_managed_primary(typed_prepared_pool, monkeypatch):
     """CI-only real builder, daemon inspection, private journal and UID-1000 IO."""
+    import logging
     import traceback
     from threading import Lock
 
@@ -1175,6 +1176,11 @@ def test_gateway_uid_1000_submits_and_acknowledges_actual_managed_primary(typed_
     tool._native_bridge_contained = False
     child = os.fork()
     if child == 0:
+        # pytest's in-memory capture does not return logs from a forked
+        # child. Keep containment diagnostics on its captured stderr.
+        native_logger = logging.getLogger("deerflow.community.aio_sandbox")
+        native_logger.addHandler(logging.StreamHandler())
+        native_logger.setLevel(logging.INFO)
         owner = PoolRuntimeOwner(tool.pool)
         handoff = adapter = backend = provider = None
         exit_code = 0
