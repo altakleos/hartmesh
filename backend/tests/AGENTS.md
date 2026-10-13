@@ -203,3 +203,5 @@ allocation range; Gateway-container socket checks cannot observe host listeners.
 Failure artifacts include bounded numeric image/root facts and role/backing
 mappings. Keep file contents and credentials out; physical failures must remain
 diagnosable without relaxing admission or repairing an image during the test.
+Full-files HTTP 507 uses the central root-level `reason` and fallback `detail`
+sentence; feature unavailable/busy responses have separate nested envelopes.

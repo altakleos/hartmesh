@@ -237,3 +237,32 @@ def test_failure_evidence_captures_physical_image_facts_and_role_bindings():
     assert "256" in diagnostic and "islice" in diagnostic and "follow_symlinks=False" in diagnostic
     assert "storage_space_backings" in source and "hm_storage_feature_links" in source
     assert "timeout 30 $C exec -T postgres psql" in source
+
+
+def test_full_files_proof_reads_the_central_refusal_envelope():
+    tree = ast.parse((ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8"))
+    full = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == STORAGE_TESTS[9])
+    assignments = {target.id: node.value for node in ast.walk(full) if isinstance(node, ast.Assign) for target in node.targets if isinstance(target, ast.Name)}
+    reason_reads = set()
+    for node in ast.walk(full):
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and isinstance(node.slice, ast.Constant) and node.slice.value == "reason":
+            reason_reads.add(node.value.id)
+    for name in ("refusal", "denied", "denied_create"):
+        value = assignments[name]
+        assert isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) and value.func.attr == "json", "The central refusal body is the root JSON object"
+        assert name in reason_reads
+
+
+def test_full_files_application_refusal_has_a_reason_and_fallback_sentence():
+    import asyncio
+    import json
+
+    from starlette.requests import Request
+
+    from app.gateway.refusals import refusal_handler
+    from deerflow.spaces.chat_paths import ChatFilesFull
+
+    response = asyncio.run(refusal_handler(Request({"type": "http", "headers": []}), ChatFilesFull()))
+    body = json.loads(response.body)
+    assert response.status_code == 507 and body["reason"] == "files-full"
+    assert isinstance(body["detail"], str) and body["detail"]

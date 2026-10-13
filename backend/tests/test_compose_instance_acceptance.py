@@ -775,12 +775,12 @@ def test_full_user_space_refuses_upload_and_new_conversation_with_files_full(com
         assert filled.returncode != 0 and "No space left on device" in filled.stderr
         compose.invoke(["docker", "exec", entry["Id"], "truncate", "-s", "-8M", "/mnt/user-data/workspace/qualification-fill"])
         with payload.open("rb") as source:
-            refusal = member.upload(thread_id, source, name="large.txt", expected=507).json()["detail"]
-        assert refusal["code"] == "files-full"
-        denied = member.request("POST", f"/api/langgraph/threads/{empty_thread}/runs/stream", json={"assistant_id": "lead_agent", "input": {"messages": [{"type": "human", "content": "acceptance:file"}]}}, expected=507).json()["detail"]
-        assert denied["code"] == "files-full"
-        denied_create = member.request("POST", "/api/langgraph/threads", json={"thread_id": str(uuid.uuid4())}, expected=507).json()["detail"]
-        assert denied_create["code"] == "files-full"
+            refusal = member.upload(thread_id, source, name="large.txt", expected=507).json()
+        assert refusal["reason"] == "files-full"
+        denied = member.request("POST", f"/api/langgraph/threads/{empty_thread}/runs/stream", json={"assistant_id": "lead_agent", "input": {"messages": [{"type": "human", "content": "acceptance:file"}]}}, expected=507).json()
+        assert denied["reason"] == "files-full"
+        denied_create = member.request("POST", "/api/langgraph/threads", json={"thread_id": str(uuid.uuid4())}, expected=507).json()
+        assert denied_create["reason"] == "files-full"
         after = {container["Id"] for container in compose.containers() if (container["Config"].get("Labels") or {}).get("deerflow.role") == "sandbox"}
         assert after == before
         member.request("POST", "/api/langgraph/threads/search", json={})
