@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Workspace closure attribution and host containment
+
+Human recovery and AI-instance lifecycle closures record the first closer and
+reason before containment, with a timestamp only after confirmation. Trusted host
+code can close a workspace without human grants or changing its Space generation.
+Callbacks run after commit, support exact recorded retries and cannot undo a
+confirmed closure. Read-only liveness checks preserve unknown Docker outcomes and
+require current-daemon proof before and after inspection. Lost creation replies
+remain pending even after an empty container census; cleanup failures retain
+retryable closure state. Storage/agent defaults remain disabled. There is no
+database schema change.
+
 ### Compose storage operations
 
 The operator runbook now describes User/company assignment, ordinary chat mounts,

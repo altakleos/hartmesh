@@ -105,6 +105,7 @@ class DockerStorageAdapter:
         self._prepare, self._runner = prepare, runner
         self._probe_image = probe_image
         self._execution_guard = None
+        self._cleanup = None
         if host_verifier is None and (not probe_image or pool is None):
             raise StorageHostUnqualified("Native storage requires a probe image and pool")
         self._host_verifier = host_verifier or (lambda: _local_endpoint(self._json("context", "inspect")))
@@ -203,7 +204,7 @@ class DockerStorageAdapter:
     def _same_host(self):
         self._host_verifier()
         facts = self._json("info", "--format", "{{json .}}")
-        if facts.get("ID") != self.host_id or facts.get("OSType") != "linux":
+        if not isinstance(facts, dict) or facts.get("ID") != self.host_id or facts.get("OSType") != "linux":
             raise StorageAdapterUnsupported("Docker host identity changed; cross-host fencing is unsupported")
 
     def _inspect(self, container):
@@ -314,10 +315,32 @@ class DockerStorageAdapter:
                 self._owned(entry, attachment_id)
         return containers
 
+    def container_state(self, container, attachment_id):
+        """Fresh read-only liveness, qualified on both sides of inspection."""
+        try:
+            self._same_host()
+            entry = self._inspect(container)
+            self._same_host()
+            if entry is None:
+                return "gone"
+            self._owned(entry, attachment_id)
+            state = entry.get("State")
+            if not isinstance(state, dict) or type(state.get("Running")) is not bool:
+                return "unknown"
+            return "running" if state["Running"] else "gone"
+        except Exception:
+            return "unknown"
+
+    def cleanup(self, attachment_id):
+        """Optional trusted paired-resource cleanup, wired by the provider."""
+        if self._cleanup is not None:
+            self._cleanup(attachment_id)
+
     def fence(self, container, attachment_id):
         self._same_host()
         entry = self._inspect(container)
         if entry is None:
+            self._same_host()
             return
         self._owned(entry, attachment_id)
         result = self._call("rm", "--force", container)
@@ -327,6 +350,7 @@ class DockerStorageAdapter:
             raise StorageAdapterUnsupported("Container removal has not fenced its storage handles")
         if result.returncode and self.discover(attachment_id):
             raise StorageAdapterUnsupported("Attachment containment remains unconfirmed")
+        self._same_host()
 
     @classmethod
     def from_local_backend(cls, backend, *, pool: Path | None = None, clean_probe: bool = True):

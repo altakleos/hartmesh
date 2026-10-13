@@ -263,7 +263,7 @@ async def test_pending_empty_scope_never_retires_a_new_human_attachment(instance
     async with sf() as session:
         intent = await session.get(AgentLifecycleRow, (agent.id, key))
         assert intent.phase == "pending" and intent.attachment_ids == []
-    await attachments.retire(actor=ALICE, space_id=home.id, expected_generation=home.generation, attachment_ids=[replacement.id])
+    await attachments.retire(reason="lifecycle", actor=ALICE, space_id=home.id, expected_generation=home.generation, attachment_ids=[replacement.id])
     complete = await InstanceLifecycle(agents).change(actor=ALICE, instance_id=agent.id, expected_generation=agent.generation, operation_id=key, action="suspend")
     assert complete["complete"] is True
 
@@ -480,7 +480,7 @@ async def test_retired_supervision_target_can_be_abandoned_only_after_exact_cont
         await lifecycle.abandon(actor=BOB, instance_id=agent.id, expected_generation=pending["instance"].generation, operation_id=key)
     assert writer.container_id in provider.containers
     provider.uncertain = False
-    await attachments.retire(actor=BOB, space_id=home.id, expected_generation=home.generation, attachment_ids=[writer.id])
+    await attachments.retire(reason="lifecycle", actor=BOB, space_id=home.id, expected_generation=home.generation, attachment_ids=[writer.id])
     done = await lifecycle.abandon(actor=BOB, instance_id=agent.id, expected_generation=pending["instance"].generation, operation_id=key)
     assert done["complete"] and done["instance"].status == "suspended" and done["instance"].supervisor == BOB
     async with sf() as session:

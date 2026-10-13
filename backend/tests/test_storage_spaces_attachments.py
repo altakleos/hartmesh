@@ -36,6 +36,9 @@ class ContainedProvider:
             raise RuntimeError("Daemon unavailable")
         return [key for key, value in self.containers.items() if value.id == attachment_id]
 
+    def cleanup(self, attachment_id):
+        pass
+
     def verify_active(self, container, plan):
         if self.uncertain or self.containers.get(container) != plan or container not in self.started:
             raise RuntimeError("The exact admitted environment is unavailable")
@@ -58,7 +61,7 @@ async def test_attachment_survives_calls_and_coexists_with_host_editor(storage):
     restarted = SpaceAttachments(files, provider)
     await restarted.attach(actor=ALICE, incarnation=operation(), resources=[ResourceMount(space.id, 1, "new", writable=True)])
     assert len(provider.containers) == 2
-    await restarted.retire(actor=ALICE, space_id=space.id, expected_generation=1)
+    await restarted.retire(reason="storage-recovery", actor=ALICE, space_id=space.id, expected_generation=1)
     assert not provider.containers
     async with sf() as session:
         assert all(row.phase == "fenced" for row in (await session.execute(select(SpaceAttachmentRow))).scalars())
@@ -91,7 +94,7 @@ async def test_resume_rejects_changed_resource_or_fenced_environment(storage):
         await mounts.resume(actor=ALICE, incarnation=incarnation, resources=[ResourceMount(space.id, 1, "renamed", writable=True)])
     with pytest.raises(SpaceDenied):
         await mounts.resume(actor=BOB, incarnation=incarnation, resources=resources)
-    await mounts.retire(actor=ALICE, space_id=space.id, expected_generation=1)
+    await mounts.retire(reason="storage-recovery", actor=ALICE, space_id=space.id, expected_generation=1)
     with pytest.raises(AttachmentPending):
         await mounts.resume(actor=ALICE, incarnation=incarnation, resources=resources)
 
@@ -103,14 +106,14 @@ async def test_unknown_writer_keeps_retirement_pending_without_expiry(storage):
     await mounts.attach(actor=ALICE, incarnation=operation(), resources=[ResourceMount(space.id, 1, "home", writable=True)])
     provider.uncertain = True
     with pytest.raises(AttachmentPending):
-        await mounts.retire(actor=ALICE, space_id=space.id, expected_generation=1)
+        await mounts.retire(reason="storage-recovery", actor=ALICE, space_id=space.id, expected_generation=1)
     async with sf() as session:
         assert (await session.execute(select(SpaceAttachmentRow))).scalar_one().phase == "fence_pending"
     with pytest.raises(SpaceConflict):
         await files.registry.set_grant(actor=ALICE, space_id=space.id, expected_generation=1, subject=BOB, permissions=Permission.READ, acknowledge_existing_data=True)
     await mounts.attach(actor=ALICE, incarnation=operation(), resources=[ResourceMount(space.id, 1, "parallel", writable=True)])
     provider.uncertain = False
-    await mounts.retire(actor=ALICE, space_id=space.id, expected_generation=1)
+    await mounts.retire(reason="storage-recovery", actor=ALICE, space_id=space.id, expected_generation=1)
     assert not provider.containers
 
 
@@ -123,7 +126,7 @@ async def test_readonly_attachments_do_not_authorize_mutation_and_modes_are_enfo
         await mounts.attach(actor=BOB, incarnation=operation(), resources=[ResourceMount(space.id, 2, "home", writable=True)])
     await mounts.attach(actor=BOB, incarnation=operation(), resources=[ResourceMount(space.id, 2, "home")])
     with pytest.raises(SpaceDenied):
-        await mounts.retire(actor=BOB, space_id=space.id, expected_generation=2)
+        await mounts.retire(reason="storage-recovery", actor=BOB, space_id=space.id, expected_generation=2)
 
 
 @pytest.mark.asyncio
@@ -163,7 +166,7 @@ async def test_failed_start_persists_intent_and_requires_real_containment(storag
     async with sf() as session:
         row = (await session.execute(select(SpaceAttachmentRow))).scalar_one()
         assert row.phase == "pending" and row.container_id in provider.containers
-    await mounts.retire(actor=ALICE, space_id=space.id, expected_generation=1)
+    await mounts.retire(reason="storage-recovery", actor=ALICE, space_id=space.id, expected_generation=1)
     assert not provider.containers
 
 
@@ -179,7 +182,7 @@ async def test_unknown_prepare_without_discoverable_identity_stays_pending(stora
     with pytest.raises(AttachmentPending):
         await mounts.attach(actor=ALICE, incarnation=operation(), resources=[ResourceMount(space.id, 1, "home", writable=True)])
     with pytest.raises(AttachmentPending, match="identity is unknown"):
-        await mounts.retire(actor=ALICE, space_id=space.id, expected_generation=1)
+        await mounts.retire(reason="storage-recovery", actor=ALICE, space_id=space.id, expected_generation=1)
     await files.write(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=operation(), path="page", content=b"host", create=True)
 
 
@@ -202,7 +205,7 @@ async def test_invalid_prepared_ownership_retains_known_identity_and_denies_take
     async with sf() as session:
         assert (await session.execute(select(SpaceAttachmentRow))).scalar_one().container_id == ID
     with pytest.raises(AttachmentPending):
-        await mounts.retire(actor=ALICE, space_id=space.id, expected_generation=1)
+        await mounts.retire(reason="storage-recovery", actor=ALICE, space_id=space.id, expected_generation=1)
     with pytest.raises(SpaceConflict):
         await mounts.attach(actor=ALICE, incarnation=operation(), resources=[ResourceMount(space.id, 1, "takeover", writable=True)])
     assert docker.entry is not None and not any(command[1] == "rm" for command in docker.calls)
@@ -213,9 +216,9 @@ async def test_explicit_retirement_retry_does_not_stop_replacement(storage):
     files, _, _, mounts, provider = storage
     space = await home(files)
     first = await mounts.attach(actor=ALICE, incarnation=operation(), resources=[ResourceMount(space.id, 1, "home", writable=True)])
-    await mounts.retire(actor=ALICE, space_id=space.id, expected_generation=1, attachment_ids=[first.id])
+    await mounts.retire(reason="storage-recovery", actor=ALICE, space_id=space.id, expected_generation=1, attachment_ids=[first.id])
     replacement = await mounts.attach(actor=ALICE, incarnation=operation(), resources=[ResourceMount(space.id, 1, "home", writable=True)])
-    await mounts.retire(actor=ALICE, space_id=space.id, expected_generation=1, attachment_ids=[first.id])
+    await mounts.retire(reason="storage-recovery", actor=ALICE, space_id=space.id, expected_generation=1, attachment_ids=[first.id])
     assert replacement.container_id in provider.containers
 
 

@@ -219,7 +219,7 @@ async def retire_attachments(space_id: str, body: RetireAttachmentsRequest, requ
     provider = getattr(_service(request), "attachments", None)
     if provider is None:
         raise HTTPException(501, "The attachment provider must reconnect before containment can be confirmed")
-    await provider.retire(actor=await _actor(request), space_id=space_id, expected_generation=body.generation, attachment_ids=body.attachment_ids)
+    await provider.retire(reason="storage-recovery", actor=await _actor(request), space_id=space_id, expected_generation=body.generation, attachment_ids=body.attachment_ids)
     return {"complete": True}
 
 
