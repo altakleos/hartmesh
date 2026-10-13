@@ -95,7 +95,7 @@ jobs:
           sudo cp -R deploy/compose/. /opt/hartmesh/
           sudo find /opt/hartmesh -type d -exec chmod 0755 {} +
           sudo find /opt/hartmesh -type f -exec chmod 0644 {} +
-          sudo sed -i -E "s#ghcr\.io/altakleos/hartmesh-backend@sha256:[0-9a-f]{64}#${BACKEND_REF}#g" /opt/hartmesh/compose.yaml
+          sudo sed -i -E "s#ghcr\.io/altakleos/hartmesh-backend@sha256:[0-9a-f]{64}#${BACKEND_REF}#g" /opt/hartmesh/compose.yaml /opt/hartmesh/images.txt
           test "$(grep -c -F "$BACKEND_REF" /opt/hartmesh/compose.yaml)" = 3
           if grep -q 'ghcr.io/altakleos/hartmesh-backend@' /opt/hartmesh/compose.yaml; then exit 1; fi
 
@@ -137,6 +137,13 @@ jobs:
           HARTMESH_COMPANY_STORAGE_GIB=1
           ENV
           sudo chmod 0644 /srv/hartmesh/.env /srv/hartmesh/operator/models.yaml
+
+      - name: Prefetch every pinned bundle image
+        run: |
+          while IFS= read -r image; do
+            case "$image" in *@sha256:*) ;; *) echo "bundle image is not digest-pinned: $image"; exit 1 ;; esac
+            docker pull "$image"
+          done < /opt/hartmesh/images.txt
 
       - name: 10 Ask the shipped one-shot whether the keys fit, before anything exists
         run: |
@@ -214,6 +221,7 @@ jobs:
           mkdir -p "$EVIDENCE"
           $C logs --no-color > "$EVIDENCE/compose.log" 2>&1 || true
           docker ps -a --no-trunc > "$EVIDENCE/containers.txt" 2>&1 || true
+          docker image ls --digests --no-trunc > "$EVIDENCE/images.txt" 2>&1 || true
           sudo cat /etc/fstab > "$EVIDENCE/fstab.txt" || true
           sudo cat /srv/hartmesh/spaces/inventory.v2.json > "$EVIDENCE/inventory.v2.json" || true
 

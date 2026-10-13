@@ -95,6 +95,19 @@ def test_startup_failures_keep_readable_evidence_and_report_service_logs():
     assert "sudo cp" not in collection
 
 
+def test_bundle_prefetches_every_pinned_image_before_the_gateway_starts():
+    document = yaml.safe_load((ROOT / ".github/workflows/compose-instances.yml").read_text(encoding="utf-8"))
+    steps = document["jobs"]["bundle-instances"]["steps"]
+    by_name = {step.get("name"): step.get("run", "") for step in steps}
+    prefetch = by_name["Prefetch every pinned bundle image"]
+    assert 'docker pull "$image"' in prefetch and "/opt/hartmesh/images.txt" in prefetch
+    names = [step.get("name") for step in steps]
+    assert names.index("Prefetch every pinned bundle image") < names.index("11 Start the bundle, whose first start prepares every Space")
+    install = by_name["8 Install the bundle at /opt/hartmesh with the built image"]
+    assert "/opt/hartmesh/compose.yaml /opt/hartmesh/images.txt" in install
+    assert 'docker image ls --digests --no-trunc > "$EVIDENCE/images.txt"' in by_name["Collect logs"]
+
+
 def test_bundle_acceptance_is_opt_in_and_keeps_the_prescribed_file_order():
     source = (ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
