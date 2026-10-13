@@ -1495,6 +1495,29 @@ class RunManager:
         lease_seconds = self._run_ownership_config.lease_seconds
         return (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()
 
+    async def find_idempotent_run(self, thread_id: str, key: str, *, user_id: str | None = None) -> RunRecord | None:
+        """Read a recorded retry without admitting or registering a peer run."""
+        user_id = _resolve_record_user_id(user_id)
+
+        def validated(record):
+            if record.thread_id != thread_id or record.user_id != user_id:
+                raise RuntimeError("Run idempotency key resolved to a different thread or user")
+            record.idempotency_reused = True
+            return record
+
+        async with self._lock:
+            for record in self._runs.values():
+                if record.idempotency_key == key:
+                    return validated(record)
+        row = await self._store.get_by_idempotency_key(key) if self._store is not None else None
+        # A same-worker admission may have committed while the store read
+        # yielded. Preserve its task/stream identity instead of a peer handle.
+        async with self._lock:
+            for record in self._runs.values():
+                if record.idempotency_key == key:
+                    return validated(record)
+        return validated(self._record_from_store(row)) if row is not None else None
+
     async def create_or_reject(
         self,
         thread_id: str,

@@ -30,6 +30,9 @@ accounting or closes admission. Pending denies guessed adoption/replacement/remo
 known exact returned or live tracked IDs may use canonical fenced cleanup.
 Confirmed absence retires acknowledged handoffs only; unacknowledged evidence stays
 reserved. SDK-less quarantine retains actual identity, never a guessed client.
+Unconfirmed create warnings expose bounded cause types, source locations, errno,
+return code and retained attempt/submission facts. Never log exception messages,
+subprocess argv/output, environment or relay tokens at this boundary.
 
 With managed storage off, `_get_thread_mounts` retains the release-45 binds and
 does not resolve a Space. Storage-on ordinary chats use a Gateway-owned

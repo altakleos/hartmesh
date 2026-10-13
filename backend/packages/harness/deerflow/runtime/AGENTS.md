@@ -140,6 +140,10 @@ a pre-admission miss can become an exact hit.
 
 **A `RunRecord` owner matches its durable row.** HTTP admissions omit `user_id` and the SQL store stamps the ambient user, so `create()` and `_admit_thread_operation()` resolve an omitted owner from the contextvar, keeping `None` without one — never `get_effective_user_id()`'s `default` bucket. A `None` record made SQL keyed retries on a peer or after `cleanup()` return 500, hid HTTP runs from owner-scoped history, and skipped their MCP `background_tasks` projection. Pinned by `test_run_record_owner_matches_row_stamped_from_context`, `test_keyed_retry_without_explicit_user_*`, the `sql` case of `test_start_run_peer_idempotent_reuse_*`, `test_run_manager_*_admitted_without_explicit_user`, and `test_run_manager_keeps_omitted_owner_unset_without_user_context`.
 
+`RunManager.find_idempotent_run()` reads an indexed key without admission,
+validates thread/owner, and rechecks local identity after store I/O. Peer handles
+stay unregistered; filesystem preflight stays outside the manager lock.
+
 **Where things live**:
 - `runtime/checkpoint_mode.py` — mode + snapshot-frequency freeze, marker injection, delta detection, compatibility gate, both error types
 - `runtime/checkpoint_state.py` — `CheckpointStateAccessor`, `build_state_mutation_graph`, `RollbackPoint`

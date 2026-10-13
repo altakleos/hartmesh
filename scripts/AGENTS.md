@@ -425,3 +425,18 @@ Provider pack replacement uses Linux atomic directory exchange; unsupported
 hosts/filesystems refuse replacement before changing the existing pack. First
 publication uses an atomic rename. Interrupted cleanup can leave hidden staging
 files, but cannot retire the published baseline.
+
+
+## Tenant qualification receipts
+
+`tenant_class_receipt.py` adds the optional `tenant_class` entry to the existing
+image-acceptance record. It admits bounded UTF-8 JSON/JUnit, exactly 27 named
+bundle cases, successful actual case results and consistent declared totals.
+Runtime and mount propagation are derived solely from the two required passed
+cases. Every nested key/type, UTC timestamp, image digest and finite timing is
+validated; failed qualification preserves existing record bytes. Commit the
+record after a human-performed pinned-tenant run. Stage-two CI has ten storage
+cases and cannot supply the complete receipt. Release verification compares
+receipt backend/sandbox digests with pinned candidates and still authenticates
+both image-acceptance stores. New image admission writes its five fields freshly
+and removes an older tenant receipt. Activation remains deferred.

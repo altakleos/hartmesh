@@ -172,3 +172,36 @@ package over the canonical human facade). Keep business formats in consumer
 packages. Native proof stays in the mandatory no-skip storage tier; deterministic
 fixtures and model smoke are separate evidence. No consumer path selects host
 identity or bypasses native containment.
+
+
+## Shipped Compose qualification
+
+`test_compose_instance_acceptance.py` is opt-in live, gated by
+`HARTMESH_REQUIRE_BUNDLE_INSTANCES=1`; missing prerequisites fail when requested.
+The `bundle-instances` CI job requires all ten named storage cases in file order
+with zero skips and disk-backed `TMPDIR`/pytest basetemp. Never run or collect this
+suite locally. Ordinary coverage reads its AST/workflow through
+`test_compose_instance_acceptance_contract.py`; receipt tests use synthetic files
+and do not qualify a tenant host. Case four stops the Gateway and takes the pool
+runtime ownership lock for isolated orphan-fixture cleanup; it preserves the new
+allocation and unrelated bindings. Case seven proves automatic released-account
+reclamation. Case nine exercises exact-ID Undo sharing and explicit republication,
+matching existing product behavior; removal has no Undo. Keep CI stack evidence
+separate from the complete human-performed tenant qualification receipt.
+The missing-role observation holds the production allocation advisory lock on a
+separate test-owned PostgreSQL session. Drain that exact session and any owned
+cleanup one-off before allowing maintenance or restarting the Gateway; failure
+to confirm drainage leaves the Gateway stopped and fails qualification.
+The offline contract pins runtime-stage provisioning of the bundle's `nsenter`
+and `setpriv` tools; builder-only packages do not reach the final slim image.
+Each synthetic run preserves bounded SSE and terminal JSON evidence before its
+success assertion. Exclude cookies and auth headers. Skill category binds may
+come from caller/global projections or operational `chat-runtime` projections;
+neither changes the six admitted data/ACP binds or caller-owned integration binds.
+The scripted model listens on a runner-host port outside the shipped sandbox's
+allocation range; Gateway-container socket checks cannot observe host listeners.
+Failure artifacts include bounded numeric image/root facts and role/backing
+mappings. Keep file contents and credentials out; physical failures must remain
+diagnosable without relaxing admission or repairing an image during the test.
+Full-files HTTP 507 uses the central root-level `reason` and fallback `detail`
+sentence; feature unavailable/busy responses have separate nested envelopes.

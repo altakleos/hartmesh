@@ -163,6 +163,57 @@ def test_local_uncommitted_success_claim_cannot_qualify_a_release(evidence):
         guard.verify_acceptance(REPOSITORY, VERSION, "HEAD", IMAGES, client=actions)
 
 
+def tenant_receipt():
+    return {
+        "schema": 1,
+        "version": VERSION,
+        "recorded_at": "2026-10-13T07:00:00Z",
+        "guest": {"vcpus": 4, "memory_mib": 8192, "data_disk_gib": 100, "kernel": "6.8", "docker_engine": "28.3", "compose": "2.38", "runsc": "20260901"},
+        "images": {"backend": DIGEST, "sandbox": DIGEST},
+        "native": {"cases": 25, "junit_sha256": DIGEST},
+        "acceptance": {"cases": 27, "junit_sha256": DIGEST},
+        "steps": dict.fromkeys(("fresh_install", "runtime", "rprivate", "cold_start", "enospc", "egress_denial", "transfer_64_mib", "two_runs_one_workspace", "reboot", "restore"), "passed"),
+        "seconds": dict.fromkeys(("prepare", "cold_start", "pending", "fence_pending", "idle_eviction", "transfer_64_mib"), 1.25),
+    }
+
+
+def test_acceptance_record_admits_an_optional_tenant_class_entry(evidence):
+    guard, actions, _root = evidence
+    value = {**record(evidence), "tenant_class": tenant_receipt()}
+    write_record(evidence, value)
+    candidates = {**IMAGES, "sandbox": f"ghcr.io/{REPOSITORY}-sandbox@{DIGEST}"}
+    assert guard.verify_acceptance(REPOSITORY, VERSION, "HEAD", candidates, client=actions) == value
+    assert actions.downloads == [1, 2, 1, 2]
+    # New authenticated admission evidence always replaces the original five
+    # fields; it cannot silently carry an older tenant qualification forward.
+    assert "tenant_class" not in record(evidence)
+
+
+@pytest.mark.parametrize("mutation", ["version", "unknown", "missing-step", "failed-step", "bad-utc", "bool-guest", "wrong-image"])
+def test_tenant_class_entry_with_another_version_or_shape_is_refused(evidence, mutation):
+    guard, actions, _root = evidence
+    entry = tenant_receipt()
+    if mutation == "version":
+        entry["version"] = "another"
+    elif mutation == "unknown":
+        entry["images"]["unknown"] = DIGEST
+    elif mutation == "missing-step":
+        del entry["steps"]["restore"]
+    elif mutation == "failed-step":
+        entry["steps"]["restore"] = "failed"
+    elif mutation == "bad-utc":
+        entry["recorded_at"] = "2026-99-99T00:00:00Z"
+    elif mutation == "bool-guest":
+        entry["guest"]["vcpus"] = True
+    elif mutation == "wrong-image":
+        entry["images"]["sandbox"] = "sha256:" + "d" * 64
+    value = {**record(evidence), "tenant_class": entry}
+    write_record(evidence, value)
+    candidates = {**IMAGES, "sandbox": f"ghcr.io/{REPOSITORY}-sandbox@{DIGEST}"}
+    with pytest.raises(guard.AcceptanceError):
+        guard.verify_acceptance(REPOSITORY, VERSION, "HEAD", candidates, client=actions)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

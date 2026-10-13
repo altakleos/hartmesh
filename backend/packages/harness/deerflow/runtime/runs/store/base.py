@@ -153,6 +153,10 @@ class RunStore(abc.ABC):
     ) -> dict[str, Any] | None:
         pass
 
+    async def get_by_idempotency_key(self, key: str) -> dict[str, Any] | None:
+        """Optional lookup; callers validate thread/owner, never infer absence from failure."""
+        raise NotImplementedError("RunStore cannot look up idempotency keys")
+
     @abc.abstractmethod
     async def list_by_thread(
         self,

@@ -628,6 +628,8 @@ Unresolved requests survive restart, reserve capacity and block another native
 create for the same account or container name. Cancellation retains verified
 containers for fenced cleanup. Operators must preserve the directory alongside
 the pool; unsafe or unknown evidence refuses admission. Defaults remain disabled.
+Unconfirmed creation logs include bounded source locations, error codes and
+attempt/submission facts, without exception text or subprocess payloads.
 
 Managed native cleanup now reserves the opaque owner and exact physical slot
 through final absence verification. Running and stopped containers across all
@@ -669,6 +671,8 @@ Ordinary chats in an enabled, qualified storage deployment keep workspace,
 uploads and outputs in the person's assigned User Space. My Files uses that
 same Space; Shared uses a read-only company bind. Missing or unverified personal
 storage lets the chat continue with text and reports files as unavailable.
+Such chats clear prior upload context before calling the model, preserving text
+without resolving personal file paths.
 Unsupported storage credentials also run chats without files. Uploads and edits
 stage privately on the qualified volume and report `files-full` with HTTP 507
 when capacity or inode headroom is exhausted. Free room by deleting files or old
@@ -696,6 +700,18 @@ reference where appropriate. Native downloads stream through the browser;
 unrecognized responses leave the ordinary download link available for a manual
 retry. Settings shows managed account seats and explains a full deployment;
 storage-off deployments retain the existing account controls.
+
+When a managed conversation has no file directory yet, full storage refuses its
+first run with HTTP 507 before creating a run or opening its stream. Retrying an
+already admitted request returns that run, even if storage subsequently fills.
+
+Provider qualification includes a CI job that installs the pinned Compose
+bundle, verifies its prepared storage and runs ten real storage journeys through
+its public entry point. Full-suite fixtures use disk-backed temporary storage.
+Release tooling can carry an optional receipt of a human-performed tenant-class
+run alongside authenticated image acceptance; that receipt requires the full
+27-case qualification. Storage defaults remain disabled until the remaining
+design stages and qualification are complete.
 
 `/api/features` reports storage readiness, account seats, AI assistant/AI employee
 allowances and the caller's file readiness. `/health` reports storage and agent
