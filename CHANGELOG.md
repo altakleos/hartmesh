@@ -21,6 +21,8 @@ Unconfirmed sandbox creation reports bounded causal locations and error codes
 without exposing exception text, command arguments or subprocess output.
 Chats without assigned personal files clear upload context before the model runs;
 CI failure evidence includes bounded physical image and binding facts.
+Full personal storage refuses a first-conversation run with HTTP 507 before
+admission or streaming, while recorded idempotent retries still return their run.
 Storage defaults remain disabled.
 There is no database schema change.
 

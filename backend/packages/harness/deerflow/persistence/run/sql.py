@@ -179,6 +179,11 @@ class RunRepository(RunStore):
                 return None
             return self._row_to_dict(row)
 
+    async def get_by_idempotency_key(self, key):
+        async with self._sf() as session:
+            row = (await session.execute(select(RunRow).where(RunRow.idempotency_key == key))).scalar_one_or_none()
+            return self._row_to_dict(row) if row is not None else None
+
     async def list_changed(
         self,
         *,

@@ -154,6 +154,11 @@ class RunStore(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def get_by_idempotency_key(self, key: str) -> dict[str, Any] | None:
+        """Read an admitted key; callers must validate its thread and owner."""
+        pass
+
+    @abc.abstractmethod
     async def list_by_thread(
         self,
         thread_id: str,

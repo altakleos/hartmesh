@@ -701,6 +701,10 @@ unrecognized responses leave the ordinary download link available for a manual
 retry. Settings shows managed account seats and explains a full deployment;
 storage-off deployments retain the existing account controls.
 
+When a managed conversation has no file directory yet, full storage refuses its
+first run with HTTP 507 before creating a run or opening its stream. Retrying an
+already admitted request returns that run, even if storage subsequently fills.
+
 Provider qualification includes a CI job that installs the pinned Compose
 bundle, verifies its prepared storage and runs ten real storage journeys through
 its public entry point. Full-suite fixtures use disk-backed temporary storage.

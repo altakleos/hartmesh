@@ -37,6 +37,11 @@ async def test_real_admission_and_worker_keep_requester_attribution_and_instance
     chat = await authority.create(actor=BOB, instance_id=agent.id, creation_id=operation())
     request, _, _ = _make_start_run_persistence_context()
     state = request.app.state
+    state.storage_spaces_enabled = True
+    from app.gateway import chat_storage
+
+    personal_preflight = AsyncMock(side_effect=AssertionError("Instance runs must not consult the human's chat capacity"))
+    monkeypatch.setattr(chat_storage, "prepare_chat_request", personal_preflight)
     state.thread_store = threads
     state.agent_conversations = authority
     state.stream_bridge = _make_bridge()
@@ -89,6 +94,7 @@ async def test_real_admission_and_worker_keep_requester_attribution_and_instance
         await record.task
         assert record.status == RunStatus.success, record.error
         assert record.user_id == "bob" and len(captured) == 1
+        personal_preflight.assert_not_awaited()
         assert not private_scans
         assert "__agent_execution" not in str(record.kwargs)
         state.mcp_task_repo.list_by_thread.assert_not_awaited()

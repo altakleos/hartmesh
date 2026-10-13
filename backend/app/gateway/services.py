@@ -2173,41 +2173,66 @@ async def start_run(
 
         try:
             async with goal_thread_lock(thread_id):
-                await ensure_checkpoint_history_seeded(
-                    request,
-                    thread_id=thread_id,
-                    assistant_id=body.assistant_id,
-                )
-                # A strict caller may have observed the thread before a
-                # concurrent delete removed it while checkpoint preparation
-                # yielded. Recheck immediately before durable admission. The
-                # delete route holds a durable thread-operation reservation,
-                # so after this point either the run or the delete wins; they
-                # cannot both succeed across Gateway workers.
                 if require_existing_thread and not await thread_access_allowed():
                     raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
                 if instance_execution is not None:
                     await instance_execution.authority.validate(instance_execution)
-                record = await run_mgr.create_or_reject(
-                    thread_id,
-                    body.assistant_id,
-                    on_disconnect=disconnect,
-                    metadata=run_metadata,
-                    # Persist a secret-redacted copy of the config: the run record is
-                    # written to runs.kwargs_json and echoed by the run API, so a
-                    # request-scoped secret (#3861) must not ride along. The live
-                    # config built above keeps the secrets for the actual run.
-                    kwargs={
-                        "input": run_record_input,
-                        **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
-                        "config": redact_config_secrets(body.config),
-                        **({"conversation_references": conversation_references} if conversation_references else {}),
-                    },
-                    multitask_strategy=body.multitask_strategy,
-                    model_name=model_name,
-                    user_id=owner_user_id,
-                    idempotency_key=idempotency_key,
-                )
+                record = None
+                if instance_execution is None and getattr(request.app.state, "storage_spaces_enabled", False) is True:
+                    from app.gateway.chat_storage import check_chat_thread_capacity, prepare_chat_request
+                    from deerflow.spaces.chat_paths import ChatFilesFull
+
+                    if idempotency_key is not None:
+                        record = await run_mgr.find_idempotent_run(thread_id, idempotency_key, user_id=owner_user_id)
+                    if record is None:
+                        prepared = await prepare_chat_request(request, thread_id)
+                        if prepared is not None:
+                            try:
+                                await check_chat_thread_capacity(prepared, thread_id)
+                            except ChatFilesFull:
+                                # A peer may have admitted this retry while
+                                # the filesystem check yielded. Reuse only
+                                # its actual record, never admit on refusal.
+                                if idempotency_key is not None:
+                                    record = await run_mgr.find_idempotent_run(thread_id, idempotency_key, user_id=owner_user_id)
+                                if record is None:
+                                    raise
+                if record is None:
+                    await ensure_checkpoint_history_seeded(
+                        request,
+                        thread_id=thread_id,
+                        assistant_id=body.assistant_id,
+                    )
+                    # A strict caller may have observed the thread before a
+                    # concurrent delete removed it while checkpoint preparation
+                    # yielded. Recheck immediately before durable admission. The
+                    # delete route holds a durable thread-operation reservation,
+                    # so after this point either the run or the delete wins; they
+                    # cannot both succeed across Gateway workers.
+                    if require_existing_thread and not await thread_access_allowed():
+                        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+                    if instance_execution is not None:
+                        await instance_execution.authority.validate(instance_execution)
+                    record = await run_mgr.create_or_reject(
+                        thread_id,
+                        body.assistant_id,
+                        on_disconnect=disconnect,
+                        metadata=run_metadata,
+                        # Persist a secret-redacted copy of the config: the run record is
+                        # written to runs.kwargs_json and echoed by the run API, so a
+                        # request-scoped secret (#3861) must not ride along. The live
+                        # config built above keeps the secrets for the actual run.
+                        kwargs={
+                            "input": run_record_input,
+                            **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
+                            "config": redact_config_secrets(body.config),
+                            **({"conversation_references": conversation_references} if conversation_references else {}),
+                        },
+                        multitask_strategy=body.multitask_strategy,
+                        model_name=model_name,
+                        user_id=owner_user_id,
+                        idempotency_key=idempotency_key,
+                    )
 
                 if record.idempotency_reused:
                     stored = record.kwargs or {}
