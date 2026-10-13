@@ -132,8 +132,10 @@ describe("ordinary composer storage refusals", () => {
       screen.getByRole<HTMLButtonElement>("button", { name: "Submit" })
         .disabled,
     ).toBe(false);
-    expect(screen.getByRole<HTMLTextAreaElement>("textbox").value).toBe(
-      "original draft",
+    await waitFor(() =>
+      expect(screen.getByRole<HTMLTextAreaElement>("textbox").value).toBe(
+        "original draft",
+      ),
     );
   });
 
