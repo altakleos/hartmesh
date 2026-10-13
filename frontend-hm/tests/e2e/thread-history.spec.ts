@@ -4,6 +4,7 @@ import {
   mockLangGraphAPI,
   MOCK_THREAD_ID,
   MOCK_THREAD_ID_2,
+  runStreamThreadId,
 } from "./utils/mock-api";
 
 const THREADS = [
@@ -678,12 +679,14 @@ test.describe("Thread history", () => {
     });
 
     const metadataOnlyStream = async (route: Route) => {
+      const threadId = runStreamThreadId(route);
+      const runId = "00000000-0000-0000-0000-000000000778";
       const body = [
         {
           event: "metadata",
           data: {
-            run_id: "00000000-0000-0000-0000-000000000778",
-            thread_id: MOCK_THREAD_ID,
+            run_id: runId,
+            thread_id: threadId,
           },
         },
         { event: "end", data: {} },
@@ -694,6 +697,9 @@ test.describe("Thread history", () => {
       await route.fulfill({
         status: 200,
         contentType: "text/event-stream",
+        headers: {
+          "Content-Location": `/api/threads/${threadId}/runs/${runId}`,
+        },
         body,
       });
     };
@@ -712,7 +718,10 @@ test.describe("Thread history", () => {
     );
     await textarea.press("Enter");
 
-    await expect(page.getByText(OPTIMISTIC_PROMPT_MARKER)).toBeVisible();
+    await expect(
+      page.getByTestId("main-message-list").getByText(OPTIMISTIC_PROMPT_MARKER),
+    ).toBeVisible();
+    await expect(textarea).toHaveValue("");
 
     await page.getByText("Destination conversation").click();
     await page.waitForURL(`**/workspace/chats/${MOCK_THREAD_ID_2}`);

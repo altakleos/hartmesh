@@ -219,7 +219,7 @@ function mockStreamMessages(
   ];
 }
 
-function runStreamThreadId(route: Route) {
+export function runStreamThreadId(route: Route) {
   const pathThreadId = /\/threads\/([^/]+)\/runs\/stream/.exec(
     new URL(route.request().url()).pathname,
   )?.[1];
@@ -797,12 +797,19 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         thread_id?: string;
       };
       const createdThreadId = requested.thread_id ?? MOCK_THREAD_ID;
-      upsertThread({
-        thread_id: createdThreadId,
-        title: "New Chat",
-        updated_at: new Date().toISOString(),
-        messages: options?.createdThreadMessages ?? mockStreamMessages(),
-      });
+      const existingThread = threads.find(
+        (thread) => thread.thread_id === createdThreadId,
+      );
+      // Gateway creation is idempotent and preserves an existing thread's
+      // metadata, including the side-chat relationship used when reopening.
+      if (!existingThread) {
+        upsertThread({
+          thread_id: createdThreadId,
+          title: "New Chat",
+          updated_at: new Date().toISOString(),
+          messages: options?.createdThreadMessages ?? mockStreamMessages(),
+        });
+      }
       return route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -810,7 +817,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           thread_id: createdThreadId,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
-          metadata: {},
+          metadata: existingThread?.metadata ?? {},
           status: "idle",
           values: {},
         }),

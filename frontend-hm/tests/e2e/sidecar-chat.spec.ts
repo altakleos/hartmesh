@@ -728,6 +728,9 @@ test.describe("Side chat", () => {
       return route.fulfill({
         status: 200,
         contentType: "text/event-stream",
+        headers: {
+          "Content-Location": `/api/threads/${MOCK_SIDECAR_THREAD_ID}/runs/run-${MOCK_SIDECAR_THREAD_ID}`,
+        },
         body: events
           .map((event) => {
             return `event: ${event.event}\ndata: ${JSON.stringify(
