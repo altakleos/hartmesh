@@ -89,9 +89,12 @@ def test_bundle_gate_requires_disk_backed_fixtures_and_exact_named_cases():
     document = yaml.safe_load((ROOT / ".github/workflows/compose-instances.yml").read_text(encoding="utf-8"))
     job = document["jobs"]["bundle-instances"]
     assert job["runs-on"] == "ubuntu-latest"
-    assert job["env"]["TMPDIR"].startswith("${{ runner.temp }}/hartmesh-bundle-")
+    # Runner context is unavailable in job-level env; use the step environment.
+    assert "TMPDIR" not in job["env"]
     steps = {step.get("name"): step.get("run", "") for step in job["steps"]}
     preflight = steps["2 Free disk space and check the data directory"]
+    assert 'TMPDIR="${RUNNER_TEMP}/hartmesh-bundle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"' in preflight
+    assert 'echo "TMPDIR=$TMPDIR" >> "$GITHUB_ENV"' in preflight
     assert 'findmnt -no FSTYPE --target "$TMPDIR"' in preflight
     assert "tmpfs|ramfs)" in preflight and "exit 1" in preflight
     acceptance = steps["13 Run the acceptance tests"]

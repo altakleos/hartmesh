@@ -23,7 +23,6 @@ jobs:
     env:
       C: docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env
       EVIDENCE: ${{ github.workspace }}/bundle-evidence
-      TMPDIR: ${{ runner.temp }}/hartmesh-bundle-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v6
 
@@ -36,6 +35,9 @@ jobs:
       - name: 2 Free disk space and check the data directory
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          TMPDIR="${RUNNER_TEMP}/hartmesh-bundle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          export TMPDIR
+          echo "TMPDIR=$TMPDIR" >> "$GITHUB_ENV"
           mkdir -p "$TMPDIR"
           case "$(findmnt -no FSTYPE --target "$TMPDIR")" in tmpfs|ramfs) echo "full-suite temporary directory must be disk-backed"; exit 1 ;; esac
           sudo mkdir -p /srv/hartmesh
