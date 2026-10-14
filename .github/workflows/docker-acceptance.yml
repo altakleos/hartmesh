@@ -64,7 +64,10 @@ jobs:
           import xml.etree.ElementTree as ET
           tree = ET.parse(sys.argv[1])
           cases = tree.findall(".//testcase")
-          assert len(cases) >= 16, "Required managed-storage and instance AIO cases were not collected"
+          names = [case.get("name") for case in cases]
+          required = {'test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol', 'test_host_containment_removes_the_real_container_and_the_next_run_attaches_afresh'}
+          assert len(names) == len(set(names)) and required <= set(names), "Required resident cases were not collected exactly once"
+          assert len(cases) >= 26, "Required managed-storage and instance AIO cases were not collected"
           assert not tree.findall(".//skipped"), "Managed-storage merge qualification cannot skip"
           assert not tree.findall(".//failure") and not tree.findall(".//error")
           PY

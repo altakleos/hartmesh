@@ -10,6 +10,7 @@ import os
 import re
 import selectors
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -337,6 +338,145 @@ def member(compose):
     person.user = person.request("GET", "/api/v1/auth/me").json()
     yield person
     person.client.close()
+
+
+@pytest.fixture(scope="module")
+def employee(compose, session):
+    """Stage-three cases share one AI assistant; deletion arrives in stage four."""
+    definition = session.request(
+        "POST",
+        "/api/agents",
+        json={"name": "bundle-worker", "model": "acceptance-model", "skills": [], "mcp_plugins": [], "allowed_subagents": [], "work_policy": {"enabled": True}, "soul": "Complete the assigned work using the offered tools."},
+        expected=201,
+    ).json()
+    instance = session.request("POST", "/api/agent-instances", json={"creation_id": uuid.uuid4().hex, "name": "Qualification AI assistant", "definition_name": definition["name"], "custody": "personal"}, expected=201).json()
+    thread = session.request("POST", f"/api/agent-instances/{instance['id']}/conversations", json={"creation_id": uuid.uuid4().hex}, expected=201).json()
+    slot = compose.psql("SELECT b.slot_id FROM storage_spaces s JOIN storage_space_backings b ON b.backing_handle=s.backing_handle WHERE s.id=" + sql(instance["home_id"]))
+    assert compose.state["inventory"][slot]["kind"] == "assistant"
+    root = compose.state["inventory"][slot]["mount_path"] + "/data"
+    # The pre-run Space WRITE route is available now; composer transfers are
+    # stage-four qualification and must not be claimed by this setup.
+    space = session.request("GET", f"/api/spaces/{instance['home_id']}").json()
+    session.request("PUT", f"/api/spaces/{instance['home_id']}/content", params={"path": "uploads/input.txt", "generation": space["generation"], "operation_id": uuid.uuid4().hex, "create": True}, content=MARKER)
+    return {"instance": instance, "thread_id": thread["thread_id"], "slot": slot, "root": root}
+
+
+def workspace(compose, employee):
+    value = compose.psql(
+        "SELECT json_build_object('attachment_id',id,'container_id',container_id)::text FROM storage_space_attachments WHERE actor_kind='nonhuman' AND actor_id=" + sql("agent:" + employee["instance"]["id"]) + " AND phase='active'"
+    )
+    assert value, "AI assistant has no active attachment"
+    identity = json.loads(value)
+    (entry,) = json.loads(compose.invoke(["docker", "inspect", "hartmesh-space-" + identity["attachment_id"]]).stdout)
+    assert entry["Id"] == identity["container_id"] and entry["State"]["Running"]
+    return identity, entry
+
+
+def container_absent(compose, identity):
+    result = compose.invoke(["docker", "inspect", identity], check=False)
+    if result.returncode == 0:
+        return False
+    assert result.returncode == 1 and result.stdout.strip() in ("", "[]")
+    assert result.stderr.strip() in ("Error: No such object: " + identity, "error: no such object: " + identity, "Error response from daemon: No such container: " + identity)
+    return True
+
+
+def work_path(employee, work_id=None):
+    base = f"/api/agent-instances/{employee['instance']['id']}/work"
+    return base + ("/" + work_id if work_id else "")
+
+
+def delegate(session, employee, marker):
+    return session.request("POST", work_path(employee), json={"operation_id": uuid.uuid4().hex, "objective": marker, "success_criteria": "Complete the deterministic acceptance task.", "review_required": True}, expected=201).json()
+
+
+def activate(session, employee, work, *, expected=200):
+    return session.request(
+        "POST",
+        work_path(employee, work["id"]) + "/activate",
+        json={"operation_id": uuid.uuid4().hex, "expected_revision": work["revision"], "expected_assignment_revision": work["assignment_revision"], "thread_id": employee["thread_id"]},
+        expected=expected,
+    ).json()
+
+
+def await_attempt(session, employee, work_id, statuses):
+    def check():
+        work = session.request("GET", work_path(employee, work_id)).json()
+        return work if work["attempt"] and work["attempt"]["status"] in statuses else None
+
+    return eventually(check, timeout=120, interval=2)
+
+
+def held_attempt(compose, session, employee):
+    work = delegate(session, employee, "acceptance:work:hold")
+    activate(session, employee, work)
+
+    def holding():
+        value = session.request("GET", work_path(employee, work["id"])).json()
+        if not value["attempt"] or value["attempt"]["status"] != "running" or value["attempt"]["workspace"] != "ready":
+            return None
+        identity, _entry = workspace(compose, employee)
+        attempt_attachment = compose.psql("SELECT attachment_id FROM agent_work_attempts WHERE id=" + sql(value["attempt"]["id"]))
+        assert attempt_attachment == identity["attachment_id"]
+        processes = compose.invoke(["docker", "exec", identity["container_id"], "ps", "-eo", "args"]).stdout.splitlines()
+        return (value, identity) if any(line.strip() == "sleep 300" for line in processes) else None
+
+    return eventually(holding, timeout=120, interval=2)
+
+
+class ProbeObserver:
+    """Observe actual probe creates during preparation, draining our reader."""
+
+    def __init__(self, compose):
+        self.compose, self.facts, self.errors = compose, [], []
+        self.stop = threading.Event()
+
+    def __enter__(self):
+        self.process = subprocess.Popen(
+            ["docker", "events", "--since", str(int(time.time())), "--filter", "type=container", "--filter", "event=create", "--filter", "label=hartmesh.storage.probe", "--format", "{{json .}}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.reader = threading.Thread(target=self.observe, name="qualification-probe-observer")
+        self.reader.start()
+        return self
+
+    def observe(self):
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(self.process.stdout, selectors.EVENT_READ)
+                while not self.stop.is_set():
+                    if not selector.select(0.2):
+                        continue
+                    line = self.process.stdout.readline()
+                    if not line:
+                        if self.stop.is_set():
+                            return
+                        raise AssertionError("Docker probe observer ended before drainage")
+                    event = json.loads(line)
+                    identity = event["Actor"]["ID"]
+                    result = self.compose.invoke(["docker", "inspect", identity], check=False, timeout=10)
+                    if result.returncode == 0:
+                        (entry,) = json.loads(result.stdout)
+                        assert entry["Id"] == identity and "hartmesh.storage.probe" in entry["Config"]["Labels"]
+                        self.facts.append(entry)
+        except BaseException as error:
+            self.errors.append(error)
+
+    def __exit__(self, *_args):
+        self.stop.set()
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=15)
+        self.reader.join(timeout=15)
+        self.process.stdout.close()
+        self.process.stderr.close()
+        assert not self.reader.is_alive(), "Docker observer reader did not drain"
+        assert not self.errors, self.errors
 
 
 def company(compose):
@@ -851,3 +991,157 @@ def test_full_user_space_refuses_upload_and_new_conversation_with_files_full(com
     member.upload(fresh)
     member.run(fresh)
     artifact(member, fresh)
+
+
+def test_bundle_runs_an_agent_and_its_space_survives_gateway_restart_and_workspace_loss(compose, session, employee):
+    thread_id = employee["thread_id"]
+    session.run(thread_id)
+    artifact(session, thread_id)
+    first, entry = workspace(compose, employee)
+    home = mounted(entry, "/mnt/spaces/home")
+    assert home["Source"] == employee["root"] and home["RW"] is True and home["Propagation"] == "rprivate"
+    assert not any(mount["Destination"] == "/mnt/user-data/files" for mount in entry["Mounts"])
+    shared = company(compose)
+    shared_mount = mounted(entry, "/mnt/user-data/shared")
+    assert shared_mount["Source"] == compose.state["inventory"][shared["slot"]]["mount_path"] + "/data/shared" and shared_mount["RW"] is False
+    labels = entry["Config"]["Labels"]
+    assert labels["deerflow.role"] == "resident"
+    assert not entry["HostConfig"]["PortBindings"] and not any(entry["NetworkSettings"]["Ports"].values())
+    assert len(entry["NetworkSettings"]["Networks"]) == 1
+    network_name = next(iter(entry["NetworkSettings"]["Networks"]))
+    (network,) = json.loads(compose.invoke(["docker", "network", "inspect", network_name]).stdout)
+    assert network["Internal"] is True
+    tenant = mounted(entry, "/mnt/tenant")
+    assert tenant["RW"] is False
+    for slot in (employee["slot"], shared["slot"]):
+        assert labels["hartmesh.storage.space." + slot] == "1"
+    assert compose.invoke(["docker", "exec", entry["Id"], "cat", "/mnt/user-data/outputs/acceptance.txt"]).stdout.encode() == ARTIFACT
+    compose.run("restart", "gateway", timeout=180)
+    compose.run("up", "-d", "--wait", timeout=240)
+    artifact(session, thread_id)
+    session.run(thread_id)
+    second, _entry = workspace(compose, employee)
+    assert second["container_id"] == first["container_id"]
+    compose.invoke(["docker", "rm", "-f", second["container_id"]])
+    assert container_absent(compose, second["container_id"])
+    session.run(thread_id)
+    third, _entry = workspace(compose, employee)
+    assert third["container_id"] != second["container_id"]
+    artifact(session, thread_id)
+    assert compose.gateway("python", "-c", "from pathlib import Path; import sys; print((Path(sys.argv[1])/'outputs/acceptance.txt').read_bytes().hex())", employee["root"]) == ARTIFACT.hex()
+
+
+def test_runtime_alias_is_on_the_workspace_and_the_chat_sandbox_and_not_on_the_relay_and_the_probe(compose, session, employee):
+    daemon = json.loads(compose.invoke(["docker", "info", "--format", "{{json .}} "]).stdout)
+    default_runtime = daemon["DefaultRuntime"]
+    chat_thread = session.thread()
+    session.upload(chat_thread)
+    session.run(chat_thread)
+    chat = compose.sandbox(chat_thread)
+    assert chat["HostConfig"]["Runtime"] == compose.runtime
+    sandbox_id = chat["Config"]["Labels"]["deerflow.sandbox_id"]
+    relays = [entry for entry in compose.containers() if (entry["Config"].get("Labels") or {}).get("deerflow.role") == "network-proxy" and entry["Config"]["Labels"].get("deerflow.sandbox_id") == sandbox_id]
+    assert len(relays) == 1 and relays[0]["HostConfig"]["Runtime"] == default_runtime
+    _identity, resident = workspace(compose, employee)
+    resident_sid = resident["Config"]["Labels"]["deerflow.sandbox_id"]
+    resident_relays = [entry for entry in compose.containers() if (entry["Config"].get("Labels") or {}).get("deerflow.role") == "network-proxy" and entry["Config"]["Labels"].get("deerflow.sandbox_id") == resident_sid]
+    assert len(resident_relays) == 1 and resident_relays[0]["HostConfig"]["Runtime"] == default_runtime
+    with ProbeObserver(compose) as observer:
+        for _retry in range(3):
+            identity, _entry = workspace(compose, employee)
+            compose.invoke(["docker", "rm", "-f", identity["container_id"]])
+            session.run(employee["thread_id"])
+            if observer.facts:
+                break
+        assert observer.facts, "No actual probe inspect survived three bounded preparations"
+        assert all(entry["HostConfig"]["Runtime"] == default_runtime for entry in observer.facts)
+        evidence = Path(os.environ.get("EVIDENCE", os.environ["TMPDIR"]))
+        (evidence / "probe-runtime.json").write_text(
+            json.dumps({"default_runtime": default_runtime, "probes": [{"id": entry["Id"], "runtime": entry["HostConfig"]["Runtime"], "labels": entry["Config"]["Labels"]} for entry in observer.facts]}), encoding="utf-8"
+        )
+    _identity, current = workspace(compose, employee)
+    assert current["HostConfig"]["Runtime"] == compose.runtime
+
+
+def test_work_activation_on_a_real_workspace_settles_succeeded_and_submits_the_outcome(compose, session, employee):
+    work = delegate(session, employee, "acceptance:work:outcome")
+    activated = activate(session, employee, work)
+    settled = await_attempt(session, employee, work["id"], {"succeeded"})
+    assert settled["attempt"]["id"] == activated["activation_receipt"]["attempt_id"]
+    assert settled["attempt"]["contained"] is None
+    assert settled["status"] == "submitted" and settled["outcome"]["attempt_id"] == settled["attempt"]["id"]
+    assert settled["outcome"]["statement"] == "Acceptance outcome: outputs/proof.txt written."
+    proof = session.request("GET", f"/api/threads/{employee['thread_id']}/artifacts/mnt/user-data/outputs/proof.txt")
+    assert proof.content == b"WORK-ACCEPTANCE-PROOF\n"
+    _identity, entry = workspace(compose, employee)
+    assert compose.invoke(["docker", "exec", entry["Id"], "cat", "/mnt/user-data/outputs/proof.txt"]).stdout == "WORK-ACCEPTANCE-PROOF\n"
+
+
+def test_attempt_in_flight_leaves_a_slot_for_an_ordinary_chat(compose, session, employee):
+    held, identity = held_attempt(compose, session, employee)
+    compose.state["graceful_work"] = held
+    compose.state["graceful_identity"] = identity
+    capacity = session.request("GET", work_path(employee)).json()["work_capacity"]
+    replicas = json.loads(compose.gateway("python", "-c", "import os, json, yaml; from pathlib import Path; print(json.dumps(yaml.safe_load(Path(os.environ['DEER_FLOW_CONFIG_PATH']).read_text(encoding='utf-8'))['sandbox']['replicas']))"))
+    assert capacity["max"] == max(1, replicas - 1) and capacity["in_use"] == 1 and len(capacity["running"]) == 1
+    assert capacity["running"][0]["work_id"] == held["id"]
+    thread = session.thread()
+    session.upload(thread)
+    session.run(thread)
+    artifact(session, thread)
+    assert compose.sandbox(thread)["State"]["Running"]
+    another = delegate(session, employee, "acceptance:work:outcome")
+    refusal = activate(session, employee, another, expected=409)
+    assert refusal["reason"] == "work-limit"
+    assert session.request("GET", work_path(employee, another["id"])).json()["attempt"] is None
+    assert workspace(compose, employee)[0] == identity
+
+
+def test_graceful_gateway_restart_leaves_no_unresolved_attempt(compose, session, employee):
+    held = compose.state["graceful_work"]
+    compose.run("restart", "gateway", timeout=180)
+    compose.run("up", "-d", "--wait", timeout=240)
+    settled = await_attempt(session, employee, held["id"], {"cancelled", "failed"})
+    assert settled["attempt"]["id"] == held["attempt"]["id"]
+    unresolved = compose.psql("SELECT count(*) FROM agent_work_attempts WHERE status IN ('starting','running','stopping','uncertain')")
+    assert unresolved == "0"
+
+
+def test_killed_gateway_settles_the_attempt_failed_with_an_attempt_contained_event(compose, session, employee):
+    held, identity = held_attempt(compose, session, employee)
+    startup = compose.logs().count("agents: ready (")
+    compose.run("kill", "-s", "KILL", "gateway")
+    compose.run("up", "-d", "--wait", timeout=240)
+    settled = await_attempt(session, employee, held["id"], {"failed"})
+    assert settled["attempt"]["id"] == held["attempt"]["id"] and settled["attempt"]["contained"]["reason"] == "run-orphaned"
+    events = session.request("GET", work_path(employee, held["id"]) + "/history").json()["events"]
+    contained = [event for event in events if event["action"] == "attempt_contained"]
+    assert len(contained) == 1
+    event = contained[0]
+    assert event["actor_kind"] == "host"
+    assert event["report"]["attempt_id"] == held["attempt"]["id"] and event["report"]["attachment_id"] == identity["attachment_id"] and event["report"]["reason"] == "run-orphaned"
+    assert eventually(lambda: container_absent(compose, identity["container_id"]))
+    assert eventually(lambda: container_absent(compose, "hartmesh-space-" + identity["attachment_id"]))
+
+    def startup_settled():
+        lines = [line for line in compose.logs().splitlines() if "agents: ready (" in line]
+        return len(lines) > startup and "1 attachment fenced at start; 1 work attempt settled" in lines[-1]
+
+    assert eventually(startup_settled)
+    compose.state["contained_work"] = settled
+
+
+def test_new_activation_is_admitted_after_a_contained_attempt(compose, session, employee):
+    prior = compose.state["contained_work"]
+    fresh = session.request("GET", work_path(employee, prior["id"])).json()
+    edited = session.request(
+        "POST",
+        work_path(employee, prior["id"]) + "/commands",
+        json={"operation_id": uuid.uuid4().hex, "expected_revision": fresh["revision"], "expected_assignment_revision": fresh["assignment_revision"], "action": "edit", "objective": "acceptance:work:outcome"},
+    ).json()
+    activated = activate(session, employee, edited)
+    assert activated["activation_receipt"]["attempt_id"] != prior["attempt"]["id"]
+    settled = await_attempt(session, employee, prior["id"], {"succeeded"})
+    assert settled["status"] == "submitted" and settled["outcome"]["attempt_id"] == activated["activation_receipt"]["attempt_id"]
+    _identity, entry = workspace(compose, employee)
+    assert compose.invoke(["docker", "exec", entry["Id"], "cat", "/mnt/user-data/outputs/proof.txt"]).stdout == "WORK-ACCEPTANCE-PROOF\n"

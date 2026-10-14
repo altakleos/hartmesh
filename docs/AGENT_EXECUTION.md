@@ -15,13 +15,22 @@ Managed-storage availability is separate from agent identity. `/api/features`
 reports `agent_instances.execution` as `ready` or `unavailable` with a bounded
 reason; `/health` maps this to state words `ready`, `none`, `held` or `unavailable`
 (and `off` with storage disabled). Current reasons include `storage-unavailable`,
-`agents-none`, `space-unverified` and `space-not-assigned`. Hold/host-replacement
-enforcement is not activated yet. AI assistant/AI employee allowances expose
+`agents-none`, `space-unverified`, `space-not-assigned`, `operator-hold` and
+`host-replaced`. AI assistant/AI employee allowances expose
 `allowed` and `in_use` counts, never bytes. An execution admission refusal carries
 HTTP 409 with a public `detail`, `reason: execution-unavailable` and a separate
 `execution_reason`. Feature file routes instead use a structured `detail` with
 `code`, `reason` and a public message. The Compose renderer still writes both
-agent creation counts as zero.
+explicit agent creation counts; both default to zero until default activation.
+
+Creation, conversations, replies, activations and lifecycle changes check current
+execution readiness. AI assistant creation can refuse `ai-assistant-limit` with
+`{per_user, mine, allowed, in_use}` or `ai-assistant-none-free`. AI employee
+creation can refuse `ai-employee-limit` with `{allowed, in_use}`; a caller without
+current company provisioning authority gets 403. The instance list also returns
+`ai_assistants` personal counts. Custody selects the kind: `personal` takes an
+assistant slot and `company` an employee slot. Unfinished and inactive instances
+count toward allowances; exact creation retries preserve admitted identities.
 
 
 `POST /api/agent-instances` requires provider permissions `agents:read` and
@@ -103,6 +112,19 @@ unsupported; a configured Shared bind is not an ordinary attachment mount edge.
 A new chat or completed run reuses the admitted attachment. Lease
 expiry, SDK closure and chat deletion do not retire a physical writer or Home.
 
+A workspace takes one of `sandbox.replicas` slots. At most two runs share it;
+Work attempts are globally limited to `max(1, replicas - 1)`, including launch
+reservations. Admission reports `busy`, `run-limit`, `work-limit`,
+`restarting` or `starting-elsewhere` when those boundaries refuse work.
+The host contains orphaned workspaces at startup, after 1800 idle seconds,
+after a failed start or an uncertain end, with recorded attribution. A running
+workspace with no run survives a Gateway restart. Closing a workspace under a
+run stops it by its next model call with `ResidentInterrupted` and the recorded
+reason. A busy Space refuses a new message with `storage-busy` and `cause`;
+starting or closing workspaces retain their charge until confirmed containment.
+Graceful Gateway shutdown records `gateway_stopped` on interrupted runs. This
+managed resident lifecycle assumes one Gateway worker.
+
 Ordinary wiki, repository and database edits persist in Home without an artifact
 manifest or automatic delivery requirement. Explicit output presentation uses
 Home's `outputs/` and the existing Space download path. Checkpoint branches keep
@@ -163,9 +185,10 @@ This integration adds no database migration or configuration-version change.
 Private native evidence adds explicit schema-3 zero-slot create and schema-4
 zero-slot teardown records for managed chats without User storage. Existing
 schema-1 creates and schema-2 teardowns keep their validation rules. Compose
-agent counts remain disabled. Strict durable cleanup of untracked resident graphs
-is a subsequent stage: unexplained primaries or secondary resources currently
-keep capacity admission closed rather than being removed from census alone.
+agent counts now apply when explicitly set. Strict recovery uses retained original
+container, network and backing identities, even when an attachment row is absent
+or fenced. Live leases and unfinished create operations remain protected;
+unexplained resources keep admission closed until their identity is resolved.
 
 ## Instance memory
 

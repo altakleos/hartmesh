@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -39,6 +40,8 @@ def reply(body: dict[str, Any]) -> dict[str, Any]:
     turn = messages[latest:]
     if not turn:
         raise ValueError("missing acceptance turn")
+    if any(tool.get("function", {}).get("name") == "report_work" for tool in body["tools"]):
+        return work_reply(body, turn)
     skill_match = re.search(
         r"acceptance:skill:(supplier-comparison|procedure-summary)(?:\s|$)",
         str(turn[0].get("content")),
@@ -78,6 +81,58 @@ def reply(body: dict[str, Any]) -> dict[str, Any]:
             }
         ]
     }
+
+
+def work_reply(body, turn):
+    """Stateless script of real Work tools; no application inference bypass."""
+    results = [message for message in turn if message.get("role") == "tool"]
+    if not results:
+        name, arguments = "read_work_context", {}
+    else:
+        try:
+            work = json.loads(results[0]["content"])["work"]
+            work_id, attempt_id = work["id"], work["attempt"]["id"]
+            revision, objective = work["revision"], work["objective"]
+            if (
+                not isinstance(work_id, str)
+                or not re.fullmatch(r"[0-9a-f]{32}", work_id)
+                or not isinstance(attempt_id, str)
+                or not re.fullmatch(r"[0-9a-f]{32}", attempt_id)
+                or type(revision) is not int
+                or not 1 <= revision <= 2**31 - 1
+                or not isinstance(objective, str)
+            ):
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("invalid acceptance work context") from None
+        if "acceptance:work:outcome" in objective:
+            if len(results) == 1:
+                name, arguments = "bash", {"command": "mkdir -p /mnt/user-data/outputs && printf 'WORK-ACCEPTANCE-PROOF\\n' > /mnt/user-data/outputs/proof.txt"}
+            elif len(results) == 2:
+                name, arguments = (
+                    "report_work",
+                    {
+                        "report": {
+                            "operation_id": hashlib.sha256((work_id + ":" + attempt_id).encode("utf-8")).hexdigest()[:32],
+                            "expected_revision": revision,
+                            "action": "outcome",
+                            "statement": "Acceptance outcome: outputs/proof.txt written.",
+                        }
+                    },
+                )
+            else:
+                return {"content": "Work acceptance complete."}
+        elif "acceptance:work:hold" in objective:
+            if len(results) == 1:
+                name, arguments = "bash", {"command": "sleep 300"}
+            else:
+                return {"content": "Work hold finished."}
+        else:
+            raise ValueError("unrecognized acceptance work objective")
+    offered = {tool.get("function", {}).get("name") for tool in body["tools"]}
+    if name not in offered:
+        raise ValueError(f"required real tool not offered: {name}")
+    return {"tool_calls": [{"id": f"call_work_{len(results)}", "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}]}
 
 
 def skill_reply(body, turn, package):

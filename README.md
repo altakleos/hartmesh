@@ -58,9 +58,14 @@ separate instance scope, with current audience checks and stale-write fencing.
 Qualified workspaces support the provider's restricted network and read-only
 Shared binding alongside Home, without publishing a sandbox or relay port.
 Storage and agent counts remain opt-in while the Compose rollout continues.
-Shared chat/workspace capacity accounting and worker lifecycle hooks are staged
-for coordinated Gateway integration. The optional hooks retain uncertain starts
-and complete cleanup before releasing capacity; see the
+Required CI now checks seventeen shipped-bundle storage and agent journeys,
+including Work outcomes, concurrent ordinary chat, idle workspace reuse and
+interrupted-attempt containment. Native CI uses real resident admission and
+proves original-container removal before replacement. See the
+[qualification limits](docs/AI_EMPLOYEE_QUALIFICATION.md).
+Shared chat/workspace capacity accounting and worker lifecycle hooks are installed
+in the Gateway. They retain uncertain starts and complete cleanup before releasing
+capacity; see the
 [registry foundation](backend/docs/RESIDENT_REGISTRY.md).
 Its restart foundation counts each uncertain durable attachment separately and
 requires a complete validated snapshot before opening admission.

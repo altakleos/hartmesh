@@ -178,7 +178,7 @@ identity or bypasses native containment.
 
 `test_compose_instance_acceptance.py` is opt-in live, gated by
 `HARTMESH_REQUIRE_BUNDLE_INSTANCES=1`; missing prerequisites fail when requested.
-The `bundle-instances` CI job requires all ten named storage cases in file order
+The `bundle-instances` CI job requires all seventeen storage/agent cases in order
 with zero skips and disk-backed `TMPDIR`/pytest basetemp. Never run or collect this
 suite locally. Ordinary coverage reads its AST/workflow through
 `test_compose_instance_acceptance_contract.py`; receipt tests use synthetic files
@@ -208,3 +208,13 @@ mappings. Keep file contents and credentials out; physical failures must remain
 diagnosable without relaxing admission or repairing an image during the test.
 Full-files HTTP 507 uses the central root-level `reason` and fallback `detail`
 sentence; feature unavailable/busy responses have separate nested envelopes.
+Stage-three cases share one AI assistant and use authenticated Space WRITE before
+execution. They require idle-restart CID reuse, workspace loss recovery, actual
+runtime/probe facts, Work outcomes/capacity and graceful/forced restart settlement.
+The Docker event observer starts before preparation and drains on every exit.
+Native resident cases use a real provider, registry and run manager on a separate
+4096-inode backing; keep the 256-inode exhaustion fixture unchanged. Drain SDK
+clients, confirm attachments contained, close the registry/provider, then dispose
+SQL. Both named resident cases are mandatory with zero skips; never import or
+collect the native suite locally. Generic native backing proof is distinct from
+managed Gateway ownership, proved by the bundle cases.

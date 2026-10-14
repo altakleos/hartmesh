@@ -55,7 +55,9 @@ History retains prior responses and routing actions.
 
 References use existing Space locators with current shared-audience admission.
 References do not upload, copy, verify contents or mount a resource for the AI
-employee. Its native environment currently mounts Home only. Use existing Home
+employee. Its workspace mounts its own files at `/mnt/spaces/home` read-write and
+the company's Shared folder at `/mnt/user-data/shared` read-only, and none of the
+requester's My Files or Projects. Use existing Home
 storage controls for a transfer; managers must establish the qualified exclusive
 write window after native attachments are fenced. A finished or blocked run is
 not that proof. Upload and response are separate: preserve an uploaded file if

@@ -157,24 +157,31 @@ async def test_resized_space_keeps_its_files_and_reports_the_new_bound(typed_pre
         await engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(backing, tmp_path, monkeypatch):
-    """Use the shipped AIO image and existing SDK across immutable-ID control."""
+@pytest.fixture
+async def resident_runtime(resident_backing, tmp_path, monkeypatch):
+    """Real resident path on a generic native backing, not managed-v5 proof."""
+    import atexit
+    from types import SimpleNamespace
+
+    from sqlalchemy import select
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    from deerflow.agent_instances.contract import DefinitionSnapshot
+    from deerflow.agent_instances.contract import DefinitionSnapshot, InstanceIdentity
     from deerflow.agent_instances.conversations import AgentConversations
     from deerflow.agent_instances.directory import InstanceDirectory
-    from deerflow.agent_instances.lifecycle import InstanceLifecycle
-    from deerflow.agent_instances.runtime import prepare_environment
+    from deerflow.agent_instances.residents import ResidentRegistry
+    from deerflow.agent_instances.runtime import qualified_attachments
     from deerflow.agent_instances.service import AgentInstances
+    from deerflow.agent_instances.work import AgentWork
+    from deerflow.agent_instances.work_execution import WorkExecution
     from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
-    from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
-    from deerflow.config.app_config import AppConfig
+    from deerflow.config.app_config import AppConfig, pop_current_app_config, push_current_app_config
     from deerflow.config.sandbox_config import SandboxConfig
     from deerflow.persistence import models  # noqa: F401 -- register complete ORM
+    from deerflow.persistence.agent_instances.model import AgentInstanceRow
     from deerflow.persistence.base import Base
     from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+    from deerflow.runtime.runs.manager import RunManager
     from deerflow.spaces.contract import PrincipalRef, ResolvedPrincipal
     from deerflow.spaces.principals import HostPrincipalResolver
     from deerflow.spaces.registry import SpaceRegistry
@@ -187,44 +194,161 @@ async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(bac
         monkeypatch.setenv("DEER_FLOW_SANDBOX_RUNTIME", writer_runtime)
     for key, value in {"DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS": "0", "DEER_FLOW_SANDBOX_MEMORY": "768m", "DEER_FLOW_SANDBOX_CPUS": "1", "DEER_FLOW_SANDBOX_PIDS_LIMIT": "128", "DEER_FLOW_SANDBOX_CONTAINER_USER": "1000:1000"}.items():
         monkeypatch.setenv(key, value)
-    catalog, _, _, containment = backing
+    catalog, _, _, containment = resident_backing
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'agent-native.db'}")
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    sf = async_sessionmaker(engine, expire_on_commit=False)
+    baseline = residents = files = instance = None
+    config_pushed = False
+    clients = []
     alice, bob = PrincipalRef("human", "alice"), PrincipalRef("human", "bob")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        sf = async_sessionmaker(engine, expire_on_commit=False)
 
-    async def human(reference):
-        return ResolvedPrincipal(reference, reference == alice) if reference in (alice, bob) else None
+        async def human(reference):
+            return ResolvedPrincipal(reference, reference == alice) if reference in (alice, bob) else None
 
-    directory = InstanceDirectory(sf, human=human)
-    files = SpaceFiles(SpaceRegistry(sf, HostPrincipalResolver(human=human, nonhuman=directory.lookup)), catalog, inventory_path=catalog.data_disk / "inventory.v1.json")
-    agents = AgentInstances(files, directory)
-    authority = AgentConversations(agents)
-    threads = ThreadMetaRepository(sf, instance_authority=authority)
-    instance = await agents.create(
-        actor=alice,
-        creation_id=uuid.uuid4().hex,
-        name="Company analyst",
-        custody="company",
-        supervisor=bob,
-        definition=DefinitionSnapshot.capture(owner_id="alice", config={"name": "analyst", "skills": [], "mcp_plugins": []}, soul="Analyze team work."),
-    )
-    app_config = AppConfig(models=[], sandbox=SandboxConfig(use="deerflow.community.aio_sandbox:AioSandboxProvider"))
-    baseline = object.__new__(AioSandboxProvider)
-    baseline._config = {"ready_timeout": 60}
-    baseline._backend = LocalContainerBackend(
-        image=image,
-        base_port=0,
-        container_prefix="hartmesh-agent-native",
-        config_mounts=[],
-        environment={key: "true" for key in ("DISABLE_BROWSER", "DISABLE_JUPYTER", "DISABLE_CODE_SERVER", "DISABLE_VNC", "DISABLE_MCP_BROWSER", "DISABLE_NODEJS_REPL")},
-    )
+        directory = InstanceDirectory(sf, human=human)
+        files = SpaceFiles(SpaceRegistry(sf, HostPrincipalResolver(human=human, nonhuman=directory.lookup)), catalog, inventory_path=catalog.data_disk / "inventory.v1.json")
+        agents = AgentInstances(files, directory)
+        authority = AgentConversations(agents)
+        instance = await agents.create(
+            actor=alice,
+            creation_id=uuid.uuid4().hex,
+            name="Qualification AI employee",
+            custody="company",
+            supervisor=bob,
+            definition=DefinitionSnapshot.capture(owner_id="alice", config={"name": "analyst", "skills": [], "mcp_plugins": []}, soul="Analyze team work."),
+        )
+        app_config = AppConfig(
+            models=[],
+            sandbox=SandboxConfig(
+                use="deerflow.community.aio_sandbox:AioSandboxProvider",
+                image=image,
+                replicas=2,
+                idle_timeout=0,
+                container_prefix="hartmesh-agent-native-" + uuid.uuid4().hex,
+                ownership={"type": "memory"},
+                environment={key: "true" for key in ("DISABLE_BROWSER", "DISABLE_JUPYTER", "DISABLE_CODE_SERVER", "DISABLE_VNC", "DISABLE_MCP_BROWSER", "DISABLE_NODEJS_REPL")},
+            ),
+        )
+        # Scope configuration only; constructor, provider state and all native
+        # preparation/containment operations remain their real implementations.
+        push_current_app_config(app_config)
+        config_pushed = True
+        baseline = await await_drained(run_file_io(AioSandboxProvider))
+        _provider, attachments = await qualified_attachments(files, baseline_provider=baseline)
+
+        async def owner_of(home_id):
+            async with sf() as session:
+                row = await session.scalar(select(AgentInstanceRow).where(AgentInstanceRow.home_id == home_id))
+                return InstanceIdentity.from_row(row) if row is not None else None
+
+        async def settle(**kwargs):
+            return await WorkExecution(AgentWork(agents)).settle_contained(host_id=attachments.provider.host_id, **kwargs)
+
+        residents = ResidentRegistry(attachments=attachments, provider=baseline, run_manager=RunManager(), settle=settle, owner_of=owner_of, replicas=2, idle_timeout=0)
+        agents.residents = residents
+        attachments.on_contained = residents.contained
+
+        def install_accounting():
+            baseline.external_slots = residents.external_slots
+            baseline.external_native_claims = residents.external_native_claims
+            baseline.evict_external = residents.evict_external
+
+        baseline.external_changed(install_accounting)
+        token = residents.begin_restore()
+        residents.finish_restore(token, await attachments.retained_claims())
+        yield SimpleNamespace(
+            agents=agents,
+            authority=authority,
+            files=files,
+            instance=instance,
+            alice=alice,
+            bob=bob,
+            baseline=baseline,
+            app_config=app_config,
+            containment=containment,
+            residents=residents,
+            sf=sf,
+            clients=clients,
+            threads=ThreadMetaRepository(sf, instance_authority=authority),
+        )
+    finally:
+
+        async def cleanup():
+            errors = []
+            for client in clients:
+                try:
+                    await await_drained(run_file_io(client.close))
+                except BaseException as error:
+                    errors.append(error)
+            try:
+                if files is not None and instance is not None and files.attachments is not None:
+                    home = await files.registry.get(actor=alice, space_id=instance.home_id)
+                    await files.attachments.retire(reason="storage-recovery", actor=alice, space_id=home.id, expected_generation=home.generation)
+                    containment["confirmed"] = True
+            except BaseException as error:
+                errors.append(error)
+            if residents is not None:
+                try:
+                    await await_drained(residents.close())
+                except BaseException as error:
+                    errors.append(error)
+            if baseline is not None:
+                try:
+                    await await_drained(run_file_io(baseline.shutdown))
+                    atexit.unregister(baseline.shutdown)
+                except BaseException as error:
+                    errors.append(error)
+            try:
+                await engine.dispose()
+            except BaseException as error:
+                errors.append(error)
+            if errors:
+                raise BaseExceptionGroup("Native resident fixture cleanup failed", errors)
+
+        try:
+            await await_drained(cleanup())
+        finally:
+            if config_pushed:
+                pop_current_app_config()
+
+
+async def native_prepare(runtime, actor, thread_id):
+    from deerflow.agent_instances.runtime import execution_scope, prepare_environment
+    from deerflow.config.app_config import pop_current_app_config, push_current_app_config
+
+    execution = await runtime.authority.execution(actor=actor, thread_id=thread_id)
+    runtime.containment["confirmed"] = False
+    push_current_app_config(runtime.app_config)
+    try:
+        with execution_scope(execution) as environment:
+            try:
+                provider = await prepare_environment(execution, baseline_provider=runtime.baseline, app_config=runtime.app_config)
+                assert environment.provider is provider and environment.attachment_id == provider.sandbox.id
+            finally:
+                if environment.provider is not None:
+                    runtime.clients.append(environment.provider)
+    finally:
+        pop_current_app_config()
+    return provider
+
+
+@pytest.mark.asyncio
+async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(resident_runtime):
+    """Use the shipped AIO image through real resident admission and the SDK."""
+    from deerflow.agent_instances.lifecycle import InstanceLifecycle
+    from deerflow.utils.file_io import await_drained, run_file_io
+
+    runtime = resident_runtime
+    agents, files, authority, threads = runtime.agents, runtime.files, runtime.authority, runtime.threads
+    instance, alice, bob, containment = runtime.instance, runtime.alice, runtime.bob, runtime.containment
     first = second = third = None
     containment["confirmed"] = False
     try:
         one = await authority.create(actor=alice, instance_id=instance.id, thread_id=uuid.uuid4().hex)
-        first = await prepare_environment(await authority.execution(actor=alice, thread_id=one["thread_id"]), baseline_provider=baseline, app_config=app_config)
+        first = await native_prepare(runtime, alice, one["thread_id"])
         await await_drained(
             run_file_io(
                 first.sandbox.execute_command,
@@ -283,7 +407,7 @@ async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(bac
             consumer_revisions[consumer] = receipt["revision"]
         await await_drained(run_file_io(first.close))
         two = await authority.create(actor=bob, instance_id=instance.id, thread_id=uuid.uuid4().hex)
-        second = await prepare_environment(await authority.execution(actor=bob, thread_id=two["thread_id"]), baseline_provider=baseline, app_config=app_config)
+        second = await native_prepare(runtime, bob, two["thread_id"])
         assert first.sandbox.id == second.sandbox.id
         for consumer, _, field, value, key in consumer_settings:
             output = await await_drained(run_file_io(second.sandbox.execute_command, f"python3 /mnt/spaces/home/qualification/{consumer}.py read /mnt/spaces/home/workflow-data/{consumer}/settings.json"))
@@ -304,7 +428,7 @@ async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(bac
         assert await files.read(actor=alice, space_id=instance.home_id, path="wiki/home.md", max_bytes=1024) == b"# Team wiki\n"
         restored = await lifecycle.change(actor=alice, instance_id=instance.id, expected_generation=stopped["instance"].generation, operation_id=uuid.uuid4().hex, action="restore")
         assert restored["complete"] and restored["instance"].home_id == instance.home_id
-        third = await prepare_environment(await authority.execution(actor=bob, thread_id=two["thread_id"]), baseline_provider=baseline, app_config=app_config)
+        third = await native_prepare(runtime, bob, two["thread_id"])
         assert third.sandbox.id != second.sandbox.id
         for consumer, _, _, _, key in consumer_settings:
             command = f"python3 /mnt/spaces/home/qualification/{consumer}.py reset /mnt/spaces/home/workflow-data/{consumer}/settings.json --expected {shlex.quote(consumer_revisions[consumer])} --operation reset-after-replacement"
@@ -328,7 +452,36 @@ async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(bac
             home = await files.registry.get(actor=alice, space_id=instance.home_id)
             await files.attachments.retire(reason="storage-recovery", actor=alice, space_id=home.id, expected_generation=home.generation)
             containment["confirmed"] = True
-        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_host_containment_removes_the_real_container_and_the_next_run_attaches_afresh(resident_runtime):
+    from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow
+    from deerflow.utils.file_io import await_drained, run_file_io
+
+    runtime = resident_runtime
+    conversation = await runtime.authority.create(actor=runtime.alice, instance_id=runtime.instance.id, thread_id=uuid.uuid4().hex)
+    first = await native_prepare(runtime, runtime.alice, conversation["thread_id"])
+    runtime.containment["confirmed"] = False
+    attachments = runtime.files.attachments
+    identity = await attachments.retained_attachment(first.sandbox.id)
+    assert identity is not None and identity.container_id is not None
+    await await_drained(run_file_io(first.sandbox.write_file, "/mnt/spaces/home/outputs/retained.txt", "retained through host containment"))
+    await await_drained(run_file_io(first.close))
+    assert await attachments.contain_host(identity.id, "operator")
+    assert await attachments.container_gone(identity.id)
+    result = subprocess.run(["docker", "inspect", identity.container_id], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 1 and result.stdout.strip() in ("", "[]")
+    assert result.stderr.strip() in ("Error: No such object: " + identity.container_id, "error: no such object: " + identity.container_id, "Error response from daemon: No such container: " + identity.container_id)
+    async with runtime.sf() as session:
+        row = await session.get(SpaceAttachmentRow, identity.id)
+        assert row.phase == "fenced" and row.fenced_by_kind == "host" and row.fenced_by_id == attachments.provider.host_id
+        assert row.fence_reason == "operator" and row.fenced_at is not None
+    assert identity.id not in runtime.residents.retained and runtime.residents.external_slots() == 0
+    second = await native_prepare(runtime, runtime.alice, conversation["thread_id"])
+    replacement = await attachments.retained_attachment(second.sandbox.id)
+    assert replacement.id != identity.id and replacement.container_id != identity.container_id
+    assert await await_drained(run_file_io(second.sandbox.read_file, "/mnt/spaces/home/outputs/retained.txt")) == "retained through host containment"
 
 
 @pytest.mark.asyncio
@@ -591,8 +744,7 @@ def test_real_create_with_lost_acknowledgement_preserves_backing_until_verified_
             containment["confirmed"] = True
 
 
-@pytest.fixture(scope="module")
-def prepared(tmp_path_factory):
+def _prepared_native(tmp_path_factory, *, inodes):
     if os.environ.get("HARTMESH_REQUIRE_MANAGED_STORAGE") != "1":
         pytest.skip("Managed-disk qualification runs in its mandatory Linux CI job")
     if os.geteuid() != 0 or not shutil.which("docker"):
@@ -605,7 +757,7 @@ def prepared(tmp_path_factory):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     disk = tmp_path_factory.mktemp("resource volume")
-    volumes = module.prepare_volumes(disk, count=1, size_bytes=64 << 20, inodes=256, reserve_bytes=16 << 20, reserve_inodes=64, data_uid=1000)
+    volumes = module.prepare_volumes(disk, count=1, size_bytes=64 << 20, inodes=inodes, reserve_bytes=16 << 20, reserve_inodes=64, data_uid=1000)
     catalog = PreparedVolumeCatalog.from_manifest(disk / "inventory.v1.json")
     probe = disk / ".probe"
     probe.mkdir(mode=0o700)
@@ -619,8 +771,28 @@ def prepared(tmp_path_factory):
             subprocess.run([shutil.which("umount"), str(volumes[0].mount_path)], check=True, timeout=30)
 
 
+@pytest.fixture(scope="module")
+def prepared(tmp_path_factory):
+    yield from _prepared_native(tmp_path_factory, inodes=256)
+
+
+@pytest.fixture(scope="module")
+def resident_prepared(tmp_path_factory):
+    # Resident admission needs 256 FREE inodes after the Home layout exists.
+    yield from _prepared_native(tmp_path_factory, inodes=4096)
+
+
+@pytest.fixture
+def resident_backing(resident_prepared):
+    yield from _backing(resident_prepared)
+
+
 @pytest.fixture
 def backing(prepared):
+    yield from _backing(prepared)
+
+
+def _backing(prepared):
     catalog, spec, image, containment = prepared
     if not containment["confirmed"]:
         pytest.fail("Earlier native writer containment is pending; preserve its disk")

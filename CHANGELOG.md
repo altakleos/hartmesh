@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Compose agent qualification
+
+The scripted acceptance model supports deterministic Work outcomes and held
+attempts. Required CI adds seven real bundle cases for AI assistant file
+persistence, runtime placement, Work outcomes/capacity and graceful/forced restart
+recovery. Native qualification now uses real resident admission and verifies host
+containment before replacement. Named-case gates reject skips or missing cases;
+operator docs describe holds, recovery and workspace cleanup. Default activation
+and remaining product controls stay deferred.
+
+There is no database schema, native evidence format or configuration-version change.
+
 ### Typed AI agent creation and execution admission
 
 Explicit managed Compose counts now enable AI assistants and AI employees with

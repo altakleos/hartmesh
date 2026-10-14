@@ -579,9 +579,22 @@ def test_readme_tells_the_operator_to_remove_orphaned_sandboxes_before_an_upgrad
     limits. Until the backend compares those, the README carries the upgrade step."""
     readme = (PROFILE / "README.md").read_text(encoding="utf-8")
     note = readme[readme.index("**Upgrading a guest that already runs sandboxes.**") :]
-    assert "docker ps --filter name=deer-flow-sandbox- --filter name=deer-flow-netproxy-" in note
-    assert "docker rm -f $(docker ps -q --filter name=deer-flow-sandbox- --filter name=deer-flow-netproxy-)" in note
+    assert "docker ps --filter name=hartmesh-space- --filter name=deer-flow-sandbox- --filter name=deer-flow-netproxy-" in note
+    assert "docker rm -f $(docker ps -q --filter name=hartmesh-space- --filter name=deer-flow-sandbox- --filter name=deer-flow-netproxy-)" in note
     assert "6336 MiB" in note, "two surviving 512 MiB sandboxes beside the two new 1 GiB slots on the 6 GiB guest"
+
+
+def test_readme_carries_the_hold_file_lines():
+    readme = (PROFILE / "README.md").read_text(encoding="utf-8")
+    section = readme.split("### Stopping agents in an emergency", 1)[1].split("###", 1)[0]
+    for line in (
+        "printf 'incident 4711: runaway assignment\\n' > /srv/hartmesh/operator/agents-hold",
+        "chown 1000:1000 /srv/hartmesh/operator/agents-hold; chmod 0640 /srv/hartmesh/operator/agents-hold",
+        "rm /srv/hartmesh/operator/agents-hold",
+        "grep 'agents: held'",
+        "grep 'agents: hold lifted'",
+    ):
+        assert line in section
 
 
 def test_gateway_wiring_follows_the_contract(compose: dict) -> None:

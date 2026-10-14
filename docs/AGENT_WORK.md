@@ -127,8 +127,9 @@ response-set acknowledgement. See [Attention](HUMAN_INPUT_REQUESTS.md).
 Migration `0041_storage_host_replacements` follows `0040_work_execution` and
 adds nullable `contained_reason`, `workspace_ready_at` and `attachment_id` to
 `agent_work_attempts`, and permits `host` as an actor in `agent_work_events`.
-No current execution path writes those three columns or host settlement events;
-they reserve durable facts for later host containment and settlement.
+The host writes those existing columns when preparation confirms the workspace
+and when containment settles an interrupted attempt. This integration adds no
+database schema or configuration-version change.
 
 ## Explicit execution and supervision
 
@@ -141,8 +142,22 @@ marks the conversation Inspect-protected even when memory is off.
 An attempt records its actual conversation/run identity. Starting, Running,
 Stop pending and Outcome uncertain all prohibit a replacement attempt. Retry the
 same activation operation and body after an unknown acknowledgement. Recovering
-its receipt never creates a second worker for an existing run. An orphaned run or
-uncertain cleanup stays unresolved; terminal run status alone is insufficient.
+its receipt never creates a second worker for an existing run. When the host
+confirms the original workspace is gone and no run remains in flight, it settles
+an orphaned attempt as failed, preserving its candidate and next action without
+promoting an outcome. One host-attributed `attempt_contained` event records the
+exact attachment, attempt and reason. A new explicit activation is then possible.
+Unconfirmed containment stays unresolved; terminal run status alone is insufficient.
+
+The attempt projection includes `workspace` (`starting`, `ready`, or null after
+settlement) and `contained` (null or `{reason, at}`). Recorded host reasons are
+`idle`, `start-failed`, `outcome-uncertain`, `container-absent`, `run-orphaned`,
+`operator`, `host-replaced`, `lifecycle`, and `storage-recovery`; host settlement
+can also record `run-never-started`. History exposes the recorded reason and attachment ID.
+The Work list's `work_capacity` counts all in-flight attempts, including launch
+reservations, against `max(1, sandbox.replicas - 1)`. Its `running` details are
+Inspect-filtered. Each workspace admits at most two runs; an ordinary chat still
+has a sandbox slot while a Work attempt holds the other slot in the bundle.
 
 Progress changes the row revision without changing the assignment. A completion
 report remains a **candidate** until the matching run succeeds, owned operations

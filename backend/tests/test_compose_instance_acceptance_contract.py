@@ -20,6 +20,13 @@ STORAGE_TESTS = (
     "test_company_grant_is_written_for_an_account_that_had_none",
     "test_publication_records_the_member_and_by_host",
     "test_full_user_space_refuses_upload_and_new_conversation_with_files_full",
+    "test_bundle_runs_an_agent_and_its_space_survives_gateway_restart_and_workspace_loss",
+    "test_runtime_alias_is_on_the_workspace_and_the_chat_sandbox_and_not_on_the_relay_and_the_probe",
+    "test_work_activation_on_a_real_workspace_settles_succeeded_and_submits_the_outcome",
+    "test_attempt_in_flight_leaves_a_slot_for_an_ordinary_chat",
+    "test_graceful_gateway_restart_leaves_no_unresolved_attempt",
+    "test_killed_gateway_settles_the_attempt_failed_with_an_attempt_contained_event",
+    "test_new_activation_is_admitted_after_a_contained_attempt",
 )
 
 
@@ -197,6 +204,30 @@ def test_bundle_gate_requires_disk_backed_fixtures_and_exact_named_cases():
     shutdown = steps["14 Check that the stack stops cleanly"]
     assert shutdown.index("compose-before-down.log") < shutdown.index("$C down")
     assert "storage-init quiesce" in shutdown
+
+
+def test_work_qualification_uses_one_shared_assistant_and_exact_recovery_evidence():
+    tree = ast.parse((ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8"))
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    fixture = ast.unparse(functions["employee"])
+    assert "scope='module'" in fixture and "work_policy" in fixture and "personal" in fixture
+    killed = ast.unparse(functions[STORAGE_TESTS[15]])
+    assert "'kill', '-s', 'KILL', 'gateway'" in killed
+    assert "'run-orphaned'" in killed and "'attempt_contained'" in killed
+    assert "attachment_id" in killed and "'host'" in killed
+    assert "startup" in killed and "container_absent" in killed
+    runtime = ast.unparse(functions[STORAGE_TESTS[11]])
+    assert "ProbeObserver" in runtime and "DefaultRuntime" in runtime
+    assert any(isinstance(node, ast.With) for node in ast.walk(functions[STORAGE_TESTS[11]]))
+
+
+def test_native_resident_gate_requires_both_named_real_cases():
+    document = yaml.safe_load((ROOT / ".github/workflows/docker-acceptance.yml").read_text(encoding="utf-8"))
+    source = next(step["run"] for step in document["jobs"]["managed-storage"]["steps"] if "native.xml" in step.get("run", ""))
+    for name in ("test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol", "test_host_containment_removes_the_real_container_and_the_next_run_attaches_afresh"):
+        assert repr(name) in source
+    assert "len(names) == len(set(names))" in source
+    assert 'tree.findall(".//skipped")' in source
 
 
 def test_scripted_model_host_port_stays_outside_the_container_port_allocator_range():

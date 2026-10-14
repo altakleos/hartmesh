@@ -906,6 +906,7 @@ Two directories cross the container boundary:
   path: operator-owned deployment material that is not release content: the
   optional model file `HARTMESH_MODELS_FILE` names (§ "Operator-managed
   models") and the tenant bundle at `operator/tenant/` (§ "Tenant bundle").
+  Its `agents-hold` file stops AI assistant and AI employee execution (§ "Storage and agents").
   It sits beside `home/` rather than inside it
   on purpose -- `home/` is `DEER_FLOW_HOME`, whose `threads/` and `skills/`
   subtrees are what sandboxes bind-mount -- so nothing a chat user or an agent
@@ -1121,7 +1122,8 @@ differs on purpose because the VM's host firewall is the front door and admits
 only the platform's front-door proxies. No other compose service publishes a
 port (`docker compose ps` shows one `PORTS` entry).
 
-Each sandbox does publish one host port by design: its proxy's under
+An AI agent workspace and its relay publish no host port: the Gateway reaches
+them through `docker exec`. Each ordinary chat sandbox does publish one host port by design: its proxy's under
 `allowlist`, its own under `open`. Those bind the daemon's host-gateway
 address (`host.docker.internal` from the Gateway's side; resolved by
 `_resolve_docker_bind_host()`), never `0.0.0.0`, so `ss -ltnp` on the guest
@@ -1303,6 +1305,10 @@ The sidecar runs under the daemon's default runtime (runc), not `runsc`, by
 decision: it is the trusted policy enforcement point, runs no model-authored
 code, is already `--cap-drop=ALL --read-only` as uid 65532, and gVisor's
 netstack under a policy proxy is unproven here.
+
+An AI agent workspace uses the same restricted network pieces, keyed by its
+attachment ID. Its relay runs under the daemon default runtime; the configured
+sandbox runtime applies to the workspace itself.
 
 ### `SANDBOX_EGRESS=open`
 
@@ -1776,8 +1782,8 @@ up a new bundle on a guest whose Gateway did not stop cleanly, list and
 remove them:
 
 ```sh
-docker ps --filter name=deer-flow-sandbox- --filter name=deer-flow-netproxy-
-docker rm -f $(docker ps -q --filter name=deer-flow-sandbox- --filter name=deer-flow-netproxy-)
+docker ps --filter name=hartmesh-space- --filter name=deer-flow-sandbox- --filter name=deer-flow-netproxy-
+docker rm -f $(docker ps -q --filter name=hartmesh-space- --filter name=deer-flow-sandbox- --filter name=deer-flow-netproxy-)
 ```
 
 Redis's `maxmemory` is half its cgroup on purpose: a background AOF rewrite
@@ -1836,6 +1842,8 @@ with a retryable capacity outcome. The slot is reserved before any container
 work and released only once the container, its sidecar and its networks are
 confirmed absent, so concurrent acquisitions cannot each take the last slot.
 
+A running AI agent workspace, with its relay, takes one of these same two slots.
+Work attempts are globally limited to one while replies may share a workspace.
 Scheduled tasks share these two slots and add no container and no limit to the
 budget: `scheduler.max_concurrent_runs` is 1, so unattended work holds at most
 one of them (§ "Scheduled tasks" says what that does and does not leave a
@@ -2156,6 +2164,9 @@ one-at-a-time budget and shows `queued` while it waits. Not measured: an
 unattended run against the tenant's own model route on a leased guest, and the
 Gateway's memory under scheduled work.
 
+An assignment is separate from the scheduled queue. A scheduled run and a Work
+attempt can occupy both sandbox slots; scheduler concurrency does not count Work.
+
 ## Storage and agents
 
 **The storage model and the agents are not offered in this release.** This
@@ -2177,8 +2188,9 @@ default activation and the remaining product screens are deferred.
 **Qualification and operator hold.** With managed storage enabled, the Gateway
 keeps execution closed until it has reconciled durable run ownership, retained
 workspace attachments and the complete Docker resource census. Unknown
-containers or paired networks keep it closed; automatic recovery of resident
-orphans remains a later implementation step, before agent counts activate.
+containers or paired networks keep it closed. Recovery of original resident
+resources uses retained immutable identities and preserves live foreign leases;
+unknown resources and unconfirmed cleanup remain charged.
 The existing maintenance task retries qualification every 60 seconds.
 Creating `/srv/hartmesh/operator/agents-hold` refuses new agent execution and
 causes maintenance to contain locally owned workspaces. A foreign Gateway's
@@ -2311,7 +2323,10 @@ creation respects each kind's allowance and each person's assistant limit,
 including administrators. Unfinished, paused and archived agents count; exact
 creation retries preserve their identity and files. Assistant and employee files
 use slots of their matching kind. Both counts still default to zero in this
-staged build. Qualified nonzero counts permit execution; holds and unavailable
+staged build. Three product capabilities remain unfinished: giving an agent files
+while its workspace runs, freeing its slot on deletion, and screens that distinguish
+AI assistants from AI employees. This staged build is for qualification, not customer
+deployment. Qualified nonzero counts permit execution; holds and unavailable
 storage refuse new replies, activations and lifecycle changes. Work projections
 report readiness, containment and capacity, with details limited by Inspect.
 A successful qualification writes `storage: ready (…)` and `agents: ready (…)`
@@ -2422,6 +2437,11 @@ missing slots and does not cure a Gateway helper failure.
 | `storage: file operations settled <n>` | Confirmed interrupted intents settled; unknown outcomes remain pending. |
 | `storage: user space reclaimed (<slot>)` | Verified cleanup freed a released account's binding. |
 | `agents: none (…)` | Both rendered agent counts are zero. |
+| `agents: ready (<n> attachments fenced at start; <n> work attempts settled)` | Resident restoration and containment completed. |
+| `agents: unavailable (…)` | Qualification remains closed; maintenance retries. |
+| `agents: attachment <id> of <id> contained (<reason>)` | Exact workspace containment confirmed. |
+| `agents: work attempt <id> of <id> settled failed (…)` | Interrupted attempt failed without promoting its candidate. |
+| `agents: held (…)` / `agents: hold lifted` | Operator hold found / removed. |
 
 The renderer reports `spaces=off` with the key absent, otherwise the planned
 counts/capacities followed by `agents=on` when either agent count is nonzero,
@@ -2502,6 +2522,26 @@ and confirm it reports no holders or busy loop devices. The data disk must be
 unmounted while restored; use a stopped guest if required by the platform.
 Restore the disk, restore the release-45 bundle at `/opt/hartmesh`, then start
 that bundle with its original environment and read readiness/logs.
+
+Agents can be stopped or their workspace containers removed without changing
+storage. Files remain in their Space. Before a bundle swap, inspect and remove
+owned holders with the upgrade commands, including `hartmesh-space-` workspaces.
+
+### After a reboot or a Gateway restart
+
+After a VM reboot, fstab and the Gateway's `mount-all` restore the pool mounts.
+Recorded missing workspaces are fenced; interrupted Work attempts settle failed
+only after original-container absence and no run in flight are confirmed. The
+Gateway records attachment and attempt IDs with their reasons, then reports
+`agents: ready (…)`. Incomplete recovery stays unavailable and is retried every
+60 seconds; the health endpoint still exposes the actual state.
+
+A Gateway-only restart preserves a running idle workspace and its files. It
+stops work in flight during graceful shutdown; a forced kill grants no drainage.
+On startup the host contains workspaces associated with orphaned runs and settles
+their attempts as failed. Work can then be explicitly resumed. Nothing restarts
+an assignment automatically. An idle workspace expires after 1800 seconds in
+this profile. Restart when people and AI agents are not working.
 
 ### Commands
 
@@ -2593,6 +2633,27 @@ and verifies every original container/network ID and name is absent before reuse
 Partial paired cleanup survives restart through the private journal. A free seat does not guarantee an
 immediately reusable User slot.
 
+### Stopping agents in an emergency
+
+Place the hold file to refuse new AI assistant and AI employee execution without
+restarting the stack. Maintenance closes locally owned workspaces at its next
+60-second pass. Ordinary chats and people's files remain available.
+
+```bash
+printf 'incident 4711: runaway assignment\n' > /srv/hartmesh/operator/agents-hold
+chown 1000:1000 /srv/hartmesh/operator/agents-hold; chmod 0640 /srv/hartmesh/operator/agents-hold
+hm logs --no-log-prefix gateway | grep 'agents: held'
+# later
+rm /srv/hartmesh/operator/agents-hold
+hm logs --no-log-prefix gateway | grep 'agents: hold lifted'
+```
+
+The Gateway reads this operator-owned file through its read-only mount. Its owner
+is `1000:1000`, mode `0640`; the optional first line appears in the journal only.
+`/health` reports agents `held`. Removing it lifts the hold at admission, but
+qualification must still succeed. The next message or explicit activation starts
+work; removing the file starts no assignment.
+
 ### Full Spaces, the data disk, and unverified Spaces
 
 A person's My Files, Projects and conversation files share one capacity.
@@ -2605,6 +2666,13 @@ receive `No space left on device`; the model explains how to free room.
 An unavailable User Space instead permits text chat without files. Company
 capacity/refusal affects Shared without closing personal file access.
 
+
+An agent whose Space is full refuses a new reply or assignment with `files-full`;
+commands already running can receive `No space left on device`. Its files and
+history remain. Free files through authorized Space controls while its workspace
+is contained, or grow its identified slot after removing holders. An unverified
+Space retains its identity and refuses new execution until verification or
+qualified recovery succeeds. No folder is substituted for it.
 
 Each filesystem enforces bytes and inodes. `si status` separates prepared,
 missing and reserved capacity; `si verify` identifies unverified slots. Freeing
@@ -2642,6 +2710,13 @@ from another cannot restore the binding identities. Do not copy directories over
 a live disk. Generic per-Space lifecycle/recovery refuses managed User and company
 roles with `mounts-unrecorded`; chat binds have no attachment records to establish
 quiescence. Restore their data disk instead.
+
+One agent's Space also supports qualified per-Space backup, restore and recovery
+through the authenticated Spaces API. Current Space ADMIN and generation are
+required; those operations contain recorded attachments with `storage-recovery`
+before physical effects. They preserve existing files when containment is uncertain.
+An operator export command and product Files controls arrive in the next stage.
+User and company roles use the whole data-disk snapshot instead.
 
 The Gateway attempts interrupted ordinary file and feature-workflow settlement
 at startup and in minute-based maintenance. It confirms private receipts and
