@@ -3238,9 +3238,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             config = getattr(peek_loaded_app_config(), "storage_spaces", None)
             host = self._storage_host()
             admission = getattr(host, "admission", None)
-            with self._lock:
-                current = getattr(self, "_runtime_admission", None)
-                if admission is not None:
+            if admission is not None:
+                with self._lock:
+                    current = getattr(self, "_runtime_admission", None)
                     if current is not None and current is not admission:
                         raise SandboxRuntimeAdmissionError("Sandbox lifecycle host binding changed")
                     self._runtime_admission = admission
