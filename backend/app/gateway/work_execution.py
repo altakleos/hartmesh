@@ -21,7 +21,7 @@ async def activate_work_run(request, service, execution, work_id, body):
     """Own capacity, durable reservation, run launch and observation together."""
     from app.gateway.run_models import RunCreateRequest
     from app.gateway.services import start_run
-    from deerflow.agent_instances.contract import ExecutionUnavailable, Refusal
+    from deerflow.agent_instances.contract import Refusal
     from deerflow.agent_instances.runtime import admit_storage
 
     residents = service.agents.residents
@@ -46,16 +46,15 @@ async def activate_work_run(request, service, execution, work_id, body):
             residents.bind(reservation, attempt_id, owner=owner)
 
         try:
+            if not await service.activation_exists(work_id, body.operation_id):
+                await execution.authority.require_ready(execution)
             if residents is None:
-                scope = await service.reserve(execution=execution, work_id=work_id, request=body)
+                scope = await admit_storage(service.agents, execution.instance, lambda: service.reserve(execution=execution, work_id=work_id, request=body))
             else:
                 try:
                     scope = await exact_replay()
                 except _NewActivationRequired:
-                    if service.agents.execution_probe is not None:
-                        state = await service.agents.execution_probe(execution.instance.id)
-                        if state.execution != "ready":
-                            raise ExecutionUnavailable(state.reason)
+                    await execution.authority.require_ready(execution)
                     try:
                         reservation = await residents.admit(execution.instance, work=True)
                     except Refusal as refusal:
@@ -67,6 +66,7 @@ async def activate_work_run(request, service, execution, work_id, body):
                             raise refusal
                     else:
                         retain(reservation)
+                        await execution.authority.require_ready(execution)
                         scope = await admit_storage(
                             service.agents,
                             execution.instance,

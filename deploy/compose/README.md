@@ -2171,7 +2171,8 @@ on the data disk. A **slot** is a prepared filesystem, assigned or free, with
 kind `user`, `assistant`, `employee` or `company`. The **pool** holds the slots
 at `/srv/hartmesh/spaces`. An AI assistant is a person's own agent; an AI
 employee is the company's agent. Counts and capacities below plan their storage;
-they do not activate those capabilities in this release.
+explicit agent counts also enable counted creation and qualified execution while
+default activation and the remaining product screens are deferred.
 
 **Qualification and operator hold.** With managed storage enabled, the Gateway
 keeps execution closed until it has reconciled durable run ownership, retained
@@ -2305,10 +2306,16 @@ Setting only `HARTMESH_USERS=10` prepares eleven 1 GiB slots in this release.
 
 With the keys set for operator qualification, people's files, Shared and Projects
 live in Spaces and ordinary chats mount them. Missing or unverified assignments
-remain visible without preventing text chat. Both rendered agent counts remain zero.
-Nonzero planning counts reserve agent slots. AI assistant and AI employee execution
-support is not offered while qualification continues. A successful qualification
-writes `storage: ready (…)` and `agents: none (…)`.
+remain visible without preventing text chat. Explicit AI assistant and AI employee counts now take effect:
+creation respects each kind's allowance and each person's assistant limit,
+including administrators. Unfinished, paused and archived agents count; exact
+creation retries preserve their identity and files. Assistant and employee files
+use slots of their matching kind. Both counts still default to zero in this
+staged build. Qualified nonzero counts permit execution; holds and unavailable
+storage refuse new replies, activations and lifecycle changes. Work projections
+report readiness, containment and capacity, with details limited by Inspect.
+A successful qualification writes `storage: ready (…)` and `agents: ready (…)`
+when a count is nonzero, or `agents: none (…)` when both are zero.
 The bytes and inodes per conversation are unmeasured;
 the allocation example is not a workload-sizing recommendation.
 
@@ -2417,7 +2424,8 @@ missing slots and does not cure a Gateway helper failure.
 | `agents: none (…)` | Both rendered agent counts are zero. |
 
 The renderer reports `spaces=off` with the key absent, otherwise the planned
-counts/capacities followed by `agents=none`. It reads no disk. `/health` reports
+counts/capacities followed by `agents=on` when either agent count is nonzero,
+or `agents=none` otherwise. It reads no disk. `/health` reports
 state words only; `/api/features` adds authenticated readiness and counts,
 without paths or byte capacities. See [Storage Spaces](../../docs/STORAGE_SPACES.md).
 
@@ -2572,7 +2580,10 @@ accounts release-seat --id ACCOUNT_UUID
 ```
 
 The release transaction records `released_at`, releases the address and marks
-the exact User Space deleted. Sessions and running-work cleanup follow commit;
+the exact User Space and all personal AI assistants with their bound Spaces
+deleted. An unfinished AI assistant without a Space is removed with its grants;
+the receipt counts currently matched assistants and a retry excludes that removed
+intent. Company AI employees stay intact. Sessions and running-work cleanup follow commit;
 a released account cannot be enabled again. Its account/history rows and Shared
 publications remain. Maintenance attempts to remove positively owned chat
 sandboxes before emptying the Space and freeing its binding for another account.

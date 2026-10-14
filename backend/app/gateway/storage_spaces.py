@@ -203,7 +203,8 @@ async def execution_state(app, instance_id: str | None = None) -> ExecutionState
 
 
 async def require_execution(app, instance_id: str | None) -> None:
-    state = await execution_state(app, instance_id)
+    probe = getattr(getattr(app.state, "agent_instances", None), "execution_probe", None)
+    state = await probe(instance_id) if probe is not None else await execution_state(app, instance_id)
     if state.execution == "unavailable":
         raise ExecutionUnavailable(state.reason)
 
@@ -1131,7 +1132,7 @@ async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session
         thread_store.instance_authority = app.state.agent_conversations
     counts = None if status.mount_pending else await _metadata_step(app, timeout=max(0, entered + STARTUP_BUDGET_SECONDS - time.monotonic()))
     app.state.agent_instances.execution_probe = lambda instance_id=None: execution_state(app, instance_id)
-    app.state.agent_instances.allowance_of = lambda kind: allowance(app, kind)
+    app.state.agent_instances.allowance_of = lambda kind, *, session=None: allowance(app, kind, session=session)
     if status.storage_reason is None and status.metadata_task is None and not status.mount_pending:
         await _adapter_step(app, timeout=min(ADAPTER_LIMIT_SECONDS, max(0, entered + STARTUP_BUDGET_SECONDS - time.monotonic())))
     await _resident_step(app, timeout=None)

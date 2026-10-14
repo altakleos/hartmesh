@@ -703,9 +703,26 @@ keep admission closed and preserve existing files and accounting. Work activatio
 reserves capacity before committing a new attempt; exact retries reuse its receipt.
 Shutdown drains pending launches before stopping their workers. The existing
 minute-long maintenance cycle retries qualification, closes eligible workspaces
-and completes authorized releases for every Space kind. Compose agent counts
-remain disabled while strict orphan recovery and the remaining product stages
-are completed.
+and completes authorized releases for every Space kind. Explicit Compose AI
+assistant and AI employee counts now take effect when managed storage is enabled.
+Creation respects the configured allowance, counts unfinished and paused agents,
+and assigns files from the matching kind of prepared slot. Exact creation retries
+retain their identity and files. Default activation and the remaining product
+screens are staged separately.
+
+An operator hold or unavailable execution blocks new conversations, replies,
+Work activations and lifecycle changes before durable admission. Current grants
+are checked first; exact Work retries retain their recorded admission. Deleting
+an agent or abandoning its lifecycle operation remains possible when only its
+files Space is unverified. Generic Space actions cannot archive or delete the
+files of an agent that still exists. Work records expose execution availability,
+workspace readiness and containment receipts; capacity counts include hidden
+assignments while their details require Inspect.
+
+Releasing a disabled account also deletes its personal AI assistants and marks
+their bound files for cleanup, preserving company AI employees. An unfinished
+creation without a files Space is removed with its grants. Unknown cleanup
+outcomes keep capacity charged until containment and release are confirmed.
 
 Managed AI employee preparation records its original container, networks and
 qualified mounts before activation. Reuse checks that same prepared environment.

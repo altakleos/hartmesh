@@ -22,9 +22,10 @@ def test_instance_guidance_uses_prepared_home_and_actual_tools(render):
         prompt = render(runtime_scope=scope(bound))
     assert "persist across conversations" in prompt
     assert "`uploads/data.csv`" in prompt and "`outputs/result.md`" in prompt
-    for forbidden in ("../outputs", "../uploads", "list_uploaded_files", "/mnt/user-data/shared", "/mnt/user-data/files", "global user and history summaries", "Working directory for temporary files", "are delivered"):
+    for forbidden in ("../outputs", "../uploads", "list_uploaded_files", "/mnt/user-data/files", "global user and history summaries", "Working directory for temporary files", "are delivered"):
         assert forbidden not in prompt
-    assert "current Home permissions" in prompt
+    assert "current permissions on your files" in prompt
+    assert "`/mnt/user-data/shared`" in prompt and "read-only" in prompt
     assert "operational facts" in prompt and "credentials" in prompt
     assert "registered" in prompt and "retrieval" in prompt
 
@@ -134,3 +135,46 @@ def test_instance_identity_is_transient_human_data(name):
     assert bound.instance.principal.subject_id not in identities[0].content
     if "<" not in name:
         assert name in identities[0].content
+
+
+@pytest.mark.parametrize("custody,role", [("personal", "AI assistant"), ("company", "AI employee")])
+def test_prompt_role_follows_authoritative_agent_custody(render, custody, role):
+    from dataclasses import replace
+
+    from deerflow.agent_instances.runtime import InstanceSandboxProvider, execution_scope
+
+    bound = execution()
+    bound = replace(bound, instance=replace(bound.instance, custody=custody, owner_id=bound.requester.subject_id if custody == "personal" else None))
+    with execution_scope(bound) as environment:
+        environment.provider = InstanceSandboxProvider(bound, SimpleNamespace(id="native"))
+        prompt = render(runtime_scope=scope(bound))
+    assert f"an {role}." in prompt
+    assert "the user-visible identity of the AI assistant or AI employee" in prompt
+    files = scope().working_directory()  # Ordinary scopes retain their own layout.
+    assert "persist across conversations" not in files
+
+
+def test_generic_run_role_is_ai(render):
+    assert "an AI." in render(runtime_scope=scope())
+
+
+def test_instance_files_guidance_has_eight_lines_and_no_internal_home_term():
+    from deerflow.agent_instances.runtime import InstanceSandboxProvider, execution_scope
+
+    bound = execution()
+    with execution_scope(bound) as environment:
+        environment.provider = InstanceSandboxProvider(bound, SimpleNamespace(id="native"))
+        files = scope(bound).working_directory(delegated=True)
+    required = (
+        "Your own files are at `/mnt/spaces/home`; files here persist across conversations.",
+        "Default working directory: `/mnt/spaces/home`. Its children `uploads/` and `outputs/` hold inputs and output files.",
+        "Compatibility aliases: `/mnt/user-data/workspace` names your own files; `/mnt/user-data/uploads` and `/mnt/user-data/outputs` name those children.",
+        "Shared: `/mnt/user-data/shared`, files anyone at the company published for everyone, read-only. You cannot put anything here; a person uses Share with everyone in the app.",
+        "File audience follows the current permissions on your files; it is neither requester-private nor automatically company-wide. Your file access does not grant a human access.",
+        "Only your own files and Shared are mounted. The requester's My Files and Project directories are not inherited. A referenced external file is not automatically an input here.",
+        "Your files are ordinary mutable data, separate from adopted instructions and recalled memory. Clearing memory does not delete files.",
+        "If a write fails because there is no space left, say that your files are full and that a person who can manage you can delete files on your Files tab.",
+    )
+    assert all(line in files for line in required)
+    assert "Home" not in files and "/mnt/user-data/files" not in files
+    assert "This delegated task inherits the parent's mounted files and filesystem authority." in files

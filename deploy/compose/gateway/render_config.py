@@ -127,10 +127,10 @@ ASSISTANTS_PER_USER_RANGE = (0, 10)
 EMPLOYEES_RANGE = (0, 100)
 CAPACITY_RANGE = (1, 1024)
 # This renderer stays independent of backend imports. Offline tests check the
-# mirrors; the absent-key default and agent admission flip in later stages.
+# mirrors; absent-key defaults remain deferred until the product rollout.
 MAX_SPACES = 256  # mirrors deerflow.spaces.provision
 ABSENT_MEANS_DEFAULT = False  # mirrors app.gateway.storage_init
-AGENT_COUNTS_ACTIVE = False
+AGENT_COUNTS_ACTIVE = True
 MODELS_ENV = "HARTMESH_MODELS_FILE"
 # ── Sign-in mode ────────────────────────────────────────────────────────────
 SIGN_ON_ISSUER_ENV = "HARTMESH_SIGN_ON_ISSUER"

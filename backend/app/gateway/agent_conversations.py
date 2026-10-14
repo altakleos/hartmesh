@@ -108,8 +108,8 @@ async def resident_run_admission(execution, run_manager, *, idempotency_key):
     from deerflow.agent_instances.contract import ExecutionUnavailable, ResidentStartingElsewhere
 
     async with residents.entry(execution.instance).lock:
-        await execution.authority.admit(execution)
         record = await run_manager.find_idempotent_run(execution.thread_id, idempotency_key, user_id=execution.requester.subject_id) if idempotency_key is not None else None
+        await execution.authority.admit(execution, require_ready=record is None and execution.work is None)
         if record is None:
             if execution.work is None:
                 probe = execution.authority.instances.execution_probe

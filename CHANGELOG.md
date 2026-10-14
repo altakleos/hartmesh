@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Typed AI agent creation and execution admission
+
+Explicit managed Compose counts now enable AI assistants and AI employees with
+serialized allowance checks and matching storage kinds. Creation retries retain
+their admitted identity; unfinished and paused agents count toward their limits.
+Current grants precede execution and storage checks for replies and activations;
+operator holds prevent new attempts, including holds arriving during reservation.
+Exact Work retries keep their recorded admission. Lifecycle deletion and abandon
+remain available for an unverified agent Space. Generic Space archive/delete
+preserves agent ownership. Work projections show readiness, containment and
+permission-filtered global capacity. Prompts distinguish the two AI agent kinds
+and describe their own files and read-only Shared files.
+
+Account release transactionally deletes personal AI assistants and their bound
+Spaces, removes unfinished creations without a Space, and preserves company AI
+employees. Unconfirmed containment or final cleanup retains capacity charges.
+Storage defaults and the remaining product stages stay deferred.
+
+There is no database schema, native evidence format or configuration-version change.
+
 ### Strict original workspace recovery
 
 Managed startup can finish interrupted cleanup of an AI agent's original workspace

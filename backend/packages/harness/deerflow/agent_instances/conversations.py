@@ -177,10 +177,12 @@ class AgentConversations:
         row = (await session.execute(select(AgentInstanceRow).where(AgentInstanceRow.id == binding.instance_id).with_for_update())).scalar_one_or_none()
         try:
             identity = InstanceIdentity.from_row(row)
-            await self.instances._human(PrincipalRef("human", user_id))
+            await self.instances._human(PrincipalRef("human", user_id), session=session)
+            if identity.custody == "personal":
+                await self.instances._human(PrincipalRef("human", identity.owner_id), session=session)
         except (AgentDenied, TypeError, ValueError, AttributeError):
             return False
-        if identity.status == "deleted" or (identity.custody == "personal" and await self.instances.directory.human(PrincipalRef("human", identity.owner_id)) is None):
+        if identity.status == "deleted":
             return False
         grant = await session.get(AgentInstanceGrantRow, (binding.instance_id, user_id))
         return grant is not None and 1 <= grant.permissions <= 7 and grant.permissions & int(AgentPermission.MANAGE) == int(AgentPermission.MANAGE)
@@ -209,7 +211,7 @@ class AgentConversations:
             needed = int(permission | AgentPermission.USE)
             if current is None or current.status != "active" or current.generation != view.generation or grant is None or grant.permissions & needed != needed:
                 raise AgentDenied("Instance conversation admission changed")
-            await self.instances._human(actor)
+            await self.instances._human(actor, session=session)
             if await session.get(AgentConversationRow, thread_id) is not None:
                 raise AgentDenied("Conversation identity cannot be reused")
             destination = AgentConversationRow(thread_id=thread_id, instance_id=instance_id, requester_id=actor.subject_id, creation_id=creation_id)
@@ -269,12 +271,28 @@ class AgentConversations:
         compatible = await admit_storage(self.instances, view, lambda: self.context_admission(execution))
         return replace(execution, memory_audience_allowed=compatible)
 
-    async def admit(self, execution):
+    async def require_ready(self, execution):
+        """Recheck human grants before deployment state, without touching storage."""
+        await self._validate_authority(execution)
+        if self.instances.execution_probe is not None:
+            from deerflow.agent_instances.contract import ExecutionUnavailable
+
+            state = await self.instances.execution_probe(execution.instance.id)
+            if state.execution == "unavailable":
+                raise ExecutionUnavailable(state.reason)
+
+    async def admit(self, execution, *, require_ready=None):
         from deerflow.agent_instances.runtime import admit_storage
 
+        if require_ready is None:
+            require_ready = execution.work is None
+        if require_ready:
+            await self.require_ready(execution)
+        else:
+            await self._validate_authority(execution)
         await admit_storage(self.instances, execution.instance, lambda: self.validate(execution))
 
-    async def validate(self, execution):
+    async def _validate_authority(self, execution):
         if not execution.execution_allowed:
             raise AgentDenied("A conversation inspection context cannot execute")
         async with self._sf() as session:
@@ -287,6 +305,10 @@ class AgentConversations:
             raise AgentDenied("Agent conversation audience changed")
         if current.status != "active" or current.generation != execution.instance.generation or current.definition_revision != execution.definition.revision:
             raise AgentDenied("Agent execution authority changed")
+        return current
+
+    async def validate(self, execution):
+        current = await self._validate_authority(execution)
         home = await self.instances.files.registry.get(actor=current.principal, space_id=current.home_id)
         if home.generation != execution.home_generation or home.permissions & (Permission.READ | Permission.WRITE) != Permission.READ | Permission.WRITE:
             raise AgentDenied("Agent storage authority changed")
@@ -315,7 +337,9 @@ class AgentConversations:
                 continue
             if reference.kind != "human":
                 raise AgentDenied("The writable Home audience has an unsupported nonhuman recipient")
-            if await self.instances.directory.human(reference) is None:
+            try:
+                await self.instances._human(reference, session=session)
+            except AgentDenied:
                 continue
             grant = await session.get(AgentInstanceGrantRow, (instance.id, reference.subject_id))
             inspected = grant is not None and type(grant.permissions) is int and 1 <= grant.permissions <= 7 and bool(grant.permissions & int(AgentPermission.INSPECT))
@@ -338,7 +362,8 @@ class AgentConversations:
         # Inspect recipients are identical within an instance. The only extra
         # reader is each unprotected conversation's original Use requester.
         recipient = destination.requester_id
-        if await self.instances.directory.human(PrincipalRef("human", recipient)) is not None and await self._can_read(session, destination, recipient) and not await self._can_read(session, source, recipient):
+        await self.instances._human(PrincipalRef("human", recipient), session=session)
+        if await self._can_read(session, destination, recipient) and not await self._can_read(session, source, recipient):
             raise AgentDenied("Destination conversation audience cannot read referenced context")
 
     async def context_admission(self, execution, *, mark_memory=False, mark_work=False, source_thread_id=None):
@@ -365,7 +390,7 @@ class AgentConversations:
                 or binding.instance_id != identity.id
             ):
                 raise AgentDenied("Agent context authority changed")
-            await self.instances._human(execution.requester)
+            await self.instances._human(execution.requester, session=session)
             if grant is None or type(grant.permissions) is not int or not 1 <= grant.permissions <= 7 or not grant.permissions & int(AgentPermission.USE) or not await self._can_read(session, binding, execution.requester.subject_id):
                 raise AgentDenied("Agent context access changed")
             if mark_work and not grant.permissions & int(AgentPermission.INSPECT):

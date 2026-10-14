@@ -1421,7 +1421,7 @@ def test_render_config_mirrors_the_storage_constants(render_config: ModuleType) 
 
     assert render_config.MAX_SPACES == assignment(REPO_ROOT / "backend/packages/harness/deerflow/spaces/provision.py", "MAX_SPACES") == 256
     assert render_config.ABSENT_MEANS_DEFAULT == assignment(REPO_ROOT / "backend/app/gateway/storage_init.py", "ABSENT_MEANS_DEFAULT") is False
-    assert render_config.AGENT_COUNTS_ACTIVE is False
+    assert render_config.AGENT_COUNTS_ACTIVE is True
 
 
 @pytest.mark.parametrize("raw", [None, "", "  "])
@@ -1444,7 +1444,7 @@ def test_render_writes_the_plan_from_the_seven_keys_with_their_defaults(render_c
         "user_spaces": False,
         "plan": {"users": 10, "user_gib": 1, "ai_assistants_per_user": counts[0], "ai_assistant_gib": 1, "ai_employees": counts[1], "ai_employee_gib": 1, "company_gib": 1},
     }
-    assert document["agents_api"] == {"enabled": True, "ai_assistants_per_user": 0, "ai_employees": 0}
+    assert document["agents_api"] == {"enabled": True, "ai_assistants_per_user": counts[0], "ai_employees": counts[1]}
 
 
 def test_render_keeps_requested_capacities_and_inventory_host_path(render_config: ModuleType) -> None:
@@ -1525,7 +1525,7 @@ def test_summary_line_reports_the_spaces_and_the_agents(render_config: ModuleTyp
     monkeypatch.setenv("HARTMESH_AI_ASSISTANTS_PER_USER", "1")
     monkeypatch.setenv("HARTMESH_AI_EMPLOYEES", "10")
     assert render_config.main(args) == 0
-    assert "egress=allowlist; spaces: users 10 x 1 GiB, assistants 1 per user x 1 GiB, employees 10 x 1 GiB, company 1 GiB; agents=none; " in capsys.readouterr().out
+    assert "egress=allowlist; spaces: users 10 x 1 GiB, assistants 1 per user x 1 GiB, employees 10 x 1 GiB, company 1 GiB; agents=on; " in capsys.readouterr().out
 
 
 def test_storage_init_is_pinned_outside_the_memory_equality(compose: dict) -> None:
@@ -1586,7 +1586,7 @@ def test_readme_says_spaces_and_agents_are_not_offered_while_the_default_is_off(
     assert section.startswith("**The storage model and the agents are not offered in this release.**")
     assert "HARTMESH_USERS" in section and "storage: off (HARTMESH_USERS absent)" in section
     assert '"storage": "off"' in section and '"agents": "off"' in section
-    assert "Both rendered agent counts remain zero" in section
+    assert "Explicit AI assistant and AI employee counts now take effect" in section
     assert "ai()" not in section and "release-seat" in section
 
 

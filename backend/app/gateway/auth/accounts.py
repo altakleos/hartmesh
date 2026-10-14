@@ -1405,26 +1405,38 @@ class AccountsCommand:
 
         from app.gateway.storage_spaces import serialize_role_assignment
         from deerflow.features.resources import StorageFeatureLinkRow
+        from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow, AgentInstanceRow
         from deerflow.persistence.spaces.files import SpaceBackingRow
         from deerflow.persistence.spaces.model import SpaceRow
         from deerflow.persistence.user.access import DisabledIdentityRow
         from deerflow.persistence.user.model import UserRow
         from deerflow.spaces.contract import PrincipalRef, SpaceConflict
         from deerflow.spaces.recovery import SpaceRecovery
+        from deerflow.spaces.service import SpaceFiles
 
         if account is None:
             raise CommandError("release-seat requires an existing account")
         account_id = str(account.id)
         slot = None
+        assistants = []
         async with self._users._sf() as session, session.begin():
+            if session.get_bind().dialect.name == "postgresql":
+                await SpaceFiles._serialize_allocation(session)
             await self._users.serialize_seats(session)
             await serialize_role_assignment(session)
+            assistants = (await session.scalars(select(AgentInstanceRow).where(AgentInstanceRow.custody == "personal", AgentInstanceRow.owner_id == account_id).order_by(AgentInstanceRow.id))).all()
+            homes = {row.id: row.home_id for row in assistants}
             company = await session.get(StorageFeatureLinkRow, ("hm.company-space", "company"))
             user = await session.get(StorageFeatureLinkRow, ("hm.user-space", "human:" + account_id))
-            identifiers = sorted({link.space_id for link in (company, user) if link is not None})
+            identifiers = sorted({link.space_id for link in (company, user) if link is not None} | {home for home in homes.values() if home is not None})
             parents = {}
             for identifier in identifiers:
                 parents[identifier] = (await session.execute(select(SpaceRow).where(SpaceRow.id == identifier).with_for_update())).scalar_one_or_none()
+            for index, captured in enumerate(assistants):
+                row = await session.get(AgentInstanceRow, captured.id, with_for_update=True, populate_existing=True)
+                if row is None or row.custody != "personal" or row.owner_id != account_id or row.home_id != homes[row.id]:
+                    raise SpaceConflict("AI assistant ownership changed during seat release")
+                assistants[index] = row
             await self._users._hold_identity(session, *identity)
             current = await session.get(UserRow, account_id, with_for_update=True)
             if current is None:
@@ -1452,14 +1464,39 @@ class AccountsCommand:
                 if space is not None:
                     space.status = "deleted"
                     SpaceRecovery._advance(session, space, PrincipalRef("human", account_id), "delete", {"retained_backups": False, "retained_binding": True, "by": "host", "cause": "seat-released"})
+            for assistant in assistants:
+                if assistant.home_id is None:
+                    if assistant.status != "provisioning":
+                        raise SpaceConflict("Only unfinished AI assistant creation may have no Space")
+                    grants = (await session.scalars(select(AgentInstanceGrantRow).where(AgentInstanceGrantRow.instance_id == assistant.id))).all()
+                    for grant in grants:
+                        await session.delete(grant)
+                    await session.flush()
+                    await session.delete(assistant)
+                    continue
+                home = parents.get(assistant.home_id) if assistant.home_id is not None else None
+                if assistant.home_id is not None and (
+                    home is None
+                    or (home.mode, home.custody_kind, home.custodian_kind, home.custodian_id, home.feature_namespace, home.feature_controller, home.feature_metadata_version) != ("native", "personal", "human", account_id, None, None, None)
+                ):
+                    raise SpaceConflict("Release requires the exact owned AI assistant Space")
+                if assistant.status != "deleted":
+                    if assistant.generation >= 2**31 - 1:
+                        raise SpaceConflict("AI assistant generation cannot advance")
+                    assistant.status = "deleted"
+                    assistant.generation += 1
+                    assistant.updated_at = datetime.now(UTC)
+                if home is not None and home.status != "deleted":
+                    home.status = "deleted"
+                    SpaceRecovery._advance(session, home, PrincipalRef("human", account_id), "delete", {"retained_backups": False, "retained_binding": True, "by": "host", "cause": "seat-released"})
         # A retry still reaches unfinished work cleanup after the durable release.
         try:
             refreshed = await self._users.get_user_by_id(account_id)
             cleanup = await self.end_sessions(identity, refreshed, end_running_work=True)
         except Exception as exc:
             logger.warning("Account %s is released; cleanup is unconfirmed (%s)", account_id, type(exc).__name__)
-            return {"command": "release-seat", "released": account_id, "assistants": 0, "space": slot, "cleanup_pending": True, "error": "cleanup_unconfirmed", "returncode": EXIT_UNCONFIRMED_RUNS}
-        return {**cleanup, "command": "release-seat", "released": account_id, "assistants": 0, "space": slot, "cleanup_pending": bool(cleanup.get("returncode"))}
+            return {"command": "release-seat", "released": account_id, "assistants": len(assistants), "space": slot, "cleanup_pending": True, "error": "cleanup_unconfirmed", "returncode": EXIT_UNCONFIRMED_RUNS}
+        return {**cleanup, "command": "release-seat", "released": account_id, "assistants": len(assistants), "space": slot, "cleanup_pending": bool(cleanup.get("returncode"))}
 
     async def end_sessions(self, identity: tuple[str, str], account: User | None, *, end_running_work: bool = False) -> dict[str, Any]:
         """End an account's sessions, and its running work only when asked.

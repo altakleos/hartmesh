@@ -17,7 +17,12 @@ from deerflow.spaces.principals import HostPrincipalResolver
 
 
 @pytest_asyncio.fixture(params=["sqlite", "postgres"])
-async def instances(tmp_path, request):
+async def instances(tmp_path, request, monkeypatch):
+    from deerflow.config import agents_api_config
+
+    # Identity/storage tests exercise multiple independent instances. Creation
+    # limit cases set their own policy after this shared fixture is established.
+    monkeypatch.setattr(agents_api_config, "_agents_api_config", agents_api_config.get_agents_api_config().model_copy(update={"ai_assistants_per_user": 10}))
     async for files, sf, catalog in make_storage_fixture(tmp_path, request):
         async with sf.kw["bind"].begin() as connection:
             await connection.run_sync(lambda c: AgentDefinitionRevisionRow.__table__.create(c))
@@ -26,7 +31,7 @@ async def instances(tmp_path, request):
             await connection.run_sync(lambda c: AgentLifecycleRow.__table__.create(c))
         human = files.registry._resolver._human
         directory = InstanceDirectory(sf, human=human)
-        files.registry._resolver = HostPrincipalResolver(human=human, nonhuman=directory.lookup)
+        files.registry._resolver = HostPrincipalResolver(human=human, nonhuman=directory.lookup, nonhuman_in_session=directory.lookup_in_session)
         yield AgentInstances(files, directory), files, sf, catalog
 
 

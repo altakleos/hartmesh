@@ -32,7 +32,7 @@ class AgentWork:
     async def _parent(self, session, actor, instance_id, permission, *, lock=False):
         query = select(AgentInstanceRow).where(AgentInstanceRow.id == instance_id)
         row = (await session.execute(query.with_for_update().execution_options(populate_existing=True) if lock else query)).scalar_one_or_none()
-        await self.agents._human(actor)
+        await self.agents._human(actor, session=session)
         grant = await session.get(AgentInstanceGrantRow, (instance_id, actor.subject_id))
         if row is None or grant is None or row.status == "provisioning":
             raise AgentDenied("Work requires current instance visibility")
@@ -141,13 +141,19 @@ class AgentWork:
                 "requester_id": attempt.requester_id,
                 "candidate": await self._redact(session, actor, attempt.candidate),
                 "settled_at": _date(attempt.settled_at) if attempt.settled_at else None,
+                "workspace": "ready" if attempt.status in UNRESOLVED and attempt.workspace_ready_at is not None else "starting" if attempt.status in {"starting", "running"} else None,
+                "contained": {"reason": attempt.contained_reason, "at": _date(attempt.settled_at) if attempt.settled_at else None} if attempt.contained_reason is not None else None,
             }
             if attempt
             else None,
         )
-        if execution_state is not None:
-            available = execution_state.execution == "ready"
-            value.update(execution_available=available, availability="explicit_activation" if available else "unavailable", execution_reason=execution_state.reason)
+        return self._execution_projection(value, execution_state)
+
+    @staticmethod
+    def _execution_projection(value, state):
+        if state is not None:
+            available = state.execution == "ready"
+            value.update(execution_available=available, availability="explicit_activation" if available else "unavailable", execution_reason=state.reason)
         return value
 
     @staticmethod
@@ -173,19 +179,23 @@ class AgentWork:
             if instance_id is not None:
                 query = query.where(AgentWorkRow.instance_id == instance_id)
             results = (await session.execute(query)).all()
-            states = {}
-            if self.agents.execution_probe is not None:
-                for _row, parent in results:
-                    if parent.id not in states:
-                        states[parent.id] = await self.agents.execution_probe(parent.id)
-            return [await self._project(session, actor, parent, self._snapshot(row), execution_state=states.get(parent.id)) for row, parent in results]
+            records = [await self._project(session, actor, parent, self._snapshot(row)) for row, parent in results]
+        # The probe owns its read session. Never hold a connection while it
+        # checks current host/Space state, including a one-connection pool.
+        states = {}
+        if self.agents.execution_probe is not None:
+            for _row, parent in results:
+                if parent.id not in states:
+                    states[parent.id] = await self.agents.execution_probe(parent.id)
+        return [self._execution_projection(record, states.get(parent.id)) for record, (_row, parent) in zip(records, results, strict=True)]
 
     async def get(self, *, actor, instance_id, work_id):
         async with self._sf() as session:
             parent, _ = await self._parent(session, actor, instance_id, INSPECT)
             row = await self._row(session, instance_id, work_id)
-            state = await self.agents.execution_probe(parent.id) if self.agents.execution_probe is not None else None
-            return await self._project(session, actor, parent, self._snapshot(row), execution_state=state)
+            record = await self._project(session, actor, parent, self._snapshot(row))
+        state = await self.agents.execution_probe(parent.id) if self.agents.execution_probe is not None else None
+        return self._execution_projection(record, state)
 
     async def history(self, *, actor, instance_id, work_id, limit=50, offset=0):
         self._pagination(limit, offset)
@@ -203,7 +213,9 @@ class AgentWork:
                     "assignment_revision": event.assignment_revision,
                     "created_at": _date(event.created_at),
                     "note": event.request.get("note"),
-                    "report": await self._redact(session, actor, {k: event.request[k] for k in ("statement", "sources", "attempt_id", "run_id", "status") if k in event.request}) if event.actor_kind == "nonhuman" else None,
+                    "report": await self._redact(session, actor, {k: event.request[k] for k in ("statement", "sources", "attempt_id", "run_id", "status", "reason", "attachment_id") if k in event.request})
+                    if event.actor_kind in {"nonhuman", "host"}
+                    else None,
                     "record": await self._project(session, actor, parent, event.result, current_attempt=False),
                 }
                 for event in events
