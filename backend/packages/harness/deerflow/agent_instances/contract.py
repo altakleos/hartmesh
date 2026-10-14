@@ -16,6 +16,10 @@ class AgentDenied(PermissionError):
     """Unknown, inaccessible or unauthorized persistent instance."""
 
 
+class CompanyProvisioningDenied(AgentDenied):
+    """A current human lacks host authority to provision company AI employees."""
+
+
 class AgentConflict(RuntimeError):
     """Stale instance generation or reused creation identity with another intent."""
 

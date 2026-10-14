@@ -6214,7 +6214,7 @@ async def test_instance_child_receives_host_capability_and_discloses_inherited_f
         assert current_environment().execution is bound
         assert get_sandbox_provider() is provider
         prompt = str(state["messages"][0].content)
-        assert "mounted Home and filesystem authority" in prompt
+        assert "mounted files and filesystem authority" in prompt
         assert "persist across conversations" in prompt
         assert "../outputs" not in prompt and "../uploads" not in prompt
         assert "list_uploaded_files" not in prompt

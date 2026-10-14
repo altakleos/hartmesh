@@ -10,7 +10,7 @@ from pydantic import Field, model_validator
 
 from app.gateway.authz import require_permission
 from app.gateway.routers.spaces import StrictRequest, _actor, _http_error
-from deerflow.agent_instances.contract import AgentConflict, AgentDenied, DefinitionSnapshot
+from deerflow.agent_instances.contract import AgentConflict, AgentDenied, CompanyProvisioningDenied, DefinitionSnapshot
 from deerflow.agent_instances.service import AgentInstances
 from deerflow.agents.memory.manager import MemoryConflictError, MemoryCorruptionError, _get_host_memory_manager
 from deerflow.config.agents_api_config import get_agents_api_config
@@ -205,7 +205,7 @@ async def create_company_copy(instance_id: str, body: CreateCompanyCopy, request
             snapshot = DefinitionSnapshot.capture(owner_id=actor.subject_id, config=captured.config, soul=captured.soul)
     try:
         instance = await service.create(actor=actor, creation_id=body.creation_id, name=body.name, custody="company", supervisor=supervisor, definition=snapshot, copy_from=instance_id, copy_generation=body.generation)
-    except AgentDenied as exc:
+    except CompanyProvisioningDenied as exc:
         raise HTTPException(403, str(exc)) from None
     return jsonable_encoder(asdict(instance))
 

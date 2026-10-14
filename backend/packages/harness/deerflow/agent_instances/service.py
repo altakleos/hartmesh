@@ -12,7 +12,7 @@ from uuid import uuid4
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
-from deerflow.agent_instances.contract import ALL_AGENT_PERMISSIONS, AgentConflict, AgentDenied, AgentInstance, AgentPermission, DefinitionSnapshot, InstanceIdentity, Refusal
+from deerflow.agent_instances.contract import ALL_AGENT_PERMISSIONS, AgentConflict, AgentDenied, AgentInstance, AgentPermission, CompanyProvisioningDenied, DefinitionSnapshot, InstanceIdentity, Refusal
 from deerflow.agent_instances.directory import InstanceDirectory
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.persistence.agent_instances.model import AgentDefinitionRevisionRow, AgentInstanceGrantRow, AgentInstanceRow, AgentLifecycleRow
@@ -57,7 +57,7 @@ class AgentInstances:
     async def _creation_authority(self, session, actor, custody):
         resolved = await self._human(actor, session=session)
         if custody == "company" and resolved.can_provision_company is not True:
-            raise AgentDenied("Company agents require current host provisioning authority")
+            raise CompanyProvisioningDenied("Company agents require current host provisioning authority")
 
     async def space_owner(self, space_id):
         """Host-only ownership metadata; grants are admitted by the caller."""

@@ -230,6 +230,29 @@ async def test_work_capacity_never_substitutes_historical_or_falsey_task_metadat
 
 
 @pytest.mark.asyncio
+async def test_no_registry_capacity_uses_request_configuration_and_config_errors_stay_503(execution, monkeypatch):
+    from fastapi import HTTPException
+
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    service, admitted, _row, _sf = execution
+    config = AppConfig(models=[], sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider", replicas=5))
+    monkeypatch.setattr("app.gateway.deps.get_config", lambda: config)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=activation_app(service, admitted)), base_url="http://test") as client:
+        response = await client.get(f"/api/agent-instances/{admitted.instance.id}/work")
+        assert response.status_code == 200, response.text
+        assert response.json()["work_capacity"] == {"max": 4, "in_use": 0, "running": []}
+
+        def unavailable():
+            raise HTTPException(503, "Configuration not available")
+
+        monkeypatch.setattr("app.gateway.deps.get_config", unavailable)
+        response = await client.get(f"/api/agent-instances/{admitted.instance.id}/work")
+        assert response.status_code == 503 and response.json()["detail"] == "Configuration not available"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("late", [False, True])
 async def test_activation_adapter_refuses_initial_or_late_hold_before_attempt_write(execution, registry, monkeypatch, late):
     from test_gateway_work_admission import request_for

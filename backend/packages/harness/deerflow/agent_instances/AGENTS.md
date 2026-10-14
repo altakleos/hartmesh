@@ -26,6 +26,8 @@ suspended and archived rows count. Exact retries bypass counts, never current
 authority. Homes use assistant/employee slots by custody; refresh authority before
 binding effects and active publication. Generic `space_owner` is metadata only;
 the caller must admit current Space ADMIN before an ownership refusal.
+Only `CompanyProvisioningDenied` maps company copying to 403; hidden or revoked
+source authority retains 404. Capacity reads use the Gateway config wrapper's 503.
 
 New reply/Work admission checks current grants → execution → storage, repeating
 the decision immediately before durable admission and after capacity reservation.

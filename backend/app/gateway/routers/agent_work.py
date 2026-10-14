@@ -22,10 +22,10 @@ async def _work_capacity(agents, actor):
 
     residents = agents.residents
     if residents is None:
+        from app.gateway.deps import get_config
         from deerflow.community.warm_pool_lifecycle import DEFAULT_REPLICAS
-        from deerflow.config import get_app_config
 
-        replicas = (await run_file_io(get_app_config)).sandbox.replicas
+        replicas = (await run_file_io(get_config)).sandbox.replicas
         return {"max": max(1, (replicas or DEFAULT_REPLICAS) - 1), "in_use": 0, "running": []}
     attempts = residents.attempts_in_flight()
     capacity = {"max": residents.work_max(), "in_use": len(attempts), "running": []}
