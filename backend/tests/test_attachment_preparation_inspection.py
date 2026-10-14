@@ -12,6 +12,21 @@ from deerflow.persistence.spaces.model import SpaceGrantRow
 from deerflow.spaces.attachments import AttachmentPending, ResourceMount
 
 
+@pytest.mark.parametrize("changed", ["actor", "extra"])
+@pytest.mark.asyncio
+async def test_scoped_unfenced_read_refuses_pending_row_with_foreign_actor_or_complete_mount_mismatch(storage, changed):
+    files, sf, _catalog, mounts, provider = storage
+    space = await home(files)
+    resources = [ResourceMount(space.id, 1, "home", writable=True)]
+    attached = await mounts.attach(actor=ALICE, incarnation=operation(), resources=resources)
+    async with sf() as session, session.begin():
+        (await session.get(SpaceAttachmentRow, attached.id)).phase = "pending"
+    requested = resources if changed == "actor" else resources + [ResourceMount(operation(), 1, "extra")]
+    actor = BOB if changed == "actor" else ALICE
+    with pytest.raises(AttachmentPending):
+        await mounts.unfenced(space.id, actor=actor, resources=requested, host_id=provider.host_id)
+
+
 @pytest.mark.asyncio
 async def test_missing_preparation_is_distinct_from_a_fenced_historical_row(storage):
     files, _sf, _catalog, mounts, provider = storage

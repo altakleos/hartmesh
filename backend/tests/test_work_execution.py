@@ -105,6 +105,27 @@ async def test_success_without_report_does_not_complete_work(execution):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("installed", [False, True])
+async def test_no_workspace_lifecycle_change_is_left_for_host_only_with_registry(execution, installed):
+    from deerflow.persistence.agent_instances.model import AgentInstanceRow
+    from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow
+
+    service, admitted, row, sf = execution
+    scope = await service.reserve(execution=admitted, work_id=row["id"], request=activation(admitted, row))
+    admitted = replace(admitted, work=scope)
+    record = run_record(admitted, scope)
+    await scope.bind(admitted, record, admitted.thread_incarnation)
+    service.agents.residents = SimpleNamespace() if installed else None
+    async with sf() as session, session.begin():
+        (await session.get(AgentInstanceRow, admitted.instance.id)).generation += 1
+    status = await scope.finish(admitted, record, settled=True)
+    assert status == ("running" if installed else "cancelled")
+    async with sf() as session:
+        attempt = await session.get(AgentWorkAttemptRow, scope.attempt_id)
+        assert (attempt.settled_at is None) == installed
+
+
+@pytest.mark.asyncio
 async def test_cancellation_fences_worker_and_keeps_stop_pending(execution):
     service, admitted, row, _ = execution
     scope = await service.reserve(execution=admitted, work_id=row["id"], request=activation(admitted, row))

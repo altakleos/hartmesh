@@ -1,6 +1,7 @@
 """Bind one existing run to its qualified home environment, without fake users."""
 
 import asyncio
+import logging
 import shlex
 import time
 from contextlib import contextmanager
@@ -11,18 +12,22 @@ from uuid import uuid4
 
 import httpx
 
-from deerflow.agent_instances.contract import AgentDenied
+from deerflow.agent_instances.contract import RESIDENT_INTERRUPTED, AgentDenied, Refusal
 from deerflow.agent_instances.conversations import AgentExecution
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 from deerflow.spaces.attachments import ResourceMount, SpaceAttachments
 from deerflow.spaces.facade import storage_actor_scope
 from deerflow.utils.file_io import await_drained, run_file_io
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class ExecutionEnvironment:
     execution: AgentExecution
     provider: SandboxProvider | None = None
+    attachment_id: str | None = None
+    recycle_required: bool = False
 
 
 _environment = ContextVar("agent_execution_environment", default=None)
@@ -30,6 +35,109 @@ _environment = ContextVar("agent_execution_environment", default=None)
 
 def current_environment():
     return _environment.get()
+
+
+def _workspace_identity(execution, environment):
+    if environment is None:
+        return None, None
+    if environment.execution is not execution:
+        raise AgentDenied("The workspace environment belongs to another execution")
+    sandbox = getattr(getattr(environment, "provider", None), "sandbox", None)
+    captured = getattr(environment, "attachment_id", None)
+    client_id = getattr(sandbox, "id", None)
+    if captured is not None and client_id is not None and captured != client_id:
+        raise AgentDenied("The workspace client does not match its captured attachment")
+    return sandbox, captured or client_id
+
+
+async def require_live_workspace(execution, environment) -> None:
+    residents = getattr(execution.authority.instances, "residents", None)
+    if residents is None:
+        return
+    sandbox, attachment_id = _workspace_identity(execution, environment)
+    if attachment_id is None:
+        return
+    reason = await residents.attachments.fence_reason(attachment_id)
+    if reason is None and (getattr(sandbox, "execution_outcome_uncertain", False) or getattr(sandbox, "requires_container_recycle", False)):
+        if await residents.attachments.container_gone(attachment_id):
+            async with residents.entry(execution.instance).lock:
+                if await residents.attachments.container_gone(attachment_id):
+                    await residents.attachments.contain_host(attachment_id, "container-absent")
+            reason = await residents.attachments.fence_reason(attachment_id)
+    if reason is not None:
+        raise AgentDenied("The workspace of this run was closed (" + reason + ")")
+
+
+async def run_error(execution, record, exc: BaseException) -> dict:
+    """Map host facts without mutating the winning run outcome."""
+    plain = {"name": type(exc).__name__, "reason": None, "stop_reason": None}
+    if isinstance(exc, Refusal):
+        return {"name": type(exc).__name__, "reason": exc.reason, "stop_reason": exc.reason}
+    if execution is None:
+        return plain
+    try:
+        residents = getattr(execution.authority.instances, "residents", None)
+        if residents is None:
+            return plain
+        _sandbox, attachment_id = _workspace_identity(execution, current_environment())
+        reason = await residents.attachments.fence_reason(attachment_id) if attachment_id is not None else None
+        if reason is not None:
+            return {"name": RESIDENT_INTERRUPTED, "reason": reason, "stop_reason": None}
+    except Exception:
+        logger.warning("Workspace error diagnostics unavailable for run %s", record.run_id, exc_info=True)
+    from deerflow.spaces.service import SpaceOperationPending
+
+    if isinstance(exc, SpaceOperationPending):
+        return {"name": "ResidentFilesBusy", "reason": "storage-busy", "stop_reason": "storage-busy", "cause": exc.cause}
+    return plain
+
+
+async def complete_environment(execution, environment, run_manager, record):
+    """Own SDK closure, Work settlement and unavoidable resident completion."""
+    from deerflow.agent_instances.work import UNRESOLVED
+
+    residents = execution.authority.instances.residents
+
+    async def perform():
+        cleanup_settled = not getattr(environment, "recycle_required", False)
+        provider = getattr(environment, "provider", None)
+        sandbox = getattr(provider, "sandbox", None)
+        attachment_id = getattr(environment, "attachment_id", None) or getattr(sandbox, "id", None)
+        attempt_status = None
+        try:
+            if provider is not None:
+                try:
+                    cleanup_settled = cleanup_settled and not (getattr(sandbox, "requires_container_recycle", True) or getattr(sandbox, "execution_outcome_uncertain", True))
+                    await await_drained(run_file_io(provider.close))
+                    cleanup_settled = cleanup_settled and not (getattr(sandbox, "requires_container_recycle", True) or getattr(sandbox, "execution_outcome_uncertain", True))
+                except (Exception, asyncio.CancelledError):
+                    cleanup_settled = False
+                    logger.warning("SDK cleanup remains unconfirmed for run %s", record.run_id, exc_info=True)
+        finally:
+            try:
+                if execution.work is not None:
+                    settled = False
+                    try:
+                        stored = await run_manager._store.get(record.run_id, user_id=record.user_id) if run_manager._store is not None else None
+                        fenced = attachment_id is not None and await residents.attachments.fence_reason(attachment_id) is not None
+                        settled = bool(cleanup_settled and not fenced and execution.work.owned_cleanup_confirmed and stored and stored.get("status") == record.status.value and stored.get("stop_reason") != "orphan_recovered")
+                    except (Exception, asyncio.CancelledError):
+                        logger.warning("Work cleanup diagnostics unavailable for run %s", record.run_id, exc_info=True)
+                    try:
+                        attempt_status = await execution.work.finish(execution, record, settled=settled)
+                    except (Exception, asyncio.CancelledError):
+                        attempt_status = "uncertain"
+                        logger.warning("Work settlement remains pending for run %s", record.run_id, exc_info=True)
+            finally:
+                await residents.run_ended(
+                    execution.instance.id, execution.instance.home_id, record.run_id, attachment_id, recycle=not cleanup_settled or attempt_status in UNRESOLVED, attempt_id=execution.work.attempt_id if execution.work is not None else None
+                )
+
+    try:
+        await await_drained(perform())
+    except (Exception, asyncio.CancelledError):
+        # Completion cannot replace the worker's original result or exception.
+        logger.warning("Resident completion drained with an error for run %s", record.run_id, exc_info=True)
 
 
 @contextmanager
@@ -186,10 +294,21 @@ async def qualified_attachments(files, *, baseline_provider=None):
             raise
 
 
-async def prepare_environment(execution, *, baseline_provider=None, app_config=None):
-    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
-    from deerflow.spaces.docker import StorageAdapterUnsupported
+async def prepare_environment(execution, *, baseline_provider=None, app_config=None, run_id=None):
+    residents = getattr(execution.authority.instances, "residents", None)
+    if residents is None:
+        return await _prepare_environment_legacy(execution, baseline_provider=baseline_provider, app_config=app_config)
+    environment = current_environment()
+    if environment is None or environment.execution is not execution:
+        raise AgentDenied("Instance preparation requires its exact host environment")
+    from deerflow.agent_instances.resident_preparation import prepare_resident
 
+    # Publish the client inside the owned operation. Cancellation drains that
+    # operation but discards its return value; completion still needs its client.
+    return await await_drained(prepare_resident(execution, environment, residents, baseline_provider=baseline_provider, app_config=app_config, run_id=run_id))
+
+
+async def _prepare_environment_legacy(execution, *, baseline_provider=None, app_config=None):
     await execution.authority.validate(execution)
     from deerflow.agent_instances.public_skills import capture_public_skills
     from deerflow.config.app_config import get_app_config
@@ -201,8 +320,13 @@ async def prepare_environment(execution, *, baseline_provider=None, app_config=N
     attached = await mounts.resume(actor=execution.instance.principal, resources=resources)
     if attached is None:
         attached = await mounts.attach(actor=execution.instance.principal, incarnation=uuid4().hex, resources=resources)
+    return await _prepare_client(execution, baseline_provider, attached, capture, app_config)
 
+
+async def _prepare_client(execution, baseline_provider, attached, capture, app_config, *, validate=True):
     from deerflow.agent_instances.docker_transport import DockerControlTransport
+    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+    from deerflow.spaces.docker import StorageAdapterUnsupported
 
     transport = DockerControlTransport(attached.container_id)
     url = "http://127.0.0.1:8080"
@@ -243,7 +367,8 @@ async def prepare_environment(execution, *, baseline_provider=None, app_config=N
                 raise AgentDenied("The admitted public package copy is unconfirmed")
         scoped_skills = app_config.skills.model_copy(update={"container_path": package_root})
         scoped_config = app_config.model_copy(update={"skills": scoped_skills})
-        await execution.authority.validate(execution)
+        if validate:
+            await execution.authority.validate(execution)
         return InstanceSandboxProvider(execution, sandbox, app_config=scoped_config, skill_revision=capture.revision)
     except BaseException:
         await await_drained(run_file_io(sandbox.close))

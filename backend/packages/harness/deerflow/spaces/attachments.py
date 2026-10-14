@@ -162,16 +162,31 @@ class SpaceAttachments:
         record.phase = "fenced"
         record.fenced_at = datetime.now(UTC)
 
-    async def unfenced(self, space_id: str) -> AttachmentState | None:
+    async def unfenced(self, space_id: str, *, actor=None, resources=None, host_id=None) -> AttachmentState | None:
         """Trusted host read; ambiguity and pending containment are not absence."""
         self._identifier(space_id)
+        scoped = any(value is not None for value in (actor, resources, host_id))
+        if scoped:
+            if not isinstance(actor, PrincipalRef) or not isinstance(host_id, str) or not host_id or not isinstance(resources, (list, tuple)) or not resources or any(not isinstance(resource, ResourceMount) for resource in resources):
+                raise ValueError("Scoped inspection requires exact actor, host and mounts")
+            expected = {(resource.space_id, resource.generation, resource.alias, resource.writable) for resource in resources}
+            if len({resource.space_id for resource in resources}) != len(resources) or len({resource.alias for resource in resources}) != len(resources) or space_id not in {resource.space_id for resource in resources}:
+                raise ValueError("Scoped inspection requires a complete unique resource view")
         async with self.registry._sf() as session:
             records = {row.id: row for row, _mount in await self._current(session, [space_id])}
-        if len(records) > 1:
-            raise SpaceConflict("The resource does not identify one attachment")
-        if not records:
-            return None
-        row = next(iter(records.values()))
+            if len(records) > 1:
+                raise SpaceConflict("The resource does not identify one attachment")
+            if not records:
+                return None
+            row = next(iter(records.values()))
+            if scoped:
+                scope = (await self._mount_scope(session, (row.id,)))[row.id]
+                if (row.actor_kind, row.actor_id) != (actor.kind, actor.subject_id) or row.host_id != host_id or scope != expected:
+                    raise AttachmentPending("Resident attachment differs from its exact actor, host and mount scope")
+                self._identifier(row.id)
+                if row.phase not in {"pending", "active", "fence_pending"} or (row.phase == "active" and row.container_id is None) or (row.container_id is not None and not re.fullmatch(r"[0-9a-f]{64}", row.container_id)):
+                    raise AttachmentPending("Resident attachment facts are invalid")
+                self._closure_reason(row, None)
         return AttachmentState(row.id, row.phase, row.host_id, row.container_id)
 
     async def inspect_preparation(self, *, actor: PrincipalRef, incarnation: str, resources: Sequence[ResourceMount], host_id: str) -> AttachmentState | None:

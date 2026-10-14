@@ -1002,28 +1002,34 @@ async def run_agent(bridge: StreamBridge, run_manager: RunManager, record: RunRe
         try:
             await _run_agent(bridge, run_manager, record, progress=progress, **kwargs)
         finally:
-            cleanup_settled = False
-            try:
-                cleanup_known = True
-                if instance_environment is not None and instance_environment.provider is not None:
-                    from deerflow.utils.file_io import await_drained, run_file_io
+            execution = getattr(kwargs.get("ctx"), "agent_execution", None)
+            residents = getattr(execution.authority.instances, "residents", None) if execution is not None else None
+            if residents is not None:
+                from deerflow.agent_instances.runtime import complete_environment
 
-                    sandbox = getattr(instance_environment.provider, "sandbox", None)
-                    cleanup_known = not (getattr(sandbox, "requires_container_recycle", True) or getattr(sandbox, "execution_outcome_uncertain", True))
-                    await await_drained(run_file_io(instance_environment.provider.close))
-                    cleanup_known = cleanup_known and not (getattr(sandbox, "requires_container_recycle", True) or getattr(sandbox, "execution_outcome_uncertain", True))
-                cleanup_settled = cleanup_known
-            finally:
-                execution = getattr(kwargs.get("ctx"), "agent_execution", None)
-                if execution is not None and execution.work is not None:
-                    try:
-                        # The ordinary completion hook precedes SDK cleanup. Work
-                        # promotion needs this later boundary and a durable status.
-                        stored = await run_manager._store.get(record.run_id, user_id=record.user_id) if run_manager._store is not None else None
-                        settled = bool(cleanup_settled and execution.work.owned_cleanup_confirmed and stored and stored.get("status") == record.status.value and stored.get("stop_reason") != "orphan_recovered")
-                        await execution.work.finish(execution, record, settled=settled)
-                    except Exception:
-                        logger.warning("Work settlement remains pending for run %s", record.run_id, exc_info=True)
+                await complete_environment(execution, instance_environment, run_manager, record)
+            else:
+                cleanup_settled = False
+                try:
+                    cleanup_known = True
+                    if instance_environment is not None and instance_environment.provider is not None:
+                        from deerflow.utils.file_io import await_drained, run_file_io
+
+                        sandbox = getattr(instance_environment.provider, "sandbox", None)
+                        cleanup_known = not (getattr(sandbox, "requires_container_recycle", True) or getattr(sandbox, "execution_outcome_uncertain", True))
+                        await await_drained(run_file_io(instance_environment.provider.close))
+                        cleanup_known = cleanup_known and not (getattr(sandbox, "requires_container_recycle", True) or getattr(sandbox, "execution_outcome_uncertain", True))
+                    cleanup_settled = cleanup_known
+                finally:
+                    if execution is not None and execution.work is not None:
+                        try:
+                            # Promotion requires this later cleanup boundary and
+                            # the already persisted terminal run outcome.
+                            stored = await run_manager._store.get(record.run_id, user_id=record.user_id) if run_manager._store is not None else None
+                            settled = bool(cleanup_settled and execution.work.owned_cleanup_confirmed and stored and stored.get("status") == record.status.value and stored.get("stop_reason") != "orphan_recovered")
+                            await execution.work.finish(execution, record, settled=settled)
+                        except Exception:
+                            logger.warning("Work settlement remains pending for run %s", record.run_id, exc_info=True)
             progress.close()
             journal.mark(TurnPhase.TERMINAL)
             journal.set_outcome(str(getattr(record, "status", "unknown")))
@@ -1232,7 +1238,9 @@ async def _run_agent(
             environment = current_environment()
             if environment is None or environment.execution is not ctx.agent_execution:
                 raise ValueError("Instance execution is missing its trusted host scope")
-            environment.provider = await prepare_environment(ctx.agent_execution, app_config=ctx.app_config)
+            environment.provider = await prepare_environment(ctx.agent_execution, app_config=ctx.app_config, run_id=record.run_id)
+            if ctx.agent_execution.work is not None and getattr(ctx.agent_execution.authority.instances, "residents", None) is not None:
+                await ctx.agent_execution.work.workspace_ready(ctx.agent_execution, environment.provider.sandbox.id)
             from dataclasses import replace
 
             ctx = replace(ctx, app_config=environment.provider.app_config)
@@ -1788,28 +1796,32 @@ async def _run_agent(
     except Exception as exc:
         error_msg = f"{exc}"
         logger.exception("Run %s failed: %s", run_id, error_msg)
-        await _ensure_finalizing_before_edit_failure(run_manager, record)
-        cancel_action = await run_manager.set_status_if_not_cancelled(
-            run_id,
-            RunStatus.error,
-            error=error_msg,
-            **terminal_status_kwargs,
-        )
-        if cancel_action is not None:
-            await _finish_cancellation(cancel_action)
-        else:
-            from deerflow.agent_instances.contract import Refusal
+        from deerflow.agent_instances.runtime import run_error
 
-            refusal = {"reason": exc.reason, "status": exc.status, **exc.extra} if isinstance(exc, Refusal) else {}
-            await bridge.publish(
+        try:
+            facts = await run_error(ctx.agent_execution, record, exc)
+            reason_kwargs = {"stop_reason": facts["stop_reason"]} if facts["stop_reason"] is not None else {}
+            await _ensure_finalizing_before_edit_failure(run_manager, record)
+            cancel_action = await run_manager.set_status_if_not_cancelled(
                 run_id,
-                "error",
-                {
-                    "message": error_msg,
-                    "name": type(exc).__name__,
-                    **refusal,
-                },
+                RunStatus.error,
+                error=error_msg,
+                **reason_kwargs,
+                **terminal_status_kwargs,
             )
+        except asyncio.CancelledError:
+            await _finish_cancellation(record.abort_action)
+        else:
+            if cancel_action is not None:
+                await _finish_cancellation(cancel_action)
+            else:
+                from deerflow.agent_instances.contract import Refusal
+
+                refusal = {"reason": exc.reason, "status": exc.status, **exc.extra} if isinstance(exc, Refusal) else {}
+                mapped = {key: value for key, value in facts.items() if key not in {"stop_reason", "reason"}}
+                if facts["reason"] is not None:
+                    mapped["reason"] = facts["reason"]
+                await bridge.publish(run_id, "error", {"message": error_msg, **refusal, **mapped})
 
     finally:
         try:

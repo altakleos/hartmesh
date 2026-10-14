@@ -600,7 +600,12 @@ class WorkExecution:
                 if not settled or record.ownership_lost or status not in {"success", "error", "timeout", "interrupted"}:
                     attempt.status = "uncertain"
                 else:
-                    stale = row.assignment_revision != attempt.assignment_revision or parent.generation != attempt.instance_generation or parent.definition_revision != attempt.definition_revision
+                    lifecycle_stale = parent.generation != attempt.instance_generation or parent.definition_revision != attempt.definition_revision
+                    if self.agents.residents is not None and attempt.attachment_id is None and lifecycle_stale:
+                        # Preparation executed no model/tool. Only qualified
+                        # host settlement may resolve withdrawn lifecycle scope.
+                        return attempt.status
+                    stale = row.assignment_revision != attempt.assignment_revision or lifecycle_stale
                     attempt.status = "cancelled" if stale or status == "interrupted" else "succeeded" if status == "success" else "failed"
                     attempt.settled_at = datetime.now(UTC)
                     promote = not stale and status == "success" and attempt.candidate and row.status == "open"

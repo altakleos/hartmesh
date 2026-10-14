@@ -2,13 +2,14 @@
 
 `deerflow.agent_instances.residents.ResidentRegistry` provides generic workspace
 capacity and lifecycle bookkeeping. It is not installed by Gateway startup yet.
-The current instance preparation path and storage/agent defaults remain unchanged.
+With `AgentInstances.residents=None`, instance preparation and completion keep
+their existing path. Storage and agent defaults remain unchanged.
 Gateway installation must include durable restart restoration, exact preparation
 correlation, Work admission and replay, worker completion, reaping and shutdown.
 There is no database schema change in this foundation.
 
-The next additive foundation provides `SpaceAttachments.inspect_preparation` and
-Work readiness/host-settlement APIs without installing runtime callers. Inspection
+The additive foundation provides `SpaceAttachments.inspect_preparation` and
+Work readiness/host-settlement APIs. Inspection
 returns immutable SQL facts for the exact incarnation, actor, host and complete
 mount scope. Missing intent differs from a fenced historical row; mismatched or
 malformed facts and unavailable metadata raise errors. This read resolves no
@@ -23,8 +24,42 @@ Work, then reloads the attempt before deciding. A supplied live-run snapshot is 
 caller precondition; future coordinated callers must preserve its validity across
 their admission and settlement boundary. Settlement never promotes a candidate
 or releases a preparation claim. It commits failed-attempt status and its single
-host event before logging. `finish()` returns the resulting status while retaining
-its existing decisions; changed stale-preparation behavior awaits worker integration.
+host event before logging. `finish()` returns the resulting status. With a registry,
+a lifecycle-stale attempt without a workspace remains unresolved for qualified
+host settlement; an assignment-only change keeps cancellation.
+
+## Optional preparation and worker hooks
+
+`prepare_environment` passes through the existing path unless a registry is
+explicitly supplied by the owning host. It captures configuration and public
+skills and freshly qualifies the exact provider/attachments before taking the
+Home lock. Under that lock, it rechecks authority and run admission, drains
+resume verification, and admits capacity before creating a new attachment.
+Authority is checked again after capacity waiting. Resume recovery uses a scoped
+`unfenced` read requiring the exact actor, host and complete mount view; an
+unrelated or ambiguous row cannot authorize adoption or containment.
+
+A newly invoked start is recovered only by its exact preparation incarnation.
+Unreadable or mismatched SQL retains the opaque claim and slot. Missing intent
+releases the claim only after the operation drains and the qualified host is
+freshly confirmed. A matching durable row transfers to its real attachment ID
+even when it is unusable. Readiness and public package copying run outside the
+Home lock. The owned preparation publishes the client into its trusted run
+environment before cancellation can discard its return value.
+
+The worker records Work readiness before any model/tool dispatch. Authority
+middleware checks the run's captured attachment on the original authority loop,
+including child loops and synchronous workers; a replacement is never substituted.
+Error frames preserve refusal status, reason and cause, or the captured
+attachment's historical closure reason. Diagnostics failures retain the original
+error, and cancellation follows ordinary worker cancellation handling.
+
+Registry-aware completion drains SDK closure, durable status lookup, Work
+settlement and the mandatory `run_ended` notification as one owned operation.
+Failures cannot skip the later mandatory hooks or replace the original worker
+outcome. Fenced workspaces and uncertain cleanup cannot promote Work candidates.
+These hooks do not install a registry; restart restoration, admission/replay and
+coordinated reaping/shutdown must land before Gateway installation.
 
 ## Shared capacity
 
