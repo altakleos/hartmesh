@@ -51,6 +51,12 @@ def test_resident_native_fixture_uses_real_provider_registry_and_dedicated_inode
     assert "4096" in ast.unparse(functions["resident_prepared"])
     native = ast.unparse(functions["test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol"])
     assert "resident_runtime" in native and "object.__new__" not in native and "native_prepare(" in native
+    fixture_values = [
+        ast.unparse(node.value)
+        for node in ast.walk(functions["test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol"])
+        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "runtime" for target in node.targets)
+    ]
+    assert fixture_values == ["resident_runtime"], "Presentation context must not replace the resident fixture"
     containment = ast.unparse(functions["test_host_containment_removes_the_real_container_and_the_next_run_attaches_afresh"])
     for fact in ("contain_host", "fenced_by_kind", "fenced_by_id", "fence_reason", "fenced_at", "container_gone"):
         assert fact in containment
