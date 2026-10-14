@@ -73,6 +73,7 @@ class NativeContainerIdentity:
 class NativeEvidenceSnapshot:
     creates: tuple[NativeCreateAttempt, ...]
     teardowns: tuple[NativeTeardownRecord, ...]
+    teardown_revision: int = 0
 
     def pending_creates(self, daemon_id):
         return tuple(record for record in self.creates if record.phase == "pending" or record.daemon_id != daemon_id)
@@ -96,6 +97,8 @@ class NativeCreateEvidence:
         self._stages = {}
         self._teardown_removals = {}
         self._has_teardown = False
+        self._teardown_revision = 0
+        self._teardown_facts = frozenset()
         self._pool_fd = self._directory_fd = None
         self._closed = False
         try:
@@ -121,6 +124,11 @@ class NativeCreateEvidence:
     def creation_ready(self):
         """Memory-only publication gate; a fresh mixed snapshot precedes effects."""
         return self.ready and not self._has_teardown
+
+    @property
+    def teardown_revision(self):
+        """Memory-only fence for restored accounting; fresh scanning remains mandatory."""
+        return self._teardown_revision
 
     def _assert_current(self):
         if not self.ready or self._pool_fd is None:
@@ -219,6 +227,10 @@ class NativeCreateEvidence:
             if len({record.container_id for record in teardowns}) != len(teardowns):
                 raise StorageHostUnqualified("Native teardown primary correlation is ambiguous")
             self._has_teardown = bool(teardowns)
+            facts = frozenset(teardowns)
+            if facts != self._teardown_facts:
+                self._teardown_facts = facts
+                self._teardown_revision += 1
         except (OSError, StoreError, ValueError, UnicodeError, RecursionError) as exc:
             raise StorageHostUnqualified("Native create evidence cannot be inspected") from exc
         return records, total
@@ -227,7 +239,7 @@ class NativeCreateEvidence:
         """One bounded mixed view, never a cleanup or actor capability."""
         with self._lock:
             records, _ = self._scan()
-            return NativeEvidenceSnapshot(tuple(record for record, _ in records if isinstance(record, NativeCreateAttempt)), tuple(record for record, _ in records if isinstance(record, NativeTeardownRecord)))
+            return NativeEvidenceSnapshot(tuple(record for record, _ in records if isinstance(record, NativeCreateAttempt)), tuple(record for record, _ in records if isinstance(record, NativeTeardownRecord)), self._teardown_revision)
 
     def pending(self, *, slots=None, owner_id=None):
         with self._lock:
@@ -403,6 +415,7 @@ class NativeCreateEvidence:
             if len(records) >= MAX_RECORDS or total + len(raw) > MAX_TOTAL_BYTES:
                 raise StorageHostUnqualified("Native lifecycle evidence is full; teardown is refused")
             self._has_teardown = True
+            self._teardown_revision += 1
             stage = self._write_stage(raw)
             try:
                 self._assert_current()
@@ -420,6 +433,7 @@ class NativeCreateEvidence:
 
     def _confirm_teardown_publication(self, record, metadata):
         """Retry an uncertain publication without treating readability as fsync."""
+        self._teardown_revision += 1
         name = record.id + ".json"
         descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=self._directory_fd)
         try:
@@ -445,6 +459,7 @@ class NativeCreateEvidence:
             records, _ = self._scan()
             if not any(saved == record for saved, _metadata in records):
                 raise StorageHostUnqualified("Native teardown completion lacks its exact retained record")
+            self._teardown_revision += 1
             name = record.id + ".json"
             removal = self._teardown_removals.get(record.id)
             if removal is None:

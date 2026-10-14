@@ -191,8 +191,10 @@ attachment row; missing User storage permits mountless text chat, and missing
 company storage omits Shared. Managed generic grants return `owned-space`, and
 User/company lifecycle/recovery returns `mounts-unrecorded`. Restore the complete
 data disk rather than infer quiescence from attachment discovery. Seat release
-and verified host reclamation are separate: an unused account's reuse is qualified,
-while used allowlist sandbox containment currently retains its binding.
+and verified host reclamation are separate. The bundle gate uses two allowlist
+chats, rechecks both actual resource sets before disablement and requires every
+original ID and name absent before slot reuse. Unknown containment retains its
+binding.
 
 | Requirement | Executable coverage |
 | --- | --- |
@@ -202,7 +204,7 @@ while used allowlist sandbox containment currently retains its binding.
 | SQLite locking/rollback, committed-data integrity at real ENOSPC | `test_storage_spaces_volume_native.py::test_sqlite_transactions_and_committed_rows_survive_real_disk_exhaustion` |
 | Actual source-chat deletion and zero-feature retained reads/edits | `test_storage_feature_routes.py::test_saved_bytes_survive_actual_thread_deletion_and_optional_feature_removal` on SQLite/PostgreSQL |
 | Kernel byte/inode bounds, reserve, private growth, exact fencing and quiesced WAL restore | Existing cases in mandatory `test_storage_spaces_volume_native.py` |
-| Shipped Compose bundle: ten account/seat, ordinary chat, file/publication and full-storage journeys | Required `bundle-instances` CI job; scripted inference and runc alias, unused-account reclamation only |
+| Shipped Compose bundle: ten account/seat, ordinary chat, file/publication and full-storage journeys | Required `bundle-instances` CI job; scripted inference and runc alias, used-account reclamation after two allowlist chats |
 | Test-fixture creation acknowledgement loss preserves its backing until exact absence | Native real-create-then-error case and `test_storage_spaces_native_fixture_ownership.py` |
 | Missing controller, private state and current grants | Existing facade, workflow, feature-control/publication and attachment tests |
 

@@ -14,6 +14,7 @@ import logging
 import threading
 import uuid
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -764,6 +765,28 @@ _manager_lock = threading.Lock()
 _managers: dict[int, tuple[SandboxProvider, SandboxLeaseManager]] = {}
 
 
+@dataclass(eq=False)
+class _CleanupReservation:
+    provider: SandboxProvider
+    sandbox_id: str
+    manager: SandboxLeaseManager
+    active: bool = True
+
+
+_CLEANUP_RESERVATION = ContextVar("sandbox_cleanup_reservation", default=None)
+
+
+def current_cleanup_reservation(provider, sandbox_id):
+    """Private host lifetime proof; copied contexts cannot extend its reservation."""
+    token = _CLEANUP_RESERVATION.get()
+    if not isinstance(token, _CleanupReservation) or not token.active or token.provider is not provider or token.sandbox_id != sandbox_id:
+        return None
+    with token.manager._metadata_lock:
+        if not token.active or sandbox_id not in token.manager._cleanup_reservations or getattr(token.manager, "_cleanup_tokens", {}).get(sandbox_id) is not token:
+            return None
+    return token
+
+
 def cleanup_unheld_sandbox(provider: SandboxProvider, sandbox_id: str, cleanup: Callable[[], None], *, defer_release: bool = True) -> bool:
     """Fence failed admission cleanup against process-local holder binding.
 
@@ -783,11 +806,20 @@ def cleanup_unheld_sandbox(provider: SandboxProvider, sandbox_id: str, cleanup: 
         if sandbox_id in manager._cleanup_reservations:
             return False
         manager._cleanup_reservations.add(sandbox_id)
+        proof = _CleanupReservation(provider, sandbox_id, manager)
+        tokens = getattr(manager, "_cleanup_tokens", None)
+        if tokens is None:
+            tokens = manager._cleanup_tokens = {}
+        tokens[sandbox_id] = proof
+    context = _CLEANUP_RESERVATION.set(proof)
     try:
         cleanup()
         return True
     finally:
+        proof.active = False
+        _CLEANUP_RESERVATION.reset(context)
         with manager._metadata_lock:
+            manager._cleanup_tokens.pop(sandbox_id)
             manager._cleanup_reservations.discard(sandbox_id)
 
 

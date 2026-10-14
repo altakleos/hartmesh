@@ -15,6 +15,8 @@ from deerflow.spaces.docker import StorageHostUnqualified
 from deerflow.spaces.native_create_evidence import ATTEMPT_LABEL, MAX_RECORDS, NativeContainerIdentity, NativeCreateAttempt, _unique_object
 from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
 
+from .native_teardown import NativeTeardownIndex
+
 MAX_RESTORE_UPDATES = MAX_RECORDS * 2
 NATIVE_CREATE_RESERVATION = ContextVar("native_create_reservation", default=None)
 NATIVE_CREATE_HANDOFF = ContextVar("native_create_handoff", default=None)
@@ -218,6 +220,8 @@ class NativeCreateBridge:
 
     def __init__(self, *, evidence, handoffs, check_owner, owner_accepts, check_daemon, admit_native=None):
         self.evidence, self.handoffs = evidence, handoffs
+        self.teardowns = NativeTeardownIndex(daemon_id=handoffs.daemon_id, lock=handoffs.lock)
+        self._restored_teardown_revision = None
         self._check_owner, self._owner_accepts, self._check_daemon = check_owner, owner_accepts, check_daemon
         self._admit_native = admit_native or (lambda _owner, _slots: nullcontext())
         self._installed = False
@@ -225,22 +229,27 @@ class NativeCreateBridge:
 
     @property
     def ready(self):
-        return self._installed and self.evidence.creation_ready and self.handoffs.ready and self._owner_accepts()
+        return self._installed and self.evidence.ready and self.handoffs.ready and self.teardowns.ready and self.evidence.teardown_revision == self._restored_teardown_revision and self._owner_accepts()
 
     def invalidate(self):
         """Memory-only admission closure; owned identity/teardown is retained."""
         self._installed = False
 
     def qualify(self):
-        token = None
+        token = teardown_token = None
         try:
             self._check_owner()
             self._check_daemon()
             token = self.handoffs.begin_restore()
-            pending = self._snapshot_pending()
+            teardown_token = self.teardowns.begin_restore()
+            snapshot = self.evidence.snapshot()
             self._check_owner()
             self._check_daemon()
-            self.handoffs.finish_restore(token, pending)
+            self.teardowns.finish_restore(teardown_token, snapshot.teardowns)
+            self.handoffs.finish_restore(token, snapshot.pending_creates(self.evidence.daemon_id))
+            if snapshot.teardown_revision != self.evidence.teardown_revision or frozenset(snapshot.teardowns) != frozenset(self.teardowns.records()):
+                raise StorageRuntimeUnavailable("Native teardown evidence changed during accounting restoration")
+            self._restored_teardown_revision = snapshot.teardown_revision
             self._installed = True
             self._check_owner()
             self._ever_installed = True
@@ -248,6 +257,8 @@ class NativeCreateBridge:
             self._installed = False
             if token is not None:
                 self.handoffs.abort_restore(token)
+            if teardown_token is not None:
+                self.teardowns.abort_restore(teardown_token)
             raise
 
     def assert_current(self, *, teardown=False):
@@ -272,14 +283,20 @@ class NativeCreateBridge:
 
     def _snapshot_pending(self):
         snapshot = self.evidence.snapshot()
-        if snapshot.teardowns:
+        if not self.teardowns.ready or snapshot.teardown_revision != self._restored_teardown_revision or frozenset(snapshot.teardowns) != frozenset(self.teardowns.records()):
             self._installed = False
-            raise StorageRuntimeUnavailable("Native teardown evidence requires its qualified recovery protocol")
+            raise StorageRuntimeUnavailable("Native teardown evidence has no current restored accounting")
         return snapshot.pending_creates(self.evidence.daemon_id)
 
     def assert_candidate_current(self, info, *, teardown=False, known_live=False):
         pending = self.assert_current(teardown=teardown)
         name = info.container_name
+        owner = getattr(info, "owner", None)
+        if self.teardowns.blocks(owner_id=owner[0] if owner is not None else None, name=name, container_id=getattr(info, "container_id", None), slots=getattr(info, "native_slots", None) or ()):
+            from .native_teardown_execution import permits_teardown
+
+            if not teardown or not permits_teardown(self, info):
+                raise StorageHostUnqualified("An unresolved native teardown cannot be reused or removed without its exact recovery scope")
         unresolved = any(name is None or record.name == name for record in pending)
         unresolved = unresolved or (name is not None and self.handoffs.pending_for(name=name))
         if unresolved and not (known_live or self.handoffs.known_returned(info)):

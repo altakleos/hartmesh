@@ -681,14 +681,72 @@ def test_release_seat_frees_the_seat_and_empties_the_users_space(compose, sessio
     account = compose.state["release_account"]
     old = compose.role(account["id"])
     before = session.request("GET", "/api/features").json()["accounts"]["seats"]
+    person = Person(compose)
+    paired_resources = []
+    try:
+        person.request("POST", "/api/v1/auth/login/local", data={"username": account["email"], "password": account["one_time_password"]})
+        person.request("POST", "/api/v1/auth/change-password", json={"current_password": account["one_time_password"], "new_password": "Acceptance-Released-2026!", "new_email": account["email"]})
+        person.user = person.request("GET", "/api/v1/auth/me").json()
+        assert person.user["id"] == account["id"] and person.user["needs_setup"] is False
+        for _index in range(2):
+            thread_id = person.thread()
+            person.upload(thread_id)
+            person.run(thread_id)
+            artifact(person, thread_id)
+            primary = compose.sandbox(thread_id)
+            user_mounts(compose, primary, thread_id, old)
+            labels = primary["Config"]["Labels"]
+            assert labels["deerflow.network_mode"] == "allowlist" and labels["deerflow.owner_user_id"] == account["id"]
+            networks = primary["NetworkSettings"]["Networks"]
+            assert len(networks) == 1
+            internal_name = next(iter(networks))
+            (internal,) = json.loads(compose.invoke(["docker", "network", "inspect", internal_name]).stdout)
+            assert internal["Id"] == networks[internal_name]["NetworkID"]
+            candidates = set(internal["Containers"]) - {primary["Id"]}
+            assert len(candidates) == 1
+            (proxy,) = json.loads(compose.invoke(["docker", "inspect", next(iter(candidates))]).stdout)
+            assert proxy["Config"]["Labels"]["deerflow.role"] == "network-proxy"
+            assert proxy["Config"]["Labels"]["deerflow.sandbox_id"] == labels["deerflow.sandbox_id"]
+            proxy_networks = proxy["NetworkSettings"]["Networks"]
+            assert len(proxy_networks) == 2 and internal_name in proxy_networks
+            egress_name = next(iter(set(proxy_networks) - {internal_name}))
+            (egress,) = json.loads(compose.invoke(["docker", "network", "inspect", egress_name]).stdout)
+            assert egress["Id"] == proxy_networks[egress_name]["NetworkID"]
+            paired_resources.extend((kind, entry["Id"], entry["Name"].removeprefix("/")) for kind, entry in (("container", primary), ("container", proxy), ("network", internal), ("network", egress)))
+        assert len({(kind, identity) for kind, identity, _name in paired_resources}) == 8
+        compose.state["resource_members"] = paired_resources
+    finally:
+        person.client.close()
+
     code, result = compose.accounts("release-seat", account["email"])
     assert code == 1 and result["error"] == "not_disabled"
+    # Both complete sets must still exist at the containment boundary.
+    for kind, identity, name in paired_resources:
+        (current,) = json.loads(compose.invoke(["docker", *(["network"] if kind == "network" else []), "inspect", identity]).stdout)
+        assert current["Id"] == identity and current["Name"].removeprefix("/") == name
     code, result = compose.accounts("disable", account["email"])
     assert code == 0 and result["returncode"] == 0
     code, result = compose.accounts("release-seat", account["email"])
     assert code == 0 and result["returncode"] == 0
     eventually(lambda: old["slot"] not in compose.bindings())
     eventually(lambda: f"storage: user space reclaimed ({old['slot']})" in compose.logs())
+
+    def paired_absent():
+        for kind, identity, name in paired_resources:
+            for reference in (identity, name):
+                result = compose.invoke(["docker", *(["network"] if kind == "network" else []), "inspect", reference], check=False)
+                absent = (
+                    ("Error: No such object: " + reference, "Error response from daemon: No such container: " + reference)
+                    if kind == "container"
+                    else ("Error: No such network: " + reference, "Error response from daemon: network " + reference + " not found")
+                )
+                if result.returncode == 0:
+                    return False
+                assert result.returncode == 1 and result.stdout.strip() in ("", "[]") and result.stderr.strip() in absent
+        assert not any((entry.get("Config", {}).get("Labels") or {}).get("hartmesh.storage.space." + old["slot"]) == "1" for entry in compose.containers())
+        return True
+
+    assert eventually(paired_absent)
     assert session.request("GET", "/api/features").json()["accounts"]["seats"] == {"allowed": before["allowed"], "in_use": before["allowed"] - 1}
     path = compose.state["inventory"][old["slot"]]["mount_path"]
     compose.gateway("python", "-c", "from pathlib import Path; import sys; p=Path(sys.argv[1]); assert not any((p/'data').iterdir()) and not any((p/'control').iterdir())", path)

@@ -2563,9 +2563,10 @@ the exact User Space deleted. Sessions and running-work cleanup follow commit;
 a released account cannot be enabled again. Its account/history rows and Shared
 publications remain. Maintenance attempts to remove positively owned chat
 sandboxes before emptying the Space and freeing its binding for another account.
-Unverified or uncontained storage stays reserved. Qualification currently proves
-reclamation for an unused account; automatic cleanup of a used allowlist sandbox
-is not yet qualified and retains its storage. A free seat does not guarantee an
+Unverified or uncontained storage stays reserved. The bundle gate proves reclamation
+after two allowlist chats, rechecks both complete resource sets before disablement
+and verifies every original container/network ID and name is absent before reuse.
+Partial paired cleanup survives restart through the private journal. A free seat does not guarantee an
 immediately reusable User slot.
 
 ### Full Spaces, the data disk, and unverified Spaces

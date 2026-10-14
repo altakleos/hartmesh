@@ -185,7 +185,10 @@ suite locally. Ordinary coverage reads its AST/workflow through
 and do not qualify a tenant host. Case four stops the Gateway and takes the pool
 runtime ownership lock for isolated orphan-fixture cleanup; it preserves the new
 allocation and unrelated bindings. Case seven proves automatic reclamation of an
-unused account; used allowlist sandbox containment remains unqualified. Case nine exercises exact-ID Undo sharing and explicit republication,
+used account after two allowlist chats. It authenticates that account through the
+public setup flow, captures both actual paired sets, rechecks all eight resources
+before disablement and requires original ID AND name absence before reuse.
+Case nine exercises exact-ID Undo sharing and explicit republication,
 matching existing product behavior; removal has no Undo. Keep CI stack evidence
 separate from the complete human-performed tenant qualification receipt.
 The missing-role observation holds the production allocation advisory lock on a

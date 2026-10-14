@@ -266,3 +266,17 @@ def test_full_files_application_refusal_has_a_reason_and_fallback_sentence():
     body = json.loads(response.body)
     assert response.status_code == 507 and body["reason"] == "files-full"
     assert isinstance(body["detail"], str) and body["detail"]
+
+
+def test_released_account_proof_uses_authenticated_allowlist_chats_and_actual_paired_identities():
+    tree = ast.parse((ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8"))
+    release = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == STORAGE_TESTS[6])
+    calls = [node for node in ast.walk(release) if isinstance(node, ast.Call)]
+    attributes = {node.func.attr for node in calls if isinstance(node.func, ast.Attribute)}
+    assert {"thread", "upload", "run", "sandbox", "invoke"} <= attributes
+    constants = {node.value for node in ast.walk(release) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+    assert {"/api/v1/auth/login/local", "/api/v1/auth/change-password", "allowlist", "NetworkSettings", "Networks", "Containers", "network-proxy", "resource_members"} <= constants
+    source = ast.unparse(release)
+    assert source.index("person.run(") < source.index("compose.accounts('disable'")
+    assert "paired_absent" in source and "paired_resources" in source
+    assert any(isinstance(node, ast.Try) and node.finalbody for node in ast.walk(release))

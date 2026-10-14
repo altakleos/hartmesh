@@ -141,7 +141,7 @@ def test_foreign_daemon_records_are_retained_but_cannot_be_published_or_finished
 
 
 @pytest.mark.parametrize("closing", [False, True])
-def test_new_teardown_evidence_closes_ready_bridge_and_known_teardown_path(fixture, closing):
+def test_new_teardown_evidence_closes_bridge_until_exact_accounting_restoration(fixture, closing):
     journal, _state, bridge, owner = fixture
     journal.begin_teardown(record())
     if closing:
@@ -149,8 +149,12 @@ def test_new_teardown_evidence_closes_ready_bridge_and_known_teardown_path(fixtu
     with pytest.raises(StorageHostUnqualified):
         bridge.assert_current(teardown=closing)
     assert not bridge.ready
-    with pytest.raises(StorageHostUnqualified):
+    if closing:
+        with pytest.raises(StorageHostUnqualified):
+            bridge.qualify()
+    else:
         bridge.qualify()
+        assert bridge.ready and bridge.teardowns.records() == (record(),)
     assert journal.snapshot().teardowns == (record(),)
 
 

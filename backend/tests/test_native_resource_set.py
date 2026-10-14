@@ -1,0 +1,164 @@
+"""Actual immutable graph proof with an offline Docker command double."""
+
+import json
+from copy import deepcopy
+from types import SimpleNamespace
+
+import pytest
+from test_native_slot_inventory import CID, SLOT, entry
+from test_native_teardown_evidence import STAMP
+
+from deerflow.community.aio_sandbox.local_backend import _native_inspection
+from deerflow.community.aio_sandbox.native_resource_set import NativeResourceSet
+from deerflow.spaces.docker import StorageHostUnqualified
+from deerflow.spaces.native_teardown_evidence import NativeTeardownRecord
+
+PROXY, INTERNAL, EGRESS, DIGEST = "f" * 64, "1" * 64, "2" * 64, "8" * 64
+
+
+def topology(*, running=True):
+    primary = entry(running=running)
+    primary["Created"] = STAMP
+    primary["State"]["Status"] = "running" if running else "created"
+    primary["Config"]["Labels"].update({"deerflow.network_mode": "allowlist", "deerflow.network_policy_digest": DIGEST})
+    primary["HostConfig"]["NetworkMode"] = "retained-internal"
+    primary["NetworkSettings"] = {"Networks": {"retained-internal": {"NetworkID": INTERNAL if running else "", "EndpointID": "9" * 64 if running else ""}}}
+    labels = {"deerflow.sandbox_id": "native", "deerflow.network_mode": "allowlist", "deerflow.network_policy_digest": DIGEST}
+    proxy = {
+        "Id": PROXY,
+        "Name": "/retained-proxy",
+        "Created": STAMP,
+        "Config": {"Labels": {**labels, "deerflow.role": "network-proxy"}},
+        "HostConfig": {"NetworkMode": "retained-egress", "AutoRemove": True},
+        "State": {"Running": True, "Status": "running"},
+        "Mounts": [],
+        "NetworkSettings": {
+            "Networks": {
+                "retained-internal": {"NetworkID": INTERNAL, "EndpointID": "4" * 64},
+                "retained-egress": {"NetworkID": EGRESS, "EndpointID": "5" * 64},
+            }
+        },
+    }
+    internal = {
+        "Id": INTERNAL,
+        "Name": "retained-internal",
+        "Created": STAMP,
+        "Driver": "bridge",
+        "Internal": True,
+        "Labels": {**labels, "deerflow.role": "network"},
+        "Options": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated", "com.docker.network.bridge.gateway_mode_ipv6": "isolated"},
+        "Containers": {PROXY: {"Name": "retained-proxy", "EndpointID": "4" * 64}},
+    }
+    if running:
+        internal["Containers"][CID] = {"Name": primary["Name"][1:], "EndpointID": "9" * 64}
+    egress = {
+        "Id": EGRESS,
+        "Name": "retained-egress",
+        "Created": STAMP,
+        "Driver": "bridge",
+        "Internal": False,
+        "Labels": {**labels, "deerflow.role": "egress-network"},
+        "Options": {"com.docker.network.bridge.enable_icc": "false"},
+        "Containers": {PROXY: {"Name": "retained-proxy", "EndpointID": "5" * 64}},
+    }
+    objects = {("container", CID): primary, ("container", PROXY): proxy, ("network", INTERNAL): internal, ("network", EGRESS): egress}
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        network = command[1] == "network"
+        assert command[2 if network else 1] == "inspect"
+        kind, reference = "network" if network else "container", command[-1]
+        selected = [obj for (obj_kind, identity), obj in objects.items() if kind == obj_kind and (identity == reference or obj["Name"].removeprefix("/") == reference)]
+        if selected:
+            return SimpleNamespace(returncode=0, stdout=json.dumps(selected), stderr="")
+        error = "Error: No such object: " + reference if kind == "container" else "Error: No such network: " + reference
+        return SimpleNamespace(returncode=1, stdout="[]", stderr=error)
+
+    actual = _native_inspection(primary, CID, "daemon-A", slot_id=SLOT)
+    return NativeResourceSet(SimpleNamespace(_run=run)), primary, actual, objects, calls
+
+
+def capture(reader, primary, actual):
+    digest, resources = reader.capture(primary, actual)
+    return NativeTeardownRecord("e" * 32, actual.daemon_id, *actual.owner, actual.sandbox_id, actual.slots, SLOT, actual.container_id, actual.container_name, actual.created_at, actual.network_mode, digest, resources)
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_complete_graph_uses_actual_ids_names_and_persisted_policy(running):
+    reader, primary, actual, _objects, calls = topology(running=running)
+    saved = capture(reader, primary, actual)
+    assert saved.policy_digest == DIGEST
+    assert {item.identity for item in saved.resources} == {PROXY, INTERNAL, EGRESS}
+    assert all(item.created_at == STAMP for item in saved.resources)
+    assert {item.name for item in saved.resources} == {"retained-proxy", "retained-internal", "retained-egress"}
+    assert calls and all("inspect" in command for command in calls)
+
+
+@pytest.mark.parametrize("change", ["internal-foreign", "egress-foreign", "proxy-host-bind", "proxy-policy", "internal-isolation", "egress-icc", "primary-network-id", "proxy-endpoint"])
+def test_incomplete_or_foreign_graph_refuses_before_effects(change):
+    reader, primary, actual, objects, calls = topology()
+    proxy, internal, egress = objects[("container", PROXY)], objects[("network", INTERNAL)], objects[("network", EGRESS)]
+    if change.endswith("foreign"):
+        (internal if change.startswith("internal") else egress)["Containers"]["7" * 64] = {"Name": "foreign", "EndpointID": "6" * 64}
+    elif change == "proxy-host-bind":
+        proxy["Mounts"] = [{"Type": "bind", "Source": "/operator/pool", "Destination": "/data", "RW": True}]
+    elif change == "proxy-policy":
+        proxy["Config"]["Labels"]["deerflow.network_policy_digest"] = "7" * 64
+    elif change == "internal-isolation":
+        internal["Options"]["com.docker.network.bridge.gateway_mode_ipv6"] = "nat"
+    elif change == "egress-icc":
+        egress["Options"]["com.docker.network.bridge.enable_icc"] = "true"
+    elif change == "primary-network-id":
+        primary["NetworkSettings"]["Networks"]["retained-internal"]["NetworkID"] = "7" * 64
+    else:
+        internal["Containers"][PROXY]["EndpointID"] = "7" * 64
+    with pytest.raises(StorageHostUnqualified):
+        capture(reader, primary, actual)
+    assert all("inspect" in command for command in calls)
+
+
+def test_recovery_qualifies_original_survivors_after_primary_disappears():
+    reader, primary, actual, objects, _calls = topology()
+    saved = capture(reader, primary, actual)
+    del objects[("container", CID)]
+    del objects[("network", INTERNAL)]["Containers"][CID]
+    survivors = reader.qualify(saved)
+    assert survivors[("container", CID)] is None
+    assert survivors[("container", PROXY)]["Id"] == PROXY
+    assert not reader.prove_absent(saved)
+    objects.clear()
+    assert reader.prove_absent(saved)
+
+
+@pytest.mark.parametrize("member", ["container", "network"])
+def test_reused_original_name_is_not_absence_or_cleanup_permission(member):
+    reader, primary, actual, objects, _calls = topology()
+    saved = capture(reader, primary, actual)
+    identity = PROXY if member == "container" else EGRESS
+    replacement = deepcopy(objects.pop((member, identity)))
+    replacement["Id"] = "7" * 64
+    objects[(member, replacement["Id"])] = replacement
+    with pytest.raises(StorageHostUnqualified):
+        reader.qualify(saved)
+    with pytest.raises(StorageHostUnqualified):
+        reader.prove_absent(saved)
+
+
+def test_fresh_capture_refuses_primary_disappearance_before_final_graph_proof():
+    reader, primary, actual, objects, _calls = topology()
+    inspect = reader.inspect
+    removed = []
+
+    def disappear(kind, reference):
+        result = inspect(kind, reference)
+        if kind == "network" and reference == "retained-egress" and not removed:
+            objects.pop(("container", CID))
+            objects[("network", INTERNAL)]["Containers"].pop(CID)
+            removed.append(True)
+        return result
+
+    reader.inspect = disappear
+    with pytest.raises(StorageHostUnqualified):
+        capture(reader, primary, actual)
+    assert removed
