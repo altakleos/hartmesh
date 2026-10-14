@@ -16,6 +16,7 @@ from uuid import uuid4
 from deerflow.files.store import StoreError, open_directory_source
 from deerflow.spaces.docker import StorageHostUnqualified
 from deerflow.spaces.filesystem import ConfinedFilesystem
+from deerflow.spaces.native_teardown_evidence import NativeTeardownRecord
 
 DIRECTORY = ".native-creates"
 ATTEMPT_LABEL = "hartmesh.native.create-attempt"
@@ -68,6 +69,22 @@ class NativeContainerIdentity:
     container_id: str
 
 
+@dataclass(frozen=True)
+class NativeEvidenceSnapshot:
+    creates: tuple[NativeCreateAttempt, ...]
+    teardowns: tuple[NativeTeardownRecord, ...]
+
+    def pending_creates(self, daemon_id):
+        return tuple(record for record in self.creates if record.phase == "pending" or record.daemon_id != daemon_id)
+
+
+@dataclass(frozen=True)
+class _TeardownRemoval:
+    record: NativeTeardownRecord
+    metadata: object
+    descriptor: int
+
+
 class NativeCreateEvidence:
     """One lifecycle retains its exact qualified directory, never repairs it."""
 
@@ -77,6 +94,8 @@ class NativeCreateEvidence:
         self.pool, self.daemon_id = Path(pool), daemon_id
         self._lock = RLock()
         self._stages = {}
+        self._teardown_removals = {}
+        self._has_teardown = False
         self._pool_fd = self._directory_fd = None
         self._closed = False
         try:
@@ -98,6 +117,11 @@ class NativeCreateEvidence:
         """Memory-only lifetime fact; fresh physical proof precedes effects."""
         return not self._closed and self._directory_fd is not None
 
+    @property
+    def creation_ready(self):
+        """Memory-only publication gate; a fresh mixed snapshot precedes effects."""
+        return self.ready and not self._has_teardown
+
     def _assert_current(self):
         if not self.ready or self._pool_fd is None:
             raise StorageHostUnqualified("Native create evidence is closed")
@@ -118,6 +142,8 @@ class NativeCreateEvidence:
 
     @staticmethod
     def _validate(document, identifier):
+        if isinstance(document, dict) and type(document.get("schema_version")) is int and document["schema_version"] == 2:
+            return NativeTeardownRecord.parse(document, identifier)
         if not isinstance(document, dict) or set(document) != _FIELDS or type(document["schema_version"]) is not int or document["schema_version"] != 1:
             raise StorageHostUnqualified("Native create evidence schema is unknown")
         slots = document["slots"]
@@ -178,24 +204,55 @@ class NativeCreateEvidence:
                         raise StorageHostUnqualified("Native create evidence byte capacity is exhausted")
                     records.append((record, metadata))
             self._assert_current()
+            by_id = {record.id: (record, metadata) for record, metadata in records}
+            for identifier, removal in self._teardown_removals.items():
+                if identifier in by_id:
+                    record, metadata = by_id[identifier]
+                    if record != removal.record or _identity(metadata) != _identity(removal.metadata):
+                        raise StorageHostUnqualified("Unconfirmed native teardown removal identity changed")
+                else:
+                    records.append((removal.record, None))
+                    total += len(self._encode_teardown(removal.record))
+            if len(records) > MAX_RECORDS or total > MAX_TOTAL_BYTES:
+                raise StorageHostUnqualified("Native lifecycle evidence capacity is exhausted")
+            teardowns = [record for record, _ in records if isinstance(record, NativeTeardownRecord)]
+            if len({record.container_id for record in teardowns}) != len(teardowns):
+                raise StorageHostUnqualified("Native teardown primary correlation is ambiguous")
+            self._has_teardown = bool(teardowns)
         except (OSError, StoreError, ValueError, UnicodeError, RecursionError) as exc:
             raise StorageHostUnqualified("Native create evidence cannot be inspected") from exc
         return records, total
+
+    def snapshot(self):
+        """One bounded mixed view, never a cleanup or actor capability."""
+        with self._lock:
+            records, _ = self._scan()
+            return NativeEvidenceSnapshot(tuple(record for record, _ in records if isinstance(record, NativeCreateAttempt)), tuple(record for record, _ in records if isinstance(record, NativeTeardownRecord)))
 
     def pending(self, *, slots=None, owner_id=None):
         with self._lock:
             records, _ = self._scan()
             return tuple(
-                record for record, _metadata in records if (record.phase == "pending" or record.daemon_id != self.daemon_id) and (slots is None or set(slots).intersection(record.slots)) and (owner_id is None or owner_id == record.owner_id)
+                record
+                for record, _metadata in records
+                if isinstance(record, NativeCreateAttempt)
+                and (record.phase == "pending" or record.daemon_id != self.daemon_id)
+                and (slots is None or set(slots).intersection(record.slots))
+                and (owner_id is None or owner_id == record.owner_id)
             )
 
-    def require_admissible(self, *, owner_id, name):
+    def require_admissible(self, *, owner_id, name, slots=()):
         with self._lock:
-            if any(record.owner_id == owner_id or record.name == name for record in self.pending()):
+            snapshot = self.snapshot()
+            if any(record.owner_id == owner_id or record.name == name for record in snapshot.pending_creates(self.daemon_id)):
                 raise StorageHostUnqualified("A previous native creation is unresolved for this owner or name")
+            if any(record.owner_id == owner_id or record.name == name or (record.target_slot is not None and record.target_slot in slots) for record in snapshot.teardowns):
+                raise StorageHostUnqualified("A previous native teardown is unresolved for this owner, name or target slot")
 
     @staticmethod
     def _encode(record):
+        if not isinstance(record, NativeCreateAttempt):
+            raise StorageHostUnqualified("Create encoding requires an exact create record")
         raw = json.dumps({"schema_version": 1, **asdict(record)}, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
         if len(raw) > MAX_RECORD_BYTES:
             raise StorageHostUnqualified("Native create evidence record exceeds its bound")
@@ -205,7 +262,7 @@ class NativeCreateEvidence:
         # Validate the whole namespace before removing anything. A valid
         # acknowledgment for a different daemon still fences its slot.
         for record, metadata in records:
-            if record.phase != "acknowledged" or record.daemon_id != self.daemon_id:
+            if not isinstance(record, NativeCreateAttempt) or record.phase != "acknowledged" or record.daemon_id != self.daemon_id:
                 continue
             name = record.id + ".json"
             descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=self._directory_fd)
@@ -263,7 +320,7 @@ class NativeCreateEvidence:
             record = NativeCreateAttempt(uuid4().hex, self.daemon_id, owner_id, thread_id, name, tuple(sorted(set(slots))))
             raw = self._encode(record)
             self._validate(json.loads(raw), record.id)
-            self.require_admissible(owner_id=owner_id, name=name)
+            self.require_admissible(owner_id=owner_id, name=name, slots=record.slots)
             records, total = self._scan()
             if len(records) >= MAX_RECORDS or total + len(raw) > MAX_TOTAL_BYTES:
                 raise StorageHostUnqualified("Native create evidence is full; submission is refused")
@@ -317,11 +374,120 @@ class NativeCreateEvidence:
             os.unlink(attempt.id + ".json", dir_fd=self._directory_fd)
             os.fsync(self._directory_fd)
 
+    @staticmethod
+    def _encode_teardown(record):
+        if not isinstance(record, NativeTeardownRecord):
+            raise StorageHostUnqualified("Teardown encoding requires an exact teardown record")
+        try:
+            raw = json.dumps(record.document(), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+            if len(raw) > MAX_RECORD_BYTES or NativeTeardownRecord.parse(json.loads(raw), record.id) != record:
+                raise StorageHostUnqualified("Native teardown record exceeds its bound or changes shape")
+            return raw
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise StorageHostUnqualified("Native teardown record is malformed") from exc
+
+    def begin_teardown(self, record):
+        """Persist correlation before effects; the record grants no authority."""
+        with self._lock:
+            raw = self._encode_teardown(record)
+            if record.daemon_id != self.daemon_id:
+                raise StorageHostUnqualified("Cannot publish teardown evidence for another daemon")
+            records, total = self._scan()
+            for previous, metadata in records:
+                if isinstance(previous, NativeTeardownRecord) and previous.container_id == record.container_id:
+                    if previous == replace(record, id=previous.id):
+                        if metadata is None or previous.id in self._teardown_removals:
+                            raise StorageHostUnqualified("Native teardown removal durability remains pending")
+                        return self._confirm_teardown_publication(previous, metadata)
+                    raise StorageHostUnqualified("Native teardown primary already has different immutable correlation")
+            if len(records) >= MAX_RECORDS or total + len(raw) > MAX_TOTAL_BYTES:
+                raise StorageHostUnqualified("Native lifecycle evidence is full; teardown is refused")
+            self._has_teardown = True
+            stage = self._write_stage(raw)
+            try:
+                self._assert_current()
+                self._assert_stage(stage, raw)
+                ConfinedFilesystem._rename_no_replace(self._directory_fd, stage, self._directory_fd, record.id + ".json")
+                os.fsync(self._directory_fd)
+                self._assert_current()
+                saved, metadata = self._read(record.id + ".json")
+                if saved != record or _identity(metadata) != _identity(os.fstat(self._stages[stage])):
+                    raise StorageHostUnqualified("Native teardown publication identity changed")
+                self._assert_current()
+            finally:
+                self._close_stage(stage)
+            return record
+
+    def _confirm_teardown_publication(self, record, metadata):
+        """Retry an uncertain publication without treating readability as fsync."""
+        name = record.id + ".json"
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=self._directory_fd)
+        try:
+            saved, current = self._read(name)
+            if saved != record or _identity(current) != _identity(metadata) or _identity(os.fstat(descriptor)) != _identity(metadata):
+                raise StorageHostUnqualified("Native teardown publication retry identity changed")
+            os.fsync(descriptor)
+            os.fsync(self._directory_fd)
+            self._assert_current()
+            saved, current = self._read(name)
+            if saved != record or _identity(current) != _identity(metadata):
+                raise StorageHostUnqualified("Native teardown publication changed after durability retry")
+            return record
+        finally:
+            os.close(descriptor)
+
+    def finish_teardown(self, record):
+        """Trusted caller must first prove the complete captured set absent."""
+        with self._lock:
+            self._encode_teardown(record)
+            if record.daemon_id != self.daemon_id:
+                raise StorageHostUnqualified("Cannot remove teardown evidence for another daemon")
+            records, _ = self._scan()
+            if not any(saved == record for saved, _metadata in records):
+                raise StorageHostUnqualified("Native teardown completion lacks its exact retained record")
+            name = record.id + ".json"
+            removal = self._teardown_removals.get(record.id)
+            if removal is None:
+                descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=self._directory_fd)
+                try:
+                    saved, metadata = self._read(name)
+                    if saved != record or _identity(os.fstat(descriptor)) != _identity(metadata):
+                        raise StorageHostUnqualified("Native teardown record changed before completion")
+                    os.fsync(descriptor)
+                    removal = _TeardownRemoval(record, metadata, descriptor)
+                    self._teardown_removals[record.id] = removal
+                except BaseException:
+                    os.close(descriptor)
+                    raise
+            self._assert_current()
+            try:
+                saved, metadata = self._read(name)
+            except FileNotFoundError:
+                pass
+            else:
+                if saved != removal.record or _identity(metadata) != _identity(removal.metadata):
+                    raise StorageHostUnqualified("Native teardown completion cannot remove a replacement")
+                os.unlink(name, dir_fd=self._directory_fd)
+            os.fsync(self._directory_fd)
+            self._assert_current()
+            try:
+                os.stat(name, dir_fd=self._directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise StorageHostUnqualified("Native teardown evidence removal is unconfirmed")
+            self._teardown_removals.pop(record.id)
+            os.close(removal.descriptor)
+            self._scan()
+
     def close(self):
         with self._lock:
             self._closed = True
             for stage in tuple(self._stages):
                 self._close_stage(stage)
+            for removal in self._teardown_removals.values():
+                os.close(removal.descriptor)
+            self._teardown_removals.clear()
             for name in ("_directory_fd", "_pool_fd"):
                 descriptor = getattr(self, name, None)
                 if descriptor is not None:

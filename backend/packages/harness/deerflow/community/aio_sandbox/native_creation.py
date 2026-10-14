@@ -225,7 +225,7 @@ class NativeCreateBridge:
 
     @property
     def ready(self):
-        return self._installed and self.evidence.ready and self.handoffs.ready and self._owner_accepts()
+        return self._installed and self.evidence.creation_ready and self.handoffs.ready and self._owner_accepts()
 
     def invalidate(self):
         """Memory-only admission closure; owned identity/teardown is retained."""
@@ -237,7 +237,7 @@ class NativeCreateBridge:
             self._check_owner()
             self._check_daemon()
             token = self.handoffs.begin_restore()
-            pending = self.evidence.pending()
+            pending = self._snapshot_pending()
             self._check_owner()
             self._check_daemon()
             self.handoffs.finish_restore(token, pending)
@@ -264,11 +264,18 @@ class NativeCreateBridge:
             raise
         try:
             self._check_daemon()
-            pending = self.evidence.pending()
+            pending = self._snapshot_pending()
         except BaseException:
             self._installed = False
             raise
         return pending
+
+    def _snapshot_pending(self):
+        snapshot = self.evidence.snapshot()
+        if snapshot.teardowns:
+            self._installed = False
+            raise StorageRuntimeUnavailable("Native teardown evidence requires its qualified recovery protocol")
+        return snapshot.pending_creates(self.evidence.daemon_id)
 
     def assert_candidate_current(self, info, *, teardown=False, known_live=False):
         pending = self.assert_current(teardown=teardown)

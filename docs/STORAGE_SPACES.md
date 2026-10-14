@@ -301,6 +301,21 @@ correlation facts; these facts grant no authority. Qualification restores retain
 pending capacity before orphan reconciliation or native publication. The exact
 journal stays owned through retry and worker drainage, alongside the pool lock.
 
+The same bounded namespace also understands private version-2 teardown records.
+They preserve the original primary, relay and network IDs/names, daemon, opaque
+owner/thread and exact correlation slots; an optional retirement target is distinct
+from incidental read-only companion slots. These records grant no cleanup authority.
+Publication retries sync the retained file and directory again. Terminal removal
+checks the exact record/inode and remains pending in memory if directory sync fails,
+even when the named file is already absent. They share the existing record/byte
+limits and are never pruned as create acknowledgments or evicted for capacity.
+
+This is metadata groundwork: no production path emits teardown records yet, and
+the current native bridge refuses them until the cleanup recovery integration is
+available. Preserve the journal in complete pool backups. Version-1-only binaries
+refuse qualification while version-2 records remain; deleting evidence is not a
+rollback procedure. There is no database schema change.
+
 Each primary request is recorded and fsynced before submission. Acknowledgment
 requires actual same-daemon inspection of the full Docker ID, exact name, private
 attempt label and all requested labels/slots. The provider retains verified

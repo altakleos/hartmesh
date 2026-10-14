@@ -634,6 +634,8 @@ Unresolved requests survive restart, reserve capacity and block another native
 create for the same account or container name. Cancellation retains verified
 containers for fenced cleanup. Operators must preserve the directory alongside
 the pool; unsafe or unknown evidence refuses admission. Defaults remain disabled.
+The journal also supports private teardown correlation; unresolved version-2
+records refuse native admission until their recovery protocol is integrated.
 Unconfirmed creation logs include bounded source locations, error codes and
 attempt/submission facts, without exception text or subprocess payloads.
 
