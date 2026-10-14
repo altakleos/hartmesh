@@ -1800,12 +1800,13 @@ async def _run_agent(
 
         try:
             facts = await run_error(ctx.agent_execution, record, exc)
+            reason_kwargs = {"stop_reason": facts["stop_reason"]} if facts["stop_reason"] is not None else {}
             await _ensure_finalizing_before_edit_failure(run_manager, record)
             cancel_action = await run_manager.set_status_if_not_cancelled(
                 run_id,
                 RunStatus.error,
                 error=error_msg,
-                stop_reason=facts["stop_reason"],
+                **reason_kwargs,
                 **terminal_status_kwargs,
             )
         except asyncio.CancelledError:
