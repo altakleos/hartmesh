@@ -35,6 +35,7 @@ class NativeAccountingProof:
     evidence: object
     evidence_revision: int
     validate_locked: Callable[[], None]
+    resident_revision: int
 
     @classmethod
     def capture(cls, provider, permit, *, validate_locked):
@@ -48,7 +49,7 @@ class NativeAccountingProof:
             owner, bridge = provider._pool_runtime_owner, provider._native_creation
             if bridge.evidence is not owner.native_create_evidence:
                 raise StorageRuntimeUnavailable("Native accounting evidence belongs to another owner")
-            result = cls(provider, permit, owner, bridge, bridge.evidence, bridge.evidence.teardown_revision, validate_locked)
+            result = cls(provider, permit, owner, bridge, bridge.evidence, bridge.evidence.teardown_revision, validate_locked, bridge.evidence.resident_revision)
 
         provider.external_changed(capture)
         return result
@@ -62,6 +63,7 @@ class NativeAccountingProof:
             or self.evidence is not self.bridge.evidence
             or self.evidence is not self.owner.native_create_evidence
             or self.evidence_revision != self.evidence.teardown_revision
+            or self.resident_revision != self.evidence.resident_revision
         ):
             raise StorageRuntimeUnavailable("Native accounting lost its exact retained evidence")
         provider._require_bootstrap_accounting_locked(permit)
@@ -178,6 +180,7 @@ class ResidentBootstrapCoordinator:
                 # callback. Physical and SQL effects have already drained.
                 self.registry.external_slots()
                 self.provider.external_slots = self.registry.external_slots
+                self.provider.external_native_claims = self.registry.external_native_claims
                 self.provider.evict_external = self.registry.evict_external
                 self.admission.open(self.provider)
 

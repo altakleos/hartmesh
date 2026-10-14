@@ -79,6 +79,24 @@ async def test_pending_owner_or_slot_refuses_even_with_empty_inventory(fixture, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["prepared", "retiring"])
+@pytest.mark.parametrize("slot", [SLOT, SHARED])
+async def test_original_resident_record_prevents_backing_release_even_without_a_primary(fixture, phase, slot):
+    from test_native_resident_evidence import record as resident_record
+
+    provider, bridge, local = qualify(fixture)
+    saved = bridge.evidence.begin_resident(resident_record())
+    if phase == "retiring":
+        saved = bridge.evidence.retire_resident(saved)
+    bridge.qualify()
+    with pytest.raises(StorageHostUnqualified):
+        async with provider._native_retirement_scope("released-account", slot):
+            pytest.fail("An unfinished original resident graph released its backing")
+    assert bridge.residents.records() == (saved,)
+    local.destroy.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_active_admission_refuses_before_any_inventory(fixture):
     provider, _bridge, local = qualify(fixture)
     with provider._owner_admission_scope("alice"):

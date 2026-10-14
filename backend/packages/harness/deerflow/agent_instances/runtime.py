@@ -313,6 +313,13 @@ async def qualified_attachments(files, *, baseline_provider=None):
             if owner is not None:
                 evidence = await await_drained(run_file_io(owner.qualify_native_evidence, baseline_provider, daemon_id=adapter.host_id))
                 await await_drained(run_file_io(baseline_provider._install_native_creation, evidence, adapter))
+                from deerflow.spaces.resident_containment import NativeResidentContainmentScopes
+
+                containment = getattr(adapter, "_containment_scope", None)
+                if containment is None:
+                    adapter._containment_scope = NativeResidentContainmentScopes(provider=baseline_provider, files=files, adapter=adapter)
+                elif not isinstance(containment, NativeResidentContainmentScopes) or (containment.provider is not baseline_provider or containment.files is not files or containment.adapter is not adapter):
+                    raise StorageRuntimeUnavailable("Resident containment cannot replace another retained lifetime")
                 await await_drained(run_file_io(owner.assert_provider, baseline_provider))
                 await await_drained(run_file_io(baseline_provider._reconcile_orphans))
             files.attachments = mounts

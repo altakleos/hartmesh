@@ -905,11 +905,16 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             starting = {sandbox_id: token for sandbox_id, token in getattr(self, "_native_start_reservations", {}).items() if sandbox_id in self._starting}
             extra = bridge.handoffs.extra_slots_locked(starting=starting, known_container_ids=known)
             extra += bridge.teardowns.extra_slots_locked(known_container_ids=known)
+            extra += bridge.residents.extra_slots_locked(known_claims=self.external_native_claims())
         return replicas, self._active_count_locked(), len(self._warm_pool), len(self._starting) + extra + self.external_slots()
 
     def external_slots(self) -> int:
         """Host-owned reservations; callback runs under the metadata lock."""
         return 0
+
+    def external_native_claims(self):
+        """Host-owned detached correlations, read under the metadata lock only."""
+        return frozenset()
 
     def evict_external(self) -> bool:
         """Ask the host to contain an idle environment, outside the lock."""
@@ -3515,6 +3520,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         pending = scope.bridge.assert_current()
         reservation = scope.reservation
         eligible_teardowns(scope)
+        if any(reservation.slot_id in record.slots for record in scope.bridge.residents.records()):
+            raise StorageHostUnqualified("Unfinished original resident resources prevent backing retirement")
         if any(record.owner_id == reservation.owner_id or reservation.slot_id in record.slots for record in pending) or scope.bridge.handoffs.retained_for_retirement(owner_id=reservation.owner_id, slot_id=reservation.slot_id):
             raise StorageHostUnqualified("Unresolved native owner or slot requests prevent containment")
         scope.assert_current()

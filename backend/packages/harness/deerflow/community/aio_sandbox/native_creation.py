@@ -15,6 +15,7 @@ from deerflow.spaces.docker import StorageHostUnqualified
 from deerflow.spaces.native_create_evidence import ATTEMPT_LABEL, MAX_RECORDS, NativeContainerIdentity, NativeCreateAttempt, _unique_object
 from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
 
+from .native_resident_index import NativeResidentIndex
 from .native_teardown import NativeTeardownIndex
 
 MAX_RESTORE_UPDATES = MAX_RECORDS * 2
@@ -221,7 +222,9 @@ class NativeCreateBridge:
     def __init__(self, *, evidence, handoffs, check_owner, owner_accepts, check_daemon, admit_native=None):
         self.evidence, self.handoffs = evidence, handoffs
         self.teardowns = NativeTeardownIndex(daemon_id=handoffs.daemon_id, lock=handoffs.lock)
+        self.residents = NativeResidentIndex(daemon_id=handoffs.daemon_id, lock=handoffs.lock)
         self._restored_teardown_revision = None
+        self._restored_resident_revision = None
         self._check_owner, self._owner_accepts, self._check_daemon = check_owner, owner_accepts, check_daemon
         self._admit_native = admit_native or (lambda _owner, _slots: nullcontext())
         self._installed = False
@@ -229,14 +232,23 @@ class NativeCreateBridge:
 
     @property
     def ready(self):
-        return self._installed and self.evidence.ready and self.handoffs.ready and self.teardowns.ready and self.evidence.teardown_revision == self._restored_teardown_revision and self._owner_accepts()
+        return (
+            self._installed
+            and self.evidence.ready
+            and self.handoffs.ready
+            and self.teardowns.ready
+            and self.residents.ready
+            and self.evidence.teardown_revision == self._restored_teardown_revision
+            and self.evidence.resident_revision == self._restored_resident_revision
+            and self._owner_accepts()
+        )
 
     def invalidate(self):
         """Memory-only admission closure; owned identity/teardown is retained."""
         self._installed = False
 
     def qualify(self, *, teardown=False):
-        token = teardown_token = None
+        token = teardown_token = resident_token = None
         try:
             if teardown and not self._ever_installed:
                 raise StorageRuntimeUnavailable("Native teardown restoration requires prior owning runtime installation")
@@ -245,14 +257,22 @@ class NativeCreateBridge:
             self._check_daemon()
             token = self.handoffs.begin_restore()
             teardown_token = self.teardowns.begin_restore()
+            resident_token = self.residents.begin_restore()
             snapshot = self.evidence.snapshot()
             check_owner()
             self._check_daemon()
             self.teardowns.finish_restore(teardown_token, snapshot.teardowns)
+            self.residents.finish_restore(resident_token, snapshot.residents)
             self.handoffs.finish_restore(token, snapshot.pending_creates(self.evidence.daemon_id))
-            if snapshot.teardown_revision != self.evidence.teardown_revision or frozenset(snapshot.teardowns) != frozenset(self.teardowns.records()):
+            if (
+                snapshot.teardown_revision != self.evidence.teardown_revision
+                or frozenset(snapshot.teardowns) != frozenset(self.teardowns.records())
+                or snapshot.resident_revision != self.evidence.resident_revision
+                or frozenset(snapshot.residents) != frozenset(self.residents.records())
+            ):
                 raise StorageRuntimeUnavailable("Native teardown evidence changed during accounting restoration")
             self._restored_teardown_revision = snapshot.teardown_revision
+            self._restored_resident_revision = snapshot.resident_revision
             self._installed = True
             check_owner()
             self._ever_installed = True
@@ -262,6 +282,8 @@ class NativeCreateBridge:
                 self.handoffs.abort_restore(token)
             if teardown_token is not None:
                 self.teardowns.abort_restore(teardown_token)
+            if resident_token is not None:
+                self.residents.abort_restore(resident_token)
             raise
 
     def assert_current(self, *, teardown=False):
@@ -286,7 +308,14 @@ class NativeCreateBridge:
 
     def _snapshot_pending(self):
         snapshot = self.evidence.snapshot()
-        if not self.teardowns.ready or snapshot.teardown_revision != self._restored_teardown_revision or frozenset(snapshot.teardowns) != frozenset(self.teardowns.records()):
+        if (
+            not self.teardowns.ready
+            or not self.residents.ready
+            or snapshot.teardown_revision != self._restored_teardown_revision
+            or frozenset(snapshot.teardowns) != frozenset(self.teardowns.records())
+            or snapshot.resident_revision != self._restored_resident_revision
+            or frozenset(snapshot.residents) != frozenset(self.residents.records())
+        ):
             self._installed = False
             raise StorageRuntimeUnavailable("Native teardown evidence has no current restored accounting")
         return snapshot.pending_creates(self.evidence.daemon_id)

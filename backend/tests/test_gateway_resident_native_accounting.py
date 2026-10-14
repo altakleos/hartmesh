@@ -112,7 +112,44 @@ async def test_secondary_without_a_primary_remains_a_native_accounting_blocker(f
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("change", ["identity", "producer", "pending", "catalog"])
+async def test_journal_membership_cannot_explain_a_changed_original_relay(fixture, monkeypatch):
+    from test_resident_containment_worker import worker
+
+    from deerflow.community.aio_sandbox.native_resource_set import NativeResourceSet, PairedResource
+    from deerflow.spaces.docker import StorageHostUnqualified
+
+    host, provider, admission, local, _calls = runtime(fixture)
+    bridge = provider._native_creation
+    capability, gate, token, saved, objects, _effects = worker((bridge.evidence, bridge.handoffs, bridge, None))
+    objects.pop(("container", saved.container_id))
+    for entry in objects.values():
+        entry.get("Containers", {}).pop(saved.container_id, None)
+    proxy = next(member for member in saved.resources if member.role == "network-proxy")
+    objects[("container", proxy.identity)]["Mounts"] = [{"Type": "bind", "Source": "/changed/host", "Destination": "/data", "RW": True}]
+    original = local._runtime_runner
+
+    def inspect_original(command, **kwargs):
+        if "inspect" in command and command[-1] in {saved.container_id, saved.name, *(member.identity for member in saved.resources), *(member.name for member in saved.resources)}:
+            return capability.backend._run(command, **kwargs)
+        return original(command, **kwargs)
+
+    local._runtime_runner = inspect_original
+    monkeypatch.setattr(local, "_bootstrap_primary_inventory", lambda **_kwargs: ())
+    monkeypatch.setattr(NativeResourceSet, "inventory_paired", lambda _reader: tuple(PairedResource(member, saved.attachment_id, saved.network_mode, saved.policy_digest) for member in saved.resources))
+    permit = provider._begin_bootstrap_accounting(admission)
+    try:
+        with pytest.raises(StorageHostUnqualified, match="relay has a host storage mount"):
+            await host.account_native(permit)
+        with pytest.raises(SandboxRuntimeAdmissionError):
+            admission.require(provider)
+    finally:
+        provider._end_bootstrap_accounting(permit)
+        capability.close()
+        gate.end_resident_batch(token)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("change", ["identity", "producer", "pending", "catalog", "resident"])
 async def test_gateway_census_proof_refuses_late_identity_or_producer_change(fixture, change):
     host, provider, admission, _local, _calls = runtime(fixture)
     permit = provider._begin_bootstrap_accounting(admission)
@@ -124,6 +161,12 @@ async def test_gateway_census_proof_refuses_late_identity_or_producer_change(fix
             provider._runtime_producers = {object()}
         elif change == "catalog":
             host.files.catalog.volumes.clear()
+        elif change == "resident":
+            from test_native_resident_evidence import record
+
+            bridge = provider._native_creation
+            bridge.evidence.begin_resident(record(container_id="4" * 64))
+            bridge.qualify()
         else:
             labels = {"deerflow.role": "sandbox", "deerflow.owner_user_id": "bob", "deerflow.thread_id": "another", "deerflow.sandbox_id": "other", "hartmesh.chat.storage": "on"}
             provider._native_creation.begin(name="another-native", labels=labels)

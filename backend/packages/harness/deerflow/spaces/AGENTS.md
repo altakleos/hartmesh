@@ -19,13 +19,18 @@ v1 creates and private v2 `native_teardown_evidence.py` records under one bound.
 Explicit v3 `mountless-create` and v4 `mountless-teardown` variants require zero
 Space slots; they journal managed NoUser submissions without a fabricated slot.
 Older nonempty-slot formats retain their exact rules; unknown formats refuse.
+Private v5 `native_resident_evidence.py` retains actorless prepared/retiring graphs,
+complete original roots, configured RO mounts and network identities. Shared
+networks are observed, never owned or removed. Creation ACK pruning excludes them.
+`resident_revision` and a separate typed index fence accounting restoration;
+exact SQL correlation alone deduplicates a resident capacity charge.
 Create-only ACK pruning never removes teardown. Exact primary correlation is unique;
 publication retries reprove durability, and failed terminal fsync retains the record
 and FD in memory. Same-daemon mutations only; never infer a target from slot order.
 Pending survives restart; unknown/malformed/staging evidence fails closed and is
 never evicted. `ready`/`creation_ready` and `teardown_revision` are memory-only;
 IO methods belong off-loop. Teardown publication/completion closes the bridge's
-revision gate until both typed indexes match the complete mixed snapshot. Restore
+revision gate until all typed indexes match the complete mixed snapshot. Restore
 never drops retained accounting to manufacture readiness.
 The already-installed canonical cleanup path can restore accounting while its
 owner closes, retaining current owner/daemon proof and closed creation readiness.
@@ -327,6 +332,19 @@ tier rejects every skip and includes real AIO two-chat persistence and full
 private-control reclamation (bytes, inodes and held file descriptors);
 directory fixtures never qualify quotas. `resume` rechecks exact mounts, current
 generations, audience and immutable container identity without prepare/start.
+
+`resident_containment.py` installs the qualified adapter's private batch scope
+before sorted SQL parents. Detached ADMIN capture uses metadata-only `get`;
+authoritative admission/callback remain under the owning transaction. Include
+RO backing parents and recheck immutable mappings, roots and complete mount scope.
+Keep original retiring evidence through confirmed fenced commit, then freshly
+prove every owned original ID/name absent before journal fsync/index removal.
+Already-fenced no-record retries only observe primary absence plus complete
+resident/paired census, journal/handoff uncertainty and unchanged historical SQL;
+they reconstruct no erased graph and issue no effects. Unfinished retiring
+records block ADMIN backing mutation and native release. Offload full runtime,
+journal and root proofs; drain workers before expiring the batch. Never reacquire
+a caller-owned Home lock. Missing/unreturned preparations still refuse.
 
 `retire` accepts a host-only admission callback after locking scoped attachments
 inside its first ADMIN transaction, before pending/effects. Domain conditions add

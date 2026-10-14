@@ -100,6 +100,20 @@ async def test_missing_journal_refuses_then_retry_keeps_provider_and_exact_helpe
 
 
 @pytest.mark.asyncio
+async def test_managed_qualification_retains_the_exact_native_containment_factory(fixture, monkeypatch):
+    from deerflow.agent_instances.runtime import qualified_attachments
+
+    _pool, provider, _owner, storage, adapter, _getter = fixture
+    monkeypatch.setattr(DockerStorageAdapter, "from_local_backend", lambda *_args, **_kwargs: adapter)
+    _, mounts = await qualified_attachments(storage)
+    factory = getattr(adapter, "_containment_scope", None)
+    assert factory is not None
+    assert factory.provider is provider and factory.files is storage and factory.adapter is adapter
+    _, repeated = await qualified_attachments(storage)
+    assert repeated is mounts and adapter._containment_scope is factory
+
+
+@pytest.mark.asyncio
 async def test_failed_first_journal_keeps_exact_attachments_and_qualified_adapter_on_retry(fixture, monkeypatch):
     from deerflow.agent_instances.runtime import qualified_attachments
 

@@ -372,8 +372,56 @@ class DockerStorageAdapter:
             raise StorageAdapterUnsupported("Attachment preparation must leave its environment stopped")
         return entry
 
+    def _require_resident_record(self, container, plan):
+        if self._backend is None or not getattr(self._backend, "_managed_native_required", False):
+            return None
+        from deerflow.community.aio_sandbox.native_resource_set import NativeResourceSet
+        from deerflow.community.aio_sandbox.resident_preparation import _network_target
+        from deerflow.spaces.native_resident_evidence import NativeResidentRoot
+
+        bridge = self._backend._native_creation
+        bridge.assert_current()
+        record = bridge.residents.for_attachment(plan.id)
+        roots = tuple(view.native_root for view in plan.views) + tuple(NativeResidentRoot.from_readonly(root) for root in plan.readonly_roots)
+        mode = self._backend.network_mode
+        target = _network_target(self._backend, plan.id)
+        configured = tuple((source, destination, False) for source, destination, readonly in self._configured_mounts if readonly is True)
+        if (
+            record is None
+            or record.phase != "prepared"
+            or (record.container_id, record.daemon_id, record.incarnation, record.roots, record.configured_mounts, record.network_mode, record.network_target, record.policy_digest)
+            != (container, plan.host_id, plan.incarnation, roots, configured, mode, target, None if mode == "open" else self._backend._network_policy_digest())
+            or len(configured) != len(self._configured_mounts)
+        ):
+            raise StorageHostUnqualified("Resident activation lacks its exact prepared original graph")
+        entries = NativeResourceSet(self._backend, guard=bridge.assert_current).qualify_resident_record(record)
+        if any(entry is None for entry in entries.values()):
+            raise StorageHostUnqualified("Resident activation lacks a complete original resource graph")
+        return record
+
+    @contextmanager
+    def _resident_activation(self, container, plan):
+        record = self._require_resident_record(container, plan)
+        if record is None:
+            yield
+            return
+        factory = getattr(self, "_containment_scope", None)
+        if factory is None or factory.provider._backend is not self._backend:
+            raise StorageHostUnqualified("Resident activation lost its exact owning lifecycle")
+        gate = factory.provider._owner_admission_gate()
+        reference = gate.enter("resident:" + plan.id)
+        try:
+            gate.register_slots(reference, record.slots)
+            self._require_resident_record(container, plan)
+            yield
+        finally:
+            gate.end(reference)
+
     def verify_active(self, container, plan):
-        return self._validate(container, plan, active=True)
+        with self._resident_activation(container, plan):
+            result = self._validate(container, plan, active=True)
+            self._require_resident_record(container, plan)
+            return result
 
     def prepare(self, plan):
         self._same_host()
@@ -393,11 +441,14 @@ class DockerStorageAdapter:
         return container
 
     def start(self, container, plan):
-        self._validate(container, plan)
-        result = self._call("start", container)
-        if result.returncode:
-            raise StorageAdapterUnsupported("Environment start outcome is unconfirmed")
-        self._validate(container, plan, active=True)
+        with self._resident_activation(container, plan):
+            self._validate(container, plan)
+            self._require_resident_record(container, plan)
+            result = self._call("start", container)
+            if result.returncode:
+                raise StorageAdapterUnsupported("Environment start outcome is unconfirmed")
+            self._validate(container, plan, active=True)
+            self._require_resident_record(container, plan)
 
     def bootstrap_residents(self, *, known_slots, paired=None):
         """Count strict original residents; this grants no adoption or cleanup."""

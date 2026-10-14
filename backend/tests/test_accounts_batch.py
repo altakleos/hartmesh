@@ -120,8 +120,19 @@ async def _worker(stores: SimpleNamespace, run_id: str, status: str, stop: async
 
 
 @pytest.mark.anyio
-async def test_ten_identities_take_one_wait_one_entry_each_and_the_worst_exit_status(stores) -> None:
+@pytest.mark.parametrize("startup_elapsed", [0.0, 1.0])
+async def test_ten_identities_take_one_wait_one_entry_each_and_the_worst_exit_status(stores, monkeypatch, startup_elapsed) -> None:
     """Three with a running tool call, one with no account, one refused: every run is asked to stop before the one wait."""
+    from app.gateway.auth import accounts as accounts_module
+
+    class EarlierClock(accounts_module.SurfaceClock):
+        def __init__(self):
+            super().__init__()
+            # Model time already spent on the command, without slowing the suite.
+            self._start -= startup_elapsed
+            self.started_at -= timedelta(seconds=startup_elapsed)
+
+    monkeypatch.setattr(accounts_module, "SurfaceClock", EarlierClock)
     subjects = [f"sub-{index}" for index in range(10)]
     accounts = {}
     for subject in subjects[:8]:
@@ -133,14 +144,32 @@ async def test_ten_identities_take_one_wait_one_entry_each_and_the_worst_exit_st
     # sub-9 has no account yet.
     running = {subject: await _seed_run(stores, str(accounts[subject].id)) for subject in subjects[:3]}
     wait = 1.0
+    command = _command(stores, wait_seconds=wait)
+    disable_many, cancel_and_wait = command._disable_many, command._cancel_and_wait
+    clock = None
+    wait_boundaries = []
+
+    async def capture_clock(items):
+        nonlocal clock
+        clock = items[0][2]
+        return await disable_many(items)
+
+    async def capture_shared_wait(owners, **kwargs):
+        assert clock is not None
+        wait_boundaries.append(clock.now_ms())
+        return await cancel_and_wait(owners, **kwargs)
+
+    monkeypatch.setattr(command, "_disable_many", capture_clock)
+    monkeypatch.setattr(command, "_cancel_and_wait", capture_shared_wait)
 
     started = time.monotonic()
-    document = await _command(stores, wait_seconds=wait).run("disable", issuer=ISSUER, subjects=subjects)
+    document = await command.run("disable", issuer=ISSUER, subjects=subjects)
     took = time.monotonic() - started
 
     # Bounded by the one wait; that every run is asked to stop before it is
     # the next test's, where a run stops only when asked.
     assert took < wait + 3.0, took
+    assert len(wait_boundaries) == 1
     assert document["command"] == "disable" and document["issuer"] == ISSUER
     assert [entry["identity"]["subject"] for entry in document["identities"]] == subjects
     for subject, run_id in running.items():
@@ -149,8 +178,9 @@ async def test_ten_identities_take_one_wait_one_entry_each_and_the_worst_exit_st
         assert (await stores.runs.get(run_id, user_id=None))["cancel_action"] == "interrupt"
     for subject in subjects[3:8]:
         assert _entry(document, subject)["verdict"] == "disabled" and _entry(document, subject)["returncode"] == 0, subject
-        # With no runs, its running work stopped at once: not when the others' wait ended.
-        assert _entry(document, subject)["surfaces"]["running_work"]["stopped_after_ms"] < wait * 1000 / 2, subject
+        # Serial setup can be slow; the no-run observation must precede the shared wait.
+        stopped_ms = _entry(document, subject)["surfaces"]["running_work"]["stopped_after_ms"]
+        assert 0 <= stopped_ms <= wait_boundaries[0], subject
     no_account = _entry(document, "sub-9")
     assert no_account["verdict"] == "disabled" and no_account["account"] is None
     refused = _entry(document, "sub-8")

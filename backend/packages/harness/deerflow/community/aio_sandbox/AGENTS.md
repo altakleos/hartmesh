@@ -90,8 +90,19 @@ Private `resident_preparation.py` uses committed attachment tokens and the exact
 pool-owner runner; never invent chat/human labels or use the chat journal for it.
 Expire capabilities after drained workers, consume once, and retain every bound
 slot through CID commit. Residents stay stopped/unpublished; chat defaults remain.
+Before CID return, capture and publish a complete v5 actorless original graph.
+`native_resident_index.py` restores its separate revision/accounting. Prepared
+records permit unrelated chat creation and RO Company sharing. Activation/reuse
+require exact prepared record, current plan/roots/policy and complete fresh graph,
+under a retained opaque resident owner/slot reference. Use preparation's common
+network-target normalization. Retiring/missing records grant no SDK authority.
+`resident_containment.py` consumes original records only: qualify, publish retiring,
+effect exact IDs, retain evidence through SQL commit, then fresh absence/fsync.
+Uncertain journal transitions restore accounting even while closing, preserving
+the original exception and charge. Incomplete resident records block every touched
+backing's retirement, including RO companions. They never enter chat cleanup.
 
-Native bridge qualification/current proof restores both typed indexes from one
+Native bridge qualification/current proof restores all typed indexes from one
 mixed snapshot before publication. `native_teardown.py` retains bounded pending
 accounting, exact member ID/typed-name collision guards and restore tombstones.
 The journal revision closes readiness until the restored set exactly matches.

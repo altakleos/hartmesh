@@ -1,5 +1,7 @@
 """Offline builder doubles: command shape and provenance are not native proof."""
 
+import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -41,7 +43,7 @@ def labels(command):
 def test_prepare_resident_creates_a_stopped_container_labelled_resident():
     local, calls = backend()
     assert local.prepare_resident(ATTACHMENT, "hartmesh-space-" + ATTACHMENT, MOUNTS, LABELS) == CONTAINER
-    ((command, options),) = calls
+    ((command, options),) = [call for call in calls if call[0][1] == "create"]
     assert command[:2] == ["docker", "create"] and "--rm" in command
     assert "-p" not in command and "-d" not in command and options["timeout"] == 30
     expected = {**LABELS, "deerflow.role": "resident"}
@@ -209,6 +211,7 @@ def test_resident_capability_cannot_follow_a_changed_topology(change):
 def managed(fixture, monkeypatch):
     from deerflow.spaces.attachments import AttachmentPlan, NativeView
     from deerflow.spaces.contract import PrincipalRef
+    from deerflow.spaces.native_resident_evidence import NativeResidentRoot
 
     _pool, provider, owner, _files, adapter, _getter = fixture
     local, calls = backend()
@@ -220,12 +223,43 @@ def managed(fixture, monkeypatch):
     evidence = owner.qualify_native_evidence(provider, daemon_id=adapter.host_id)
     provider._install_native_creation(evidence, adapter)
 
+    original = {}
+    target = os.environ.get("DEER_FLOW_SANDBOX_NETWORK", "").strip() or "bridge"
+    shared = {"Id": "0" * 64, "Name": target, "Created": "2026-10-14T00:00:00Z", "Containers": {}}
+
     def engine(command, **kwargs):
         calls.append((command, kwargs))
-        return SimpleNamespace(returncode=0, stdout=CONTAINER, stderr="")
+        if command[1] == "create":
+            mounts = []
+            for index, argument in enumerate(command):
+                if argument == "--mount":
+                    facts = dict(part.split("=", 1) for part in command[index + 1].split(",") if "=" in part)
+                    mounts.append({"Type": "bind", "Source": facts["src"], "Destination": facts["dst"], "RW": "readonly" not in command[index + 1].split(","), "Propagation": "rprivate"})
+            original.update(
+                Id=CONTAINER,
+                Name="/hartmesh-space-" + ATTACHMENT,
+                Created="2026-10-14T00:00:00.123456789Z",
+                Config={"Labels": labels(command)},
+                HostConfig={"NetworkMode": target, "PortBindings": {}},
+                State={"Running": False, "Status": "created"},
+                Mounts=mounts,
+                NetworkSettings={"Networks": {target: {"NetworkID": "", "EndpointID": ""}}, "Ports": {}},
+            )
+            return SimpleNamespace(returncode=0, stdout=CONTAINER, stderr="")
+        if command[1] == "ps" or command[1:3] == ["network", "ls"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if command[1] == "inspect":
+            if command[-1] in (CONTAINER, original.get("Name", "").removeprefix("/")):
+                return SimpleNamespace(returncode=0, stdout=json.dumps([original]), stderr="")
+            return SimpleNamespace(returncode=1, stdout="[]", stderr="Error: No such object: " + command[-1])
+        if command[1:3] == ["network", "inspect"]:
+            assert command[-1] in (target, shared["Id"])
+            return SimpleNamespace(returncode=0, stdout=json.dumps([shared]), stderr="")
+        pytest.fail("Unexpected offline Docker operation")
 
     monkeypatch.setattr("deerflow.spaces.runtime_owner.subprocess.run", engine)
-    plan = AttachmentPlan(ATTACHMENT, "c" * 32, PrincipalRef("nonhuman", "ai-employee"), adapter.host_id, (NativeView("e" * 32, 1, MOUNTS[0][0], MOUNTS[0][1], True, SLOT),))
+    root = NativeResidentRoot(SLOT, MOUNTS[0][0], MOUNTS[0][1], True, "1" * 32, "11111111-1111-4111-8111-111111111111", 10, 11, 12, 11, "e" * 32, 1, None)
+    plan = AttachmentPlan(ATTACHMENT, "c" * 32, PrincipalRef("nonhuman", "ai-employee"), adapter.host_id, (NativeView("e" * 32, 1, MOUNTS[0][0], MOUNTS[0][1], True, SLOT, root),))
     admitted_labels = {**LABELS, "hartmesh.storage.host": adapter.host_id}
     return local, calls, provider, adapter, plan, admitted_labels
 
@@ -250,7 +284,7 @@ def test_managed_resident_uses_owned_runner_without_chat_journal_and_holds_slots
         assert provider._native_creation.evidence.pending() == ()
     retirement = gate.reserve("unrelated-human", SLOT)
     gate.end_retirement(retirement)
-    ((command, options),) = calls
+    ((command, options),) = [call for call in calls if call[0][1] == "create"]
     assert command[:2] == ["docker", "create"] and options["pass_fds"]
     assert labels(command)["deerflow.role"] == "resident"
 
@@ -287,7 +321,7 @@ def test_managed_resident_token_cannot_submit_a_second_primary(managed):
         local.prepare_resident(ATTACHMENT, "hartmesh-space-" + ATTACHMENT, MOUNTS, admitted_labels)
         with pytest.raises(StorageHostUnqualified):
             local.prepare_resident(ATTACHMENT, "hartmesh-space-" + ATTACHMENT, MOUNTS, admitted_labels)
-    assert len(calls) == 1
+    assert sum(command[1] == "create" for command, _options in calls) == 1
 
 
 @pytest.mark.asyncio
@@ -300,6 +334,14 @@ async def test_prepare_resident_binds_shared_read_only_and_labels_both_spaces(ma
     local, calls, provider, adapter, plan, admitted_labels = managed
     _agents, _files, _sf, catalog = instances
     volume = catalog.verify(next(iter(catalog.volumes)))
+    from uuid import uuid4
+
+    from deerflow.spaces.incarnations import publish_marker, verify_bound
+
+    handle = uuid4().hex
+    with volume.filesystem() as filesystem:
+        publish_marker(filesystem, handle)
+    volume = verify_bound(volume, handle)
     (volume.data_path / "shared").mkdir()
     root = ReadOnlyRoot.capture(volume, "shared", "/mnt/user-data/shared")
     plan = replace(plan, readonly_roots=(root,))
@@ -313,7 +355,7 @@ async def test_prepare_resident_binds_shared_read_only_and_labels_both_spaces(ma
         for slot in (SLOT, root.slot_id):
             with pytest.raises(StorageHostUnqualified):
                 gate.reserve("unrelated-human", slot)
-    ((command, _options),) = calls
+    ((command, _options),) = [call for call in calls if call[0][1] == "create"]
     assert "type=bind,src=" + root.source + ",dst=/mnt/user-data/shared,readonly" in command
     assert not any("dst=/mnt/user-data/files" in value for value in command)
     for slot in (SLOT, root.slot_id):

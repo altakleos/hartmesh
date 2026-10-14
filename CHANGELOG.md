@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Durable resident resource lifecycle
+
+Managed AI employee preparation retains the original container, network and
+mount identities before returning its stopped container. Activation and reuse
+require that exact prepared graph. Normal containment removes only freshly
+verified original resources, retaining their capacity charge through confirmed
+SQL closure and durable journal completion. Lost replies, cancellation and partial
+batch cleanup preserve retry evidence; finished retries observe absence without
+replaying destructive commands. Unfinished cleanup blocks backing administration
+and release. Capacity reporting verifies original graphs before counting them.
+Compose agent counts remain disabled pending strict orphan recovery and the
+remaining product stages.
+
+There is no database schema or configuration-version change. The private native
+evidence journal adds explicit v5 actorless resident records; v1–v4 validation
+rules remain unchanged.
+
 ### Coordinated Gateway workspace runtime
 
 Managed Gateway startup now restores durable attachment claims and requires a

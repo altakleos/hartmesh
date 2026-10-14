@@ -8,6 +8,7 @@ publication window. Copied expired ContextVar references grant no admission.
 import re
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from uuid import uuid4
 
 from deerflow.spaces.docker import StorageHostUnqualified
 
@@ -33,6 +34,13 @@ class OwnerAdmission:
 class OwnerRetirement:
     owner_id: str
     slot_id: str
+
+
+@dataclass(eq=False, frozen=True)
+class ResidentRetirementBatch:
+    owners: frozenset[str]
+    writable_slots: frozenset[str]
+    reference: OwnerAdmission = field(repr=False)
 
 
 class OwnerAdmissions:
@@ -123,3 +131,51 @@ class OwnerAdmissions:
             if self.current_locked(token):
                 self._owners.pop(token.owner_id)
                 self._slots.pop(token.slot_id)
+
+    def reserve_resident_batch(self, scopes):
+        """Atomically exclude original owners/writers and retain read-only slots."""
+        if not isinstance(scopes, (tuple, list)) or not 1 <= len(scopes) <= 256:
+            raise StorageHostUnqualified("Resident containment requires a bounded explicit batch")
+        owners, writable, readonly = set(), set(), set()
+        for scope in scopes:
+            if not isinstance(scope, (tuple, list)) or len(scope) != 3:
+                raise StorageHostUnqualified("Resident containment has malformed scope")
+            owner, writes, reads = scope
+            self._owner(owner)
+            if owner in owners or any(not isinstance(slots, (tuple, list, set, frozenset)) or len(slots) > 128 for slots in (writes, reads)):
+                raise StorageHostUnqualified("Resident containment has duplicate owners or unbounded slots")
+            owners.add(owner)
+            for slot in (*writes, *reads):
+                self._slot(slot)
+            writable.update(writes)
+            readonly.update(reads)
+        slots = writable | readonly
+        if not slots:
+            raise StorageHostUnqualified("Resident containment requires exact physical slots")
+        with self.lock:
+            if any(not self.allowed_locked(owner, slots) for owner in owners) or any(token.owner_id in owners or writable.intersection(group.slots) for token, group in self._active.items()):
+                raise NativeRetirementBusy("Resident containment is busy with admitted owner or writer work")
+            reference = OwnerAdmission("resident-containment:" + uuid4().hex, _Group(slots))
+            token = ResidentRetirementBatch(frozenset(owners), frozenset(writable), reference)
+            for owner in owners:
+                self._owners[owner] = token
+            for slot in writable:
+                self._slots[slot] = token
+            self._active[reference] = reference._group
+            return token
+
+    def current_resident_batch_locked(self, token):
+        return isinstance(token, ResidentRetirementBatch) and token.reference in self._active and all(self._owners.get(owner) is token for owner in token.owners) and all(self._slots.get(slot) is token for slot in token.writable_slots)
+
+    def current_resident_batch(self, token):
+        with self.lock:
+            return self.current_resident_batch_locked(token)
+
+    def end_resident_batch(self, token):
+        with self.lock:
+            if self.current_resident_batch_locked(token):
+                for owner in token.owners:
+                    self._owners.pop(owner)
+                for slot in token.writable_slots:
+                    self._slots.pop(slot)
+                self._active.pop(token.reference)

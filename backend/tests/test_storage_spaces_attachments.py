@@ -52,6 +52,20 @@ async def storage(tmp_path, request):
 
 
 @pytest.mark.asyncio
+async def test_fresh_attachment_service_retains_then_clears_failed_host_containment(storage):
+    files, _sf, _catalog, mounts, provider = storage
+    space = await home(files)
+    attached = await mounts.attach(actor=ALICE, incarnation=operation(), resources=[ResourceMount(space.id, 1, "home", writable=True)])
+    restarted = SpaceAttachments(files, provider)
+    provider.uncertain = True
+    assert await restarted.contain_host(attached.id, "operator") is False
+    assert restarted.uncontained == {attached.id: "operator"}
+    provider.uncertain = False
+    assert await restarted.contain_host(attached.id, "operator") is True
+    assert restarted.uncontained == {} and not provider.containers
+
+
+@pytest.mark.asyncio
 async def test_attachment_survives_calls_and_coexists_with_host_editor(storage):
     files, sf, _, mounts, provider = storage
     space = await home(files)
