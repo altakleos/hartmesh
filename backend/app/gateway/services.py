@@ -1833,7 +1833,7 @@ async def _start_run(
     user = getattr(request.state, "user", None)
     from app.gateway.agent_conversations import execution_for_run
 
-    instance_execution = await execution_for_run(request, thread_id)
+    instance_execution = await execution_for_run(request, thread_id, require_ready=work_attempt is None)
     if work_attempt is not None:
         from deerflow.agent_instances.work_execution import WorkAttempt
 

@@ -207,6 +207,11 @@ async def resource_lifecycle(space_id: str, body: LifecycleRequest, request: Req
     service, actor = _service(request), await _actor(request)
     await _chat_lifecycle_guard(service, actor, space_id, body.generation)
     recovery = SpaceRecovery(service)
+    if body.action in {"archive", "delete"}:
+        agents = getattr(request.app.state, "agent_instances", None)
+        owner = await agents.space_owner(space_id) if agents is not None else None
+        if owner is not None and owner.status != "deleted":
+            raise Refusal("These files belong to an AI assistant or AI employee; change its status through agent management.", reason="owned-space")
     arguments = {"actor": actor, "space_id": space_id, "expected_generation": body.generation, "operation_id": body.operation_id}
     if body.action == "restore":
         arguments["backup_id"] = body.backup_id

@@ -26,7 +26,7 @@ async def prepared(instances):
     async with sf() as session:
         backing = await session.scalar(select(SpaceBackingRow).where(SpaceBackingRow.space_id == instance.home_id))
     root = instances[3].verified[backing.slot_id].data_path
-    (root / "outputs").mkdir()
+    assert (root / "outputs").is_dir()
     (root / "outputs/result.txt").write_text("real output", encoding="utf-8")
     runtime = SimpleNamespace(context={AGENT_EXECUTION_CONTEXT_KEY: execution, "thread_id": execution.thread_id}, state={"thread_data": execution.thread_paths})
     return execution, runtime, root

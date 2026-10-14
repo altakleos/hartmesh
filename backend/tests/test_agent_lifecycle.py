@@ -334,7 +334,9 @@ async def test_explicit_company_copy_creates_distinct_empty_home_and_memory(inst
         assert company["id"] != personal.id and company["home_id"] != personal.home_id
         assert (await client.post(endpoint, json=body)).json()["id"] == company["id"]
         files, truncated = await agents.files.list_directory(actor=ALICE, space_id=company["home_id"])
-        assert files == [] and truncated is False
+        assert {entry.name for entry in files} == {"uploads", "outputs", ".agent-skill-packages"} and truncated is False
+        for entry in files:
+            assert await agents.files.list_directory(actor=ALICE, space_id=company["home_id"], path=entry.name) == ([], False)
         assert (await agents.get(actor=ALICE, instance_id=personal.id)).custody == "personal"
         port = await memory.bind(actor=ALICE, instance_id=company["id"])
         import asyncio

@@ -348,9 +348,12 @@ async def test_http_work_ceiling_visibility_and_no_execution_shortcuts(work, mon
 
     from app.gateway.routers import agent_instances as routes
     from app.gateway.routers.agent_work import router
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
 
     service, instance, sf = work
     monkeypatch.setattr(routes, "get_agents_api_config", lambda: SimpleNamespace(enabled=True))
+    monkeypatch.setattr("app.gateway.deps.get_config", lambda: AppConfig(models=[], sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider", replicas=3)))
     body = {"operation_id": operation(), "objective": "Review", "success_criteria": "Explain"}
     for kwargs, status in [({"permissions": ("agents:read",)}, 403), ({"permissions": ("agents:write",)}, 403), ({"source": "pat"}, 403), ({"actor": None}, 401), ({}, 201)]:
         app = request_app(service.agents, **kwargs)

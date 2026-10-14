@@ -13,6 +13,7 @@ class RuntimeScope:
     mode: Literal["conversation", "instance", "unavailable"]
     tools: frozenset[str]
     memory: Literal["ordinary", "instance", "disabled"]
+    agent_role: Literal["AI", "AI assistant", "AI employee"] = "AI"
 
     def working_directory(self, *, delegated=False, ordinary_extras="", libraries="") -> str:
         lines = ['<working_directory existed="true">']
@@ -20,12 +21,14 @@ class RuntimeScope:
             return "<working_directory>Instance storage is not qualified for this assembly. No requester filesystem fallback is available.</working_directory>"
         if self.mode == "instance":
             lines += [
-                "- This AI employee's Home is `/mnt/spaces/home`; files here persist across conversations.",
+                "- Your own files are at `/mnt/spaces/home`; files here persist across conversations.",
                 "- Default working directory: `/mnt/spaces/home`. Its children `uploads/` and `outputs/` hold inputs and output files.",
-                "- Compatibility aliases: `/mnt/user-data/workspace` names Home; `/mnt/user-data/uploads` and `/mnt/user-data/outputs` name those children.",
-                "- File audience follows current Home permissions; it is neither requester-private nor automatically company-wide. Your file access does not grant a human access.",
-                "- Only Home is mounted. Requester My Files, Shared and Project directories are not inherited. A referenced external file is not automatically an input here.",
-                "- Home files are ordinary mutable data, separate from adopted instructions and recalled memory. Clearing memory does not delete files.",
+                "- Compatibility aliases: `/mnt/user-data/workspace` names your own files; `/mnt/user-data/uploads` and `/mnt/user-data/outputs` name those children.",
+                "- Shared: `/mnt/user-data/shared`, files anyone at the company published for everyone, read-only. You cannot put anything here; a person uses Share with everyone in the app.",
+                "- File audience follows the current permissions on your files; it is neither requester-private nor automatically company-wide. Your file access does not grant a human access.",
+                "- Only your own files and Shared are mounted. The requester's My Files and Project directories are not inherited. A referenced external file is not automatically an input here.",
+                "- Your files are ordinary mutable data, separate from adopted instructions and recalled memory. Clearing memory does not delete files.",
+                "- If a write fails because there is no space left, say that your files are full and that a person who can manage you can delete files on your Files tab.",
             ]
         else:
             lines += [
@@ -51,7 +54,7 @@ class RuntimeScope:
             lines.append("- No `bash` tool is bound: work out results directly and write them with `write_file` instead of saving helper scripts")
         if delegated:
             if self.mode == "instance":
-                lines.append("- This delegated task inherits the parent instance's mounted Home and filesystem authority. A narrower tool list does not narrow that native filesystem scope.")
+                lines.append("- This delegated task inherits the parent's mounted files and filesystem authority. A narrower tool list does not narrow that native filesystem scope.")
             lines.append("- Report useful file paths to the parent; a delegated task cannot present files itself.")
         elif "present_files" in self.tools or "bash" in self.tools:
             lines.append("- Final deliverables belong in `/mnt/user-data/outputs`. Skill drafts remain ordinary artifacts until explicitly installed through authorized skill management.")
@@ -61,7 +64,7 @@ class RuntimeScope:
                 lines.append("- Use `present_files` to register an existing output reference. Registration alone does not verify existence or file contents.")
             lines.append('- "Presented to the user" means output references were registered. Do not register them again. Validation reports observed metadata, not immutable bytes or a completed human retrieval. ')
             lines.append(
-                "- Current Home READ and explicit download EXPORT permissions still apply; retrieval may fail or be denied."
+                "- Current READ and explicit download EXPORT permissions on your files still apply; retrieval may fail or be denied."
                 if self.mode == "instance"
                 else "- Human retrieval still requires current conversation access and may fail or be denied."
             )
@@ -77,8 +80,10 @@ def build_runtime_scope(*, execution=None, tools=(), memory_enabled=False) -> Ru
     names = frozenset(tool.name for tool in tools if isinstance(getattr(tool, "name", None), str))
     if execution is None:
         return RuntimeScope("conversation", names, "ordinary" if memory_enabled else "disabled")
+    custody = getattr(getattr(execution, "instance", None), "custody", None)
+    role = "AI assistant" if custody == "personal" else "AI employee" if custody == "company" else "AI"
     environment = current_environment()
     qualified = environment is not None and environment.execution is execution and isinstance(environment.provider, InstanceSandboxProvider) and environment.provider.execution is execution
     if not qualified:
-        return RuntimeScope("unavailable", frozenset(), "disabled")
-    return RuntimeScope("instance", names, "instance" if memory_enabled else "disabled")
+        return RuntimeScope("unavailable", frozenset(), "disabled", role)
+    return RuntimeScope("instance", names, "instance" if memory_enabled else "disabled", role)

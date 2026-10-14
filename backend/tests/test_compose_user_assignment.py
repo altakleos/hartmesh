@@ -26,6 +26,10 @@ async def account_storage(seated_accounts, monkeypatch, tmp_path):
     files.registry._resolver = HostPrincipalResolver(human=ss.human_lookup(repo))
     async with sf.kw["bind"].begin() as connection:
         await connection.run_sync(StorageFeatureLinkRow.__table__.create)
+        from deerflow.persistence.agent_instances.model import AgentDefinitionRevisionRow, AgentInstanceGrantRow, AgentInstanceRow, AgentLifecycleRow
+
+        for model in (AgentDefinitionRevisionRow, AgentInstanceRow, AgentInstanceGrantRow, AgentLifecycleRow):
+            await connection.run_sync(model.__table__.create)
     for spec, kind in zip(catalog.volumes.values(), ("user", "user", "user", "company"), strict=True):
         spec.kind = kind
     company = await files.registry.host_create(name="Company", custody=Custody.company(), mode=MutationMode.NATIVE, feature=None, kind="company")

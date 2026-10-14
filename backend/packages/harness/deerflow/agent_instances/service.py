@@ -9,11 +9,12 @@ revoked grants. An instance cannot execute while provisioning is incomplete.
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
-from deerflow.agent_instances.contract import ALL_AGENT_PERMISSIONS, AgentConflict, AgentDenied, AgentInstance, AgentPermission, DefinitionSnapshot, InstanceIdentity
+from deerflow.agent_instances.contract import ALL_AGENT_PERMISSIONS, AgentConflict, AgentDenied, AgentInstance, AgentPermission, CompanyProvisioningDenied, DefinitionSnapshot, InstanceIdentity, Refusal
 from deerflow.agent_instances.directory import InstanceDirectory
+from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.persistence.agent_instances.model import AgentDefinitionRevisionRow, AgentInstanceGrantRow, AgentInstanceRow, AgentLifecycleRow
 from deerflow.persistence.spaces.model import SpaceGrantRow
 from deerflow.spaces.contract import Custody, MutationMode, Permission, PrincipalRef, SpaceConflict, validate_generation, validate_name
@@ -44,13 +45,47 @@ class AgentInstances:
         self.allowance_of = None
         self.residents = None
 
-    async def _human(self, actor):
+    async def _human(self, actor, *, session=None):
         if not isinstance(actor, PrincipalRef) or actor.kind != "human":
             raise AgentDenied("Agent management requires a current human identity")
-        resolved = await self.directory.human(actor)
+        borrowed = getattr(self.directory.human, "in_session", None)
+        resolved = await borrowed(actor, session) if session is not None and callable(borrowed) else await self.directory.human(actor)
         if resolved is None or resolved.reference != actor:
             raise AgentDenied("Agent management requires a current human identity")
         return resolved
+
+    async def _creation_authority(self, session, actor, custody):
+        resolved = await self._human(actor, session=session)
+        if custody == "company" and resolved.can_provision_company is not True:
+            raise CompanyProvisioningDenied("Company agents require current host provisioning authority")
+
+    async def space_owner(self, space_id):
+        """Host-only ownership metadata; grants are admitted by the caller."""
+        async with self._sf() as session:
+            return await session.scalar(select(AgentInstanceRow).where(AgentInstanceRow.home_id == space_id))
+
+    async def _creation_counts(self, session, actor, custody):
+        kind = "assistant" if custody == "personal" else "employee"
+        rows = select(func.count()).select_from(AgentInstanceRow).where(AgentInstanceRow.custody == custody, AgentInstanceRow.status.in_(("provisioning", "active", "suspended", "archived")))
+        allowance = await self.allowance_of(kind, session=session) if self.allowance_of is not None else None
+        in_use = allowance.in_use if allowance is not None else await session.scalar(rows)
+        allowed = allowance.allowed if allowance is not None else len(self.files.catalog.volumes)
+        extra = {"allowed": allowed, "in_use": in_use}
+        if custody == "personal":
+            extra = {"per_user": get_agents_api_config().ai_assistants_per_user, "mine": await session.scalar(rows.where(AgentInstanceRow.owner_id == actor.subject_id)), **extra}
+        return allowance, extra
+
+    async def _admit_creation_count(self, session, actor, custody):
+        allowance, extra = await self._creation_counts(session, actor, custody)
+        if custody == "personal":
+            if extra["per_user"] == 0 or extra["mine"] >= extra["per_user"]:
+                raise Refusal("You already have as many AI assistants as each person can have here.", reason="ai-assistant-limit", **extra)
+            if allowance is not None and allowance.free <= 0:
+                raise Refusal("No AI assistant can be added right now: all the AI assistants allowed here are in use.", reason="ai-assistant-none-free", **extra)
+        elif allowance is not None and (allowance.allowed_key == 0 or allowance.in_use >= allowance.allowed):
+            if allowance.allowed_key == 0:
+                extra["allowed"] = 0
+            raise Refusal("All the AI employees allowed here are in use.", reason="ai-employee-limit", **extra)
 
     @staticmethod
     def _view(row, permissions):
@@ -97,6 +132,12 @@ class AgentInstances:
             ).all()
         return [self._view(*value) for value in results]
 
+    async def personal_counts(self, *, actor):
+        await self._human(actor)
+        async with self._sf() as session, session.begin():
+            _allowance, counts = await self._creation_counts(session, actor, "personal")
+            return counts
+
     async def definition(self, *, actor, instance_id):
         view = await self._read(actor, instance_id, AgentPermission.INSPECT)
         async with self._sf() as session:
@@ -136,6 +177,15 @@ class AgentInstances:
             try:
                 async with self._sf() as session, session.begin():
                     await self._reserve_writer(session)
+                    # Share pool serialization with Home binding and account
+                    # release before kind counts or mutable identity snapshots.
+                    await self.files._serialize_allocation(session)
+                    if session.bind.dialect.name == "postgresql":
+                        kind = "assistant" if request["custody"] == "personal" else "employee"
+                        await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": "agent-count:" + kind})
+                        if request["custody"] == "personal":
+                            await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": "agent-personal:" + actor.subject_id})
+                    await self._creation_authority(session, actor, request["custody"])
                     source = None
                     if request.get("copy_from"):
                         source = (await session.execute(select(AgentInstanceRow).where(AgentInstanceRow.id == request["copy_from"]).with_for_update())).scalar_one_or_none()
@@ -160,10 +210,8 @@ class AgentInstances:
                         captured = await self._stored_definition(session, source.definition_revision)
                         if DefinitionSnapshot.capture(owner_id=actor.subject_id, config=captured.config, soul=captured.soul) != definition or request["custody"] != "company":
                             raise AgentConflict("Company copy must use the current source business definition")
-                    resolved = await self._human(actor)
-                    if request["custody"] == "company" and resolved.can_provision_company is not True:
-                        raise AgentDenied("Company agents require current host provisioning authority")
-                    await self._human(PrincipalRef("human", request["supervisor_id"]))
+                    await self._admit_creation_count(session, actor, request["custody"])
+                    await self._human(PrincipalRef("human", request["supervisor_id"]), session=session)
                     revision = await session.get(AgentDefinitionRevisionRow, definition.revision)
                     if revision is None:
                         session.add(AgentDefinitionRevisionRow(revision=definition.revision, owner_id=definition.owner_id, config=definition.config, soul=definition.soul))
@@ -204,13 +252,30 @@ class AgentInstances:
             return instance
         for attempt in range(len(self.files.catalog.volumes) + 1):
             try:
-                async with self.files.provisioning(actor=actor, name=instance.name, custody=Custody.personal(actor) if instance.custody == "personal" else Custody.company(), mode=MutationMode.NATIVE) as (session, home):
+
+                async def admission(session):
+                    await self._creation_authority(session, actor, instance.custody)
+                    row = await session.get(AgentInstanceRow, instance.id, populate_existing=True)
+                    grant = await session.get(AgentInstanceGrantRow, (instance.id, actor.subject_id), populate_existing=True)
+                    if row is None or row.status not in {"provisioning", "active"} or row.creator_id != actor.subject_id or grant is None or not grant.permissions & int(AgentPermission.MANAGE):
+                        raise AgentDenied("Home binding requires current instance management access")
+                    if row.home_id is not None:
+                        raise _BoundHome()
+
+                async with self.files.provisioning(
+                    actor=actor,
+                    name=instance.name,
+                    custody=Custody.personal(actor) if instance.custody == "personal" else Custody.company(),
+                    mode=MutationMode.NATIVE,
+                    kind="assistant" if instance.custody == "personal" else "employee",
+                    admission=admission,
+                ) as (session, home):
                     row = (await session.execute(select(AgentInstanceRow).where(AgentInstanceRow.id == instance.id).with_for_update())).scalar_one()
                     if row.home_id is not None:
                         raise _BoundHome()
                     if row.status != "provisioning" or row.creator_id != actor.subject_id:
                         raise AgentConflict("Agent enrollment changed before home binding")
-                    await self._human(actor)
+                    await self._creation_authority(session, actor, instance.custody)
                     row.home_id = home.id
                     row.updated_at = datetime.now(UTC)
                     await session.flush()
@@ -224,7 +289,13 @@ class AgentInstances:
                 current = await self._read(actor, instance.id, AgentPermission.MANAGE)
                 if current.home_id is not None:
                     return current
-                raise
+                if self.allowance_of is None:
+                    raise
+                async with self._sf() as session, session.begin():
+                    _allowance, extra = await self._creation_counts(session, actor, instance.custody)
+                reason = "ai-assistant-none-free" if instance.custody == "personal" else "ai-employee-limit"
+                detail = "No AI assistant can be added right now: all the AI assistants allowed here are in use." if instance.custody == "personal" else "All the AI employees allowed here are in use."
+                raise Refusal(detail, reason=reason, **extra) from None
             except IntegrityError:
                 if attempt == len(self.files.catalog.volumes):
                     raise
@@ -257,7 +328,7 @@ class AgentInstances:
         if row is None or grant is None or row.creator_id != actor.subject_id or row.home_id != instance.home_id:
             raise AgentDenied("Creation requires current instance management access")
         view = self._view(row, grant.permissions)
-        await self._human(actor)
+        await self._creation_authority(session, actor, row.custody)
         if not view.permissions & AgentPermission.MANAGE:
             raise AgentDenied("Creation requires current instance management access")
         if row.status == "active":
@@ -272,7 +343,7 @@ class AgentInstances:
         async with self.files.registry.admitted(actor=actor, requests={instance.home_id: (Permission.ADMIN, None)}) as (session, _):
             row = await self._creation_admission(session, actor, instance)
             for subject, permissions in grants:
-                await self.files.registry._actor(subject)
+                await self.files.registry._actor(subject, session=session)
                 grant = await session.get(SpaceGrantRow, (row.home_id, subject.kind, subject.subject_id))
                 if grant is None or grant.permissions != int(permissions):
                     raise AgentConflict("Initial home access has not been confirmed")
@@ -337,7 +408,7 @@ class AgentInstances:
                 view = self._view(row, grant.permissions)
                 if not view.permissions & AgentPermission.MANAGE:
                     raise AgentDenied("Managing this agent is not granted")
-                await self._human(actor)
+                await self._human(actor, session=session)
                 if row.generation != expected_generation or row.generation >= 2**31 - 1 or row.status == "provisioning":
                     raise AgentConflict("Stale generation or incomplete agent provisioning")
                 if await session.scalar(select(AgentLifecycleRow.operation_id).where(AgentLifecycleRow.instance_id == instance_id, AgentLifecycleRow.phase == "pending")) is not None:

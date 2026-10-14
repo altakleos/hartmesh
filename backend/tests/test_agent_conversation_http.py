@@ -271,7 +271,6 @@ async def test_registered_instance_outputs_recheck_human_read_export_and_revocat
     agent = await create(agents, custody="company", supervisor=BOB)
     files = agents.files
     home = await files.registry.get(actor=ALICE, space_id=agent.home_id)
-    await files.mkdir(actor=ALICE, space_id=home.id, expected_generation=home.generation, operation_id=operation(), path="outputs")
     for path, content in (("outputs/result.txt", b"result"), ("outputs/page.html", b"<html>active</html>")):
         await files.write(actor=ALICE, space_id=home.id, expected_generation=home.generation, operation_id=operation(), path=path, content=content, create=True)
     chat = await authority.create(actor=ALICE, instance_id=agent.id, creation_id=operation())

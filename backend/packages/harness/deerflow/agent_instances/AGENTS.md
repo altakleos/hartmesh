@@ -18,6 +18,28 @@ restore revoked grants or recreate backing. Use Storage Spaces' provisioning
 transaction and membership API, never direct grant inserts or directory creation.
 Unknown outcomes retain inspectable intent.
 
+Creation applies current human/company provisioning authority before exact retry;
+new intents serialize allocation → kind → personal count locks on PostgreSQL,
+or the SQLite writer. Bundle allowance lookup and human validation borrow the
+owning session. Per-user limits also apply to administrators; unfinished,
+suspended and archived rows count. Exact retries bypass counts, never current
+authority. Homes use assistant/employee slots by custody; refresh authority before
+binding effects and active publication. Generic `space_owner` is metadata only;
+the caller must admit current Space ADMIN before an ownership refusal.
+Only `CompanyProvisioningDenied` maps company copying to 403; hidden or revoked
+source authority retains 404. Capacity reads use the Gateway config wrapper's 503.
+
+New reply/Work admission checks current grants → execution → storage, repeating
+the decision immediately before durable admission and after capacity reservation.
+Exact Work retries validate their recorded intent without another readiness
+decision. Preserve uncertain committed launch promises. Lifecycle delete/abandon
+alone admit `space-unverified`. Account release locks allocation → seats → role
+→ sorted Space parents → instances; no parent-locked reclamation callback may
+acquire allocation. Delete only grants plus an exact personal provisioning row
+with no Home; unexpected referenced history rolls back. Bound assistants and
+their Spaces become deleted together. The release receipt counts currently
+matched assistants, so a retry excludes a removed unfinished creation.
+
 SQLite reserves its writer before instance reads; PostgreSQL locks the parent.
 Resource locks precede instance locks during home binding/activation. Confirm
 initial grants in the shared transaction before active publication. Host grant
