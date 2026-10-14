@@ -262,6 +262,7 @@ class SandboxLeaseManager:
         release_on_last: bool,
         storage_candidate: object = None,
     ) -> tuple[_LeaseBinding | None, bool]:
+        self._require_provider_admission()
         if sandbox_id in self._cleanup_reservations:
             raise RuntimeError("Sandbox cleanup is in progress; acquire a fresh client")
         self._check_storage_candidate(storage_candidate)
@@ -294,6 +295,13 @@ class SandboxLeaseManager:
         self._owners_by_sandbox.setdefault(sandbox_id, set()).add(owner_id)
 
         return previous, release_previous
+
+    def _require_provider_admission(self):
+        # Memory-only and no provider metadata lock: this is also called under
+        # the holder lock. Never resolve a host or perform storage IO here.
+        check = getattr(type(self._provider), "_require_runtime_admission", None)
+        if callable(check):
+            check(self._provider)
 
     def _validate_storage_candidate(self, sandbox_id, key, *, allow_unscoped_borrow=False):
         if getattr(self._provider, "requires_chat_storage_validation", False) is not True:
@@ -351,6 +359,7 @@ class SandboxLeaseManager:
             if validate_storage:
                 token = self._validate_storage_candidate(existing.sandbox_id, key, allow_unscoped_borrow=allow_unscoped_borrow)
             with self._metadata_lock:
+                self._require_provider_admission()
                 if validate_storage:
                     self._check_storage_candidate(token)
                 if self._bindings_by_owner.get(owner_id) != existing:
@@ -388,6 +397,7 @@ class SandboxLeaseManager:
         if sandbox_id is not None:
             token = await self._validate_storage_candidate_async(sandbox_id, key, allow_unscoped_borrow=allow_unscoped_borrow)
             with self._metadata_lock:
+                self._require_provider_admission()
                 self._check_storage_candidate(token)
                 binding = self._bindings_by_owner.get(owner_id)
                 if binding is None or binding.sandbox_id != sandbox_id or binding.thread_key != key:
@@ -725,7 +735,10 @@ class SandboxLeaseManager:
             assert binding is not None
 
             try:
-                sandbox = self._provider.get(binding.sandbox_id)
+                # Only lease cleanup may use this hook. Resolve it on the type
+                # so duck-typed providers retain their original get behavior.
+                lookup = getattr(type(self._provider), "_get_for_cleanup", None)
+                sandbox = lookup(self._provider, binding.sandbox_id) if callable(lookup) else self._provider.get(binding.sandbox_id)
                 if sandbox is not None:
                     sandbox.release_command_scope(owner_id)
             finally:

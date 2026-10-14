@@ -64,6 +64,10 @@ and complete cleanup before releasing capacity; see the
 [registry foundation](backend/docs/RESIDENT_REGISTRY.md).
 Its restart foundation counts each uncertain durable attachment separately and
 requires a complete validated snapshot before opening admission.
+The staged runtime also provides a private host-controlled admission guard.
+It blocks new acquisition and client publication while allowing existing lease
+cleanup and qualified storage inspection. Gateway activation remains a separate
+rollout step.
 The run API distinguishes a Gateway shutdown from a human Stop. Shutdown records
 its reason before cancelling active runs; a run that finishes during shutdown
 keeps its outcome.

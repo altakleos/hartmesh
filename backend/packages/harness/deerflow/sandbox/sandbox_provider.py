@@ -86,6 +86,10 @@ class SandboxProvider(ABC):
         """
         pass
 
+    def _get_for_cleanup(self, sandbox_id: str) -> Sandbox | None:
+        """Private lease-release lookup; providers may keep it open to cleanup."""
+        return self.get(sandbox_id)
+
     def get_scoped(
         self,
         sandbox_id: str,

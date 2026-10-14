@@ -31,6 +31,10 @@ class SandboxRuntimeError(SandboxError):
     pass
 
 
+class SandboxRuntimeAdmissionError(SandboxRuntimeError):
+    """The owning host has not opened this exact provider's lifecycle."""
+
+
 class SandboxCommandError(SandboxError):
     """Raised when a command execution fails in the sandbox."""
 

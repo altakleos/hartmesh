@@ -38,6 +38,23 @@ the metadata lock. Physical eviction runs outside it, after warm-chat eviction
 and fresh admission checks. Drain async effects across cancellation; prewarm
 never evicts externally. See [registry rules](../../../../../docs/RESIDENT_REGISTRY.md).
 
+Optional `ChatStorageHost.admission` is a private, generic exact-provider
+lifecycle capability. Capture it before constructor reconciliation/threads;
+explicitly bind cached providers with `_bind_runtime_admission`. Absence leaves
+existing admission unchanged. The host installs complete accounting callbacks
+and opens the capability in one `external_changed` critical section; opening
+it does not certify qualification or restoration. Close/seal through
+`_close_runtime_admission` to serialize publication and wake capacity waiters.
+Check before starting/reserved shortcuts, speculative submission and every
+cache/warm/discovered/new-client publication. Deferred orphan adoption retains
+its actual identity. Closed admission must still permit qualification and cleanup:
+the private `_get_for_cleanup` hook is for lease command-scope release only,
+with no activity refresh or acquisition. Drain already submitted physical work
+before opening; preserve starting, warm, active and native evidence accounting.
+Lease binding and existing-holder return also check the capability; those checks
+are memory-only and never acquire the provider metadata lock under the holder lock.
+Regressions: `test_provider_lifecycle_admission.py`.
+
 Private `resident_preparation.py` uses committed attachment tokens and the exact
 pool-owner runner; never invent chat/human labels or use the chat journal for it.
 Expire capabilities after drained workers, consume once, and retain every bound

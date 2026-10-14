@@ -1,5 +1,14 @@
 # Storage Spaces
 
+`ChatStorageHost` accepts an optional private `ProviderAdmission` capability.
+It contains only lifecycle state and exact provider identity, with no resident,
+storage or business policy. Constructor capture is separate from exact singleton
+binding. The host alone publishes readiness after complete restoration, under
+the provider metadata lock together with its accounting callbacks. Close/seal
+and wake waiters under that lock before draining workers; preserve cleanup and
+qualification while closed. Absent capability preserves existing behavior;
+these optional seams do not activate Gateway restoration.
+
 Private `native_create_evidence.py` owns durable managed-create evidence.
 The operator atomically publishes `.native-creates` as 1000:1000/0700 outside
 `.probe` and reclaimable roots; never repair a published conflict or erase stages.

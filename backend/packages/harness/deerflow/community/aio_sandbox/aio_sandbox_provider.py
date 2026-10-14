@@ -68,7 +68,8 @@ from deerflow.runtime.turn_phases import (
 )
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
-from deerflow.sandbox.exceptions import SandboxCapacityExceededError
+from deerflow.sandbox.admission import ProviderAdmission
+from deerflow.sandbox.exceptions import SandboxCapacityExceededError, SandboxRuntimeAdmissionError
 from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.lease import cleanup_unheld_sandbox, run_sync_lifecycle_operation
 from deerflow.sandbox.sandbox import Sandbox
@@ -908,6 +909,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 with the container mid-stop or starts a generation the
                 reaper's retry cannot tell apart.
         """
+        self._require_runtime_admission()
         if self._being_torn_down_locally(sandbox_id):
             raise SandboxBeingDestroyedError(sandbox_id)
         if sandbox_id in self._starting:
@@ -1077,6 +1079,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             raise asyncio.CancelledError
         if self._shutdown_called:
             raise RuntimeError("Sandbox provider is shut down")
+        self._require_runtime_admission()
 
     async def admit_external_async(self, key: str, reserve: Callable[[], None], *, wait: bool, is_reserved: Callable[[], bool] | None = None) -> None:
         """Share the native/chat budget with a host-owned reservation.
@@ -1087,6 +1090,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         idempotent, including when another caller reserves during eviction.
         Physical eviction and its host decisions run outside that lock.
         """
+        self._require_runtime_admission()
         started = time.monotonic()
         deadline = started + (self.sandbox_capacity_wait_timeout() if wait else 0.0)
         waiting = False
@@ -1467,7 +1471,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         try:
             with self._candidate_owner_scope(info):
                 return self._replace_incompatible_sandbox_in_owner(info, now)
-        except StorageHostUnqualified:
+        except (StorageHostUnqualified, SandboxRuntimeAdmissionError):
             return False
 
     def _replace_incompatible_sandbox_in_owner(self, info: SandboxInfo, now: float) -> bool:
@@ -1485,7 +1489,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             return False
         try:
             self._assert_managed_container(info)
-        except StorageHostUnqualified:
+        except (StorageHostUnqualified, SandboxRuntimeAdmissionError):
             return False
         if not info.requires_replacement:
             return False
@@ -1576,7 +1580,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                         continue
                     try:
                         self._assert_managed_container(info)
-                    except StorageHostUnqualified:
+                    except (StorageHostUnqualified, SandboxRuntimeAdmissionError):
                         deferred += 1
                         continue
                     if info.requires_replacement:
@@ -1614,7 +1618,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                             continue
                         try:
                             self._assert_managed_publication(info)
-                        except StorageHostUnqualified:
+                        except (StorageHostUnqualified, SandboxRuntimeAdmissionError):
                             deferred += 1
                             continue
                         if info.sandbox_id in self._sandboxes or info.sandbox_id in self._warm_pool or info.sandbox_id in self._starting:
@@ -1644,7 +1648,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     adopted += 1
                     logger.info(f"Adopted container {info.sandbox_id} into warm pool (age: {age:.0f}s)")
 
-            except StorageHostUnqualified:
+            except (StorageHostUnqualified, SandboxRuntimeAdmissionError):
                 deferred += 1
                 continue
 
@@ -2472,6 +2476,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         expected_id = self._sandbox_id_for_thread(thread_id, effective_user_id)
         stale_id: str | None = None
         with self._lock:
+            self._require_runtime_admission()
             if key not in self._thread_sandboxes:
                 return None
 
@@ -2602,6 +2607,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # now means the id is free to create; still not gone means the
         # acquisition is refused, never a half-removed set.
         with self._lock:
+            self._require_runtime_admission()
             if sandbox_id in self._warm_pool:
                 self._assert_warm_identity_available_locked(sandbox_id, key)
         retried = self._retry_pending_cleanup(sandbox_id, reason="reacquisition")
@@ -2718,6 +2724,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             raise SandboxPolicyReplacementDeferredError(info.sandbox_id)
         key = self._thread_key(thread_id, user_id)
         with self._lock:
+            self._require_runtime_admission()
             if self._being_torn_down_locally(info.sandbox_id):
                 # Discovery is the fall-through once the caches miss, so it is
                 # also the path a reaper's own untracking opens up. `take()` would
@@ -2769,6 +2776,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             SandboxBeingDestroyedError,
             SandboxIdentityCollisionError,
             StorageHostUnqualified,
+            SandboxRuntimeAdmissionError,
         ):
             try:
                 sandbox.close()
@@ -2845,6 +2853,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             SandboxBeingDestroyedError,
             SandboxIdentityCollisionError,
             StorageHostUnqualified,
+            SandboxRuntimeAdmissionError,
         ):
             logger.error(
                 "Could not register new sandbox %s; attempting ownership-fenced cleanup",
@@ -3228,9 +3237,44 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
             config = getattr(peek_loaded_app_config(), "storage_spaces", None)
             host = self._storage_host()
+            admission = getattr(host, "admission", None)
+            if admission is not None:
+                with self._lock:
+                    current = getattr(self, "_runtime_admission", None)
+                    if current is not None and current is not admission:
+                        raise SandboxRuntimeAdmissionError("Sandbox lifecycle host binding changed")
+                    self._runtime_admission = admission
             required = getattr(host, "pool_runtime_owner", None) is not None or (getattr(config, "enabled", False) is True and getattr(config, "plan", None) is not None)
             self._managed_runtime_required = required
         return required
+
+    def _bind_runtime_admission(self, admission):
+        """Bind a cached provider without resetting any physical accounting."""
+        if not isinstance(admission, ProviderAdmission):
+            raise SandboxRuntimeAdmissionError("Sandbox lifecycle requires its exact admission capability")
+        with self._lock:
+            current = getattr(self, "_runtime_admission", None)
+            if current is not None and current is not admission:
+                raise SandboxRuntimeAdmissionError("Sandbox lifecycle capability cannot be replaced")
+            admission.bind(self)
+            self._runtime_admission = admission
+            self._wake_capacity_waiters_locked()
+
+    def _require_runtime_admission(self):
+        admission = getattr(self, "_runtime_admission", None)
+        if admission is not None:
+            admission.require(self)
+
+    def _close_runtime_admission(self, *, seal=False):
+        """Close under the publication lock and wake already waiting callers."""
+        with self._lock:
+            admission = getattr(self, "_runtime_admission", None)
+            if admission is not None:
+                if seal:
+                    admission.seal()
+                else:
+                    admission.close()
+            self._wake_capacity_waiters_locked()
 
     def _pool_runtime_current(self):
         owner = getattr(self, "_pool_runtime_owner", None)
@@ -3455,6 +3499,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def _assert_managed_publication(self, info):
         """Memory-only check safe inside provider/lease metadata locks."""
+        self._require_runtime_admission()
         if not getattr(self, "_managed_runtime_required", False):
             return
         host_owner = getattr(getattr(self, "_chat_storage_host", None), "pool_runtime_owner", None)
@@ -3677,6 +3722,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         Returns:
             The ID of the acquired sandbox environment.
         """
+        self._require_runtime_admission()
         effective_user_id = self._effective_acquire_user_id(user_id)
         with self._chat_scope(thread_id, effective_user_id):
             if thread_id:
@@ -3697,6 +3743,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                         break
             else:
                 result = self._acquire_internal(thread_id, user_id=effective_user_id)
+            with self._lock:
+                self._require_runtime_admission()
             return result
 
     def _retire_chat_candidate(self, sandbox_id, client, info):
@@ -3850,6 +3898,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     async def prewarm_async(self, thread_id: str, *, user_id: str | None = None) -> str | None:
         """Build and park ``thread_id``'s sandbox without blocking the event loop."""
+        self._require_runtime_admission()
         effective_user_id = self._effective_acquire_user_id(user_id)
         async with self._chat_scope_async(thread_id, effective_user_id):
             admitted = self._submit_prewarm(thread_id, user_id=effective_user_id)
@@ -3858,7 +3907,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         worker, stop = admitted
         wrapped = asyncio.wrap_future(worker)
         try:
-            return await asyncio.shield(wrapped)
+            result = await asyncio.shield(wrapped)
+            with self._lock:
+                self._require_runtime_admission()
+            return result
         except asyncio.CancelledError:
             stop.set()
             worker.cancel()
@@ -3877,18 +3929,24 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def prewarm(self, thread_id: str, *, user_id: str | None = None) -> str | None:
         """Run one admitted speculative build, or skip it immediately if busy."""
+        self._require_runtime_admission()
         effective_user_id = self._effective_acquire_user_id(user_id)
         with self._chat_scope(thread_id, effective_user_id):
             admitted = self._submit_prewarm(thread_id, user_id=effective_user_id)
-            return admitted[0].result() if admitted is not None else None
+            result = admitted[0].result() if admitted is not None else None
+            with self._lock:
+                self._require_runtime_admission()
+            return result
 
     def _submit_prewarm(self, thread_id: str, *, user_id: str | None) -> tuple[Future[str | None], threading.Event] | None:
+        self._require_runtime_admission()
         effective_user_id = self._effective_acquire_user_id(user_id)
         gate = self._owner_admission_gate() if self._managed_pool_required() else None
         reference = gate.enter(effective_user_id, borrow=OWNER_ADMISSION.get()) if gate is not None else None
         admitted = None
         try:
             with self._lock:
+                self._require_runtime_admission()
                 future = getattr(self, "_prewarm_future", None)
                 if not (self._shutdown_called or getattr(self, "_prewarm_closed", False) or (future is not None and not future.done())):
                     executor = getattr(self, "_prewarm_executor", None)
@@ -4007,6 +4065,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                         self._forget_prewarm_unclaimed_locked(created)
                 return None
         logger.info("Prewarmed sandbox %s for thread %s", created, thread_id)
+        with self._lock:
+            self._require_runtime_admission()
         return created
 
     #: How often the prewarm reaper looks; short against the claim timeout so
@@ -4097,6 +4157,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         event loop and using async-native readiness polling for newly created
         sandboxes.
         """
+        self._require_runtime_admission()
         effective_user_id = self._effective_acquire_user_id(user_id)
         async with self._chat_scope_async(thread_id, effective_user_id):
             if thread_id:
@@ -4117,6 +4178,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                         break
             else:
                 result = await self._acquire_internal_async(thread_id, user_id=effective_user_id)
+            with self._lock:
+                self._require_runtime_admission()
             return result
 
     def _acquire_internal(self, thread_id: str | None, *, user_id: str) -> str:
@@ -4663,6 +4726,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             The sandbox instance if found, None otherwise.
         """
         with self._lock:
+            self._require_runtime_admission()
             if sandbox_id in getattr(self, "_cleanup_pending", {}):
                 # Quarantine is a lifecycle state, not a warm-pool detail: a
                 # set whose cleanup did not confirm is never usable, whichever
@@ -4681,6 +4745,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self._last_activity[sandbox_id] = time.time()
         return sandbox
 
+    def _get_for_cleanup(self, sandbox_id):
+        """Existing-client command-scope cleanup only; no admission or refresh."""
+        with self._lock:
+            return self._sandboxes.get(sandbox_id)
+
     def get_scoped(
         self,
         sandbox_id: str,
@@ -4691,6 +4760,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """Return a cached client only for its recorded user/thread identity."""
         key = self._thread_key(thread_id, user_id)
         with self._lock:
+            self._require_runtime_admission()
             if self._thread_sandboxes.get(key) != sandbox_id:
                 return None
             if self._active_sandbox_identity.get(sandbox_id) != key:
