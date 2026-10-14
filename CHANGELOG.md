@@ -17,6 +17,8 @@ reserves capacity before writing an attempt, preserves exact replay checks, and
 drains commit, launch and observation across cancellation. Shutdown drains pending
 admissions before stopping workers. Existing maintenance adds operator holds,
 eligible workspace reaping, Work settlement and release cleanup for every kind.
+Reclamation retries brief reservation conflicts for up to five seconds in the
+same maintenance pass. Unknown outcomes retain their existing retry safeguards.
 Compose agent counts remain disabled; strict durable resident orphan cleanup and
 the remaining product stages follow separately.
 

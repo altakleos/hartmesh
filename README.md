@@ -671,6 +671,8 @@ and durable completion of its journal record.
 
 After the operator releases an account's seat, startup and minute-based maintenance
 can reclaim its deleted User Space before assigning storage to waiting accounts.
+Reclamation waits up to five seconds for a brief owner or slot reservation conflict
+to clear, then repeats the normal eligibility and containment checks in the same pass.
 Held work, unverified storage or unconfirmed cleanup keeps the binding and role
 reserved for a later retry. Confirmed reclamation empties that Space and makes its
 slot available while preserving account provenance and the Space tombstone.

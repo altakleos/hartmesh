@@ -1,12 +1,15 @@
 """Gateway reclamation borrows the canonical native lifecycle and release proof."""
 
+import asyncio
 import json
 import logging
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 
 from sqlalchemy import select
 
 from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+from deerflow.community.aio_sandbox.owner_admission import NativeRetirementBusy
 from deerflow.features.resources import StorageFeatureLinkRow
 from deerflow.persistence.spaces.files import SpaceBackingRow
 from deerflow.persistence.spaces.model import SpaceEventRow, SpaceRow
@@ -18,6 +21,24 @@ from deerflow.spaces.recovery import SpaceRecovery
 logger = logging.getLogger(__name__)
 _BINDING = ("backing_handle", "space_id", "slot_id", "filesystem_uuid", "max_bytes", "max_inodes", "root_inode", "control_inode")
 _SPACE = ("id", "generation", "backing_handle", "status", "mode", "custody_kind", "custodian_kind", "custodian_id", "feature_namespace", "feature_controller", "feature_metadata_version")
+RETIREMENT_WAIT_SECONDS = 5.0
+
+
+@asynccontextmanager
+async def _retirement_scope(retire, owner_id, slot_id):
+    """Retry only a pre-effect busy reservation; keep one bounded loop-owned wait."""
+    deadline = asyncio.get_running_loop().time() + RETIREMENT_WAIT_SECONDS
+    async with AsyncExitStack() as stack:
+        while True:
+            try:
+                scope = await stack.enter_async_context(retire(owner_id, slot_id))
+                break
+            except NativeRetirementBusy:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise
+                await asyncio.sleep(min(0.1, remaining))
+        yield scope
 
 
 @dataclass(frozen=True)
@@ -128,7 +149,7 @@ async def reclaim_released_user_spaces(app):
         try:
             # Preflight SQL is closed. Keep this exact provider and slot
             # reservation through all drained kernel workers and commit.
-            async with retire(candidate.account_id, candidate.slot_id) as scope:
+            async with _retirement_scope(retire, candidate.account_id, candidate.slot_id) as scope:
 
                 async def admission(session):
                     await _admitted(app, files, session, candidate, provider, scope)
@@ -186,7 +207,7 @@ async def finish_releases(app):
         try:
             # The opaque host resource key reserves the slot; it supplies no
             # human identity and cannot authorize a foreign native holder.
-            async with retire("space:" + space_id, slot) as scope:
+            async with _retirement_scope(retire, "space:" + space_id, slot) as scope:
 
                 async def admission(session):
                     if status.qualified_provider is not provider or status.storage_reason is not None:

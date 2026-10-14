@@ -7,6 +7,9 @@ target slot before native retirement's first await; pending evidence matches own
 OR slot. Cache, warm, discovery, orphan and final publication retain/recheck admission.
 No provider lock encloses Docker/journal/store IO or the global lease holder gate.
 Positively unrelated starts and provider-owned mountless clients remain usable.
+`NativeRetirementBusy` refuses reservation before publication or physical effects.
+Gateway reclamation may wait up to five seconds and retry only scope entry;
+unknown failures and errors after entry must never replay containment.
 
 `native_retirement.py` retains reservation through caller work and drained final
 proof; expired scopes refuse. Strict all-prefix/all-state inventory is correlation,
