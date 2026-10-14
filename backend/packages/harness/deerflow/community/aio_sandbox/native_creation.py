@@ -235,15 +235,18 @@ class NativeCreateBridge:
         """Memory-only admission closure; owned identity/teardown is retained."""
         self._installed = False
 
-    def qualify(self):
+    def qualify(self, *, teardown=False):
         token = teardown_token = None
         try:
-            self._check_owner()
+            if teardown and not self._ever_installed:
+                raise StorageRuntimeUnavailable("Native teardown restoration requires prior owning runtime installation")
+            check_owner = (lambda: self._check_owner(teardown=True)) if teardown else self._check_owner
+            check_owner()
             self._check_daemon()
             token = self.handoffs.begin_restore()
             teardown_token = self.teardowns.begin_restore()
             snapshot = self.evidence.snapshot()
-            self._check_owner()
+            check_owner()
             self._check_daemon()
             self.teardowns.finish_restore(teardown_token, snapshot.teardowns)
             self.handoffs.finish_restore(token, snapshot.pending_creates(self.evidence.daemon_id))
@@ -251,7 +254,7 @@ class NativeCreateBridge:
                 raise StorageRuntimeUnavailable("Native teardown evidence changed during accounting restoration")
             self._restored_teardown_revision = snapshot.teardown_revision
             self._installed = True
-            self._check_owner()
+            check_owner()
             self._ever_installed = True
         except BaseException:
             self._installed = False
@@ -302,12 +305,15 @@ class NativeCreateBridge:
         if unresolved and not (known_live or self.handoffs.known_returned(info)):
             raise StorageHostUnqualified("An unreturned native request cannot be adopted, replaced or removed by its name")
 
-    def _check_failure_evidence(self):
+    def _check_failure_evidence(self, *, teardown=False):
         # begin may publish a record before its fsync/final proof raises, so
         # a scan alone cannot permit admission with stale memory accounting.
         # Merge retained evidence using the same bounded restore protocol.
         try:
-            self.qualify()
+            if teardown:
+                self.qualify(teardown=True)
+            else:
+                self.qualify()
         except Exception:
             self._installed = False
 

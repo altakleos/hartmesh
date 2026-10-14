@@ -49,6 +49,23 @@ def second_set(engine):
     return changed_ids
 
 
+def test_recovery_during_another_owners_admission_restores_the_original_context(fixture):
+    from deerflow.community.aio_sandbox.owner_admission import OWNER_ADMISSION
+
+    engine = Engine(fixture)
+    engine.bridge.evidence.begin_teardown(saved_record(engine))
+    engine.bridge.qualify()
+    try:
+        with engine.provider._native_admission("bob", ("b" * 32,)):
+            reference = OWNER_ADMISSION.get()
+            recover_teardowns(engine.provider)
+            assert OWNER_ADMISSION.get() is reference
+            assert not engine.objects and not engine.bridge.teardowns.records()
+            assert not engine.provider._warm_pool and not engine.provider._sandboxes
+    finally:
+        discard_sandbox_lease_manager(engine.provider)
+
+
 def test_held_first_record_does_not_starve_later_cleanup(fixture):
     engine = Engine(fixture)
     second_ids = second_set(engine)

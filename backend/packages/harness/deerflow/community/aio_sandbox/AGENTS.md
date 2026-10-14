@@ -51,6 +51,15 @@ admission through canonical cleanup; recheck exact record retention after admiss
 and inside the canonical holder reservation before claiming or inserting tracking
 to prevent stale-snapshot resurrection. Held entries never starve later records;
 foreign and targeted records remain counted without ordinary cleanup authority.
+Cleanup invoked during another owner's acquire validates that inherited reference
+against this provider's live gate, retains a separate admission for the actual
+cleanup owner/slots and restores the original context on every exit. Never borrow
+a different owner or relax general admission; stale or foreign-gate references
+still refuse before publication or effects.
+Canonical cleanup restores mixed accounting with `qualify(teardown=True)` during
+closing, including uncertain-publication and terminal-sync retries. It requires
+prior successful installation and fresh owning-runtime/daemon proof. Normal
+qualification stays refused and memory readiness remains closed to new work.
 
 Managed native chat primaries require installed `native_creation.py` accounting and the
 exact owner-held journal. Persist pending before submission; preserve the existing

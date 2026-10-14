@@ -140,6 +140,185 @@ async def test_primary_gone_relay_failure_restart_keeps_scope_closed_until_origi
         discard_sandbox_lease_manager(provider)
 
 
+def test_closing_owner_can_finish_canonical_cleanup_without_reopening_admission(fixture):
+    engine = Engine(fixture)
+    provider = engine.provider
+    provider._warm_pool["native"] = (engine.info, 0)
+    provider._warm_pool_identity["native"] = engine.info.owner
+    engine.owner.mark_closing()
+    try:
+        assert not engine.bridge.ready
+        assert provider._destroy_warm_entry("native", engine.info, reason="shutdown", still_reapable=lambda: True)
+        assert not engine.objects and not engine.bridge.teardowns.records() and not provider._warm_pool
+        assert not engine.bridge.ready and engine.bridge.evidence.snapshot().teardowns == ()
+        with pytest.raises(StorageHostUnqualified):
+            engine.bridge.require_admissible(owner_id="alice", name="new-chat")
+    finally:
+        discard_sandbox_lease_manager(provider)
+
+
+@pytest.mark.parametrize("failure", ["publication", "terminal-sync"])
+def test_closing_cleanup_failure_restores_accounting_and_can_retry(fixture, monkeypatch, failure):
+    engine = Engine(fixture)
+    provider = engine.provider
+    provider._warm_pool["native"] = (engine.info, 0)
+    provider._warm_pool_identity["native"] = engine.info.owner
+    engine.owner.mark_closing()
+    failed = []
+    publish, fsync = engine.bridge.evidence.begin_teardown, os.fsync
+
+    def publication(record):
+        result = publish(record)
+        if not failed:
+            failed.append(True)
+            raise OSError("Injected closing publication reply loss")
+        return result
+
+    def sync(fd):
+        if fd == engine.bridge.evidence._directory_fd and not engine.objects and not failed:
+            failed.append(True)
+            raise OSError("Injected closing terminal directory sync loss")
+        return fsync(fd)
+
+    if failure == "publication":
+        monkeypatch.setattr(engine.bridge.evidence, "begin_teardown", publication)
+    else:
+        monkeypatch.setattr(os, "fsync", sync)
+    try:
+        assert not provider._destroy_warm_entry("native", engine.info, reason="shutdown", still_reapable=lambda: True)
+        (saved,) = engine.bridge.evidence.snapshot().teardowns
+        assert failed and engine.bridge.teardowns.records() == (saved,)
+        assert not engine.bridge.ready
+        engine.bridge.assert_current(teardown=True)
+        before = len(engine.calls)
+        assert provider._destroy_warm_entry("native", engine.info, reason="shutdown", still_reapable=lambda: True)
+        if failure == "terminal-sync":
+            assert all("inspect" in command for command in engine.calls[before:])
+        assert not engine.objects and not engine.bridge.teardowns.records() and not provider._warm_pool
+        assert not engine.bridge.ready and not engine.bridge.evidence.snapshot().teardowns
+    finally:
+        discard_sandbox_lease_manager(provider)
+
+
+@pytest.mark.parametrize("lost", ["never-installed", "owner", "daemon"])
+def test_teardown_restoration_never_installs_or_bypasses_owning_proof(fixture, monkeypatch, lost):
+    from deerflow.community.aio_sandbox.native_creation import NativeCreateBridge, NativeCreateHandoffs
+
+    engine = Engine(fixture)
+    engine.owner.mark_closing()
+    bridge = engine.bridge
+    if lost == "never-installed":
+        bridge = NativeCreateBridge(
+            evidence=bridge.evidence,
+            handoffs=NativeCreateHandoffs(daemon_id="daemon-A", lock=engine.provider._lock),
+            check_owner=bridge._check_owner,
+            owner_accepts=bridge._owner_accepts,
+            check_daemon=bridge._check_daemon,
+        )
+    elif lost == "owner":
+        monkeypatch.setattr(engine.owner, "_provider", object())
+    else:
+        monkeypatch.setattr(bridge, "_check_daemon", Mock(side_effect=StorageHostUnqualified("Changed actual daemon")))
+    with pytest.raises(StorageHostUnqualified):
+        bridge.qualify(teardown=True)
+    assert not bridge.ready and not engine.calls
+    assert not bridge.evidence.snapshot().teardowns
+    with pytest.raises(StorageHostUnqualified):
+        bridge.qualify()
+
+
+def test_warm_eviction_during_another_owners_acquire_retains_independent_admission(fixture, monkeypatch):
+    from deerflow.community.aio_sandbox.owner_admission import OWNER_ADMISSION
+
+    engine = Engine(fixture)
+    provider = engine.provider
+    provider._warm_pool["native"] = (engine.info, 0)
+    provider._warm_pool_identity["native"] = engine.info.owner
+    original = engine.local._runtime_runner
+    borrower = []
+
+    def observed(command, **kwargs):
+        if "inspect" not in command:
+            gate = provider._owner_admission_gate()
+            current = OWNER_ADMISSION.get()
+            assert current.owner_id == "alice" and current is not borrower[0]
+            with provider._lock:
+                assert gate.admission_current_locked(current) and gate.admission_current_locked(borrower[0])
+                assert current._group is not borrower[0]._group
+                assert current._group.slots == {SLOT} and borrower[0]._group.slots == {"b" * 32}
+            with pytest.raises(StorageHostUnqualified):
+                gate.reserve("alice", SLOT)
+            with pytest.raises(StorageHostUnqualified):
+                gate.reserve("bob", "b" * 32)
+        return original(command, **kwargs)
+
+    monkeypatch.setattr(engine.local, "_runtime_runner", observed)
+    try:
+        with provider._native_admission("bob", ("b" * 32,)):
+            reference = OWNER_ADMISSION.get()
+            borrower.append(reference)
+            with pytest.raises(StorageHostUnqualified):
+                with provider._native_admission("alice", (SLOT,)):
+                    pytest.fail("Ordinary admission borrowed another owner's reference")
+            assert provider._destroy_warm_entry("native", engine.info, reason="warm_eviction", still_reapable=lambda: True)
+            assert OWNER_ADMISSION.get() is reference
+            gate = provider._owner_admission_gate()
+            with provider._lock:
+                assert gate.admission_current_locked(reference)
+        assert not engine.objects and not engine.bridge.teardowns.records()
+    finally:
+        discard_sandbox_lease_manager(provider)
+
+
+@pytest.mark.parametrize("inherited", ["expired-other", "expired-same", "foreign-gate"])
+def test_cleanup_refuses_expired_or_foreign_inherited_admission_without_effects(fixture, inherited):
+    from deerflow.community.aio_sandbox.owner_admission import OWNER_ADMISSION, OwnerAdmissions
+
+    engine = Engine(fixture)
+    provider = engine.provider
+    provider._warm_pool["native"] = (engine.info, 0)
+    provider._warm_pool_identity["native"] = engine.info.owner
+    gate = OwnerAdmissions(lock=Lock()) if inherited == "foreign-gate" else provider._owner_admission_gate()
+    reference = gate.enter("alice" if inherited == "expired-same" else "bob")
+    if inherited != "foreign-gate":
+        gate.end(reference)
+    context = OWNER_ADMISSION.set(reference)
+    original = deepcopy(engine.objects)
+    try:
+        assert not provider._destroy_warm_entry("native", engine.info, reason="warm_eviction", still_reapable=lambda: True)
+        assert OWNER_ADMISSION.get() is reference
+        assert engine.objects == original and all("inspect" in command for command in engine.calls)
+        assert engine.bridge.evidence.snapshot().teardowns == () and provider._warm_pool
+    finally:
+        OWNER_ADMISSION.reset(context)
+        gate.end(reference)
+        discard_sandbox_lease_manager(provider)
+
+
+def test_cleanup_slot_refusal_restores_the_other_owners_live_admission(fixture):
+    from deerflow.community.aio_sandbox.owner_admission import OWNER_ADMISSION
+
+    engine = Engine(fixture)
+    provider = engine.provider
+    provider._warm_pool["native"] = (engine.info, 0)
+    provider._warm_pool_identity["native"] = engine.info.owner
+    gate = provider._owner_admission_gate()
+    reservation = gate.reserve("charlie", SLOT)
+    original = deepcopy(engine.objects)
+    try:
+        with provider._native_admission("bob", ("b" * 32,)):
+            reference = OWNER_ADMISSION.get()
+            assert not provider._destroy_warm_entry("native", engine.info, reason="warm_eviction", still_reapable=lambda: True)
+            assert OWNER_ADMISSION.get() is reference
+            with provider._lock:
+                assert gate.admission_current_locked(reference)
+            assert engine.objects == original and all("inspect" in command for command in engine.calls)
+            assert engine.bridge.evidence.snapshot().teardowns == ()
+    finally:
+        gate.end_retirement(reservation)
+        discard_sandbox_lease_manager(provider)
+
+
 def test_active_owner_ordinary_partial_cleanup_recovers_after_restart_without_primary(fixture, tmp_path, monkeypatch):
     engine = Engine(fixture)
     provider, owner = engine.provider, engine.owner
@@ -214,11 +393,11 @@ def test_transient_failure_after_durable_completion_can_retry_exact_absence(fixt
         finish(record)
         completed.append(record)
 
-    def fault():
+    def fault(**kwargs):
         if completed and not failed:
             failed.append(True)
             raise StorageHostUnqualified("Injected final publication failure")
-        return qualify()
+        return qualify(**kwargs)
 
     monkeypatch.setattr(engine.bridge.evidence, "finish_teardown", done)
     monkeypatch.setattr(engine.bridge, "qualify", fault)

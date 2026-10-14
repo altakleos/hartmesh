@@ -19,6 +19,28 @@ _CLEANUP = ContextVar("native_teardown_capability", default=None)
 logger = logging.getLogger(__name__)
 
 
+@contextmanager
+def _cleanup_admission(provider, owner_id, slots):
+    """Cleanup retains its own owner; never borrows another acquirer's reference."""
+    from .owner_admission import OWNER_ADMISSION
+
+    inherited = OWNER_ADMISSION.get()
+    separate = False
+    if inherited is not None:
+        gate = provider._owner_admission_gate()
+        with provider._lock:
+            if not gate.admission_current_locked(inherited):
+                raise StorageHostUnqualified("Native cleanup inherited an expired or foreign admission reference")
+            separate = inherited.owner_id != owner_id
+    context = OWNER_ADMISSION.set(None) if separate else None
+    try:
+        with provider._native_admission(owner_id, slots):
+            yield
+    finally:
+        if context is not None:
+            OWNER_ADMISSION.reset(context)
+
+
 def recover_teardowns(provider):
     """Bounded ordinary recovery; durable correlation never becomes a usable client."""
     from .local_backend import _NATIVE_SLOT_INVENTORY_DEADLINE, LocalContainerBackend, NativeSlotContainer
@@ -47,7 +69,7 @@ def recover_teardowns(provider):
                 bridge.assert_current()
                 if record not in bridge.teardowns.records():
                     continue
-                with provider._native_admission(record.owner_id, record.slots):
+                with _cleanup_admission(provider, record.owner_id, record.slots):
                     bridge.assert_current()
                     if record not in bridge.teardowns.records() or time.monotonic() >= deadline:
                         continue
@@ -171,7 +193,7 @@ class _Capability:
 
     def _admit(self, slots):
         if self.outer is None:
-            self.owned.enter_context(self.provider._native_admission(self.info.owner[0], slots))
+            self.owned.enter_context(_cleanup_admission(self.provider, self.info.owner[0], slots))
         else:
             self.outer.assert_current()
             if self.outer.reservation.owner_id != self.info.owner[0] or self.outer.reservation.slot_id not in slots:
@@ -214,9 +236,9 @@ class _Capability:
             saved = self.bridge.evidence.begin_teardown(self.record)
             self.bind(saved)
             self.bridge.teardowns.add(saved)
-            self.bridge.qualify()
+            self.bridge.qualify(teardown=True)
         except BaseException:
-            self.bridge._check_failure_evidence()
+            self.bridge._check_failure_evidence(teardown=True)
             raise
         self.assert_current()
         self.permits(self.info)
@@ -260,9 +282,9 @@ class _Capability:
             self.bridge.evidence.finish_teardown(self.record)
             self.bridge.teardowns.remove(self.record)
             self.info.native_completion = _Completion(self.record, self.bridge.evidence)
-            self.bridge.qualify()
+            self.bridge.qualify(teardown=True)
         except BaseException:
-            self.bridge._check_failure_evidence()
+            self.bridge._check_failure_evidence(teardown=True)
             raise
         self.assert_current()
         return DestroyOutcome.ABSENT
