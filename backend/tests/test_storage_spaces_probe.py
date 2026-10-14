@@ -212,8 +212,87 @@ def test_restricted_network_provider_cannot_bypass_preparation_or_resume(tmp_pat
     assert docker.entry is None
 
 
+@pytest.mark.parametrize("mode", ["allowlist", "blocked"])
+def test_restricted_network_resident_goes_through_the_network_controller(tmp_path, monkeypatch, mode):
+    from unittest.mock import Mock
+
+    from test_resident_topology import backend, labels
+
+    from deerflow.spaces import docker as module
+
+    docker = ProbeDocker()
+    monkeypatch.setattr(module, "_local_endpoint", lambda _contexts: None)
+    local, _calls = backend(mode)
+    local._image = IMAGE
+
+    def engine(command, **kwargs):
+        if command[1:3] == ["network", "inspect"]:
+            network = {
+                "Id": "2" * 64,
+                "Name": command[-1],
+                "Driver": "bridge",
+                "Internal": True,
+                "Labels": local._restricted_labels(PLAN.id, "network"),
+                "Options": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated", "com.docker.network.bridge.gateway_mode_ipv6": "isolated"},
+            }
+            return SimpleNamespace(returncode=0, stdout=json.dumps([network]), stderr="")
+        return docker(command, **kwargs)
+
+    local._runtime_runner = engine
+    local._resident_resources_status = Mock(return_value="missing")
+    local._create_internal_network, local._create_egress_network = Mock(), Mock()
+    local._start_network_proxy = Mock(return_value="172.24.0.2")
+    adapter = DockerStorageAdapter.from_local_backend(local, pool=tmp_path)
+    data = tmp_path / ("d" * 32 + ".volume") / "data"
+    data.mkdir(parents=True)
+    (data.parent / "control").mkdir()
+    plan = replace(PLAN, views=(replace(PLAN.views[0], source=str(data), slot_id="d" * 32),))
+    assert adapter.prepare(plan) == ID
+    command = next(command for command in docker.calls if command[1] == "create")
+    network = local._resource_names(plan.id)[1]
+    assert command[command.index("--network") + 1] == network and "-p" not in command
+    assert labels(command)["deerflow.role"] == "resident"
+    assert local._start_network_proxy.call_args.kwargs["publish"] is False
+    docker.entry["Config"]["Labels"] = labels(command)
+    docker.entry["HostConfig"]["NetworkMode"] = network
+    docker.entry["NetworkSettings"] = {"Networks": {network: {"NetworkID": "2" * 64}}}
+    docker.entry["Mounts"][0]["Source"] = str(data)
+    adapter.start(ID, plan)
+    adapter.verify_active(ID, plan)
+
+
+@pytest.mark.parametrize("configured_network", [None, "default", "bridge"])
+@pytest.mark.parametrize("inspected_network", ["default", "bridge"])
+def test_open_resident_accepts_the_default_docker_bridge(tmp_path, monkeypatch, configured_network, inspected_network):
+    from test_resident_topology import backend
+
+    from deerflow.spaces import docker as module
+
+    if configured_network is None:
+        monkeypatch.delenv("DEER_FLOW_SANDBOX_NETWORK", raising=False)
+    else:
+        monkeypatch.setenv("DEER_FLOW_SANDBOX_NETWORK", configured_network)
+    monkeypatch.setattr(module, "_local_endpoint", lambda _contexts: None)
+    local, _calls = backend()
+    docker = ProbeDocker()
+    local._runtime_runner = docker
+    local._image = IMAGE
+    provider = DockerStorageAdapter.from_local_backend(local, pool=tmp_path)
+    plan = replace(PLAN, views=(replace(PLAN.views[0], slot_id="d" * 32),))
+    _mounts, labels = provider._resident_projection(plan)
+    docker.entry["Config"]["Labels"] = {**labels, "deerflow.role": "resident"}
+    docker.entry["HostConfig"]["NetworkMode"] = inspected_network
+    provider.start(ID, plan)
+    provider.verify_active(ID, plan)
+    for refused in (None, "", "unrelated-network"):
+        docker.entry["HostConfig"]["NetworkMode"] = refused
+        with pytest.raises(StorageAdapterUnsupported):
+            provider.verify_active(ID, plan)
+    assert sum(command[1] == "start" for command in docker.calls) == 1
+
+
 @pytest.mark.asyncio
-async def test_runtime_always_probes_the_pool_and_cleans_only_first_construction(instances, tmp_path, monkeypatch):
+async def test_runtime_reuses_qualified_adapter_without_repeating_pool_probe(instances, tmp_path, monkeypatch):
     from deerflow.agent_instances import runtime
     from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
     from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
@@ -224,7 +303,7 @@ async def test_runtime_always_probes_the_pool_and_cleans_only_first_construction
 
     def build(backend, **kwargs):
         calls.append(kwargs)
-        return SimpleNamespace(host_id="fixture-host")
+        return SimpleNamespace(host_id="fixture-host", _backend=backend, _same_host=lambda: None)
 
     monkeypatch.setattr(DockerStorageAdapter, "from_local_backend", build)
     baseline = object.__new__(AioSandboxProvider)
@@ -232,7 +311,7 @@ async def test_runtime_always_probes_the_pool_and_cleans_only_first_construction
     _, first = await runtime.qualified_attachments(files, baseline_provider=baseline)
     _, second = await runtime.qualified_attachments(files, baseline_provider=baseline)
     assert first is second
-    assert calls == [{"pool": tmp_path, "clean_probe": True}, {"pool": tmp_path, "clean_probe": False}]
+    assert calls == [{"pool": tmp_path, "clean_probe": True}]
 
 
 @pytest.mark.parametrize("writer_runtime", [None, "runsc"])

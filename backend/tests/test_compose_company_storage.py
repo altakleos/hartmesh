@@ -210,3 +210,54 @@ async def test_company_grant_accepts_setup_pending_and_rejects_released_or_unkno
             await ss.grant_company_space(app, account)
     async with sf() as session:
         assert [row.subject_id for row in (await session.execute(select(SpaceGrantRow))).scalars().all()] == ["alice"]
+
+
+@pytest.mark.asyncio
+async def test_resident_projection_qualified_before_company_bootstrap_refreshes_after_commit(startup, monkeypatch):
+    ss, app, config, sf, _catalog, adapter, _agents = startup
+    original = ss._company_step
+
+    async def defer(_app, *, timeout):
+        return False
+
+    monkeypatch.setattr(ss, "_company_step", defer)
+    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    provider = adapter.return_value[1].provider
+    with pytest.raises(SpaceConflict):
+        await provider._readonly_roots()
+    monkeypatch.setattr(ss, "_company_step", original)
+    assert await ss._company_step(app, timeout=5)
+    (root,) = await provider._readonly_roots()
+    assert root.relative == "shared" and root.destination == "/mnt/user-data/shared"
+    async with sf() as session:
+        assert not (await session.execute(select(SpaceGrantRow))).first()
+
+
+@pytest.mark.asyncio
+async def test_resident_shared_projection_checks_binding_again_after_filesystem_proof(startup, monkeypatch):
+    ss, app, config, sf, catalog, _adapter, _agents = startup
+    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    entered, release = threading.Event(), threading.Event()
+    capture = ss.ReadOnlyRoot.capture
+
+    def held(*args, **kwargs):
+        result = capture(*args, **kwargs)
+        entered.set()
+        assert release.wait(10)
+        return result
+
+    monkeypatch.setattr(ss.ReadOnlyRoot, "capture", held)
+    task = asyncio.create_task(ss.resident_readonly_roots(app))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        async with sf() as session, session.begin():
+            link = await session.get(StorageFeatureLinkRow, ("hm.company-space", "company"))
+            row = await session.get(SpaceRow, link.space_id)
+            backing = await session.get(SpaceBackingRow, row.backing_handle)
+            backing.slot_id = next(slot for slot in catalog.volumes if slot != backing.slot_id)
+        release.set()
+        with pytest.raises(SpaceConflict):
+            await task
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)

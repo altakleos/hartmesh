@@ -37,6 +37,7 @@ from deerflow.spaces.contract import Custody, InvalidPrincipal, MutationMode, Pe
 from deerflow.spaces.docker import StorageHostUnqualified
 from deerflow.spaces.principals import HostPrincipalResolver
 from deerflow.spaces.provision import KINDS, StorageFit, plan_counts, storage_fit
+from deerflow.spaces.readonly_roots import ReadOnlyRoot
 from deerflow.spaces.registry import SpaceRegistry
 from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
 from deerflow.spaces.service import SpaceFiles
@@ -398,6 +399,7 @@ async def _adapter_step(app, *, timeout=ADAPTER_LIMIT_SECONDS):
         status.storage_text = str(exc)
         return False
     status.host_id = attachments.provider.host_id
+    attachments.provider._readonly_roots = lambda: resident_readonly_roots(app)
     status.qualified_provider = baseline
     status.runtime_retry = False
     status.storage_reason, status.storage_text = None, None
@@ -519,6 +521,36 @@ async def _company_role(session):
     if row is None or (row.status, row.custody_kind, row.mode, row.feature_namespace, row.feature_controller, row.feature_metadata_version) != ("active", "company", "native", None, None, None):
         raise SpaceConflict("The assigned company Space is unavailable; its identity is retained")
     return row
+
+
+async def resident_readonly_roots(app):
+    """Project the current Company binding without borrowing actor authority."""
+    from deerflow.spaces.incarnations import verify_bound
+
+    files = app.state.storage_spaces
+
+    async def snapshot(session):
+        row = await _company_role(session)
+        binding = await session.get(SpaceBackingRow, row.backing_handle) if row is not None else None
+        if row is None or binding is None or binding.space_id != row.id:
+            raise SpaceConflict("The current Company read-only binding is unavailable")
+        facts = (row.id, row.backing_handle, binding.slot_id, binding.filesystem_uuid, binding.root_inode, binding.control_inode)
+        return facts, binding
+
+    async with files.registry._sf() as session:
+        facts, binding = await snapshot(session)
+    files._binding_spec(binding)
+    volume = await await_drained(run_file_io(files.catalog.verify, binding.slot_id, previous=files._verified.get(binding.slot_id)))
+    files._check_incarnation(binding, volume)
+    if getattr(volume.spec, "kind", None) not in (None, "company"):
+        raise SpaceConflict("The Company read-only binding is not a company slot")
+    bound = await await_drained(run_file_io(verify_bound, volume, binding.backing_handle))
+    root = await await_drained(run_file_io(ReadOnlyRoot.capture, bound, "shared", "/mnt/user-data/shared"))
+    async with files.registry._sf() as session:
+        current, _binding = await snapshot(session)
+        if current != facts:
+            raise SpaceConflict("The Company read-only binding changed during qualification")
+    return (root,)
 
 
 class _AssignedRole(Exception):

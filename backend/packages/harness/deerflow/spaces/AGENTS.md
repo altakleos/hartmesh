@@ -214,9 +214,12 @@ host. Missing/foreign identity, unknown containment and adapter loss stay pendin
 leases never prove retirement. Local endpoint checks retain root socket/alias
 identity; a UID-1000 nonce-file probe proves pool and bound-view path coherence.
 Private probe directories serialize cleanup through pinned descriptors; only the
-controlled first runtime qualification clears the pool. Repeated construction
-still probes but preserves live markers. Unsupported workspace topology rejects
-prepare and activation/resume while discovery/fencing remain available. Joint
+controlled first runtime qualification clears the pool. Qualified adapter reuse
+retains host/owner/evidence checks without another pool probe. Per-plan
+`readonly_roots.py` projections bind qualified slots, backing/root revisions and
+confined directories; the Gateway supplies role policy. They are configured RO
+roots, never ordinary mount edges or grants. Company remains unreclaimable.
+Resident preparation and reuse check exact mounts/network; joint
 views require audience admission. No chat or task lifecycle owns it.
 
 Native recovery quiesces all mounts, records backup identity before I/O and

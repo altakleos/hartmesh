@@ -20,7 +20,12 @@ sets refuse. Unknown tracking, held/foreign owners and untransferred results sta
 reserved. Process-local slot/containment facts never serialize. Host eligibility
 belongs outside this generic provider and no provider callback runs under SQL.
 
-Managed native primaries require installed `native_creation.py` accounting and the
+Private `resident_preparation.py` uses committed attachment tokens and the exact
+pool-owner runner; never invent chat/human labels or use the chat journal for it.
+Expire capabilities after drained workers, consume once, and retain every bound
+slot through CID commit. Residents stay stopped/unpublished; chat defaults remain.
+
+Managed native chat primaries require installed `native_creation.py` accounting and the
 exact owner-held journal. Persist pending before submission; preserve the existing
 run/create timeout policy. Strict actual daemon/ID/name/attempt/slot inspection
 precedes verified handoff then durable ACK. Opaque worker reservations fence

@@ -154,7 +154,13 @@ async def qualified_attachments(files, *, baseline_provider=None):
         previous = getattr(baseline_provider, "_native_creation", None)
         try:
             mounts = getattr(files, "attachments", None)
-            adapter = await await_drained(run_file_io(DockerStorageAdapter.from_local_backend, baseline_provider._backend, pool=Path(files.inventory_path).parent, clean_probe=mounts is None))
+            adapter = getattr(files, "_qualified_adapter", None)
+            if adapter is None:
+                adapter = await await_drained(run_file_io(DockerStorageAdapter.from_local_backend, baseline_provider._backend, pool=Path(files.inventory_path).parent, clean_probe=mounts is None))
+            else:
+                if mounts is None or mounts.provider is not adapter or getattr(files, "_qualified_backend", None) is not baseline_provider._backend:
+                    raise StorageHostUnqualified("Cached storage adapter lost its exact provider binding")
+                await await_drained(run_file_io(adapter._same_host))
             if mounts is None:
                 mounts = SpaceAttachments(files, adapter)
             elif mounts.provider.host_id != adapter.host_id:
@@ -164,6 +170,9 @@ async def qualified_attachments(files, *, baseline_provider=None):
                 await await_drained(run_file_io(baseline_provider._install_native_creation, evidence, adapter))
                 await await_drained(run_file_io(owner.assert_provider, baseline_provider))
                 await await_drained(run_file_io(baseline_provider._reconcile_orphans))
+            files.attachments = mounts
+            files._qualified_adapter = mounts.provider
+            files._qualified_backend = baseline_provider._backend
             return baseline_provider, mounts
         except BaseException as exc:
             from deerflow.community.aio_sandbox.native_creation import NativeCreateBridge
