@@ -560,6 +560,16 @@ class ResidentRegistry:
             raise StorageRuntimeUnavailable("Resident accounting restoration is incomplete")
         return len(self.retained) + sum(self._associated.get(home_id) not in self.retained for home_id in self.slots)
 
+    def external_native_claims(self):
+        """Pure exact SQL correlations; unknown-CID preparations cannot deduplicate."""
+        if self._restoration_started and not self.restoration_complete:
+            raise StorageRuntimeUnavailable("Resident accounting restoration is incomplete")
+        return frozenset(
+            (claim.id, claim.container_id, claim.host_id, claim.incarnation, tuple(sorted((resource.space_id, resource.generation, resource.alias, resource.writable) for resource in claim.resources)))
+            for claim in self.retained.values()
+            if claim.container_id is not None
+        )
+
     def _evictable(self, entry: ResidentEntry) -> bool:
         return entry.attachment_id is not None and entry.preparation is None and entry.recycle_due_since is None and not self.in_flight(entry.instance_id) and not self._has_reservation(entry.home_id)
 

@@ -69,6 +69,11 @@ through drainage. Restore durable claims and coordinate admission before install
 see [registry rules](../../../../docs/RESIDENT_REGISTRY.md).
 
 `app.gateway.resident_runtime` owns the registry and complete native collector.
+Resident capacity deduplicates retained SQL and v5 journal claims only by exact
+attachment/CID/daemon/incarnation/full resource scope. An unknown CID stays charged.
+The collector freshly qualifies each original resident graph before explaining its
+paired resources, preserving partial cleanup and rejecting changed/foreign graphs.
+Capture that exact set and resident revision in the memory-only publication proof.
 Work activation's refusing preflight authorizes an exact replay without writing
 a new attempt; physical capacity stays outside SQL, with pure exact binding
 before commit. Retain live launch tasks through cancellation and never expire

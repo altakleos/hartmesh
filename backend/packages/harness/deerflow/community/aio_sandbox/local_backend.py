@@ -1407,7 +1407,7 @@ class LocalContainerBackend(SandboxBackend):
 
     def prepare_resident(self, sandbox_id, container_name, extra_mounts, labels):
         """Prepare one stopped workspace through the existing native builder."""
-        from .resident_preparation import resident_submission
+        from .resident_preparation import capture_resident_resources, resident_submission
 
         if self._runtime != "docker":
             raise ValueError("Stopped environment preparation requires Docker")
@@ -1432,6 +1432,7 @@ class LocalContainerBackend(SandboxBackend):
             proof.assert_current()
             if not isinstance(container, str) or not re.fullmatch(r"[0-9a-f]{64}", container):
                 raise StorageHostUnqualified("Resident preparation did not return an immutable Docker identity")
+            capture_resident_resources(proof, container)
             return container
 
     def _resident_resources_status(self, sandbox_id, container_name):

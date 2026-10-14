@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 from deerflow.spaces.docker import StorageHostUnqualified
 from deerflow.spaces.native_create_evidence import _unique_object
+from deerflow.spaces.native_resident_evidence import NativeResidentRecord
 from deerflow.spaces.native_teardown_evidence import NativeMountlessTeardownRecord, NativeTeardownRecord, NativeTeardownResource
 
 logger = logging.getLogger(__name__)
@@ -167,6 +168,77 @@ class NativeResourceSet:
             if entries[(resource.kind, resource.identity)] is None:
                 raise StorageHostUnqualified("Resident paired graph is incomplete")
         self._paired_graph(record, entries, primary)
+
+    def qualify_resident_record(self, record):
+        """Inspect original actorless members and mounts, including partial cleanup."""
+        from hashlib import sha256
+
+        from deerflow.spaces.docker import ATTACHMENT_LABEL, HOST_LABEL
+
+        if not isinstance(record, NativeResidentRecord) or NativeResidentRecord.parse(record.document(), record.id) != record:
+            raise StorageHostUnqualified("Resident graph lacks its exact original record")
+        entries = {("container", record.container_id): self._member("container", record.container_id, record.name, record.created_at)}
+        for member in record.resources:
+            entries[(member.kind, member.identity)] = self._member(member.kind, member.identity, member.name, member.created_at)
+        primary = entries[("container", record.container_id)]
+        if primary is not None:
+            labels = primary.get("Config", {}).get("Labels")
+            prefix = "hartmesh.storage.space."
+            expected = {ATTACHMENT_LABEL: record.attachment_id, HOST_LABEL: record.daemon_id, "deerflow.role": "resident", **{prefix + slot: "1" for slot in record.slots}}
+            readonly = {"hartmesh.storage.readonly." + sha256(root.destination.encode("utf-8")).hexdigest()[:16]: root.revision for root in record.roots if root.revision is not None}
+            expected.update(readonly)
+            if record.network_mode != "open":
+                expected.update({"deerflow.sandbox_id": record.attachment_id, "deerflow.network_mode": record.network_mode, "deerflow.network_policy_digest": record.policy_digest})
+            if (
+                not isinstance(labels, dict)
+                or any(not isinstance(key, str) or not isinstance(value, str) for key, value in labels.items())
+                or any(labels.get(key) != value for key, value in expected.items())
+                or {key for key in labels if key.startswith(prefix)} != {prefix + slot for slot in record.slots}
+                or {key for key in labels if key.startswith("hartmesh.storage.readonly.")} != set(readonly)
+                or any(key in labels for key in ("deerflow.owner_user_id", "deerflow.thread_id", "hartmesh.chat.storage"))
+                or (record.network_mode == "open" and (labels.get("deerflow.network_mode") not in (None, "open") or labels.get("deerflow.network_policy_digest") is not None))
+            ):
+                raise StorageHostUnqualified("Resident original writer attribution changed")
+            mounts = primary.get("Mounts")
+            if (
+                not isinstance(mounts, list)
+                or len(mounts) > 256
+                or any(
+                    not isinstance(mount, dict)
+                    or mount.get("Type") != "bind"
+                    or mount.get("Propagation") != "rprivate"
+                    or type(mount.get("RW")) is not bool
+                    or not isinstance(mount.get("Source"), str)
+                    or not isinstance(mount.get("Destination"), str)
+                    for mount in mounts
+                )
+            ):
+                raise StorageHostUnqualified("Resident original mount facts are unknown")
+            actual = tuple(sorted((mount["Source"], mount["Destination"], mount["RW"]) for mount in mounts))
+            if actual != record.mounts:
+                raise StorageHostUnqualified("Resident original mount projection changed")
+            config = primary.get("HostConfig")
+            ports = primary.get("NetworkSettings", {}).get("Ports")
+            if not isinstance(config, dict) or config.get("PortBindings") not in (None, {}) or not isinstance(ports, dict) or any(value for value in ports.values()):
+                raise StorageHostUnqualified("Resident primary publishes a host port")
+            target = config.get("NetworkMode")
+            equivalent_bridge = record.network_target == "bridge" and target == "default"
+            if target != record.network_target and not equivalent_bridge:
+                raise StorageHostUnqualified("Resident original network target changed")
+            self._state(primary)
+            if record.shared_network is not None:
+                shared = record.shared_network
+                network = self._member("network", shared.identity, shared.name, shared.created_at)
+                if network is None:
+                    raise StorageHostUnqualified("Resident original shared network is absent")
+                normalized = {**primary, "HostConfig": {**config, "NetworkMode": "bridge" if equivalent_bridge else target}}
+                self._links(normalized, {shared.name: shared.identity}, {shared.identity: network})
+        topology = SimpleNamespace(container_id=record.container_id, sandbox_id=record.attachment_id, network_mode=record.network_mode, policy_digest=record.policy_digest, resources=record.resources)
+        self._paired_graph(topology, entries, primary)
+        return entries
+
+    def prove_resident_absent(self, record):
+        return all(entry is None for entry in self.qualify_resident_record(record).values())
 
     @staticmethod
     def _labels(entry, record, role, *, container=False):

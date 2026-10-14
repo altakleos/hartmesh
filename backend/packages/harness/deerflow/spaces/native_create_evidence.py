@@ -16,6 +16,7 @@ from uuid import uuid4
 from deerflow.files.store import StoreError, open_directory_source
 from deerflow.spaces.docker import StorageHostUnqualified
 from deerflow.spaces.filesystem import ConfinedFilesystem
+from deerflow.spaces.native_resident_evidence import NativeResidentRecord
 from deerflow.spaces.native_teardown_evidence import NativeTeardownRecord
 
 DIRECTORY = ".native-creates"
@@ -79,6 +80,8 @@ class NativeEvidenceSnapshot:
     creates: tuple[NativeCreateAttempt, ...]
     teardowns: tuple[NativeTeardownRecord, ...]
     teardown_revision: int = 0
+    residents: tuple[NativeResidentRecord, ...] = ()
+    resident_revision: int = 0
 
     def pending_creates(self, daemon_id):
         return tuple(record for record in self.creates if record.phase == "pending" or record.daemon_id != daemon_id)
@@ -86,7 +89,7 @@ class NativeEvidenceSnapshot:
 
 @dataclass(frozen=True)
 class _TeardownRemoval:
-    record: NativeTeardownRecord
+    record: NativeTeardownRecord | NativeResidentRecord
     metadata: object
     descriptor: int
 
@@ -104,6 +107,8 @@ class NativeCreateEvidence:
         self._has_teardown = False
         self._teardown_revision = 0
         self._teardown_facts = frozenset()
+        self._resident_revision = 0
+        self._resident_facts = frozenset()
         self._pool_fd = self._directory_fd = None
         self._closed = False
         try:
@@ -135,6 +140,11 @@ class NativeCreateEvidence:
         """Memory-only fence for restored accounting; fresh scanning remains mandatory."""
         return self._teardown_revision
 
+    @property
+    def resident_revision(self):
+        """Memory-only fence for the separate actorless original graph index."""
+        return self._resident_revision
+
     def _assert_current(self):
         if not self.ready or self._pool_fd is None:
             raise StorageHostUnqualified("Native create evidence is closed")
@@ -160,6 +170,8 @@ class NativeCreateEvidence:
             raise StorageHostUnqualified("Native create evidence schema is unknown")
         if version in (2, 4):
             return NativeTeardownRecord.parse(document, identifier)
+        if version == 5:
+            return NativeResidentRecord.parse(document, identifier)
         mountless = version == 3
         fields = _FIELDS | {"record_kind"} if mountless else _FIELDS
         if version not in (1, 3) or set(document) != fields or (mountless and document["record_kind"] != "mountless-create"):
@@ -235,13 +247,21 @@ class NativeCreateEvidence:
             if len(records) > MAX_RECORDS or total > MAX_TOTAL_BYTES:
                 raise StorageHostUnqualified("Native lifecycle evidence capacity is exhausted")
             teardowns = [record for record, _ in records if isinstance(record, NativeTeardownRecord)]
-            if len({record.container_id for record in teardowns}) != len(teardowns):
+            residents = [record for record, _ in records if isinstance(record, NativeResidentRecord)]
+            graphs = [*teardowns, *residents]
+            if len({record.container_id for record in graphs}) != len(graphs) or len({record.attachment_id for record in residents}) != len(residents):
                 raise StorageHostUnqualified("Native teardown primary correlation is ambiguous")
+            for index, graph in enumerate(graphs):
+                self._require_separate_graph(graph, [(previous, None) for previous in graphs[:index]])
             self._has_teardown = bool(teardowns)
             facts = frozenset(teardowns)
             if facts != self._teardown_facts:
                 self._teardown_facts = facts
                 self._teardown_revision += 1
+            resident_facts = frozenset(residents)
+            if resident_facts != self._resident_facts:
+                self._resident_facts = resident_facts
+                self._resident_revision += 1
         except (OSError, StoreError, ValueError, UnicodeError, RecursionError) as exc:
             raise StorageHostUnqualified("Native create evidence cannot be inspected") from exc
         return records, total
@@ -250,7 +270,13 @@ class NativeCreateEvidence:
         """One bounded mixed view, never a cleanup or actor capability."""
         with self._lock:
             records, _ = self._scan()
-            return NativeEvidenceSnapshot(tuple(record for record, _ in records if isinstance(record, NativeCreateAttempt)), tuple(record for record, _ in records if isinstance(record, NativeTeardownRecord)), self._teardown_revision)
+            return NativeEvidenceSnapshot(
+                tuple(record for record, _ in records if isinstance(record, NativeCreateAttempt)),
+                tuple(record for record, _ in records if isinstance(record, NativeTeardownRecord)),
+                self._teardown_revision,
+                tuple(record for record, _ in records if isinstance(record, NativeResidentRecord)),
+                self._resident_revision,
+            )
 
     def pending(self, *, slots=None, owner_id=None):
         with self._lock:
@@ -271,6 +297,8 @@ class NativeCreateEvidence:
                 raise StorageHostUnqualified("A previous native creation is unresolved for this owner or name")
             if any(record.owner_id == owner_id or record.name == name or (record.target_slot is not None and record.target_slot in slots) for record in snapshot.teardowns):
                 raise StorageHostUnqualified("A previous native teardown is unresolved for this owner, name or target slot")
+            if any(record.name == name or any(root.writable and root.slot_id in slots for root in record.roots) for record in snapshot.residents):
+                raise StorageHostUnqualified("Native resident resources retain this original name or writable slot")
 
     @staticmethod
     def _encode(record):
@@ -405,18 +433,109 @@ class NativeCreateEvidence:
 
     @staticmethod
     def _encode_teardown(record):
-        if not isinstance(record, NativeTeardownRecord):
+        if not isinstance(record, (NativeTeardownRecord, NativeResidentRecord)):
             raise StorageHostUnqualified("Teardown encoding requires an exact teardown record")
         try:
             raw = json.dumps(record.document(), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-            if len(raw) > MAX_RECORD_BYTES or NativeTeardownRecord.parse(json.loads(raw), record.id) != record:
+            record_type = NativeResidentRecord if isinstance(record, NativeResidentRecord) else NativeTeardownRecord
+            if len(raw) > MAX_RECORD_BYTES or record_type.parse(json.loads(raw), record.id) != record:
                 raise StorageHostUnqualified("Native teardown record exceeds its bound or changes shape")
             return raw
         except (TypeError, ValueError, RecursionError) as exc:
             raise StorageHostUnqualified("Native teardown record is malformed") from exc
 
+    @staticmethod
+    def _graph_members(record):
+        return {record.container_id, *(member.identity for member in record.resources)}, {("container", record.name), *((member.kind, member.name) for member in record.resources)}
+
+    @classmethod
+    def _require_separate_graph(cls, record, records):
+        identities, names = cls._graph_members(record)
+        for previous, _metadata in records:
+            if not isinstance(previous, (NativeTeardownRecord, NativeResidentRecord)):
+                continue
+            other_ids, other_names = cls._graph_members(previous)
+            if identities & other_ids or names & other_names:
+                raise StorageHostUnqualified("Native original graphs have overlapping immutable members")
+
+    def begin_resident(self, record):
+        """Retain a complete stopped preparation graph before returning its CID."""
+        if not isinstance(record, NativeResidentRecord) or record.phase != "prepared":
+            raise StorageHostUnqualified("Resident publication requires its exact prepared evidence")
+        with self._lock:
+            raw = self._encode_teardown(record)
+            if record.daemon_id != self.daemon_id:
+                raise StorageHostUnqualified("Cannot publish resident evidence for another daemon")
+            records, total = self._scan()
+            for previous, metadata in records:
+                if isinstance(previous, NativeResidentRecord) and previous.attachment_id == record.attachment_id:
+                    if previous != replace(record, id=previous.id) or metadata is None or previous.id in self._teardown_removals:
+                        raise StorageHostUnqualified("Resident evidence changed its original correlation or durable state")
+                    return self._confirm_teardown_publication(previous, metadata)
+            self._require_separate_graph(record, records)
+            if len(records) >= MAX_RECORDS or total + len(raw) > MAX_TOTAL_BYTES:
+                raise StorageHostUnqualified("Native lifecycle evidence is full; resident publication is refused")
+            self._resident_revision += 1
+            stage = self._write_stage(raw)
+            try:
+                self._assert_current()
+                self._assert_stage(stage, raw)
+                ConfinedFilesystem._rename_no_replace(self._directory_fd, stage, self._directory_fd, record.id + ".json")
+                os.fsync(self._directory_fd)
+                self._assert_current()
+                saved, metadata = self._read(record.id + ".json")
+                if saved != record or _identity(metadata) != _identity(os.fstat(self._stages[stage])):
+                    raise StorageHostUnqualified("Resident graph changed during durable publication")
+                self._assert_current()
+                self._scan()
+            finally:
+                self._close_stage(stage)
+            return record
+
+    def retire_resident(self, record):
+        """Monotonic retirement publication precedes every resource effect."""
+        if not isinstance(record, NativeResidentRecord):
+            raise StorageHostUnqualified("Resident retirement requires its exact original evidence")
+        with self._lock:
+            self._encode_teardown(record)
+            self._assert_current()
+            if record.daemon_id != self.daemon_id or record.id in self._teardown_removals:
+                raise StorageHostUnqualified("Resident retirement lacks its current durable original record")
+            saved, metadata = self._read(record.id + ".json")
+            if saved != record:
+                raise StorageHostUnqualified("Resident graph changed before retirement admission")
+            if record.phase == "retiring":
+                return self._confirm_teardown_publication(record, metadata)
+            retiring = replace(record, phase="retiring")
+            raw = self._encode_teardown(retiring)
+            self._resident_revision += 1
+            stage = self._write_stage(raw)
+            try:
+                self._assert_current()
+                self._assert_stage(stage, raw)
+                if _identity(os.stat(record.id + ".json", dir_fd=self._directory_fd, follow_symlinks=False)) != _identity(metadata):
+                    raise StorageHostUnqualified("Resident inode changed before retirement publication")
+                os.replace(stage, record.id + ".json", src_dir_fd=self._directory_fd, dst_dir_fd=self._directory_fd)
+                os.fsync(self._directory_fd)
+                self._assert_current()
+                saved, metadata = self._read(record.id + ".json")
+                if saved != retiring or _identity(metadata) != _identity(os.fstat(self._stages[stage])):
+                    raise StorageHostUnqualified("Resident retirement publication is unconfirmed")
+                self._scan()
+            finally:
+                self._close_stage(stage)
+            return retiring
+
+    def finish_resident(self, record):
+        """Trusted caller first proves every original ID AND name absent."""
+        if not isinstance(record, NativeResidentRecord) or record.phase != "retiring":
+            raise StorageHostUnqualified("Resident completion requires its admitted retiring record")
+        return self._finish_retained(record)
+
     def begin_teardown(self, record):
         """Persist correlation before effects; the record grants no authority."""
+        if not isinstance(record, NativeTeardownRecord):
+            raise StorageHostUnqualified("Chat teardown requires its exact chat evidence type")
         with self._lock:
             raw = self._encode_teardown(record)
             if record.daemon_id != self.daemon_id:
@@ -429,6 +548,7 @@ class NativeCreateEvidence:
                             raise StorageHostUnqualified("Native teardown removal durability remains pending")
                         return self._confirm_teardown_publication(previous, metadata)
                     raise StorageHostUnqualified("Native teardown primary already has different immutable correlation")
+            self._require_separate_graph(record, records)
             if len(records) >= MAX_RECORDS or total + len(raw) > MAX_TOTAL_BYTES:
                 raise StorageHostUnqualified("Native lifecycle evidence is full; teardown is refused")
             self._has_teardown = True
@@ -450,7 +570,10 @@ class NativeCreateEvidence:
 
     def _confirm_teardown_publication(self, record, metadata):
         """Retry an uncertain publication without treating readability as fsync."""
-        self._teardown_revision += 1
+        if isinstance(record, NativeResidentRecord):
+            self._resident_revision += 1
+        else:
+            self._teardown_revision += 1
         name = record.id + ".json"
         descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=self._directory_fd)
         try:
@@ -469,6 +592,11 @@ class NativeCreateEvidence:
 
     def finish_teardown(self, record):
         """Trusted caller must first prove the complete captured set absent."""
+        if not isinstance(record, NativeTeardownRecord):
+            raise StorageHostUnqualified("Chat completion requires its exact chat evidence type")
+        return self._finish_retained(record)
+
+    def _finish_retained(self, record):
         with self._lock:
             self._encode_teardown(record)
             if record.daemon_id != self.daemon_id:
@@ -476,7 +604,10 @@ class NativeCreateEvidence:
             records, _ = self._scan()
             if not any(saved == record for saved, _metadata in records):
                 raise StorageHostUnqualified("Native teardown completion lacks its exact retained record")
-            self._teardown_revision += 1
+            if isinstance(record, NativeResidentRecord):
+                self._resident_revision += 1
+            else:
+                self._teardown_revision += 1
             name = record.id + ".json"
             removal = self._teardown_removals.get(record.id)
             if removal is None:

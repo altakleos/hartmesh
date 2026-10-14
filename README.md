@@ -707,6 +707,14 @@ and completes authorized releases for every Space kind. Compose agent counts
 remain disabled while strict orphan recovery and the remaining product stages
 are completed.
 
+Managed AI employee preparation records its original container, networks and
+qualified mounts before activation. Reuse checks that same prepared environment.
+Cleanup retains the original evidence and capacity charge until resource absence,
+SQL closure and journal completion are confirmed. Interrupted cleanup retries
+the original resources; a completed cleanup retry checks current absence without
+issuing removal commands. Unfinished cleanup keeps backing administration and
+release unavailable. Strict recovery of orphaned residents follows separately.
+
 Managed deployments refuse generic Space grant changes. User and Company storage
 also refuse generic backup, restore, archive, delete and acceptance of uncertain
 file state: their chat mounts require host containment. Recovery status remains

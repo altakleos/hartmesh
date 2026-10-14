@@ -10,7 +10,7 @@ import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from contextlib import ExitStack
+from contextlib import AsyncExitStack, ExitStack
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -64,6 +64,7 @@ class NativeView:
     destination: str
     writable: bool
     slot_id: str | None = None
+    native_root: object | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,34 @@ class SpaceAttachments:
         self.on_contained: Callable[[str, Sequence[str], str], Awaitable[None]] | None = None
         self.uncontained: dict[str, str] = {}
 
+    def _views(self, resources, volumes):
+        from deerflow.spaces.native_resident_evidence import NativeResidentRoot
+
+        managed = getattr(getattr(self.provider, "_backend", None), "_managed_native_required", False)
+        return tuple(
+            NativeView(
+                resource.space_id,
+                resource.generation,
+                str(volumes[resource.space_id].data_path),
+                "/mnt/spaces/" + resource.alias,
+                resource.writable,
+                slot_id=getattr(volumes[resource.space_id].spec, "slot_id", None),
+                native_root=NativeResidentRoot.from_view(resource, volumes[resource.space_id]) if managed else None,
+            )
+            for resource in resources
+        )
+
+    async def _containment(self, stack, scope, space_ids):
+        """Private host exclusion precedes every expanded SQL parent phase."""
+        factory = getattr(self.provider, "_containment_scope", None)
+        if factory is None or not scope:
+            return None, space_ids
+        native = await stack.enter_async_context(factory(self, scope))
+        parents = sorted(set(native.parent_ids))
+        if not set(space_ids).issubset(parents):
+            raise AttachmentPending("Containment omitted an original resource parent")
+        return native, parents
+
     @staticmethod
     def _closure_reason(record, fallback):
         previous = (record.fenced_by_kind, record.fenced_by_id, record.fence_reason)
@@ -180,7 +209,10 @@ class SpaceAttachments:
             raise AttachmentPending("Invalid persisted attachment state")
         return records
 
-    async def _fence_physical(self, record):
+    async def _fence_physical(self, record, native=None):
+        if native is not None:
+            await native.contain(record)
+            return
         containers = set(await run_file_io(self.provider.discover, record.id))
         if record.container_id is not None:
             containers.add(record.container_id)
@@ -194,8 +226,8 @@ class SpaceAttachments:
             raise AttachmentPending("Preparation identity is unknown; containment remains unconfirmed")
         await run_file_io(self.provider.cleanup, record.id)
 
-    async def _fence_record(self, record):
-        await self._fence_physical(record)
+    async def _fence_record(self, record, native=None):
+        await self._fence_physical(record, native)
         record.phase = "fenced"
         record.fenced_at = datetime.now(UTC)
 
@@ -284,14 +316,20 @@ class SpaceAttachments:
         space_ids = sorted({resource.space_id for resource in resources})
 
         async def perform():
-            async with self.registry.host_locked(space_ids) as (session, parents):
-                if set(parents) != set(space_ids):
-                    raise AttachmentPending("Fenced preparation resources are unavailable")
-                record = (await self._locked_records(session, expected))[attachment_id]
-                if (record.incarnation, record.actor_kind, record.actor_id, record.host_id, record.container_id, record.phase) != (incarnation, actor.kind, actor.subject_id, host_id, container_id, "fenced"):
-                    raise AttachmentPending("Fenced preparation changed before physical confirmation")
-                self._closure_reason(record, None)
-                await self._fence_physical(record)
+            async with AsyncExitStack() as stack:
+                native, parent_ids = await self._containment(stack, expected, space_ids)
+                async with self.registry.host_locked(parent_ids) as (session, parents):
+                    if set(parents) != set(parent_ids):
+                        raise AttachmentPending("Fenced preparation resources are unavailable")
+                    record = (await self._locked_records(session, expected))[attachment_id]
+                    if (record.incarnation, record.actor_kind, record.actor_id, record.host_id, record.container_id, record.phase) != (incarnation, actor.kind, actor.subject_id, host_id, container_id, "fenced"):
+                        raise AttachmentPending("Fenced preparation changed before physical confirmation")
+                    if native is not None:
+                        await native.admit(session, {record.id: record})
+                    self._closure_reason(record, None)
+                    await self._fence_physical(record, native)
+                if native is not None:
+                    await native.finalize()
             return True
 
         return await await_drained(perform())
@@ -395,26 +433,36 @@ class SpaceAttachments:
                         raise ValueError("Unknown attachment")
                     scope = await self._mount_scope(session, [attachment_id])
                 space_ids = sorted(fact[0] for fact in scope[attachment_id])
-                async with self.registry.host_locked(space_ids) as (session, parents):
-                    if set(parents) != set(space_ids):
-                        raise AttachmentPending("Attachment resources are unavailable")
-                    record = (await self._locked_records(session, scope))[attachment_id]
-                    if record.phase != "fenced":
-                        replaced = await self._host_eligible(session, record)
-                        retry_reason = stored_reason = "host-replaced" if replaced else reason
-                        self._record_closure(record, kind="host", subject_id=self.provider.host_id, reason=stored_reason)
-                        record.phase = "fence_pending"
-                    stored_reason = self._closure_reason(record, stored_reason)
-                async with self.registry.host_locked(space_ids) as (session, parents):
-                    if set(parents) != set(space_ids):
-                        raise AttachmentPending("Attachment resources are unavailable")
-                    record = (await self._locked_records(session, scope))[attachment_id]
-                    stored_reason = self._closure_reason(record, stored_reason)
-                    if record.phase != "fenced":
-                        await self._host_eligible(session, record)
-                        if record.phase != "fence_pending":
-                            raise AttachmentPending("Attachment containment state changed")
-                        await self._fence_record(record)
+                async with AsyncExitStack() as stack:
+                    native, parent_ids = await self._containment(stack, scope, space_ids)
+                    async with self.registry.host_locked(parent_ids) as (session, parents):
+                        if set(parents) != set(parent_ids):
+                            raise AttachmentPending("Attachment resources are unavailable")
+                        records = await self._locked_records(session, scope)
+                        if native is not None:
+                            await native.admit(session, records)
+                        record = records[attachment_id]
+                        if record.phase != "fenced":
+                            replaced = await self._host_eligible(session, record)
+                            retry_reason = stored_reason = "host-replaced" if replaced else reason
+                            self._record_closure(record, kind="host", subject_id=self.provider.host_id, reason=stored_reason)
+                            record.phase = "fence_pending"
+                        stored_reason = self._closure_reason(record, stored_reason)
+                    async with self.registry.host_locked(parent_ids) as (session, parents):
+                        if set(parents) != set(parent_ids):
+                            raise AttachmentPending("Attachment resources are unavailable")
+                        records = await self._locked_records(session, scope)
+                        if native is not None:
+                            await native.admit(session, records)
+                        record = records[attachment_id]
+                        stored_reason = self._closure_reason(record, stored_reason)
+                        if record.phase != "fenced":
+                            await self._host_eligible(session, record)
+                            if record.phase != "fence_pending":
+                                raise AttachmentPending("Attachment containment state changed")
+                            await self._fence_record(record, native)
+                    if native is not None:
+                        await native.finalize()
             except Exception as exc:
                 if unknown_attachment:
                     raise
@@ -451,6 +499,12 @@ class SpaceAttachments:
 
     async def _guard(self, session, admitted, requests):
         action = _operation.get()
+        factory = getattr(self.provider, "_containment_scope", None)
+        blocks_admin = getattr(factory, "blocks_admin", None)
+        if callable(blocks_admin) and action != ("retire", None):
+            for identifier, (row, _grant) in admitted.items():
+                if requests[identifier][0] & Permission.ADMIN and _reservation.get() != identifier and blocks_admin(row.backing_handle):
+                    raise AttachmentPending("Resident durable cleanup still owns this backing")
         for attachment, mount in await self._current(session, admitted):
             if action == ("retire", None) or action == ("attach", attachment.id):
                 continue
@@ -529,7 +583,7 @@ class SpaceAttachments:
                     record.incarnation,
                     actor,
                     self.provider.host_id,
-                    tuple(NativeView(r.space_id, r.generation, str(volumes[r.space_id].data_path), "/mnt/spaces/" + r.alias, r.writable, slot_id=getattr(volumes[r.space_id].spec, "slot_id", None)) for r in resources),
+                    self._views(resources, volumes),
                     readonly_roots,
                 )
                 await run_file_io(self.provider.verify_active, record.container_id, plan)
@@ -584,7 +638,7 @@ class SpaceAttachments:
                             incarnation,
                             actor,
                             self.provider.host_id,
-                            tuple(NativeView(r.space_id, r.generation, str(volumes[r.space_id].data_path), "/mnt/spaces/" + r.alias, r.writable, slot_id=getattr(volumes[r.space_id].spec, "slot_id", None)) for r in resources),
+                            self._views(resources, volumes),
                             readonly_roots,
                         )
                         proof = preparation_lifetime.enter_context(preparation_scope(self.provider, plan))
@@ -642,7 +696,8 @@ class SpaceAttachments:
             callback_rejected = False
             effects_possible = False
             try:
-                async with self.registry.admitted(actor=actor, requests=requests, operation_id=exemption) as (session, _):
+                await self.registry.get(actor=actor, space_id=space_id, permission=Permission.ADMIN, expected_generation=expected_generation)
+                async with self.registry._sf() as session:
                     identifiers = {a.id for a, _mount in await self._current(session, [space_id])}
                     if attachment_ids is not None:
                         bound = set((await session.execute(select(SpaceMountRow.attachment_id).where(SpaceMountRow.space_id == space_id, SpaceMountRow.attachment_id.in_(attachment_ids)))).scalars())
@@ -654,48 +709,56 @@ class SpaceAttachments:
                 # ADMIN on one root closes the entire native environment; it
                 # does not require new grants on its other captured roots.
                 space_ids = sorted({space_id} | {fact[0] for facts in scope.values() for fact in facts})
-                async with self.registry.host_locked(space_ids) as (session, parents):
-                    if set(parents) != set(space_ids):
-                        raise AttachmentPending("Attachment resources are unavailable")
-                    await self.registry.admit_in_session(session, actor=actor, requests=requests, operation_id=exemption)
-                    if attachment_ids is None and {a.id for a, _mount in await self._current(session, [space_id])} != identifiers:
-                        raise SpaceConflict("Retirement scope changed; retry against current attachments")
-                    records = await self._locked_records(session, scope)
-                    identities = [(a.id, a.container_id) for a in records.values()]
-                    if admission is not None:
-                        try:
-                            await admission(session, tuple(identities))
-                        except Exception:
-                            callback_rejected = True
-                            raise
-                    # From here, transaction commit/physical outcomes may be uncertain.
-                    effects_possible = True
-                    for record in records.values():
-                        if record.host_id != self.provider.host_id:
-                            raise AttachmentPending("Cross-host containment is unsupported")
-                        if record.phase == "fenced":
-                            self._closure_reason(record, reason)
-                            continue
-                        self._record_closure(record, kind="human", subject_id=actor.subject_id, reason=reason)
-                        record.phase = "fence_pending"
-                confirmed = []
-                async with self.registry.host_locked(space_ids) as (session, parents):
-                    if set(parents) != set(space_ids):
-                        raise AttachmentPending("Attachment resources are unavailable")
-                    await self.registry.admit_in_session(session, actor=actor, requests=requests, operation_id=exemption)
-                    records = await self._locked_records(session, scope)
-                    for attachment_id, _container_id in identities:
-                        record = records[attachment_id]
-                        if record.host_id != self.provider.host_id:
-                            raise AttachmentPending("Cross-host containment is unsupported")
-                        stored_reason = self._closure_reason(record, reason)
-                        if record.phase == "fenced":
+                async with AsyncExitStack() as stack:
+                    native, parent_ids = await self._containment(stack, scope, space_ids)
+                    async with self.registry.host_locked(parent_ids) as (session, parents):
+                        if set(parents) != set(parent_ids):
+                            raise AttachmentPending("Attachment resources are unavailable")
+                        await self.registry.admit_in_session(session, actor=actor, requests=requests, operation_id=exemption)
+                        if attachment_ids is None and {a.id for a, _mount in await self._current(session, [space_id])} != identifiers:
+                            raise SpaceConflict("Retirement scope changed; retry against current attachments")
+                        records = await self._locked_records(session, scope)
+                        if native is not None:
+                            await native.admit(session, records)
+                        identities = [(a.id, a.container_id) for a in records.values()]
+                        if admission is not None:
+                            try:
+                                await admission(session, tuple(identities))
+                            except Exception:
+                                callback_rejected = True
+                                raise
+                        # From here, transaction commit/physical outcomes may be uncertain.
+                        effects_possible = True
+                        for record in records.values():
+                            if record.host_id != self.provider.host_id:
+                                raise AttachmentPending("Cross-host containment is unsupported")
+                            if record.phase == "fenced":
+                                self._closure_reason(record, reason)
+                                continue
+                            self._record_closure(record, kind="human", subject_id=actor.subject_id, reason=reason)
+                            record.phase = "fence_pending"
+                    confirmed = []
+                    async with self.registry.host_locked(parent_ids) as (session, parents):
+                        if set(parents) != set(parent_ids):
+                            raise AttachmentPending("Attachment resources are unavailable")
+                        await self.registry.admit_in_session(session, actor=actor, requests=requests, operation_id=exemption)
+                        records = await self._locked_records(session, scope)
+                        if native is not None:
+                            await native.admit(session, records)
+                        for attachment_id, _container_id in identities:
+                            record = records[attachment_id]
+                            if record.host_id != self.provider.host_id:
+                                raise AttachmentPending("Cross-host containment is unsupported")
+                            stored_reason = self._closure_reason(record, reason)
+                            if record.phase == "fenced":
+                                confirmed.append((attachment_id, stored_reason))
+                                continue
+                            if record.phase != "fence_pending":
+                                raise AttachmentPending("Attachment containment state changed")
+                            await self._fence_record(record, native)
                             confirmed.append((attachment_id, stored_reason))
-                            continue
-                        if record.phase != "fence_pending":
-                            raise AttachmentPending("Attachment containment state changed")
-                        await self._fence_record(record)
-                        confirmed.append((attachment_id, stored_reason))
+                    if native is not None:
+                        await native.finalize()
             except (SpaceDenied, AttachmentPending):
                 raise
             except Exception as exc:

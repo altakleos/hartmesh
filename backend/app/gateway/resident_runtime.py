@@ -124,6 +124,11 @@ class ResidentRuntime:
 
             provider.external_changed(provider._require_bootstrap_producers_drained_locked)
             paired = NativeResourceSet(provider._backend, guard=bridge.assert_current).inventory_paired()
+            qualified_resident_records = frozenset(bridge.residents.records())
+            for record in qualified_resident_records:
+                if record.daemon_id != bridge.evidence.daemon_id:
+                    raise StorageRuntimeUnavailable("Resident census retains a foreign original graph")
+                NativeResourceSet(provider._backend, guard=bridge.assert_current).qualify_resident_record(record)
             residents = adapter.bootstrap_residents(known_slots=tuple(catalog.volumes), paired=paired)
             for actual in residents:
                 claim = claims.get(actual.attachment_id)
@@ -132,6 +137,7 @@ class ResidentRuntime:
             actuals = provider._backend._bootstrap_primary_inventory(known_slots=tuple(catalog.volumes), mountless_binds=self._operational_projection)
             explained = {resource for actual in (*actuals, *residents) for resource in actual.resources}
             explained.update(resource for record in bridge.teardowns._items.values() for resource in record.resources)
+            explained.update(resource for record in qualified_resident_records for resource in record.resources)
             if any(item.fact not in explained for item in paired):
                 raise StorageRuntimeUnavailable("Native census retains unexplained paired resources")
             for actual in actuals:
@@ -147,10 +153,10 @@ class ResidentRuntime:
                 )
                 provider._park_bootstrap_accounting(permit, info)
             retained = {}
-            pending = teardowns = None
+            pending = teardowns = resident_records = None
 
             def capture():
-                nonlocal pending, teardowns
+                nonlocal pending, teardowns, resident_records
                 provider._require_bootstrap_producers_drained_locked()
                 for actual in actuals:
                     parked = provider._warm_pool.get(actual.sandbox_id)
@@ -160,6 +166,9 @@ class ResidentRuntime:
                     retained[actual.sandbox_id] = (current, actual)
                 pending = self._pending_facts(bridge)
                 teardowns = frozenset(bridge.teardowns._items.values())
+                resident_records = frozenset(bridge.residents._items.values())
+                if resident_records != qualified_resident_records:
+                    raise StorageRuntimeUnavailable("Resident original graph changed during census qualification")
 
             provider.external_changed(capture)
 
@@ -174,6 +183,7 @@ class ResidentRuntime:
                     or self._catalog_facts(catalog) != catalog_facts
                     or self._pending_facts(bridge) != pending
                     or frozenset(bridge.teardowns._items.values()) != teardowns
+                    or frozenset(bridge.residents._items.values()) != resident_records
                 ):
                     raise StorageRuntimeUnavailable("Native census or submitted request facts changed")
                 if tuple(adapter._configured_mounts) != configured or any(self.registry.retained.get(actual.attachment_id) != claims[actual.attachment_id] for actual in residents):
