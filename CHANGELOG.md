@@ -20,6 +20,8 @@ and remaining product controls stay deferred.
 Startup agent readiness reflects execution admission. Resident initialization
 failures produce bounded source diagnostics without exception values or tenant
 contents, so an unavailable resident is no longer logged as ready.
+Resident census ignores changing health and exec observations while preserving
+identity, process state, mount and network comparisons across fresh inspections.
 
 There is no database schema, native evidence format or configuration-version change.
 

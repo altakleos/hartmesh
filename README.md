@@ -713,6 +713,8 @@ assistant and AI employee counts now take effect when managed storage is enabled
 Startup logs distinguish prepared storage from agent execution readiness. Failed
 resident initialization logs bounded error types and source locations without
 exception values or tenant contents, while agent execution remains unavailable.
+Resident startup comparison tolerates Docker health and exec observations while
+retaining checks for changes to identity, process state, configuration and mounts.
 Creation respects the configured allowance, counts unfinished and paused agents,
 and assigns files from the matching kind of prepared slot. Exact creation retries
 retain their identity and files. Default activation and the remaining product

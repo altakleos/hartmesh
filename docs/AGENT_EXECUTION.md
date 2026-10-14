@@ -28,6 +28,11 @@ storage pool can coexist with `agents: unavailable (storage-unavailable)` while
 resident initialization is incomplete. Failed initialization reports bounded
 error types and source locations plus qualification state; exception values,
 tenant contents and source text are omitted.
+Resident graph qualification excludes only Docker's observational `ExecIDs` and
+`State.Health` fields from snapshot equality. Identity, process state, restart
+count, complete configuration, mounts and network facts still have to match;
+the paired graph is checked against the fresh primary inspection. A mismatch
+logs only known top-level field names, with unknown names shown as `other`.
 
 Creation, conversations, replies, activations and lifecycle changes check current
 execution readiness. AI assistant creation can refuse `ai-assistant-limit` with
