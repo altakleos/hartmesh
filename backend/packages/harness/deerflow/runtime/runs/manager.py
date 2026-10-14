@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 ORPHAN_RECOVERY_STOP_REASON = "orphan_recovered"
+GATEWAY_STOP_REASON = "gateway_stopped"
 STARTUP_ORPHAN_RECOVERY_ERROR = "Gateway restarted before this run reached a durable final state."
 LEASE_ORPHAN_RECOVERY_ERROR = "Run lease expired — owning worker is unreachable."
 
@@ -309,6 +310,18 @@ class RunManager:
         if not run_ids:
             return []
         return [record for run_id in run_ids if (record := self._runs.get(run_id)) is not None]
+
+    def task_run_ids(self, metadata_key: str, value: str) -> frozenset[str]:
+        """Read active local tasks synchronously on this manager's owning loop."""
+        return frozenset(run_id for run_id, record in self._runs.items() if record.task is not None and not record.task.done() and metadata_key in record.metadata and record.metadata[metadata_key] == value)
+
+    def task_runs(self, metadata_key: str) -> dict[str, dict]:
+        """Snapshot active local tasks in admission order, without store IO."""
+        return {
+            run_id: {"value": record.metadata[metadata_key], "thread_id": record.thread_id, "user_id": record.user_id, "created_at": record.created_at, "metadata": dict(record.metadata)}
+            for run_id, record in self._runs.items()
+            if record.task is not None and not record.task.done() and metadata_key in record.metadata
+        }
 
     @staticmethod
     def _store_put_payload(record: RunRecord, *, error: str | None = None, stop_reason: str | None = None) -> dict[str, Any]:
@@ -2365,6 +2378,8 @@ class RunManager:
             for record in inflight:
                 record.abort_action = "interrupt"
                 record.abort_event.set()
+                if record.stop_reason is None:
+                    record.stop_reason = GATEWAY_STOP_REASON
                 record.task.cancel()  # type: ignore[union-attr]  # filtered above
                 # Status is decided AFTER the drain (below), not here: a run that
                 # completes on its own during the drain must keep its real status.
@@ -2393,7 +2408,8 @@ class RunManager:
                 if record.status in (RunStatus.pending, RunStatus.running):
                     record.status = RunStatus.interrupted
                     record.updated_at = _now_iso()
-                to_persist.append(record)
+                if record.status == RunStatus.interrupted:
+                    to_persist.append(record)
 
         # Bound the trailing status persistence within the remaining budget so a
         # slow store (``_call_store_with_retry`` can back off under DB pressure)
@@ -2405,7 +2421,7 @@ class RunManager:
             else:
                 try:
                     results = await asyncio.wait_for(
-                        asyncio.gather(*(self._persist_status(record, RunStatus.interrupted) for record in to_persist), return_exceptions=True),
+                        asyncio.gather(*(self._persist_status(record, RunStatus.interrupted, stop_reason=record.stop_reason) for record in to_persist), return_exceptions=True),
                         timeout=remaining,
                     )
                 except TimeoutError:

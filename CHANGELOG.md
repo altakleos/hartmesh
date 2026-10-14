@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Workspace runtime observations and shutdown attribution
+
+Workspace refusal types share the existing structured host envelope, with stable
+HTTP 409 reasons and fallback sentences. A memory-only RunManager snapshot exposes
+local active tasks in admission order, including tasks still finalizing a staged
+terminal outcome, without adding a run store or ledger. Gateway shutdown records
+`gateway_stopped` before cancellation and preserves an existing reason. Cancelled
+cleanup cannot overwrite a staged success or error with durable interruption;
+unconfirmed finalization remains the worker's or recovery's responsibility.
+Storage/agent defaults remain disabled. There is no database schema change.
+
 ### Durable restricted sandbox containment
 
 The private native lifecycle journal accepts bounded version-2 teardown

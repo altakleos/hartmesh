@@ -43,6 +43,58 @@ class ExecutionUnavailable(Refusal):
         super().__init__("AI assistants and AI employees cannot run on this deployment right now.", execution_reason=execution_reason)
 
 
+class ResidentUnavailable(Refusal):
+    """The AI agent's workspace cannot admit this run now."""
+
+    template = ""
+
+    def __init__(self, name: str, **extra):
+        super().__init__(self.template.format(name=name), **extra)
+
+
+class ResidentBusy(ResidentUnavailable):
+    reason = "busy"
+    template = "Too much is running at once, so {name} could not start. Try again in a minute."
+
+
+class ResidentWorkLimit(ResidentUnavailable):
+    reason = "work-limit"
+    template = "As many assignments are running as this deployment runs at once. Start this one when one of them finishes."
+
+
+class ResidentRunLimit(ResidentUnavailable):
+    reason = "run-limit"
+    template = "{name} is already working in two conversations. Try again when one of them finishes."
+
+
+class ResidentRestarting(ResidentUnavailable):
+    reason = "restarting"
+    template = "{name}'s workspace restarts once another conversation finishes. Try again in a few minutes."
+
+
+class ResidentStartingElsewhere(ResidentUnavailable):
+    reason = "starting-elsewhere"
+    template = "Another conversation is starting {name}. Try again in a moment."
+
+
+class ResidentStartFailed(ResidentUnavailable):
+    reason = "start-failed"
+    template = "{name}'s workspace did not start. Try again."
+
+
+class ResidentFilesFull(ResidentUnavailable):
+    reason = "files-full"
+    template = "{name}'s files are full, so {name} cannot start. Delete files or ask for more room."
+
+
+class ResidentFilesBusy(ResidentUnavailable):
+    reason = "storage-busy"
+    template = "{name}'s files are being changed right now and cannot be used. Try again in a few minutes."
+
+
+RESIDENT_INTERRUPTED = "ResidentInterrupted"
+
+
 class AgentPermission(IntFlag):
     USE = 1
     INSPECT = 2
