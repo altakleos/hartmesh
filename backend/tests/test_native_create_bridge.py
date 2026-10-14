@@ -53,14 +53,15 @@ def command():
     return ["docker", "run", "--name", "native-a", "image"]
 
 
-def engine(journal, *, error=None, mismatch=None, after_run=None):
+def engine(journal, *, error=None, mismatch=None, after_run=None, labels=LABELS):
     calls, observed = [], []
 
     def run(cmd, **kwargs):
         calls.append(cmd)
         if cmd[1] == "run":
             (pending,) = journal.pending()
-            assert pending.name == "native-a" and pending.slots == (SLOT,)
+            expected_slots = tuple(sorted(key.removeprefix("hartmesh.storage.space.") for key in labels if key.startswith("hartmesh.storage.space.")))
+            assert pending.name == "native-a" and pending.slots == expected_slots
             assert ATTEMPT_LABEL + "=" + pending.id in cmd
             observed.append(pending)
             if error:
@@ -70,7 +71,7 @@ def engine(journal, *, error=None, mismatch=None, after_run=None):
             return SimpleNamespace(stdout=CONTAINER, returncode=0, stderr="")
         assert cmd == ["docker", "inspect", CONTAINER]
         record = observed[0]
-        entry = {"Id": CONTAINER, "Name": "/native-a", "Config": {"Labels": {**LABELS, ATTEMPT_LABEL: record.id}}}
+        entry = {"Id": CONTAINER, "Name": "/native-a", "Config": {"Labels": {**labels, ATTEMPT_LABEL: record.id}}}
         if mismatch == "id":
             entry["Id"] = "d" * 64
         elif mismatch == "name":
@@ -82,6 +83,51 @@ def engine(journal, *, error=None, mismatch=None, after_run=None):
         return SimpleNamespace(stdout=json.dumps([entry]), returncode=0, stderr="")
 
     return run, calls, observed
+
+
+def test_mountless_primary_has_durable_pending_and_exact_verified_handoff(fixture):
+    from deerflow.spaces.native_create_evidence import NativeMountlessCreateAttempt
+
+    journal, state, bridge, _owner = fixture
+    labels = {key: value for key, value in LABELS.items() if not key.startswith("hartmesh.storage.space.")}
+    runner, calls, observed = engine(journal, labels=labels)
+    assert bridge.submit(name="native-a", labels=labels, command=command(), runner=runner) == CONTAINER
+    assert len(calls) == 2 and journal.pending() == ()
+    assert isinstance(observed[0], NativeMountlessCreateAttempt)
+    assert observed[0].slots == ()
+    with state.lock:
+        assert state.extra_slots_locked(starting={}, known_container_ids=set()) == 1
+        assert state.extra_slots_locked(starting={}, known_container_ids={CONTAINER}) == 0
+
+
+@pytest.mark.parametrize("failure", ["request", "extra_slot"])
+def test_mountless_unknown_outcome_keeps_original_attempt_charged(fixture, failure):
+    journal, state, bridge, _owner = fixture
+    labels = {key: value for key, value in LABELS.items() if not key.startswith("hartmesh.storage.space.")}
+    runner, calls, observed = engine(journal, labels=labels, error=RuntimeError("uncertain") if failure == "request" else None, mismatch="extra_slot" if failure == "extra_slot" else None)
+    with pytest.raises(StorageHostUnqualified):
+        bridge.submit(name="native-a", labels=labels, command=command(), runner=runner)
+    assert len(calls) == (1 if failure == "request" else 2)
+    assert journal.pending() == (observed[0],)
+    assert state.pending_for(owner_id="alice")
+    with state.lock:
+        assert state.extra_slots_locked(starting={}, known_container_ids={CONTAINER}) == 1
+
+
+def test_managed_mountless_primary_cannot_bypass_installed_bridge(fixture):
+    from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
+    from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
+
+    _journal, _state, bridge, _owner = fixture
+    backend = object.__new__(LocalContainerBackend)
+    backend._managed_native_required = True
+    backend._runtime = "docker"
+    backend._native_creation = bridge
+    labels = {key: value for key, value in LABELS.items() if not key.startswith("hartmesh.storage.space.")}
+    assert backend._managed_native_bridge(labels) is bridge
+    bridge.invalidate()
+    with pytest.raises(StorageRuntimeUnavailable):
+        backend._managed_native_bridge(labels)
 
 
 def test_pending_is_durable_and_verified_identity_retained_before_ack(fixture):

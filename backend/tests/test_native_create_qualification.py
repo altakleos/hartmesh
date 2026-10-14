@@ -32,7 +32,13 @@ def fixture(tmp_path, monkeypatch):
     storage = SimpleNamespace(inventory_path=pool / "inventory.json", _managed_runtime_required=True, _pool_runtime_owner=owner, attachments=None)
     getter = Mock(return_value=provider)
     monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_baseline_sandbox_provider", getter)
-    monkeypatch.setattr(runtime, "SpaceAttachments", lambda _files, _adapter: SimpleNamespace(provider=_adapter))
+
+    def attachments(files, adapter):
+        mounts = SimpleNamespace(provider=adapter)
+        files.attachments = mounts
+        return mounts
+
+    monkeypatch.setattr(runtime, "SpaceAttachments", attachments)
     adapter = SimpleNamespace(host_id="daemon-A", _same_host=Mock())
     try:
         yield pool, provider, owner, storage, adapter, getter
@@ -91,6 +97,26 @@ async def test_missing_journal_refuses_then_retry_keeps_provider_and_exact_helpe
     assert first is second is provider and repeated is mounts
     assert owner.native_create_evidence is evidence and provider._native_creation is bridge
     getter.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_first_journal_keeps_exact_attachments_and_qualified_adapter_on_retry(fixture, monkeypatch):
+    from deerflow.agent_instances.runtime import qualified_attachments
+
+    pool, provider, _owner, storage, adapter, _getter = fixture
+    alternate = SimpleNamespace(host_id="daemon-A", _same_host=Mock())
+    factory = Mock(side_effect=[adapter, alternate])
+    monkeypatch.setattr(DockerStorageAdapter, "from_local_backend", factory)
+    (pool / ".native-creates").rmdir()
+    with pytest.raises(StorageHostUnqualified):
+        await qualified_attachments(storage)
+    retained = storage.attachments
+    assert retained is not None and retained.provider is adapter
+    (pool / ".native-creates").mkdir(mode=0o700)
+    _baseline, reused = await qualified_attachments(storage)
+    assert reused is retained and storage._qualified_adapter is adapter
+    assert provider._native_creation._check_daemon == adapter._same_host
+    factory.assert_called_once()
 
 
 @pytest.mark.asyncio

@@ -146,9 +146,26 @@ and configuration format are unchanged. Downgrade refuses to erase used bindings
 Migration `0041_storage_host_replacements` follows `0040_work_execution`. It
 adds the host-replacement table, nullable user seat-release marker, four storage
 attachment fence-attribution columns and three Work-attempt containment/workspace
-columns, and permits `host` as a Work-event actor. These later host facts are not
-written yet. It ships with configuration version 54. Normal bootstrap upgrades
+columns, and permits `host` as a Work-event actor. It ships with configuration
+version 54. Normal bootstrap upgrades
 SQLite/PostgreSQL; rollback to release 45 restores the pre-upgrade snapshot.
+
+The Gateway now writes those existing host-attribution and Work-workspace fields
+through coordinated restoration, exact preparation transfer and settlement.
+Capacity publication requires a complete native census and drained producers;
+workspace qualification remains a separate, retried execution condition. Work
+launches retain exact reservations through commit and worker attachment, including
+caller cancellation. The operator's `agents-hold` file refuses new agent execution
+and closes current local workspaces through maintenance, without taking over a
+live foreign lease.
+
+This integration adds no database migration or configuration-version change.
+Private native evidence adds explicit schema-3 zero-slot create and schema-4
+zero-slot teardown records for managed chats without User storage. Existing
+schema-1 creates and schema-2 teardowns keep their validation rules. Compose
+agent counts remain disabled. Strict durable cleanup of untracked resident graphs
+is a subsequent stage: unexplained primaries or secondary resources currently
+keep capacity admission closed rather than being removed from census alone.
 
 ## Instance memory
 

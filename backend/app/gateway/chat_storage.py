@@ -266,10 +266,14 @@ async def chat_storage_lifecycle(app, *, enabled):
 
     app.state.chat_storage_host = None
     app.state.chat_storage_scope = None
+    app.state.resident_runtime = None
     if enabled:
         from app.gateway.native_screenshots import publish_screenshot
+        from deerflow.sandbox.admission import ProviderAdmission
 
-        host = ChatStorageHost(asyncio.get_running_loop(), partial(prepare_chat_storage, app), publish=partial(publish_screenshot, app), pool_runtime_owner=getattr(app.state, "pool_runtime_owner", None))
+        owner = getattr(app.state, "pool_runtime_owner", None)
+        admission = ProviderAdmission() if owner is not None else None
+        host = ChatStorageHost(asyncio.get_running_loop(), partial(prepare_chat_storage, app), publish=partial(publish_screenshot, app), pool_runtime_owner=owner, admission=admission)
         install_chat_storage_host(host)
         app.state.chat_storage_host = host
         app.state.chat_storage_scope = chat_storage_scope_factory(app)

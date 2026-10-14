@@ -37,6 +37,26 @@ def current_environment():
     return _environment.get()
 
 
+async def admit_storage(agents, instance, call, *, wait=False):
+    """Translate run-start storage facts without locks or physical effects."""
+    from deerflow.agent_instances.contract import ExecutionUnavailable, ResidentFilesBusy, ResidentStartFailed, ResidentStartingElsewhere
+    from deerflow.spaces.attachments import AttachmentPending
+    from deerflow.spaces.backings import BackingUnavailable
+    from deerflow.spaces.service import SpaceOperationPending
+
+    try:
+        return await call()
+    except SpaceOperationPending as exc:
+        raise ResidentFilesBusy(instance.name, cause=exc.cause) from exc
+    except BackingUnavailable as exc:
+        state = await agents.execution_probe(instance.id) if agents.execution_probe is not None else None
+        raise ExecutionUnavailable(getattr(state, "reason", None) or "space-unverified") from exc
+    except AttachmentPending as exc:
+        current = await agents.files.attachments.unfenced(instance.home_id)
+        refusal = ResidentStartFailed if getattr(current, "phase", None) == "fence_pending" else ResidentStartingElsewhere
+        raise refusal(instance.name) from exc
+
+
 def _workspace_identity(execution, environment):
     if environment is None:
         return None, None
@@ -223,6 +243,7 @@ async def qualified_attachments(files, *, baseline_provider=None):
     from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
     from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
     from deerflow.spaces.docker import DockerStorageAdapter, StorageAdapterUnsupported, StorageHostUnqualified
+    from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
 
     owner = getattr(files, "_pool_runtime_owner", None)
     if getattr(files, "_managed_runtime_required", False):
@@ -248,6 +269,15 @@ async def qualified_attachments(files, *, baseline_provider=None):
             baseline_provider = await await_drained(run_file_io(get_baseline_sandbox_provider))
     if not isinstance(baseline_provider, AioSandboxProvider) or not isinstance(baseline_provider._backend, LocalContainerBackend):
         raise StorageHostUnqualified("Instance execution requires qualified direct-host Docker AIO storage")
+    if owner is not None:
+        from deerflow.spaces.chat_bridge import get_chat_storage_host
+
+        host = get_chat_storage_host()
+        admission = getattr(host, "admission", None)
+        if admission is not None:
+            if host.pool_runtime_owner is not owner or baseline_provider._storage_host() is not host:
+                raise StorageHostUnqualified("Managed execution lifecycle belongs to another owning host")
+            baseline_provider._bind_runtime_admission(admission)
     if getattr(files, "inventory_path", None) is None:
         raise StorageHostUnqualified("Native execution requires a configured inventory path")
     if owner is not None:
@@ -273,6 +303,13 @@ async def qualified_attachments(files, *, baseline_provider=None):
                 mounts = SpaceAttachments(files, adapter)
             elif mounts.provider.host_id != adapter.host_id:
                 raise StorageAdapterUnsupported("The home attachment belongs to another qualified host")
+            if owner is not None and mounts.provider is not adapter:
+                raise StorageRuntimeUnavailable("Attachment qualification cannot replace its retained adapter")
+            # The adapter's physical probe already succeeded. Retain these
+            # exact objects even if the later journal installation fails.
+            files.attachments = mounts
+            files._qualified_adapter = adapter
+            files._qualified_backend = baseline_provider._backend
             if owner is not None:
                 evidence = await await_drained(run_file_io(owner.qualify_native_evidence, baseline_provider, daemon_id=adapter.host_id))
                 await await_drained(run_file_io(baseline_provider._install_native_creation, evidence, adapter))
@@ -284,7 +321,6 @@ async def qualified_attachments(files, *, baseline_provider=None):
             return baseline_provider, mounts
         except BaseException as exc:
             from deerflow.community.aio_sandbox.native_creation import NativeCreateBridge
-            from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
 
             bridge = getattr(baseline_provider, "_native_creation", None)
             if isinstance(bridge, NativeCreateBridge):

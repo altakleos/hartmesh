@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Coordinated Gateway workspace runtime
+
+Managed Gateway startup now restores durable attachment claims and requires a
+complete sandbox, resident and paired-resource census before publishing capacity.
+Unknown resources and live foreign leases preserve charges and keep admission
+closed. Current workspace qualification is retried independently. Work activation
+reserves capacity before writing an attempt, preserves exact replay checks, and
+drains commit, launch and observation across cancellation. Shutdown drains pending
+admissions before stopping workers. Existing maintenance adds operator holds,
+eligible workspace reaping, Work settlement and release cleanup for every kind.
+Reclamation retries brief reservation conflicts for up to five seconds in the
+same maintenance pass. Unknown outcomes retain their existing retry safeguards.
+Compose agent counts remain disabled; strict durable resident orphan cleanup and
+the remaining product stages follow separately.
+
+There is no database schema or configuration-version change. Private native
+evidence adds explicit v3 zero-slot create and v4 zero-slot teardown records;
+existing v1/v2 formats retain their validation rules.
+
 ### Workspace outcome correlation and settlement foundation
 
 Trusted attachment inspection matches the exact durable incarnation, actor, host
@@ -16,8 +35,8 @@ ready-workspace correlation, identify admitted activation retries and settle
 confirmed host failures while preserving candidates and assignment state. Terminal
 worker results win over late settlement; failed transactions publish no receipt
 or journal line. Worker completion now returns its resulting status with unchanged
-decisions. These APIs have no new runtime callers yet. Storage/agent defaults remain
-disabled. There is no database schema change.
+decisions. The coordinated Gateway runtime above now consumes these APIs.
+Storage/agent defaults remain disabled. There is no database schema change.
 
 ### Shared workspace capacity foundation
 
@@ -27,8 +46,8 @@ rechecks exact Home claims before eviction and drains lifecycle effects across
 cancellation. The owning-loop resident registry adds Work and conversation limits,
 exact preparation claims, idle containment and completion bookkeeping. Expired or
 cancelled reservations cannot release an uncertain preparation or publish late
-capacity. Timed-out eviction remains owned until drainage. Registry installation,
-durable restart restoration and Gateway/Work integration follow separately.
+capacity. Timed-out eviction remains owned until drainage. The coordinated Gateway
+runtime above now installs restoration and Work integration.
 Storage/agent defaults remain disabled. There is no database schema change.
 
 ### Workspace runtime observations and shutdown attribution

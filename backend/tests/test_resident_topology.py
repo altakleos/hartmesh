@@ -81,6 +81,24 @@ def test_prepare_resident_inherits_runtime_user_seccomp_network_and_config_mount
     local._restricted_resources_status.assert_not_called()
 
 
+def test_first_restricted_resident_accepts_exact_docker29_lowercase_absence():
+    local, calls = backend("allowlist")
+    original = local._runtime_runner
+
+    def run(command, **kwargs):
+        if "inspect" in command:
+            calls.append((command, kwargs))
+            error = "error: no such object: " + command[-1] if command[1] == "inspect" else "Error: No such network: " + command[-1]
+            return SimpleNamespace(returncode=1, stdout="[]", stderr=error)
+        return original(command, **kwargs)
+
+    local._runtime_runner = run
+    local._create_internal_network, local._create_egress_network = Mock(), Mock()
+    local._start_network_proxy = Mock(return_value="172.24.0.2")
+    assert local.prepare_resident(ATTACHMENT, "hartmesh-space-" + ATTACHMENT, MOUNTS, LABELS) == CONTAINER
+    assert any(command[1] == "create" for command, _kwargs in calls)
+
+
 def test_resident_relay_publishes_no_port_and_carries_no_storage_label():
     local, calls = backend("allowlist")
     local._container_network_address = Mock(return_value="172.24.0.2")

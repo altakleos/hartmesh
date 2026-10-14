@@ -62,6 +62,107 @@ async def test_reservation_is_exact_and_prevents_concurrent_activation(execution
 
 
 @pytest.mark.asyncio
+async def test_new_attempt_capacity_refusal_writes_no_attempt_or_revision(execution):
+    from deerflow.agent_instances.contract import ResidentWorkLimit
+
+    service, admitted, row, _sf = execution
+
+    def refuse(_attempt_id):
+        raise ResidentWorkLimit(admitted.instance.name)
+
+    with pytest.raises(ResidentWorkLimit):
+        await service.reserve(execution=admitted, work_id=row["id"], request=activation(admitted, row), before_admit=refuse)
+    current = await service.work.get(actor=ALICE, instance_id=admitted.instance.id, work_id=row["id"])
+    assert current["attempt"] is None and current["revision"] == row["revision"]
+
+
+@pytest.mark.asyncio
+async def test_exact_activation_replay_skips_new_capacity_and_keeps_payload_checks(execution):
+    service, admitted, row, _sf = execution
+    body = activation(admitted, row)
+    scope = await service.reserve(execution=admitted, work_id=row["id"], request=body)
+
+    def refuse(_attempt_id):
+        raise AssertionError("A replay does not create another attempt")
+
+    same = await service.reserve(execution=admitted, work_id=row["id"], request=body, before_admit=refuse)
+    assert same.attempt_id == scope.attempt_id
+    with pytest.raises(AgentConflict):
+        await service.reserve(execution=admitted, work_id=row["id"], request=body.model_copy(update={"expected_revision": 8}), before_admit=refuse)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_attempt_commit_retains_the_exact_admitted_identity(execution, monkeypatch):
+    import asyncio
+
+    from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow
+
+    service, admitted, row, sf = execution
+    entered, release = asyncio.Event(), asyncio.Event()
+    admitted_ids = []
+    original = service.work._event
+
+    async def event(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        await original(*args, **kwargs)
+
+    monkeypatch.setattr(service.work, "_event", event)
+    task = asyncio.create_task(service.reserve(execution=admitted, work_id=row["id"], request=activation(admitted, row), before_admit=admitted_ids.append))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        assert len(admitted_ids) == 1
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        async with sf() as session:
+            saved = await session.get(AgentWorkAttemptRow, admitted_ids[0])
+            assert saved is not None and saved.status == "starting"
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_host_settlement_rechecks_live_attempt_after_work_lock_wait(execution, monkeypatch):
+    import asyncio
+
+    from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow
+
+    service, admitted, row, sf = execution
+    scope = await service.reserve(execution=admitted, work_id=row["id"], request=activation(admitted, row))
+    entered, release = asyncio.Event(), asyncio.Event()
+    live = set()
+    original = service.work._row
+
+    async def locked(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        if kwargs.get("lock"):
+            entered.set()
+            await release.wait()
+        return result
+
+    monkeypatch.setattr(service.work, "_row", locked)
+    options = dict(instance_id=admitted.instance.id, host_id="qualified-test-host", reason="start-failed", attachment_id=None, unstarted_after=0, live_run_ids=frozenset(), live_attempts=lambda: frozenset(live))
+    task = asyncio.create_task(service.settle_contained(**options))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        live.add(scope.attempt_id)
+        release.set()
+        assert await task == []
+        async with sf() as session:
+            assert (await session.get(AgentWorkAttemptRow, scope.attempt_id)).status == "starting"
+        live.clear()
+        assert await service.settle_contained(**options) == [scope.attempt_id]
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_work_context_marks_history_protected_even_without_memory(execution):
     service, admitted, row, sf = execution
     await service.reserve(execution=admitted, work_id=row["id"], request=activation(admitted, row))

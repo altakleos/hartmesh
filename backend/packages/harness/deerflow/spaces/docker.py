@@ -14,7 +14,9 @@ import secrets
 import stat
 import subprocess
 import threading
+import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from deerflow.spaces.filesystem import FilesystemUnavailable
@@ -22,6 +24,18 @@ from deerflow.spaces.filesystem import FilesystemUnavailable
 ATTACHMENT_LABEL = "hartmesh.storage.attachment"
 HOST_LABEL = "hartmesh.storage.host"
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ResidentPrimary:
+    container_id: str
+    name: str
+    created_at: str
+    attachment_id: str
+    host_id: str
+    slots: tuple[str, ...]
+    mounts: tuple[tuple[str, str, bool], ...]
+    resources: tuple = ()
 
 
 class StorageAdapterUnsupported(FilesystemUnavailable):
@@ -385,6 +399,92 @@ class DockerStorageAdapter:
             raise StorageAdapterUnsupported("Environment start outcome is unconfirmed")
         self._validate(container, plan, active=True)
 
+    def bootstrap_residents(self, *, known_slots, paired=None):
+        """Count strict original residents; this grants no adoption or cleanup."""
+        from deerflow.community.aio_sandbox.native_resource_set import NativeResourceSet
+        from deerflow.spaces.native_teardown_evidence import _timestamp
+
+        if self._backend is None or not isinstance(known_slots, (tuple, list, set, frozenset)) or len(known_slots) > 4096 or any(not isinstance(slot, str) or re.fullmatch(r"[0-9a-f]{32}", slot) is None for slot in known_slots):
+            raise StorageHostUnqualified("Resident census requires its exact qualified backend and pool")
+        self._same_host()
+        reader = NativeResourceSet(self._backend, guard=self._same_host)
+        paired = reader.inventory_paired() if paired is None else paired
+        identifiers = set()
+        selectors = ("label=deerflow.role=resident", "label=" + ATTACHMENT_LABEL, "label=" + HOST_LABEL + "=" + self.host_id, "name=^/hartmesh-space-")
+        for selector in selectors:
+            remaining = reader.deadline - time.monotonic()
+            if remaining <= 0:
+                raise StorageHostUnqualified("Resident candidate census exhausted its budget")
+            reply = self._backend._run(["docker", "ps", "--all", "--no-trunc", "--filter", selector, "--format", "{{.ID}}"], capture_output=True, text=True, timeout=min(15, remaining))
+            candidates = reply.stdout.splitlines()
+            if reply.returncode or len(reply.stdout) > 65536 or len(candidates) > 256 or len(set(candidates)) != len(candidates) or any(re.fullmatch(r"[0-9a-f]{64}", identifier) is None for identifier in candidates):
+                raise StorageHostUnqualified("Resident primary census is incomplete or unbounded")
+            identifiers.update(candidates)
+            if len(identifiers) > 256:
+                raise StorageHostUnqualified("Resident candidate union is unbounded")
+        result, attachments = [], set()
+        for identifier in sorted(identifiers):
+            entry = reader.inspect("container", identifier)
+            labels = (entry or {}).get("Config", {}).get("Labels")
+            if not isinstance(labels, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in labels.items()):
+                raise StorageHostUnqualified("Resident census has unknown labels")
+            attachment_id = labels.get(ATTACHMENT_LABEL)
+            slots = tuple(sorted(key.removeprefix("hartmesh.storage.space.") for key in labels if key.startswith("hartmesh.storage.space.")))
+            if (
+                not isinstance(attachment_id, str)
+                or re.fullmatch(r"[0-9a-f]{32}", attachment_id) is None
+                or attachment_id in attachments
+                or labels.get(HOST_LABEL) != self.host_id
+                or labels.get("deerflow.role") != "resident"
+                or entry.get("Name") != "/hartmesh-space-" + attachment_id
+                or not _timestamp(entry.get("Created"))
+                or not 1 <= len(slots) <= 128
+                or not set(slots).issubset(known_slots)
+                or any(labels["hartmesh.storage.space." + slot] != "1" for slot in slots)
+                or any(key in labels for key in ("deerflow.owner_user_id", "deerflow.thread_id", "hartmesh.chat.storage"))
+            ):
+                raise StorageHostUnqualified("Resident primary has unknown or ambiguous correlation")
+            reader._state(entry)
+            mounts = entry.get("Mounts")
+            if (
+                not isinstance(mounts, list)
+                or len(mounts) > 128
+                or any(
+                    not isinstance(mount, dict)
+                    or mount.get("Type") != "bind"
+                    or mount.get("Propagation") != "rprivate"
+                    or type(mount.get("RW")) is not bool
+                    or not isinstance(mount.get("Source"), str)
+                    or not isinstance(mount.get("Destination"), str)
+                    for mount in mounts
+                )
+            ):
+                raise StorageHostUnqualified("Resident primary has unknown mount facts")
+            mode, digest = labels.get("deerflow.network_mode", "open"), labels.get("deerflow.network_policy_digest")
+            members = tuple(item.fact for item in paired if item.sandbox_id == attachment_id)
+            if mode == "open":
+                if members or digest is not None:
+                    raise StorageHostUnqualified("Open resident has unexplained paired resources")
+            elif mode in {"blocked", "allowlist"}:
+                if (
+                    labels.get("deerflow.sandbox_id") != attachment_id
+                    or not isinstance(digest, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                    or len(members) != 3
+                    or {member.role for member in members} != {"network-proxy", "network", "egress-network"}
+                ):
+                    raise StorageHostUnqualified("Resident paired graph is incomplete")
+            else:
+                raise StorageHostUnqualified("Resident network policy is unknown")
+            reader.qualify_resident_graph(entry, attachment_id=attachment_id, network_mode=mode, policy_digest=digest, resources=members)
+            actual_mounts = tuple(sorted((mount["Source"], mount["Destination"], mount["RW"]) for mount in mounts))
+            if len(set(actual_mounts)) != len(actual_mounts):
+                raise StorageHostUnqualified("Resident mount projection is ambiguous")
+            result.append(ResidentPrimary(identifier, entry["Name"][1:], entry["Created"], attachment_id, self.host_id, slots, actual_mounts, members))
+            attachments.add(attachment_id)
+        self._same_host()
+        return tuple(result)
+
     def discover(self, attachment_id):
         if not isinstance(attachment_id, str) or not re.fullmatch(r"[0-9a-f]{32}", attachment_id):
             raise ValueError("Invalid attachment identity")
@@ -424,7 +524,7 @@ class DockerStorageAdapter:
         result = self._call(*(["network"] if kind == "network" else []), "inspect", identity)
         if result.returncode:
             absent = (
-                ("Error: No such object: " + identity, "Error response from daemon: No such container: " + identity)
+                ("Error: No such object: " + identity, "error: no such object: " + identity, "Error response from daemon: No such container: " + identity)
                 if kind == "container"
                 else ("Error: No such network: " + identity, "Error response from daemon: network " + identity + " not found")
             )

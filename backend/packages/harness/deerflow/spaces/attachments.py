@@ -180,7 +180,7 @@ class SpaceAttachments:
             raise AttachmentPending("Invalid persisted attachment state")
         return records
 
-    async def _fence_record(self, record):
+    async def _fence_physical(self, record):
         containers = set(await run_file_io(self.provider.discover, record.id))
         if record.container_id is not None:
             containers.add(record.container_id)
@@ -193,6 +193,9 @@ class SpaceAttachments:
             # after this census. Removing observed IDs does not settle it.
             raise AttachmentPending("Preparation identity is unknown; containment remains unconfirmed")
         await run_file_io(self.provider.cleanup, record.id)
+
+    async def _fence_record(self, record):
+        await self._fence_physical(record)
         record.phase = "fenced"
         record.fenced_at = datetime.now(UTC)
 
@@ -264,6 +267,66 @@ class SpaceAttachments:
             facts = AttachmentState(record.id, record.phase, record.host_id, record.container_id)
         return facts
 
+    async def confirm_fenced_preparation(self, *, actor, incarnation, resources, host_id, attachment_id, container_id):
+        """Fresh exact physical confirmation for an already drained host start.
+
+        Historical phase alone never releases an in-process preparation. The
+        trusted caller retains its Home lock and has drained every invoked
+        worker. Reprove the original immutable resource set under SQL parent
+        locks without changing its historical closure attribution or time.
+        """
+        state = await self.inspect_preparation(actor=actor, incarnation=incarnation, resources=resources, host_id=host_id)
+        if state is None or (state.id, state.phase, state.host_id, state.container_id) != (attachment_id, "fenced", host_id, container_id):
+            raise AttachmentPending("Fenced preparation lost its exact historical identity")
+        if host_id != self.provider.host_id:
+            raise AttachmentPending("Fenced preparation belongs to another physical host")
+        expected = {attachment_id: {(resource.space_id, resource.generation, resource.alias, resource.writable) for resource in resources}}
+        space_ids = sorted({resource.space_id for resource in resources})
+
+        async def perform():
+            async with self.registry.host_locked(space_ids) as (session, parents):
+                if set(parents) != set(space_ids):
+                    raise AttachmentPending("Fenced preparation resources are unavailable")
+                record = (await self._locked_records(session, expected))[attachment_id]
+                if (record.incarnation, record.actor_kind, record.actor_id, record.host_id, record.container_id, record.phase) != (incarnation, actor.kind, actor.subject_id, host_id, container_id, "fenced"):
+                    raise AttachmentPending("Fenced preparation changed before physical confirmation")
+                self._closure_reason(record, None)
+                await self._fence_physical(record)
+            return True
+
+        return await await_drained(perform())
+
+    @classmethod
+    def _retained_claim(cls, record, scope):
+        cls._closure_reason(record, None)
+        if record.phase in {"pending", "active"} and any(value is not None for value in (record.fenced_by_kind, record.fenced_by_id, record.fence_reason, record.fenced_at)):
+            raise AttachmentPending("Open retained attachment carries closure metadata")
+        if any(type(writable) not in (int, bool) or writable not in (0, 1) for _space, _generation, _alias, writable in scope):
+            raise AttachmentPending("Retained mount has an invalid write mode")
+        return RetainedAttachment(
+            record.id,
+            record.incarnation,
+            PrincipalRef(record.actor_kind, record.actor_id),
+            record.host_id,
+            tuple(ResourceMount(space, generation, alias, bool(writable)) for space, generation, alias, writable in scope),
+            record.phase,
+            record.container_id,
+        )
+
+    async def retained_attachment(self, attachment_id: str) -> RetainedAttachment | None:
+        """Exact detached accounting read; None confers no containment proof."""
+        self._identifier(attachment_id)
+        async with self.registry._sf() as session:
+            record = await session.get(SpaceAttachmentRow, attachment_id)
+            if record is None:
+                return None
+            if record.phase == "fenced":
+                self._identifier(record.incarnation)
+                self._closure_reason(record, None)
+                return None
+            scope = (await self._mount_scope(session, (record.id,)))[record.id]
+            return self._retained_claim(record, scope)
+
     async def retained_claims(self, *, limit=MAX_RETAINED_ATTACHMENTS) -> tuple[RetainedAttachment, ...]:
         """Read a complete globally bounded snapshot, without effects or grants."""
         if type(limit) is not int or not 1 <= limit <= MAX_RETAINED_ATTACHMENTS:
@@ -278,20 +341,7 @@ class SpaceAttachments:
             scope = await self._mount_scope(session, identifiers) if identifiers else {}
             claims = []
             for record in records:
-                self._closure_reason(record, None)
-                if record.phase in {"pending", "active"} and any(value is not None for value in (record.fenced_by_kind, record.fenced_by_id, record.fence_reason, record.fenced_at)):
-                    raise AttachmentPending("Open retained attachment carries closure metadata")
-                claims.append(
-                    RetainedAttachment(
-                        record.id,
-                        record.incarnation,
-                        PrincipalRef(record.actor_kind, record.actor_id),
-                        record.host_id,
-                        tuple(ResourceMount(space, generation, alias, bool(writable)) for space, generation, alias, writable in scope[record.id]),
-                        record.phase,
-                        record.container_id,
-                    )
-                )
+                claims.append(self._retained_claim(record, scope[record.id]))
         return tuple(claims)
 
     async def fence_reason(self, attachment_id: str) -> str | None:

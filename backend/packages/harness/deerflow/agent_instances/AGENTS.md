@@ -58,15 +58,25 @@ All eight `ResidentUnavailable` subclasses default to 409, including workspace
 `files-full`, distinct from the personal-chat 507. Preserve cause metadata and
 stable fallback sentences. `RESIDENT_INTERRUPTED` names a frame, never an exception.
 
-`residents.py` remains uninstalled; optional preparation/worker hooks use the owning loop;
+Managed Gateway startup installs `residents.py`; preparation/worker hooks use the owning loop;
 provider-locked slots include exact preparation claims through uncertain outcomes.
 Restoration retains each durable attachment; incomplete snapshots never open admission.
-Private uninstalled `bootstrap.py` retains startup tasks through timeout/cancellation,
+Private `bootstrap.py` retains startup tasks through timeout/cancellation,
 checks exact census evidence before atomic callback/readiness publication, and seals
 before draining workers, initialization and registry effects. See the registry guide.
 Expiry/cancellation never implies containment. Timed-out eviction stays owned
 through drainage. Restore durable claims and coordinate admission before installation;
 see [registry rules](../../../../docs/RESIDENT_REGISTRY.md).
+
+`app.gateway.resident_runtime` owns the registry and complete native collector.
+Work activation's refusing preflight authorizes an exact replay without writing
+a new attempt; physical capacity stays outside SQL, with pure exact binding
+before commit. Retain live launch tasks through cancellation and never expire
+their promises. Confirmed rollback may cancel; uncertain commit retains charge.
+Serialize runless replay recovery under the Home lock, releasing before launch.
+Drain sealed admissions before RunManager shutdown snapshots workers. Periodic
+orphan callbacks request an exact deferred recycle; maintenance owns closure.
+An unacknowledged preparation cannot become absence from an empty census.
 
 Opt-in Work readiness/host-settlement seams require exact Home/actor/host facts.
 Reload attempts after Work locking; preserve terminal outcomes and candidates.

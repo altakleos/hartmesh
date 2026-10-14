@@ -241,13 +241,19 @@ class AgentConversations:
                 if attempt == 2:
                     raise AgentConflict("Conversation identity was claimed concurrently") from exc
 
-    async def execution(self, *, actor, thread_id):
+    async def execution(self, *, actor, thread_id, require_ready=False):
         instance_id = await self.binding(thread_id)
         if instance_id is None or not await self.allowed(actor=actor, thread_id=thread_id, permission=AgentPermission.USE) or not await self.allowed(actor=actor, thread_id=thread_id, permission=AgentPermission.INSPECT):
             raise AgentDenied("Agent conversation is unavailable")
         view = await self.instances.get(actor=actor, instance_id=instance_id, permission=AgentPermission.USE)
         if view.status != "active":
             raise AgentDenied("Agent instance is not active")
+        if require_ready and self.instances.execution_probe is not None:
+            from deerflow.agent_instances.contract import ExecutionUnavailable
+
+            state = await self.instances.execution_probe(view.id)
+            if state.execution == "unavailable":
+                raise ExecutionUnavailable(state.reason)
         async with self._sf() as session:
             definition = await self.instances._stored_definition(session, view.definition_revision)
         home = await self.instances.files.registry.get(actor=view.principal, space_id=view.home_id)
@@ -258,8 +264,15 @@ class AgentConversations:
             if thread is None or not thread.incarnation:
                 raise AgentDenied("Agent conversation is unavailable")
             execution = AgentExecution(view, actor, definition, home.generation, self, thread_id, thread.incarnation, asyncio.get_running_loop())
-        compatible = await self.context_admission(execution)
+        from deerflow.agent_instances.runtime import admit_storage
+
+        compatible = await admit_storage(self.instances, view, lambda: self.context_admission(execution))
         return replace(execution, memory_audience_allowed=compatible)
+
+    async def admit(self, execution):
+        from deerflow.agent_instances.runtime import admit_storage
+
+        await admit_storage(self.instances, execution.instance, lambda: self.validate(execution))
 
     async def validate(self, execution):
         if not execution.execution_allowed:

@@ -708,6 +708,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 cleanup_delay=cleanup_delay,
                 on_cleanup_scheduled=track_recovered_stream_cleanup,
             )
+            from app.gateway.work_execution import contain_orphaned_work
+
+            await contain_orphaned_work(app, recovered_runs)
 
         app.state.run_manager = RunManager(
             store=app.state.run_store,
@@ -727,6 +730,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             before=now_iso(),
             stop_reason=ORPHAN_RECOVERY_STOP_REASON,
         )
+        app.state.startup_recovered_runs = recovered_runs
         await _terminalize_recovered_runs(
             app.state.stream_bridge,
             recovered_runs,
@@ -745,6 +749,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         try:
             yield
         finally:
+            from app.gateway.resident_runtime import seal_resident_runtime
+
+            seal_resident_runtime(app)
             mark_pool_runtime_closing(app)
             # Drain in-flight run tasks BEFORE the AsyncExitStack tears down the
             # checkpointer (and its connection pool). A run still mid-graph would
@@ -754,6 +761,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             try:
                 run_manager = getattr(app.state, "run_manager", None)
                 if run_manager is not None:
+                    runtime = getattr(app.state, "resident_runtime", None)
+                    if runtime is not None:
+                        await await_drained(runtime.drain_admissions())
                     shutdown_deadline = asyncio.get_running_loop().time() + _RUN_DRAIN_TIMEOUT_SECONDS
                     try:
                         await _drain_inflight_runs(run_manager)
@@ -785,12 +795,19 @@ async def _close_runtime_storage(app):
 
         async def drain():
             from app.gateway.chat_storage import close_chat_storage_host
-            from app.gateway.storage_spaces import close_storage_spaces
+            from app.gateway.resident_runtime import close_resident_runtime
+            from app.gateway.storage_spaces import close_storage_spaces, drain_storage_spaces
 
             try:
-                await close_chat_storage_host(app)
+                await drain_storage_spaces(app)
             finally:
-                await close_storage_spaces(app)
+                try:
+                    await close_resident_runtime(app)
+                finally:
+                    try:
+                        await close_chat_storage_host(app)
+                    finally:
+                        await close_storage_spaces(app)
 
         task = asyncio.create_task(drain())
         app.state.runtime_storage_shutdown_task = task

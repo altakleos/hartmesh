@@ -28,7 +28,8 @@ async def managed_pool_runtime(app, config):
     """Retain ownership beyond provider drains and SQL disposal.
 
     Acquisition belongs to native qualification, so a missing/busy pool still
-    permits metadata and mountless chats. An incomplete provider constructor is
+    permits metadata access; native mountless execution still requires the host's
+    complete accounting and opened admission. An incomplete provider constructor is
     joined off-loop here, including when early storage closure found no provider.
     """
     owner = PoolRuntimeOwner(Path(config.inventory_path).parent) if config.enabled and config.plan is not None else None

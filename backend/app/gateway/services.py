@@ -1740,6 +1740,23 @@ async def start_run(
     require_existing_thread: bool = False,
     work_attempt: Any | None = None,
 ) -> RunRecord:
+    """Own an installed host's whole admission through worker attachment."""
+    operation = _start_run(body, thread_id, request, idempotency_key=idempotency_key, require_existing_thread=require_existing_thread, work_attempt=work_attempt)
+    scope = getattr(request, "scope", None)
+    app = scope.get("app") if isinstance(scope, Mapping) else getattr(request, "app", None)
+    runtime = getattr(getattr(app, "state", None), "resident_runtime", None)
+    return await (runtime.own_operation(operation) if runtime is not None else operation)
+
+
+async def _start_run(
+    body: RunCreateRequest,
+    thread_id: str,
+    request: Request,
+    *,
+    idempotency_key: str | None = None,
+    require_existing_thread: bool = False,
+    work_attempt: Any | None = None,
+) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
     Parameters
@@ -2172,12 +2189,14 @@ async def start_run(
             )
 
         try:
-            async with goal_thread_lock(thread_id):
+            from app.gateway.agent_conversations import resident_run_admission
+
+            async with goal_thread_lock(thread_id), resident_run_admission(instance_execution, run_mgr, idempotency_key=idempotency_key) as admitted_record:
                 if require_existing_thread and not await thread_access_allowed():
                     raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
                 if instance_execution is not None:
                     await instance_execution.authority.validate(instance_execution)
-                record = None
+                record = admitted_record
                 if instance_execution is None and getattr(request.app.state, "storage_spaces_enabled", False) is True:
                     from app.gateway.chat_storage import check_chat_thread_capacity, prepare_chat_request
                     from deerflow.spaces.chat_paths import ChatFilesFull
@@ -2212,7 +2231,7 @@ async def start_run(
                     if require_existing_thread and not await thread_access_allowed():
                         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
                     if instance_execution is not None:
-                        await instance_execution.authority.validate(instance_execution)
+                        await instance_execution.authority.admit(instance_execution)
                     record = await run_mgr.create_or_reject(
                         thread_id,
                         body.assistant_id,

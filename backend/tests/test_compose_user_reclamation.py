@@ -86,6 +86,34 @@ async def release(repo, account):
 
 
 @pytest.mark.asyncio
+async def test_reclamation_retries_brief_live_owner_reference_in_the_same_pass(account_storage):
+    app, repo, sf, files, catalog, _company = account_storage
+    provider = app.state.agent_execution.qualified_provider = ContainmentFixture(sf)
+    person = await repo.create_user(User(email="transient-owner@example.com"))
+    await ss.assign_user_space(app, person)
+    space_id, handle, slot = await assigned(sf, person)
+    (catalog.verified[slot].data_path / "old").write_bytes(b"released account")
+    await release(repo, person)
+    reference = provider.gate.enter(str(person.id))
+    provider.gate.register_slots(reference, (slot,))
+
+    async def finish_admitted_work():
+        await asyncio.sleep(0.05)
+        provider.gate.end(reference)
+
+    finishing = asyncio.create_task(finish_admitted_work())
+    try:
+        assert await ss.reclaim_released_user_spaces(app) == 1
+        assert provider.proof_count and not any(catalog.verified[slot].data_path.iterdir())
+        async with sf() as session:
+            assert await session.get(SpaceBackingRow, handle) is None
+        assert await assigned(sf, person) is None
+    finally:
+        provider.gate.end(reference)
+        await finishing
+
+
+@pytest.mark.asyncio
 async def test_release_reclaims_one_slot_for_next_account_and_preserves_other_users(account_storage):
     app, repo, sf, files, catalog, _company = account_storage
     provider = app.state.agent_execution.qualified_provider = ContainmentFixture(sf)

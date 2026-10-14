@@ -330,15 +330,14 @@ class NativeCreateBridge:
         slots = tuple(sorted(key[len(_SLOT_PREFIX) :] for key in labels if key.startswith(_SLOT_PREFIX)))
         owner, thread, sandbox = (labels.get(key) for key in ("deerflow.owner_user_id", "deerflow.thread_id", "deerflow.sandbox_id"))
         if (
-            not slots
-            or any(re.fullmatch(r"[0-9a-f]{32}", slot) is None or labels[_SLOT_PREFIX + slot] != "1" for slot in slots)
+            any(re.fullmatch(r"[0-9a-f]{32}", slot) is None or labels[_SLOT_PREFIX + slot] != "1" for slot in slots)
             or labels.get("hartmesh.chat.storage") != "on"
             or labels.get("deerflow.role") != "sandbox"
             or not owner
             or not thread
             or not sandbox
         ):
-            raise StorageHostUnqualified("Native creation lacks its exact slot and execution correlation")
+            raise StorageHostUnqualified("Native creation lacks its exact managed execution correlation")
         return owner, thread, sandbox, slots
 
     def begin(self, *, name, labels):
@@ -356,7 +355,12 @@ class NativeCreateBridge:
         try:
             owner, thread, sandbox, slots = self._requested(labels)
             self.require_admissible(name=name, owner_id=owner)
-            attempt = self.evidence.begin(owner_id=owner, thread_id=thread, name=name, slots=slots)
+            if slots:
+                attempt = self.evidence.begin(owner_id=owner, thread_id=thread, name=name, slots=slots)
+            else:
+                # This proves submission correlation only. Empty Space slots
+                # grant neither mount qualification nor cleanup authority.
+                attempt = self.evidence.begin_mountless(owner_id=owner, thread_id=thread, name=name)
             handoff = self.handoffs.record_pending(attempt, sandbox_id=sandbox, reservation=NATIVE_CREATE_RESERVATION.get())
             self.assert_current()
             return handoff

@@ -59,6 +59,11 @@ class NativeCreateAttempt:
 
 
 @dataclass(frozen=True)
+class NativeMountlessCreateAttempt(NativeCreateAttempt):
+    """Explicit zero-Space-slot correlation, never a fabricated backing."""
+
+
+@dataclass(frozen=True)
 class NativeContainerIdentity:
     attempt_id: str
     daemon_id: str
@@ -150,9 +155,14 @@ class NativeCreateEvidence:
 
     @staticmethod
     def _validate(document, identifier):
-        if isinstance(document, dict) and type(document.get("schema_version")) is int and document["schema_version"] == 2:
+        version = document.get("schema_version") if isinstance(document, dict) else None
+        if type(version) is not int:
+            raise StorageHostUnqualified("Native create evidence schema is unknown")
+        if version in (2, 4):
             return NativeTeardownRecord.parse(document, identifier)
-        if not isinstance(document, dict) or set(document) != _FIELDS or type(document["schema_version"]) is not int or document["schema_version"] != 1:
+        mountless = version == 3
+        fields = _FIELDS | {"record_kind"} if mountless else _FIELDS
+        if version not in (1, 3) or set(document) != fields or (mountless and document["record_kind"] != "mountless-create"):
             raise StorageHostUnqualified("Native create evidence schema is unknown")
         slots = document["slots"]
         if (
@@ -164,7 +174,7 @@ class NativeCreateEvidence:
             or not isinstance(document["name"], str)
             or not _NAME.fullmatch(document["name"])
             or not isinstance(slots, list)
-            or not 1 <= len(slots) <= 128
+            or (len(slots) != 0 if mountless else not 1 <= len(slots) <= 128)
             or any(not isinstance(slot, str) or not _HEX32.fullmatch(slot) for slot in slots)
             or slots != sorted(set(slots))
             or document["phase"] not in ("pending", "acknowledged")
@@ -172,7 +182,8 @@ class NativeCreateEvidence:
             or (document["phase"] == "acknowledged" and (not isinstance(document["container_id"], str) or not _HEX64.fullmatch(document["container_id"])))
         ):
             raise StorageHostUnqualified("Native create evidence facts are malformed")
-        return NativeCreateAttempt(**{key: tuple(value) if key == "slots" else value for key, value in document.items() if key != "schema_version"})
+        record_type = NativeMountlessCreateAttempt if mountless else NativeCreateAttempt
+        return record_type(**{key: tuple(value) if key == "slots" else value for key, value in document.items() if key not in {"schema_version", "record_kind"}})
 
     def _read(self, name):
         if not name.endswith(".json") or not _HEX32.fullmatch(name[:-5]):
@@ -265,7 +276,8 @@ class NativeCreateEvidence:
     def _encode(record):
         if not isinstance(record, NativeCreateAttempt):
             raise StorageHostUnqualified("Create encoding requires an exact create record")
-        raw = json.dumps({"schema_version": 1, **asdict(record)}, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        header = {"schema_version": 3, "record_kind": "mountless-create"} if isinstance(record, NativeMountlessCreateAttempt) else {"schema_version": 1}
+        raw = json.dumps({**header, **asdict(record)}, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
         if len(raw) > MAX_RECORD_BYTES:
             raise StorageHostUnqualified("Native create evidence record exceeds its bound")
         return raw
@@ -328,11 +340,16 @@ class NativeCreateEvidence:
             os.close(descriptor)
 
     def begin(self, *, owner_id, thread_id, name, slots):
+        return self._begin_record(NativeCreateAttempt(uuid4().hex, self.daemon_id, owner_id, thread_id, name, tuple(sorted(set(slots)))))
+
+    def begin_mountless(self, *, owner_id, thread_id, name):
+        return self._begin_record(NativeMountlessCreateAttempt(uuid4().hex, self.daemon_id, owner_id, thread_id, name, ()))
+
+    def _begin_record(self, record):
         with self._lock:
-            record = NativeCreateAttempt(uuid4().hex, self.daemon_id, owner_id, thread_id, name, tuple(sorted(set(slots))))
             raw = self._encode(record)
             self._validate(json.loads(raw), record.id)
-            self.require_admissible(owner_id=owner_id, name=name, slots=record.slots)
+            self.require_admissible(owner_id=record.owner_id, name=record.name, slots=record.slots)
             records, total = self._scan()
             if len(records) >= MAX_RECORDS or total + len(raw) > MAX_TOTAL_BYTES:
                 raise StorageHostUnqualified("Native create evidence is full; submission is refused")

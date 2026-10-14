@@ -58,11 +58,14 @@ class NativeTeardownRecord:
     resources: tuple[NativeTeardownResource, ...]
 
     def document(self):
-        return {"schema_version": 2, "record_kind": "teardown", **asdict(self), "slots": list(self.slots), "resources": [asdict(resource) for resource in self.resources]}
+        header = {"schema_version": 4, "record_kind": "mountless-teardown"} if isinstance(self, NativeMountlessTeardownRecord) else {"schema_version": 2, "record_kind": "teardown"}
+        return {**header, **asdict(self), "slots": list(self.slots), "resources": [asdict(resource) for resource in self.resources]}
 
     @classmethod
     def parse(cls, document, identifier):
-        if not isinstance(document, dict) or set(document) != _FIELDS or type(document["schema_version"]) is not int or document["schema_version"] != 2 or document["record_kind"] != "teardown":
+        version = document.get("schema_version") if isinstance(document, dict) else None
+        mountless = type(version) is int and version == 4
+        if not isinstance(document, dict) or set(document) != _FIELDS or type(version) is not int or version not in (2, 4) or document["record_kind"] != ("mountless-teardown" if mountless else "teardown"):
             raise StorageHostUnqualified("Native teardown evidence schema is unknown")
         slots, raw = document["slots"], document["resources"]
         if (
@@ -71,7 +74,7 @@ class NativeTeardownRecord:
             or not _text(document["daemon_id"], 128)
             or any(not _text(document[key]) for key in ("owner_id", "thread_id", "sandbox_id"))
             or not isinstance(slots, list)
-            or not 1 <= len(slots) <= 128
+            or (len(slots) != 0 if mountless else not 1 <= len(slots) <= 128)
             or any(not _hex(slot, 32) for slot in slots)
             or slots != sorted(set(slots))
             or (document["target_slot"] is not None and document["target_slot"] not in slots)
@@ -106,4 +109,10 @@ class NativeTeardownRecord:
         names = [("container", document["name"]), *((resource.kind, resource.name) for resource in resources)]
         if not complete or len(set(identities)) != len(identities) or len(set(names)) != len(names):
             raise StorageHostUnqualified("Native teardown set is incomplete or ambiguous")
-        return cls(**{key: tuple(value) if key == "slots" else tuple(resources) if key == "resources" else value for key, value in document.items() if key not in ("schema_version", "record_kind")})
+        record_type = NativeMountlessTeardownRecord if mountless else NativeTeardownRecord
+        return record_type(**{key: tuple(value) if key == "slots" else tuple(resources) if key == "resources" else value for key, value in document.items() if key not in ("schema_version", "record_kind")})
+
+
+@dataclass(frozen=True)
+class NativeMountlessTeardownRecord(NativeTeardownRecord):
+    """Exact resource correlation with zero Space slots and no retirement target."""

@@ -14,6 +14,10 @@ from deerflow.spaces.docker import StorageHostUnqualified
 OWNER_ADMISSION = ContextVar("native_owner_admission", default=None)
 
 
+class NativeRetirementBusy(StorageHostUnqualified):
+    """Reservation refused before physical work because a live reference remains."""
+
+
 @dataclass(eq=False)
 class _Group:
     slots: set[str] = field(default_factory=set)
@@ -93,12 +97,16 @@ class OwnerAdmissions:
         """Caller holds metadata lock; copied stale references prove nothing."""
         return isinstance(token, OwnerAdmission) and token in self._active
 
+    def has_active_locked(self):
+        """Caller holds metadata lock; producer drainage is a separate boundary."""
+        return bool(self._active)
+
     def reserve(self, owner_id, slot_id):
         self._owner(owner_id)
         self._slot(slot_id)
         with self.lock:
             if not self.allowed_locked(owner_id, (slot_id,)) or any(token.owner_id == owner_id or slot_id in group.slots for token, group in self._active.items()):
-                raise StorageHostUnqualified("Native retirement is busy with admitted owner or slot work")
+                raise NativeRetirementBusy("Native retirement is busy with admitted owner or slot work")
             token = OwnerRetirement(owner_id, slot_id)
             self._owners[owner_id] = self._slots[slot_id] = token
             return token

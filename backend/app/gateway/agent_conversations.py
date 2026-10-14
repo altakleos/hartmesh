@@ -1,6 +1,7 @@
 """Instance conversation authority is mandatory alongside route ceilings."""
 
 from collections.abc import Mapping
+from contextlib import asynccontextmanager
 
 from fastapi import HTTPException
 
@@ -87,14 +88,42 @@ def guard_response(request, response):
     return response
 
 
-async def execution_for_run(request, thread_id):
+async def execution_for_run(request, thread_id, *, require_ready=False):
     authority = _authority(request)
     if not isinstance(authority, AgentConversations) or await authority.binding(thread_id) is None:
         return None
     try:
-        return await authority.execution(actor=await _actor(request), thread_id=thread_id)
+        return await authority.execution(actor=await _actor(request), thread_id=thread_id, require_ready=require_ready)
     except AgentDenied:
         raise HTTPException(404, "Agent conversation is unavailable") from None
+
+
+@asynccontextmanager
+async def resident_run_admission(execution, run_manager, *, idempotency_key):
+    """Serialize one Home's check through durable admission/task attachment."""
+    residents = execution.authority.instances.residents if execution is not None else None
+    if residents is None:
+        yield None
+        return
+    from deerflow.agent_instances.contract import ExecutionUnavailable, ResidentStartingElsewhere
+
+    async with residents.entry(execution.instance).lock:
+        await execution.authority.admit(execution)
+        record = await run_manager.find_idempotent_run(execution.thread_id, idempotency_key, user_id=execution.requester.subject_id) if idempotency_key is not None else None
+        if record is None:
+            if execution.work is None:
+                probe = execution.authority.instances.execution_probe
+                state = await probe(execution.instance.id) if probe is not None else None
+                if state is not None and state.execution != "ready":
+                    raise ExecutionUnavailable(state.reason)
+                await residents.admit(execution.instance, work=False)
+                await residents.take_slot(execution.instance, wait=True)
+            elif residents.reservation_for(execution.instance, execution.work.attempt_id) is None:
+                raise ResidentStartingElsewhere(execution.instance.name)
+        try:
+            yield record
+        finally:
+            residents._drop_slot(execution.instance.home_id)
 
 
 async def evidence_user_id(request, thread_id, fallback):

@@ -55,6 +55,21 @@ def topology():
     return adapter, resources, calls, (proxy, internal, egress)
 
 
+def test_cleanup_accepts_exact_docker29_lowercase_primary_and_relay_absence(topology):
+    provider, resources, calls, _names = topology
+    original = provider._runner
+
+    def run(command, **kwargs):
+        reply = original(command, **kwargs)
+        if command[1] == "inspect" and reply.returncode == 1:
+            return SimpleNamespace(returncode=1, stdout="[]", stderr="error: no such object: " + command[-1])
+        return reply
+
+    provider._runner = run
+    provider._cleanup_resident(ATTACHMENT)
+    assert resources == {} and any("rm" in command for command in calls)
+
+
 def test_cleanup_removes_only_confirmed_immutable_relay_and_empty_networks(topology):
     adapter, resources, calls, _names = topology
     adapter._cleanup_resident(ATTACHMENT)

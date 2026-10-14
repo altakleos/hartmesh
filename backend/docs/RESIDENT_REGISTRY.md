@@ -1,12 +1,14 @@
-# Resident registry foundation
+# Resident registry and Gateway ownership
 
 `deerflow.agent_instances.residents.ResidentRegistry` provides generic workspace
-capacity and lifecycle bookkeeping. It is not installed by Gateway startup yet.
+capacity and lifecycle bookkeeping. Managed Gateway startup installs it after
+capturing the closed host capability and binding the exact provider/attachments.
 With `AgentInstances.residents=None`, instance preparation and completion keep
 their existing path. Storage and agent defaults remain unchanged.
-Gateway installation must include durable restart restoration, exact preparation
-correlation, Work admission and replay, worker completion, reaping and shutdown.
-There is no database schema change in this foundation.
+The installation includes durable restoration, exact preparation correlation,
+Work admission/replay, completion, maintenance and shutdown. Compose counts remain
+disabled until strict orphan recovery and the remaining product stages complete.
+There is no database schema change in this integration.
 
 The additive foundation provides `SpaceAttachments.inspect_preparation` and
 Work readiness/host-settlement APIs. Inspection
@@ -21,8 +23,8 @@ host and valid immutable container identity; it records no new Work revision.
 Host settlement instead permits historical mount generations and recorded host
 replacement, preserving human closure attribution. It locks Home, instance and
 Work, then reloads the attempt before deciding. A supplied live-run snapshot is a
-caller precondition; future coordinated callers must preserve its validity across
-their admission and settlement boundary. Settlement never promotes a candidate
+caller precondition; Gateway also supplies a memory-only live-attempt guard after
+the Work lock and preserves current durable foreign owners. Settlement never promotes a candidate
 or releases a preparation claim. It commits failed-attempt status and its single
 host event before logging. `finish()` returns the resulting status. With a registry,
 a lifecycle-stale attempt without a workspace remains unresolved for qualified
@@ -58,10 +60,10 @@ Registry-aware completion drains SDK closure, durable status lookup, Work
 settlement and the mandatory `run_ended` notification as one owned operation.
 Failures cannot skip the later mandatory hooks or replace the original worker
 outcome. Fenced workspaces and uncertain cleanup cannot promote Work candidates.
-These hooks do not install a registry; restart restoration, admission/replay and
-coordinated reaping/shutdown must land before Gateway installation.
+These hooks do not install a registry themselves; the Gateway owns their coordinated
+restoration, admission/replay, reaping and shutdown.
 
-## Uninstalled restoration foundation
+## Durable restoration
 
 `SpaceAttachments.retained_claims()` supplies a complete metadata snapshot of
 every non-fenced attachment, bounded globally at 4,096 rows. Overflow, missing
@@ -96,10 +98,10 @@ durable charge; later Work settlement failure cannot reverse that release.
 An eligible Home association requires its lock and one exact claim for the
 current actor, host, generation and complete Home mount. It preserves the capacity
 charge atomically. It grants no physical liveness or execution proof; ordinary
-resume and authority checks remain required. No Gateway caller installs or starts
-this restoration foundation yet, and it makes no database schema change.
+resume and authority checks remain required. Gateway coordinates this restoration
+without a database schema change.
 
-## Uninstalled startup coordinator
+## Owned startup coordinator
 
 `ResidentBootstrapCoordinator` owns one exact registry, provider, attachment service
 and lifecycle capability on the registry's loop. Its default wait uses the original
@@ -134,9 +136,38 @@ stop its separately owned maintenance/reaper producers and close provider, stora
 SQL and pool owner only after this boundary. Reconciliation must retain all durable
 inflight rows and never infer foreign lease takeover from census membership.
 
-Gateway installation, exact typed preparation transfer, Work admission/replay and
-the real complete census/drain collector remain a subsequent coherent change.
-This module activates no defaults and makes no schema change.
+`app.gateway.resident_runtime` supplies the complete collector and actual producer
+drain. It reads every durable inflight Run, including unexpired leases; failed
+inventory never becomes an empty success. Bounded all-state census includes native
+chat and resident primaries plus relay/network resources independently of name
+prefix. Exact SQL CID/host/full mounts cover residents; an unexplained primary or
+secondary refuses publication. Preparations without an original CID remain charged
+and cannot be contained merely from an empty listing. Strict durable actorless
+resident orphan cleanup remains a separate follow-up before count activation.
+
+Workspace readiness is current host state, separate from the cached initial
+capacity result. Maintenance retries qualification on the same registry. Failed
+inventory closes admission before requalification; an unfinished initializer must
+be consumed before invalidation. Cached attachments/adapters never change on retry.
+The startup recovered-run snapshot applies only to its original attachment IDs,
+so later maintenance cannot close a newer workspace from historical recovery.
+
+Work activation first performs a fully authorized replay-only durable preflight.
+A new attempt reserves physical capacity outside SQL and binds its exact promise
+before durable writes. A capacity refusal rechecks exact replay, and a concurrent
+replay cancels only the caller's unused promise. Runless replay recovery holds the
+Home lock through capacity awaiting, releasing it before run launch takes that lock.
+Live launch owners prevent reservation expiry before commit/attachment. Confirmed
+rollback may release; unknown commits remain charged until exact host settlement.
+
+Gateway registers owned launch tasks before their first await. Shutdown seals
+registration and drains those admissions before RunManager snapshots/cancels its
+workers, then retains mandatory completion before provider/SQL closure. Periodic
+orphan callbacks correlate exact Work/run facts and request a deferred recycle;
+the existing maintenance task owns physical effects and settlement.
+Storage maintenance drains through one shared task without withdrawing callbacks.
+Resident and chat-host/provider drainage follows; final storage cleanup withdraws
+the callbacks afterward, including when provider shutdown fails.
 
 ## Shared capacity
 
@@ -168,7 +199,8 @@ The registry counts live local worker tasks, including staged terminal results
 still finalizing. `ended` masks a worker only after its completion notification;
 it is pruned from current task snapshots. Work reservations bridge activation to
 that existing task state. Binding, cancellation and expiry use exact reservation
-identity; expired admission cannot publish a late slot. Workspace concurrency is
+identity; expired unowned admission cannot publish a late slot. Bound attempts and
+live launch promises do not expire before handoff or confirmed settlement. Workspace concurrency is
 two runs; deployment Work capacity is `max(1, replicas - 1)`.
 
 ## Uncertain preparation and containment

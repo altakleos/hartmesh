@@ -97,6 +97,99 @@ def test_ordinary_canonical_cleanup_persists_complete_set_before_effects(fixture
         discard_sandbox_lease_manager(provider)
 
 
+def test_mountless_canonical_cleanup_persists_original_restricted_set_before_effects(fixture):
+    from deerflow.spaces.native_teardown_evidence import NativeMountlessTeardownRecord
+
+    engine = Engine(fixture)
+    primary = engine.objects[("container", CID)]
+    primary["Config"]["Labels"].pop("hartmesh.storage.space." + SLOT)
+    primary["Mounts"] = []
+    actual = _native_inspection(primary, CID, "daemon-A", allow_mountless=True)
+    actual = engine.local._qualify_native_mountless(primary, actual, ())
+    actual = engine.local._native_resource_facts(primary, actual)
+    engine.info.native_container, engine.info.native_slots = actual, ()
+    provider = engine.provider
+    provider._warm_pool["native"] = (engine.info, 0)
+    provider._warm_pool_identity["native"] = engine.info.owner
+    saved_records = []
+    publish = engine.bridge.evidence.begin_teardown
+
+    def retain(record):
+        saved_records.append(record)
+        return publish(record)
+
+    engine.bridge.evidence.begin_teardown = retain
+    try:
+        assert provider._destroy_warm_entry("native", engine.info, reason="idle_timeout", still_reapable=lambda: True)
+        assert not engine.objects and not provider._warm_pool
+        assert len(saved_records) == 1 and isinstance(saved_records[0], NativeMountlessTeardownRecord)
+        assert saved_records[0].slots == () and saved_records[0].target_slot is None
+        assert engine.bridge.evidence.snapshot().teardowns == () and engine.bridge.teardowns.records() == ()
+    finally:
+        discard_sandbox_lease_manager(provider)
+
+
+def test_created_nouser_partial_cleanup_restart_retains_original_paired_identities(fixture, tmp_path):
+    from deerflow.community.aio_sandbox.native_teardown_execution import recover_teardowns
+    from deerflow.community.aio_sandbox.sandbox_info import PROVENANCE_CREATED
+    from deerflow.config.paths import Paths, paths_scope
+    from deerflow.spaces.chat_paths import ChatStoragePaths
+    from deerflow.spaces.native_create_evidence import NativeContainerIdentity
+    from deerflow.spaces.native_teardown_evidence import NativeMountlessTeardownRecord
+
+    engine = Engine(fixture)
+    primary = engine.objects[("container", CID)]
+    primary["Config"]["Labels"].pop("hartmesh.storage.space." + SLOT)
+    primary["Mounts"] = []
+    labels = primary["Config"]["Labels"]
+    handoff = engine.bridge.begin(name=primary["Name"][1:], labels=labels)
+    returned = NativeContainerIdentity(handoff.attempt.id, "daemon-A", "alice", "chat", primary["Name"][1:], (), CID)
+    engine.bridge.handoffs.record_verified(handoff, returned)
+    engine.bridge.evidence.acknowledge(handoff.attempt, returned)
+    engine.bridge.handoffs.record_acknowledged(handoff)
+    engine.info.provenance = PROVENANCE_CREATED
+    engine.info.native_slots = None
+    engine.local._native_mountless_binds = lambda _owner, _thread: ()
+    with paths_scope(ChatStoragePaths(Paths(base_dir=tmp_path), user_id="alice")):
+        engine.provider._own_before_readiness("native", engine.info)
+    assert engine.info.mountless_provider is engine.provider and engine.info.native_container is None
+    engine.provider._warm_pool["native"] = (engine.info, 0)
+    engine.provider._warm_pool_identity["native"] = engine.info.owner
+    with engine.provider._lock:
+        engine.bridge.handoffs.transferred_locked(handoff)
+    engine.fail_proxy = True
+    restarted = None
+    replacement_owner = None
+    try:
+        assert not engine.provider._destroy_warm_entry("native", engine.info, reason="idle_timeout", still_reapable=lambda: True)
+        (saved,) = engine.bridge.evidence.snapshot().teardowns
+        assert isinstance(saved, NativeMountlessTeardownRecord) and saved.slots == ()
+        assert ("container", CID) not in engine.objects and ("container", PROXY) in engine.objects
+        engine.owner.close()
+        restarted = _make_provider(tmp_path / "restart")
+        restarted._lock = Lock()
+        restarted._managed_runtime_required = True
+        restarted._backend = backend(None)
+        restarted._backend._runtime_runner = engine.run
+        replacement_owner = PoolRuntimeOwner(engine.owner.pool)
+        replacement_owner.resolve_provider(lambda: restarted)
+        engine.bridge = install(restarted, replacement_owner)
+        with restarted._lock:
+            assert restarted._counted_slots_locked()[3] == 1
+        engine.fail_proxy = False
+        recover_teardowns(restarted)
+        assert not engine.objects and not engine.bridge.evidence.snapshot().teardowns
+        assert not restarted._warm_pool and not restarted._sandboxes
+    finally:
+        discard_sandbox_lease_manager(engine.provider)
+        if restarted is not None:
+            restarted._acquire_serializer.close()
+            restarted._acquire_worker_executor.shutdown(wait=True)
+            discard_sandbox_lease_manager(restarted)
+        if replacement_owner is not None:
+            replacement_owner.close()
+
+
 def test_canonical_cleanup_qualifies_docker_29_lowercase_primary_and_relay_absence(fixture):
     engine = Engine(fixture)
     inspect = engine.inspect
