@@ -89,7 +89,8 @@ jobs:
           backend_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' localhost/hartmesh-backend:ci)
           case "$backend_ref" in localhost/hartmesh-backend@sha256:*) ;; *) echo "unexpected reference: $backend_ref"; exit 1 ;; esac
           echo "BACKEND_REF=$backend_ref" >> "$GITHUB_ENV"
-          docker run --rm --entrypoint sh "$backend_ref" -c 'set -eu; command -v nsenter; command -v setpriv'
+          docker run --rm --entrypoint sh "$backend_ref" -c 'set -eu; command -v nsenter; command -v setpriv; docker --version' > "$EVIDENCE/backend-tools.txt"
+          cat "$EVIDENCE/backend-tools.txt"
 
       - name: 8 Install the bundle at /opt/hartmesh with the built image
         run: |

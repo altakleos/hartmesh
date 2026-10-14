@@ -97,6 +97,30 @@ def test_ordinary_canonical_cleanup_persists_complete_set_before_effects(fixture
         discard_sandbox_lease_manager(provider)
 
 
+def test_canonical_cleanup_qualifies_docker_29_lowercase_primary_and_relay_absence(fixture):
+    engine = Engine(fixture)
+    inspect = engine.inspect
+
+    def current_cli(command, **kwargs):
+        response = inspect(command, **kwargs)
+        if command[1] == "inspect" and response.returncode == 1:
+            response.stderr = "error: no such object: " + command[-1] + "\n"
+        return response
+
+    engine.inspect = current_cli
+    provider = engine.provider
+    provider._warm_pool["native"] = (engine.info, 0)
+    provider._warm_pool_identity["native"] = engine.info.owner
+    try:
+        assert provider._destroy_warm_entry("native", engine.info, reason="idle_timeout", still_reapable=lambda: True)
+        assert not engine.objects and not provider._warm_pool
+        assert engine.bridge.evidence.snapshot().teardowns == () and engine.bridge.teardowns.records() == ()
+        assert ["docker", "rm", CID] in engine.calls
+        assert ["docker", "rm", PROXY] not in engine.calls
+    finally:
+        discard_sandbox_lease_manager(provider)
+
+
 @pytest.mark.asyncio
 async def test_primary_gone_relay_failure_restart_keeps_scope_closed_until_original_set_absent(fixture, tmp_path):
     engine = Engine(fixture)

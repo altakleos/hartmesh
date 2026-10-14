@@ -162,3 +162,52 @@ def test_fresh_capture_refuses_primary_disappearance_before_final_graph_proof():
     with pytest.raises(StorageHostUnqualified):
         capture(reader, primary, actual)
     assert removed
+
+
+@pytest.mark.parametrize("reference", [CID, "retained-primary"])
+def test_docker_29_exact_lowercase_object_absence(reference):
+    response = SimpleNamespace(returncode=1, stdout="[]\n", stderr="error: no such object: " + reference + "\n")
+    reader = NativeResourceSet(SimpleNamespace(_run=lambda *_args, **_kwargs: response))
+    assert reader.inspect("container", reference) is None
+
+
+@pytest.mark.parametrize("change", ["wrong-reference", "extra-error", "nonempty-json", "wrong-returncode", "wrong-kind", "case-guess"])
+def test_lowercase_absence_does_not_relax_exact_reply_proof(change):
+    response = SimpleNamespace(returncode=1, stdout="[]\n", stderr="error: no such object: " + CID)
+    kind = "container"
+    if change == "wrong-reference":
+        response.stderr = "error: no such object: " + PROXY
+    elif change == "extra-error":
+        response.stderr += "\npermission denied"
+    elif change == "nonempty-json":
+        response.stdout = '[{"unexpected": true}]'
+    elif change == "wrong-returncode":
+        response.returncode = 125
+    elif change == "wrong-kind":
+        kind = "network"
+    else:
+        response.stderr = "ERROR: NO SUCH OBJECT: " + CID
+    reader = NativeResourceSet(SimpleNamespace(_run=lambda *_args, **_kwargs: response))
+    with pytest.raises(StorageHostUnqualified):
+        reader.inspect(kind, CID)
+
+
+def test_unknown_reply_diagnostics_exclude_reference_and_payload(caplog):
+    reference = "private-tenant-reference"
+    response = SimpleNamespace(returncode=1, stdout='{"secret": "private-output"}', stderr="private-error-and-token")
+    reader = NativeResourceSet(SimpleNamespace(_run=lambda *_args, **_kwargs: response))
+    with pytest.raises(StorageHostUnqualified):
+        reader.inspect("container", reference)
+    assert "Native graph reply unqualified" in caplog.text
+    assert "kind=container reference=name returncode=1" in caplog.text
+    assert "stdout_shape=object stderr_template=unknown" in caplog.text
+    assert all(value not in caplog.text for value in (reference, "private-output", "private-error-and-token", "secret"))
+
+
+def test_duplicate_key_reply_still_logs_only_structural_diagnostics(caplog):
+    response = SimpleNamespace(returncode=1, stdout='{"private-key":"private-value","private-key":"private-other"}', stderr="private-token")
+    reader = NativeResourceSet(SimpleNamespace(_run=lambda *_args, **_kwargs: response))
+    with pytest.raises(StorageHostUnqualified):
+        reader.inspect("container", CID)
+    assert "stdout_shape=invalid-json stderr_template=unknown" in caplog.text
+    assert all(value not in caplog.text for value in (CID, "private-key", "private-value", "private-other", "private-token"))

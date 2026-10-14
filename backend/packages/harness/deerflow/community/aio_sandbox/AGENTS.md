@@ -18,6 +18,9 @@ deadline; send no additional destructive command from an ambiguous inventory.
 Restricted sets use `native_resource_set.py` to inspect original primary, relay
 and networks, labels and exact membership. Persist the complete set before any
 effect; survivor recovery never derives identities from current names or policy.
+Absence replies require return code 1, empty output and an exact known template
+bound to the inspected reference, including Docker 29's lowercase object error.
+Unexpected replies log bounded structural facts, never names or payload contents.
 `native_teardown_execution.py` binds cleanup to the exact live canonical holder,
 provider reservation, lease, runtime and optional owner/target reservation.
 Observed lease loss and scope exit invalidate copied capabilities. Reserve before

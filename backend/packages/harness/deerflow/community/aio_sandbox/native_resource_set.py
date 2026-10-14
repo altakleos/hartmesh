@@ -1,12 +1,29 @@
 """Bounded actual Docker graph correlation; no admission or destructive commands."""
 
 import json
+import logging
 import re
 import time
 
 from deerflow.spaces.docker import StorageHostUnqualified
 from deerflow.spaces.native_create_evidence import _unique_object
 from deerflow.spaces.native_teardown_evidence import NativeTeardownRecord, NativeTeardownResource
+
+logger = logging.getLogger(__name__)
+
+
+def _reply_shape(output):
+    if not output.strip():
+        return "empty"
+    if len(output) > 65536:
+        return "oversized"
+    try:
+        value = json.loads(output, object_pairs_hook=_unique_object)
+    except (ValueError, RecursionError, StorageHostUnqualified):
+        return "invalid-json"
+    if isinstance(value, list):
+        return "empty-list" if not value else "nonempty-list"
+    return "object" if isinstance(value, dict) else "scalar"
 
 
 def _hex(value):
@@ -39,12 +56,22 @@ class NativeResourceSet:
                 raise ValueError("Late graph inspection")
             if result.returncode:
                 absent = (
-                    ("Error: No such object: " + reference, "Error response from daemon: No such container: " + reference)
+                    ("Error: No such object: " + reference, "error: no such object: " + reference, "Error response from daemon: No such container: " + reference)
                     if kind == "container"
                     else ("Error: No such network: " + reference, "Error response from daemon: network " + reference + " not found")
                 )
                 if result.returncode == 1 and result.stdout.strip() in ("", "[]") and result.stderr.strip() in absent:
                     return None
+                logger.warning(
+                    "Native graph reply unqualified: kind=%s reference=%s returncode=%d stdout_shape=%s stderr_template=%s stdout_bytes=%d stderr_bytes=%d",
+                    kind,
+                    "id" if _hex(reference) else "name",
+                    result.returncode,
+                    _reply_shape(result.stdout),
+                    "known-absence" if result.stderr.strip() in absent else "unknown",
+                    len(result.stdout.encode("utf-8")),
+                    len(result.stderr.encode("utf-8")),
+                )
                 raise ValueError("Unqualified resource absence")
             entries = json.loads(result.stdout, object_pairs_hook=_unique_object)
             if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
