@@ -710,6 +710,9 @@ Shutdown drains pending launches before stopping their workers. The existing
 minute-long maintenance cycle retries qualification, closes eligible workspaces
 and completes authorized releases for every Space kind. Explicit Compose AI
 assistant and AI employee counts now take effect when managed storage is enabled.
+Startup logs distinguish prepared storage from agent execution readiness. Failed
+resident initialization logs bounded error types and source locations without
+exception values or tenant contents, while agent execution remains unavailable.
 Creation respects the configured allowance, counts unfinished and paused agents,
 and assigns files from the matching kind of prepared slot. Exact creation retries
 retain their identity and files. Default activation and the remaining product

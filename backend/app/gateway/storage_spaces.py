@@ -53,6 +53,29 @@ STORAGE_REASONS = ("disk-too-small", "storage-pool-missing", "inventory-unreadab
 EXECUTION_REASONS = ("storage-unavailable", "agents-none", "operator-hold", "host-replaced", "space-unverified", "space-not-assigned")
 
 
+def _bootstrap_error_locations(error: BaseException) -> str:
+    """Bounded operator diagnostics without exception values or source text."""
+
+    def token(value):
+        return "".join(char if char.isascii() and (char.isalnum() or char in "._-") else "_" for char in value[:80])
+
+    chain, seen = [], set()
+    for _ in range(3):
+        if error is None or id(error) in seen:
+            break
+        seen.add(id(error))
+        frames, traceback = [], error.__traceback__
+        for _ in range(64):
+            if traceback is None:
+                break
+            code = traceback.tb_frame.f_code
+            frames.append(f"{token(os.path.basename(code.co_filename))}:{token(code.co_name)}:{traceback.tb_lineno}")
+            traceback = traceback.tb_next
+        chain.append(f"{token(type(error).__name__)}@{'/'.join(frames[-3:]) or 'unknown'}")
+        error = error.__cause__ or (None if error.__suppress_context__ else error.__context__)
+    return " <- ".join(chain)
+
+
 def hold_present():
     """One stat per admission; an unreadable operator path cannot lift a hold."""
     try:
@@ -533,7 +556,11 @@ async def _startup_lines(app, *, counts=None):
         if config.ai_assistants_per_user == config.ai_employees == 0:
             logger.info("agents: none (HARTMESH_AI_ASSISTANTS_PER_USER=0, HARTMESH_AI_EMPLOYEES=0)")
         else:
-            logger.info("agents: ready (%s attachments fenced at start; %s work attempts settled)", status.attachments_fenced, status.attempts_settled)
+            execution = await execution_state(app)
+            if execution.execution == "unavailable":
+                logger.warning("agents: unavailable (%s)", execution.reason)
+            else:
+                logger.info("agents: ready (%s attachments fenced at start; %s work attempts settled)", status.attachments_fenced, status.attempts_settled)
         keys = {"user": "HARTMESH_USERS", "assistant": "HARTMESH_USERS x HARTMESH_AI_ASSISTANTS_PER_USER", "employee": "HARTMESH_AI_EMPLOYEES", "company": "company allowance"}
         for kind, count in counts.items():
             if count.allowed_key < count.in_use and kind in ("assistant", "employee"):
@@ -799,6 +826,15 @@ async def _resident_step(app, *, timeout):
         runtime.coordinator.invalidate()
         runtime.accounting_retry = False
     result = await runtime.coordinator.poll(timeout=timeout)
+    if result is None and runtime.coordinator.task is None and runtime.coordinator.last_error is not None:
+        logger.warning(
+            "agents: bootstrap unavailable (%s; initializer=%s; result=%s; workspace_qualified=%s; pending=%s)",
+            _bootstrap_error_locations(runtime.coordinator.last_error),
+            runtime.coordinator.task is not None,
+            runtime.coordinator.result is not None,
+            runtime.workspace_qualified,
+            len(app.state.agent_execution.pending_reconcile),
+        )
     if runtime.accounting_retry:
         if runtime.coordinator.task is None:
             runtime.coordinator.invalidate()

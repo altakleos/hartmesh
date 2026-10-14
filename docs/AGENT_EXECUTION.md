@@ -23,6 +23,12 @@ HTTP 409 with a public `detail`, `reason: execution-unavailable` and a separate
 `code`, `reason` and a public message. The Compose renderer still writes both
 explicit agent creation counts; both default to zero until default activation.
 
+Startup logs report storage and agent execution readiness separately. A prepared
+storage pool can coexist with `agents: unavailable (storage-unavailable)` while
+resident initialization is incomplete. Failed initialization reports bounded
+error types and source locations plus qualification state; exception values,
+tenant contents and source text are omitted.
+
 Creation, conversations, replies, activations and lifecycle changes check current
 execution readiness. AI assistant creation can refuse `ai-assistant-limit` with
 `{per_user, mine, allowed, in_use}` or `ai-assistant-none-free`. AI employee

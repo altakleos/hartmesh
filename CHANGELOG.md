@@ -17,6 +17,10 @@ containment before replacement. Named-case gates reject skips or missing cases;
 operator docs describe holds, recovery and workspace cleanup. Default activation
 and remaining product controls stay deferred.
 
+Startup agent readiness reflects execution admission. Resident initialization
+failures produce bounded source diagnostics without exception values or tenant
+contents, so an unavailable resident is no longer logged as ready.
+
 There is no database schema, native evidence format or configuration-version change.
 
 ### Typed AI agent creation and execution admission
