@@ -68,6 +68,10 @@ The staged runtime also provides a private host-controlled admission guard.
 It blocks new acquisition and client publication while allowing existing lease
 cleanup and qualified storage inspection. Gateway activation remains a separate
 rollout step.
+Private restart-accounting seams retain qualified sandbox primaries in the
+existing capacity pool without creating clients. A bounded read-only inventory
+includes stopped containers and historical prefixes; missing or ambiguous facts
+prevent it from reporting complete accounting.
 The run API distinguishes a Gateway shutdown from a human Stop. Shutdown records
 its reason before cancelling active runs; a run that finishes during shutdown
 keeps its outcome.
