@@ -58,5 +58,5 @@ def test_resident_native_fixture_uses_real_provider_registry_and_dedicated_inode
     ]
     assert fixture_values == ["resident_runtime"], "Presentation context must not replace the resident fixture"
     containment = ast.unparse(functions["test_host_containment_removes_the_real_container_and_the_next_run_attaches_afresh"])
-    for fact in ("contain_host", "fenced_by_kind", "fenced_by_id", "fence_reason", "fenced_at", "container_gone"):
+    for fact in ("contain_host", "fenced_by_kind", "fenced_by_id", "fence_reason", "fenced_at", "subprocess.run"):
         assert fact in containment

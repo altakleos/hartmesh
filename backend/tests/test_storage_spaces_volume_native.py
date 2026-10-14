@@ -470,7 +470,8 @@ async def test_host_containment_removes_the_real_container_and_the_next_run_atta
     await await_drained(run_file_io(first.sandbox.write_file, "/mnt/spaces/home/outputs/retained.txt", "retained through host containment"))
     await await_drained(run_file_io(first.close))
     assert await attachments.contain_host(identity.id, "operator")
-    assert await attachments.container_gone(identity.id)
+    # SQL liveness reads only active attachments. After fencing, prove physical
+    # absence by the captured immutable Docker identity instead.
     result = subprocess.run(["docker", "inspect", identity.container_id], capture_output=True, text=True, timeout=30)
     assert result.returncode == 1 and result.stdout.strip() in ("", "[]")
     assert result.stderr.strip() in ("Error: No such object: " + identity.container_id, "error: no such object: " + identity.container_id, "Error response from daemon: No such container: " + identity.container_id)
