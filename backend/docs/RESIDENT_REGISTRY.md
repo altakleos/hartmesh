@@ -99,6 +99,45 @@ charge atomically. It grants no physical liveness or execution proof; ordinary
 resume and authority checks remain required. No Gateway caller installs or starts
 this restoration foundation yet, and it makes no database schema change.
 
+## Uninstalled startup coordinator
+
+`ResidentBootstrapCoordinator` owns one exact registry, provider, attachment service
+and lifecycle capability on the registry's loop. Its default wait uses the original
+startup entry time plus 120 seconds. Timeout and caller cancellation detach only
+the waiter; the same retained initializer and its result survive for the host's
+later maintenance pass. Explicit retry waits have their own bounded timeout.
+Successful repeated calls return the consumed result, without another restoration.
+An explicit invalidation must first consume any owned initializer result.
+
+Restoration begins before producer drainage and the complete SQL snapshot. Drain
+already submitted producers before reading metadata, so their late commits appear
+in that snapshot. Failed reads preserve previous claims and close readiness.
+SQL alone never certifies the full sandbox budget. The host supplies a typed `NativeAccountingProof`
+for its complete census, with a memory-only validator of the retained census and
+drained producer identities. Capture performs no census by itself. The proof pins
+the exact provider, closed-lifecycle permit, pool owner, native bridge, evidence
+object and teardown revision; boolean success cannot replace it.
+
+Final publication rechecks the original lifecycle revision and all runtime bindings
+under one provider critical section, validates the retained proof and resident count,
+then installs both callbacks and opens admission together. Registry restoration
+methods acquire that lock independently and must not be nested inside it. Workspace
+qualification is a separate result: complete accounting can permit ordinary mountless
+chats while workspace qualification is unavailable. Failed publication retains all
+charges and existing callbacks.
+
+Close seals the exact captured capability before any await. One shared drain task
+joins mandatory worker completion, initialization/reconciliation and registry effects,
+even if an earlier shutdown hook fails. Concurrent or cancelled close callers retain
+that same task. Callbacks remain installed during drainage. The installing host must
+stop its separately owned maintenance/reaper producers and close provider, storage,
+SQL and pool owner only after this boundary. Reconciliation must retain all durable
+inflight rows and never infer foreign lease takeover from census membership.
+
+Gateway installation, exact typed preparation transfer, Work admission/replay and
+the real complete census/drain collector remain a subsequent coherent change.
+This module activates no defaults and makes no schema change.
+
 ## Shared capacity
 
 The existing AIO provider adds `external_slots()` exactly once to its reserved
