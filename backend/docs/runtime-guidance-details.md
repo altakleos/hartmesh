@@ -231,3 +231,14 @@ PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_production.py \
 PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_production.py \
   /tmp/production-bench.jsonl
 ```
+
+
+## Local run ownership and task observation
+
+**`RunManager._runs` holds only records this worker admitted.** A cross-worker idempotent reuse returns the `store_only` row from `_record_from_store()` unregistered: the peer never finalizes or `cleanup()`s it, so a registered copy stays `pending`/`running`, 409s later same-thread admissions, hides the owner's orphan from reconciliation, and sends a peer `cancel()` down the local-owner path. Pinned by `test_peer_idempotent_reuse_*` and `test_peer_cancel_of_reused_run_*` (`tests/test_multi_worker_run_ownership.py`) plus `tests/test_gateway_services.py::test_start_run_peer_idempotent_reuse_*`.
+
+**A `RunRecord` owner matches its durable row.** HTTP admissions omit `user_id` and the SQL store stamps the ambient user, so `create()` and `_admit_thread_operation()` resolve an omitted owner from the contextvar, keeping `None` without one — never `get_effective_user_id()`'s `default` bucket. A `None` record made SQL keyed retries on a peer or after `cleanup()` return 500, hid HTTP runs from owner-scoped history, and skipped their MCP `background_tasks` projection. Pinned by `test_run_record_owner_matches_row_stamped_from_context`, `test_keyed_retry_without_explicit_user_*`, the `sql` case of `test_start_run_peer_idempotent_reuse_*`, `test_run_manager_*_admitted_without_explicit_user`, and `test_run_manager_keeps_omitted_owner_unset_without_user_context`.
+
+`RunManager.task_run_ids()` and `task_runs()` read active locally admitted tasks on the owning event loop without locks or store I/O. Metadata key presence, including falsey values, and task liveness decide membership; staged terminal status does not end a still-active task. Results preserve admission order and copy metadata shallowly. These observations reuse the existing registry and add no ledger.
+
+Gateway shutdown sets `gateway_stopped` before cancellation, preserves existing reasons, and includes the reason in forced interruption persistence. Persist interruption only while the record remains interrupted; cancelled cleanup must not overwrite staged success or error. An unconfirmed durable outcome belongs to worker finalization or orphan recovery. Preserve the shared shutdown deadline and heartbeat drain.

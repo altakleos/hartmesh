@@ -53,6 +53,11 @@ adopted revision, Home and thread incarnation. Reject client copies and never pe
 the object. Inspection projections cannot execute. Validate on the original host
 loop before model/tool calls, including isolated child loops and worker threads.
 
+Workspace refusal types in `contract.py` use the existing `Refusal` HTTP envelope.
+All eight `ResidentUnavailable` subclasses default to 409, including workspace
+`files-full`, distinct from the personal-chat 507. Preserve cause metadata and
+stable fallback sentences. `RESIDENT_INTERRUPTED` names a frame, never an exception.
+
 `runtime.prepare_environment` consumes exact admitted native attachments and the
 existing AIO SDK. Address immutable Docker IDs, not container IPs. Drain preparation
 and closure across cancellation; unknown outcomes retain native intents. SDK closure,
