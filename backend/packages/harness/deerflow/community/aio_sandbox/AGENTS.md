@@ -55,6 +55,23 @@ Lease binding and existing-holder return also check the capability; those checks
 are memory-only and never acquire the provider metadata lock under the holder lock.
 Regressions: `test_provider_lifecycle_admission.py`.
 
+Uninstalled bootstrap accounting uses an opaque permit pinned to the exact
+provider, admission transition revision, pool owner and native bridge. It is
+valid only while that lifecycle stays closed and the native binding remains
+qualified. Open/close cannot revive a permit. Parking retains the original
+`SandboxInfo` in the existing warm pool, keeps ownership/grace, retirement and
+native evidence checks, and constructs no client. Its memory-only accounting
+marker prevents warm SDK reuse; ordinary discovery must qualify endpoint/policy.
+Later registration cannot replace that charge with a different immutable CID.
+Ending a permit never drops retained charges or opens admission.
+`LocalContainerBackend._bootstrap_primary_inventory` is bounded and read-only,
+includes all states/prefixes of labelled primaries, and checks exact actual IDs,
+owner, slots, duplicate names/SIDs, resource facts and the native bridge before
+returning. Missing, foreign and old mountless attribution refuse completeness;
+never fabricate `mountless_provider=self` for an old container. These seams
+do not install Gateway coordination or certify a complete platform budget alone.
+Tests: `test_bootstrap_sandbox_accounting.py`, `test_bootstrap_primary_inventory.py`.
+
 Private `resident_preparation.py` uses committed attachment tokens and the exact
 pool-owner runner; never invent chat/human labels or use the chat journal for it.
 Expire capabilities after drained workers, consume once, and retain every bound

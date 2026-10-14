@@ -842,6 +842,48 @@ class LocalContainerBackend(SandboxBackend):
         finally:
             _NATIVE_SLOT_INVENTORY_DEADLINE.reset(deadline)
 
+    def _bootstrap_primary_inventory(self, *, known_slots):
+        """Strict all-state/prefix accounting facts; no adoption or cleanup authority."""
+        bridge = getattr(self, "_native_creation", None)
+        if self._runtime != "docker" or not isinstance(bridge, NativeCreateBridge):
+            raise StorageHostUnqualified("Bootstrap census requires its qualified native runtime")
+        if not isinstance(known_slots, (tuple, list, frozenset, set)) or len(known_slots) > 4096 or any(not isinstance(slot, str) or re.fullmatch(r"[0-9a-f]{32}", slot) is None for slot in known_slots):
+            raise StorageHostUnqualified("Bootstrap census requires a bounded exact pool scope")
+        slots = frozenset(known_slots)
+        inherited = _NATIVE_SLOT_INVENTORY_DEADLINE.get()
+        deadline = _NATIVE_SLOT_INVENTORY_DEADLINE.set(min(time.monotonic() + 30, inherited) if inherited is not None else time.monotonic() + 30)
+        try:
+            bridge.assert_current()
+            listed = self._run(["docker", "ps", "--all", "--no-trunc", "--filter", "label=deerflow.role=sandbox", "--format", "{{.ID}}"], capture_output=True, text=True, check=True, timeout=15)
+            identifiers = listed.stdout.splitlines()
+            if listed.returncode or len(identifiers) > 256 or len(set(identifiers)) != len(identifiers) or any(re.fullmatch(r"[0-9a-f]{64}", identifier) is None for identifier in identifiers):
+                raise ValueError("Bootstrap primary census is malformed or exceeds its bound")
+            result, names, sandbox_ids = [], set(), set()
+            for identifier in identifiers:
+                inspected = self._run(["docker", "inspect", identifier], capture_output=True, text=True, check=True, timeout=15)
+                payload = json.loads(inspected.stdout, object_pairs_hook=_unique_object)
+                if inspected.returncode or not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
+                    raise ValueError("Bootstrap primary inspection is missing or ambiguous")
+                actual = _native_inspection(payload[0], identifier, bridge.evidence.daemon_id)
+                if not set(actual.slots).issubset(slots):
+                    raise ValueError("Bootstrap primary has foreign or unknown pool attribution")
+                if actual.container_name in names or actual.sandbox_id in sandbox_ids:
+                    raise ValueError("Bootstrap census has conflicting primary incarnations")
+                names.add(actual.container_name)
+                sandbox_ids.add(actual.sandbox_id)
+                result.append(self._native_resource_facts(payload[0], actual))
+                bridge.assert_current()
+                if time.monotonic() >= _NATIVE_SLOT_INVENTORY_DEADLINE.get():
+                    raise ValueError("Bootstrap census exceeded its overall deadline")
+            bridge.assert_current()
+            if time.monotonic() >= _NATIVE_SLOT_INVENTORY_DEADLINE.get():
+                raise ValueError("Bootstrap census arrived after its overall deadline")
+            return tuple(result)
+        except Exception as exc:
+            raise StorageHostUnqualified("Bootstrap primary inventory is incomplete; preserve existing accounting") from exc
+        finally:
+            _NATIVE_SLOT_INVENTORY_DEADLINE.reset(deadline)
+
     def _native_candidate_container(self, info):
         """Strict actual candidate facts for admission; no lifecycle effects."""
         bridge = getattr(self, "_native_creation", None)

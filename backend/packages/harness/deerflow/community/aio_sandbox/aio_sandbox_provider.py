@@ -19,6 +19,7 @@ import hashlib
 import logging
 import math
 import os
+import re
 import signal
 import threading
 import time
@@ -2625,6 +2626,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 return None
 
             info, _ = self._warm_pool[sandbox_id]
+            if getattr(info, "_bootstrap_accounting_only", False):
+                # Physical facts charge capacity; ordinary discovery must
+                # qualify the endpoint and policy before constructing a client.
+                return None
 
         self._assert_managed_container(info)
         alive = self._check_tracked_sandbox_alive(sandbox_id, info)
@@ -2749,6 +2754,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._assert_managed_container(info)
             with self._lock:
                 self._assert_managed_publication(info)
+                self._assert_bootstrap_replacement_locked(info)
                 if self._being_torn_down_locally(info.sandbox_id):
                     # The pre-publish reservation check is only an early-out: a
                     # local reaper can reserve the id during the store round
@@ -2830,6 +2836,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
             with self._lock:
                 self._assert_managed_publication(info)
+                self._assert_bootstrap_replacement_locked(info)
                 if self._being_torn_down_locally(sandbox_id):
                     # Re-checked after the store round trip, as on the discover
                     # and warm paths: the reservation can land during `take()`.
@@ -3260,6 +3267,90 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._runtime_admission = admission
             self._wake_capacity_waiters_locked()
 
+    def _begin_bootstrap_accounting(self, admission):
+        """Private owning-host permit for charging qualified primaries, not clients."""
+        if not isinstance(admission, ProviderAdmission) or admission is not getattr(self, "_runtime_admission", None):
+            raise SandboxRuntimeAdmissionError("Bootstrap accounting belongs to another lifecycle")
+        owner = getattr(self, "_pool_runtime_owner", None)
+        if owner is None or not self._pool_runtime_current():
+            raise StorageHostUnqualified("Bootstrap accounting requires its qualified native runtime")
+        owner.assert_provider(self)
+        with self._lock:
+            revision = admission.require_closed(self)
+            previous = getattr(self, "_bootstrap_accounting", None)
+            if previous is not None:
+                self._require_bootstrap_accounting_locked(previous[0])
+                return previous[0]
+            token = object()
+            self._bootstrap_accounting = (token, admission, owner, self._native_creation, revision)
+            self._require_bootstrap_accounting_locked(token)
+            return token
+
+    def _require_bootstrap_accounting_locked(self, token):
+        permit = getattr(self, "_bootstrap_accounting", None)
+        if permit is None or permit[0] is not token or permit[1] is not getattr(self, "_runtime_admission", None):
+            raise SandboxRuntimeAdmissionError("Bootstrap accounting permit is no longer current")
+        permit[1].require_closed(self, revision=permit[4])
+        if permit[2] is not getattr(self, "_pool_runtime_owner", None) or permit[3] is not getattr(self, "_native_creation", None) or not self._pool_runtime_current():
+            raise StorageHostUnqualified("Bootstrap accounting lost its native runtime")
+
+    def _end_bootstrap_accounting(self, token):
+        """End only this permit; retained physical charges survive its lifetime."""
+        with self._lock:
+            permit = getattr(self, "_bootstrap_accounting", None)
+            if permit is None or permit[0] is not token:
+                raise SandboxRuntimeAdmissionError("Bootstrap accounting permit is no longer current")
+            self._bootstrap_accounting = None
+
+    def _park_bootstrap_accounting(self, token, info):
+        """Charge one original qualified identity without admission or an SDK."""
+        if (
+            not isinstance(info, SandboxInfo)
+            or not isinstance(info.sandbox_id, str)
+            or not info.sandbox_id
+            or not isinstance(info.container_name, str)
+            or not info.container_name
+            or not isinstance(info.container_id, str)
+            or re.fullmatch(r"[0-9a-f]{64}", info.container_id) is None
+            or not isinstance(info.owner, tuple)
+            or len(info.owner) != 2
+            or any(not isinstance(value, str) or not value for value in info.owner)
+            or info.chat_storage_enabled is not True
+        ):
+            raise StorageHostUnqualified("Bootstrap primary lacks an exact managed identity")
+        with self._lock:
+            self._require_bootstrap_accounting_locked(token)
+            tracked = info.sandbox_id in self._sandbox_infos or info.sandbox_id in self._warm_pool
+        with self._owner_admission_scope(info.owner[0]):
+            self._assert_managed_container(info)
+            if not tracked and not self._adoptable_after_grace(info.sandbox_id, time.time()):
+                raise StorageHostUnqualified("Bootstrap primary still belongs to a live owner")
+            if not self._claim_ownership(info.sandbox_id):
+                raise StorageHostUnqualified("Bootstrap primary ownership could not be claimed")
+            self._assert_managed_container(info)
+            with self._lock:
+                self._require_bootstrap_accounting_locked(token)
+                self._assert_managed_publication(info, bootstrap=token)
+                if self._being_torn_down_locally(info.sandbox_id) or info.sandbox_id in self._starting:
+                    raise StorageHostUnqualified("Bootstrap primary intersects a live lifecycle operation")
+                parked = self._warm_pool.get(info.sandbox_id)
+                current = self._sandbox_infos.get(info.sandbox_id) or (parked[0] if parked is not None else None)
+                if current is not None:
+                    if any(getattr(current, key) != getattr(info, key) for key in ("container_id", "container_name", "owner", "native_slots")):
+                        raise StorageHostUnqualified("Bootstrap primary conflicts with retained accounting")
+                    return
+                if info.sandbox_id in self._sandboxes:
+                    raise StorageHostUnqualified("Bootstrap primary has an uncorrelated active client")
+                info._bootstrap_accounting_only = True
+                self._warm_pool[info.sandbox_id] = (info, time.time())
+                self._warm_pool_identity[info.sandbox_id] = info.owner
+                self._wake_capacity_waiters_locked()
+
+    def _assert_bootstrap_replacement_locked(self, info):
+        parked = self._warm_pool.get(info.sandbox_id)
+        if parked is not None and getattr(parked[0], "_bootstrap_accounting_only", False) and parked[0].container_id != info.container_id:
+            raise StorageHostUnqualified("Native publication cannot erase another accounted primary")
+
     def _require_runtime_admission(self):
         admission = getattr(self, "_runtime_admission", None)
         if admission is not None:
@@ -3497,9 +3588,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 logger.warning("Native creation handoff could not enter quarantine for %s; identity and capacity retained", sandbox_id, exc_info=True)
             transfer_if_counted(handoff)
 
-    def _assert_managed_publication(self, info):
+    def _assert_managed_publication(self, info, *, bootstrap=None):
         """Memory-only check safe inside provider/lease metadata locks."""
-        self._require_runtime_admission()
+        if bootstrap is None:
+            self._require_runtime_admission()
+        else:
+            self._require_bootstrap_accounting_locked(bootstrap)
         if not getattr(self, "_managed_runtime_required", False):
             return
         host_owner = getattr(getattr(self, "_chat_storage_host", None), "pool_runtime_owner", None)
