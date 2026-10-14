@@ -30,7 +30,7 @@ class _Request:
 
 
 class ChatStorageHost:
-    def __init__(self, loop, prepare, *, publish=None, pool_runtime_owner=None):
+    def __init__(self, loop, prepare, *, publish=None, pool_runtime_owner=None, admission=None):
         if not callable(prepare):
             raise TypeError("Chat storage admission requires a host callback")
         self._loop, self._prepare = loop, prepare
@@ -38,9 +38,14 @@ class ChatStorageHost:
             raise TypeError("Screenshot publication requires a host callback")
         self._publish = publish
         self.pool_runtime_owner = pool_runtime_owner
+        self.admission = admission
         self._lock = threading.RLock()
         self._closed = False
         self._requests: set[_Request] = set()
+
+    def require_admission(self, provider):
+        if self.admission is not None:
+            self.admission.require(provider)
 
     @property
     def is_owner_loop(self):
