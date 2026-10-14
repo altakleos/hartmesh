@@ -33,6 +33,8 @@ Resident graph qualification excludes only Docker's observational `ExecIDs` and
 count, complete configuration, mounts and network facts still have to match;
 the paired graph is checked against the fresh primary inspection. A mismatch
 logs only known top-level field names, with unknown names shown as `other`.
+Mount list order is normalized using each complete record; all record fields
+and duplicate multiplicity remain part of the comparison.
 
 Creation, conversations, replies, activations and lifecycle changes check current
 execution readiness. AI assistant creation can refuse `ai-assistant-limit` with

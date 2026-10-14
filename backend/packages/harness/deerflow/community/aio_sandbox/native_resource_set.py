@@ -50,6 +50,11 @@ def _resident_snapshot(entry):
     snapshot = {key: value for key, value in entry.items() if key != "ExecIDs"}
     if isinstance(snapshot.get("State"), dict):
         snapshot["State"] = {key: value for key, value in snapshot["State"].items() if key != "Health"}
+    if isinstance(snapshot.get("Mounts"), list):
+        try:
+            snapshot["Mounts"] = sorted(snapshot["Mounts"], key=lambda mount: json.dumps(mount, sort_keys=True, separators=(",", ":"), allow_nan=False))
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise StorageHostUnqualified("Resident mount snapshot is malformed") from exc
     return snapshot
 
 

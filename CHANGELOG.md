@@ -22,6 +22,7 @@ failures produce bounded source diagnostics without exception values or tenant
 contents, so an unavailable resident is no longer logged as ready.
 Resident census ignores changing health and exec observations while preserving
 identity, process state, mount and network comparisons across fresh inspections.
+Mount list ordering is normalized without discarding record fields or duplicates.
 
 There is no database schema, native evidence format or configuration-version change.
 

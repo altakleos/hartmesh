@@ -40,8 +40,10 @@ def census():
     return docker, provider
 
 
-def moving_primary(change):
+def moving_primary(change, *, several_mounts=False):
     docker, provider = census()
+    if several_mounts:
+        docker.entry["Mounts"].append({"Type": "bind", "Source": "/company/shared", "Destination": "/mnt/user-data/shared", "RW": False, "Propagation": "rprivate", "Mode": "ro"})
     docker.entry["State"].update(Status="running", Running=True, Pid=101, StartedAt="2026-10-01T12:00:01Z", Health={"Status": "healthy", "Log": []})
     docker.entry.update(ExecIDs=[], RestartCount=0)
     original = docker.__call__
@@ -60,6 +62,40 @@ def moving_primary(change):
 
     provider._backend._run = run
     return docker, provider
+
+
+def test_resident_census_tolerates_reordering_complete_mount_records():
+    docker, provider = moving_primary(lambda entry: entry["Mounts"].reverse(), several_mounts=True)
+    before = copy.deepcopy(docker.entry)
+    actual = provider.bootstrap_residents(known_slots=(SLOT,))
+    assert len(actual) == 1 and len(actual[0].mounts) == 2
+    assert docker.entry == before
+    assert not any(command[1] in {"start", "rm"} for command in docker.calls)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda mounts: mounts[1].update(Source="/another/shared"),
+        lambda mounts: mounts[1].update(Destination="/another/destination"),
+        lambda mounts: mounts[1].update(RW=True),
+        lambda mounts: mounts[1].update(Propagation="rshared"),
+        lambda mounts: mounts[1].update(Mode="rw"),
+        lambda mounts: mounts[1].update(other_metadata="changed"),
+        lambda mounts: mounts.pop(),
+        lambda mounts: mounts.append({**mounts[1], "Destination": "/extra"}),
+        lambda mounts: mounts.append(copy.deepcopy(mounts[1])),
+    ],
+)
+def test_resident_census_refuses_mount_record_values_and_multiplicity_changes(change):
+    def alteration(entry):
+        change(entry["Mounts"])
+        entry["Mounts"].reverse()
+
+    docker, provider = moving_primary(alteration, several_mounts=True)
+    with pytest.raises(StorageHostUnqualified):
+        provider.bootstrap_residents(known_slots=(SLOT,))
+    assert not any(command[1] in {"start", "rm"} for command in docker.calls)
 
 
 @pytest.mark.parametrize("change", ["health", "exec", "both"])
