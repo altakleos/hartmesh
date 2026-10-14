@@ -61,6 +61,9 @@ stable fallback sentences. `RESIDENT_INTERRUPTED` names a frame, never an except
 `residents.py` remains uninstalled; optional preparation/worker hooks use the owning loop;
 provider-locked slots include exact preparation claims through uncertain outcomes.
 Restoration retains each durable attachment; incomplete snapshots never open admission.
+Private uninstalled `bootstrap.py` retains startup tasks through timeout/cancellation,
+checks exact census evidence before atomic callback/readiness publication, and seals
+before draining workers, initialization and registry effects. See the registry guide.
 Expiry/cancellation never implies containment. Timed-out eviction stays owned
 through drainage. Restore durable claims and coordinate admission before installation;
 see [registry rules](../../../../docs/RESIDENT_REGISTRY.md).

@@ -72,6 +72,8 @@ Private restart-accounting seams retain qualified sandbox primaries in the
 existing capacity pool without creating clients. A bounded read-only inventory
 includes stopped containers and historical prefixes; missing or ambiguous facts
 prevent it from reporting complete accounting.
+The staged startup coordinator retains work across timeouts and retries, checks
+complete accounting before opening admission, and drains shutdown in order.
 The run API distinguishes a Gateway shutdown from a human Stop. Shutdown records
 its reason before cancelling active runs; a run that finishes during shutdown
 keeps its outcome.
