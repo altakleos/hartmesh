@@ -338,3 +338,29 @@ async def test_submitted_producer_commit_is_in_complete_snapshot_before_publicat
     assert residents.retained == {row.id: row for row in rows}
     assert provider.external_slots() == 2
     await coordinator.close()
+
+
+@pytest.mark.anyio
+async def test_recovery_budget_belongs_to_one_initializer_and_only_explicit_retry_renews_it(build):
+    coordinator, _residents, _provider, _admission, clock, _validate = build()
+    observed = []
+    account = coordinator.account_native.side_effect
+
+    async def capture(token):
+        observed.append(coordinator.recovery_deadline)
+        if len(observed) < 3:
+            raise RuntimeError("retryable accounting failure")
+        return await account(token)
+
+    coordinator.account_native.side_effect = capture
+    assert await coordinator.poll(timeout=2) is None
+    assert observed == [220.0]
+    clock[0] = 230.0
+    assert await coordinator.poll() is None
+    # Harvest the default-started failure without changing its inherited budget.
+    assert await coordinator.poll(timeout=2) is None
+    assert observed == [220.0, 220.0]
+    assert await coordinator.poll(timeout=2) is not None
+    assert observed == [220.0, 220.0, 350.0]
+    assert coordinator.deadline == 220.0
+    await coordinator.close()

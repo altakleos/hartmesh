@@ -39,8 +39,16 @@ This permission grants no resource effect or new runtime installation.
 Gateway census includes immutable resident primaries and actual paired resources.
 Unknown or untracked graphs close admission; census grants no destructive scope.
 `DockerStorageAdapter._cleanup_resident` remains best effort and its normal return
-never certifies graph absence. Strict actorless resident orphan journal recovery
-must land before Compose agent counts activate. Generic release uses the existing
+never certifies graph absence. Private `resident_recovery.py` grants explicit
+host recovery only from an original v5 graph and a trusted borrowed-session
+eligibility callback. Hold Home, provider batch and sorted original/RO parents;
+commit eligibility before fresh absence and terminal fsync in a second validation-only
+parent transaction. Pending create/handoff identity or writable-slot conflicts
+refuse effects and completion. Recovery alone bridges each effect and terminal
+completion back to owning-loop eligibility using the suspended parent's borrowed
+session. The callback owns its deadline and drains fully, without another checkout
+or a worker Future timeout. Normal fenced retries remain observation-only.
+Compose agent counts remain disabled. Generic release uses the existing
 host-release proof and a native slot reservation before SQL locks; foreign native
 holders keep their backing and evidence. Released User policy stays in Gateway.
 PoolRuntimeOwner retains the exact published namespace even through failed first

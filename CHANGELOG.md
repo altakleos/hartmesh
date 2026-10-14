@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Strict original workspace recovery
+
+Managed startup can finish interrupted cleanup of an AI agent's original workspace
+when its attachment row is missing or already fenced. It uses retained container,
+network and backing identities, preserves live runs and unfinished create requests,
+and keeps uncertain cleanup charged. Bounded retries run before a fresh complete
+capacity census. Historical closure attribution and files remain intact. Compose
+agent counts remain disabled pending the remaining product stages.
+
+There is no database schema, native evidence format or configuration-version change.
+
 ### Durable resident resource lifecycle
 
 Managed AI employee preparation retains the original container, network and

@@ -1,6 +1,7 @@
 """Original actorless removal and durability with offline Docker and disk journal."""
 
 import os
+import time
 from dataclasses import replace
 from threading import Lock
 from types import SimpleNamespace
@@ -172,6 +173,61 @@ def test_retirement_publication_reply_loss_restores_charge_for_a_fresh_worker(fi
             assert not objects and journal.snapshot().residents == ()
         finally:
             fresh.close()
+    finally:
+        capability.close()
+        gate.end_resident_batch(token)
+
+
+def test_expired_inherited_recovery_budget_issues_no_effect_and_keeps_charge(fixture):
+    capability, gate, token, saved, objects, calls = worker(fixture)
+    try:
+        bounded = ResidentContainmentWorker(provider=capability.provider, adapter=capability.adapter, gate=gate, reservation=token, records=(saved,), roots_guard=lambda _record: None, deadline=time.monotonic() - 1)
+        try:
+            with pytest.raises(StorageHostUnqualified, match="deadline"):
+                bounded.contain(saved.attachment_id)
+            assert objects and capability.bridge.residents.for_attachment(saved.attachment_id) == saved
+            assert not any("stop" in command or "rm" in command for command in calls)
+        finally:
+            bounded.close()
+    finally:
+        capability.close()
+        gate.end_resident_batch(token)
+
+
+@pytest.mark.parametrize("interruption", ["missing-primary", "network-proxy", "network", "egress-network"])
+def test_original_recovery_resumes_surviving_graph_after_each_lost_effect_reply(fixture, interruption):
+    capability, gate, token, saved, objects, calls = worker(fixture)
+    engine = capability.backend._run
+    failed = []
+    if interruption == "missing-primary":
+        objects.pop(("container", saved.container_id))
+        for entry in objects.values():
+            entry.get("Containers", {}).pop(saved.container_id, None)
+    else:
+        member = next(member for member in saved.resources if member.role == interruption)
+
+        def interrupted(command, **kwargs):
+            reply = engine(command, **kwargs)
+            if command[-1] == member.identity and "inspect" not in command and not failed:
+                failed.append(True)
+                raise OSError("Original graph effect reply lost")
+            return reply
+
+        capability.backend._run = interrupted
+    try:
+        if interruption != "missing-primary":
+            with pytest.raises(OSError, match="effect reply"):
+                capability.recover(saved.attachment_id)
+            retained = capability.bridge.residents.for_attachment(saved.attachment_id)
+            assert retained.phase == "retiring" and failed
+            capability.close()
+            capability.backend._run = engine
+            capability = ResidentContainmentWorker(provider=capability.provider, adapter=capability.adapter, gate=gate, reservation=token, records=(retained,), roots_guard=lambda _record: None)
+        capability.recover(saved.attachment_id)
+        assert not objects
+        capability.finalize(saved.attachment_id)
+        assert capability.bridge.residents.records() == ()
+        assert all(command[-1] in {saved.container_id, *(member.identity for member in saved.resources)} for command in calls if "rm" in command or "stop" in command)
     finally:
         capability.close()
         gate.end_resident_batch(token)

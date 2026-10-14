@@ -82,6 +82,12 @@ Serialize runless replay recovery under the Home lock, releasing before launch.
 Drain sealed admissions before RunManager shutdown snapshots workers. Periodic
 orphan callbacks request an exact deferred recycle; maintenance owns closure.
 An unacknowledged preparation cannot become absence from an empty census.
+Startup recovery freezes the original record set and rotates at most four records
+per pass before the final census. Require exactly one supported writable Home
+mount, current Home ownership, unchanged missing/fenced SQL facts, and no local
+holders or borrowed complete durable inflight matches. One absolute deadline
+belongs to the owned initializer; only a new explicit retry gets a new budget.
+Completion drops only the exact attachment claim after durable original removal.
 
 Opt-in Work readiness/host-settlement seams require exact Home/actor/host facts.
 Reload attempts after Work locking; preserve terminal outcomes and candidates.

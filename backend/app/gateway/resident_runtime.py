@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -16,10 +17,10 @@ from deerflow.config.paths import get_paths, paths_scope
 from deerflow.persistence.agent_instances.model import AgentInstanceRow
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkRow
 from deerflow.persistence.spaces.files import SpaceBackingRow
-from deerflow.persistence.spaces.lifecycle import StorageHostReplacementRow
+from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceMountRow, StorageHostReplacementRow
 from deerflow.persistence.spaces.model import SpaceRow
 from deerflow.sandbox.lease import run_sync_lifecycle_operation
-from deerflow.spaces.attachments import ResourceMount
+from deerflow.spaces.attachments import AttachmentPending, ResourceMount
 from deerflow.spaces.chat_paths import ChatStoragePaths
 from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
 from deerflow.utils.file_io import await_drained
@@ -40,6 +41,9 @@ class ResidentRuntime:
         self.accounting_retry = False
         self._startup_claims = None
         self._startup_settled = False
+        self._startup_record_ids = None
+        self._startup_originals = {}
+        self._recovery_cursor = 0
         self._projection_roots = tuple(str(path) for spec in self.files.catalog.volumes.values() for name in ("mount_path", "image_path") if (path := getattr(spec, name, None)) is not None)
         self.provider._backend._native_mountless_binds = self._operational_projection
         self.provider._backend._native_protected_roots = self._projection_roots
@@ -94,6 +98,9 @@ class ResidentRuntime:
         provider, bridge, catalog = self.provider, self.provider._native_creation, self.files.catalog
         catalog_facts = self._catalog_facts(catalog)
         await self.inventory_runs()
+        pending_recovery = await self.recover_originals(deadline=min(self.coordinator.recovery_deadline, time.monotonic() + 60))
+        if pending_recovery:
+            raise StorageRuntimeUnavailable("Original workspace recovery remains pending before the complete census")
         adapter = self.attachments.provider
         claims = dict(self.registry.retained)
         if any(claim.container_id is None for claim in claims.values()):
@@ -198,14 +205,122 @@ class ResidentRuntime:
 
         return await await_drained(run_sync_lifecycle_operation(account))
 
+    async def recover_originals(self, *, deadline):
+        """Bounded recovery of the original startup set, before the complete census."""
+        from deerflow.spaces.resident_containment import _fenced_facts
+        from deerflow.spaces.resident_recovery import NativeResidentRecoveryScopes
+
+        factory = getattr(self.attachments.provider, "_containment_scope", None)
+        if factory is None:
+            return ()
+        bridge = self.provider._native_creation
+        if time.monotonic() >= deadline:
+            return tuple(record.attachment_id for record in bridge.residents.records())
+        await await_drained(run_sync_lifecycle_operation(bridge.assert_current, teardown=True))
+        records = bridge.residents.records()
+        if self._startup_record_ids is None:
+            async with asyncio.timeout_at(deadline), self.files.registry._sf() as session:
+                phases = dict((await session.execute(select(SpaceAttachmentRow.id, SpaceAttachmentRow.phase).where(SpaceAttachmentRow.id.in_([record.attachment_id for record in records])))).all())
+            self._startup_record_ids = frozenset(record.id for record in records if phases.get(record.attachment_id) in (None, "fenced"))
+            self._startup_originals = {record.id: record for record in records if record.id in self._startup_record_ids}
+        records = sorted((record for record in records if record.id in self._startup_record_ids), key=lambda record: record.id)
+        if not records:
+            return ()
+        offset = self._recovery_cursor % len(records)
+        ordered = records[offset:] + records[:offset]
+        self._recovery_cursor += min(4, len(records))
+        pending = [record.attachment_id for record in ordered[4:]]
+        for index, record in enumerate(ordered[:4]):
+            if time.monotonic() >= deadline:
+                pending.extend(item.attachment_id for item in ordered[index:4])
+                break
+            if replace(self._startup_originals[record.id], phase=record.phase) != record:
+                pending.append(record.attachment_id)
+                continue
+            async with asyncio.timeout_at(deadline), self.files.registry._sf() as session:
+                row = await session.get(SpaceAttachmentRow, record.attachment_id)
+                if row is not None and row.phase != "fenced":
+                    pending.append(record.attachment_id)
+                    continue
+                expected = None if row is None else _fenced_facts(row)
+                scoped = [root for root in record.roots if root.space_id is not None]
+                home_id = scoped[0].space_id if len(scoped) == 1 and scoped[0].writable and scoped[0].destination == "/mnt/spaces/home" else None
+                owners = (await session.scalars(select(AgentInstanceRow).where(AgentInstanceRow.home_id == home_id))).all() if home_id is not None else []
+                identity = InstanceIdentity.from_row(owners[0]) if len(owners) == 1 else None
+            if time.monotonic() >= deadline or identity is None or record.daemon_id != bridge.evidence.daemon_id:
+                pending.append(record.attachment_id)
+                continue
+            entry = self.registry.entry(identity)
+            if entry.lock.locked():
+                pending.append(record.attachment_id)
+                continue
+
+            def locally_idle():
+                if self.registry.in_flight(identity.id) or self.registry._has_reservation(entry.home_id) or entry.preparation is not None or entry.attachment_id not in (None, record.attachment_id):
+                    raise AttachmentPending("Original resident recovery has a current local holder")
+
+            async def eligible(session, original):
+                locally_idle()
+                current = await session.get(AgentInstanceRow, identity.id, populate_existing=True)
+                if current is None or InstanceIdentity.from_row(current) != identity or entry.home_id != identity.home_id:
+                    raise AttachmentPending("Original resident Home changed owner")
+                current_row = await session.get(SpaceAttachmentRow, original.attachment_id, populate_existing=True)
+                if (current_row is None) != (expected is None) or (current_row is not None and _fenced_facts(current_row) != expected):
+                    raise AttachmentPending("Original orphan SQL eligibility changed")
+                if current_row is not None:
+                    self.attachments._closure_reason(current_row, None)
+                    mounts = (await self.attachments._mount_scope(session, (original.attachment_id,)))[original.attachment_id]
+                    if (current_row.host_id, current_row.incarnation, current_row.container_id, current_row.actor_kind, current_row.actor_id) != (
+                        original.daemon_id,
+                        original.incarnation,
+                        original.container_id,
+                        identity.principal.kind,
+                        identity.principal.subject_id,
+                    ) or set(mounts) != set(original.correlation[4]):
+                        raise AttachmentPending("Original fenced resident correlation changed")
+                other = await session.scalar(select(SpaceAttachmentRow.id).join(SpaceMountRow).where(SpaceMountRow.space_id == entry.home_id, SpaceAttachmentRow.id != original.attachment_id, SpaceAttachmentRow.phase != "fenced").limit(1))
+                if other is not None:
+                    raise AttachmentPending("Original resident Home has another unfenced incarnation")
+                snapshot = getattr(self.app.state.run_store, "_borrowed_inflight", None)
+                if not callable(snapshot):
+                    raise AttachmentPending("Original resident recovery lacks a borrowed complete run snapshot")
+                rows = await snapshot(session)
+                self._validate_run_snapshot(rows)
+                if any(run.get("metadata", {}).get("agent_instance_id") == identity.id or run.get("metadata", {}).get("agent_attachment_id") == original.attachment_id for run in rows):
+                    raise AttachmentPending("Original resident recovery retains a durable inflight run")
+                locally_idle()
+
+            async with entry.lock:
+                entry.reconciling = True
+                try:
+                    locally_idle()
+                    async with NativeResidentRecoveryScopes(factory)(record, eligible=eligible, deadline=deadline) as scope:
+                        try:
+                            await scope.contain()
+                            await scope.finalize()
+                        finally:
+                            if scope.terminal_completed:
+                                await await_drained(self.registry.contained(record.attachment_id, (entry.home_id,), "container-absent"))
+                    logger.info("agents: recovered original resident resources %s", record.attachment_id)
+                except Exception as exc:
+                    pending.append(record.attachment_id)
+                    logger.warning("Original resident recovery remains pending for %s (%s)", record.attachment_id, type(exc).__name__)
+                finally:
+                    entry.reconciling = False
+        return tuple(pending)
+
+    @staticmethod
+    def _validate_run_snapshot(rows):
+        if not isinstance(rows, list) or len(rows) > 100000 or any(not isinstance(row, dict) or not isinstance(row.get("run_id"), str) or not row["run_id"] or not isinstance(row.get("metadata", {}), dict) for row in rows):
+            raise ValueError("Invalid durable run inventory")
+        if len({row["run_id"] for row in rows}) != len(rows):
+            raise ValueError("Ambiguous durable run inventory")
+
     async def inventory_runs(self):
         """Read all durable inflight rows; a census grants no lease takeover."""
         try:
             rows = await self.app.state.run_store.list_inflight()
-            if not isinstance(rows, list) or len(rows) > 100000 or any(not isinstance(row, dict) or not isinstance(row.get("run_id"), str) or not row["run_id"] or not isinstance(row.get("metadata", {}), dict) for row in rows):
-                raise ValueError("Invalid durable run inventory")
-            if len({row["run_id"] for row in rows}) != len(rows):
-                raise ValueError("Ambiguous durable run inventory")
+            self._validate_run_snapshot(rows)
         except Exception as exc:
             self.invalidate_accounting()
             raise StorageRuntimeUnavailable("The complete durable inflight run inventory is unavailable") from exc

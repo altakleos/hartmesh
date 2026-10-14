@@ -713,7 +713,11 @@ Cleanup retains the original evidence and capacity charge until resource absence
 SQL closure and journal completion are confirmed. Interrupted cleanup retries
 the original resources; a completed cleanup retry checks current absence without
 issuing removal commands. Unfinished cleanup keeps backing administration and
-release unavailable. Strict recovery of orphaned residents follows separately.
+release unavailable. Managed startup also finishes eligible original workspace
+cleanup when its attachment row is missing or already fenced. Recovery preserves
+live runs and unfinished create requests, retries within a bounded pass, and
+requires a fresh complete census before opening capacity. Ambiguous or changed
+resources remain reserved for investigation.
 
 Managed deployments refuse generic Space grant changes. User and Company storage
 also refuse generic backup, restore, archive, delete and acceptance of uncertain

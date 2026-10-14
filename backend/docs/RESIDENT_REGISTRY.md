@@ -7,8 +7,20 @@ With `AgentInstances.residents=None`, instance preparation and completion keep
 their existing path. Storage and agent defaults remain unchanged.
 The installation includes durable restoration, exact preparation correlation,
 Work admission/replay, completion, maintenance and shutdown. Compose counts remain
-disabled until strict orphan recovery and the remaining product stages complete.
+disabled until the remaining product stages complete.
 There is no database schema change in this integration.
+
+Startup recovery freezes the retained original workspace graphs and rotates at
+most four per pass under one absolute deadline. Only an exact supported AI agent
+Home with missing or unchanged fenced attachment metadata is eligible. Home
+exclusion, provider reservations and sorted backing locks cover fresh identity,
+root, local activity and borrowed complete durable-run checks. Pending creates,
+foreign inflight runs and ambiguous identities preserve the original evidence.
+The original graph survives the eligibility commit. A second validation-only
+parent transaction rechecks eligibility and fresh absence before durable journal
+completion. Logs report host cleanup without inventing a human closure event.
+Normal fenced retries retain their observation-only authority. Capacity opens
+only after a later fresh complete native census; unresolved resources stay charged.
 
 The additive foundation provides `SpaceAttachments.inspect_preparation` and
 Work readiness/host-settlement APIs. Inspection
