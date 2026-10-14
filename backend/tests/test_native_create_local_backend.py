@@ -80,17 +80,41 @@ def test_managed_native_without_installed_bridge_starts_no_command(fixture, monk
     local._runtime_runner.assert_not_called()
 
 
-def test_mountless_profile_keeps_ordinary_command_without_journal(fixture, monkeypatch):
+def test_storage_off_keeps_ordinary_command_without_journal(fixture, monkeypatch):
     journal, _state, bridge, owner = fixture
     local = backend(bridge)
     owner.live = False
     calls = []
     monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda **kwargs: 19080)
     local._runtime_runner = lambda cmd, **kwargs: calls.append(cmd) or SimpleNamespace(stdout=CONTAINER, stderr="", returncode=0)
-    info = local.create("chat", "a", user_id="alice", storage_labels={})
+    info = local.create("chat", "a", user_id="alice", storage_labels=None)
     assert info.container_id == CONTAINER and len(calls) == 1
     assert not any(value.startswith(ATTEMPT_LABEL + "=") for value in calls[0])
     assert journal.pending() == ()
+
+
+def test_managed_nouser_create_retains_pending_on_uncertain_primary(fixture, monkeypatch):
+    from deerflow.spaces.native_create_evidence import NativeMountlessCreateAttempt
+
+    journal, state, bridge, _owner = fixture
+    local = backend(bridge)
+    local.discover = Mock(side_effect=AssertionError("Cannot adopt an uncertain request"))
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda **kwargs: 19080)
+    observed = []
+
+    def run(cmd, **kwargs):
+        (pending,) = journal.pending()
+        assert isinstance(pending, NativeMountlessCreateAttempt) and pending.slots == ()
+        assert ATTEMPT_LABEL + "=" + pending.id in cmd
+        observed.append(pending)
+        raise subprocess.CalledProcessError(125, cmd, stderr="uncertain result")
+
+    local._runtime_runner = run
+    with pytest.raises(StorageHostUnqualified):
+        local.create("chat", "a", user_id="alice", storage_labels={})
+    assert journal.pending() == tuple(observed)
+    assert state.pending_for(owner_id="alice")
+    local.discover.assert_not_called()
 
 
 def test_restricted_early_failure_retains_pending_before_sidecar_effect_and_never_guesses_cleanup(fixture, monkeypatch):

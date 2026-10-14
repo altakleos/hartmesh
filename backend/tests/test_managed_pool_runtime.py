@@ -106,6 +106,34 @@ def test_unqualified_managed_reconciliation_is_effect_free(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_managed_qualification_refuses_replacing_same_host_retained_adapter(pool, monkeypatch):
+    from deerflow.agent_instances import runtime
+    from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
+    from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
+    from deerflow.spaces.docker import DockerStorageAdapter
+    from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
+
+    owner = PoolRuntimeOwner(pool)
+    provider = AioSandboxProvider.__new__(AioSandboxProvider)
+    provider._lock = threading.RLock()
+    provider._backend = LocalContainerBackend.__new__(LocalContainerBackend)
+    provider._reconcile_orphans = Mock()
+    monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_initialized_sandbox_provider", lambda: None)
+    replacement = SimpleNamespace(host_id="host", _same_host=Mock())
+    monkeypatch.setattr(DockerStorageAdapter, "from_local_backend", lambda *_args, **_kwargs: replacement)
+    storage = files(pool, owner)
+    retained = storage.attachments = SimpleNamespace(provider=SimpleNamespace(host_id="host"))
+    try:
+        await asyncio.to_thread(owner.resolve_provider, lambda: provider)
+        with pytest.raises(StorageRuntimeUnavailable, match="replace its retained adapter"):
+            await runtime.qualified_attachments(storage, baseline_provider=provider)
+        assert storage.attachments is retained
+        assert getattr(provider, "_native_creation", None) is None
+    finally:
+        owner.close()
+
+
+@pytest.mark.asyncio
 async def test_mountless_chat_remains_available_without_pool_ownership(tmp_path):
     from test_compose_chat_provider import provider_fixture
 

@@ -801,24 +801,42 @@ def test_runs_create_only_pat_cannot_use_mutating_multitask_strategy(client):
     assert session_allowed.status_code == 200
 
 
-def test_start_run_gates_mutating_strategies_at_the_choke_point():
-    """The strategy gate lives inside start_run itself — the single choke point
-    every run-creation path (all five HTTP entrypoints plus internal
-    launchers) flows through — so no entry point can bypass it. Mirrored
-    routes prove the middleware path; this anchor proves the choke point."""
-    import inspect
+@pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+def test_start_run_gates_mutating_strategies_at_the_choke_point(monkeypatch, strategy):
+    """Installed resident ownership preserves the real cancel-capability gate."""
+    from fastapi import HTTPException
 
-    from app.gateway.services import start_run
+    from app.gateway import services
+    from app.gateway.authz import AuthContext
+    from app.gateway.resident_runtime import ResidentRuntime
+    from app.gateway.run_models import RunCreateRequest
 
-    source = inspect.getsource(start_run)
-    assert "require_cancel_permission_if" in source
-    assert "multitask_strategy" in source
+    entered = []
+
+    async def past_gate(_request):
+        entered.append(True)
+        raise RuntimeError("passed the permission gate")
+
+    monkeypatch.setattr(services, "_refuse_launch_for_refused_owner", past_gate)
+
+    async def check():
+        runtime = ResidentRuntime.__new__(ResidentRuntime)
+        runtime._closing, runtime._operations = False, set()
+        request = SimpleNamespace(state=SimpleNamespace(auth=AuthContext(user=SimpleNamespace(id="user-1"), permissions=["runs:create"])), app=SimpleNamespace(state=SimpleNamespace(resident_runtime=runtime)))
+        with pytest.raises(HTTPException) as denied:
+            await services.start_run(RunCreateRequest(multitask_strategy=strategy), "t1", request)
+        assert denied.value.status_code == 403 and denied.value.detail == "Permission denied: runs:cancel"
+        assert not entered and not runtime._operations
+        with pytest.raises(RuntimeError, match="passed the permission gate"):
+            await services.start_run(RunCreateRequest(multitask_strategy="reject"), "t1", request)
+        assert entered == [True] and not runtime._operations
+
+    asyncio.run(check())
 
 
 def test_start_run_gate_denies_create_only_credential_behaviorally():
-    """Behavioral pin on the real start_run (the mirror route and source
-    anchor above prove wiring, but this drives the production choke point
-    itself): a create-only auth context gets 403 for a mutating strategy,
+    """Behavioral pin on the real start_run without an installed runtime:
+    a create-only auth context gets 403 for a mutating strategy,
     and the gate never misfires on "reject" — with no cancel permission at
     all, the call proceeds past the gate (failing later on missing test
     wiring, never with a permission 403)."""

@@ -172,12 +172,12 @@ async def test_release_assignment_settlement_share_one_failure_isolated_pass(mai
         calls.append("settlement")
         return 3
 
-    monkeypatch.setattr(ss, "reclaim_released_user_spaces", release)
+    monkeypatch.setattr(ss, "finish_releases", release)
     monkeypatch.setattr(ss, "assign_spaces", assignment)
     monkeypatch.setattr(app.state.storage_spaces, "settle_interrupted", settlement)
     assert await ss._maintenance_step(app, timeout=5)
     assert calls == ["reclamation", "assignment", "settlement"]
-    assert app.state.agent_execution.user_spaces_reclaimed == (0 if failure == "reclamation" else 2)
+    assert app.state.agent_execution.spaces_reclaimed == (0 if failure == "reclamation" else 2)
     assert app.state.agent_execution.file_operations_settled == 3
 
 
@@ -197,7 +197,7 @@ async def test_pending_reclamation_reuses_maintenance_task_and_shutdown_drains_i
         calls.append("assignment")
         return 0, 0
 
-    monkeypatch.setattr(ss, "reclaim_released_user_spaces", release)
+    monkeypatch.setattr(ss, "finish_releases", release)
     monkeypatch.setattr(ss, "assign_spaces", assignment)
     assert not await ss._maintenance_step(app, timeout=0.01)
     await entered.wait()
@@ -212,7 +212,7 @@ async def test_pending_reclamation_reuses_maintenance_task_and_shutdown_drains_i
         resume.set()
         await stop
     assert calls == ["reclamation", "assignment"]
-    assert owned.done() and app.state.agent_execution.user_spaces_reclaimed == 1
+    assert owned.done() and app.state.agent_execution.spaces_reclaimed == 1
 
 
 @pytest.mark.asyncio

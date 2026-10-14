@@ -65,8 +65,7 @@ async def command_work(instance_id: str, work_id: str, body: WorkCommand, reques
 @require_permission("runs", "create")
 async def activate_work(instance_id: str, work_id: str, body: ActivateWork, request: Request):
     from app.gateway.agent_conversations import execution_for_run
-    from app.gateway.run_models import RunCreateRequest
-    from app.gateway.services import start_run
+    from app.gateway.work_execution import activate_work_run
     from deerflow.agent_instances.contract import AgentDenied
     from deerflow.agent_instances.work_execution import WorkExecution
 
@@ -74,15 +73,5 @@ async def activate_work(instance_id: str, work_id: str, body: ActivateWork, requ
     execution = await execution_for_run(request, body.thread_id)
     if execution is None or execution.instance.id != instance_id:
         raise AgentDenied("Activation requires this AI employee's bound conversation")
-    scope = await WorkExecution(work).reserve(execution=execution, work_id=work_id, request=body)
-    if not scope.retired:
-        record = await start_run(
-            RunCreateRequest(input={"messages": [{"role": "user", "content": "Work on the explicitly activated assignment. Read current Work context, follow the adopted mandate, and report progress, blockers or an outcome."}]}),
-            body.thread_id,
-            request,
-            idempotency_key="agent-work:" + scope.attempt_id,
-            require_existing_thread=True,
-            work_attempt=scope,
-        )
-        await scope.observe_run(execution, record)
+    scope = await activate_work_run(request, WorkExecution(work), execution, work_id, body)
     return {**await work.get(actor=execution.requester, instance_id=instance_id, work_id=work_id), "activation_receipt": {"operation_id": body.operation_id, "attempt_id": scope.attempt_id}}

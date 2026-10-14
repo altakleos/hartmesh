@@ -874,19 +874,35 @@ async def test_discover_or_create_with_lock_async_offloads_lock_file_open_and_cl
 
     monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
 
-    to_thread_calls: list[object] = []
+    loop_thread = threading.get_ident()
+    calls, opened = [], []
+    original_open = aio_mod._open_lock_file
 
-    async def fake_to_thread(func, /, *args, **kwargs):
-        to_thread_calls.append(func)
-        return func(*args, **kwargs)
+    class CheckedLockFile:
+        def __init__(self, file):
+            self.file = file
 
-    monkeypatch.setattr(aio_mod.asyncio, "to_thread", fake_to_thread)
+        def __getattr__(self, name):
+            return getattr(self.file, name)
+
+        def close(self):
+            calls.append(("close", threading.get_ident()))
+            self.file.close()
+
+    def checked_open(path):
+        calls.append(("open", threading.get_ident()))
+        file = original_open(path)
+        opened.append(file)
+        return CheckedLockFile(file)
+
+    monkeypatch.setattr(aio_mod, "_open_lock_file", checked_open)
 
     sandbox_id = await provider._discover_or_create_with_lock_async("thread-async-lock", "sandbox-async-lock", user_id="default")
 
     assert sandbox_id == "sandbox-async-lock"
-    assert aio_mod._open_lock_file in to_thread_calls
-    assert any(getattr(func, "__name__", "") == "close" for func in to_thread_calls)
+    assert [action for action, _thread in calls] == ["open", "close"]
+    assert all(thread != loop_thread for _action, thread in calls)
+    assert opened and all(file.closed for file in opened)
 
 
 @pytest.mark.anyio

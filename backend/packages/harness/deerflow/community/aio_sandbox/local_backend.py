@@ -96,7 +96,14 @@ class NativeSlotContainer:
     resources: tuple[NativeTeardownResource, ...] = ()
 
 
-def _native_inspection(entry, identifier, daemon_id, *, slot_id=None, require_open=False):
+@dataclass(frozen=True)
+class NativeMountlessContainer(NativeSlotContainer):
+    """Inspected accounting correlation, never process-created provenance."""
+
+    mountless_binds: tuple[tuple[str, str, bool], ...] = ()
+
+
+def _native_inspection(entry, identifier, daemon_id, *, slot_id=None, require_open=False, allow_mountless=False):
     prefix = "hartmesh.storage.space."
     name, created = entry.get("Name"), entry.get("Created")
     labels = entry["Config"]["Labels"]
@@ -126,7 +133,7 @@ def _native_inspection(entry, identifier, daemon_id, *, slot_id=None, require_op
         # or self-attest a complete restricted resource set.
         raise ValueError("Native slot inventory cannot qualify this restricted resource set")
     slots = tuple(sorted(key[len(prefix) :] for key in labels if key.startswith(prefix)))
-    if not slots:
+    if not slots and not allow_mountless:
         raise ValueError("Native candidate has no exact physical slots")
     return NativeSlotContainer(identifier, name[1:], sandbox, (owner, thread), slots, daemon_id, running, auto_remove, created, labels["deerflow.network_mode"])
 
@@ -796,7 +803,9 @@ class LocalContainerBackend(SandboxBackend):
 
             require_resident_submission(self, labels)
             return None
-        if not getattr(self, "_managed_native_required", False) or not labels or not any(isinstance(key, str) and key.startswith("hartmesh.storage.space.") for key in labels):
+        if not getattr(self, "_managed_native_required", False) or not labels:
+            return None
+        if labels.get("hartmesh.chat.storage") != "on" and not any(isinstance(key, str) and key.startswith("hartmesh.storage.space.") for key in labels):
             return None
         bridge = getattr(self, "_native_creation", None)
         if self._runtime != "docker" or not isinstance(bridge, NativeCreateBridge) or not bridge.ready:
@@ -842,7 +851,41 @@ class LocalContainerBackend(SandboxBackend):
         finally:
             _NATIVE_SLOT_INVENTORY_DEADLINE.reset(deadline)
 
-    def _bootstrap_primary_inventory(self, *, known_slots):
+    def _qualify_native_mountless(self, entry, actual, binds):
+        """Pin exact host operational binds and modes, outside the pool."""
+        if actual.slots or not isinstance(binds, (tuple, list)) or len(binds) > 4096:
+            raise StorageHostUnqualified("Mountless accounting requires its bounded host projection")
+        observed = _inspect_mounts(entry)
+        if observed is None or len(observed) > 4096:
+            raise StorageHostUnqualified("Mountless accounting lacks complete mount facts")
+        protected = (PurePosixPath("/mnt/user-data"), PurePosixPath("/mnt/acp-workspace"), PurePosixPath("/mnt/spaces"))
+        pool = self._native_creation.evidence.pool.resolve()
+        roots = tuple(Path(root).resolve() for root in getattr(self, "_native_protected_roots", ()))
+        allowed = set()
+        for bind in binds:
+            if not isinstance(bind, (tuple, list)) or len(bind) != 3 or type(bind[2]) is not bool or any(not isinstance(value, str) or not value or len(value) > 4096 or "\x00" in value for value in bind[:2]):
+                raise StorageHostUnqualified("Mountless projection contains invalid operational binds")
+            source, destination = (PurePosixPath(posixpath.normpath(value)) for value in bind[:2])
+            resolved = Path(source).resolve()
+            if (
+                not source.is_absolute()
+                or not destination.is_absolute()
+                or any(destination.is_relative_to(root) or root.is_relative_to(destination) for root in protected)
+                or any(resolved.is_relative_to(root) or root.is_relative_to(resolved) for root in (pool, *roots))
+            ):
+                raise StorageHostUnqualified("Mountless projection exposes protected storage")
+            allowed.add((str(source), str(destination), bind[2]))
+        projection, destinations = [], set()
+        for mount in observed:
+            key = (posixpath.normpath(mount.source), posixpath.normpath(mount.destination), not mount.writable)
+            if mount.type != "bind" or mount.propagation != "rprivate" or key not in allowed or key[1] in destinations:
+                raise StorageHostUnqualified("Mountless candidate differs from its exact operational projection")
+            destinations.add(key[1])
+            projection.append(key)
+        facts = {field.name: getattr(actual, field.name) for field in dataclasses.fields(NativeSlotContainer)}
+        return NativeMountlessContainer(**facts, mountless_binds=tuple(sorted(projection)))
+
+    def _bootstrap_primary_inventory(self, *, known_slots, mountless_binds=None):
         """Strict all-state/prefix accounting facts; no adoption or cleanup authority."""
         bridge = getattr(self, "_native_creation", None)
         if self._runtime != "docker" or not isinstance(bridge, NativeCreateBridge):
@@ -864,7 +907,10 @@ class LocalContainerBackend(SandboxBackend):
                 payload = json.loads(inspected.stdout, object_pairs_hook=_unique_object)
                 if inspected.returncode or not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
                     raise ValueError("Bootstrap primary inspection is missing or ambiguous")
-                actual = _native_inspection(payload[0], identifier, bridge.evidence.daemon_id)
+                actual = _native_inspection(payload[0], identifier, bridge.evidence.daemon_id, allow_mountless=mountless_binds is not None)
+                if not actual.slots:
+                    projection = mountless_binds(*actual.owner) if callable(mountless_binds) else mountless_binds
+                    actual = self._qualify_native_mountless(payload[0], actual, projection)
                 if not set(actual.slots).issubset(slots):
                     raise ValueError("Bootstrap primary has foreign or unknown pool attribution")
                 if actual.container_name in names or actual.sandbox_id in sandbox_ids:
@@ -896,7 +942,12 @@ class LocalContainerBackend(SandboxBackend):
             payload = json.loads(result.stdout, object_pairs_hook=_unique_object)
             if result.returncode or not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
                 raise ValueError("Native candidate inspection is missing or ambiguous")
-            actual = _native_inspection(payload[0], info.container_id, bridge.evidence.daemon_id)
+            original = getattr(info, "native_container", None)
+            actual = _native_inspection(payload[0], info.container_id, bridge.evidence.daemon_id, allow_mountless=isinstance(original, NativeMountlessContainer))
+            if not actual.slots:
+                actual = self._qualify_native_mountless(payload[0], actual, original.mountless_binds)
+                if actual.mountless_binds != original.mountless_binds:
+                    raise ValueError("Mountless accounting projection changed")
             if (actual.container_name, actual.sandbox_id, actual.owner) != (info.container_name, info.sandbox_id, info.owner):
                 raise ValueError("Native candidate identity conflicts with tracking")
             bridge.assert_current()
@@ -944,7 +995,14 @@ class LocalContainerBackend(SandboxBackend):
         entry = NativeResourceSet(self, guard=lambda: bridge.assert_current(teardown=True)).inspect("container", info.container_id)
         if entry is None:
             raise StorageHostUnqualified("Unrecorded native primary has no complete resource proof")
-        actual = _native_inspection(entry, info.container_id, bridge.evidence.daemon_id)
+        original = getattr(info, "native_container", None)
+        projection = getattr(self, "_native_mountless_binds", None)
+        actual = _native_inspection(entry, info.container_id, bridge.evidence.daemon_id, allow_mountless=isinstance(original, NativeMountlessContainer) or callable(projection))
+        if not actual.slots:
+            binds = original.mountless_binds if isinstance(original, NativeMountlessContainer) else projection(*actual.owner)
+            actual = self._qualify_native_mountless(entry, actual, binds)
+            if isinstance(original, NativeMountlessContainer) and actual.mountless_binds != original.mountless_binds:
+                raise StorageHostUnqualified("Mountless cleanup projection changed")
         if (actual.container_name, actual.sandbox_id, actual.owner) != (info.container_name, info.sandbox_id, info.owner):
             raise StorageHostUnqualified("Native resource candidate differs from its canonical incarnation")
         return self._native_resource_facts(entry, actual)
@@ -1387,7 +1445,11 @@ class LocalContainerBackend(SandboxBackend):
                 raise StorageHostUnqualified("Resident resource absence is unconfirmed") from exc
             if result.returncode == 0:
                 return "mismatch"
-            absent = ("Error: No such object: " + name, "Error response from daemon: No such container: " + name) if kind == "container" else ("Error: No such network: " + name, "Error response from daemon: network " + name + " not found")
+            absent = (
+                ("Error: No such object: " + name, "error: no such object: " + name, "Error response from daemon: No such container: " + name)
+                if kind == "container"
+                else ("Error: No such network: " + name, "Error response from daemon: network " + name + " not found")
+            )
             if result.returncode != 1 or result.stderr.strip() not in absent or result.stdout.strip() not in ("", "[]"):
                 raise StorageHostUnqualified("Resident resource absence is unconfirmed")
         return "missing"
@@ -1746,11 +1808,29 @@ class LocalContainerBackend(SandboxBackend):
             logger.warning("Sandbox %s resource set is not confirmed absent after destroy: %s", info.sandbox_id, outcome)
         return outcome
 
+    def _native_mountless_primary(self, expected, bridge):
+        from .native_resource_set import NativeResourceSet
+
+        reader = NativeResourceSet(self, guard=lambda: bridge.assert_current(teardown=True))
+        entry = reader.inspect("container", expected.container_id)
+        if entry is None:
+            return ()
+        actual = _native_inspection(entry, expected.container_id, bridge.evidence.daemon_id, require_open=True, allow_mountless=True)
+        if actual.slots:
+            raise StorageHostUnqualified("Mountless primary acquired an unexpected Space slot")
+        return (self._qualify_native_mountless(entry, actual, expected.mountless_binds),)
+
     def _destroy_native_primary(self, info):
         """Called by canonical provider fencing; correlation alone grants nothing."""
         expected = info.native_container
         bridge = getattr(self, "_native_creation", None)
-        if not isinstance(expected, NativeSlotContainer) or not expected.slots or expected.network_mode != "open" or self._runtime != "docker" or not isinstance(bridge, NativeCreateBridge):
+        if (
+            not isinstance(expected, NativeSlotContainer)
+            or (not expected.slots and not isinstance(expected, NativeMountlessContainer))
+            or expected.network_mode != "open"
+            or self._runtime != "docker"
+            or not isinstance(bridge, NativeCreateBridge)
+        ):
             return DestroyOutcome.UNKNOWN
         inherited = _NATIVE_SLOT_INVENTORY_DEADLINE.get()
         deadline = _NATIVE_SLOT_INVENTORY_DEADLINE.set(min(time.monotonic() + 60, inherited) if inherited is not None else time.monotonic() + 60)
@@ -1764,7 +1844,13 @@ class LocalContainerBackend(SandboxBackend):
                 if capability is None or not capability.permits(info):
                     raise StorageHostUnqualified("Native teardown requires its qualified recovery capability")
             bridge.assert_current(teardown=True)
-            matches = tuple(entry for entry in self._slot_containers(expected.slots[0]) if entry.container_id == expected.container_id)
+
+            def current_primary():
+                if expected.slots:
+                    return tuple(entry for entry in self._slot_containers(expected.slots[0]) if entry.container_id == expected.container_id)
+                return self._native_mountless_primary(expected, bridge)
+
+            matches = current_primary()
             if not matches:
                 return DestroyOutcome.ABSENT if self._native_primary_absent(expected, bridge) else DestroyOutcome.UNKNOWN
             if len(matches) != 1 or dataclasses.replace(matches[0], running=False) != dataclasses.replace(expected, running=False):
@@ -1775,7 +1861,7 @@ class LocalContainerBackend(SandboxBackend):
             absent = self._container_absent(expected.container_id)
             if absent is False:
                 try:
-                    matches = tuple(entry for entry in self._slot_containers(expected.slots[0]) if entry.container_id == expected.container_id)
+                    matches = current_primary()
                     if len(matches) != 1 or matches[0].running or dataclasses.replace(matches[0], running=False) != dataclasses.replace(expected, running=False):
                         raise StorageHostUnqualified("Stopped native incarnation cannot be positively removed")
                 except StorageHostUnqualified:

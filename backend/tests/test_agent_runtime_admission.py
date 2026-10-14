@@ -1,5 +1,6 @@
 """Real admission and worker preserve the instance and human scopes together."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -10,6 +11,7 @@ from test_agent_conversations import conversations
 from test_agent_instances import create
 from test_agent_instances import instances as instances
 from test_gateway_services import _make_start_run_persistence_context
+from test_resident_registry import registry as registry
 from test_run_worker_delivery import _make_bridge
 
 from app.gateway.authz import AuthContext
@@ -17,6 +19,47 @@ from app.gateway.run_models import RunCreateRequest
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+
+@pytest.mark.asyncio
+async def test_resident_limit_refuses_before_checkpoint_or_durable_run(instances, registry, monkeypatch):
+    from app.gateway import services
+    from deerflow.agent_instances.contract import ResidentRunLimit
+
+    agents, authority, threads, _sf = await conversations(instances)
+    agent = await create(agents, custody="company", supervisor=BOB)
+    chat = await authority.create(actor=BOB, instance_id=agent.id, creation_id=operation())
+    request, run_store, _threads = _make_start_run_persistence_context()
+    request.app.state.thread_store = threads
+    request.app.state.agent_conversations = authority
+    request.state.user = SimpleNamespace(id="bob", system_role="user", role="user")
+    request.state.auth = AuthContext(request.state.user, ["runs:create", "runs:read"])
+    request.state.auth_source = "session"
+    request.url = "http://test/api/threads/" + chat["thread_id"] + "/runs"
+    residents, _provider, _records, _clock = registry()
+    agents.residents = residents
+    residents.run_manager = request.app.state.run_manager
+    workers = []
+    for index in range(2):
+        record = await residents.run_manager.create("other-" + str(index), metadata={"agent_instance_id": agent.id})
+        record.task = asyncio.create_task(asyncio.Event().wait())
+        workers.append(record.task)
+    seed = AsyncMock(side_effect=AssertionError("Capacity must precede checkpoint writes"))
+    monkeypatch.setattr(services, "ensure_checkpoint_history_seeded", seed)
+    config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
+    set_app_config(config)
+    token = set_current_user(request.state.user)
+    try:
+        with pytest.raises(ResidentRunLimit):
+            await services.start_run(RunCreateRequest(input={"messages": [{"role": "user", "content": "hello"}]}), chat["thread_id"], request)
+        seed.assert_not_awaited()
+        assert await run_store.list_by_thread(chat["thread_id"]) == []
+    finally:
+        for task in workers:
+            task.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        reset_current_user(token)
+        reset_app_config()
 
 
 @pytest.mark.asyncio

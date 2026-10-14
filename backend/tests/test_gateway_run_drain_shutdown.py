@@ -26,6 +26,7 @@ import operator
 from contextlib import asynccontextmanager, suppress
 from types import SimpleNamespace
 from typing import Annotated, TypedDict
+from unittest.mock import AsyncMock
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
@@ -144,6 +145,91 @@ async def test_shutdown_is_noop_without_inflight_runs():
     record = await rm.create("t-done")
     await rm.set_status(record.run_id, RunStatus.success)
     await rm.shutdown(timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_langgraph_shutdown_drains_late_admission_before_manager_snapshot(monkeypatch):
+    from fastapi import FastAPI
+
+    from app.gateway.deps import langgraph_runtime
+    from app.gateway.resident_runtime import ResidentRuntime
+    from deerflow.extensions.registry import ExtensionRegistry
+    from deerflow.sandbox.admission import ProviderAdmission
+
+    @asynccontextmanager
+    async def stand_in(_config):
+        yield object()
+
+    monkeypatch.setattr("deerflow.runtime.checkpointer.async_provider.make_checkpointer", stand_in)
+    monkeypatch.setattr("deerflow.runtime.make_stream_bridge", stand_in)
+    monkeypatch.setattr("deerflow.runtime.make_store", stand_in)
+    monkeypatch.setattr("deerflow.persistence.engine.init_engine_from_config", AsyncMock())
+    monkeypatch.setattr("deerflow.persistence.engine.close_engine", AsyncMock())
+    monkeypatch.setattr("deerflow.persistence.engine.get_session_factory", lambda: None)
+    monkeypatch.setattr("deerflow.runtime.events.store.make_run_event_store", lambda _cfg: object())
+    monkeypatch.setattr("deerflow.persistence.thread_meta.make_thread_store", lambda *_: object())
+    monkeypatch.setattr("app.gateway.chat_storage.close_chat_storage_host", AsyncMock())
+    app = FastAPI()
+    app.state.extensions = ExtensionRegistry().build()
+    config = SimpleNamespace(database=SimpleNamespace(backend="memory", checkpoint_channel_mode="full", checkpoint_delta=SimpleNamespace(snapshot_frequency=10)), run_events=None)
+    entered, release, sealed, cancelled = (asyncio.Event() for _ in range(4))
+    launched = []
+
+    async def scenario():
+        async with langgraph_runtime(app, config):
+            manager = app.state.run_manager
+            host = ResidentRuntime.__new__(ResidentRuntime)
+            host.app = app
+            host.provider = SimpleNamespace(external_changed=lambda change: change())
+            host.admission = ProviderAdmission()
+            host.admission.bind(host.provider)
+            host.admission.open(host.provider)
+            host.registry = SimpleNamespace(run_manager=manager)
+            host._closing_tasks, host._closing, host._operations = None, False, set()
+            host.drain_producers = AsyncMock()
+            host.coordinator = SimpleNamespace(close=host.drain_workers)
+            app.state.resident_runtime = host
+            seal = host.seal
+
+            def signal_seal():
+                seal()
+                sealed.set()
+
+            host.seal = signal_seal
+
+            async def worker():
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+
+            async def late_launch():
+                entered.set()
+                await release.wait()
+                record = await manager.create("late", metadata={"agent_instance_id": "agent"})
+                await manager.set_status(record.run_id, RunStatus.running)
+                record.task = asyncio.create_task(worker())
+                launched.append(record)
+
+            app.state.pending_launch = asyncio.create_task(host.own_operation(late_launch()))
+            await entered.wait()
+
+    closing = asyncio.create_task(scenario())
+    try:
+        await asyncio.wait_for(sealed.wait(), 2)
+        release.set()
+        done, _pending = await asyncio.wait({closing}, timeout=2)
+        assert done, "Canonical shutdown must cancel a worker attached by the drained admission"
+        await closing
+        assert cancelled.is_set() and launched[0].task.done()
+        assert launched[0].status == RunStatus.interrupted
+        assert launched[0].stop_reason == "gateway_stopped"
+    finally:
+        release.set()
+        for record in launched:
+            if not record.task.done():
+                record.task.cancel()
+        await asyncio.gather(closing, return_exceptions=True)
 
 
 @pytest.mark.asyncio

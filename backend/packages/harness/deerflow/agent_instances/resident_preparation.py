@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from deerflow.agent_instances.contract import AgentDenied, Refusal, ResidentFilesBusy, ResidentFilesFull, ResidentStartFailed, ResidentStartingElsewhere
 from deerflow.runtime.turn_phases import TurnPhase, phase_span
-from deerflow.spaces.attachments import AttachmentPending, ResourceMount
+from deerflow.spaces.attachments import AttachmentPending, ResourceMount, RetainedAttachment
 from deerflow.spaces.backings import BackingUnavailable
 from deerflow.spaces.provision import SPACE_MIN_FREE_BYTES, SPACE_MIN_FREE_INODES
 from deerflow.spaces.service import SpaceOperationPending
@@ -26,6 +26,49 @@ async def _validate(execution):
         raise ResidentStartFailed(execution.instance.name) from exc
 
 
+async def _retained(execution, residents, mounts, attached):
+    facts = await mounts.retained_attachment(attached.id)
+    if (
+        not isinstance(facts, RetainedAttachment)
+        or facts.id != attached.id
+        or facts.actor != execution.instance.principal
+        or facts.host_id != mounts.provider.host_id
+        or facts.resources != (ResourceMount(execution.instance.home_id, execution.home_generation, "home", True),)
+        or (getattr(attached, "container_id", None) is not None and facts.container_id != attached.container_id)
+    ):
+        raise AttachmentPending("Preparation does not match its detached immutable facts")
+    return facts
+
+
+async def _require_usable(residents, mounts, attached, facts):
+    merged = residents.retained.get(attached.id)
+    if facts.phase != "active" or merged is None or merged.phase != "active" or merged.container_id != attached.container_id:
+        await mounts.contain_host(attached.id, "start-failed")
+        raise AttachmentPending("The returned attachment is no longer confirmed active")
+
+
+async def _claim_existing(execution, residents, mounts, attached, *, attempt_id=None, require_active=True):
+    if not residents._restoration_started:
+        residents.claimed(execution.instance, attached.id, attempt_id=attempt_id)
+        return
+    facts = await _retained(execution, residents, mounts, attached)
+    residents.retain(facts)
+    if require_active:
+        await _require_usable(residents, mounts, attached, facts)
+    if facts.phase == "active":
+        residents.associate(execution.instance, residents.retained[facts.id], generation=execution.home_generation, attempt_id=attempt_id)
+
+
+async def _transfer_preparation(execution, residents, mounts, preparation, attached, *, attempt_id=None, require_active=False):
+    if not residents._restoration_started:
+        return residents.preparation_claimed(execution.instance, preparation, attached.id, attempt_id=attempt_id)
+    facts = await _retained(execution, residents, mounts, attached)
+    transferred = residents.preparation_retained(execution.instance, preparation, facts, attempt_id=attempt_id)
+    if transferred and require_active:
+        await _require_usable(residents, mounts, attached, facts)
+    return transferred
+
+
 async def _resume(execution, residents, mounts, resources):
     instance = execution.instance
     for retry in range(RESUME_RETRIES + 1):
@@ -37,7 +80,7 @@ async def _resume(execution, residents, mounts, resources):
             state = await mounts.unfenced(instance.home_id, actor=instance.principal, resources=resources, host_id=mounts.provider.host_id)
             if state is None:
                 return None
-            residents.claimed(instance, state.id)
+            await _claim_existing(execution, residents, mounts, state, require_active=False)
             physical = await mounts.container_state(state.id) if state.container_id is not None else "unknown"
             if physical == "gone" and await mounts.container_state(state.id) == "gone":
                 if await mounts.contain_host(state.id, "container-absent"):
@@ -54,17 +97,36 @@ async def _resume(execution, residents, mounts, resources):
             raise ResidentStartFailed(instance.name)
 
 
-async def _recover_claim(execution, environment, residents, mounts, resources, claim):
+async def _recover_claim(execution, environment, residents, mounts, resources, claim, *, returned=None):
     """Only exact correlation authorizes cleanup of an invoked preparation."""
     instance = execution.instance
     try:
         state = await mounts.inspect_preparation(actor=instance.principal, incarnation=claim.incarnation, resources=resources, host_id=claim.host_id)
         if state is None:
+            if returned is not None:
+                raise AttachmentPending("Returned native attachment cannot be forgotten from a missing metadata read")
             # No SQL intent is insufficient if the qualified host disappeared.
             await await_drained(run_file_io(mounts.provider._same_host))
             residents.preparation_absent(instance.home_id, claim)
             return
-        if residents.preparation_claimed(instance, claim, state.id, attempt_id=getattr(execution.work, "attempt_id", None)):
+        if returned is not None and (state.id != returned.id or (getattr(state, "container_id", None) is not None and state.container_id != returned.container_id)):
+            raise AttachmentPending("Preparation recovery changed its returned immutable identity")
+        if residents._restoration_started and state.phase == "fenced":
+            confirmed = await mounts.confirm_fenced_preparation(
+                actor=instance.principal,
+                incarnation=claim.incarnation,
+                resources=resources,
+                host_id=claim.host_id,
+                attachment_id=state.id,
+                container_id=state.container_id,
+            )
+            if confirmed:
+                try:
+                    await mounts.contain_host(state.id, "start-failed")
+                finally:
+                    residents.preparation_absent(instance.home_id, claim)
+            return
+        if await _transfer_preparation(execution, residents, mounts, claim, state, attempt_id=getattr(execution.work, "attempt_id", None)):
             environment.attachment_id = state.id
             await mounts.contain_host(state.id, "start-failed")
     except Exception:
@@ -93,11 +155,18 @@ async def _attachment(execution, environment, residents, mounts, run_id):
         except Exception as exc:
             raise ResidentStartFailed(instance.name) from exc
         if attached is not None:
-            residents.claimed(instance, attached.id, attempt_id=getattr(execution.work, "attempt_id", None))
             environment.attachment_id = attached.id
+            try:
+                await _claim_existing(execution, residents, mounts, attached, attempt_id=getattr(execution.work, "attempt_id", None))
+            except BaseException as exc:
+                environment.recycle_required = True
+                if isinstance(exc, (asyncio.CancelledError, AgentDenied, Refusal)):
+                    raise
+                raise ResidentStartFailed(instance.name) from exc
             return attached
         claim = residents.preparing(instance, incarnation=uuid4().hex, generation=execution.home_generation, host_id=mounts.provider.host_id)
         invoked = False
+        returned = None
         try:
             await residents.take_slot(instance, wait=True)
             # Capacity waiting releases the event loop; authority may change.
@@ -108,14 +177,16 @@ async def _attachment(execution, environment, residents, mounts, run_id):
             invoked = True
             with phase_span(TurnPhase.SANDBOX_CREATE):
                 attached = await await_drained(mounts.attach(actor=instance.principal, incarnation=claim.incarnation, resources=resources))
-            if not residents.preparation_claimed(instance, claim, attached.id, attempt_id=getattr(execution.work, "attempt_id", None)):
+            returned = attached
+            environment.attachment_id = attached.id
+            if not await _transfer_preparation(execution, residents, mounts, claim, attached, attempt_id=getattr(execution.work, "attempt_id", None), require_active=True):
                 raise RuntimeError("The exact preparation claim changed")
             environment.attachment_id = attached.id
             return attached
         except BaseException as exc:
             if invoked:
                 environment.recycle_required = True
-                await await_drained(_recover_claim(execution, environment, residents, mounts, resources, claim))
+                await await_drained(_recover_claim(execution, environment, residents, mounts, resources, claim, returned=returned))
             else:
                 residents.preparation_absent(instance.home_id, claim)
             if isinstance(exc, (asyncio.CancelledError, AgentDenied, Refusal)):

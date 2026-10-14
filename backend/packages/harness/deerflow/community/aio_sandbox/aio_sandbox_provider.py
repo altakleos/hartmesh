@@ -16,6 +16,7 @@ import contextlib
 import contextvars
 import errno
 import hashlib
+import inspect
 import logging
 import math
 import os
@@ -29,7 +30,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from functools import partial
+from functools import partial, wraps
 from typing import Any
 
 try:
@@ -77,6 +78,7 @@ from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 from deerflow.skills.types import SkillCategory
 from deerflow.spaces.docker import StorageHostUnqualified
+from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
 from deerflow.utils.file_io import await_drained
 
 from .aio_sandbox import AioSandbox
@@ -293,6 +295,25 @@ async def _run_started_acquire_worker[T](
         except Exception:
             logger.warning("Cancelled AIO acquire worker failed while draining", exc_info=True)
         raise cancellation
+
+
+def _owned_acquisition(function):
+    """Retain the whole acquisition, including work before slot reservation."""
+    if inspect.iscoroutinefunction(function):
+
+        @wraps(function)
+        async def asynchronous(provider, *args, **kwargs):
+            with provider._acquisition_producer():
+                return await function(provider, *args, **kwargs)
+
+        return asynchronous
+
+    @wraps(function)
+    def synchronous(provider, *args, **kwargs):
+        with provider._acquisition_producer():
+            return function(provider, *args, **kwargs)
+
+    return synchronous
 
 
 def _lock_file_exclusive(lock_file) -> None:
@@ -3356,6 +3377,54 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if admission is not None:
             admission.require(self)
 
+    @contextlib.contextmanager
+    def _acquisition_producer(self):
+        token = object()
+        with self._lock:
+            self._require_runtime_admission()
+            producers = getattr(self, "_runtime_producers", None)
+            if producers is None:
+                producers = self._runtime_producers = set()
+            producers.add(token)
+        try:
+            yield
+        finally:
+            with self._lock:
+                producers.discard(token)
+                self._wake_capacity_waiters_locked()
+
+    def _require_bootstrap_producers_drained_locked(self):
+        """Pure census precondition; caller owns the metadata lock."""
+        gate = getattr(self, "_owner_admissions", None)
+        future = getattr(self, "_prewarm_future", None)
+        reaper = getattr(self, "_prewarm_reaper_thread", None)
+        if (
+            getattr(self, "_runtime_producers", None)
+            or self._starting
+            or getattr(self, "_local_teardown", None)
+            or (gate is not None and gate.has_active_locked())
+            or (future is not None and not future.done())
+            or (reaper is not None and reaper.is_alive())
+        ):
+            raise StorageRuntimeUnavailable("Submitted sandbox producers have not completely drained")
+
+    def _drain_bootstrap_producers(self):
+        """Join submitted work off-loop; preserve every uncertain journal charge."""
+        self._stop_prewarm_reaper()
+        with self._lock:
+            stop = getattr(self, "_prewarm_stop", None)
+            if stop is not None:
+                stop.set()
+        with self._lock:
+            while True:
+                try:
+                    self._require_bootstrap_producers_drained_locked()
+                    return
+                except StorageRuntimeUnavailable:
+                    # Owner-reference completion is independent of a Future's
+                    # done flag. Bounded waits also observe those callbacks.
+                    self._capacity_gate().wait(timeout=0.1)
+
     def _close_runtime_admission(self, *, seal=False):
         """Close under the publication lock and wake already waiting callers."""
         with self._lock:
@@ -3801,6 +3870,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 raise BackingUnavailable("Chat client changed after admission")
             return token
 
+    @_owned_acquisition
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment and return its ID.
 
@@ -4244,6 +4314,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 with self._lock:
                     self._forget_prewarm_unclaimed_locked(sandbox_id)
 
+    @_owned_acquisition
     async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment without blocking the event loop.
 
@@ -4312,7 +4383,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     async def _acquire_internal_async(self, thread_id: str | None, *, user_id: str) -> str:
         """Async counterpart to ``_acquire_internal``."""
-        await asyncio.to_thread(self._ensure_skills_projection, user_id)
+        await run_sync_lifecycle_operation(self._ensure_skills_projection, user_id)
         cached_id = await _run_started_acquire_worker(
             self._acquire_worker_executor,
             self._reuse_in_process_sandbox,
@@ -4385,11 +4456,19 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """Async counterpart to ``_discover_or_create_with_lock``."""
         paths = get_paths()
         effective_user_id = self._effective_acquire_user_id(user_id)
-        lock_path = await asyncio.to_thread(self._thread_lock_path, paths, thread_id, sandbox_id, user_id=effective_user_id)
+        lock_path = await run_sync_lifecycle_operation(self._thread_lock_path, paths, thread_id, sandbox_id, user_id=effective_user_id)
 
-        lock_file = await asyncio.to_thread(_open_lock_file, lock_path)
+        lock_file = None
         locked = False
+
+        def open_owned():
+            nonlocal lock_file
+            lock_file = _open_lock_file(lock_path)
+
         try:
+            # Retain a late returned FD inside the owned worker. Cancellation
+            # drains opening before finally closes it, even without a return.
+            await run_sync_lifecycle_operation(open_owned)
             while not locked:
                 locked = await run_sync_lifecycle_operation(_try_lock_file_exclusive, lock_file)
                 if not locked:
@@ -4429,7 +4508,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 if locked:
                     await run_sync_lifecycle_operation(_unlock_file, lock_file)
             finally:
-                await run_sync_lifecycle_operation(lock_file.close)
+                if lock_file is not None:
+                    await run_sync_lifecycle_operation(lock_file.close)
 
     @native_cleanup(refused=DestroyOutcome.UNKNOWN)
     def _destroy_unready_sandbox(self, sandbox_id: str, info: SandboxInfo) -> DestroyOutcome:
@@ -4671,6 +4751,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         paths = get_paths()
         if self._managed_pool_required() and isinstance(paths, ChatStoragePaths) and not paths.has_personal_files and info.provenance == PROVENANCE_CREATED and info.chat_storage_enabled is True:
             info.mountless_provider = self
+            bridge = getattr(self, "_native_creation", None)
+            if isinstance(bridge, NativeCreateBridge) and bridge.handoffs.known_returned(info):
+                info._native_journal_bridge = bridge
         try:
             self._assert_managed_container(info, teardown=True)
             self._publish_ownership(sandbox_id)

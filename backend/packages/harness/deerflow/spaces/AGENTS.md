@@ -7,7 +7,7 @@ binding. The host alone publishes readiness after complete restoration, under
 the provider metadata lock together with its accounting callbacks. Close/seal
 and wake waiters under that lock before draining workers; preserve cleanup and
 qualification while closed. Absent capability preserves existing behavior;
-these optional seams do not activate Gateway restoration.
+managed Gateway startup binds the exact capability and coordinates restoration.
 
 Private `native_create_evidence.py` owns durable managed-create evidence.
 The operator atomically publishes `.native-creates` as 1000:1000/0700 outside
@@ -16,6 +16,9 @@ Retain exact pool/directory/stage FDs and validate the named published record af
 fsync. Strict bounded 0600 single-link versioned records correlate immutable
 attempt/daemon/name/owner/thread/slots, never permission. The mixed scanner validates
 v1 creates and private v2 `native_teardown_evidence.py` records under one bound.
+Explicit v3 `mountless-create` and v4 `mountless-teardown` variants require zero
+Space slots; they journal managed NoUser submissions without a fabricated slot.
+Older nonempty-slot formats retain their exact rules; unknown formats refuse.
 Create-only ACK pruning never removes teardown. Exact primary correlation is unique;
 publication retries reprove durability, and failed terminal fsync retains the record
 and FD in memory. Same-daemon mutations only; never infer a target from slot order.
@@ -27,6 +30,14 @@ never drops retained accounting to manufacture readiness.
 The already-installed canonical cleanup path can restore accounting while its
 owner closes, retaining current owner/daemon proof and closed creation readiness.
 This permission grants no resource effect or new runtime installation.
+
+Gateway census includes immutable resident primaries and actual paired resources.
+Unknown or untracked graphs close admission; census grants no destructive scope.
+`DockerStorageAdapter._cleanup_resident` remains best effort and its normal return
+never certifies graph absence. Strict actorless resident orphan journal recovery
+must land before Compose agent counts activate. Generic release uses the existing
+host-release proof and a native slot reservation before SQL locks; foreign native
+holders keep their backing and evidence. Released User policy stays in Gateway.
 PoolRuntimeOwner retains the exact published namespace even through failed first
 load and constructs the helper against that inode. Qualification installs the
 AIO bridge and restored memory accounting before reconciliation/publication.

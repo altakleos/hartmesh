@@ -93,6 +93,10 @@ class OwnerAdmissions:
         """Caller holds metadata lock; copied stale references prove nothing."""
         return isinstance(token, OwnerAdmission) and token in self._active
 
+    def has_active_locked(self):
+        """Caller holds metadata lock; producer drainage is a separate boundary."""
+        return bool(self._active)
+
     def reserve(self, owner_id, slot_id):
         self._owner(owner_id)
         self._slot(slot_id)

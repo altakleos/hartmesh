@@ -2173,6 +2173,19 @@ at `/srv/hartmesh/spaces`. An AI assistant is a person's own agent; an AI
 employee is the company's agent. Counts and capacities below plan their storage;
 they do not activate those capabilities in this release.
 
+**Qualification and operator hold.** With managed storage enabled, the Gateway
+keeps execution closed until it has reconciled durable run ownership, retained
+workspace attachments and the complete Docker resource census. Unknown
+containers or paired networks keep it closed; automatic recovery of resident
+orphans remains a later implementation step, before agent counts activate.
+The existing maintenance task retries qualification every 60 seconds.
+Creating `/srv/hartmesh/operator/agents-hold` refuses new agent execution and
+causes maintenance to contain locally owned workspaces. A foreign Gateway's
+live lease remains protected. Remove the file to lift the hold; qualification
+must still succeed before execution resumes. The directory can be overridden
+with `HARTMESH_OPERATOR_DIR` in deployments that configure another operator
+path.
+
 Examples use these shell functions, defined in the operator's shell:
 
 ```bash

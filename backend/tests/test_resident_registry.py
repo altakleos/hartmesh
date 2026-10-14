@@ -82,6 +82,35 @@ async def test_work_limit_reservations_and_binding_count_once(registry):
 
 
 @pytest.mark.anyio
+async def test_bound_attempt_cannot_expire_before_commit_or_worker_attachment(registry):
+    residents, _provider, _records, clock = registry(replicas=2)
+    agent = instance()
+    reservation = await residents.admit(agent, work=True)
+    residents.bind(reservation, "owned-attempt")
+    clock[0] = reservation.expires_at + 1
+    assert residents.attempts_in_flight()[0]["attempt_id"] == "owned-attempt"
+    assert residents.reservations[reservation.id] is reservation
+    with pytest.raises(ResidentWorkLimit):
+        await residents.admit(instance("second"), work=True)
+    residents.cancel(reservation)
+    assert not residents.reservations and not residents.slots
+
+
+@pytest.mark.anyio
+async def test_owned_unbound_promise_survives_slow_transaction_admission(registry):
+    residents, _provider, _records, clock = registry()
+    reservation = await residents.admit(instance(), work=True)
+    owner = asyncio.current_task()
+    residents.retain_launch(reservation, owner)
+    clock[0] = reservation.expires_at + 1
+    residents.attempts_in_flight()
+    residents.bind(reservation, "slow-commit", owner=owner)
+    assert residents.reservations[reservation.id] is reservation
+    residents.release_launch(reservation, owner)
+    assert not residents.launch_owned(reservation)
+
+
+@pytest.mark.anyio
 async def test_two_conversation_limit_preserves_admission_order(registry):
     residents, _provider, records, _clock = registry()
     agent = instance()

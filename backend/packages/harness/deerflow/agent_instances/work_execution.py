@@ -3,6 +3,8 @@
 import logging
 import math
 import re
+from collections.abc import Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -21,6 +23,22 @@ from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _activation_transaction(session, on_rollback):
+    transaction = await session.begin()
+    try:
+        yield
+    except BaseException:
+        # A failed commit is deliberately outside this branch: an unknown
+        # commit outcome must retain its host admission promise.
+        await transaction.rollback()
+        if on_rollback is not None:
+            on_rollback()
+        raise
+    else:
+        await transaction.commit()
 
 
 @dataclass
@@ -117,7 +135,7 @@ class WorkExecution:
         await self.work._admit_sources(session, execution.requester, parent, [WorkSource.model_validate(s) for s in await self._sources(session, row)])
         return policy
 
-    async def reserve(self, *, execution, work_id, request: ActivateWork):
+    async def reserve(self, *, execution, work_id, request: ActivateWork, before_admit: Callable[[str], None] | None = None, on_rollback: Callable[[], None] | None = None):
         request = ActivateWork.model_validate(request.model_dump())
         if request.thread_id != execution.thread_id or not execution.execution_allowed:
             raise AgentDenied("Activation requires the admitted conversation")
@@ -126,7 +144,7 @@ class WorkExecution:
         await execution.authority.context_admission(execution, mark_work=True)
 
         async def perform():
-            async with self._sf() as session, session.begin():
+            async with self._sf() as session, _activation_transaction(session, on_rollback):
                 parent, row = await self._locked(session, execution, work_id)
                 attempt = await session.scalar(select(AgentWorkAttemptRow).where(AgentWorkAttemptRow.work_id == row.id, AgentWorkAttemptRow.activation_id == request.operation_id))
                 if attempt is not None:
@@ -138,8 +156,14 @@ class WorkExecution:
                     raise AgentConflict("Work changed; reload before activation")
                 if await session.scalar(select(AgentWorkAttemptRow.id).where(AgentWorkAttemptRow.work_id == row.id, AgentWorkAttemptRow.status.in_(UNRESOLVED))):
                     raise AgentConflict("Reconcile the prior attempt before activating")
+                attempt_id = uuid4().hex
+                # Exact replay and current authority precede this pure host
+                # predicate. Capacity/physical work belongs outside SQL; bind
+                # the retained memory promise before any durable attempt write.
+                if before_admit is not None and before_admit(attempt_id) is not None:
+                    raise TypeError("Work admission requires a synchronous memory-only predicate")
                 attempt = AgentWorkAttemptRow(
-                    id=uuid4().hex,
+                    id=attempt_id,
                     work_id=row.id,
                     activation_id=request.operation_id,
                     requester_id=execution.requester.subject_id,
@@ -227,7 +251,9 @@ class WorkExecution:
 
         await await_drained(perform())
 
-    async def settle_contained(self, *, instance_id: str, host_id: str, reason: str, attachment_id: str | None, unstarted_after: float | None = None, live_run_ids: frozenset[str]) -> list[str]:
+    async def settle_contained(
+        self, *, instance_id: str, host_id: str, reason: str, attachment_id: str | None, unstarted_after: float | None = None, live_run_ids: frozenset[str], live_attempts: Callable[[], frozenset[str]] | None = None
+    ) -> list[str]:
         """Settle failed host outcomes; physical capacity remains independent."""
         from deerflow.persistence.agent_instances.model import AgentInstanceRow
         from deerflow.persistence.spaces.model import SpaceRow
@@ -262,6 +288,12 @@ class WorkExecution:
                 for attempt_id, work_id in candidates:
                     row = await self.work._row(session, instance_id, work_id, lock=True)
                     attempt = await session.get(AgentWorkAttemptRow, attempt_id, populate_existing=True)
+                    if live_attempts is not None:
+                        current_live = live_attempts()
+                        if not isinstance(current_live, frozenset):
+                            raise TypeError("Host settlement requires a synchronous memory-only live attempt snapshot")
+                        if attempt_id in current_live:
+                            continue
                     if attempt is None or attempt.work_id != row.id or attempt.status not in UNRESOLVED or attempt.run_id in live_run_ids:
                         continue
                     if attempt.run_id is None:

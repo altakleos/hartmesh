@@ -124,3 +124,90 @@ def test_actual_local_inspection_then_parking_remains_counted_without_sdk(fixtur
         provider.get(actual.sandbox_id)
     assert len([command for command in calls if command[1] == "inspect"]) >= 3
     assert all(command[1] in {"ps", "inspect"} for command in calls)
+
+
+def mountless_entry(*, mounts=()):
+    actual = entry()
+    actual["Config"]["Labels"].pop("hartmesh.storage.space." + SLOT)
+    actual["Mounts"] = list(mounts)
+    return actual
+
+
+def readonly_mount(source="/opt/skills", destination="/mnt/skills"):
+    return {"Type": "bind", "Source": source, "Destination": destination, "RW": False, "Propagation": "rprivate"}
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_original_nouser_with_explicit_readonly_projection_is_accounted_without_sdk(fixture, running):
+    from deerflow.community.aio_sandbox.aio_sandbox_provider import SandboxInfo
+    from deerflow.sandbox.admission import ProviderAdmission
+
+    original = mountless_entry(mounts=(readonly_mount(),))
+    original["State"]["Running"] = running
+    local, _bridge, calls = setup(fixture, entries={CID: original})
+    provider, _owner = fixture
+    admission = ProviderAdmission()
+    provider._bind_runtime_admission(admission)
+    token = provider._begin_bootstrap_accounting(admission)
+    (actual,) = local._bootstrap_primary_inventory(known_slots=(), mountless_binds=(("/opt/skills", "/mnt/skills", True),))
+    assert actual.slots == () and actual.container_id == CID
+    info = SandboxInfo(actual.sandbox_id, "", container_name=actual.container_name, container_id=actual.container_id, owner=actual.owner, native_slots=(), chat_storage_enabled=True)
+    info.native_container = actual
+    provider._park_bootstrap_accounting(token, info)
+    assert provider._warm_pool[actual.sandbox_id][0] is info
+    assert info._bootstrap_accounting_only and getattr(info, "mountless_provider", None) is None
+    assert not provider._sandboxes
+    with provider._lock:
+        assert provider._counted_slots_locked() == (3, 0, 1, 0)
+    assert all(command[1] in {"ps", "inspect"} for command in calls)
+
+
+@pytest.mark.parametrize("change", ["missing_projection", "missing_mounts", "writable", "unknown_source", "data_overlay", "home_overlay", "pool_source", "propagation"])
+def test_nouser_mount_census_refuses_unknown_or_storage_exposing_projection(fixture, change):
+    actual = mountless_entry(mounts=(readonly_mount(),))
+    local, bridge, _calls = setup(fixture, entries={CID: actual})
+    projection = (("/opt/skills", "/mnt/skills", True),)
+    mount = actual["Mounts"][0]
+    if change == "missing_projection":
+        projection = None
+    elif change == "missing_mounts":
+        actual.pop("Mounts")
+    elif change == "writable":
+        mount["RW"] = True
+    elif change == "unknown_source":
+        mount["Source"] = "/unknown"
+    elif change in {"data_overlay", "home_overlay"}:
+        mount["Destination"] = "/mnt/user-data/files" if change == "data_overlay" else "/mnt/spaces/home"
+        projection = ((mount["Source"], mount["Destination"], True),)
+    elif change == "pool_source":
+        mount["Source"] = str(bridge.evidence.pool / "slot/data")
+        projection = ((mount["Source"], mount["Destination"], True),)
+    else:
+        mount["Propagation"] = "rshared"
+    with pytest.raises(StorageHostUnqualified):
+        local._bootstrap_primary_inventory(known_slots=(), mountless_binds=projection)
+
+
+def test_actual_integration_operational_mounts_survive_nouser_census_and_parking(fixture, tmp_path, monkeypatch):
+    from deerflow.community.aio_sandbox import aio_sandbox_provider as module
+    from deerflow.community.aio_sandbox.aio_sandbox_provider import SandboxInfo
+    from deerflow.config.paths import Paths
+    from deerflow.sandbox.admission import ProviderAdmission
+
+    paths = Paths(base_dir=tmp_path / "operational")
+    monkeypatch.setattr(module, "get_paths", lambda: paths)
+    binds = module.AioSandboxProvider._get_lark_cli_runtime_mounts(user_id="alice")
+    assert binds and {readonly for _source, _destination, readonly in binds} == {False, True}
+    mounts = [{"Type": "bind", "Source": source, "Destination": destination, "RW": not readonly, "Propagation": "rprivate"} for source, destination, readonly in binds]
+    original = mountless_entry(mounts=mounts)
+    local, _bridge, calls = setup(fixture, entries={CID: original})
+    provider, _owner = fixture
+    admission = ProviderAdmission()
+    provider._bind_runtime_admission(admission)
+    token = provider._begin_bootstrap_accounting(admission)
+    (actual,) = local._bootstrap_primary_inventory(known_slots=(), mountless_binds=binds)
+    info = SandboxInfo(actual.sandbox_id, "", container_name=actual.container_name, container_id=actual.container_id, owner=actual.owner, native_slots=(), chat_storage_enabled=True, native_container=actual)
+    provider._park_bootstrap_accounting(token, info)
+    assert provider._warm_pool[actual.sandbox_id][0] is info
+    assert not provider._sandboxes and getattr(info, "mountless_provider", None) is None
+    assert all(command[1] in {"ps", "inspect"} for command in calls)

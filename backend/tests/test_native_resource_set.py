@@ -84,6 +84,28 @@ def capture(reader, primary, actual):
     return NativeTeardownRecord("e" * 32, actual.daemon_id, *actual.owner, actual.sandbox_id, actual.slots, SLOT, actual.container_id, actual.container_name, actual.created_at, actual.network_mode, digest, resources)
 
 
+@pytest.mark.parametrize("kind,identity", [("container", PROXY), ("network", INTERNAL), ("network", EGRESS)])
+def test_paired_role_without_sandbox_label_cannot_disappear_from_census(kind, identity):
+    reader, _primary, _actual, objects, calls = topology()
+    candidate = objects[(kind, identity)]
+    labels = candidate["Config"]["Labels"] if kind == "container" else candidate["Labels"]
+    labels.pop("deerflow.sandbox_id")
+    original = reader.backend._run
+
+    def run(command, **kwargs):
+        if command[1] == "ps" or command[1:3] == ["network", "ls"]:
+            calls.append(command)
+            selector = command[command.index("--filter") + 1]
+            selected = selector == "label=deerflow.role=" + labels["deerflow.role"] and (command[1] == "ps") == (kind == "container")
+            return SimpleNamespace(returncode=0, stdout=identity if selected else "", stderr="")
+        return original(command, **kwargs)
+
+    reader.backend._run = run
+    with pytest.raises(StorageHostUnqualified, match="unknown original"):
+        reader.inventory_paired()
+    assert all("rm" not in command and "start" not in command for command in calls)
+
+
 @pytest.mark.parametrize("running", [False, True])
 def test_complete_graph_uses_actual_ids_names_and_persisted_policy(running):
     reader, primary, actual, _objects, calls = topology(running=running)
@@ -93,6 +115,21 @@ def test_complete_graph_uses_actual_ids_names_and_persisted_policy(running):
     assert all(item.created_at == STAMP for item in saved.resources)
     assert {item.name for item in saved.resources} == {"retained-proxy", "retained-internal", "retained-egress"}
     assert calls and all("inspect" in command for command in calls)
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_mountless_primary_capture_preserves_complete_original_restricted_graph(running):
+    from deerflow.spaces.native_teardown_evidence import NativeMountlessTeardownRecord
+
+    reader, primary, _actual, _objects, calls = topology(running=running)
+    primary["Config"]["Labels"].pop("hartmesh.storage.space." + SLOT)
+    actual = _native_inspection(primary, CID, "daemon-A", allow_mountless=True)
+    digest, resources = reader.capture(primary, actual)
+    saved = NativeMountlessTeardownRecord("e" * 32, actual.daemon_id, *actual.owner, actual.sandbox_id, (), None, actual.container_id, actual.container_name, actual.created_at, actual.network_mode, digest, resources)
+    assert NativeTeardownRecord.parse(saved.document(), saved.id) == saved
+    assert {item.identity for item in resources} == {PROXY, INTERNAL, EGRESS}
+    assert len(reader.qualify(saved)) == 4
+    assert all("inspect" in command for command in calls)
 
 
 @pytest.mark.parametrize("change", ["internal-foreign", "egress-foreign", "proxy-host-bind", "proxy-policy", "internal-isolation", "egress-icc", "primary-network-id", "proxy-endpoint"])

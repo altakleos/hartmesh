@@ -4,12 +4,22 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
+from types import SimpleNamespace
 
 from deerflow.spaces.docker import StorageHostUnqualified
 from deerflow.spaces.native_create_evidence import _unique_object
-from deerflow.spaces.native_teardown_evidence import NativeTeardownRecord, NativeTeardownResource
+from deerflow.spaces.native_teardown_evidence import NativeMountlessTeardownRecord, NativeTeardownRecord, NativeTeardownResource
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PairedResource:
+    fact: NativeTeardownResource
+    sandbox_id: str
+    network_mode: str
+    policy_digest: str | None
 
 
 def _reply_shape(output):
@@ -99,6 +109,65 @@ class NativeResourceSet:
             raise StorageHostUnqualified("Native graph member no longer has its original name")
         return entry
 
+    def inventory_paired(self):
+        """All-state immutable facts, including secondaries without a primary."""
+        from deerflow.spaces.native_teardown_evidence import _timestamp
+
+        result = []
+        for kind in ("container", "network"):
+            selectors = (
+                ("label=deerflow.sandbox_id", "label=deerflow.role=network-proxy", "name=^/deer-flow-netproxy-")
+                if kind == "container"
+                else ("label=deerflow.sandbox_id", "label=deerflow.role=network", "label=deerflow.role=egress-network", "name=^deer-flow-sandbox-net-", "name=^deer-flow-sandbox-egress-")
+            )
+            identifiers = set()
+            for selector in selectors:
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise StorageHostUnqualified("Paired resource census exhausted its budget")
+                command = ["docker", *(["ps", "--all", "--no-trunc"] if kind == "container" else ["network", "ls", "--no-trunc"]), "--filter", selector, "--format", "{{.ID}}"]
+                self.guard()
+                reply = self.backend._run(command, capture_output=True, text=True, timeout=min(15, remaining))
+                self.guard()
+                candidates = reply.stdout.splitlines()
+                if reply.returncode or len(reply.stdout) > 65536 or len(candidates) > 512 or len(set(candidates)) != len(candidates) or any(not _hex(identifier) for identifier in candidates):
+                    raise StorageHostUnqualified("Paired resource census is incomplete or unbounded")
+                identifiers.update(candidates)
+                if len(identifiers) > 512:
+                    raise StorageHostUnqualified("Paired candidate union is unbounded")
+            for identifier in sorted(identifiers):
+                entry = self.inspect(kind, identifier)
+                if entry is None:
+                    raise StorageHostUnqualified("A listed paired resource disappeared during census")
+                labels = entry.get("Config", {}).get("Labels") if kind == "container" else entry.get("Labels")
+                if not isinstance(labels, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in labels.items()):
+                    raise StorageHostUnqualified("Paired census has invalid labels")
+                role = labels.get("deerflow.role")
+                if kind == "container" and role in {"sandbox", "resident"}:
+                    continue
+                if role not in ({"network-proxy"} if kind == "container" else {"network", "egress-network"}):
+                    raise StorageHostUnqualified("Paired census contains an unexplained resource role")
+                sandbox_id, mode, digest = (labels.get(key) for key in ("deerflow.sandbox_id", "deerflow.network_mode", "deerflow.network_policy_digest"))
+                if not isinstance(sandbox_id, str) or not 1 <= len(sandbox_id) <= 256 or any(ord(char) < 32 for char in sandbox_id) or mode not in {"blocked", "allowlist"} or not _hex(digest) or not _timestamp(entry.get("Created")):
+                    raise StorageHostUnqualified("Paired census has unknown original policy or creation")
+                fact = NativeTeardownResource(kind, role, identifier, entry["Name"].removeprefix("/"), entry["Created"])
+                result.append(PairedResource(fact, sandbox_id, mode, digest))
+        if time.monotonic() >= self.deadline:
+            raise StorageHostUnqualified("Paired resource census arrived after its budget")
+        return tuple(result)
+
+    def qualify_resident_graph(self, primary, *, attachment_id, network_mode, policy_digest, resources):
+        """Shared graph rules without inventing a chat owner or teardown permit."""
+        record = SimpleNamespace(container_id=primary["Id"], sandbox_id=attachment_id, network_mode=network_mode, policy_digest=policy_digest, resources=resources)
+        entries = {("container", primary["Id"]): self._member("container", primary["Id"], primary["Name"][1:], primary["Created"])}
+        if entries[("container", primary["Id"])] != primary:
+            raise StorageHostUnqualified("Resident primary changed during graph qualification")
+        for resource in resources:
+            entries[(resource.kind, resource.identity)] = self._member(resource.kind, resource.identity, resource.name, resource.created_at)
+            if entries[(resource.kind, resource.identity)] is None:
+                raise StorageHostUnqualified("Resident paired graph is incomplete")
+        self._paired_graph(record, entries, primary)
+
     @staticmethod
     def _labels(entry, record, role, *, container=False):
         labels = entry.get("Config", {}).get("Labels") if container else entry.get("Labels")
@@ -157,6 +226,9 @@ class NativeResourceSet:
             ):
                 raise StorageHostUnqualified("Native primary writer correlation changed")
             self._state(primary)
+        self._paired_graph(record, entries, primary)
+
+    def _paired_graph(self, record, entries, primary):
         if record.network_mode == "open":
             return
         resources = {item.role: item for item in record.resources}
@@ -213,7 +285,8 @@ class NativeResourceSet:
                 for kind, role, entry in (("container", "network-proxy", proxy), ("network", "network", internal), ("network", "egress-network", egress))
             )
             digest = primary["Config"]["Labels"].get("deerflow.network_policy_digest")
-            record = NativeTeardownRecord("0" * 32, actual.daemon_id, *actual.owner, actual.sandbox_id, actual.slots, None, actual.container_id, actual.container_name, actual.created_at, actual.network_mode, digest, resources)
+            record_type = NativeTeardownRecord if actual.slots else NativeMountlessTeardownRecord
+            record = record_type("0" * 32, actual.daemon_id, *actual.owner, actual.sandbox_id, actual.slots, None, actual.container_id, actual.container_name, actual.created_at, actual.network_mode, digest, resources)
             if any(entry is None for entry in self.qualify(record).values()):
                 raise StorageHostUnqualified("Fresh native capture requires every actual graph member")
             return digest, resources

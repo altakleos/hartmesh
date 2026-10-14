@@ -55,7 +55,7 @@ Lease binding and existing-holder return also check the capability; those checks
 are memory-only and never acquire the provider metadata lock under the holder lock.
 Regressions: `test_provider_lifecycle_admission.py`.
 
-Uninstalled bootstrap accounting uses an opaque permit pinned to the exact
+Gateway bootstrap accounting uses an opaque permit pinned to the exact
 provider, admission transition revision, pool owner and native bridge. It is
 valid only while that lifecycle stays closed and the native binding remains
 qualified. Open/close cannot revive a permit. Parking retains the original
@@ -67,10 +67,21 @@ Ending a permit never drops retained charges or opens admission.
 `LocalContainerBackend._bootstrap_primary_inventory` is bounded and read-only,
 includes all states/prefixes of labelled primaries, and checks exact actual IDs,
 owner, slots, duplicate names/SIDs, resource facts and the native bridge before
-returning. Missing, foreign and old mountless attribution refuse completeness;
+returning. Explicit NoUser facts permit zero slots only with the exact production
+operational mount projection; trusted integration config/locks/data modes remain
+exact. Missing and foreign attribution refuse completeness;
 never fabricate `mountless_provider=self` for an old container. These seams
-do not install Gateway coordination or certify a complete platform budget alone.
+do not certify a complete platform budget alone. Gateway additionally correlates
+all-state resident and paired inventories with full retained SQL mounts; unknown
+secondary resources or preparations without an original CID keep admission closed.
 Tests: `test_bootstrap_sandbox_accounting.py`, `test_bootstrap_primary_inventory.py`.
+
+Full acquire/acquire_async operations register producers before their first await
+or shortcut. Bootstrap stops the existing reaper and drains actual acquisitions,
+prewarm Futures, owner references, starting and teardown work before restoration.
+Cancellation of operational projection/thread-lock offloads drains their worker;
+capture a late file descriptor inside that worker so finalization still closes it.
+Normal prewarm restarts only after complete capacity publication.
 
 Private `resident_preparation.py` uses committed attachment tokens and the exact
 pool-owner runner; never invent chat/human labels or use the chat journal for it.

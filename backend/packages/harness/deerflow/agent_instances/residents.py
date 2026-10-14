@@ -48,6 +48,7 @@ class ResidentEntry:
     last_release: float = 0.0
     recycle_due_since: float | None = None
     recycle_reason: str | None = None
+    reconciling: bool = False
 
 
 @dataclass
@@ -57,6 +58,7 @@ class WorkReservation:
     home_id: str
     expires_at: float
     attempt_id: str | None = None
+    owners: set[asyncio.Task] = field(default_factory=set, repr=False)
 
 
 @dataclass(eq=False)
@@ -234,13 +236,16 @@ class ResidentRegistry:
         return transferred
 
     def _require_restored(self, instance):
+        entry = self.homes.get(instance.home_id)
+        if entry is not None and entry.reconciling:
+            raise ResidentRestarting(instance.name)
         if self._restoration_started and not self.restoration_complete:
             raise ResidentRestarting(instance.name)
         touching = [claim.id for claim in self.retained.values() if any(resource.space_id == instance.home_id for resource in claim.resources)]
         if touching and (len(touching) != 1 or self._associated.get(instance.home_id) != touching[0] or self.retained[touching[0]].phase != "active"):
             raise ResidentStartingElsewhere(instance.name)
 
-    def associate(self, instance, claim, *, generation):
+    def associate(self, instance, claim, *, generation, attempt_id=None):
         self._owning_loop()
         entry = self.entry(instance)
         if not entry.lock.locked():
@@ -266,6 +271,7 @@ class ResidentRegistry:
             self._associated[instance.home_id] = claim.id
             self.slots.add(instance.home_id)
             self._touch_retained(claim.id, claim)
+            self._forget_attempt(instance.id, attempt_id)
 
         self.provider.external_changed(associate)
 
@@ -290,7 +296,7 @@ class ResidentRegistry:
 
     def attempts_in_flight(self) -> list[dict]:
         self._owning_loop()
-        expired = [reservation for reservation in self.reservations.values() if reservation.expires_at <= self.clock()]
+        expired = [reservation for reservation in self.reservations.values() if reservation.attempt_id is None and not self.launch_owned(reservation) and reservation.expires_at <= self.clock()]
         for reservation in expired:
             self.cancel(reservation)
         result = []
@@ -339,16 +345,39 @@ class ResidentRegistry:
             raise
         return reservation
 
-    def bind(self, reservation: WorkReservation, attempt_id: str) -> None:
+    def bind(self, reservation: WorkReservation, attempt_id: str, *, owner=None) -> None:
         self._owning_loop()
         if self.reservations.get(reservation.id) is not reservation:
             raise RuntimeError("Work reservation is no longer current")
-        if reservation.expires_at <= self.clock():
+        if reservation.attempt_id is None and not self.launch_owned(reservation) and reservation.expires_at <= self.clock():
             self.cancel(reservation)
             raise RuntimeError("Work reservation expired")
         if reservation.attempt_id is not None and reservation.attempt_id != attempt_id:
             raise RuntimeError("Work reservation already binds another attempt")
         reservation.attempt_id = attempt_id
+        self.retain_launch(reservation, owner or asyncio.current_task())
+
+    def retain_launch(self, reservation, owner):
+        self._owning_loop()
+        if self.reservations.get(reservation.id) is not reservation or not isinstance(owner, asyncio.Task) or owner.done():
+            raise StorageRuntimeUnavailable("Work launch lost its exact live promise")
+        reservation.owners.add(owner)
+
+    def release_launch(self, reservation, owner):
+        self._owning_loop()
+        reservation.owners.discard(owner)
+
+    def launch_owned(self, reservation):
+        self._owning_loop()
+        return any(not task.done() for task in reservation.owners)
+
+    def reservation_for(self, instance: InstanceIdentity, attempt_id: str) -> WorkReservation | None:
+        """Recover only this exact attempt's retained launch promise."""
+        self._owning_loop()
+        matches = [reservation for reservation in self.reservations.values() if (reservation.instance_id, reservation.home_id, reservation.attempt_id) == (instance.id, instance.home_id, attempt_id)]
+        if len(matches) > 1:
+            raise StorageRuntimeUnavailable("Ambiguous retained Work admission")
+        return matches[0] if matches else None
 
     def cancel(self, reservation: WorkReservation | None) -> None:
         self._owning_loop()
@@ -446,7 +475,7 @@ class ResidentRegistry:
         # retained attachment even though its slot has not yet been released.
         self.provider.external_changed(lambda: self.slots.discard(home_id) if can_drop else None)
 
-    async def request_recycle(self, instance_id: str, home_id: str, attachment_id: str, reason: str, *, exclude_run_id: str | None = None) -> bool:
+    async def request_recycle(self, instance_id: str, home_id: str, attachment_id: str, reason: str, *, exclude_run_id: str | None = None, defer=False) -> bool:
         self._owning_loop()
         entry = self.homes.get(home_id)
         if entry is None or entry.instance_id != instance_id or entry.attachment_id != attachment_id:
@@ -455,7 +484,7 @@ class ResidentRegistry:
             if entry.attachment_id != attachment_id:
                 return False
             others = tuple(run_id for run_id in self.in_flight(instance_id) if run_id != exclude_run_id)
-            if not others and not self._has_reservation(home_id) and entry.preparation is None:
+            if not defer and not others and not self._has_reservation(home_id) and entry.preparation is None:
                 return await self.attachments.contain_host(attachment_id, reason)
             if entry.recycle_due_since is None:
                 entry.recycle_due_since, entry.recycle_reason = self.clock(), reason

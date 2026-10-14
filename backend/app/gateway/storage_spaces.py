@@ -32,6 +32,7 @@ from deerflow.persistence.agent_instances.model import AgentInstanceRow
 from deerflow.persistence.spaces.files import SpaceBackingRow
 from deerflow.persistence.spaces.model import SpaceRow
 from deerflow.persistence.user.model import UserRow
+from deerflow.sandbox.lease import run_sync_lifecycle_operation
 from deerflow.spaces.backings import RESERVE_BYTES, RESERVE_INODES, BackingUnavailable, PreparedVolumeCatalog
 from deerflow.spaces.contract import Custody, InvalidPrincipal, MutationMode, Permission, PrincipalRef, ResolvedPrincipal, SpaceConflict
 from deerflow.spaces.docker import StorageHostUnqualified
@@ -47,8 +48,20 @@ logger = logging.getLogger(__name__)
 STARTUP_BUDGET_SECONDS = 120
 ADAPTER_LIMIT_SECONDS = 30
 RECHECK_SECONDS = 60
+AGENTS_HOLD_PATH = Path(os.environ.get("HARTMESH_OPERATOR_DIR", "/srv/hartmesh/operator")) / "agents-hold"
 STORAGE_REASONS = ("disk-too-small", "storage-pool-missing", "inventory-unreadable", "host-unqualified", "admission-failed")
 EXECUTION_REASONS = ("storage-unavailable", "agents-none", "operator-hold", "host-replaced", "space-unverified", "space-not-assigned")
+
+
+def hold_present():
+    """One stat per admission; an unreadable operator path cannot lift a hold."""
+    try:
+        AGENTS_HOLD_PATH.stat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        logger.warning("agents: operator hold status is unreadable; admission remains held")
+    return True
 
 
 @dataclass(frozen=True)
@@ -102,6 +115,7 @@ class ExecutionStatus:
     file_operations_settled: int = 0
     qualified_provider: object | None = field(default=None, repr=False)
     user_spaces_reclaimed: int = 0
+    spaces_reclaimed: int = 0
 
 
 async def storage_state(app) -> StorageState:
@@ -170,6 +184,12 @@ async def execution_state(app, instance_id: str | None = None) -> ExecutionState
         reason = "storage-unavailable"
     elif config.ai_assistants_per_user == config.ai_employees == 0:
         reason = "agents-none"
+    elif await run_file_io(hold_present):
+        reason = "operator-hold"
+    elif getattr(getattr(app.state, "chat_storage_host", None), "admission", None) is not None and (
+        getattr(app.state, "resident_runtime", None) is None or app.state.resident_runtime.coordinator.result is None or not app.state.resident_runtime.workspace_qualified
+    ):
+        reason = "storage-unavailable"
     elif instance_id is not None and getattr(app.state, "agent_instances", None) is not None:
         async with app.state.agent_instances._sf() as session:
             row = (await session.execute(select(AgentInstanceRow.home_id, SpaceBackingRow.slot_id).outerjoin(SpaceBackingRow, SpaceBackingRow.space_id == AgentInstanceRow.home_id).where(AgentInstanceRow.id == instance_id))).one_or_none()
@@ -382,6 +402,15 @@ def _observe(task):
 
 async def _adapter_step(app, *, timeout=ADAPTER_LIMIT_SECONDS):
     status = app.state.agent_execution
+    runtime = getattr(app.state, "resident_runtime", None)
+    if runtime is not None and status.adapter_task is None:
+        runtime.invalidate_accounting()
+        if runtime.coordinator.task is not None:
+            await runtime.coordinator.poll(timeout=0)
+            if runtime.coordinator.task is not None:
+                return False
+        runtime.coordinator.invalidate()
+        runtime.accounting_retry = False
     if status.adapter_task is None:
         status.adapter_task = asyncio.ensure_future(qualified_attachments(app.state.storage_spaces))
         status.adapter_task.add_done_callback(_observe)
@@ -403,6 +432,18 @@ async def _adapter_step(app, *, timeout=ADAPTER_LIMIT_SECONDS):
     status.qualified_provider = baseline
     status.runtime_retry = False
     status.storage_reason, status.storage_text = None, None
+    from app.gateway.resident_runtime import install_resident_runtime
+
+    try:
+        install_resident_runtime(app, provider=baseline, attachments=attachments, entered=getattr(app.state, "storage_startup_entered", time.monotonic()))
+    except Exception as exc:
+        host = getattr(app.state, "chat_storage_host", None)
+        admission = getattr(host, "admission", None)
+        if admission is not None:
+            baseline.external_changed(admission.close)
+        status.runtime_retry = True
+        status.storage_reason, status.storage_text = "admission-failed", str(exc)
+        return False
     return True
 
 
@@ -736,14 +777,69 @@ async def reclaim_released_user_spaces(app) -> int:
     return await reclaim(app)
 
 
+async def finish_releases(app) -> int:
+    from app.gateway.storage_reclamation import finish_releases as finish
+
+    return await finish(app)
+
+
+async def reconcile_residents(app, *, attachment_ids=None, deadline):
+    runtime = getattr(app.state, "resident_runtime", None)
+    if runtime is None:
+        raise StorageRuntimeUnavailable("Resident reconciliation has no owning runtime")
+    return await await_drained(runtime.reconcile_rows(attachment_ids=attachment_ids, deadline=deadline))
+
+
+async def _resident_step(app, *, timeout):
+    runtime = getattr(app.state, "resident_runtime", None)
+    if runtime is None:
+        return False
+    if runtime.accounting_retry and runtime.coordinator.task is None:
+        runtime.coordinator.invalidate()
+        runtime.accounting_retry = False
+    result = await runtime.coordinator.poll(timeout=timeout)
+    if runtime.accounting_retry:
+        if runtime.coordinator.task is None:
+            runtime.coordinator.invalidate()
+            runtime.accounting_retry = False
+        return False
+    if result is None:
+        return False
+    # Producer drainage stopped this existing producer; resume it only after
+    # complete accounting and both callbacks have published with admission.
+    await await_drained(run_sync_lifecycle_operation(runtime.provider._start_prewarm_reaper))
+    return True
+
+
 async def _maintenance_step(app, *, timeout: float) -> bool:
     status = app.state.agent_execution
-    if getattr(app.state, "storage_spaces", None) is None or (await storage_state(app)).state in ("off", "unavailable"):
+    if getattr(app.state, "storage_spaces", None) is None:
         return False
 
     async def perform():
         try:
-            status.user_spaces_reclaimed += await reclaim_released_user_spaces(app)
+            await _resident_step(app, timeout=0)
+        except Exception:
+            logger.exception("agents: startup accounting retry remains pending")
+        if (await storage_state(app)).state in ("off", "unavailable"):
+            return
+        runtime = getattr(app.state, "resident_runtime", None)
+        if runtime is not None and runtime.coordinator.result is not None:
+            try:
+                await runtime.reconcile()
+            except Exception:
+                logger.exception("agents: workspace qualification remains pending")
+            if not runtime.foreign_run_blocks and not runtime.accounting_retry:
+                try:
+                    await runtime.registry.reap()
+                except Exception:
+                    logger.exception("agents: workspace maintenance remains pending")
+                try:
+                    await runtime.settle_pending()
+                except Exception:
+                    logger.exception("agents: Work settlement remains pending")
+        try:
+            status.spaces_reclaimed += await finish_releases(app)
         except Exception:
             logger.exception("storage: released-account reclamation failed; existing facts are kept")
         try:
@@ -849,7 +945,9 @@ async def _recheck_loop(app):
                 logger.exception("storage: availability recheck failed; existing facts are kept")
 
 
-async def close_storage_spaces(app):
+async def drain_storage_spaces(app):
+    """Join owned maintenance without withdrawing host storage callbacks."""
+
     async def drain():
         stop = getattr(app.state, "storage_recheck_stop", None)
         if stop is not None:
@@ -887,8 +985,16 @@ async def close_storage_spaces(app):
                 else:
                     logger.warning("storage: storage-init cleanup remains unconfirmed (%s)", status.mount_cleanup)
 
+    task = getattr(app.state, "storage_shutdown_task", None)
+    if task is None:
+        task = asyncio.create_task(drain())
+        app.state.storage_shutdown_task = task
+    await await_drained(task)
+
+
+async def close_storage_spaces(app):
     try:
-        await await_drained(drain())
+        await drain_storage_spaces(app)
     finally:
         _clear_owned_seats(app)
 
@@ -919,6 +1025,7 @@ def _install_seats(app, session_factory, repository):
 @asynccontextmanager
 async def storage_spaces_lifecycle(app):
     """Own startup tasks through later initialization failures and runtime teardown."""
+    app.state.storage_shutdown_task = None
     try:
         yield
     finally:
@@ -957,6 +1064,7 @@ def human_lookup(repository):
 
 async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session_factory, creation_repository=None) -> None:
     entered = time.monotonic()
+    app.state.storage_startup_entered = entered
     _clear_owned_seats(app)
     app.state.agent_execution = ExecutionStatus()
     app.state.storage_inventory_task = None
@@ -1026,6 +1134,7 @@ async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session
     app.state.agent_instances.allowance_of = lambda kind: allowance(app, kind)
     if status.storage_reason is None and status.metadata_task is None and not status.mount_pending:
         await _adapter_step(app, timeout=min(ADAPTER_LIMIT_SECONDS, max(0, entered + STARTUP_BUDGET_SECONDS - time.monotonic())))
+    await _resident_step(app, timeout=None)
     if await _company_step(app, timeout=max(0, entered + STARTUP_BUDGET_SECONDS - time.monotonic())):
         counts = None
     if await _maintenance_step(app, timeout=max(0, entered + STARTUP_BUDGET_SECONDS - time.monotonic())):

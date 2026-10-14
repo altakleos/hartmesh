@@ -688,9 +688,22 @@ the storage and sandbox layers provide reusable containment and recovery primiti
 A managed Compose pool admits one native Gateway runtime at a time. Startup
 retains an operator-created ownership lock until sandbox workers, storage tasks
 and database shutdown finish. A missing or busy lock leaves native storage
-unavailable and retries qualification; history and mountless text chats remain
-available. Stop the existing Gateway before starting another against its pool.
+unavailable and retries qualification; history remains available. Mountless
+sandbox execution requires complete accounting and opened admission, even when
+User or workspace storage is unavailable. Stop the existing Gateway before
+starting another against its pool.
 This ownership requirement applies to deployments with a managed storage plan.
+
+Managed startup restores workspace claims and inventories stopped and running
+sandboxes, resident containers, relays and networks before opening execution
+capacity. Untracked resources, uncertain preparations and live foreign leases
+keep admission closed and preserve existing files and accounting. Work activation
+reserves capacity before committing a new attempt; exact retries reuse its receipt.
+Shutdown drains pending launches before stopping their workers. The existing
+minute-long maintenance cycle retries qualification, closes eligible workspaces
+and completes authorized releases for every Space kind. Compose agent counts
+remain disabled while strict orphan recovery and the remaining product stages
+are completed.
 
 Managed deployments refuse generic Space grant changes. User and Company storage
 also refuse generic backup, restore, archive, delete and acceptance of uncertain

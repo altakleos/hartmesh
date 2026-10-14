@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from deerflow.spaces.docker import StorageHostUnqualified
-from deerflow.spaces.native_teardown_evidence import NativeTeardownRecord
+from deerflow.spaces.native_teardown_evidence import NativeMountlessTeardownRecord, NativeTeardownRecord
 
 from .backend import DestroyOutcome
 from .native_resource_set import NativeResourceSet
@@ -214,10 +214,9 @@ class _Capability:
             if actual.network_mode == "open":
                 return
             target = self.outer.reservation.slot_id if self.outer is not None else None
+            record_type = NativeTeardownRecord if actual.slots else NativeMountlessTeardownRecord
             self.bind(
-                NativeTeardownRecord(
-                    uuid4().hex, actual.daemon_id, *actual.owner, actual.sandbox_id, actual.slots, target, actual.container_id, actual.container_name, actual.created_at, actual.network_mode, actual.policy_digest, actual.resources
-                )
+                record_type(uuid4().hex, actual.daemon_id, *actual.owner, actual.sandbox_id, actual.slots, target, actual.container_id, actual.container_name, actual.created_at, actual.network_mode, actual.policy_digest, actual.resources)
             )
             # A captured DTO alone does not permit publication or effects.
             survivors = NativeResourceSet(backend, guard=self.assert_current).qualify(self.record)
@@ -293,10 +292,19 @@ class _Capability:
 @contextmanager
 def destructive_scope(provider, info):
     from .local_backend import LocalContainerBackend
+    from .native_creation import NativeCreateBridge
 
-    if not provider._managed_pool_required() or not isinstance(provider._backend, LocalContainerBackend) or info.mountless_provider is provider:
+    if not provider._managed_pool_required() or not isinstance(provider._backend, LocalContainerBackend):
         yield None
         return
+    if info.mountless_provider is provider:
+        captured = getattr(info, "_native_journal_bridge", None)
+        bridge = getattr(provider, "_native_creation", None)
+        if captured is not None and captured is not bridge:
+            raise StorageHostUnqualified("Native mountless cleanup lost its original journal binding")
+        if captured is None and not (isinstance(bridge, NativeCreateBridge) and bridge._ever_installed):
+            yield None
+            return
     proof = current_native_lease(provider, info.sandbox_id)
     if proof is None or info.owner is None or not info.container_id or not info.container_name:
         raise StorageHostUnqualified("Managed native cleanup requires its live canonical holder and lease proofs")
