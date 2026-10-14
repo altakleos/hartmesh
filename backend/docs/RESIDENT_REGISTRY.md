@@ -61,6 +61,44 @@ outcome. Fenced workspaces and uncertain cleanup cannot promote Work candidates.
 These hooks do not install a registry; restart restoration, admission/replay and
 coordinated reaping/shutdown must land before Gateway installation.
 
+## Uninstalled restoration foundation
+
+`SpaceAttachments.retained_claims()` supplies a complete metadata snapshot of
+every non-fenced attachment, bounded globally at 4,096 rows. Overflow, missing
+mounts, invalid identity/closure facts or SQL failure raises instead of returning
+an incomplete successful snapshot. Each frozen claim carries the real attachment
+ID, incarnation, actor, host, full typed mount scope, phase and optional immutable
+container ID. It performs no grants, filesystem or provider operations.
+
+The registry retains each durable attachment separately, including multiple
+attachments on the same Home, unknown owners and multi-Space environments.
+Accounting grants no workspace permission. A multi-Space attachment consumes one
+environment; a Home reservation remains an additional charge until exact transfer.
+`preparation_retained` transfers only its captured preparation token and matching
+durable facts under the provider lock, with no count gap or temporary double count.
+Pending transferred attachments still refuse admission.
+
+Register `begin_restore()` before SQL reads. `finish_restore()` merges bounded
+concurrent creation/phase updates and containment tombstones; stale snapshots
+cannot resurrect contained claims or overwrite newer immutable identities.
+Snapshot absence never proves physical containment. A malformed, conflicting or
+overflowed snapshot keeps old accounting and leaves restoration incomplete.
+Legacy creation without exact typed update facts during the scan invalidates its
+publication. Coordinated installation must fence that creation window.
+
+Untouched uninstalled registries preserve their existing optional behavior while
+`restoration_complete` remains false. Once restoration begins, incomplete or failed
+restoration blocks admission and capacity decisions before same-Home shortcuts.
+Live identity collisions and bounded-index overflow also close readiness without
+discarding known claims. Only an exact containment notification releases its
+durable charge; later Work settlement failure cannot reverse that release.
+
+An eligible Home association requires its lock and one exact claim for the
+current actor, host, generation and complete Home mount. It preserves the capacity
+charge atomically. It grants no physical liveness or execution proof; ordinary
+resume and authority checks remain required. No Gateway caller installs or starts
+this restoration foundation yet, and it makes no database schema change.
+
 ## Shared capacity
 
 The existing AIO provider adds `external_slots()` exactly once to its reserved

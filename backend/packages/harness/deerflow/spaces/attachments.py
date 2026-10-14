@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 HOST_FENCE_REASONS = frozenset({"container-absent", "run-orphaned", "start-failed", "outcome-uncertain", "idle", "operator", "host-replaced"})
 HUMAN_FENCE_REASONS = frozenset({"lifecycle", "storage-recovery"})
 FENCE_REASONS = HOST_FENCE_REASONS | HUMAN_FENCE_REASONS
+MAX_RETAINED_ATTACHMENTS = 4096
 
 
 class AttachmentPending(SpaceConflict):
@@ -89,6 +90,39 @@ class AttachmentState:
     phase: str
     host_id: str
     container_id: str | None
+
+
+@dataclass(frozen=True)
+class RetainedAttachment:
+    """Detached accounting facts; neither permission nor containment proof."""
+
+    id: str
+    incarnation: str
+    actor: PrincipalRef
+    host_id: str
+    resources: tuple[ResourceMount, ...]
+    phase: str
+    container_id: str | None
+
+    def __post_init__(self):
+        for identifier in (self.id, self.incarnation):
+            if not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{32}", identifier):
+                raise ValueError("Retained attachment requires exact durable identities")
+        if not isinstance(self.actor, PrincipalRef) or not isinstance(self.host_id, str) or not 1 <= len(self.host_id) <= 128:
+            raise ValueError("Retained attachment requires exact actor and host")
+        if not isinstance(self.resources, tuple) or not 1 <= len(self.resources) <= 32 or any(not isinstance(resource, ResourceMount) for resource in self.resources):
+            raise ValueError("Retained attachment requires complete typed mounts")
+        if len({resource.space_id for resource in self.resources}) != len(self.resources) or len({resource.alias for resource in self.resources}) != len(self.resources):
+            raise ValueError("Retained attachment mounts must be unique")
+        object.__setattr__(self, "resources", tuple(sorted(self.resources, key=lambda resource: resource.space_id)))
+        if self.phase not in {"pending", "active", "fence_pending"} or (self.phase == "active" and self.container_id is None):
+            raise ValueError("Retained attachment phase is invalid")
+        if self.container_id is not None and (not isinstance(self.container_id, str) or not re.fullmatch(r"[0-9a-f]{64}", self.container_id)):
+            raise ValueError("Retained attachment requires an immutable container identity")
+
+    @property
+    def identity(self):
+        return self.id, self.incarnation, self.actor, self.host_id, self.resources
 
 
 class SpaceAttachments:
@@ -229,6 +263,36 @@ class SpaceAttachments:
                 raise AttachmentPending("Preparation does not match its captured actor, host and mount scope")
             facts = AttachmentState(record.id, record.phase, record.host_id, record.container_id)
         return facts
+
+    async def retained_claims(self, *, limit=MAX_RETAINED_ATTACHMENTS) -> tuple[RetainedAttachment, ...]:
+        """Read a complete globally bounded snapshot, without effects or grants."""
+        if type(limit) is not int or not 1 <= limit <= MAX_RETAINED_ATTACHMENTS:
+            raise ValueError("A bounded positive attachment snapshot limit is required")
+        async with self.registry._sf() as session:
+            records = (await session.execute(select(SpaceAttachmentRow).where(SpaceAttachmentRow.phase != "fenced").order_by(SpaceAttachmentRow.id).limit(limit + 1))).scalars().all()
+            if len(records) > limit:
+                raise AttachmentPending("Retained attachment snapshot exceeds its global limit")
+            identifiers = tuple(record.id for record in records)
+            if len(set(identifiers)) != len(identifiers):
+                raise AttachmentPending("Retained attachment snapshot has duplicate identities")
+            scope = await self._mount_scope(session, identifiers) if identifiers else {}
+            claims = []
+            for record in records:
+                self._closure_reason(record, None)
+                if record.phase in {"pending", "active"} and any(value is not None for value in (record.fenced_by_kind, record.fenced_by_id, record.fence_reason, record.fenced_at)):
+                    raise AttachmentPending("Open retained attachment carries closure metadata")
+                claims.append(
+                    RetainedAttachment(
+                        record.id,
+                        record.incarnation,
+                        PrincipalRef(record.actor_kind, record.actor_id),
+                        record.host_id,
+                        tuple(ResourceMount(space, generation, alias, bool(writable)) for space, generation, alias, writable in scope[record.id]),
+                        record.phase,
+                        record.container_id,
+                    )
+                )
+        return tuple(claims)
 
     async def fence_reason(self, attachment_id: str) -> str | None:
         self._identifier(attachment_id)
