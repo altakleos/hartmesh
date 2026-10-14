@@ -882,7 +882,21 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             starting = {sandbox_id: token for sandbox_id, token in getattr(self, "_native_start_reservations", {}).items() if sandbox_id in self._starting}
             extra = bridge.handoffs.extra_slots_locked(starting=starting, known_container_ids=known)
             extra += bridge.teardowns.extra_slots_locked(known_container_ids=known)
-        return replicas, self._active_count_locked(), len(self._warm_pool), len(self._starting) + extra
+        return replicas, self._active_count_locked(), len(self._warm_pool), len(self._starting) + extra + self.external_slots()
+
+    def external_slots(self) -> int:
+        """Host-owned reservations; callback runs under the metadata lock."""
+        return 0
+
+    def evict_external(self) -> bool:
+        """Ask the host to contain an idle environment, outside the lock."""
+        return False
+
+    def external_changed(self, change: Callable[[], None]) -> None:
+        """Publish a synchronous, memory-only host change and wake admissions."""
+        with self._lock:
+            change()
+            self._wake_capacity_waiters_locked()
 
     def _try_reserve_slot_locked(self, sandbox_id: str) -> bool:
         """Take a replica slot for *sandbox_id*, or report that there is none.
@@ -919,7 +933,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         with self._lock:
             replicas, active, parked, reserved = self._counted_slots_locked()
         logger.warning(
-            "Refusing to create sandbox %s: all %s replica slots are in use (active=%s parked=%s starting=%s) and none came free in %.1fs",
+            "Refusing to create sandbox %s: all %s replica slots are in use (active=%s parked=%s reserved=%s) and none came free in %.1fs",
             sandbox_id,
             replicas,
             active,
@@ -966,6 +980,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     # holds a slot, and a late refusal never replaces the Stop.
                     raise _AcquisitionCancelledError(sandbox_id)
                 with self._lock:
+                    if self._shutdown_called:
+                        raise RuntimeError("Sandbox provider is shut down")
                     if self._try_reserve_slot_locked(sandbox_id):
                         return
                 if not allow_eviction:
@@ -977,6 +993,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 if _acquisition_cancelled():
                     raise _AcquisitionCancelledError(sandbox_id)
                 if self._evict_oldest_warm(exclude=sandbox_id) is not None:
+                    continue
+                with self._lock:
+                    if _acquisition_cancelled():
+                        raise _AcquisitionCancelledError(sandbox_id)
+                    if self._shutdown_called:
+                        raise RuntimeError("Sandbox provider is shut down")
+                    if self._try_reserve_slot_locked(sandbox_id):
+                        return
+                if self.evict_external():
                     continue
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -990,6 +1015,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     # would spend the whole budget for nothing.
                     if _acquisition_cancelled():
                         raise _AcquisitionCancelledError(sandbox_id)
+                    if self._shutdown_called:
+                        raise RuntimeError("Sandbox provider is shut down")
                     if self._try_reserve_slot_locked(sandbox_id):
                         return
                     self._capacity_gate().wait(remaining)
@@ -1013,6 +1040,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             while True:
                 waiter: asyncio.Future[None] | None = None
                 with self._lock:
+                    self._check_async_capacity_admission_locked()
                     if self._try_reserve_slot_locked(sandbox_id):
                         return
                     remaining = deadline - time.monotonic()
@@ -1021,7 +1049,13 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                         # freed while we evict or measure cannot be missed.
                         waiter = self._await_capacity_slot()
                 try:
-                    if await asyncio.to_thread(self._evict_oldest_warm, exclude=sandbox_id) is not None:
+                    if await run_sync_lifecycle_operation(self._evict_oldest_warm, exclude=sandbox_id) is not None:
+                        continue
+                    with self._lock:
+                        self._check_async_capacity_admission_locked()
+                        if self._try_reserve_slot_locked(sandbox_id):
+                            return
+                    if await run_sync_lifecycle_operation(self.evict_external):
                         continue
                     if waiter is None:
                         record_capacity_refusal()
@@ -1033,6 +1067,70 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                             await asyncio.wait_for(asyncio.shield(waiter), timeout=remaining)
                         except TimeoutError:
                             pass
+                finally:
+                    if waiter is not None:
+                        self._forget_capacity_waiter(waiter)
+
+    def _check_async_capacity_admission_locked(self) -> None:
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise asyncio.CancelledError
+        if self._shutdown_called:
+            raise RuntimeError("Sandbox provider is shut down")
+
+    async def admit_external_async(self, key: str, reserve: Callable[[], None], *, wait: bool, is_reserved: Callable[[], bool] | None = None) -> None:
+        """Share the native/chat budget with a host-owned reservation.
+
+        The predicate and reservation run under the provider metadata lock;
+        both must be synchronous, memory-only and non-reentrant. Checking the
+        exact host key before counting makes concurrent same-Home admission
+        idempotent, including when another caller reserves during eviction.
+        Physical eviction and its host decisions run outside that lock.
+        """
+        started = time.monotonic()
+        deadline = started + (self.sandbox_capacity_wait_timeout() if wait else 0.0)
+        waiting = False
+
+        def try_reserve_locked() -> bool:
+            self._check_async_capacity_admission_locked()
+            if is_reserved is not None and is_reserved():
+                return True
+            replicas, active, parked, reserved = self._counted_slots_locked()
+            if active + parked + reserved >= replicas:
+                return False
+            reserve()
+            return True
+
+        with ExitStack() as measured:
+            while True:
+                waiter: asyncio.Future[None] | None = None
+                with self._lock:
+                    if try_reserve_locked():
+                        return
+                    if deadline > time.monotonic():
+                        waiter = self._await_capacity_slot()
+                try:
+                    if await run_sync_lifecycle_operation(self._evict_oldest_warm, exclude=key) is not None:
+                        continue
+                    with self._lock:
+                        if try_reserve_locked():
+                            return
+                    if await run_sync_lifecycle_operation(self.evict_external):
+                        continue
+                    # Even a no-wait caller must observe a reservation made
+                    # during the eviction awaits before returning a refusal.
+                    with self._lock:
+                        if try_reserve_locked():
+                            return
+                    remaining = deadline - time.monotonic()
+                    if waiter is None or remaining <= 0:
+                        record_capacity_refusal()
+                        raise self._capacity_refusal(key, waited=time.monotonic() - started)
+                    waiting = waiting or self._open_capacity_wait_span(measured, key)
+                    try:
+                        await asyncio.wait_for(asyncio.shield(waiter), timeout=remaining)
+                    except TimeoutError:
+                        pass
                 finally:
                     if waiter is not None:
                         self._forget_capacity_waiter(waiter)
@@ -4786,6 +4884,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if self._shutdown_called:
                 return
             self._shutdown_called = True
+            self._wake_capacity_waiters_locked()
         self._stop_prewarm_worker()
         with self._lock:
             sandbox_ids = list(self._sandboxes.keys())

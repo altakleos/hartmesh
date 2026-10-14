@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Shared workspace capacity foundation
+
+Generic provider hooks share the existing sandbox budget with host-owned
+reservations, preserving native pending-create and teardown accounting. Admission
+rechecks exact Home claims before eviction and drains lifecycle effects across
+cancellation. The owning-loop resident registry adds Work and conversation limits,
+exact preparation claims, idle containment and completion bookkeeping. Expired or
+cancelled reservations cannot release an uncertain preparation or publish late
+capacity. Timed-out eviction remains owned until drainage. Registry installation,
+durable restart restoration and Gateway/Work integration follow separately.
+Storage/agent defaults remain disabled. There is no database schema change.
+
 ### Workspace runtime observations and shutdown attribution
 
 Workspace refusal types share the existing structured host envelope, with stable
