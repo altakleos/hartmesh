@@ -1,7 +1,10 @@
 """Host-owned explicit Work attempts, fenced reports and terminal reconciliation."""
 
+import logging
+import math
+import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import func, select
@@ -16,6 +19,8 @@ from deerflow.persistence.agent_instances.model import AgentConversationRow, Age
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow, AgentWorkRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.utils.file_io import await_drained
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -39,6 +44,9 @@ class WorkAttempt:
 
     async def observe_run(self, execution, record):
         await self.service.observe_run(execution, self, record)
+
+    async def workspace_ready(self, execution, attachment_id: str) -> None:
+        await self.service.workspace_ready(execution, self, attachment_id)
 
     async def report(self, execution, request):
         if self.retired:
@@ -173,6 +181,128 @@ class WorkExecution:
     async def validate(self, execution, scope):
         async with self._sf() as session, session.begin():
             await self._current(session, execution, scope)
+
+    async def activation_exists(self, work_id: str, activation_id: str) -> bool:
+        """Host-only retry lookup; it does not admit the actor or request."""
+        async with self._sf() as session:
+            return await session.scalar(select(AgentWorkAttemptRow.id).where(AgentWorkAttemptRow.work_id == work_id, AgentWorkAttemptRow.activation_id == activation_id)) is not None
+
+    @staticmethod
+    async def _workspace_attachment(session, parent, attachment_id, *, host_id=None, generation=None):
+        """Exact Home/actor correlation; historical generations remain valid."""
+        from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceMountRow, StorageHostReplacementRow
+
+        attached = await session.get(SpaceAttachmentRow, attachment_id, populate_existing=True)
+        if attached is None or (attached.actor_kind, attached.actor_id) != ("nonhuman", parent.principal_id):
+            return None
+        if attached.container_id is not None and (not isinstance(attached.container_id, str) or not re.fullmatch(r"[0-9a-f]{64}", attached.container_id)):
+            return None
+        mounts = (await session.execute(select(SpaceMountRow).where(SpaceMountRow.attachment_id == attached.id))).scalars().all()
+        if len(mounts) != 1 or (mounts[0].space_id, mounts[0].alias, mounts[0].writable) != (parent.home_id, "home", 1):
+            return None
+        if not 1 <= mounts[0].generation <= 2**31 - 1 or (generation is not None and mounts[0].generation != generation):
+            return None
+        if host_id is not None and attached.host_id != host_id and await session.get(StorageHostReplacementRow, (attached.host_id, host_id)) is None:
+            return None
+        return attached
+
+    async def workspace_ready(self, execution, scope, attachment_id: str) -> None:
+        """Record readiness before execution, under existing admission locks."""
+        from deerflow.spaces.attachments import SpaceAttachments
+
+        SpaceAttachments._identifier(attachment_id)
+
+        async def perform():
+            async with self._sf() as session, session.begin():
+                parent, _row, attempt = await self._current(session, execution, scope)
+                expected_host = getattr(getattr(getattr(self.agents.files, "attachments", None), "provider", None), "host_id", None)
+                attached = await self._workspace_attachment(session, parent, attachment_id, generation=execution.home_generation)
+                if attached is None or attached.phase != "active" or attached.container_id is None or expected_host is None or attached.host_id != expected_host:
+                    raise AgentDenied("The ready workspace does not match the Work Home")
+                if attempt.attachment_id is not None and attempt.attachment_id != attachment_id:
+                    raise AgentConflict("The attempt already recorded another workspace")
+                attempt.attachment_id = attachment_id
+                if attempt.workspace_ready_at is None:
+                    attempt.workspace_ready_at = datetime.now(UTC)
+
+        await await_drained(perform())
+
+    async def settle_contained(self, *, instance_id: str, host_id: str, reason: str, attachment_id: str | None, unstarted_after: float | None = None, live_run_ids: frozenset[str]) -> list[str]:
+        """Settle failed host outcomes; physical capacity remains independent."""
+        from deerflow.persistence.agent_instances.model import AgentInstanceRow
+        from deerflow.persistence.spaces.model import SpaceRow
+        from deerflow.spaces.attachments import FENCE_REASONS, SpaceAttachments
+
+        if not isinstance(host_id, str) or not host_id or len(host_id) > 128 or reason not in FENCE_REASONS | {"run-never-started"}:
+            raise ValueError("Host settlement requires bounded host and reason facts")
+        if attachment_id is not None:
+            SpaceAttachments._identifier(attachment_id)
+        if unstarted_after is not None and (isinstance(unstarted_after, bool) or not math.isfinite(unstarted_after) or unstarted_after < 0):
+            raise ValueError("Unstarted age must be finite and nonnegative")
+
+        async def perform():
+            settled = []
+            async with self._sf() as session, session.begin():
+                await self.agents._reserve_writer(session)
+                home_id = await session.scalar(select(AgentInstanceRow.home_id).where(AgentInstanceRow.id == instance_id))
+                if home_id is None or await session.scalar(select(SpaceRow).where(SpaceRow.id == home_id).with_for_update()) is None:
+                    return []
+                parent = await session.scalar(select(AgentInstanceRow).where(AgentInstanceRow.id == instance_id).with_for_update().execution_options(populate_existing=True))
+                if parent is None or parent.home_id != home_id:
+                    raise AgentConflict("Work Home changed during host settlement")
+                candidates = (
+                    await session.execute(
+                        select(AgentWorkAttemptRow.id, AgentWorkAttemptRow.work_id)
+                        .join(AgentWorkRow, AgentWorkRow.id == AgentWorkAttemptRow.work_id)
+                        .where(AgentWorkRow.instance_id == instance_id, AgentWorkAttemptRow.status.in_(UNRESOLVED))
+                        .order_by(AgentWorkAttemptRow.created_at, AgentWorkAttemptRow.id)
+                    )
+                ).all()
+                now = datetime.now(UTC)
+                for attempt_id, work_id in candidates:
+                    row = await self.work._row(session, instance_id, work_id, lock=True)
+                    attempt = await session.get(AgentWorkAttemptRow, attempt_id, populate_existing=True)
+                    if attempt is None or attempt.work_id != row.id or attempt.status not in UNRESOLVED or attempt.run_id in live_run_ids:
+                        continue
+                    if attempt.run_id is None:
+                        created = attempt.created_at.replace(tzinfo=UTC) if attempt.created_at.tzinfo is None else attempt.created_at.astimezone(UTC)
+                        if unstarted_after is None or created > now - timedelta(seconds=unstarted_after):
+                            continue
+                        contained_reason = "run-never-started"
+                    elif attempt.attachment_id is not None:
+                        if attachment_id is not None and attempt.attachment_id != attachment_id:
+                            continue
+                        attached = await self._workspace_attachment(session, parent, attempt.attachment_id, host_id=host_id)
+                        if attached is None or attached.phase != "fenced":
+                            continue
+                        contained_reason = SpaceAttachments._closure_reason(attached, reason)
+                    elif parent.generation != attempt.instance_generation or parent.definition_revision != attempt.definition_revision:
+                        contained_reason = "lifecycle"
+                    else:
+                        contained_reason = "run-orphaned" if reason == "run-orphaned" else "start-failed"
+                    attempt.status, attempt.settled_at, attempt.contained_reason = "failed", now, contained_reason
+                    self._advance(row)
+                    session.add(
+                        AgentWorkEventRow(
+                            id=uuid4().hex,
+                            instance_id=instance_id,
+                            work_id=row.id,
+                            actor_kind="host",
+                            actor_id=host_id,
+                            operation_id=uuid4().hex,
+                            action="attempt_contained",
+                            revision=row.revision,
+                            assignment_revision=row.assignment_revision,
+                            request={"attempt_id": attempt.id, "run_id": attempt.run_id, "status": "failed", "reason": contained_reason, "attachment_id": attempt.attachment_id},
+                            result=self.work._snapshot(row),
+                        )
+                    )
+                    settled.append((attempt.id, contained_reason))
+            for attempt_id, contained_reason in settled:
+                logger.info("agents: attempt %s settled (%s)", attempt_id, contained_reason)
+            return [attempt_id for attempt_id, _reason in settled]
+
+        return await await_drained(perform())
 
     async def bind(self, execution, scope, record, incarnation):
         if record.thread_id != execution.thread_id or record.user_id != execution.requester.subject_id or incarnation != execution.thread_incarnation:
@@ -465,7 +595,7 @@ class WorkExecution:
                 if not attempt or attempt.work_id != row.id or attempt.run_id != record.run_id or attempt.thread_id != record.thread_id:
                     return
                 if attempt.status not in UNRESOLVED:
-                    return
+                    return attempt.status
                 status = getattr(record.status, "value", record.status)
                 if not settled or record.ownership_lost or status not in {"success", "error", "timeout", "interrupted"}:
                     attempt.status = "uncertain"
@@ -509,5 +639,6 @@ class WorkExecution:
                             await self._request(session, parent, row, None, creator=parent.principal_id, review=True)
                 self._advance(row)
                 await self._event(session, parent, row, uuid4().hex, "attempt_settled" if attempt.settled_at else "attempt_uncertain", {"attempt_id": attempt.id, "run_id": record.run_id, "status": attempt.status})
+                return attempt.status
 
         return await await_drained(perform())

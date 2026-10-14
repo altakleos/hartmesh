@@ -327,3 +327,8 @@ failure cannot reopen closure. Fully empty legacy fenced metadata stays unchange
 partial attribution refuses. `uncontained` holds valid host retry inputs, distinct
 from durable first attribution. Read-only liveness proves the current daemon before
 and after inspection; malformed Running is unknown, and stopped still needs removal.
+
+`inspect_preparation` reads exact incarnation/actor/host/mount correlation only.
+Validate closure facts; failed or mismatched reads never imply absence. Resolve
+no current grants or physical effects. Callers independently prove drained,
+qualified containment before releasing preparation claims.

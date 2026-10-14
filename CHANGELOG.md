@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Workspace outcome correlation and settlement foundation
+
+Trusted attachment inspection matches the exact durable incarnation, actor, host
+and complete mount scope without performing physical effects or granting access.
+Malformed closure facts and failed reads remain errors. Additive Work APIs record
+ready-workspace correlation, identify admitted activation retries and settle
+confirmed host failures while preserving candidates and assignment state. Terminal
+worker results win over late settlement; failed transactions publish no receipt
+or journal line. Worker completion now returns its resulting status with unchanged
+decisions. These APIs have no new runtime callers yet. Storage/agent defaults remain
+disabled. There is no database schema change.
+
 ### Shared workspace capacity foundation
 
 Generic provider hooks share the existing sandbox budget with host-owned

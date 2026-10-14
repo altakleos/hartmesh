@@ -7,6 +7,25 @@ Gateway installation must include durable restart restoration, exact preparation
 correlation, Work admission and replay, worker completion, reaping and shutdown.
 There is no database schema change in this foundation.
 
+The next additive foundation provides `SpaceAttachments.inspect_preparation` and
+Work readiness/host-settlement APIs without installing runtime callers. Inspection
+returns immutable SQL facts for the exact incarnation, actor, host and complete
+mount scope. Missing intent differs from a fenced historical row; mismatched or
+malformed facts and unavailable metadata raise errors. This read resolves no
+current grants and performs no physical inspection or effects. Revocation must
+not prevent cleanup correlation. It supplies no containment or absence authority.
+
+Work readiness requires the current admitted Home generation, exact qualified
+host and valid immutable container identity; it records no new Work revision.
+Host settlement instead permits historical mount generations and recorded host
+replacement, preserving human closure attribution. It locks Home, instance and
+Work, then reloads the attempt before deciding. A supplied live-run snapshot is a
+caller precondition; future coordinated callers must preserve its validity across
+their admission and settlement boundary. Settlement never promotes a candidate
+or releases a preparation claim. It commits failed-attempt status and its single
+host event before logging. `finish()` returns the resulting status while retaining
+its existing decisions; changed stale-preparation behavior awaits worker integration.
+
 ## Shared capacity
 
 The existing AIO provider adds `external_slots()` exactly once to its reserved
