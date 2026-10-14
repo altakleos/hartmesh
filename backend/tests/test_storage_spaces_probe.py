@@ -212,7 +212,7 @@ def test_restricted_network_provider_cannot_bypass_preparation_or_resume(tmp_pat
     assert docker.entry is None
 
 
-@pytest.mark.parametrize("mode", ["allowlist", "none"])
+@pytest.mark.parametrize("mode", ["allowlist", "blocked"])
 def test_restricted_network_resident_goes_through_the_network_controller(tmp_path, monkeypatch, mode):
     from unittest.mock import Mock
 
@@ -259,6 +259,36 @@ def test_restricted_network_resident_goes_through_the_network_controller(tmp_pat
     docker.entry["Mounts"][0]["Source"] = str(data)
     adapter.start(ID, plan)
     adapter.verify_active(ID, plan)
+
+
+@pytest.mark.parametrize("configured_network", [None, "default", "bridge"])
+@pytest.mark.parametrize("inspected_network", ["default", "bridge"])
+def test_open_resident_accepts_the_default_docker_bridge(tmp_path, monkeypatch, configured_network, inspected_network):
+    from test_resident_topology import backend
+
+    from deerflow.spaces import docker as module
+
+    if configured_network is None:
+        monkeypatch.delenv("DEER_FLOW_SANDBOX_NETWORK", raising=False)
+    else:
+        monkeypatch.setenv("DEER_FLOW_SANDBOX_NETWORK", configured_network)
+    monkeypatch.setattr(module, "_local_endpoint", lambda _contexts: None)
+    local, _calls = backend()
+    docker = ProbeDocker()
+    local._runtime_runner = docker
+    local._image = IMAGE
+    provider = DockerStorageAdapter.from_local_backend(local, pool=tmp_path)
+    plan = replace(PLAN, views=(replace(PLAN.views[0], slot_id="d" * 32),))
+    _mounts, labels = provider._resident_projection(plan)
+    docker.entry["Config"]["Labels"] = {**labels, "deerflow.role": "resident"}
+    docker.entry["HostConfig"]["NetworkMode"] = inspected_network
+    provider.start(ID, plan)
+    provider.verify_active(ID, plan)
+    for refused in (None, "", "unrelated-network"):
+        docker.entry["HostConfig"]["NetworkMode"] = refused
+        with pytest.raises(StorageAdapterUnsupported):
+            provider.verify_active(ID, plan)
+    assert sum(command[1] == "start" for command in docker.calls) == 1
 
 
 @pytest.mark.asyncio

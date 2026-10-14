@@ -46,7 +46,7 @@ def networked():
 
 
 @pytest.mark.parametrize("active", [False, True])
-@pytest.mark.parametrize("fault", ["extra-egress", "different-id", "wrong-policy"])
+@pytest.mark.parametrize("fault", ["extra-egress", "different-id", "wrong-policy", "default-mode"])
 def test_validate_refuses_extra_or_unqualified_actual_networks(networked, active, fault):
     provider, docker, plan, name, network = networked
     if active:
@@ -56,6 +56,8 @@ def test_validate_refuses_extra_or_unqualified_actual_networks(networked, active
         docker.entry["NetworkSettings"]["Networks"]["direct-egress"] = {"NetworkID": "f" * 64}
     elif fault == "different-id":
         docker.entry["NetworkSettings"]["Networks"][name]["NetworkID"] = "f" * 64
+    elif fault == "default-mode":
+        docker.entry["HostConfig"]["NetworkMode"] = "default"
     else:
         network["Labels"]["deerflow.sandbox_id"] = "foreign"
     with pytest.raises(StorageAdapterUnsupported):

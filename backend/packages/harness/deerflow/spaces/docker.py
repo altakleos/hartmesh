@@ -279,8 +279,11 @@ class DockerStorageAdapter:
             raise StorageAdapterUnsupported("Prepared container is absent")
         self._owned(entry, plan.id)
         host = entry.get("HostConfig") or {}
-        if self._network_of is not None and host.get("NetworkMode") != self._network_of(plan):
-            raise StorageAdapterUnsupported("Environment differs from the declared resident network")
+        if self._network_of is not None:
+            declared, observed = self._network_of(plan), host.get("NetworkMode")
+            default_bridge = self._backend is not None and self._backend.network_mode == "open" and declared == "bridge" and observed == "default"
+            if observed != declared and not default_bridge:
+                raise StorageAdapterUnsupported("Environment differs from the declared resident network")
         if self._backend is not None and self._backend.network_mode != "open":
             name = self._network_of(plan)
             networks = (entry.get("NetworkSettings") or {}).get("Networks")
@@ -548,7 +551,8 @@ class DockerStorageAdapter:
                 return backend._resource_names(plan.id)[1]
             from deerflow.community.aio_sandbox.local_backend import _effective_docker_network_target
 
-            return _effective_docker_network_target(os.environ.get("DEER_FLOW_SANDBOX_NETWORK", "").strip()) or "default"
+            target = _effective_docker_network_target(os.environ.get("DEER_FLOW_SANDBOX_NETWORK", "").strip())
+            return "bridge" if target in ("", "default") else target
 
         adapter._network_of = network
         if mode != "open":
