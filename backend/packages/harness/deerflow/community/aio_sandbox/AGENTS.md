@@ -25,6 +25,11 @@ pool-owner runner; never invent chat/human labels or use the chat journal for it
 Expire capabilities after drained workers, consume once, and retain every bound
 slot through CID commit. Residents stay stopped/unpublished; chat defaults remain.
 
+Native bridge qualification/current proof reads one mixed journal snapshot and
+refuses every v2 teardown record, including known teardown paths, until recovery
+integration arrives. The memory gate closes on publication; never filter v2 away
+and infer absence from an empty create list. No production path emits v2 yet.
+
 Managed native chat primaries require installed `native_creation.py` accounting and the
 exact owner-held journal. Persist pending before submission; preserve the existing
 run/create timeout policy. Strict actual daemon/ID/name/attempt/slot inspection

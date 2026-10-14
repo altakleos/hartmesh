@@ -5,10 +5,13 @@ The operator atomically publishes `.native-creates` as 1000:1000/0700 outside
 `.probe` and reclaimable roots; never repair a published conflict or erase stages.
 Retain exact pool/directory/stage FDs and validate the named published record after
 fsync. Strict bounded 0600 single-link versioned records correlate immutable
-attempt/daemon/name/owner/thread/slots, never permission. Pending survives restart;
-only same-daemon acknowledged facts may be pruned after file and directory fsync.
-Unknown/malformed/staging evidence fails closed, never evicted at capacity. `ready`
-is memory-only; every other method performs blocking IO and belongs off-loop.
+attempt/daemon/name/owner/thread/slots, never permission. The mixed scanner validates
+v1 creates and private v2 `native_teardown_evidence.py` records under one bound.
+Create-only ACK pruning never removes teardown. Exact primary correlation is unique;
+publication retries reprove durability, and failed terminal fsync retains the record
+and FD in memory. Same-daemon mutations only; never infer a target from slot order.
+Pending survives restart; unknown/malformed/staging evidence fails closed and is
+never evicted. `ready`/`creation_ready` are memory-only; IO methods belong off-loop.
 PoolRuntimeOwner retains the exact published namespace even through failed first
 load and constructs the helper against that inode. Qualification installs the
 AIO bridge and restored memory accounting before reconciliation/publication.
