@@ -310,9 +310,12 @@ checks the exact record/inode and remains pending in memory if directory sync fa
 even when the named file is already absent. They share the existing record/byte
 limits and are never pruned as create acknowledgments or evicted for capacity.
 
-This is metadata groundwork: no production path emits teardown records yet, and
-the current native bridge refuses them until the cleanup recovery integration is
-available. Preserve the journal in complete pool backups. Version-1-only binaries
+Qualification restores both typed indexes before admission. A journal revision
+closes the memory gate until both indexes match the complete snapshot; partial
+restoration retains accounting and refuses publication. Pending teardown reserves
+capacity even after its primary disappears, fences matching owner/name/target
+admission and permits positively unrelated work. Preserve the journal in complete
+pool backups. Version-1-only binaries
 refuse qualification while version-2 records remain; deleting evidence is not a
 rollback procedure. There is no database schema change.
 
@@ -354,14 +357,30 @@ tracking, foreign ownership and held executions refuse reclamation. Cleanup uses
 the existing global holder reservation, provider teardown reservation, ownership
 store and heartbeat. Qualified open-mode primaries are stopped and, if still
 present, removed by their exact full Docker ID. The configured prefix/network mode
-never supplies missing resource identity. Unsupported restricted sets refuse;
-their sidecars and networks must be positively contained before release is enabled.
+never supplies missing resource identity. Restricted cleanup freshly inspects the
+actual primary, relay and networks, verifies their immutable identities, labels
+and exact membership, then durably records the complete set before any effect.
+Container cleanup uses full IDs; network removal requires empty membership.
+Unknown or conflicting sets refuse. A surviving relay or network remains
+discoverable through its record after primary removal and across restart.
+Ordinary orphan reconciliation resumes same-daemon untargeted records before
+enumerating running primaries, without creating usable clients. Each pass attempts
+at most four records under an inherited overall 60-second Docker budget; rotating
+attempts prevent a refused entry from starving later records. Recheck exact record
+retention before each attempt. Targeted records require their retirement scope.
 
 Stop alone is insufficient. Re-enumeration and the caller's drained final proof
 must establish absence. Failed cleanup retains the exact result in quarantine;
 an already-removed result can settle only after canonical fresh CID AND name
-absence proof. Neither absence nor time clears an unacknowledged request. Correlation
-facts stay process-local and are excluded from persisted sandbox metadata.
+absence proof. Restricted completion requires every original ID AND name absent,
+then journal removal and directory sync before releasing memory accounting,
+tracking and the port. Failed terminal sync retains the record for an absence-only
+retry. A process-local completed handoff can repeat fresh absence proof without
+publishing evidence or issuing another destructive command. Neither absence nor
+time clears an unacknowledged request. Live cleanup capabilities require the exact
+canonical holder, provider reservation, lease and current runtime; copied expired
+contexts grant nothing. Correlation and completion facts are excluded from
+persisted sandbox metadata.
 
 Managed-plan qualification requires one participating Gateway runtime per pool.
 `prepare` and `mount-all` maintain `.gateway-owner.lock`, a stable empty regular
@@ -466,8 +485,10 @@ Lifecycle/recovery refuses User/company roles with `mounts-unrecorded`, because
 plain chat binds cannot prove per-Space quiescence. Restore the whole data disk
 from one platform snapshot. The account tool releases a disabled account's seat;
 private host reclamation qualifies exact owned sandboxes before freeing its
-binding. Used allowlist sandbox sets currently remain reserved when their
-containment cannot be qualified; the bundle case proves unused-account reuse.
+binding. The bundle case uses two allowlist chats and verifies all eight original
+container/network IDs and names are absent before accepting slot reuse. Unknown
+containment still preserves the binding. This CI gate is separate from tenant
+qualification on the consumer's host.
 
 ## Resource API
 
@@ -796,8 +817,9 @@ Ordinary AIO chat mounts use the host-owned `ChatStoragePaths` projection and
 the User/company roots; fresh checks precede prewarm, creation, cache adoption,
 lease reuse and tool-client return. These labelled plain chat binds are distinct
 from qualified persistent native attachments. The neutral extension facade still
-reports native attachments unsupported; restricted resident topology remains
-outside the current attachment builder.
+reports native attachments unsupported. The qualified Docker attachment builder
+can prepare stopped restricted residents; instance Work integration has a
+separate activation lifecycle.
 
 `Paths.thread_root_resolver` remains a pure opt-in host callback for generic
 consumers. Managed chat projection resolves conversation directories under the

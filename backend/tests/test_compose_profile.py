@@ -1623,8 +1623,9 @@ def test_readme_describes_current_chat_storage_and_reclamation_limits():
     section = (PROFILE / "README.md").read_text(encoding="utf-8").split("## Storage and agents\n", 1)[1].split("\n## ", 1)[0]
     assert "data/conversations/<thread>" in section
     assert "mountless text chat" in section
-    assert "used allowlist" in section
-    assert "unused account" in section
+    assert "after two allowlist chats" in section
+    assert "every original container/network ID and name is absent" in section
+    assert "Partial paired cleanup survives restart" in section
     assert "94 seconds" in section and "illustrative" in section
     assert "bytes and inodes per conversation are unmeasured" in section
     for key in {"HARTMESH_USERS", "HARTMESH_USER_STORAGE_GIB", "HARTMESH_AI_ASSISTANTS_PER_USER", "HARTMESH_AI_ASSISTANT_STORAGE_GIB", "HARTMESH_AI_EMPLOYEES", "HARTMESH_AI_EMPLOYEE_STORAGE_GIB", "HARTMESH_COMPANY_STORAGE_GIB"}:

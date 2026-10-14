@@ -45,7 +45,10 @@ def test_prepare_gives_gateway_group_parent_write_permission(operator, monkeypat
         assert owners[spec.mount_path] == (0, 1000)
         assert spec.mount_path.stat().st_mode & 0o777 == 0o770
         assert owners[spec.image_path] == (0, 1000)
-        assert owners[spec.mount_path / "data"] == owners[spec.mount_path / "control"] == (1000, 1000)
+        for child, mode in (("data", 0o770), ("control", 0o700)):
+            metadata = (spec.mount_path / child).stat()
+            assert (metadata.st_uid, metadata.st_gid) == (1000, 1000)
+            assert metadata.st_mode & 0o777 == mode
 
 
 @pytest.mark.parametrize("already", [False, True])

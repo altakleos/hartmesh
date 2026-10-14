@@ -11,7 +11,13 @@ Create-only ACK pruning never removes teardown. Exact primary correlation is uni
 publication retries reprove durability, and failed terminal fsync retains the record
 and FD in memory. Same-daemon mutations only; never infer a target from slot order.
 Pending survives restart; unknown/malformed/staging evidence fails closed and is
-never evicted. `ready`/`creation_ready` are memory-only; IO methods belong off-loop.
+never evicted. `ready`/`creation_ready` and `teardown_revision` are memory-only;
+IO methods belong off-loop. Teardown publication/completion closes the bridge's
+revision gate until both typed indexes match the complete mixed snapshot. Restore
+never drops retained accounting to manufacture readiness.
+The already-installed canonical cleanup path can restore accounting while its
+owner closes, retaining current owner/daemon proof and closed creation readiness.
+This permission grants no resource effect or new runtime installation.
 PoolRuntimeOwner retains the exact published namespace even through failed first
 load and constructs the helper against that inode. Qualification installs the
 AIO bridge and restored memory accounting before reconciliation/publication.

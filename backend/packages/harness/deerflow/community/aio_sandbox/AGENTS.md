@@ -15,8 +15,21 @@ Qualified open sets use full-ID stop/removal and positive CID+name absence, incl
 retries after lost proof. If auto-removal finishes between post-stop inventory
 reads, require fresh CID AND name absence with current host proof and the same
 deadline; send no additional destructive command from an ambiguous inventory.
-Never derive foreign restricted resource names; unsupported
-sets refuse. Unknown tracking, held/foreign owners and untransferred results stay
+Restricted sets use `native_resource_set.py` to inspect original primary, relay
+and networks, labels and exact membership. Persist the complete set before any
+effect; survivor recovery never derives identities from current names or policy.
+Absence replies require return code 1, empty output and an exact known template
+bound to the inspected reference, including Docker 29's lowercase object error.
+Unexpected replies log bounded structural facts, never names or payload contents.
+`native_teardown_execution.py` binds cleanup to the exact live canonical holder,
+provider reservation, lease, runtime and optional owner/target reservation.
+Observed lease loss and scope exit invalidate copied capabilities. Reserve before
+closing a client or untracking it. Remove primary, relay, internal and egress in
+that order, by full ID, with fresh proof before each effect. Journal-only survivors
+remain discoverable across restart; all original IDs AND names must be absent
+before journal fsync, index removal, tracking and port release. Completed handoffs
+repeat absence-only proof without publication or effects. Unknown tracking,
+held/foreign owners and untransferred results stay
 reserved. Process-local slot/containment facts never serialize. Host eligibility
 belongs outside this generic provider and no provider callback runs under SQL.
 
@@ -25,10 +38,31 @@ pool-owner runner; never invent chat/human labels or use the chat journal for it
 Expire capabilities after drained workers, consume once, and retain every bound
 slot through CID commit. Residents stay stopped/unpublished; chat defaults remain.
 
-Native bridge qualification/current proof reads one mixed journal snapshot and
-refuses every v2 teardown record, including known teardown paths, until recovery
-integration arrives. The memory gate closes on publication; never filter v2 away
-and infer absence from an empty create list. No production path emits v2 yet.
+Native bridge qualification/current proof restores both typed indexes from one
+mixed snapshot before publication. `native_teardown.py` retains bounded pending
+accounting, exact member ID/typed-name collision guards and restore tombstones.
+The journal revision closes readiness until the restored set exactly matches.
+An absent primary still consumes capacity; deduplicate only its exact known ID.
+Matching owner/name/explicit-target admission refuses unresolved evidence.
+Independent same-owner sets remain separately counted and can be cleaned under
+exact record capabilities; incidental Shared correlation is never an inferred
+retirement target. No metadata lock encloses journal, Docker or store IO.
+Ordinary reconciliation resumes same-daemon `target=None` records before running
+primary enumeration. Limit each pass to four rotating attempts and the inherited
+60-second Docker deadline, including initial proof. Retain all actual slot
+admission through canonical cleanup; recheck exact record retention after admission
+and inside the canonical holder reservation before claiming or inserting tracking
+to prevent stale-snapshot resurrection. Held entries never starve later records;
+foreign and targeted records remain counted without ordinary cleanup authority.
+Cleanup invoked during another owner's acquire validates that inherited reference
+against this provider's live gate, retains a separate admission for the actual
+cleanup owner/slots and restores the original context on every exit. Never borrow
+a different owner or relax general admission; stale or foreign-gate references
+still refuse before publication or effects.
+Canonical cleanup restores mixed accounting with `qualify(teardown=True)` during
+closing, including uncertain-publication and terminal-sync retries. It requires
+prior successful installation and fresh owning-runtime/daemon proof. Normal
+qualification stays refused and memory readiness remains closed to new work.
 
 Managed native chat primaries require installed `native_creation.py` accounting and the
 exact owner-held journal. Persist pending before submission; preserve the existing

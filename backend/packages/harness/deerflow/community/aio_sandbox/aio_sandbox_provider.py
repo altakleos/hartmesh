@@ -82,6 +82,8 @@ from .backend import SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, DestroyOutcome, Sandb
 from .local_backend import ChatMountMismatch, LocalContainerBackend, NativeSlotContainer
 from .native_creation import NATIVE_CREATE_RESERVATION, NativeCreateBridge, NativeCreateHandoffs
 from .native_retirement import NativeRetirementScope
+from .native_teardown import begin_native_lease, end_native_lease, native_cleanup
+from .native_teardown_execution import destructive_scope, eligible_teardowns, recover_teardowns, retirement_scope
 from .owner_admission import OWNER_ADMISSION, OwnerAdmissions
 from .ownership import (
     OwnershipBackendError,
@@ -879,6 +881,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             known.update(info.container_id for info, _parked in self._warm_pool.values() if info.container_id)
             starting = {sandbox_id: token for sandbox_id, token in getattr(self, "_native_start_reservations", {}).items() if sandbox_id in self._starting}
             extra = bridge.handoffs.extra_slots_locked(starting=starting, known_container_ids=known)
+            extra += bridge.teardowns.extra_slots_locked(known_container_ids=known)
         return replicas, self._active_count_locked(), len(self._warm_pool), len(self._starting) + extra
 
     def _try_reserve_slot_locked(self, sandbox_id: str) -> bool:
@@ -1262,6 +1265,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         refresh, so no claim can follow it.
         """
         stop = threading.Event()
+        native_proof, native_context = begin_native_lease(self, sandbox_id)
 
         def beat() -> None:
             interval = self._ownership_config.renewal_interval_seconds
@@ -1269,6 +1273,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 while not stop.wait(interval):
                     try:
                         if not self._ownership.claim(sandbox_id, for_destroy=True):
+                            native_proof.lost.set()
                             # Only reachable if the store lost our marker *and* a
                             # peer took it (e.g. a flush mid-stop). The stop is
                             # already in flight and cannot be recalled, so say so
@@ -1280,6 +1285,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                             )
                             return
                     except Exception as e:
+                        native_proof.lost.set()
                         # Broad on purpose: a refresh that raises must not kill the
                         # heartbeat and strand the marker for a stop that can run
                         # unbounded. Unknown, not lost — the marker may still be
@@ -1292,12 +1298,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self._release_ownership(sandbox_id)
 
         beater = threading.Thread(target=beat, name="sandbox-teardown-lease", daemon=True)
-        beater.start()
         try:
-            yield
+            beater.start()
+            yield native_proof
         finally:
+            end_native_lease(native_proof, native_context)
             stop.set()
-            beater.join(timeout=self._TEARDOWN_JOIN_TIMEOUT_SECONDS)
+            if beater.ident is not None:
+                beater.join(timeout=self._TEARDOWN_JOIN_TIMEOUT_SECONDS)
             if beater.is_alive():
                 # The budget covers a normally timing-out refresh plus the final
                 # release. The release is the heartbeat's job and is still
@@ -1356,6 +1364,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         first_seen = self._unowned_since.setdefault(sandbox_id, now)
         return now - first_seen >= compute_lease_ttl(self._ownership_config)
 
+    @native_cleanup(refused=False)
     def _replace_incompatible_sandbox(self, info: SandboxInfo, now: float) -> bool:
         try:
             with self._candidate_owner_scope(info):
@@ -1431,6 +1440,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """
         if self._managed_pool_required() and not self._pool_runtime_current():
             return
+        recover_teardowns(self)
         try:
             running = self._backend.list_running()
         except Exception as e:
@@ -2800,6 +2810,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         return sandbox, info, True
 
+    @native_cleanup()
     def _drop_unhealthy_sandbox(self, sandbox_id: str, reason: str, *, expected_info: SandboxInfo | None = None) -> None:
         """Remove and destroy a sandbox after a definitive failed health check."""
         # Reserved for the whole path, not just the stop: this one untracks
@@ -2868,8 +2879,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         says nothing about which members are gone.
         """
         try:
-            self._assert_managed_container(info, teardown=True)
-            result = self._backend.destroy(info)
+            with destructive_scope(self, info):
+                self._assert_managed_container(info, teardown=True)
+                result = self._backend.destroy(info)
         except Exception as e:
             logger.error("Destroy of sandbox %s raised; its resource set is not confirmed absent: %s", info.sandbox_id, type(e).__name__)
             return DestroyOutcome.UNKNOWN, e
@@ -2978,6 +2990,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             except Exception:
                 logger.error("Cleanup retry for sandbox %s raised", sandbox_id, exc_info=True)
 
+    @native_cleanup(refused=False)
     def _destroy_warm_entry(self, sandbox_id: str, entry: SandboxInfo, *, reason: str, still_reapable: Callable[[], bool]) -> bool:
         """Destroy a warm-pool sandbox using AIO-specific backend logging.
 
@@ -3199,6 +3212,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         scope.assert_current()
         pending = scope.bridge.assert_current()
         reservation = scope.reservation
+        eligible_teardowns(scope)
         if any(record.owner_id == reservation.owner_id or reservation.slot_id in record.slots for record in pending) or scope.bridge.handoffs.retained_for_retirement(owner_id=reservation.owner_id, slot_id=reservation.slot_id):
             raise StorageHostUnqualified("Unresolved native owner or slot requests prevent containment")
         scope.assert_current()
@@ -3243,10 +3257,32 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         return actual
 
     def _retire_native_owner(self, scope):
+        with retirement_scope(scope):
+            self._retire_native_owner_in_scope(scope)
+
+    def _retire_native_owner_in_scope(self, scope):
         try:
             self._native_retirement_check(scope)
             observed = self._backend._slot_containers(scope.reservation.slot_id)
             actual = self._native_retirement_known(scope, observed, allow_retained=True)
+            for record in eligible_teardowns(scope):
+                entry = NativeSlotContainer(
+                    record.container_id, record.name, record.sandbox_id, (record.owner_id, record.thread_id), record.slots, record.daemon_id, False, False, record.created_at, record.network_mode, record.policy_digest, record.resources
+                )
+                current = actual.get(record.sandbox_id)
+                if current is not None and (current.container_id, current.container_name, current.owner, current.slots, current.created_at, current.network_mode, current.policy_digest, current.resources) != (
+                    entry.container_id,
+                    entry.container_name,
+                    entry.owner,
+                    entry.slots,
+                    entry.created_at,
+                    entry.network_mode,
+                    entry.policy_digest,
+                    entry.resources,
+                ):
+                    raise StorageHostUnqualified("Native teardown record conflicts with current slot inventory")
+                if current is None:
+                    actual[record.sandbox_id] = entry
             self._native_retirement_check(scope)
             for sid, entry in sorted(actual.items()):
                 scope.assert_current()
@@ -3262,6 +3298,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         self._native_retirement_known(scope, observed)
         if observed:
             raise StorageHostUnqualified("Native slot containers remain; absence is unconfirmed")
+        if eligible_teardowns(scope):
+            raise StorageHostUnqualified("Native slot retains an unresolved original resource set")
         self._native_retirement_check(scope)
 
     @contextlib.contextmanager
@@ -3329,6 +3367,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             raise StorageHostUnqualified("Native publication has no fresh actual owner and slot facts")
         if gate is not None and info.owner is not None and not gate.allowed_locked(info.owner[0], info.native_slots or ()):
             raise StorageHostUnqualified("Native publication intersects a live owner or slot retirement")
+        bridge = getattr(self, "_native_creation", None)
+        if isinstance(bridge, NativeCreateBridge) and bridge.teardowns.blocks_locked(owner_id=info.owner[0] if info.owner is not None else None, name=info.container_name, container_id=info.container_id, slots=info.native_slots or ()):
+            raise StorageHostUnqualified("Native publication intersects unresolved teardown evidence")
 
     def _assert_managed_container(self, info, *, teardown=False):
         if not self._managed_pool_required():
@@ -3357,6 +3398,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self._owner_admission_gate().register_slots(reference, actual.slots)
                 with self._lock:
                     info.native_slots = actual.slots
+                    if actual.network_mode == "open":
+                        info.native_container = actual
+                bridge.assert_candidate_current(info, known_live=known_live)
 
     def _assert_chat_runtime(self, paths):
         if not self._managed_pool_required():
@@ -3609,11 +3653,18 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if any(info.owner == key for info in self._backend.list_running(strict=True)):
             raise BackingUnavailable("Conversation container absence is not confirmed")
 
-    def _retire_unheld_container(self, sandbox_id, actual, key):
+    def _retire_unheld_container(self, sandbox_id, actual, key, *, _expected_teardown=None):
         """One canonical holder/local/store-fenced path for inspected identity."""
         from deerflow.spaces.backings import BackingUnavailable
 
         def cleanup():
+            if _expected_teardown is not None:
+                bridge = getattr(self, "_native_creation", None)
+                if bridge is None:
+                    raise BackingUnavailable("Native cleanup lost its owning evidence bridge")
+                bridge.assert_current(teardown=True)
+                if _expected_teardown not in bridge.teardowns.records():
+                    return
             with self._lock:
                 warm = self._warm_pool.get(sandbox_id)
                 current = self._sandbox_infos.get(sandbox_id) or (warm[0] if warm is not None else None)
@@ -4125,6 +4176,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             finally:
                 await run_sync_lifecycle_operation(lock_file.close)
 
+    @native_cleanup(refused=DestroyOutcome.UNKNOWN)
     def _destroy_unready_sandbox(self, sandbox_id: str, info: SandboxInfo) -> DestroyOutcome:
         """Tear down a freshly-created container whose readiness check failed.
 
@@ -4654,6 +4706,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """
         self._destroy_tracked(sandbox_id, still_reapable=lambda: True)
 
+    @native_cleanup()
     def _destroy_tracked(self, sandbox_id: str, *, still_reapable: Callable[[], bool]) -> None:
         """``destroy()`` with a caller-supplied "is this still reapable" gate.
 

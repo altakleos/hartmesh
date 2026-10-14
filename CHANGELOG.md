@@ -7,16 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Durable native teardown evidence
+### Durable restricted sandbox containment
 
 The private native lifecycle journal accepts bounded version-2 teardown
 correlation beside unchanged version-1 create records. Atomic publication,
 durability retries and exact record/inode checks retain unfinished outcomes;
 terminal unlink is not complete until directory sync succeeds. Create-only
-acknowledgment pruning never removes teardown records. The current native runtime
-refuses unresolved teardown evidence pending the cleanup integration. No production
-path emits these records yet. Storage/agent defaults remain disabled. There is no
-database schema change; the private journal adds a new record format.
+acknowledgment pruning never removes teardown records. Canonical fenced cleanup
+records the actual restricted primary, relay and network identities before effects
+and resumes partial cleanup after restart, including an already-absent primary.
+Bounded ordinary reconciliation recovers active accounts' unfinished cleanup;
+targeted retirements retain their required owner/slot reservation.
+Each original ID and name must be absent before durable completion and capacity
+release. Held executions, foreign identities and unknown outcomes retain backing
+reservations. Storage/agent defaults remain disabled. There is no database schema
+change; the private journal adds a new record format.
 
 ### Restricted resident workspace preparation
 
@@ -46,8 +51,8 @@ database schema change.
 
 The operator runbook now describes User/company assignment, ordinary chat mounts,
 mountless degradation, seats and release retries, full-files notices and complete
-data-disk backup/restore. It distinguishes unused-account reclamation proof from
-the remaining used allowlist sandbox containment work. Legacy-folder notes apply
+data-disk backup/restore. The bundle gate exercises seat reclamation after two
+allowlist chats and checks absence of both complete resource sets. Legacy-folder notes apply
 only to storage-enabled qualification, and timing/capacity examples identify
 unmeasured assumptions. Consumer documentation records the ten-case bundle gate
 and current native evidence. Storage/agent defaults remain disabled. There is no

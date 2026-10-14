@@ -634,8 +634,9 @@ Unresolved requests survive restart, reserve capacity and block another native
 create for the same account or container name. Cancellation retains verified
 containers for fenced cleanup. Operators must preserve the directory alongside
 the pool; unsafe or unknown evidence refuses admission. Defaults remain disabled.
-The journal also supports private teardown correlation; unresolved version-2
-records refuse native admission until their recovery protocol is integrated.
+The journal also retains private teardown records for restricted sandboxes.
+Unresolved records reserve capacity and fence matching owners, names and target
+slots while positively unrelated work remains admissible.
 Unconfirmed creation logs include bounded source locations, error codes and
 attempt/submission facts, without exception text or subprocess payloads.
 
@@ -643,8 +644,11 @@ Managed native cleanup now reserves the opaque owner and exact physical slot
 through final absence verification. Running and stopped containers across all
 prefixes are checked; a held execution, foreign owner, unresolved request or lost
 cleanup reply keeps the backing reserved. Qualified open-mode containers use the
-existing fenced cleanup path with immutable Docker IDs. Unsupported restricted
-resource sets require containment to be resolved before reclamation.
+existing fenced cleanup path with immutable Docker IDs. Restricted cleanup records
+the actual primary, relay and networks before removing them. Partial cleanup
+survives restart; ordinary reconciliation also resumes cleanup for active accounts
+whose primary disappeared. Reclamation requires fresh absence of every original ID and name
+and durable completion of its journal record.
 
 After the operator releases an account's seat, startup and minute-based maintenance
 can reclaim its deleted User Space before assigning storage to waiting accounts.

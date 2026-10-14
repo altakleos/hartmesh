@@ -29,6 +29,7 @@ from pathlib import Path, PurePosixPath
 from deerflow.spaces.backings import BackingUnavailable
 from deerflow.spaces.docker import StorageHostUnqualified
 from deerflow.spaces.native_create_evidence import _unique_object
+from deerflow.spaces.native_teardown_evidence import NativeTeardownResource
 from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
 from deerflow.utils.network import get_free_port, release_port
 
@@ -91,6 +92,8 @@ class NativeSlotContainer:
     auto_remove: bool
     created_at: str
     network_mode: str = "open"
+    policy_digest: str | None = None
+    resources: tuple[NativeTeardownResource, ...] = ()
 
 
 def _native_inspection(entry, identifier, daemon_id, *, slot_id=None, require_open=False):
@@ -824,7 +827,8 @@ class LocalContainerBackend(SandboxBackend):
                 payload = json.loads(inspected.stdout, object_pairs_hook=_unique_object)
                 if inspected.returncode or not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
                     raise ValueError("Missing or ambiguous slot inspection")
-                actual = _native_inspection(payload[0], identifier, bridge.evidence.daemon_id, slot_id=slot_id, require_open=True)
+                actual = _native_inspection(payload[0], identifier, bridge.evidence.daemon_id, slot_id=slot_id)
+                actual = self._native_resource_facts(payload[0], actual)
                 if actual.container_name in names:
                     raise ValueError("Native inventory observed two container incarnations with one name")
                 names.add(actual.container_name)
@@ -861,6 +865,47 @@ class LocalContainerBackend(SandboxBackend):
             raise StorageHostUnqualified("Native candidate is unconfirmed; refuse publication") from exc
         finally:
             _NATIVE_SLOT_INVENTORY_DEADLINE.reset(deadline)
+
+    def _native_resource_facts(self, entry, actual):
+        from .native_resource_set import NativeResourceSet
+
+        bridge = self._native_creation
+        records = [record for record in bridge.teardowns.records() if record.container_id == actual.container_id]
+        reader = NativeResourceSet(self, guard=lambda: bridge.assert_current(teardown=True))
+        if records:
+            if len(records) != 1:
+                raise StorageHostUnqualified("Native candidate has conflicting original teardown records")
+            record = records[0]
+            if (record.daemon_id, record.name, record.sandbox_id, record.owner_id, record.thread_id, record.slots, record.created_at, record.network_mode) != (
+                actual.daemon_id,
+                actual.container_name,
+                actual.sandbox_id,
+                *actual.owner,
+                actual.slots,
+                actual.created_at,
+                actual.network_mode,
+            ):
+                raise StorageHostUnqualified("Native candidate differs from original teardown correlation")
+            reader.qualify(record)
+            return dataclasses.replace(actual, policy_digest=record.policy_digest, resources=record.resources)
+        if actual.network_mode == "open":
+            return actual
+        digest, resources = reader.capture(entry, actual)
+        return dataclasses.replace(actual, policy_digest=digest, resources=resources)
+
+    def native_resource_candidate(self, info):
+        """Actual graph capture under the caller's retained canonical lifetime."""
+        from .native_resource_set import NativeResourceSet
+
+        bridge = self._native_creation
+        bridge.assert_current(teardown=True)
+        entry = NativeResourceSet(self, guard=lambda: bridge.assert_current(teardown=True)).inspect("container", info.container_id)
+        if entry is None:
+            raise StorageHostUnqualified("Unrecorded native primary has no complete resource proof")
+        actual = _native_inspection(entry, info.container_id, bridge.evidence.daemon_id)
+        if (actual.container_name, actual.sandbox_id, actual.owner) != (info.container_name, info.sandbox_id, info.owner):
+            raise StorageHostUnqualified("Native resource candidate differs from its canonical incarnation")
+        return self._native_resource_facts(entry, actual)
 
     def _resource_names(self, sandbox_id: str) -> tuple[str, str]:
         digest = hashlib.sha256(f"{self._container_prefix}:{sandbox_id}".encode()).hexdigest()[:16]
@@ -1601,15 +1646,32 @@ class LocalContainerBackend(SandboxBackend):
         sidecar or container may still hold it, handing it to a new container
         would only fail that start.
         """
+        from .native_teardown_execution import current_cleanup
+
+        capability = current_cleanup(self, info)
+        if capability is not None:
+            inherited = _NATIVE_SLOT_INVENTORY_DEADLINE.get()
+            deadline = min(time.monotonic() + 60, inherited) if inherited is not None else time.monotonic() + 60
+            token = _NATIVE_SLOT_INVENTORY_DEADLINE.set(deadline)
+            try:
+                outcome = capability.destroy()
+                if time.monotonic() >= deadline:
+                    raise StorageHostUnqualified("Native cleanup exceeded its overall deadline")
+                if outcome is DestroyOutcome.ABSENT:
+                    self._release_sandbox_port(info)
+                return outcome
+            except Exception:
+                logger.warning("Native resource set remains unconfirmed for %s", info.sandbox_id, exc_info=True)
+                return DestroyOutcome.UNKNOWN
+            finally:
+                _NATIVE_SLOT_INVENTORY_DEADLINE.reset(token)
         if info.native_container is not None:
             outcome = self._destroy_native_primary(info)
             if outcome is DestroyOutcome.ABSENT:
-                from urllib.parse import urlparse
-
-                port = urlparse(info.sandbox_url).port
-                if port:
-                    release_port(port)
+                self._release_sandbox_port(info)
             return outcome
+        if getattr(self, "_managed_native_required", False) and getattr(getattr(info, "mountless_provider", None), "_backend", None) is not self:
+            return DestroyOutcome.UNKNOWN
         # Prefer container_id, fall back to container_name (both accepted by docker stop).
         # This ensures containers discovered via list_running() (which only has the name)
         # can also be stopped.
@@ -1637,15 +1699,7 @@ class LocalContainerBackend(SandboxBackend):
         if timed_out and outcome is not DestroyOutcome.ABSENT:
             outcome = DestroyOutcome.UNKNOWN
         if outcome is DestroyOutcome.ABSENT:
-            # Extract port from sandbox_url for release
-            try:
-                from urllib.parse import urlparse
-
-                port = urlparse(info.sandbox_url).port
-                if port:
-                    release_port(port)
-            except Exception:
-                pass
+            self._release_sandbox_port(info)
         else:
             logger.warning("Sandbox %s resource set is not confirmed absent after destroy: %s", info.sandbox_id, outcome)
         return outcome
@@ -1656,10 +1710,17 @@ class LocalContainerBackend(SandboxBackend):
         bridge = getattr(self, "_native_creation", None)
         if not isinstance(expected, NativeSlotContainer) or not expected.slots or expected.network_mode != "open" or self._runtime != "docker" or not isinstance(bridge, NativeCreateBridge):
             return DestroyOutcome.UNKNOWN
-        deadline = _NATIVE_SLOT_INVENTORY_DEADLINE.set(time.monotonic() + 60)
+        inherited = _NATIVE_SLOT_INVENTORY_DEADLINE.get()
+        deadline = _NATIVE_SLOT_INVENTORY_DEADLINE.set(min(time.monotonic() + 60, inherited) if inherited is not None else time.monotonic() + 60)
         try:
             if (info.container_id, info.container_name, info.sandbox_id, info.owner) != (expected.container_id, expected.container_name, expected.sandbox_id, expected.owner):
                 raise StorageHostUnqualified("Native cleanup correlation changed")
+            if bridge.teardowns.blocks(owner_id=expected.owner[0], name=expected.container_name, container_id=expected.container_id, slots=expected.slots):
+                from .native_teardown_execution import current_cleanup
+
+                capability = current_cleanup(self, info)
+                if capability is None or not capability.permits(info):
+                    raise StorageHostUnqualified("Native teardown requires its qualified recovery capability")
             bridge.assert_current(teardown=True)
             matches = tuple(entry for entry in self._slot_containers(expected.slots[0]) if entry.container_id == expected.container_id)
             if not matches:
@@ -1695,6 +1756,17 @@ class LocalContainerBackend(SandboxBackend):
             return DestroyOutcome.UNKNOWN
         finally:
             _NATIVE_SLOT_INVENTORY_DEADLINE.reset(deadline)
+
+    @staticmethod
+    def _release_sandbox_port(info):
+        try:
+            from urllib.parse import urlparse
+
+            port = urlparse(info.sandbox_url).port
+            if port:
+                release_port(port)
+        except Exception:
+            pass
 
     def _native_primary_absent(self, expected, bridge):
         bridge.assert_current(teardown=True)

@@ -62,6 +62,8 @@ class SandboxInfo:
     # Fresh inspected containment correlation, never persisted or authority.
     native_container: object | None = field(default=None, repr=False, compare=False)
     native_slots: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
+    # Exact durable completion handoff; retries reprove absence, never inherit effects.
+    native_completion: object | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> dict:
         return {
