@@ -788,6 +788,11 @@ class LocalContainerBackend(SandboxBackend):
         return getattr(self, "_runtime_runner", subprocess.run)(*args, **kwargs)
 
     def _managed_native_bridge(self, labels):
+        if labels and labels.get("deerflow.role") == "resident":
+            from .resident_preparation import require_resident_submission
+
+            require_resident_submission(self, labels)
+            return None
         if not getattr(self, "_managed_native_required", False) or not labels or not any(isinstance(key, str) and key.startswith("hartmesh.storage.space.") for key in labels):
             return None
         bridge = getattr(self, "_native_creation", None)
@@ -1255,6 +1260,51 @@ class LocalContainerBackend(SandboxBackend):
             chat_storage_enabled=storage_labels is not None,
         )
 
+    def prepare_resident(self, sandbox_id, container_name, extra_mounts, labels):
+        """Prepare one stopped workspace through the existing native builder."""
+        from .resident_preparation import resident_submission
+
+        if self._runtime != "docker":
+            raise ValueError("Stopped environment preparation requires Docker")
+        environment = {"MAX_SHELL_SESSIONS": str(max(2 * self._required_shell_sessions, _AIO_DEFAULT_MAX_SHELL_SESSIONS))}
+        with resident_submission(self, sandbox_id, container_name, extra_mounts, labels) as proof:
+            owner = dict(proof.labels)
+            if self.network_mode == "open":
+                container = self._start_container(container_name, 0, extra_mounts, publish_port=False, extra_environment=environment, labels=owner, start=False)
+            else:
+                container = self._start_restricted_sandbox(
+                    sandbox_id,
+                    container_name,
+                    0,
+                    extra_mounts,
+                    config_mount_exclusion_root=None,
+                    relay_token=secrets.token_urlsafe(32),
+                    owner_labels=owner,
+                    start=False,
+                    publish=False,
+                    extra_environment=environment,
+                )
+            proof.assert_current()
+            if not isinstance(container, str) or not re.fullmatch(r"[0-9a-f]{64}", container):
+                raise StorageHostUnqualified("Resident preparation did not return an immutable Docker identity")
+            return container
+
+    def _resident_resources_status(self, sandbox_id, container_name):
+        """Only positive absence admits preparation; never adopt a resident."""
+        proxy, network = self._resource_names(sandbox_id)
+        for kind, name in (("container", container_name), ("container", proxy), ("network", network), ("network", self._egress_network_name(sandbox_id))):
+            command = ["docker", *(["network"] if kind == "network" else []), "inspect", name]
+            try:
+                result = self._run(command, capture_output=True, text=True, timeout=15)
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise StorageHostUnqualified("Resident resource absence is unconfirmed") from exc
+            if result.returncode == 0:
+                return "mismatch"
+            absent = ("Error: No such object: " + name, "Error response from daemon: No such container: " + name) if kind == "container" else ("Error: No such network: " + name, "Error response from daemon: network " + name + " not found")
+            if result.returncode != 1 or result.stderr.strip() not in absent or result.stdout.strip() not in ("", "[]"):
+                raise StorageHostUnqualified("Resident resource absence is unconfirmed")
+        return "missing"
+
     def _start_restricted_sandbox(
         self,
         sandbox_id: str,
@@ -1265,10 +1315,15 @@ class LocalContainerBackend(SandboxBackend):
         config_mount_exclusion_root: str | None,
         relay_token: str,
         owner_labels: dict[str, str] | None = None,
+        start: bool = True,
+        publish: bool = True,
+        extra_environment: dict[str, str] | None = None,
     ) -> str:
         proxy_name, network_name = self._resource_names(sandbox_id)
         egress_network_name = self._egress_network_name(sandbox_id)
-        resource_status = self._restricted_resources_status(sandbox_id)
+        resource_status = self._restricted_resources_status(sandbox_id) if start else self._resident_resources_status(sandbox_id, container_name)
+        if not start and resource_status != "missing":
+            raise StorageHostUnqualified("Resident preparation refuses an existing or unconfirmed resource set")
         if resource_status == "mismatch":
             # Enumeration/provisioning is deliberately non-destructive. A
             # mismatched set can still belong to a live Gateway from an older
@@ -1292,7 +1347,8 @@ class LocalContainerBackend(SandboxBackend):
         try:
             self._create_internal_network(network_name, sandbox_id)
             self._create_egress_network(egress_network_name, sandbox_id)
-            proxy_address = self._start_network_proxy(proxy_name, network_name, egress_network_name, container_name, port, sandbox_id, relay_token)
+            proxy_arguments = {} if publish else {"publish": False}
+            proxy_address = self._start_network_proxy(proxy_name, network_name, egress_network_name, container_name, port, sandbox_id, relay_token, **proxy_arguments)
             if proxy_address is None:
                 # Without the hosts entry below, a sandbox whose runtime has its
                 # own network stack (gVisor's runsc) passes readiness through the
@@ -1322,6 +1378,7 @@ class LocalContainerBackend(SandboxBackend):
                     # Chromium does not consistently consume shell proxy vars.
                     "PROXY_SERVER": f"{proxy_name}:3128",
                     "PROXY_EXCLUDE": "localhost,127.0.0.1,::1",
+                    **(extra_environment or {}),
                 },
                 # The sandbox reaches its proxy by name. Docker's embedded DNS
                 # (127.0.0.11) is a NAT rule in the host network namespace,
@@ -1330,8 +1387,13 @@ class LocalContainerBackend(SandboxBackend):
                 # with the address Docker assigned on the internal network.
                 extra_hosts={proxy_name: proxy_address},
                 labels={**self._restricted_labels(sandbox_id, "sandbox"), **(owner_labels or {})},
+                **({} if start else {"start": False}),
             )
         except BaseException as exc:
+            if not start:
+                # The committed attachment retains uncertain primary creation.
+                # Derived names cannot authorize rollback of a possible peer.
+                raise
             if handoff is not None:
                 if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                     raise
@@ -1416,6 +1478,8 @@ class LocalContainerBackend(SandboxBackend):
         port: int,
         sandbox_id: str,
         relay_token: str,
+        *,
+        publish: bool = True,
     ) -> str | None:
         """Create, connect, start and provision the sidecar; return its internal-network address."""
         allow_domains = self._network_config.get("allow_domains", [])
@@ -1441,8 +1505,7 @@ class LocalContainerBackend(SandboxBackend):
             "/tmp:rw,noexec,nosuid,size=16m",
             "--user",
             "65532:65532",
-            "-p",
-            port_mapping,
+            *(["-p", port_mapping] if publish else []),
             "--network",
             egress_network_name,
             "--name",
@@ -2491,6 +2554,10 @@ class LocalContainerBackend(SandboxBackend):
         logger.info(f"Starting container using {self._runtime}: {log_cmd}")
 
         try:
+            if labels and labels.get("deerflow.role") == "resident":
+                from .resident_preparation import consume_resident_command
+
+                consume_resident_command(self, container_name, extra_mounts, labels, start=start, publish=publish_port)
             native_bridge = self._managed_native_bridge(labels)
             if native_bridge is not None:
                 return native_bridge.submit(name=container_name, labels=labels, command=cmd, runner=self._run, handoff=NATIVE_CREATE_HANDOFF.get())

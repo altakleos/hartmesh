@@ -55,6 +55,9 @@ Those conversations use the adopted definition and one qualified Docker Home
 across chats, with current Use/Inspect/Manage grants. They inherit no requester
 files, private skills, memory or credentials. DeerMem facts and summaries use a
 separate instance scope, with current audience checks and stale-write fencing.
+Qualified workspaces support the provider's restricted network and read-only
+Shared binding alongside Home, without publishing a sandbox or relay port.
+Storage and agent counts remain opt-in while the Compose rollout continues.
 The AI employee's runtime guidance describes its admitted persistent Home and
 available file tools. Files survive conversations; clearing recalled memory does
 not remove them. Presenting an output registers a mutable reference: viewing it

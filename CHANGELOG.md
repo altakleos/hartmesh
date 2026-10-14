@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Restricted resident workspace preparation
+
+Qualified Docker workspaces prepare a stopped resident through the provider's
+restricted network topology, with Home and a freshly qualified read-only Shared
+binding. Neither the resident nor its relay publishes a host port. Managed
+preparation requires committed attachment admission and the exact owning runtime;
+slot coordination survives worker drainage and container-ID commit. Reuse checks
+current root binding revisions, mounts and network. Adapter reuse retains fresh
+host and native-evidence qualification. Paired cleanup is best effort and removes
+only inspected immutable resource IDs. Docker control timeouts allow up to 630
+seconds. Storage/agent defaults remain disabled. There is no database schema change.
+
 ### Workspace closure attribution and host containment
 
 Human recovery and AI-instance lifecycle closures record the first closer and

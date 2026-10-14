@@ -114,3 +114,17 @@ def test_layout_failure_never_claims_prepared():
     transport = DockerControlTransport("a" * 64, runner=lambda *a, **kw: SimpleNamespace(returncode=1))
     with pytest.raises(httpx.TransportError, match="layout"):
         transport.prepare_home_aliases()
+
+
+@pytest.mark.parametrize("requested,forwarded", [(605, 605), (630, 630), (1000, 630)])
+def test_control_timeout_preserves_default_command_reply_and_remains_bounded(requested, forwarded):
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"status": 200, "headers": [], "body": ""}).encode())
+
+    with httpx.Client(transport=DockerControlTransport("a" * 64, runner=run)) as client:
+        assert client.get("http://127.0.0.1:8080/v1/shell", timeout=requested).status_code == 200
+    assert json.loads(calls[0]["input"])["timeout"] == forwarded
+    assert calls[0]["timeout"] == forwarded + 5

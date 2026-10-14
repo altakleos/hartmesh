@@ -7,6 +7,7 @@ leases, agent identity, image management or host-path API.
 
 import errno
 import json
+import logging
 import os
 import re
 import secrets
@@ -14,12 +15,13 @@ import stat
 import subprocess
 import threading
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from deerflow.spaces.filesystem import FilesystemUnavailable
 
 ATTACHMENT_LABEL = "hartmesh.storage.attachment"
 HOST_LABEL = "hartmesh.storage.host"
+logger = logging.getLogger(__name__)
 
 
 class StorageAdapterUnsupported(FilesystemUnavailable):
@@ -106,6 +108,11 @@ class DockerStorageAdapter:
         self._probe_image = probe_image
         self._execution_guard = None
         self._cleanup = None
+        self._backend = None
+        self._configured_mounts = ()
+        self._network_of = None
+        self._readonly_roots = None
+        self._pool = Path(pool) if pool is not None else None
         if host_verifier is None and (not probe_image or pool is None):
             raise StorageHostUnqualified("Native storage requires a probe image and pool")
         self._host_verifier = host_verifier or (lambda: _local_endpoint(self._json("context", "inspect")))
@@ -230,6 +237,37 @@ class DockerStorageAdapter:
         if labels.get(ATTACHMENT_LABEL) != attachment_id or labels.get(HOST_LABEL) != self.host_id:
             raise StorageAdapterUnsupported("Container does not belong to this host attachment")
 
+    async def readonly_roots(self):
+        if self._readonly_roots is None:
+            if self._backend is not None and getattr(self._backend, "_managed_native_required", False):
+                raise StorageHostUnqualified("Resident preparation requires current host read-only roots")
+            return ()
+        return tuple(await self._readonly_roots())
+
+    def _resident_projection(self, plan):
+        mounts = [(view.source, view.destination, not view.writable) for view in plan.views]
+        labels = {ATTACHMENT_LABEL: plan.id, HOST_LABEL: plan.host_id}
+        for view in plan.views:
+            if not isinstance(view.slot_id, str) or not re.fullmatch(r"[0-9a-f]{32}", view.slot_id):
+                raise StorageHostUnqualified("Resident views require qualified physical slot identities")
+            labels["hartmesh.storage.space." + view.slot_id] = "1"
+        for root in plan.readonly_roots:
+            root.validate()
+            mounts.append((root.source, root.destination, True))
+            labels["hartmesh.storage.space." + root.slot_id] = "1"
+            labels[root.label] = root.revision
+        combined = (*mounts, *self._configured_mounts)
+        destinations = [PurePosixPath(destination) for _source, destination, _readonly in combined]
+        if any(not path.is_absolute() or ".." in path.parts for path in destinations) or any(a.is_relative_to(b) or b.is_relative_to(a) for index, a in enumerate(destinations) for b in destinations[index + 1 :]):
+            raise StorageHostUnqualified("Resident mount destinations overlap or are invalid")
+        if self._pool is not None:
+            pool = self._pool.resolve()
+            for source, _destination, readonly in self._configured_mounts:
+                path = Path(source).resolve()
+                if readonly is not True or path.is_relative_to(pool) or pool.is_relative_to(path):
+                    raise StorageHostUnqualified("Configured mounts expose unadmitted storage roots")
+        return mounts, labels
+
     def _validate(self, container, plan, *, active=False):
         self._same_host()
         if self._execution_guard is not None:
@@ -241,6 +279,46 @@ class DockerStorageAdapter:
             raise StorageAdapterUnsupported("Prepared container is absent")
         self._owned(entry, plan.id)
         host = entry.get("HostConfig") or {}
+        if self._network_of is not None and host.get("NetworkMode") != self._network_of(plan):
+            raise StorageAdapterUnsupported("Environment differs from the declared resident network")
+        if self._backend is not None and self._backend.network_mode != "open":
+            name = self._network_of(plan)
+            networks = (entry.get("NetworkSettings") or {}).get("Networks")
+            if not isinstance(networks, dict) or set(networks) != {name} or not isinstance(networks[name], dict):
+                raise StorageAdapterUnsupported("Resident has undeclared actual network membership")
+            network = self._paired_resource("network", name)
+            expected_network = self._backend._restricted_labels(plan.id, "network")
+            options = (network or {}).get("Options") or {}
+            state = entry.get("State") or {}
+            # Docker create records an unconnected endpoint. Only that exact
+            # stopped state may omit its ID; active verification never may.
+            unconnected = not active and state.get("Status") == "created" and state.get("Running") is False and networks[name].get("NetworkID") == ""
+            if (
+                network is None
+                or (not unconnected and networks[name].get("NetworkID") != network["Id"])
+                or network.get("Driver") != "bridge"
+                or network.get("Internal") is not True
+                or any((network.get("Labels") or {}).get(key) != value for key, value in expected_network.items())
+                or any(options.get("com.docker.network.bridge.gateway_mode_" + family) != "isolated" for family in ("ipv4", "ipv6"))
+            ):
+                raise StorageAdapterUnsupported("Resident internal network identity or isolation is unqualified")
+        labels = (entry.get("Config") or {}).get("Labels") or {}
+        for root in plan.readonly_roots:
+            root.validate()
+            if labels.get(root.label) != root.revision:
+                raise StorageAdapterUnsupported("Environment has an obsolete read-only root binding")
+        if self._backend is not None:
+            _mounts, expected_labels = self._resident_projection(plan)
+            expected_labels["deerflow.role"] = "resident"
+            if self._backend.network_mode != "open":
+                expected_labels = {**self._backend._restricted_labels(plan.id, "resident"), **expected_labels}
+            if any(labels.get(key) != value for key, value in expected_labels.items()):
+                raise StorageAdapterUnsupported("Environment differs from its admitted resident labels")
+            for prefix in ("hartmesh.storage.space.", "hartmesh.storage.readonly."):
+                if {key for key in labels if key.startswith(prefix)} != {key for key in expected_labels if key.startswith(prefix)}:
+                    raise StorageAdapterUnsupported("Environment carries an undeclared storage identity")
+            if any(key in labels for key in ("deerflow.owner_user_id", "deerflow.thread_id", "hartmesh.chat.storage")):
+                raise StorageAdapterUnsupported("Resident environment carries a chat identity")
         capabilities = {str(c).upper().removeprefix("CAP_") for c in host.get("CapAdd") or []}
         permitted = {"CHOWN", "FOWNER", "SETUID", "SETGID", "DAC_OVERRIDE"}
         if (
@@ -259,6 +337,10 @@ class DockerStorageAdapter:
             raise StorageAdapterUnsupported("Prepared environment cannot establish storage confinement")
         mounts = entry.get("Mounts")
         expected = {(v.source, v.destination, v.writable) for v in plan.views}
+        expected.update((root.source, root.destination, False) for root in plan.readonly_roots)
+        expected.update((source, destination, False) for source, destination, readonly in self._configured_mounts if readonly is True)
+        if any(readonly is not True for _source, _destination, readonly in self._configured_mounts):
+            raise StorageAdapterUnsupported("Writable configured workspace roots are unsupported")
         if not isinstance(mounts, list) or len(mounts) != len(expected):
             raise StorageAdapterUnsupported("Environment has undeclared storage roots")
         actual = set()
@@ -280,6 +362,8 @@ class DockerStorageAdapter:
         self._same_host()
         if self._execution_guard is not None:
             self._execution_guard()
+        for root in plan.readonly_roots:
+            root.validate()
         if self._probe_image is not None:
             for view in plan.views:
                 directory = Path(view.source).parent / "control" / "probe"
@@ -296,10 +380,7 @@ class DockerStorageAdapter:
         result = self._call("start", container)
         if result.returncode:
             raise StorageAdapterUnsupported("Environment start outcome is unconfirmed")
-        entry = self._inspect(container)
-        if entry is None or (entry.get("State") or {}).get("Running") is not True:
-            raise StorageAdapterUnsupported("Environment activation is unconfirmed")
-        self._owned(entry, plan.id)
+        self._validate(container, plan, active=True)
 
     def discover(self, attachment_id):
         if not isinstance(attachment_id, str) or not re.fullmatch(r"[0-9a-f]{32}", attachment_id):
@@ -336,6 +417,91 @@ class DockerStorageAdapter:
         if self._cleanup is not None:
             self._cleanup(attachment_id)
 
+    def _paired_resource(self, kind, identity):
+        result = self._call(*(["network"] if kind == "network" else []), "inspect", identity)
+        if result.returncode:
+            absent = (
+                ("Error: No such object: " + identity, "Error response from daemon: No such container: " + identity)
+                if kind == "container"
+                else ("Error: No such network: " + identity, "Error response from daemon: network " + identity + " not found")
+            )
+            if result.returncode == 1 and result.stdout.strip() in ("", "[]") and result.stderr.strip() in absent:
+                return None
+            raise StorageAdapterUnsupported("Paired resource absence is unconfirmed")
+        try:
+            entries = json.loads(result.stdout)
+            if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
+                raise ValueError("Invalid paired inspection")
+            entry = entries[0]
+            if not isinstance(entry.get("Id"), str) or not re.fullmatch(r"[0-9a-f]{64}", entry["Id"]):
+                raise ValueError("Invalid paired immutable identity")
+            if re.fullmatch(r"[0-9a-f]{64}", identity):
+                exact = entry["Id"] == identity
+            else:
+                exact = str(entry.get("Name", "")).removeprefix("/") == identity
+            if not exact:
+                raise ValueError("Wrong paired resource")
+            return entry
+        except (ValueError, TypeError, KeyError) as exc:
+            raise StorageAdapterUnsupported("Paired resource identity is unqualified") from exc
+
+    def _cleanup_resident(self, attachment_id):
+        """Best effort only after primary fencing; never remove guessed names."""
+        try:
+            if not isinstance(attachment_id, str) or not re.fullmatch(r"[0-9a-f]{32}", attachment_id):
+                raise StorageAdapterUnsupported("Invalid paired attachment identity")
+            self._same_host()
+            if self._paired_resource("container", "hartmesh-space-" + attachment_id) is not None:
+                raise StorageAdapterUnsupported("Resident primary containment is unconfirmed")
+            proxy_name, network_name = self._backend._resource_names(attachment_id)
+            egress_name = self._backend._egress_network_name(attachment_id)
+            proxy = self._paired_resource("container", proxy_name)
+            networks = [(name, role, self._paired_resource("network", name)) for name, role in ((network_name, "network"), (egress_name, "egress-network"))]
+            for _name, role, entry in networks:
+                if entry is None:
+                    if proxy is not None:
+                        raise StorageAdapterUnsupported("Relay network set is incomplete")
+                    continue
+                labels = entry.get("Labels") or {}
+                if any(labels.get(key) != value for key, value in self._backend._restricted_labels(attachment_id, role).items()) or any(key.startswith("hartmesh.storage.") for key in labels):
+                    raise StorageAdapterUnsupported("Paired network attribution differs")
+                if entry.get("Driver") != "bridge" or entry.get("Internal") is not (role == "network") or not isinstance(entry.get("Containers"), dict):
+                    raise StorageAdapterUnsupported("Paired network topology is unqualified")
+                if set(entry["Containers"]) - ({proxy["Id"]} if proxy is not None else set()):
+                    raise StorageAdapterUnsupported("Paired network retains an unknown holder")
+            if proxy is not None:
+                labels = (proxy.get("Config") or {}).get("Labels") or {}
+                expected = self._backend._restricted_labels(attachment_id, "network-proxy")
+                links = (proxy.get("NetworkSettings") or {}).get("Networks")
+                mounts = proxy.get("Mounts")
+                ephemeral = isinstance(mounts, list) and all(isinstance(mount, dict) and mount.get("Type") == "tmpfs" and mount.get("Destination") == "/tmp" and mount.get("Source") in (None, "") for mount in mounts)
+                if any(labels.get(key) != value for key, value in expected.items()) or any(key.startswith("hartmesh.storage.") for key in labels) or not ephemeral:
+                    raise StorageAdapterUnsupported("Paired relay attribution or mounts differ")
+                if not isinstance(links, dict) or set(links) != {network_name, egress_name} or any((links[name] or {}).get("NetworkID") != entry["Id"] for name, _role, entry in networks):
+                    raise StorageAdapterUnsupported("Paired relay names another network set")
+                self._same_host()
+                if self._paired_resource("container", proxy["Id"]) != proxy:
+                    raise StorageAdapterUnsupported("Paired relay changed before cleanup")
+                self._call("rm", "--force", proxy["Id"])
+                if self._paired_resource("container", proxy["Id"]) is not None:
+                    raise StorageAdapterUnsupported("Paired relay removal is unconfirmed")
+            for _name, _role, entry in networks:
+                if entry is None:
+                    continue
+                self._same_host()
+                current = self._paired_resource("network", entry["Id"])
+                if current is None:
+                    continue
+                if any(current.get(key) != entry.get(key) for key in ("Name", "Labels", "Driver", "Internal")) or current.get("Containers") != {}:
+                    raise StorageAdapterUnsupported("Paired network retains a holder or changed identity")
+                removed = self._call("network", "rm", entry["Id"])
+                # A lost/nonzero reply is successful only with exact-ID absence.
+                if self._paired_resource("network", entry["Id"]) is not None:
+                    raise StorageAdapterUnsupported("Paired network removal is unconfirmed" if removed.returncode == 0 else "Paired network removal failed and its identity remains")
+            self._same_host()
+        except Exception as exc:
+            logger.warning("Resident paired cleanup remains incomplete for %s: %s", attachment_id, exc)
+
     def fence(self, container, attachment_id):
         self._same_host()
         entry = self._inspect(container)
@@ -358,22 +524,33 @@ class DockerStorageAdapter:
         if backend.runtime != "docker" or any(not mount.read_only for mount in backend._config_mounts):
             raise StorageHostUnqualified("Native views require Docker with read-only configured mounts")
 
+        configured = tuple((str(m.host_path), str(m.container_path), m.read_only) for m in backend._config_mounts)
+        mode = backend.network_mode
+
         def topology():
-            if backend._config_mounts or backend.network_mode != "open":
-                raise StorageAdapterUnsupported("Native views require Docker with no unrelated configured mounts")
+            current = tuple((str(m.host_path), str(m.container_path), m.read_only) for m in backend._config_mounts)
+            if current != configured or backend.network_mode != mode:
+                raise StorageAdapterUnsupported("Resident provider configuration changed after qualification")
 
         def prepare(plan):
-            return backend._start_container(
-                "hartmesh-space-" + plan.id,
-                0,
-                [(view.source, view.destination, not view.writable) for view in plan.views],
-                publish_port=False,
-                labels={ATTACHMENT_LABEL: plan.id, HOST_LABEL: plan.host_id},
-                start=False,
-            )
+            mounts, labels = adapter._resident_projection(plan)
+            return backend.prepare_resident(plan.id, "hartmesh-space-" + plan.id, mounts, labels)
 
         adapter = cls(prepare=prepare, runner=backend._run, probe_image=backend._image, pool=pool, clean_probe=clean_probe)
         # Storage can be qualified before this provider supports its configured
         # workspace topology. Preparation and resume retain the same guard.
         adapter._execution_guard = topology
+        adapter._backend = backend
+        adapter._configured_mounts = configured
+
+        def network(plan):
+            if mode != "open":
+                return backend._resource_names(plan.id)[1]
+            from deerflow.community.aio_sandbox.local_backend import _effective_docker_network_target
+
+            return _effective_docker_network_target(os.environ.get("DEER_FLOW_SANDBOX_NETWORK", "").strip()) or "default"
+
+        adapter._network_of = network
+        if mode != "open":
+            adapter._cleanup = adapter._cleanup_resident
         return adapter

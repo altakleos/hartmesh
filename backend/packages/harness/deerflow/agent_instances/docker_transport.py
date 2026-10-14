@@ -84,7 +84,7 @@ class DockerControlTransport(httpx.BaseTransport):
             raise httpx.TransportError("Instance control request exceeds its byte limit", request=request)
         timeout = (request.extensions.get("timeout") or {}).get("read")
         timeout = timeout if isinstance(timeout, (int, float)) and math.isfinite(timeout) and timeout > 0 else 600
-        timeout = min(timeout, 600)
+        timeout = min(timeout, 630)
         payload = {"url": str(request.url), "method": request.method, "headers": list(request.headers.multi_items()), "body": base64.b64encode(body).decode("ascii"), "timeout": timeout, "limit": _MAX_RESPONSE}
         try:
             result = self.runner(["docker", "exec", "-i", self.container_id, "python3", "-c", _FORWARD], input=json.dumps(payload).encode("utf-8"), capture_output=True, timeout=timeout + 5)

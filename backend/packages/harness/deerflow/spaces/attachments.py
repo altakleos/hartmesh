@@ -10,6 +10,7 @@ import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import ExitStack
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -21,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceMountRow, StorageHostReplacementRow
 from deerflow.persistence.spaces.model import SpaceGrantRow
 from deerflow.spaces.contract import MutationMode, Permission, PrincipalRef, SpaceConflict, SpaceDenied, validate_generation
+from deerflow.spaces.preparation import preparation_scope
 from deerflow.spaces.registry import _stored_permissions
 from deerflow.spaces.service import _reservation
 from deerflow.utils.file_io import await_drained, run_file_io
@@ -60,6 +62,7 @@ class NativeView:
     source: str
     destination: str
     writable: bool
+    slot_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +72,7 @@ class AttachmentPlan:
     actor: PrincipalRef
     host_id: str
     views: tuple[NativeView, ...]
+    readonly_roots: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -321,6 +325,8 @@ class SpaceAttachments:
             raise ValueError("An exact execution incarnation is required")
         if not isinstance(actor, PrincipalRef):
             raise SpaceDenied("An authenticated resource actor is required")
+        refresh = getattr(self.provider, "readonly_roots", None)
+        readonly_roots = await refresh() if callable(refresh) else ()
         async with self.registry._sf() as session:
             query = select(SpaceAttachmentRow).where(SpaceAttachmentRow.actor_kind == actor.kind, SpaceAttachmentRow.actor_id == actor.subject_id)
             if incarnation is not None:
@@ -348,7 +354,14 @@ class SpaceAttachments:
                     raise SpaceConflict("The durable attachment differs from the requested view")
                 await self._audience(session, rows, resources, False)
                 volumes = {key: await self.files._volume(session, row) for key, (row, _) in rows.items()}
-                plan = AttachmentPlan(record.id, record.incarnation, actor, self.provider.host_id, tuple(NativeView(r.space_id, r.generation, str(volumes[r.space_id].data_path), "/mnt/spaces/" + r.alias, r.writable) for r in resources))
+                plan = AttachmentPlan(
+                    record.id,
+                    record.incarnation,
+                    actor,
+                    self.provider.host_id,
+                    tuple(NativeView(r.space_id, r.generation, str(volumes[r.space_id].data_path), "/mnt/spaces/" + r.alias, r.writable, slot_id=getattr(volumes[r.space_id].spec, "slot_id", None)) for r in resources),
+                    readonly_roots,
+                )
                 await run_file_io(self.provider.verify_active, record.container_id, plan)
                 return Attachment(record.id, record.incarnation, record.host_id, record.container_id)
         except (SpaceDenied, SpaceConflict, ValueError):
@@ -366,6 +379,8 @@ class SpaceAttachments:
         if len({r.space_id for r in resources}) != len(resources) or len({r.alias for r in resources}) != len(resources):
             raise ValueError("Duplicate resource roots or aliases are unsupported")
         attachment_id = uuid.uuid4().hex
+        refresh = getattr(self.provider, "readonly_roots", None)
+        readonly_roots = await refresh() if callable(refresh) else ()
         requests = {r.space_id: (Permission.READ | (Permission.WRITE if r.writable else Permission(0)), r.generation) for r in resources}
 
         async def perform():
@@ -388,16 +403,28 @@ class SpaceAttachments:
                     session.add_all([SpaceMountRow(attachment_id=attachment_id, space_id=r.space_id, generation=r.generation, alias=r.alias, writable=int(r.writable)) for r in resources])
                 # Persist intent before any external environment work. The
                 # prepared environment must remain stopped until start below.
-                async with self.registry.admitted(actor=actor, requests=requests) as (session, rows):
-                    record = (await session.execute(select(SpaceAttachmentRow).where(SpaceAttachmentRow.id == attachment_id).with_for_update())).scalar_one()
-                    if record.phase != "pending":
-                        raise AttachmentPending("Attachment preparation was retired")
-                    volumes = {key: await self.files._volume(session, row) for key, (row, _) in rows.items()}
-                    plan = AttachmentPlan(attachment_id, incarnation, actor, self.provider.host_id, tuple(NativeView(r.space_id, r.generation, str(volumes[r.space_id].data_path), "/mnt/spaces/" + r.alias, r.writable) for r in resources))
-                    container = await run_file_io(self.provider.prepare, plan)
-                    if not isinstance(container, str) or not re.fullmatch(r"[0-9a-f]{64}", container):
-                        raise AttachmentPending("Provider did not return an exact Docker identity")
-                    record.container_id = container
+                with ExitStack() as preparation_lifetime:
+                    async with self.registry.admitted(actor=actor, requests=requests) as (session, rows):
+                        record = (await session.execute(select(SpaceAttachmentRow).where(SpaceAttachmentRow.id == attachment_id).with_for_update())).scalar_one()
+                        if record.phase != "pending" or record.host_id != self.provider.host_id:
+                            raise AttachmentPending("Attachment preparation was retired")
+                        volumes = {key: await self.files._volume(session, row) for key, (row, _) in rows.items()}
+                        plan = AttachmentPlan(
+                            attachment_id,
+                            incarnation,
+                            actor,
+                            self.provider.host_id,
+                            tuple(NativeView(r.space_id, r.generation, str(volumes[r.space_id].data_path), "/mnt/spaces/" + r.alias, r.writable, slot_id=getattr(volumes[r.space_id].spec, "slot_id", None)) for r in resources),
+                            readonly_roots,
+                        )
+                        proof = preparation_lifetime.enter_context(preparation_scope(self.provider, plan))
+                        try:
+                            container = await await_drained(run_file_io(self.provider.prepare, plan))
+                        finally:
+                            proof.finish_worker()
+                        if not isinstance(container, str) or not re.fullmatch(r"[0-9a-f]{64}", container):
+                            raise AttachmentPending("Provider did not return an exact Docker identity")
+                        record.container_id = container
                 # The immutable ID commits before start. If start/commit loses
                 # its reply, pending never becomes a second writer invitation.
                 async with self.registry.admitted(actor=actor, requests=requests) as (session, rows):

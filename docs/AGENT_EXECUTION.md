@@ -90,13 +90,17 @@ an ordinary chat or change an instance identity.
 Instance execution currently requires the qualified Linux Docker AIO storage
 adapter. Admission probes a fresh nonce through the daemon instead of requiring
 the Gateway and Docker to share a mount namespace: a Gateway container may
-qualify through its mounted local socket. Restricted-network/configured-mount
-workspace construction remains unsupported; other transports refuse execution. The existing lead graph,
+qualify through its mounted local socket. Workspaces use the provider's restricted
+network controller and exact read-only configured mounts; other transports refuse execution. The existing lead graph,
 run worker, journals and checkpoint accessors remain in use. The environment
-mounts only the instance Home at `/mnt/spaces/home`; its fixed workspace,
+mounts instance Home at `/mnt/spaces/home` and the freshly qualified Company
+`shared/` directory read-only at `/mnt/user-data/shared`; its fixed workspace,
 uploads and outputs aliases refer to that Home. SDK requests address the exact
 registered container through Docker control, without a reusable container-IP
-endpoint. A new chat or completed run reuses the admitted attachment. Lease
+endpoint. Neither the resident nor its relay publishes a host port. Shared binding
+and directory revisions must still match before reuse. Company reclamation remains
+unsupported; a configured Shared bind is not an ordinary attachment mount edge.
+A new chat or completed run reuses the admitted attachment. Lease
 expiry, SDK closure and chat deletion do not retire a physical writer or Home.
 
 Ordinary wiki, repository and database edits persist in Home without an artifact
