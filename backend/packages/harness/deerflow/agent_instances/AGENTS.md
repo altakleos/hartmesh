@@ -58,6 +58,12 @@ All eight `ResidentUnavailable` subclasses default to 409, including workspace
 `files-full`, distinct from the personal-chat 507. Preserve cause metadata and
 stable fallback sentences. `RESIDENT_INTERRUPTED` names a frame, never an exception.
 
+`residents.py` is uninstalled foundation: all decisions use the owning loop;
+provider-locked slots include exact preparation claims through uncertain outcomes.
+Expiry/cancellation never implies containment. Timed-out eviction stays owned
+through drainage. Restore durable claims and wire completion before installation;
+see [registry rules](../../../../docs/RESIDENT_REGISTRY.md).
+
 `runtime.prepare_environment` consumes exact admitted native attachments and the
 existing AIO SDK. Address immutable Docker IDs, not container IPs. Drain preparation
 and closure across cancellation; unknown outcomes retain native intents. SDK closure,

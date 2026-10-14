@@ -33,6 +33,11 @@ held/foreign owners and untransferred results stay
 reserved. Process-local slot/containment facts never serialize. Host eligibility
 belongs outside this generic provider and no provider callback runs under SQL.
 
+External capacity callbacks are synchronous memory-only slot reads/changes under
+the metadata lock. Physical eviction runs outside it, after warm-chat eviction
+and fresh admission checks. Drain async effects across cancellation; prewarm
+never evicts externally. See [registry rules](../../../../../docs/RESIDENT_REGISTRY.md).
+
 Private `resident_preparation.py` uses committed attachment tokens and the exact
 pool-owner runner; never invent chat/human labels or use the chat journal for it.
 Expire capabilities after drained workers, consume once, and retain every bound
