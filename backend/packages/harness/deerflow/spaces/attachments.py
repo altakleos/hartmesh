@@ -174,6 +174,47 @@ class SpaceAttachments:
         row = next(iter(records.values()))
         return AttachmentState(row.id, row.phase, row.host_id, row.container_id)
 
+    async def inspect_preparation(self, *, actor: PrincipalRef, incarnation: str, resources: Sequence[ResourceMount], host_id: str) -> AttachmentState | None:
+        """Read exact durable correlation, without admission or physical proof.
+
+        No row for this incarnation is distinct from a matching fenced row.
+        Any mismatch or unreadable metadata raises; neither is absence. The
+        host caller independently retains its Home lock, drains preparation
+        and freshly qualifies physical containment before releasing a claim.
+        Current grants are deliberately irrelevant to cleanup correlation.
+        """
+        self._identifier(incarnation)
+        resources = tuple(resources)
+        if not isinstance(actor, PrincipalRef) or not isinstance(host_id, str) or not host_id or len(host_id) > 128:
+            raise ValueError("Preparation inspection requires exact actor and host facts")
+        if not resources or any(not isinstance(resource, ResourceMount) for resource in resources):
+            raise ValueError("Preparation inspection requires its complete resource scope")
+        if len({resource.space_id for resource in resources}) != len(resources) or len({resource.alias for resource in resources}) != len(resources):
+            raise ValueError("Preparation resource identities and aliases must be unique")
+        expected = {(resource.space_id, resource.generation, resource.alias, resource.writable) for resource in resources}
+        async with self.registry._sf() as session:
+            record = await session.scalar(select(SpaceAttachmentRow).where(SpaceAttachmentRow.incarnation == incarnation))
+            if record is None:
+                return None
+            try:
+                self._identifier(record.id)
+            except ValueError as exc:
+                raise AttachmentPending("Preparation attachment identity is invalid") from exc
+            if record.phase not in ("pending", "active", "fence_pending", "fenced"):
+                raise AttachmentPending("Preparation attachment phase is invalid")
+            if record.container_id is not None and (not isinstance(record.container_id, str) or not re.fullmatch(r"[0-9a-f]{64}", record.container_id)):
+                raise AttachmentPending("Preparation container identity is invalid")
+            if record.phase == "active" and record.container_id is None:
+                raise AttachmentPending("Active preparation container identity is unavailable")
+            self._closure_reason(record, None)
+            if record.phase in ("pending", "active") and any(value is not None for value in (record.fenced_by_kind, record.fenced_by_id, record.fence_reason, record.fenced_at)):
+                raise AttachmentPending("Open preparation carries closure metadata")
+            scope = (await self._mount_scope(session, (record.id,)))[record.id]
+            if (record.actor_kind, record.actor_id) != (actor.kind, actor.subject_id) or record.host_id != host_id or scope != expected:
+                raise AttachmentPending("Preparation does not match its captured actor, host and mount scope")
+            facts = AttachmentState(record.id, record.phase, record.host_id, record.container_id)
+        return facts
+
     async def fence_reason(self, attachment_id: str) -> str | None:
         self._identifier(attachment_id)
         async with self.registry._sf() as session:

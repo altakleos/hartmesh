@@ -64,6 +64,11 @@ Expiry/cancellation never implies containment. Timed-out eviction stays owned
 through drainage. Restore durable claims and wire completion before installation;
 see [registry rules](../../../../docs/RESIDENT_REGISTRY.md).
 
+Unused Work readiness/host-settlement seams require exact Home/actor/host facts.
+Reload attempts after Work locking; preserve terminal outcomes and candidates.
+Commit before journal output. Readiness checks current generation; settlement
+accepts historical containment. Caller-owned live-run snapshots require coordination.
+
 `runtime.prepare_environment` consumes exact admitted native attachments and the
 existing AIO SDK. Address immutable Docker IDs, not container IPs. Drain preparation
 and closure across cancellation; unknown outcomes retain native intents. SDK closure,
