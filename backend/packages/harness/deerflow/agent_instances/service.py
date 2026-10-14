@@ -42,6 +42,7 @@ class AgentInstances:
         self._sf = directory.session_factory
         self.execution_probe = None
         self.allowance_of = None
+        self.residents = None
 
     async def _human(self, actor):
         if not isinstance(actor, PrincipalRef) or actor.kind != "human":

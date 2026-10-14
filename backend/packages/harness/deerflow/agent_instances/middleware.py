@@ -17,16 +17,22 @@ class InstanceAuthorityMiddleware(AgentMiddleware):
         self.require_memory_audience = require_memory_audience
 
     def _validate_sync(self, runtime):
+        from deerflow.agent_instances.runtime import current_environment
+
         execution = self._execution(runtime)
-        execution.validate_sync()
+        environment = current_environment()
+        execution.validate_sync(environment) if environment is not None else execution.validate_sync()
         if self.require_memory_audience:
             from deerflow.agent_instances.memory import _bridge, validate_memory_audience
 
             _bridge(execution.owner_loop, validate_memory_audience(execution))
 
     async def _validate_async(self, runtime):
+        from deerflow.agent_instances.runtime import current_environment
+
         execution = self._execution(runtime)
-        await execution.validate()
+        environment = current_environment()
+        await execution.validate(environment) if environment is not None else await execution.validate()
         if self.require_memory_audience:
             from deerflow.agent_instances.memory import validate_memory_audience
 

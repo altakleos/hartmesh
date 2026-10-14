@@ -32,8 +32,12 @@ class AgentExecution:
     memory_audience_allowed: bool = True
     work: object | None = field(default=None, compare=False, repr=False)
 
-    async def _validate(self):
+    async def _validate(self, environment=None):
         await self.authority.validate(self)
+        if environment is not None:
+            from deerflow.agent_instances.runtime import require_live_workspace
+
+            await require_live_workspace(self, environment)
         if self.work is not None:
             from deerflow.agent_instances.work_execution import WorkAttempt
 
@@ -45,15 +49,24 @@ class AgentExecution:
     def thread_paths(self):
         return {"workspace_path": "/mnt/spaces/home", "uploads_path": "/mnt/spaces/home/uploads", "outputs_path": "/mnt/spaces/home/outputs"}
 
-    async def validate(self):
+    async def validate(self, environment=None):
         if self.owner_loop is None or asyncio.get_running_loop() is self.owner_loop:
-            return await self._validate()
+            if environment is not None and getattr(self.authority.instances, "residents", None) is not None:
+                from deerflow.utils.file_io import await_drained
+
+                return await await_drained(self._validate(environment))
+            return await self._validate(environment)
         if not self.owner_loop.is_running():
             raise AgentDenied("The host execution authority is unavailable")
-        future = asyncio.run_coroutine_threadsafe(self._validate(), self.owner_loop)
-        return await asyncio.wrap_future(future)
+        future = asyncio.run_coroutine_threadsafe(self._validate(environment), self.owner_loop)
+        wrapped = asyncio.wrap_future(future)
+        if environment is not None and getattr(self.authority.instances, "residents", None) is not None:
+            from deerflow.utils.file_io import await_drained
 
-    def validate_sync(self):
+            return await await_drained(wrapped)
+        return await wrapped
+
+    def validate_sync(self, environment=None):
         if self.owner_loop is None or not self.owner_loop.is_running():
             raise AgentDenied("Instance execution requires a live host authority loop")
         try:
@@ -62,7 +75,7 @@ class AgentExecution:
             current = None
         if current is self.owner_loop:
             raise AgentDenied("Synchronous instance operations cannot block their authority loop")
-        return asyncio.run_coroutine_threadsafe(self._validate(), self.owner_loop).result()
+        return asyncio.run_coroutine_threadsafe(self._validate(environment), self.owner_loop).result()
 
 
 class AgentConversations:

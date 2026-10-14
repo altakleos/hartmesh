@@ -31,4 +31,6 @@ async def test_preparation_inspection_uses_only_async_metadata(tmp_path):
             setattr(provider, name, Mock(side_effect=AssertionError("No provider effect during inspection")))
         facts = await mounts.inspect_preparation(actor=ALICE, incarnation=attached.incarnation, resources=resources, host_id=provider.host_id)
         assert facts.id == attached.id and facts.phase == "active"
+        scoped = await mounts.unfenced(space.id, actor=ALICE, resources=resources, host_id=provider.host_id)
+        assert scoped == facts
         assert await mounts.inspect_preparation(actor=ALICE, incarnation=operation(), resources=resources, host_id=provider.host_id) is None
