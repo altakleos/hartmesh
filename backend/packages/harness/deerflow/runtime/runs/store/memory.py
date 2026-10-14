@@ -5,6 +5,7 @@ Equivalent to the original RunManager._runs dict behavior.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -276,6 +277,13 @@ class MemoryRunStore(RunStore):
         results = [r for r in self._runs.values() if r["status"] in ("pending", "running") and r["created_at"] <= now]
         results.sort(key=lambda r: r["created_at"])
         return results
+
+    async def _borrowed_inflight(self, _session):
+        """Private loop-owned complete recovery snapshot; no second SQL checkout."""
+        rows = [row for row in self._runs.values() if row["status"] in ("pending", "running")]
+        if len(rows) > 100000:
+            raise ValueError("Complete inflight recovery snapshot exceeds its limit")
+        return deepcopy(sorted(rows, key=lambda row: row["run_id"]))
 
     async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False, user_id: str | None = None) -> dict[str, Any]:
         statuses = ("success", "error", "running") if include_active else ("success", "error")

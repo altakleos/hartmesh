@@ -444,6 +444,17 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
+    async def _borrowed_inflight(self, session):
+        """Private complete recovery snapshot under the caller's existing transaction."""
+        if not session.in_transaction() or not session.is_active or session.bind is not self._sf.kw.get("bind"):
+            raise ValueError("Run recovery requires the same active borrowed database transaction")
+        statement = select(RunRow).where(RunRow.status.in_(("pending", "running"))).order_by(RunRow.run_id).limit(100001).execution_options(populate_existing=True)
+        rows = (await session.scalars(statement)).all()
+        if len(rows) > 100000:
+            raise ValueError("Complete inflight recovery snapshot exceeds its limit")
+        # A peer's future-dated creation time cannot hide its active lease.
+        return [self._row_to_dict(row) for row in rows]
+
     async def update_run_completion(
         self,
         run_id: str,

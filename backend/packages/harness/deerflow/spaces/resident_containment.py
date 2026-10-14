@@ -95,34 +95,21 @@ class NativeResidentContainmentScopes:
             gate.end_resident_batch(reservation)
 
 
-class _Scope:
-    def __init__(self, factory, attachments, captured, records, bindings, finished):
-        self.factory, self.attachments, self.captured, self.bindings = factory, attachments, captured, bindings
+class _RootAdmission:
+    """Shared original-root proof; callers separately establish SQL eligibility."""
+
+    def __init__(self, factory, records, bindings, parent_ids):
+        self.factory, self.bindings = factory, bindings
         self.originals = {record.attachment_id: record for record in records}
-        self.finished = finished
-        self.parent_ids = tuple(sorted({binding.parent_id for binding in bindings.values()} | {fact[0] for facts in captured.values() for fact in facts}))
+        self.parent_ids = tuple(sorted(parent_ids))
         self.volumes = {}
         self.worker = None
 
-    async def admit(self, session, records):
+    async def admit_roots(self, session):
         await await_drained(run_sync_lifecycle_operation(self.worker.assert_current))
-        if set(records) != set(self.captured):
-            raise AttachmentPending("Resident containment changed its original attachment batch")
         await self._check_bindings(session)
         volumes = {}
-        for identifier, row in records.items():
-            if identifier in self.finished:
-                original = self.finished[identifier]
-                if _fenced_facts(row) != original.facts:
-                    raise AttachmentPending("Completed resident changed its historical fenced identity")
-                self.attachments._closure_reason(row, None)
-                continue
-            original = self.originals[identifier]
-            if (row.host_id, row.incarnation, row.container_id) != (original.daemon_id, original.incarnation, original.container_id):
-                raise AttachmentPending("Resident original attachment identity changed")
-            expected = {(root.space_id, root.generation, root.destination.removeprefix("/mnt/spaces/"), root.writable) for root in original.roots if root.space_id is not None}
-            if expected != set(self.captured[identifier]):
-                raise AttachmentPending("Resident original resource scope changed")
+        for original in self.originals.values():
             for root in original.roots:
                 captured = self.bindings[root.backing_handle]
                 binding = await session.get(SpaceBackingRow, root.backing_handle)
@@ -144,8 +131,6 @@ class _Scope:
                 volumes[root.backing_handle] = volume
         self.volumes = volumes
         await await_drained(run_sync_lifecycle_operation(self._guard_all_roots))
-        for identifier in sorted(self.finished):
-            await await_drained(run_sync_lifecycle_operation(self._observe_finished, identifier))
 
     async def _check_bindings(self, session):
         for handle, captured in self.bindings.items():
@@ -153,6 +138,83 @@ class _Scope:
             parent = await session.get(SpaceRow, captured.parent_id)
             if binding is None or tuple(getattr(binding, key) for key in _BINDING) != captured.facts or parent is None or parent.backing_handle != handle:
                 raise AttachmentPending("Resident backing changed while acquiring lifecycle exclusion")
+
+    async def revalidate_roots(self, session):
+        """Validation-only final phase: refresh physical proof without SQL geometry writes."""
+        from deerflow.spaces.incarnations import verify_bound
+
+        await self._check_bindings(session)
+        volumes = {}
+        for original in self.originals.values():
+            for root in original.roots:
+                previous = self.volumes.get(root.backing_handle)
+                if previous is None:
+                    raise AttachmentPending("Resident recovery lost its admitted bound root")
+
+                def fresh(root=root, previous=previous):
+                    self.worker.assert_current()
+                    physical = self.factory.files.catalog.verify(root.slot_id, previous=previous.physical)
+                    bound = verify_bound(physical, root.backing_handle)
+                    if (bound.spec.slot_id, bound.spec.filesystem_uuid, bound.device, bound.root_inode, bound.control_inode, bound.backing_handle) != (
+                        root.slot_id,
+                        root.filesystem_uuid,
+                        root.device,
+                        root.root_inode,
+                        root.control_inode,
+                        root.backing_handle,
+                    ):
+                        raise AttachmentPending("Resident recovery physical root changed")
+                    self.worker.assert_current()
+                    return bound
+
+                volumes[root.backing_handle] = await await_drained(run_sync_lifecycle_operation(fresh))
+        self.volumes = volumes
+        await await_drained(run_sync_lifecycle_operation(self._guard_all_roots))
+
+    def _guard_all_roots(self):
+        self.worker.assert_current()
+        for record in self.originals.values():
+            self.guard_roots(record)
+
+    def guard_roots(self, record):
+        for root in record.roots:
+            volume = self.volumes.get(root.backing_handle)
+            if volume is None:
+                raise AttachmentPending("Resident containment has no current admitted root proof")
+            with volume.filesystem():
+                pass
+            if root.space_id is None:
+                relative = str(PurePosixPath(root.source).relative_to(PurePosixPath(str(volume.data_path))))
+                projection = ReadOnlyRoot.capture(volume, relative, root.destination)
+                if NativeResidentRoot.from_readonly(projection) != root:
+                    raise AttachmentPending("Resident read-only projection changed")
+            elif root.source != str(volume.data_path) or root.source_inode != volume.root_inode:
+                raise AttachmentPending("Resident original writable source changed")
+
+
+class _Scope(_RootAdmission):
+    def __init__(self, factory, attachments, captured, records, bindings, finished):
+        super().__init__(factory, records, bindings, {binding.parent_id for binding in bindings.values()} | {fact[0] for facts in captured.values() for fact in facts})
+        self.attachments, self.captured, self.finished = attachments, captured, finished
+
+    async def admit(self, session, records):
+        if set(records) != set(self.captured):
+            raise AttachmentPending("Resident containment changed its original attachment batch")
+        for identifier, row in records.items():
+            if identifier in self.finished:
+                if _fenced_facts(row) != self.finished[identifier].facts:
+                    raise AttachmentPending("Completed resident changed its historical fenced identity")
+                self.attachments._closure_reason(row, None)
+                continue
+            original = self.originals[identifier]
+            if (row.host_id, row.incarnation, row.container_id) != (original.daemon_id, original.incarnation, original.container_id):
+                raise AttachmentPending("Resident original attachment identity changed")
+            expected = {(root.space_id, root.generation, root.destination.removeprefix("/mnt/spaces/"), root.writable) for root in original.roots if root.space_id is not None}
+            if expected != set(self.captured[identifier]):
+                raise AttachmentPending("Resident original resource scope changed")
+        await self.admit_roots(session)
+        for identifier in sorted(self.finished):
+            await await_drained(run_sync_lifecycle_operation(self._observe_finished, identifier))
 
     def _check_finished_journal(self, identifier):
         bridge, original = self.worker.bridge, self.finished[identifier]
@@ -187,27 +249,6 @@ class _Scope:
             raise AttachmentPending("Completed resident retains a surviving resource correlation")
         self.worker.assert_current()
         self._check_finished_journal(identifier)
-
-    def _guard_all_roots(self):
-        self.worker.assert_current()
-        for record in self.originals.values():
-            self.guard_roots(record)
-
-    def guard_roots(self, record):
-        for root in record.roots:
-            volume = self.volumes.get(root.backing_handle)
-            if volume is None:
-                raise AttachmentPending("Resident containment has no current admitted root proof")
-            with volume.filesystem():
-                pass
-            if root.space_id is None:
-                relative = str(PurePosixPath(root.source).relative_to(PurePosixPath(str(volume.data_path))))
-                projection = ReadOnlyRoot.capture(volume, relative, root.destination)
-                current = NativeResidentRoot.from_readonly(projection)
-                if current != root:
-                    raise AttachmentPending("Resident read-only projection changed")
-            elif root.source != str(volume.data_path) or root.source_inode != volume.root_inode:
-                raise AttachmentPending("Resident original writable source changed")
 
     async def contain(self, row):
         if row.id in self.finished:

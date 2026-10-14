@@ -107,6 +107,8 @@ class ResidentBootstrapCoordinator:
         if registry.loop is not self.loop:
             raise RuntimeError("Bootstrap requires the registry's owning loop")
         self.deadline = entered + STARTUP_BUDGET_SECONDS
+        self.recovery_deadline = self.deadline
+        self._attempts = 0
         self.drain_producers, self.account_native, self.reconcile, self.drain_workers = drain_producers, account_native, reconcile, drain_workers
         self.task: asyncio.Task | None = None
         self.result: BootstrapResult | None = None
@@ -218,6 +220,9 @@ class ResidentBootstrapCoordinator:
         if timeout is not None and (not math.isfinite(timeout) or timeout < 0):
             raise ValueError("Bootstrap polling requires a bounded nonnegative timeout")
         if self.task is None:
+            # Only a new explicitly polled retry owns a renewed pass budget.
+            self.recovery_deadline = self.clock() + STARTUP_BUDGET_SECONDS if self._attempts and timeout is not None else self.deadline
+            self._attempts += 1
             self.task = asyncio.create_task(self._initialize(), name="resident-bootstrap")
             self.task.add_done_callback(self._observe)
         task = self.task

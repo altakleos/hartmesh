@@ -24,13 +24,13 @@ from deerflow.spaces.resident_containment import NativeResidentContainmentScopes
 from deerflow.utils.file_io import run_file_io
 
 
-async def prepare(storage, fixture, *, readonly=False, space_id=None):
+async def prepare(storage, fixture, *, readonly=False, space_id=None, actor=ALICE):
     files, sf, _catalog, attachments, adapter = storage
     journal, _handoffs, bridge, _owner = fixture
     adapter.host_id = journal.daemon_id
-    space = await home(files) if space_id is None else await files.registry.get(actor=ALICE, space_id=space_id)
-    resource = ResourceMount(space.id, 1, "home", True)
-    attached = await attachments.attach(actor=ALICE, incarnation=operation(), resources=[resource])
+    space = await home(files) if space_id is None else await files.registry.get(actor=actor, space_id=space_id)
+    resource = ResourceMount(space.id, space.generation, "home", True)
+    attached = await attachments.attach(actor=actor, incarnation=operation(), resources=[resource])
     async with files.registry.host_locked([space.id]) as (session, parents):
         volume = await files._volume(session, parents[space.id])
         root = await run_file_io(NativeResidentRoot.from_view, resource, volume)
@@ -97,7 +97,7 @@ async def prepare(storage, fixture, *, readonly=False, space_id=None):
     adapter.bootstrap_residents = lambda **kwargs: DockerStorageAdapter.bootstrap_residents(adapter, **kwargs)
     factory = NativeResidentContainmentScopes(provider=provider, files=files, adapter=adapter)
     adapter._containment_scope = factory
-    captured = {attached.id: {(space.id, 1, "home", True)}}
+    captured = {attached.id: {(space.id, space.generation, "home", True)}}
     return factory, saved, captured, objects, calls
 
 

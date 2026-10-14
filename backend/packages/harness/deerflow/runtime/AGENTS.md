@@ -1,5 +1,9 @@
 ### Stream Bridge Heartbeats
 
+MemoryRunStore's private recovery snapshot mirrors the complete borrowed SQL
+inflight snapshot. Unsupported stores refuse recovery; the ordinary public
+inflight API and lease-takeover semantics remain unchanged.
+
 Memory/Redis bridges keep startup-only `stream_bridge.heartbeat_interval_seconds`; explicit `subscribe(..., heartbeat_interval=...)` overrides it. Provider contexts drain owned cache/bridge/checkpointer/Store teardown across cancellation. `close_agent_stream()` shields close to completion: preserve counts, defer host cancellation, balance repeats, keep active errors, log attached close failures at callers, map close cancellation to failure, never time out.
 
 ### Checkpoint Channel Modes (`full` / `delta`)

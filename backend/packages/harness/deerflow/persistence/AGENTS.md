@@ -1,5 +1,10 @@
 # Persistence lifecycle
 
+RunRepository's private `_borrowed_inflight` requires the caller's active
+same-engine transaction, reads every pending/running row under a strict bound,
+and never checks out or commits another session. Future creation times cannot
+hide a foreign lease. The public RunStore remains unchanged.
+
 Postgres bootstrap owns its session-scoped advisory lock until `pg_advisory_unlock` completes. Drain that unlock across host cancellation before leaving the SQLAlchemy connection context; repeated cancellation must not return a pooled session while it still holds the bootstrap mutex. Ordinary database errors remain best-effort and are logged.
 
 When `database.postgres_schema` is configured, both async ORM connections and the synchronous SQLAlchemy connections used by DB-backed custom agents and managed subagents must use the same `search_path`; preserve this invariant when adding another persistence entry point.
