@@ -7,12 +7,14 @@ import logging
 import threading
 import time
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from deerflow.agent_instances.contract import ResidentBusy, ResidentRestarting, ResidentRunLimit, ResidentWorkLimit
+from deerflow.agent_instances.contract import ResidentBusy, ResidentRestarting, ResidentRunLimit, ResidentStartingElsewhere, ResidentWorkLimit
 from deerflow.sandbox.exceptions import SandboxCapacityExceededError
+from deerflow.spaces.attachments import MAX_RETAINED_ATTACHMENTS, ResourceMount, RetainedAttachment
+from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
 from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
@@ -57,6 +59,13 @@ class WorkReservation:
     attempt_id: str | None = None
 
 
+@dataclass(eq=False)
+class _RestoreToken:
+    updates: dict[str, RetainedAttachment | None] = field(default_factory=dict)
+    overflowed: bool = False
+    uncorrelated_creation: bool = False
+
+
 class ResidentRegistry:
     """Share slots without a second run ledger or authority from Docker census.
 
@@ -91,6 +100,174 @@ class ResidentRegistry:
         self._thread_id = threading.get_ident()
         self._evictions: set[asyncio.Task] = set()
         self._closing = False
+        self.retained: dict[str, RetainedAttachment] = {}
+        self._associated: dict[str, str] = {}
+        self._restore: _RestoreToken | None = None
+        self._restoration_started = False
+        self.restoration_complete = False
+
+    def begin_restore(self):
+        self._owning_loop()
+        token = _RestoreToken()
+
+        def begin():
+            if self._restore is not None or self._closing:
+                raise RuntimeError("Resident restoration is already owned or closing")
+            self._restoration_started = True
+            self.restoration_complete = False
+            self._restore = token
+
+        self.provider.external_changed(begin)
+        return token
+
+    def _touch_retained(self, identifier, claim):
+        if self._restore is not None:
+            updates = self._restore.updates
+            if identifier in updates or len(updates) < MAX_RETAINED_ATTACHMENTS:
+                updates[identifier] = claim
+            else:
+                self._restore.overflowed = True
+                self.restoration_complete = False
+
+    @staticmethod
+    def _merge_retained(previous, incoming):
+        if previous.identity != incoming.identity or (previous.container_id is not None and incoming.container_id is not None and previous.container_id != incoming.container_id):
+            raise ValueError("Retained attachment changed immutable identity")
+        phases = {"pending": 0, "active": 1, "fence_pending": 2}
+        phase = max((previous.phase, incoming.phase), key=phases.__getitem__)
+        return replace(incoming, phase=phase, container_id=incoming.container_id or previous.container_id)
+
+    def finish_restore(self, token, claims):
+        self._owning_loop()
+        if not isinstance(claims, (list, tuple)) or len(claims) > MAX_RETAINED_ATTACHMENTS or any(not isinstance(claim, RetainedAttachment) for claim in claims):
+            raise ValueError("Restoration requires a complete bounded typed snapshot")
+        if len({claim.id for claim in claims}) != len(claims) or len({claim.incarnation for claim in claims}) != len(claims):
+            raise ValueError("Restoration snapshot contains duplicate durable identities")
+
+        def publish():
+            if token is not self._restore or token.overflowed or token.uncorrelated_creation:
+                raise RuntimeError("Restoration snapshot lost its bounded ownership")
+            merged = dict(self.retained)
+            for claim in claims:
+                previous = merged.get(claim.id)
+                merged[claim.id] = self._merge_retained(previous, claim) if previous is not None else claim
+            for identifier, updated in token.updates.items():
+                if updated is None:
+                    merged.pop(identifier, None)
+                else:
+                    previous = merged.get(identifier)
+                    merged[identifier] = self._merge_retained(previous, updated) if previous is not None else updated
+            if len(merged) > MAX_RETAINED_ATTACHMENTS:
+                raise ValueError("Retained attachment snapshot exceeds its global limit")
+            if len({claim.incarnation for claim in merged.values()}) != len(merged):
+                raise ValueError("Merged attachment accounting reuses an incarnation")
+            self.retained.clear()
+            self.retained.update(merged)
+            self._restore = None
+            self.restoration_complete = True
+
+        self.provider.external_changed(publish)
+
+    def abort_restore(self, token):
+        self._owning_loop()
+
+        def abort():
+            if self._restore is token:
+                self._restore = None
+                self.restoration_complete = False
+
+        self.provider.external_changed(abort)
+
+    def _retain_locked(self, claim):
+        try:
+            previous = self.retained.get(claim.id)
+            if previous is None and len(self.retained) >= MAX_RETAINED_ATTACHMENTS:
+                raise ValueError("Retained attachment index exhausted its bound")
+            if any(other.id != claim.id and other.incarnation == claim.incarnation for other in self.retained.values()):
+                raise ValueError("Retained attachment reuses another incarnation")
+            current = self._merge_retained(previous, claim) if previous is not None else claim
+            self.retained[claim.id] = current
+            self._touch_retained(claim.id, current)
+        except ValueError:
+            self._restoration_started = True
+            self.restoration_complete = False
+            if self._restore is not None:
+                self._restore.overflowed = True
+            raise
+        return current
+
+    def retain(self, claim):
+        self._owning_loop()
+        if not isinstance(claim, RetainedAttachment):
+            raise ValueError("Retained accounting requires exact typed facts")
+        self.provider.external_changed(lambda: self._retain_locked(claim))
+
+    def preparation_retained(self, instance, preparation, claim, *, attempt_id=None):
+        """Transfer the exact in-process preparation and one capacity charge."""
+        entry = self.entry(instance)
+        if not entry.lock.locked():
+            raise RuntimeError("Preparation transfer requires its Home lock")
+        if not isinstance(claim, RetainedAttachment) or (claim.incarnation, claim.host_id, claim.actor, claim.resources) != (
+            preparation.incarnation,
+            preparation.host_id,
+            instance.principal,
+            (ResourceMount(preparation.home_id, preparation.generation, "home", True),),
+        ):
+            raise ValueError("Durable claim does not match its exact preparation")
+        transferred = False
+
+        def publish():
+            nonlocal transferred
+            if entry.preparation is not preparation:
+                return
+            if entry.attachment_id not in (None, claim.id):
+                raise RuntimeError("Previous resident attachment is not contained")
+            self._retain_locked(claim)
+            entry.attachment_id, entry.last_release = claim.id, self.clock()
+            entry.preparation = None
+            self._associated[entry.home_id] = claim.id
+            self.slots.add(entry.home_id)
+            self._forget_attempt(instance.id, attempt_id)
+            transferred = True
+
+        self.provider.external_changed(publish)
+        return transferred
+
+    def _require_restored(self, instance):
+        if self._restoration_started and not self.restoration_complete:
+            raise ResidentRestarting(instance.name)
+        touching = [claim.id for claim in self.retained.values() if any(resource.space_id == instance.home_id for resource in claim.resources)]
+        if touching and (len(touching) != 1 or self._associated.get(instance.home_id) != touching[0] or self.retained[touching[0]].phase != "active"):
+            raise ResidentStartingElsewhere(instance.name)
+
+    def associate(self, instance, claim, *, generation):
+        self._owning_loop()
+        entry = self.entry(instance)
+        if not entry.lock.locked():
+            raise RuntimeError("Resident association requires its Home lock")
+        expected = (ResourceMount(instance.home_id, generation, "home", True),)
+        if (
+            not self.restoration_complete
+            or self.retained.get(claim.id) is not claim
+            or claim.actor != instance.principal
+            or claim.host_id != self.attachments.provider.host_id
+            or claim.resources != expected
+            or claim.phase != "active"
+            or claim.container_id is None
+            or entry.preparation is not None
+            or entry.attachment_id not in (None, claim.id)
+        ):
+            raise ValueError("Retained claim cannot become this resident's usable identity")
+        if sum(any(resource.space_id == instance.home_id for resource in retained.resources) for retained in self.retained.values()) != 1:
+            raise ValueError("Resident Home has ambiguous retained attachments")
+
+        def associate():
+            entry.attachment_id, entry.last_release = claim.id, self.clock()
+            self._associated[instance.home_id] = claim.id
+            self.slots.add(instance.home_id)
+            self._touch_retained(claim.id, claim)
+
+        self.provider.external_changed(associate)
 
     def _owning_loop(self) -> None:
         if asyncio.get_running_loop() is not self.loop:
@@ -136,6 +313,7 @@ class ResidentRegistry:
         return max(1, self.replicas - 1)
 
     async def admit(self, instance: InstanceIdentity, *, work: bool, run_id: str | None = None) -> WorkReservation | None:
+        self._require_restored(instance)
         entry = self.entry(instance)
         attempts = self.attempts_in_flight()
         if self._closing or (entry.recycle_due_since is not None and self.clock() - entry.recycle_due_since >= RECYCLE_GRACE_SECONDS.get(entry.recycle_reason, 0)):
@@ -182,6 +360,7 @@ class ResidentRegistry:
         entry = self.entry(instance)
 
         def check_current():
+            self._require_restored(instance)
             if self._closing:
                 raise ResidentRestarting(instance.name)
             if reservation is not None and (self.reservations.get(reservation.id) is not reservation or reservation.expires_at <= self.clock()):
@@ -212,6 +391,10 @@ class ResidentRegistry:
         entry.attachment_id, entry.last_release = attachment_id, self.clock()
         self._forget_attempt(instance.id, attempt_id)
         self.provider.external_changed(lambda: self.slots.add(entry.home_id))
+        if self._restore is not None:
+            # A legacy caller supplied no detached immutable facts. Its Home
+            # charge remains, but the concurrent snapshot cannot claim readiness.
+            self.provider.external_changed(lambda: setattr(self._restore, "uncorrelated_creation", True))
 
     def preparing(self, instance: InstanceIdentity, *, incarnation: str, generation: int, host_id: str) -> PreparationClaim:
         entry = self.entry(instance)
@@ -321,6 +504,15 @@ class ResidentRegistry:
 
     async def contained(self, attachment_id: str, space_ids: Sequence[str], reason: str) -> None:
         self._owning_loop()
+
+        def clear_exact():
+            self.retained.pop(attachment_id, None)
+            self._touch_retained(attachment_id, None)
+            for home_id, identifier in list(self._associated.items()):
+                if identifier == attachment_id:
+                    del self._associated[home_id]
+
+        self.provider.external_changed(clear_exact)
         # Caller may already hold the Home lock. Never acquire it here.
         for home_id in space_ids:
             entry = self.homes.get(home_id)
@@ -335,7 +527,9 @@ class ResidentRegistry:
 
     def external_slots(self) -> int:
         """Memory-only read called by the provider under its metadata lock."""
-        return len(self.slots)
+        if self._restoration_started and not self.restoration_complete:
+            raise StorageRuntimeUnavailable("Resident accounting restoration is incomplete")
+        return len(self.retained) + sum(self._associated.get(home_id) not in self.retained for home_id in self.slots)
 
     def _evictable(self, entry: ResidentEntry) -> bool:
         return entry.attachment_id is not None and entry.preparation is None and entry.recycle_due_since is None and not self.in_flight(entry.instance_id) and not self._has_reservation(entry.home_id)

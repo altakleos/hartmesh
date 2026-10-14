@@ -62,6 +62,8 @@ Shared chat/workspace capacity accounting and worker lifecycle hooks are staged
 for coordinated Gateway integration. The optional hooks retain uncertain starts
 and complete cleanup before releasing capacity; see the
 [registry foundation](backend/docs/RESIDENT_REGISTRY.md).
+Its restart foundation counts each uncertain durable attachment separately and
+requires a complete validated snapshot before opening admission.
 The run API distinguishes a Gateway shutdown from a human Stop. Shutdown records
 its reason before cancelling active runs; a run that finishes during shutdown
 keeps its outcome.

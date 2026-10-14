@@ -60,6 +60,7 @@ stable fallback sentences. `RESIDENT_INTERRUPTED` names a frame, never an except
 
 `residents.py` remains uninstalled; optional preparation/worker hooks use the owning loop;
 provider-locked slots include exact preparation claims through uncertain outcomes.
+Restoration retains each durable attachment; incomplete snapshots never open admission.
 Expiry/cancellation never implies containment. Timed-out eviction stays owned
 through drainage. Restore durable claims and coordinate admission before installation;
 see [registry rules](../../../../docs/RESIDENT_REGISTRY.md).
