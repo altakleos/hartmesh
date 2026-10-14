@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 from _storage_spaces_native_test_support import prepare_consumer_container
 
 from deerflow.spaces.backings import BackingUnavailable, PreparedVolumeCatalog
@@ -157,7 +158,7 @@ async def test_resized_space_keeps_its_files_and_reports_the_new_bound(typed_pre
         await engine.dispose()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def resident_runtime(resident_backing, tmp_path, monkeypatch):
     """Real resident path on a generic native backing, not managed-v5 proof."""
     import atexit

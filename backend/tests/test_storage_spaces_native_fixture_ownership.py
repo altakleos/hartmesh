@@ -43,6 +43,7 @@ def test_resident_native_fixture_uses_real_provider_registry_and_dedicated_inode
     tree = ast.parse(Path(__file__).with_name("test_storage_spaces_volume_native.py").read_text(encoding="utf-8"))
     functions = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
     setup = ast.unparse(functions["resident_runtime"])
+    assert any(isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "pytest_asyncio" and node.attr == "fixture" for node in functions["resident_runtime"].decorator_list)
     assert "run_file_io(AioSandboxProvider)" in setup and "ResidentRegistry(" in setup and "RunManager()" in setup
     assert "qualified_attachments(" in setup and "settle_contained(" in setup
     assert "begin_restore(" in setup and "finish_restore(" in setup and "retained_claims(" in setup
