@@ -7,6 +7,13 @@ here. The worker owns environment admission; every actual operation rechecks it.
 from dataclasses import dataclass
 from typing import Literal
 
+ASSIGNMENT_QUESTION_RULE = (
+    "- This run works on an assignment, and no person is waiting in this conversation. "
+    "When you need information or a decision from a person, call `report_work` with the action `request_input` before you stop: "
+    "that puts your question in front of the supervisor. "
+    "Never end your turn with a question in prose, and a `BLOCKED` result is complete only after that report."
+)
+
 
 @dataclass(frozen=True)
 class RuntimeScope:
@@ -30,6 +37,8 @@ class RuntimeScope:
                 "- Your files are ordinary mutable data, separate from adopted instructions and recalled memory. Clearing memory does not delete files.",
                 "- If a write fails because there is no space left, say that your files are full and that a person who can manage you can delete files on your Files tab.",
             ]
+            if "report_work" in self.tools and not delegated:
+                lines.append(ASSIGNMENT_QUESTION_RULE)
         else:
             lines += [
                 "- Files are conversation-scoped; this does not promise deletion at run completion or automatic reuse in another conversation.",

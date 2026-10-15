@@ -13,6 +13,19 @@ def scope(bound=None, tools=("bash", "read_file", "write_file", "present_files")
     return build_runtime_scope(execution=bound, tools=[SimpleNamespace(name=name) for name in tools], memory_enabled=memory_enabled)
 
 
+@pytest.mark.parametrize("delegated", [False, True])
+@pytest.mark.parametrize("work", [False, True])
+def test_instance_scope_states_the_question_rule_only_when_report_work_is_bound(work, delegated):
+    from deerflow.agents.runtime_scope import ASSIGNMENT_QUESTION_RULE, RuntimeScope
+
+    tools = frozenset({"report_work"}) if work else frozenset()
+    working = RuntimeScope("instance", tools, "disabled").working_directory(delegated=delegated)
+    assert (ASSIGNMENT_QUESTION_RULE in working) is (work and not delegated)
+    if work and not delegated:
+        assert working.index(ASSIGNMENT_QUESTION_RULE) > working.index("Clearing memory does not delete files")
+    assert "Home" not in working and "/mnt/user-data/files" not in working
+
+
 def test_instance_guidance_uses_prepared_home_and_actual_tools(render):
     from deerflow.agent_instances.runtime import InstanceSandboxProvider, execution_scope
 

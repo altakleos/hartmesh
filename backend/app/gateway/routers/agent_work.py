@@ -107,7 +107,7 @@ async def command_work(instance_id: str, work_id: str, body: WorkCommand, reques
     can_stop = await run_cancel_allowed(request)
     result = await work.command(actor=actor, instance_id=instance_id, work_id=work_id, request=body, can_stop=can_stop)
     if can_stop:
-        await dispatch_work_stop(request, work, actor=actor, instance_id=instance_id, work_id=work_id)
+        await dispatch_work_stop(request, work, actor=actor, instance_id=instance_id, work_id=work_id, expected_attempt_id=body.attempt_id if body.action == "stop" else None)
     return result
 
 

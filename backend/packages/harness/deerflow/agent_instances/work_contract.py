@@ -102,7 +102,7 @@ class WorkCommand(AssignmentFields):
     operation_id: Key
     expected_revision: Revision
     expected_assignment_revision: Revision
-    action: Literal["edit", "cancel", "reopen", "changes_requested", "reconcile_mandate", "reconcile_attempt", "accept", "input", "decide"]
+    action: Literal["edit", "cancel", "stop", "reopen", "changes_requested", "reconcile_mandate", "reconcile_attempt", "accept", "input", "decide"]
     note: Statement | None = None
     outcome_id: Key | None = None
     evidence_revision: Revision | None = None
@@ -130,6 +130,10 @@ class WorkCommand(AssignmentFields):
             for key in ("objective", "success_criteria", "priority", "review_required", "sources"):
                 if key in supplied and getattr(self, key) is None:
                     raise ValueError(f"{key} cannot be null")
+        elif self.action == "stop":
+            allowed.add("attempt_id")
+            if not self.attempt_id:
+                raise ValueError("Stop names the exact attempt")
         elif self.action == "reconcile_attempt":
             allowed |= {"attempt_id", "containment_operation_id"}
             if not self.attempt_id or not self.containment_operation_id or not self.note:

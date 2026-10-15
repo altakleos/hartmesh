@@ -16,6 +16,49 @@ def execution():
     return AgentExecution(instance, PrincipalRef("human", "requester"), definition, 1, SimpleNamespace(), "chat", "c" * 32)
 
 
+def test_instance_tools_keep_the_gateway_web_fetch():
+    from deerflow.agent_instances.runtime import instance_tools
+    from deerflow.community.direct_fetch.tools import web_fetch_tool
+
+    assert instance_tools([web_fetch_tool]) == [web_fetch_tool]
+
+
+def test_instance_tools_keep_the_clarification_tool_by_its_real_module():
+    from deerflow.agent_instances.runtime import instance_tools
+    from deerflow.tools.builtins.clarification_tool import ask_clarification_tool
+
+    assert instance_tools([ask_clarification_tool]) == [ask_clarification_tool]
+
+
+@pytest.mark.parametrize("work", [False, True])
+def test_a_work_attempt_is_offered_report_work_and_not_ask_clarification(monkeypatch, work):
+    from dataclasses import replace
+
+    from deerflow.agent_instances.runtime import InstanceSandboxProvider, execution_scope
+    from deerflow.agents.lead_agent import agent
+    from deerflow.extensions import bind_agent_build_extensions
+    from deerflow.tools.builtins.clarification_tool import ask_clarification_tool
+
+    app_config = _LeadAssembly._isolate_from_the_ambient_config(monkeypatch)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [ask_clarification_tool])
+    bound = replace(execution(), work=SimpleNamespace() if work else None)
+    config = {"configurable": {"thread_id": "chat"}, "context": {AGENT_EXECUTION_CONTEXT_KEY: bound, **({"interaction_mode": "autonomous"} if work else {})}}
+    with execution_scope(bound) as environment, bind_agent_build_extensions(_LeadAssembly._extensions_with_an_agent_assembly_observer()):
+        environment.provider = InstanceSandboxProvider(bound, SimpleNamespace(id="native"))
+        assembly = agent.assemble_lead_agent(config, app_config=app_config)
+    tools = {tool.name for tool in assembly.graph["tools"]}
+    if work:
+        assert {"report_work", "read_work_context"} <= tools
+        assert "ask_clarification" not in tools
+        from deerflow.agents.runtime_scope import ASSIGNMENT_QUESTION_RULE
+
+        prompt = assembly.graph["system_prompt"]
+        assert ASSIGNMENT_QUESTION_RULE in prompt and "<clarification_system>" in prompt
+        assert "ask_clarification" not in prompt
+    else:
+        assert "ask_clarification" in tools and "report_work" not in tools
+
+
 def test_worker_rejects_forged_execution_and_uses_only_host_capability():
     from deerflow.runtime.runs.worker import _build_runtime_context, _install_runtime_context
 

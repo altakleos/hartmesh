@@ -205,6 +205,390 @@ async def test_success_without_report_does_not_complete_work(execution):
     assert (await service.work.get(actor=ALICE, instance_id=admitted.instance.id, work_id=row["id"]))["status"] == "open"
 
 
+async def _running_stop_attempt(execution):
+    service, admitted, row, sf = execution
+    scope = await service.reserve(execution=admitted, work_id=row["id"], request=activation(admitted, row))
+    admitted = replace(admitted, work=scope)
+    record = run_record(admitted, scope)
+    await scope.bind(admitted, record, admitted.thread_incarnation)
+    current = await service.work.get(actor=ALICE, instance_id=admitted.instance.id, work_id=row["id"])
+    return service, admitted, current, sf, scope, record
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_attempt,internal", [(True, False), (True, True), (False, False)])
+async def test_a_work_attempt_run_carries_the_autonomous_interaction_mode(execution, monkeypatch, is_attempt, internal):
+    from unittest.mock import AsyncMock
+
+    from test_gateway_services import _make_start_run_persistence_context
+
+    from app.gateway import services
+    from app.gateway.authz import AuthContext
+    from app.gateway.run_models import RunCreateRequest
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+    from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+    from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+    service, admitted, row, sf = execution
+    scope = await service.reserve(execution=admitted, work_id=row["id"], request=activation(admitted, row)) if is_attempt else None
+    request, _, _ = _make_start_run_persistence_context()
+    request.app.state.thread_store = ThreadMetaRepository(sf, instance_authority=admitted.authority)
+    request.app.state.agent_conversations = admitted.authority
+    user = SimpleNamespace(id="alice", system_role="user", role="user")
+    request.state.user = user
+    request.state.auth = AuthContext(user, ["runs:create", "runs:read"])
+    request.state.auth_source = "internal" if internal else "session"
+    if internal:
+        user.system_role = "internal"
+        request.headers["X-DeerFlow-Owner-User-Id"] = "alice"
+    request.url = "http://test/api/threads/" + admitted.thread_id + "/runs"
+    runner = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", runner)
+    monkeypatch.setattr(services, "resolve_trusted_internal_owner_for_attribution", AsyncMock(return_value=user))
+    monkeypatch.setattr(services, "resolve_agent_factory", lambda *_args: lambda **_kwargs: None)
+    config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
+    set_app_config(config)
+    token = set_current_user(user)
+    try:
+        body = RunCreateRequest(
+            input={"messages": [{"role": "user", "content": "Continue"}]}, config={"configurable": {"interaction_mode": "interactive"}, "context": {"interaction_mode": "interactive"}}, context={"interaction_mode": "interactive"}
+        )
+        record = await services.start_run(body, admitted.thread_id, request, work_attempt=scope)
+        await record.task
+        runner.assert_awaited_once()
+        actual = runner.await_args.kwargs["config"]
+        for section in ("configurable", "context"):
+            assert actual[section].get("interaction_mode") == ("autonomous" if is_attempt else None)
+    finally:
+        await request.app.state.run_manager.shutdown()
+        reset_current_user(token)
+        reset_app_config()
+
+
+def test_stop_command_names_one_attempt_and_accepts_only_its_fields():
+    from pydantic import ValidationError
+
+    record = {"revision": 1, "assignment_revision": 1}
+    attempt_id = operation()
+    assert command(record, "stop", attempt_id=attempt_id).attempt_id == attempt_id
+    assert command(record, "stop", attempt_id=attempt_id, note="Wrong source").note == "Wrong source"
+    with pytest.raises(ValidationError, match="Stop names the exact attempt"):
+        command(record, "stop")
+    for extra in ({"objective": "Other work"}, {"outcome_id": operation()}, {"containment_operation_id": operation()}, {"attempt_id": None}):
+        with pytest.raises(ValidationError):
+            command(record, "stop", **({"attempt_id": attempt_id} | extra))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actor,permissions,allowed", [(ALICE, 3, True), (BOB, 3, False), (BOB, 6, True), (BOB, 7, True), (ALICE, 2, False), (BOB, 4, False), (ALICE, 1, False)])
+async def test_stop_is_admitted_to_the_requester_and_to_managers_only(execution, actor, permissions, allowed):
+    from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkRow
+
+    service, admitted, current, sf, scope, _record = await _running_stop_attempt(execution)
+    async with sf() as session, session.begin():
+        (await session.get(AgentInstanceGrantRow, (admitted.instance.id, actor.subject_id))).permissions = permissions
+    body = command(current, "stop", attempt_id=scope.attempt_id)
+    if allowed:
+        result = await service.work.command(actor=actor, instance_id=admitted.instance.id, work_id=current["id"], request=body, can_stop=True)
+        assert result["attempt"]["status"] == "stopping"
+        assert result["revision"] == current["revision"] + 1
+        assert result["assignment_revision"] == current["assignment_revision"] and result["status"] == current["status"]
+        assert result["next_action"] == current["next_action"]
+    else:
+        with pytest.raises(AgentDenied):
+            await service.work.command(actor=actor, instance_id=admitted.instance.id, work_id=current["id"], request=body, can_stop=True)
+        async with sf() as session:
+            assert (await session.get(AgentWorkAttemptRow, scope.attempt_id)).status == "running"
+            assert (await session.get(AgentWorkRow, current["id"])).revision == current["revision"]
+
+
+@pytest.mark.asyncio
+async def test_stop_needs_runs_cancel(execution):
+    from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkRow
+
+    service, admitted, current, sf, scope, _record = await _running_stop_attempt(execution)
+    with pytest.raises(AgentDenied, match="cancellation capability"):
+        await service.work.command(actor=ALICE, instance_id=admitted.instance.id, work_id=current["id"], request=command(current, "stop", attempt_id=scope.attempt_id), can_stop=False)
+    async with sf() as session:
+        assert (await session.get(AgentWorkAttemptRow, scope.attempt_id)).status == "running"
+        assert (await session.get(AgentWorkRow, current["id"])).revision == current["revision"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["none", "wrong", "stopping", "uncertain", "succeeded", "failed", "cancelled"])
+async def test_stop_of_a_settled_attempt_is_refused(execution, phase):
+    from deerflow.agent_instances.contract import Refusal
+    from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkRow
+
+    service, admitted, current, sf = execution
+    attempt_id = operation()
+    if phase != "none":
+        service, admitted, current, sf, scope, _record = await _running_stop_attempt(execution)
+        if phase != "wrong":
+            attempt_id = scope.attempt_id
+            async with sf() as session, session.begin():
+                (await session.get(AgentWorkAttemptRow, attempt_id)).status = phase
+    with pytest.raises(Refusal) as error:
+        await service.work.command(actor=ALICE, instance_id=admitted.instance.id, work_id=current["id"], request=command(current, "stop", attempt_id=attempt_id), can_stop=True)
+    assert error.value.reason == "no-running-attempt" and error.value.status == 409
+    assert str(error.value) == "There is no running attempt to stop"
+    async with sf() as session:
+        assert (await session.get(AgentWorkRow, current["id"])).revision == current["revision"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,expected", [("error", "cancelled"), ("timeout", "cancelled"), ("interrupted", "cancelled"), ("success", "succeeded")])
+@pytest.mark.parametrize("settled", [True, False])
+async def test_stop_leaves_the_assignment_open_and_settles_cancelled(execution, status, expected, settled):
+    from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow
+
+    service, admitted, current, sf, scope, record = await _running_stop_attempt(execution)
+    async with sf() as session, session.begin():
+        (await session.get(AgentWorkAttemptRow, scope.attempt_id)).status = "stopping"
+    record.status = status
+    assert await scope.finish(admitted, record, settled=settled) == (expected if settled else "uncertain")
+    result = await service.work.get(actor=ALICE, instance_id=admitted.instance.id, work_id=current["id"])
+    assert result["status"] == "open" and result["assignment_revision"] == current["assignment_revision"]
+    assert result["objective"] == current["objective"] and result["next_action"] == current["next_action"]
+    assert result["outcome"] is None
+
+
+@pytest.mark.asyncio
+async def test_stop_sets_stopping_and_cancels_the_exact_run(execution, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    import httpx
+    from test_agent_instances import request_app
+
+    from app.gateway.refusals import refusal_handler
+    from app.gateway.routers import agent_instances as routes
+    from app.gateway.routers.agent_work import router
+    from deerflow.agent_instances.contract import Refusal
+
+    service, admitted, current, _sf, scope, record = await _running_stop_attempt(execution)
+    manager = SimpleNamespace(get=AsyncMock(return_value=record), cancel=AsyncMock())
+    app = request_app(service.agents, permissions=("agents:read", "agents:write", "runs:cancel"))
+    app.state.run_manager = manager
+    app.add_exception_handler(Refusal, refusal_handler)
+    app.include_router(router)
+    monkeypatch.setattr(routes, "get_agents_api_config", lambda: SimpleNamespace(enabled=True))
+    body = {"operation_id": operation(), "expected_revision": current["revision"], "expected_assignment_revision": current["assignment_revision"], "action": "stop", "attempt_id": scope.attempt_id, "note": "Wrong source"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        path = f"/api/agent-instances/{admitted.instance.id}/work/{current['id']}/commands"
+        response = await client.post(path, json=body)
+        assert response.status_code == 200, response.text
+        assert response.json()["attempt"]["status"] == "stopping"
+        assert response.json()["status"] == "open" and response.json()["assignment_revision"] == current["assignment_revision"]
+        replay = await client.post(path, json=body)
+        assert replay.status_code == 200, replay.text
+    assert manager.cancel.await_count == 2
+    assert all(call.args == (record.run_id,) for call in manager.cancel.await_args_list)
+    events = await service.work.history(actor=ALICE, instance_id=admitted.instance.id, work_id=current["id"])
+    stops = [event for event in events if event["action"] == "stop"]
+    assert len(stops) == 1 and stops[0]["actor_kind"] == "human" and stops[0]["actor_id"] == "alice"
+    from sqlalchemy import select
+
+    from deerflow.persistence.agent_instances.work import AgentWorkEventRow
+
+    async with _sf() as session:
+        persisted = await session.scalar(select(AgentWorkEventRow).where(AgentWorkEventRow.work_id == current["id"], AgentWorkEventRow.action == "stop"))
+        assert persisted.request == body
+
+
+@pytest.mark.asyncio
+async def test_stop_http_observes_the_run_cancel_ceiling(execution, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    import httpx
+    from test_agent_instances import request_app
+
+    from app.gateway.routers import agent_instances as routes
+    from app.gateway.routers.agent_work import router
+    from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow
+
+    service, admitted, current, sf, scope, record = await _running_stop_attempt(execution)
+    manager = SimpleNamespace(get=AsyncMock(return_value=record), cancel=AsyncMock())
+    app = request_app(service.agents)
+    app.state.run_manager = manager
+    app.include_router(router)
+    monkeypatch.setattr(routes, "get_agents_api_config", lambda: SimpleNamespace(enabled=True))
+    body = {"operation_id": operation(), "expected_revision": current["revision"], "expected_assignment_revision": current["assignment_revision"], "action": "stop", "attempt_id": scope.attempt_id}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(f"/api/agent-instances/{admitted.instance.id}/work/{current['id']}/commands", json=body)
+    assert response.status_code == 404, response.text
+    manager.cancel.assert_not_awaited()
+    async with sf() as session:
+        assert (await session.get(AgentWorkAttemptRow, scope.attempt_id)).status == "running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["work", "plugin"])
+async def test_stop_receipt_cannot_cancel_a_newer_attempt(execution, monkeypatch, surface):
+    from unittest.mock import AsyncMock
+
+    import httpx
+    from test_agent_instances import request_app
+
+    from app.gateway.routers import agent_instances as routes
+    from app.gateway.routers.agent_work import router
+
+    service, admitted, current, sf, scope, record = await _running_stop_attempt(execution)
+    body = command(current, "stop", attempt_id=scope.attempt_id)
+    await service.work.command(actor=ALICE, instance_id=admitted.instance.id, work_id=current["id"], request=body, can_stop=True)
+    record.status = "interrupted"
+    await scope.finish(admitted, record, settled=True)
+    current = await service.work.get(actor=BOB, instance_id=admitted.instance.id, work_id=current["id"])
+    second_execution = await admitted.authority.execution(actor=BOB, thread_id=admitted.thread_id)
+    second_scope = await service.reserve(execution=second_execution, work_id=current["id"], request=activation(second_execution, current))
+    second_execution = replace(second_execution, work=second_scope)
+    second_record = run_record(second_execution, second_scope)
+    second_record.user_id = "bob"
+    await second_scope.bind(second_execution, second_record, second_execution.thread_incarnation)
+    current = await service.work.get(actor=BOB, instance_id=admitted.instance.id, work_id=current["id"])
+    await service.work.command(actor=BOB, instance_id=admitted.instance.id, work_id=current["id"], request=command(current, "stop", attempt_id=second_scope.attempt_id), can_stop=True)
+    async with sf() as session, session.begin():
+        (await session.get(AgentInstanceGrantRow, (admitted.instance.id, "alice"))).permissions = 3
+    manager = SimpleNamespace(get=AsyncMock(return_value=second_record), cancel=AsyncMock())
+    app = request_app(service.agents, permissions=("agents:read", "agents:write", "runs:cancel"))
+    app.state.run_manager = manager
+    app.include_router(router)
+    payload = body.model_dump(mode="json", exclude_unset=True)
+    path = f"/api/agent-instances/{admitted.instance.id}/work/{current['id']}/commands"
+    if surface == "plugin":
+        from deerflow_extension_api.auth import EXTENSION_PRINCIPAL_RESOLVER_KEY, ExtensionPrincipal
+        from deerflow_extension_api.plugins import BackendAction, PluginContribution
+
+        from app.gateway.routers.plugins import router as plugin_router
+        from deerflow.extensions.registry import ExtensionRegistry
+
+        async def replay(payload, context):
+            return await context.human_input.call("work_command", {"instance_id": admitted.instance.id, "work_id": current["id"], "body": payload["command"]})
+
+        plugin = PluginContribution(namespace="example.stop", title="Stop", enabled=True, api_version=5, human_input_api_version=1, backend=(BackendAction("stop", replay),))
+        extensions = ExtensionRegistry()
+        with extensions.attributed_to("test:stop"):
+            extensions.plugin(plugin)
+        app.state.extensions = extensions.build()
+        setattr(app.state, EXTENSION_PRINCIPAL_RESOLVER_KEY, lambda _request: ExtensionPrincipal("alice"))
+        app.include_router(plugin_router)
+        path = "/api/plugins/example.stop/actions/stop"
+        payload = {"command": payload}
+    monkeypatch.setattr(routes, "get_agents_api_config", lambda: SimpleNamespace(enabled=True))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(path, json=payload)
+    assert response.status_code == 200, response.text
+    manager.get.assert_not_awaited()
+    manager.cancel.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actor,permissions,can_stop", [(ALICE, 2, True), (BOB, 3, True), (BOB, 7, False)])
+async def test_stop_replay_rechecks_current_rights_and_cancellation_ceiling(execution, actor, permissions, can_stop):
+    service, admitted, current, sf, scope, _record = await _running_stop_attempt(execution)
+    body = command(current, "stop", attempt_id=scope.attempt_id)
+    await service.work.command(actor=actor, instance_id=admitted.instance.id, work_id=current["id"], request=body, can_stop=True)
+    async with sf() as session, session.begin():
+        (await session.get(AgentInstanceGrantRow, (admitted.instance.id, actor.subject_id))).permissions = permissions
+    with pytest.raises(AgentDenied):
+        await service.work.command(actor=actor, instance_id=admitted.instance.id, work_id=current["id"], request=body, can_stop=can_stop)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,expected", [("interrupted", "cancelled"), ("success", "succeeded")])
+async def test_stop_receipt_replay_survives_terminal_settlement_without_another_stop_event(execution, status, expected):
+    service, admitted, current, _sf, scope, record = await _running_stop_attempt(execution)
+    body = command(current, "stop", attempt_id=scope.attempt_id)
+    stopped = await service.work.command(actor=ALICE, instance_id=admitted.instance.id, work_id=current["id"], request=body, can_stop=True)
+    record.status = status
+    assert await scope.finish(admitted, record, settled=True) == expected
+    replay = await service.work.command(actor=ALICE, instance_id=admitted.instance.id, work_id=current["id"], request=body, can_stop=True)
+    assert replay["revision"] == stopped["revision"]
+    events = await service.work.history(actor=ALICE, instance_id=admitted.instance.id, work_id=current["id"])
+    assert sum(event["action"] == "stop" for event in events) == 1
+
+
+@pytest.mark.asyncio
+async def test_stop_does_not_replace_a_worker_first_success(execution):
+    from deerflow.agent_instances.contract import Refusal
+
+    service, admitted, current, _sf, scope, record = await _running_stop_attempt(execution)
+    assert await scope.finish(admitted, record, settled=True) == "succeeded"
+    completed = await service.work.get(actor=ALICE, instance_id=admitted.instance.id, work_id=current["id"])
+    with pytest.raises(Refusal) as error:
+        await service.work.command(actor=ALICE, instance_id=admitted.instance.id, work_id=current["id"], request=command(completed, "stop", attempt_id=scope.attempt_id), can_stop=True)
+    assert error.value.reason == "no-running-attempt"
+    unchanged = await service.work.get(actor=ALICE, instance_id=admitted.instance.id, work_id=current["id"])
+    assert unchanged["attempt"]["status"] == "succeeded" and unchanged["revision"] == completed["revision"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_before_bind", [False, True])
+async def test_stop_through_run_cancel_settles_the_attempt_cancelled(execution, monkeypatch, stop_before_bind):
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.gateway.work_execution import dispatch_work_stop
+    from deerflow.agent_instances.runtime import InstanceSandboxProvider
+    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+    from deerflow.config.app_config import AppConfig
+    from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow
+    from deerflow.persistence.run.model import RunChangeClockRow, RunRow
+    from deerflow.persistence.run.sql import RunRepository
+    from deerflow.runtime.runs.manager import RunManager
+    from deerflow.runtime.runs.worker import RunContext, run_agent
+
+    service, admitted, row, sf = execution
+    async with sf.kw["bind"].begin() as connection:
+        for model in (RunRow, RunChangeClockRow):
+            await connection.run_sync(model.__table__.create)
+    scope = await service.reserve(execution=admitted, work_id=row["id"], request=activation(admitted, row))
+    admitted = replace(admitted, work=scope)
+    manager = RunManager(store=RunRepository(sf))
+    record = await manager.create_or_reject(admitted.thread_id, "lead_agent", user_id="alice", idempotency_key="agent-work:" + scope.attempt_id, metadata={"agent_work_id": row["id"], "agent_work_attempt_id": scope.attempt_id})
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="stop-worker-test", base_url="http://localhost:8080")
+    provider = InstanceSandboxProvider(admitted, sandbox, app_config=AppConfig(sandbox={"use": "deerflow.sandbox.local.local_sandbox_provider:LocalSandboxProvider"}), skill_revision="test-public-capture")
+    monkeypatch.setattr("deerflow.agent_instances.runtime.prepare_environment", AsyncMock(return_value=provider))
+    entered = asyncio.Event()
+
+    class Agent:
+        async def astream(self, *args, **kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+            yield {"messages": []}
+
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    if stop_before_bind:
+        current = await service.work.get(actor=ALICE, instance_id=admitted.instance.id, work_id=row["id"])
+        assert current["attempt"]["status"] == "starting" and current["attempt"]["run_id"] is None
+        await service.work.command(actor=ALICE, instance_id=admitted.instance.id, work_id=row["id"], request=command(current, "stop", attempt_id=scope.attempt_id), can_stop=True)
+    worker = asyncio.create_task(
+        run_agent(bridge, manager, record, ctx=RunContext(checkpointer=None, event_store=None, agent_execution=admitted), agent_factory=lambda **kwargs: Agent(), graph_input={}, config={}, thread_incarnation=admitted.thread_incarnation)
+    )
+    record.task = worker
+    try:
+        if not stop_before_bind:
+            await asyncio.wait_for(entered.wait(), 10)
+            current = await service.work.get(actor=ALICE, instance_id=admitted.instance.id, work_id=row["id"])
+            await service.work.command(actor=ALICE, instance_id=admitted.instance.id, work_id=row["id"], request=command(current, "stop", attempt_id=scope.attempt_id), can_stop=True)
+            request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(run_manager=manager)))
+            await dispatch_work_stop(request, service.work, actor=ALICE, instance_id=admitted.instance.id, work_id=row["id"], expected_attempt_id=scope.attempt_id)
+        await asyncio.wait_for(asyncio.gather(worker, return_exceptions=True), 10)
+        result = await service.work.get(actor=ALICE, instance_id=admitted.instance.id, work_id=row["id"])
+        assert result["status"] == "open" and result["assignment_revision"] == current["assignment_revision"]
+        assert result["attempt"]["status"] == "cancelled"
+        assert record.status.value == ("error" if stop_before_bind else "interrupted")
+        assert entered.is_set() is (not stop_before_bind)
+        async with sf() as session:
+            attempt = await session.get(AgentWorkAttemptRow, scope.attempt_id)
+            assert attempt.contained_reason is None
+    finally:
+        if not worker.done():
+            worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+        await manager.shutdown()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("installed", [False, True])
 async def test_no_workspace_lifecycle_change_is_left_for_host_only_with_registry(execution, installed):

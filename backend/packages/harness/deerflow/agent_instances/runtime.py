@@ -4,16 +4,18 @@ import asyncio
 import logging
 import shlex
 import time
+from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 import httpx
 
-from deerflow.agent_instances.contract import RESIDENT_INTERRUPTED, AgentDenied, Refusal
-from deerflow.agent_instances.conversations import AgentExecution
+from deerflow.agent_instances.contract import RESIDENT_INTERRUPTED, AgentDenied, AgentPermission, Refusal
+from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
+from deerflow.runtime.turn_phases import TurnPhase, phase_span
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 from deerflow.spaces.attachments import ResourceMount, SpaceAttachments
 from deerflow.spaces.facade import storage_actor_scope
@@ -180,15 +182,81 @@ def execution_scope(execution):
         _environment.reset(token)
 
 
+def requester_can_manage(context: Mapping[str, object] | None) -> bool | None:
+    execution = context.get(AGENT_EXECUTION_CONTEXT_KEY) if isinstance(context, Mapping) else None
+    if not isinstance(execution, AgentExecution):
+        return None
+    return bool(getattr(execution.instance, "permissions", 0) & AgentPermission.MANAGE)
+
+
+def network_card_allowed(context: Mapping[str, object] | None) -> bool | None:
+    manage = requester_can_manage(context)
+    if manage is None:
+        return None
+    return manage and context[AGENT_EXECUTION_CONTEXT_KEY].work is None
+
+
+def check_network_decision(context: Mapping[str, object] | None, decision: str) -> None:
+    allowed = network_card_allowed(context)
+    if allowed is not None and (decision == "allow_sandbox" or (decision != "deny" and not allowed)):
+        name = context[AGENT_EXECUTION_CONTEXT_KEY].instance.name
+        raise Refusal(f"Only a person who can manage {name} can allow a site.", reason="managers-only")
+
+
+def network_denial_artifact(provider, sandbox_id: str, result):
+    """Acknowledge the claimed denial and copy only the tool's own result."""
+    from langchain_core.messages import ToolMessage
+    from langgraph.types import Command
+
+    events = provider.consume_network_policy_events(sandbox_id)
+    if not events or not isinstance(events[0], Mapping):
+        return result
+    event = events[0]
+    request_id, host, port = (event.get(key) for key in ("request_id", "host", "port"))
+    if not isinstance(request_id, str) or not isinstance(host, str) or type(port) is not int:
+        return result
+    if not provider.decide_network_policy_request(sandbox_id, request_id, "deny"):
+        logger.warning("Sandbox network denial acknowledgement failed")
+
+    def marked(message):
+        artifact = dict(message.artifact) if isinstance(message.artifact, Mapping) else {}
+        artifact["sandbox_network_denied"] = {"host": host, "port": port}
+        return message.model_copy(update={"artifact": artifact})
+
+    if isinstance(result, ToolMessage):
+        return marked(result)
+    if isinstance(result, Command) and isinstance(result.update, dict):
+        messages = result.update.get("messages")
+        if isinstance(messages, (list, tuple)):
+            for index in range(len(messages) - 1, -1, -1):
+                if isinstance(messages[index], ToolMessage):
+                    copied = list(messages)
+                    copied[index] = marked(copied[index])
+                    return replace(result, update={**result.update, "messages": copied})
+    return result
+
+
 class InstanceSandboxProvider(SandboxProvider):
     """One run's client; storage owns the resident container and its retirement."""
 
     uses_thread_data_mounts = False
     needs_upload_permission_adjustment = False
 
-    def __init__(self, execution, sandbox, *, app_config=None, skill_revision=None):
+    def __init__(self, execution, sandbox, *, app_config=None, skill_revision=None, baseline=None):
         self.execution, self.sandbox = execution, sandbox
         self.app_config, self.skill_revision = app_config, skill_revision
+        self.baseline = baseline
+
+    def sandbox_network_mode(self):
+        return self.baseline.sandbox_network_mode() if self.baseline is not None else super().sandbox_network_mode()
+
+    def sandbox_network_temporary_grant_ttl(self):
+        return self.baseline.sandbox_network_temporary_grant_ttl() if self.baseline is not None else super().sandbox_network_temporary_grant_ttl()
+
+    def decide_network_policy_request(self, sandbox_id, request_id, decision):
+        if self.baseline is None:
+            return super().decide_network_policy_request(sandbox_id, request_id, decision)
+        return self.baseline.decide_network_policy_request(sandbox_id, request_id, decision)
 
     def acquire(self, thread_id=None, *, user_id=None):
         self.execution.validate_sync()
@@ -222,12 +290,12 @@ def instance_tools(tools):
     builtin_modules = {
         "deerflow.sandbox.tools",
         "deerflow.tools.conversation",
-        "deerflow.tools.builtins.ask_clarification_tool",
+        "deerflow.tools.builtins.clarification_tool",
         "deerflow.tools.builtins.present_file_tool",
         "deerflow.tools.builtins.task_tool",
         "deerflow.tools.builtins.view_image_tool",
     }
-    public_providers = {"tavily", "sofya", "jina_ai", "unbrowse", "firecrawl", "image_search", "brave", "ddg_search", "exa", "searxng", "serper", "serply", "tencent_wsa"}
+    public_providers = {"tavily", "sofya", "jina_ai", "unbrowse", "firecrawl", "image_search", "brave", "ddg_search", "exa", "searxng", "serper", "serply", "tencent_wsa", "direct_fetch"}
     retained = []
     for tool in tools:
         function = getattr(tool, "coroutine", None) or getattr(tool, "func", None)
@@ -362,7 +430,8 @@ async def _prepare_environment_legacy(execution, *, baseline_provider=None, app_
     resources = [ResourceMount(execution.instance.home_id, execution.home_generation, "home", writable=True)]
     attached = await mounts.resume(actor=execution.instance.principal, resources=resources)
     if attached is None:
-        attached = await mounts.attach(actor=execution.instance.principal, incarnation=uuid4().hex, resources=resources)
+        with phase_span(TurnPhase.SANDBOX_CREATE):
+            attached = await mounts.attach(actor=execution.instance.principal, incarnation=uuid4().hex, resources=resources)
     return await _prepare_client(execution, baseline_provider, attached, capture, app_config)
 
 
@@ -412,7 +481,7 @@ async def _prepare_client(execution, baseline_provider, attached, capture, app_c
         scoped_config = app_config.model_copy(update={"skills": scoped_skills})
         if validate:
             await execution.authority.validate(execution)
-        return InstanceSandboxProvider(execution, sandbox, app_config=scoped_config, skill_revision=capture.revision)
+        return InstanceSandboxProvider(execution, sandbox, app_config=scoped_config, skill_revision=capture.revision, baseline=baseline_provider)
     except BaseException:
         await await_drained(run_file_io(sandbox.close))
         raise

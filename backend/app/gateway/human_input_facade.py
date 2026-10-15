@@ -84,7 +84,8 @@ class HostHumanInputActions(HumanInputActions):
                 can_stop = "runs:cancel" in permissions
                 result = await work.command(actor=actor, **args, can_stop=can_stop)
                 if can_stop:
-                    await dispatch_work_stop(request, work, actor=actor, instance_id=args["instance_id"], work_id=args["work_id"])
+                    command = args["request"]
+                    await dispatch_work_stop(request, work, actor=actor, instance_id=args["instance_id"], work_id=args["work_id"], expected_attempt_id=command.attempt_id if command.action == "stop" else None)
                 return result
             return await getattr(service, operation)(actor=actor, **args)
         except TypeError:

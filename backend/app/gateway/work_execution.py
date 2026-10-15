@@ -127,10 +127,12 @@ async def run_cancel_allowed(request):
     return "runs:cancel" in permissions
 
 
-async def dispatch_work_stop(request, work, *, actor, instance_id, work_id):
+async def dispatch_work_stop(request, work, *, actor, instance_id, work_id, expected_attempt_id=None):
     """Retry the recorded exact stop intent; a cancellation receipt is not settlement."""
     current = await work.get(actor=actor, instance_id=instance_id, work_id=work_id)
     attempt = current["attempt"]
+    if expected_attempt_id is not None and (attempt is None or attempt["id"] != expected_attempt_id):
+        return
     if not attempt or attempt["status"] != "stopping" or not attempt["run_id"]:
         return
     manager = get_run_manager(request)
