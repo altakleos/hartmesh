@@ -687,10 +687,15 @@ class SpaceFiles:
 
         return await await_drained(perform())
 
-    async def settle_interrupted(self) -> int:
+    async def settle_interrupted(self, *, space_id: str | None = None, operation_id: str | None = None) -> int:
         from deerflow.spaces.maintenance import settle_interrupted
 
-        return await await_drained(settle_interrupted(self))
+        if (space_id is None) != (operation_id is None):
+            raise ValueError("Targeted settlement requires both Space and operation identifiers")
+        if space_id is not None:
+            self._operation_id(space_id)
+            self._operation_id(operation_id)
+        return await await_drained(settle_interrupted(self, space_id=space_id, operation_id=operation_id))
 
     @staticmethod
     def _provenance(request, on_behalf_of, *, size=None):

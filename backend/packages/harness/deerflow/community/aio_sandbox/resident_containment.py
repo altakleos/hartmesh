@@ -7,6 +7,25 @@ from deerflow.spaces.docker import StorageHostUnqualified
 from .native_resource_set import NativeResourceSet
 
 
+def remove_original_resources(reader, record, *, guard, command):
+    """Remove only immutable members freshly matched to the full original graph."""
+    members = [("container", record.container_id), *((member.kind, member.identity) for role in ("network-proxy", "network", "egress-network") for member in record.resources if member.role == role)]
+    for kind, identity in members:
+        guard()
+        entry = reader.qualify_resident_record(record)[(kind, identity)]
+        if entry is None:
+            continue
+        if kind == "container" and reader._state(entry):
+            command(["docker", "stop", "--time", "5", identity])
+            guard()
+            if reader.qualify_resident_record(record)[(kind, identity)] is None:
+                continue
+        command(["docker", *(["rm", "--force"] if kind == "container" else ["network", "rm"]), identity])
+    guard()
+    if not reader.prove_resident_absent(record):
+        raise StorageHostUnqualified("Resident original resource absence remains unconfirmed")
+
+
 class ResidentContainmentWorker:
     """No SQL, SDK, human principal or name-derived deletion authority."""
 
@@ -78,25 +97,12 @@ class ResidentContainmentWorker:
             raise
         self.records[attachment_id] = retiring
         record = self._current_record(attachment_id)
-        primary = ("container", record.container_id)
-        members = [primary, *((member.kind, member.identity) for role in ("network-proxy", "network", "egress-network") for member in record.resources if member.role == role)]
-        for kind, identity in members:
+
+        def guard():
             self._current_record(attachment_id)
             self.roots_guard(record)
-            entry = reader.qualify_resident_record(record)[(kind, identity)]
-            if entry is None:
-                continue
-            if kind == "container" and reader._state(entry):
-                self._command(reader, ["docker", "stop", "--time", "5", identity])
-                self._current_record(attachment_id)
-                self.roots_guard(record)
-                if reader.qualify_resident_record(record)[(kind, identity)] is None:
-                    continue
-            self._command(reader, ["docker", *(["rm", "--force"] if kind == "container" else ["network", "rm"]), identity])
-        self._current_record(attachment_id)
-        self.roots_guard(record)
-        if not reader.prove_resident_absent(record):
-            raise StorageHostUnqualified("Resident original resource absence remains unconfirmed")
+
+        remove_original_resources(reader, record, guard=guard, command=lambda command: self._command(reader, command))
         self.contained.add(attachment_id)
 
     def _command(self, reader, command):
@@ -112,11 +118,13 @@ class ResidentContainmentWorker:
         if reply.returncode:
             raise StorageHostUnqualified("Resident original resource effect remains unconfirmed")
 
-    def finalize(self, attachment_id):
+    def finalize(self, attachment_id, *, allow_prepared=False):
         """Host caller confirmed fenced SQL commit; retry fresh absence only."""
         record = self._current_record(attachment_id)
-        if record.phase != "retiring":
+        if record.phase != "retiring" and not (allow_prepared and record.phase == "prepared"):
             raise StorageHostUnqualified("Resident finalization lacks its retiring original record")
+        if record.phase == "prepared":
+            self.roots_guard(record)
         reader = self._reader()
         if not reader.prove_resident_absent(record):
             raise StorageHostUnqualified("Resident finalization retains surviving original resources")
@@ -125,6 +133,13 @@ class ResidentContainmentWorker:
             self.eligibility_guard()
             self._assert_live()
         try:
+            if record.phase == "prepared":
+                # An isolated operator may fence SQL without writing this
+                # journal. The caller admitted its exact fenced SQL first.
+                record = self.bridge.evidence.retire_resident(record)
+                self.bridge.qualify(teardown=True)
+                self.records[attachment_id] = record
+                record = self._current_record(attachment_id)
             self.bridge.evidence.finish_resident(record)
             self.bridge.residents.remove(record)
             self.bridge.qualify(teardown=True)

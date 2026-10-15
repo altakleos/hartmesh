@@ -67,6 +67,23 @@ class AgentInstances:
         async with self._sf() as session:
             return await session.scalar(select(AgentInstanceRow).where(AgentInstanceRow.home_id == space_id))
 
+    def space_audience_admission(self, home_id, subject):
+        """Borrow the Home transaction before granting a human its files."""
+        from deerflow.spaces.contract import SpaceDenied
+
+        async def admission(session):
+            message = "A grant on the agent's files requires Inspect on the agent"
+            try:
+                await self._human(subject, session=session)
+            except AgentDenied as exc:
+                raise SpaceDenied(message) from exc
+            row = await session.scalar(select(AgentInstanceRow).where(AgentInstanceRow.home_id == home_id).with_for_update())
+            grant = await session.get(AgentInstanceGrantRow, (row.id, subject.subject_id)) if row is not None else None
+            if grant is None or not grant.permissions & int(AgentPermission.INSPECT):
+                raise SpaceDenied(message)
+
+        return admission
+
     async def _creation_counts(self, session, actor, custody):
         kind = "assistant" if custody == "personal" else "employee"
         rows = select(func.count()).select_from(AgentInstanceRow).where(AgentInstanceRow.custody == custody, AgentInstanceRow.status.in_(("provisioning", "active", "suspended", "archived")))
@@ -245,6 +262,11 @@ class AgentInstances:
             raise AgentConflict("The unfinished agent's Home changed; retry the removal")
 
         return await await_drained(perform())
+
+    async def host_delete(self, instance_id: str, *, host_id: str, dry_run: bool = False) -> str | None:
+        from deerflow.agent_instances.host_operations import host_delete
+
+        return await await_drained(host_delete(self, instance_id, host_id=host_id, dry_run=dry_run))
 
     async def _enroll(self, actor, request, definition, creation_id):
         for attempt in range(3):

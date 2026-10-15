@@ -117,7 +117,10 @@ def _clear_probe(path):
 
 
 class DockerStorageAdapter:
-    def __init__(self, *, prepare, runner=subprocess.run, host_verifier=None, probe_image=None, pool=None, clean_probe=True):
+    def __init__(self, *, prepare, runner=subprocess.run, host_verifier=None, probe_image=None, pool=None, clean_probe=True, _operator_only=False, _probe_pool=True):
+        if type(_operator_only) is not bool or type(_probe_pool) is not bool or (not _operator_only and not _probe_pool):
+            raise StorageHostUnqualified("Only an operator adapter may omit the pool probe")
+        self._operator_only, self._probe_pool = _operator_only, _probe_pool
         self._prepare, self._runner = prepare, runner
         self._probe_image = probe_image
         self._execution_guard = None
@@ -138,7 +141,7 @@ class DockerStorageAdapter:
         if not isinstance(host_id, str) or not host_id or len(host_id) > 128:
             raise StorageHostUnqualified("Docker daemon identity is unavailable")
         self.host_id = host_id
-        if pool is not None:
+        if pool is not None and _probe_pool:
             if not probe_image:
                 raise StorageHostUnqualified("Native storage requires a probe image")
             directory = Path(pool) / ".probe"
@@ -148,6 +151,8 @@ class DockerStorageAdapter:
                 self.probe(directory, label="pool")
 
     def probe(self, directory: Path, *, label: str) -> None:
+        if self._operator_only and not self._probe_pool:
+            raise StorageAdapterUnsupported("Operator containment cannot run a storage probe")
         with _probe_lock(directory):
             self._probe_file(directory, label=label)
 
@@ -208,6 +213,8 @@ class DockerStorageAdapter:
                 os.close(fd)
 
     def _call(self, *arguments):
+        if self._operator_only and (arguments[0] in {"create", "start"} or arguments[0] == "run" and not self._probe_pool):
+            raise StorageAdapterUnsupported("Operator adapters cannot create or start a workspace")
         try:
             return self._runner(["docker", *arguments], capture_output=True, text=True, timeout=30)
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -419,12 +426,14 @@ class DockerStorageAdapter:
             gate.end(reference)
 
     def verify_active(self, container, plan):
+        self._require_execution()
         with self._resident_activation(container, plan):
             result = self._validate(container, plan, active=True)
             self._require_resident_record(container, plan)
             return result
 
     def prepare(self, plan):
+        self._require_execution()
         self._same_host()
         if self._execution_guard is not None:
             self._execution_guard()
@@ -442,6 +451,7 @@ class DockerStorageAdapter:
         return container
 
     def start(self, container, plan):
+        self._require_execution()
         with self._resident_activation(container, plan):
             self._validate(container, plan)
             self._require_resident_record(container, plan)
@@ -569,6 +579,8 @@ class DockerStorageAdapter:
 
     def cleanup(self, attachment_id):
         """Optional trusted paired-resource cleanup, wired by the provider."""
+        if self._operator_only:
+            raise StorageAdapterUnsupported("Operator cleanup requires its exact original resource scope")
         if self._cleanup is not None:
             self._cleanup(attachment_id)
 
@@ -658,6 +670,8 @@ class DockerStorageAdapter:
             logger.warning("Resident paired cleanup remains incomplete for %s: %s", attachment_id, exc)
 
     def fence(self, container, attachment_id):
+        if self._operator_only:
+            raise StorageAdapterUnsupported("Operator fencing requires its exact original resource scope")
         self._same_host()
         entry = self._inspect(container)
         if entry is None:
@@ -673,9 +687,22 @@ class DockerStorageAdapter:
             raise StorageAdapterUnsupported("Attachment containment remains unconfirmed")
         self._same_host()
 
+    def _require_execution(self):
+        if self._operator_only:
+            raise StorageAdapterUnsupported("Operator adapters cannot prepare, start or admit execution")
+
     @classmethod
     def from_local_backend(cls, backend, *, pool: Path | None = None, clean_probe: bool = True):
         """Add storage admission to the existing provider's container builder."""
+        return cls._from_local_backend(backend, pool=pool, clean_probe=clean_probe)
+
+    @classmethod
+    def for_operator(cls, backend, *, pool: Path, probe_pool: bool = False):
+        """Endpoint qualification only; status/verify may request an isolated probe."""
+        return cls._from_local_backend(backend, pool=pool, clean_probe=False, operator_only=True, probe_pool=probe_pool)
+
+    @classmethod
+    def _from_local_backend(cls, backend, *, pool, clean_probe, operator_only=False, probe_pool=True):
         if backend.runtime != "docker" or any(not mount.read_only for mount in backend._config_mounts):
             raise StorageHostUnqualified("Native views require Docker with read-only configured mounts")
 
@@ -691,7 +718,7 @@ class DockerStorageAdapter:
             mounts, labels = adapter._resident_projection(plan)
             return backend.prepare_resident(plan.id, "hartmesh-space-" + plan.id, mounts, labels)
 
-        adapter = cls(prepare=prepare, runner=backend._run, probe_image=backend._image, pool=pool, clean_probe=clean_probe)
+        adapter = cls(prepare=prepare, runner=backend._run, probe_image=backend._image, pool=pool, clean_probe=clean_probe, _operator_only=operator_only, _probe_pool=probe_pool)
         # Storage can be qualified before this provider supports its configured
         # workspace topology. Preparation and resume retain the same guard.
         adapter._execution_guard = topology
