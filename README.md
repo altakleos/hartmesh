@@ -55,6 +55,12 @@ Those conversations use the adopted definition and one qualified Docker Home
 across chats, with current Use/Inspect/Manage grants. They inherit no requester
 files, private skills, memory or credentials. DeerMem facts and summaries use a
 separate instance scope, with current audience checks and stale-write fencing.
+The direct Home file APIs accept uploads up to 64 MiB before or during a run,
+reuse identical files and preserve different files under numbered names. Authorized
+humans can edit a loaded revision, create folders, rename and remove files without
+starting a workspace. Writes retain human attribution and recheck current access.
+See [the file API](docs/AGENT_EXECUTION.md#direct-home-file-writes); product UI
+support follows in the next design stage.
 Qualified workspaces support the provider's restricted network and read-only
 Shared binding alongside Home, without publishing a sandbox or relay port.
 Storage and agent counts remain opt-in while the Compose rollout continues.

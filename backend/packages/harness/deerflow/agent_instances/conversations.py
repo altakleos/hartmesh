@@ -369,51 +369,55 @@ class AgentConversations:
     async def context_admission(self, execution, *, mark_memory=False, mark_work=False, source_thread_id=None):
         """Resource→thread→instance snapshot/marker; no model or SDK calls."""
         async with self.instances.files.registry.admitted(actor=execution.instance.principal, requests={execution.instance.home_id: (Permission.READ, execution.home_generation)}) as (session, _):
-            ids = sorted({execution.thread_id, source_thread_id or execution.thread_id})
-            threads = {row.thread_id: row for row in (await session.execute(select(ThreadMetaRow).where(ThreadMetaRow.thread_id.in_(ids)).order_by(ThreadMetaRow.thread_id).with_for_update())).scalars()}
-            instance = (await session.execute(select(AgentInstanceRow).where(AgentInstanceRow.id == execution.instance.id).with_for_update())).scalar_one_or_none()
-            try:
-                identity = InstanceIdentity.from_row(instance)
-            except (AttributeError, TypeError, ValueError):
-                raise AgentDenied("Agent context authority is unavailable") from None
-            grant = await session.get(AgentInstanceGrantRow, (identity.id, execution.requester.subject_id))
-            binding = await session.get(AgentConversationRow, execution.thread_id)
-            thread = threads.get(execution.thread_id)
-            if (
-                identity.status != "active"
-                or identity.generation != execution.instance.generation
-                or identity.definition_revision != execution.definition.revision
-                or identity.home_id != execution.instance.home_id
-                or thread is None
-                or thread.incarnation != execution.thread_incarnation
-                or binding is None
-                or binding.instance_id != identity.id
-            ):
-                raise AgentDenied("Agent context authority changed")
-            await self.instances._human(execution.requester, session=session)
-            if grant is None or type(grant.permissions) is not int or not 1 <= grant.permissions <= 7 or not grant.permissions & int(AgentPermission.USE) or not await self._can_read(session, binding, execution.requester.subject_id):
-                raise AgentDenied("Agent context access changed")
-            if mark_work and not grant.permissions & int(AgentPermission.INSPECT):
-                raise AgentDenied("Work context requires current Inspect")
-            source = binding
-            if source_thread_id is not None:
-                source = await session.get(AgentConversationRow, source_thread_id)
-                if source is None or source.instance_id != identity.id or source_thread_id not in threads or not await self._can_read(session, source, execution.requester.subject_id):
-                    raise AgentDenied("Referenced context is unavailable")
-                await self._copy_audience(session, source, binding)
-            compatible = await self.destination_audience(session, identity, binding)
-            if source_thread_id is not None:
-                await self.destination_audience(session, identity, source)
-            bearing = await session.get(AgentProtectedContextRow, source.thread_id) is not None
-            destination_bearing = await session.get(AgentProtectedContextRow, execution.thread_id) is not None
-            if (bearing or destination_bearing or mark_memory or mark_work) and not compatible:
-                raise AgentDenied("Protected memory context audience is incompatible with writable Home")
-            cross_requester = source.requester_id != binding.requester_id
-            if cross_requester and not grant.permissions & int(AgentPermission.INSPECT):
-                raise AgentDenied("Copied context requires current Inspect")
-            if (bearing or mark_memory or mark_work or cross_requester) and await session.get(AgentProtectedContextRow, execution.thread_id) is None:
-                session.add(AgentProtectedContextRow(thread_id=execution.thread_id))
-            return compatible
+            return await self.context_admission_in_session(session, execution, mark_memory=mark_memory, mark_work=mark_work, source_thread_id=source_thread_id)
+
+    async def context_admission_in_session(self, session, execution, *, mark_memory=False, mark_work=False, source_thread_id=None):
+        """Borrow the already-admitted Home transaction; lock thread then instance."""
+        ids = sorted({execution.thread_id, source_thread_id or execution.thread_id})
+        threads = {row.thread_id: row for row in (await session.execute(select(ThreadMetaRow).where(ThreadMetaRow.thread_id.in_(ids)).order_by(ThreadMetaRow.thread_id).with_for_update())).scalars()}
+        instance = (await session.execute(select(AgentInstanceRow).where(AgentInstanceRow.id == execution.instance.id).with_for_update())).scalar_one_or_none()
+        try:
+            identity = InstanceIdentity.from_row(instance)
+        except (AttributeError, TypeError, ValueError):
+            raise AgentDenied("Agent context authority is unavailable") from None
+        grant = await session.get(AgentInstanceGrantRow, (identity.id, execution.requester.subject_id))
+        binding = await session.get(AgentConversationRow, execution.thread_id)
+        thread = threads.get(execution.thread_id)
+        if (
+            identity.status != "active"
+            or identity.generation != execution.instance.generation
+            or identity.definition_revision != execution.definition.revision
+            or identity.home_id != execution.instance.home_id
+            or thread is None
+            or thread.incarnation != execution.thread_incarnation
+            or binding is None
+            or binding.instance_id != identity.id
+        ):
+            raise AgentDenied("Agent context authority changed")
+        await self.instances._human(execution.requester, session=session)
+        if grant is None or type(grant.permissions) is not int or not 1 <= grant.permissions <= 7 or not grant.permissions & int(AgentPermission.USE) or not await self._can_read(session, binding, execution.requester.subject_id):
+            raise AgentDenied("Agent context access changed")
+        if mark_work and not grant.permissions & int(AgentPermission.INSPECT):
+            raise AgentDenied("Work context requires current Inspect")
+        source = binding
+        if source_thread_id is not None:
+            source = await session.get(AgentConversationRow, source_thread_id)
+            if source is None or source.instance_id != identity.id or source_thread_id not in threads or not await self._can_read(session, source, execution.requester.subject_id):
+                raise AgentDenied("Referenced context is unavailable")
+            await self._copy_audience(session, source, binding)
+        compatible = await self.destination_audience(session, identity, binding)
+        if source_thread_id is not None:
+            await self.destination_audience(session, identity, source)
+        bearing = await session.get(AgentProtectedContextRow, source.thread_id) is not None
+        destination_bearing = await session.get(AgentProtectedContextRow, execution.thread_id) is not None
+        if (bearing or destination_bearing or mark_memory or mark_work) and not compatible:
+            raise AgentDenied("Protected memory context audience is incompatible with writable Home")
+        cross_requester = source.requester_id != binding.requester_id
+        if cross_requester and not grant.permissions & int(AgentPermission.INSPECT):
+            raise AgentDenied("Copied context requires current Inspect")
+        if (bearing or mark_memory or mark_work or cross_requester) and await session.get(AgentProtectedContextRow, execution.thread_id) is None:
+            session.add(AgentProtectedContextRow(thread_id=execution.thread_id))
+        return compatible
 
     def mark_memory_context_sync(self, execution):
         from deerflow.agent_instances.memory import _bridge

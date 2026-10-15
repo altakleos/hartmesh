@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import stat
 from collections import defaultdict
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -32,6 +33,7 @@ from deerflow.spaces.registry import SpaceRegistry, _stored_permissions
 from deerflow.utils.file_io import await_drained, run_file_io
 
 MAX_TRANSFER_BYTES = 64 * 1024 * 1024
+MAX_NAME_SUFFIX = 99
 _reservation = ContextVar("storage_lifecycle_reservation", default=None)
 
 
@@ -698,13 +700,28 @@ class SpaceFiles:
             raise ValueError("Provenance requires a bounded human account ID")
         return {"destination": None, "sha256": None, "size": size, **request, "on_behalf_of": on_behalf_of}
 
-    async def write(self, *, actor: PrincipalRef, space_id: str, expected_generation: int, operation_id: str, path: str, content: bytes, expected_sha256: str | None = None, create: bool = False, on_behalf_of: str | None = None) -> str:
+    async def write(
+        self,
+        *,
+        actor: PrincipalRef,
+        space_id: str,
+        expected_generation: int,
+        operation_id: str,
+        path: str,
+        content: bytes,
+        expected_sha256: str | None = None,
+        create: bool = False,
+        on_behalf_of: str | None = None,
+        controller_admission=None,
+    ) -> str:
         _path(path)
         if not isinstance(content, bytes) or len(content) > MAX_TRANSFER_BYTES or type(create) is not bool:
             raise ValueError("File import/edit must contain at most64MiB")
         if (create and expected_sha256 is not None) or (not create and (not isinstance(expected_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256))):
             raise ValueError("Edits require the loaded SHA-256; creates require no previous revision")
         request = {"action": "write", "path": path, "sha256": hashlib.sha256(content).hexdigest(), "expected_sha256": expected_sha256, "create": create}
+        if on_behalf_of is not None:
+            request = {key: value for key, value in request.items() if key not in ("expected_sha256", "create")}
         request = self._provenance(request, on_behalf_of, size=len(content))
         return await self._mutate(
             actor=actor,
@@ -713,9 +730,109 @@ class SpaceFiles:
             operation_id=operation_id,
             request=request,
             call=lambda volumes: self._io(volumes[space_id], lambda fs: fs.write_atomic(path, content, expected_sha256=expected_sha256, create=create)),
+            controller_admission=controller_admission,
         )
 
-    async def mkdir(self, *, actor, space_id, expected_generation, operation_id, path, on_behalf_of: str | None = None):
+    async def put_unique(self, *, actor, space_id, expected_generation, operation_id, path, content: bytes, on_behalf_of: str, controller_admission=None):
+        _path(path)
+        if not isinstance(content, bytes) or len(content) > MAX_TRANSFER_BYTES:
+            raise ValueError("File import must contain at most64MiB")
+        digest = await await_drained(run_file_io(lambda: hashlib.sha256(content).hexdigest()))
+        request = self._provenance({"action": "put", "path": path, "sha256": digest}, on_behalf_of, size=len(content))
+
+        def publish(filesystem):
+            parent, _, name = path.rpartition("/")
+            # An upload can precede the first workspace. Keep directory creation
+            # confined and inside this one durable file operation.
+            if parent == "uploads":
+                try:
+                    descriptor = filesystem._open(parent, os.O_RDONLY | os.O_DIRECTORY, follow_symlinks=False)
+                except FileNotFoundError:
+                    try:
+                        filesystem.mkdir(parent)
+                    except FileConflict:
+                        descriptor = filesystem._open(parent, os.O_RDONLY | os.O_DIRECTORY, follow_symlinks=False)
+                        os.close(descriptor)
+                else:
+                    os.close(descriptor)
+            try:
+                observed_path = filesystem._open(path, os.O_PATH | os.O_NOFOLLOW, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                descriptor = None
+                try:
+                    if stat.S_ISREG(os.fstat(observed_path).st_mode):
+                        descriptor = os.open(f"/proc/self/fd/{observed_path}", os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOCTTY)
+                finally:
+                    os.close(observed_path)
+                if descriptor is not None:
+                    try:
+                        duplicate = self._same_named_content(filesystem, path, descriptor, content, digest)
+                    finally:
+                        os.close(descriptor)
+                    if duplicate:
+                        return {"path": path, "size": len(content), "sha256": digest, "deduplicated": True}
+            stem, dot, extension = name.rpartition(".")
+            stem, extension = (stem, dot + extension) if dot and stem else (name, "")
+            for number in range(1, MAX_NAME_SUFFIX + 1):
+                candidate = path if number == 1 else (parent + "/" if parent else "") + f"{stem} ({number}){extension}"
+                if len(candidate.rsplit("/", 1)[-1].encode("utf-8")) > 255:
+                    continue
+                try:
+                    filesystem.write_atomic(candidate, content, expected_sha256=None, create=True)
+                except UnsafeSpacePath:
+                    # An occupied leaf (including a directory) is a collision;
+                    # this no-follow lookup still refuses any unsafe parent.
+                    descriptor = filesystem._open(candidate, os.O_PATH | os.O_NOFOLLOW, follow_symlinks=False)
+                    os.close(descriptor)
+                except FileConflict as exc:
+                    if str(exc) != "Destination already exists":
+                        raise
+                else:
+                    return {"path": candidate, "size": len(content), "sha256": digest, "deduplicated": False}
+            raise FileConflict("Destination already exists")
+
+        return await self._mutate(
+            actor=actor,
+            requests={space_id: (Permission.WRITE, expected_generation)},
+            destination_id=space_id,
+            operation_id=operation_id,
+            request=request,
+            call=lambda volumes: self._io(volumes[space_id], publish),
+            controller_admission=controller_admission,
+        )
+
+    @staticmethod
+    def _same_named_content(filesystem, path, descriptor, content, digest):
+        """Compare bounded bytes and the still-named inode, excluding atime."""
+        before = os.fstat(descriptor)
+        if before.st_size == len(content):
+            observed = hashlib.sha256()
+            remaining = len(content) + 1
+            while remaining:
+                block = os.read(descriptor, min(remaining, 1 << 20))
+                if not block:
+                    break
+                observed.update(block)
+                remaining -= len(block)
+            after = os.fstat(descriptor)
+
+            def identity(st):
+                return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+
+            if identity(before) == identity(after) and remaining == 1 and observed.hexdigest() == digest:
+                try:
+                    named = filesystem._open(path, os.O_PATH | os.O_NOFOLLOW, follow_symlinks=False)
+                except FileNotFoundError:
+                    return False
+                try:
+                    return identity(os.fstat(named)) == identity(after)
+                finally:
+                    os.close(named)
+        return False
+
+    async def mkdir(self, *, actor, space_id, expected_generation, operation_id, path, on_behalf_of: str | None = None, controller_admission=None):
         _path(path)
         return await self._mutate(
             actor=actor,
@@ -724,9 +841,10 @@ class SpaceFiles:
             operation_id=operation_id,
             request=self._provenance({"action": "mkdir", "path": path}, on_behalf_of),
             call=lambda volumes: self._io(volumes[space_id], lambda fs: fs.mkdir(path)),
+            controller_admission=controller_admission,
         )
 
-    async def rename(self, *, actor, space_id, expected_generation, operation_id, path, destination, on_behalf_of: str | None = None):
+    async def rename(self, *, actor, space_id, expected_generation, operation_id, path, destination, on_behalf_of: str | None = None, controller_admission=None):
         _path(path)
         _path(destination)
         return await self._mutate(
@@ -736,9 +854,10 @@ class SpaceFiles:
             operation_id=operation_id,
             request=self._provenance({"action": "rename", "path": path, "destination": destination}, on_behalf_of),
             call=lambda volumes: self._io(volumes[space_id], lambda fs: fs.rename(path, destination)),
+            controller_admission=controller_admission,
         )
 
-    async def remove(self, *, actor, space_id, expected_generation, operation_id, path, on_behalf_of: str | None = None):
+    async def remove(self, *, actor, space_id, expected_generation, operation_id, path, on_behalf_of: str | None = None, controller_admission=None):
         _path(path)
         return await self._mutate(
             actor=actor,
@@ -747,6 +866,7 @@ class SpaceFiles:
             operation_id=operation_id,
             request=self._provenance({"action": "remove", "path": path}, on_behalf_of),
             call=lambda volumes: self._io(volumes[space_id], lambda fs: fs.remove(path)),
+            controller_admission=controller_admission,
         )
 
     async def _transfer_audience(self, session, rows, actor, request):

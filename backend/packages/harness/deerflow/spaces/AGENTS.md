@@ -243,6 +243,12 @@ File intents commit before filesystem work; uncertain file/feature-workflow
 outcomes block WRITE/OPERATE/ADMIN, while other pending actions block all access.
 Busy refusals carry workflow/lifecycle cause. Completed IDs bind exact actor,
 generation and request. Drain the entire owned mutation before cancellation.
+`put_unique` deduplicates or selects a free numbered name inside one file intent;
+it rechecks the named regular inode after hashing. Collisions, including occupied
+nonregular leaves and overlong suffixes, never overwrite. Mutation parents reject
+symlinks; read link policy stays separate. Trusted controller admission borrows
+the mutation transaction before its intent and effect. Human-attributed requests
+retain the canonical six fields; callers drain spool and metadata workers too.
 Only exact ADMIN may catch `_volume`'s `BackingUnavailable`, skipping that
 resource's workflow probe and pending-operation gate. Principal/grant/generation
 and attachment guards remain mandatory; combined file rights and workflow lock

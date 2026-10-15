@@ -191,6 +191,47 @@ existing Home Space browser for file edits and downloads. Legacy chat features
 keep their existing behavior. Turning managed storage off makes persisted
 bindings unavailable instead of restoring creator-owner access.
 
+## Direct Home file writes
+
+The following APIs write through the host's existing Space filesystem. They
+require qualified execution, but do not start, stop or wait for a workspace;
+ordinary filesystem concurrency applies while the agent is running.
+
+| Endpoint | Current authority | Body and result |
+| --- | --- | --- |
+| `POST /api/agent-instances/{id}/conversations/{thread}/files?operation_id=…` | Use on this conversation, plus `threads:write` and `agents:read` ceilings | Multipart field `file`; returns 201 with `path`, `size`, `sha256`, `deduplicated` and `sandbox_path`. |
+| `PUT /api/agent-instances/{id}/home/content?path=…&operation_id=…` | Home WRITE, plus `agents:read/write` ceilings | Raw bytes; returns `path`, `size`, `sha256` and `deduplicated`. Add `expected_sha256` to edit the exact loaded revision. |
+| `POST /api/agent-instances/{id}/home/files` | Home WRITE, plus `agents:read/write` ceilings | JSON `operation_id`, `action` (`mkdir`, `rename`, `remove`), `path`, and `destination` only for rename; returns `complete` and `path`. |
+
+Use a fresh 32-character lowercase UUID-hex operation ID per request. Exact
+retries return the recorded result only after checking current access; changing
+the request under that ID refuses. Uploads are limited to 64 MiB per file and
+stream through bounded temporary spools. File contents never enter an SQL row.
+The agent is the file-operation actor; `on_behalf_of` records the human requester.
+Current human and conversation authority is rechecked under the mutation lock.
+
+Conversation uploads land in Home's `uploads/`, creating it before the first run
+when necessary. The returned sandbox path begins `/mnt/user-data/uploads/`.
+An existing file with identical size and SHA-256 is reused; different content
+uses the next free name, from `name (2).ext` through `name (99).ext`. Occupied
+names are never overwritten. Names that cannot fit a suffix return a collision.
+Edits require a matching SHA-256. Mutations refuse symlinked parents, protected
+`.agent-skill-packages` paths, and inactive agents. Removal never recursively
+deletes a directory. Before a write, quota checks require the body plus 1 MiB of
+available bytes and at least two free inodes.
+
+Failures use the existing refusal envelope, including `file-too-large` (413),
+`files-full` (507), `file-changed`, `name-collision`, `reserved-path`,
+`directory-not-empty` and `agent-not-active` (409), `invalid-name` (400),
+`not-found` (404), and `file-write-failed` (503). Pending lifecycle or file work
+uses `storage-busy` with its cause. Permission failures retain their access-denied
+response. Cancellation drains all owned file workers before closing descriptors.
+Upload context reads only confined, current regular-file metadata; it never
+opens file content, follows upload links or reads requester directories.
+
+These APIs add no database migration, native evidence format or configuration
+version. The product UI is delivered in the subsequent design stage.
+
 ## Delivery stages and schema
 
 Identity, creation, revisions, homes, rename, durable conversations, runtime,

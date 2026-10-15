@@ -136,6 +136,14 @@ the admitted Home backing, with current resident READ and captured generation.
 It requires the exact prepared execution; container paths are never host paths.
 References remain mutable and confer no human retrieval permission.
 
+`agent_files.py` owns direct host Home mutations through existing `SpaceFiles`:
+resident actor, human provenance, bounded bytes and immutable operation receipts.
+Borrow current human/conversation admission before receipts and inside each mutation;
+`context_admission_in_session` shares the admitted Home transaction, never a checkout.
+No workspace acquisition or containment is needed. Upload context stats regular,
+no-follow Home uploads only under the exact prepared execution. Drain file/metadata
+workers before scope cleanup; never inspect requester paths or upload contents.
+
 Public skill scope is read-only and excludes private/legacy/integration storage,
 including late activation and primed caches. Capture bounded public bytes and record
 their native revision separately from live host activation. Home copies are mutable
@@ -147,7 +155,7 @@ Capture epoch when queued and retain it across retries. Clear/import retire old
 epochs atomically; lifecycle generations and conversation tombstones reject stale
 writes. Use-only/disabled/unsupported scopes have no memory fallback. Queues stay
 owned through completion and shared-budget shutdown; do not prune live run queues.
-No scheduling, background tasks or separate storage/file-manager API is introduced.
+Scheduling and a separate storage ACL engine stay outside this module.
 
 Lifecycle uses the host-only callback inside qualified attachment retirement:
 resource→attachment→instance, capture exact intent/IDs and withdraw generation

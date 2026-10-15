@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
+from test_agent_instances import instances as instances
 
 from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
 from deerflow.config.paths import Paths
@@ -21,6 +22,56 @@ from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_t
 
 THREAD_ID = "thread-abc123"
 CONTEXT_SECTION_LIMIT = 10
+
+
+async def _agent_upload(instances, tmp_path, monkeypatch, *, present=True, forbid_outline=False):
+    import asyncio
+    from types import SimpleNamespace
+
+    from test_instance_output_presentation import prepared
+
+    from deerflow.agent_instances.runtime import InstanceSandboxProvider, execution_scope
+    from deerflow.agents.middlewares import uploads_middleware as module
+
+    execution, runtime, root = await prepared(instances)
+    (root / "uploads").mkdir(exist_ok=True)
+    if present:
+        (root / "uploads/report.txt").write_bytes(b"actual upload")
+    middleware = _middleware(tmp_path)
+    if forbid_outline:
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("An agent upload must not read requester directories or outlines")
+
+        monkeypatch.setattr(module, "extract_outline_for_file", forbidden)
+        monkeypatch.setattr(module, "is_binary_file", forbidden)
+        monkeypatch.setattr(middleware._paths, "sandbox_uploads_dir", forbidden)
+    message = _human("Read this", [{"filename": "report.txt", "size": 99999, "path": "/mnt/user-data/uploads/report.txt", "status": "uploaded"}])
+    with execution_scope(execution) as environment:
+        environment.provider = InstanceSandboxProvider(execution, SimpleNamespace(id="fixture"))
+        result = await asyncio.to_thread(middleware.before_agent, {"messages": [message]}, runtime)
+    return result, message
+
+
+@pytest.mark.asyncio
+async def test_instance_run_lists_uploads_found_in_the_agents_space(instances, tmp_path, monkeypatch):
+    result, original = await _agent_upload(instances, tmp_path, monkeypatch)
+    assert result["uploaded_files"][0]["size"] == 13
+    assert "/mnt/user-data/uploads/report.txt" in message_content_to_text(result["messages"][-1].content)
+    assert result["messages"][-1] is not original and original.content == "Read this"
+
+
+@pytest.mark.asyncio
+async def test_instance_run_drops_a_name_absent_from_the_agents_space(instances, tmp_path, monkeypatch):
+    result, _ = await _agent_upload(instances, tmp_path, monkeypatch, present=False)
+    assert result == {"uploaded_files": []}
+
+
+@pytest.mark.asyncio
+async def test_instance_run_reads_no_outline(instances, tmp_path, monkeypatch):
+    result, _ = await _agent_upload(instances, tmp_path, monkeypatch, forbid_outline=True)
+    assert result["uploaded_files"]
+    assert not {"outline", "outline_preview", "has_text_form"}.intersection(result["uploaded_files"][0])
 
 
 # ---------------------------------------------------------------------------

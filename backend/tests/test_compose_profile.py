@@ -859,7 +859,18 @@ def test_profile_nginx_conf_is_a_verbatim_copy_of_the_compose_nginx_conf() -> No
     source = (PROFILE / "nginx" / "nginx.conf").read_text(encoding="utf-8")
     assert "${" not in source
     assert set(_BARE_VARIABLE.findall(source)) == NGINX_VARIABLES
-    assert len(_BARE_VARIABLE.findall(source)) == 104
+    assert len(_BARE_VARIABLE.findall(source)) == 109
+
+
+def test_agent_upload_routes_have_a_streaming_65_mebibyte_proxy_limit() -> None:
+    source = (PROFILE / "nginx" / "nginx.conf").read_text(encoding="utf-8")
+    location = re.search(r"location ~ (\^/api/agent-instances/[^\n]+) \{([^}]+)\}", source)
+    assert location is not None
+    for path in ("/api/agent-instances/agent/conversations/thread/files", "/api/agent-instances/agent/home/content"):
+        assert re.match(location[1], path)
+    assert "client_max_body_size 65M;" in location[2]
+    assert "proxy_request_buffering off;" in location[2]
+    assert "proxy_read_timeout 600s;" in location[2]
 
 
 def _render_nginx(tmp_path: Path, environ: dict[str, str], *, source: Path | None = None) -> subprocess.CompletedProcess[str]:

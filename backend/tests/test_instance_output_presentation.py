@@ -97,3 +97,22 @@ async def test_metadata_read_fences_a_generation_change_after_execution_validati
         environment.provider = InstanceSandboxProvider(execution, SimpleNamespace(id="fixture"))
         result = await asyncio.to_thread(validate_presentation, runtime, ["/mnt/user-data/outputs/result.txt"])
     assert not result.presented and result.refused
+
+
+@pytest.mark.asyncio
+async def test_upload_metadata_stats_only_inside_uploads_as_the_agent(instances):
+    from deerflow.agent_instances.presentation import upload_metadata
+
+    execution, _, root = await prepared(instances)
+    (root / "uploads").mkdir(exist_ok=True)
+    (root / "uploads/report.txt").write_bytes(b"uploaded")
+    (root / "uploads/link.txt").symlink_to("report.txt")
+    (root / "uploads/directory").mkdir()
+    os.mkfifo(root / "uploads/pipe")
+    with execution_scope(execution) as environment:
+        environment.provider = InstanceSandboxProvider(execution, SimpleNamespace(id="fixture"))
+        assert (await asyncio.to_thread(upload_metadata, execution, "report.txt")).st_size == 8
+        for filename in ("missing", "directory", "pipe", "link.txt", "../outputs/result.txt", "sub/file"):
+            assert await asyncio.to_thread(upload_metadata, execution, filename) is None
+    with pytest.raises(ValueError, match="exact prepared Space"):
+        await asyncio.to_thread(upload_metadata, execution, "report.txt")

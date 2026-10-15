@@ -218,7 +218,7 @@ class ConfinedFilesystem:
     def _parent(self, path: str) -> tuple[int, str]:
         path = _path(path)
         parent, _, name = path.rpartition("/")
-        return self._open(parent, os.O_RDONLY | os.O_DIRECTORY, allow_root=True), name
+        return self._open(parent, os.O_RDONLY | os.O_DIRECTORY, allow_root=True, follow_symlinks=False), name
 
     def write_atomic(self, path: str, content: bytes, *, expected_sha256: str | None, create: bool = False) -> str:
         if not isinstance(content, bytes) or type(create) is not bool:

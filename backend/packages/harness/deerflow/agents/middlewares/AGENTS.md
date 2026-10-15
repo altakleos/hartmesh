@@ -66,7 +66,7 @@ strict providers reject.
 4. **PiiRedactionMiddleware** - *(optional, `pii_redaction.enabled`, default off, #3190)* Rewrites PII in genuine user messages (`wrap_model_call`) and remote-content tool results (`wrap_tool_call`, the tool-result allowlist) to irreversible value-derived placeholders. Deterministic regex detectors only. Innermost Layer-1 wrapper; compaction input, summaries, title input and queued memory payloads are redacted via `redact_text`.
 
 5. **ThreadDataMiddleware** - Creates per-thread directories under the user's isolation scope (`backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/{workspace,uploads,outputs}`); resolves identity via `resolve_runtime_user_id(runtime)`, including Gateway runtime context and standalone LangGraph Server auth, then falls back to the request ContextVar / `"default"`
-6. **UploadsMiddleware** - Lead-only uploads: runtime-user existence checks, invalid size → `0`. Copy messages preserving metadata. Current Chat paths override cached roots; absent personal files clears upload context before path lookup.
+6. **UploadsMiddleware** - Lead-only; preserve metadata. Chat uses current roots/existence checks, size fallback `0`, and clears absent-personal context before paths. Agents use confined Home metadata; see [scope](../../agent_instances/AGENTS.md).
 7. **SandboxMiddleware** - Acquires sandbox, stores `sandbox_id` in state. The
    lead runtime normally owns the thread's physical Agent-skill projection;
    delegated subagents and the prompt-only bootstrap agent are non-owners, so

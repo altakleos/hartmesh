@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Direct agent file writes
+
+AI assistant and AI employee conversations accept uploads directly into their
+persistent Home, before or during a run. Home file APIs support upload, revision-
+checked edit, new folder, rename and removal without starting a workspace. New
+uploads preserve existing files, reuse identical content or select a numbered
+name. Each file is limited to 64 MiB and records its human requester separately
+from the agent actor. Current permissions are checked again before publication
+and retry receipts; cancellation drains disk work before closing its files.
+Agent upload context uses current Home file metadata without reading content or
+the requester's directories.
+
+There is no database schema, native evidence format or configuration-version change.
+
 ### Agent lifecycle and file access
 
 Agent deletion atomically deletes its Home and makes one guarded reclamation

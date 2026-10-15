@@ -1,9 +1,9 @@
 # Gateway routers
 
-Feature bootstrap counts are global except the authenticated caller's `mine`.
-Own-file status closes SQL before kernel proof and uses assignable slots, not
-seat vacancy. Failed projection returns unavailable defaults; public health
-reports storage/agent state words only, without counts, bytes or paths. Unsupported identities never project a synthetic owner.
+Bootstrap counts are global except caller `mine`. Own-file status closes SQL
+before kernel proof and uses assignable slots, not seat vacancy. Failures project
+unavailable; public health exposes state words only. Unsupported identities never
+project a synthetic owner.
 
 Artifact `preview=namespace/id` uses `_artifact_projection.py`: match installed,
 enabled literal suffixes/compatibility queries after the read/owner fence.
@@ -19,7 +19,9 @@ private no-store responses. Edits recheck admission, revision and parent before
 replacement. Uploads qualify by phase, check every chunk's limits/quota, and commit
 only after final admission. Failure/cancellation drains all stages, including
 project attachments. `ChatFilesFull` uses the central refusal handler. Ordinary
-upload/list/delete/edit refuses instance conversations; use Home APIs.
+upload/list/delete/edit refuses instance conversations. `agent_home.py` owns
+direct Home writes: recheck human rights under mutation SQL; drain spool workers
+before close. Permission errors retain their access-denied response.
 
 `chat_cleanup.py` admits only purpose-bound deletion, including unsupported resource
 credentials, without a general User scope. Durable deletion and the stable
@@ -42,9 +44,8 @@ My Files/live shelf rows plus legacy skills; exclude Company/Homes/control/orpha
 Refresh exact job/authority before ready/headers; drain builders/download work.
 NoUser has no legacy fallback.
 
-Malformed/oversized/unsupported projections retain a bounded source-preview
-fallback in the UI; ownership and path denials do not. Platforms without safe
-descriptor-relative reads return 501 so source preview remains available.
+Malformed/oversized/unsupported projections retain bounded UI source preview;
+authority/path denials do not. Unsupported descriptor reads return 501 for fallback.
 
 Workspace prewarm checks `sandbox:execute` before provider lookup/scheduling,
 using the shared request authorization helper off-loop. Denial returns 202
