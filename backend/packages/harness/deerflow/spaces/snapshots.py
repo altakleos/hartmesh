@@ -38,8 +38,8 @@ def _sync_directory(path):
         os.close(fd)
 
 
-def backup(volume, backup_id):
-    target = volume.control_path / ("backup-" + backup_id + ".tar")
+def backup(volume, backup_id, *, target: Path | None = None):
+    target = Path(target) if target is not None else volume.control_path / ("backup-" + backup_id + ".tar")
     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
         with os.fdopen(fd, "wb", closefd=False) as output, tarfile.open(fileobj=output, mode="w", dereference=False) as archive:
@@ -59,7 +59,7 @@ def backup(volume, backup_id):
                         pending.append(child)
             output.flush()
         os.fsync(fd)
-        _sync_directory(volume.control_path)
+        _sync_directory(target.parent)
         return _digest(target)
     except BaseException:
         # No public bytes have changed. This exact file belongs to this call.

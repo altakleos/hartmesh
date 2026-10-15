@@ -198,10 +198,14 @@ async def _settle(files, candidate):
     return settled
 
 
-async def settle_interrupted(files):
+async def settle_interrupted(files, *, space_id=None, operation_id=None):
     log = getattr(files, "maintenance_logger", logger)
+    statement = select(SpaceFileOperationRow).where(SpaceFileOperationRow.phase == "pending")
+    if space_id is not None:
+        statement = statement.where(SpaceFileOperationRow.space_id == space_id, SpaceFileOperationRow.operation_id == operation_id)
+    statement = statement.order_by(SpaceFileOperationRow.created_at, SpaceFileOperationRow.space_id, SpaceFileOperationRow.operation_id)
     async with files.registry._sf() as session:
-        candidates = (await session.scalars(select(SpaceFileOperationRow).where(SpaceFileOperationRow.phase == "pending").order_by(SpaceFileOperationRow.created_at, SpaceFileOperationRow.space_id, SpaceFileOperationRow.operation_id))).all()
+        candidates = (await session.scalars(statement)).all()
     count = 0
     for candidate in candidates:
         action = candidate.request.get("action") if isinstance(candidate.request, dict) else None

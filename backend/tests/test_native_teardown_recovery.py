@@ -214,6 +214,7 @@ def test_initial_and_candidate_daemon_proof_inherit_the_pass_deadline(fixture, m
         return SimpleNamespace(returncode=0, stdout=json.dumps({"ID": "daemon-A", "OSType": "linux"}), stderr="")
 
     adapter = DockerStorageAdapter.__new__(DockerStorageAdapter)
+    adapter._operator_only = False
     adapter._host_verifier = lambda: None
     adapter._runner, adapter.host_id = engine.local._run, "daemon-A"
     monkeypatch.setattr(engine.local, "_runtime_runner", command)

@@ -66,6 +66,10 @@ Administrator inventory adds four summary fields without granting access.
 never resolves humans or performs file effects under that lock. Gateway maintenance
 expires 24-hour intents before release, including when no adapter is available;
 per-row failure cannot prevent other cleanup. Keep it in the owned maintenance task.
+Host orphan deletion repeats live owner/supervisor/Manage-holder checks inside
+Home→instance locks, including after dry-run. Atomically tombstone both rows while
+retaining the binding, slot accounting and pending intents; Gateway owns release.
+Host Home-grant callbacks borrow that transaction and require current human Inspect.
 
 `test_agent_instances.py` covers both SQL backends and actual storage APIs with
 injected directories/backings; these fixtures never qualify native quotas. The

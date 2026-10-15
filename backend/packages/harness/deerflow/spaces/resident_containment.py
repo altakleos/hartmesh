@@ -260,7 +260,7 @@ class _Scope(_RootAdmission):
     async def finalize(self):
         await self._confirmed_fenced()
         for identifier in sorted(self.originals):
-            await await_drained(run_sync_lifecycle_operation(self.worker.finalize, identifier))
+            await await_drained(run_sync_lifecycle_operation(self.worker.finalize, identifier, allow_prepared=True))
         for identifier in sorted(self.finished):
             await await_drained(run_sync_lifecycle_operation(self._observe_finished, identifier))
         await self._confirmed_fenced()

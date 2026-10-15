@@ -97,7 +97,7 @@ class _TeardownRemoval:
 class NativeCreateEvidence:
     """One lifecycle retains its exact qualified directory, never repairs it."""
 
-    def __init__(self, pool: Path, *, daemon_id: str, _expected_directory=None):
+    def __init__(self, pool: Path, *, daemon_id: str, _expected_directory=None, _prune_acknowledged=True):
         if not _text(daemon_id, 128):
             raise StorageHostUnqualified("Native creation requires a qualified daemon identity")
         self.pool, self.daemon_id = Path(pool), daemon_id
@@ -118,7 +118,8 @@ class NativeCreateEvidence:
                 raise StorageHostUnqualified("Native create evidence changed before namespace qualification")
             self._assert_current()
             records, _ = self._scan()
-            self._prune_acknowledged(records)
+            if _prune_acknowledged:
+                self._prune_acknowledged(records)
         except BaseException as exc:
             self.close()
             if isinstance(exc, (OSError, StoreError)):
@@ -656,3 +657,20 @@ class NativeCreateEvidence:
                 if descriptor is not None:
                     setattr(self, name, None)
                     os.close(descriptor)
+
+
+class NativeEvidenceReader:
+    """Descriptor-pinned mixed journal inspection with no publication capability."""
+
+    def __init__(self, pool: Path, *, daemon_id: str):
+        self._source = NativeCreateEvidence(pool, daemon_id=daemon_id, _prune_acknowledged=False)
+        self.daemon_id = daemon_id
+
+    def assert_current(self):
+        self._source._assert_current()
+
+    def snapshot(self):
+        return self._source.snapshot()
+
+    def close(self):
+        self._source.close()

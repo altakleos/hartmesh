@@ -424,6 +424,17 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
 
+    async def list_inflight_by_metadata(self, key: str, value: str | None = None) -> list[dict[str, Any]]:
+        """Read currently leased runs for an operator, independent of task registries.
+
+        Filter literal JSON keys in Python after selecting the active leased set.
+        This preserves missing/null and empty-string semantics on both databases.
+        """
+        stmt = select(RunRow).where(RunRow.operation_kind == "run", RunRow.status.in_(("pending", "running")), RunRow.lease_expires_at > datetime.now(UTC)).order_by(RunRow.created_at.asc(), RunRow.run_id.asc())
+        async with self._sf() as session:
+            rows = (await session.execute(stmt)).scalars()
+            return [self._row_to_dict(row) for row in rows if isinstance(row.metadata_json, dict) and key in row.metadata_json and (value is None or row.metadata_json[key] == value)]
+
     async def list_inflight(self, *, before=None):
         """Return persisted active runs for startup recovery."""
         if before is None:

@@ -367,6 +367,19 @@ records block ADMIN backing mutation and native release. Offload full runtime,
 journal and root proofs; drain workers before expiring the batch. Never reacquire
 a caller-owned Home lock. Missing/unreturned preparations still refuse.
 
+`operator_containment.py` reuses original graph/root proofs under sorted SQL
+parents, with an explicit `DockerStorageAdapter.for_operator`. It never owns a
+Gateway runtime, installs callbacks, writes native evidence or releases capacity.
+`NativeEvidenceReader` cannot prune ACKs or publish. Only status/verify request a
+pool probe; preserve other probe entries. Operator adapters reject execution and
+label-based fencing/cleanup. Retain v5 evidence after SQL fencing. The live
+Gateway may retire a prepared record only after confirmed fenced SQL, its canonical
+batch and fresh root/whole-graph absence proof, then perform normal finalization.
+Finished no-record retries recheck journal uncertainty after the final census.
+Targeted `settle_interrupted` requires both IDs and leaves other intents pending;
+no arguments retain maintenance's full pass. `snapshots.backup(target=...)` keeps
+exclusive private creation and archive guards, fsyncing the actual destination.
+
 `retire` accepts a host-only admission callback after locking scoped attachments
 inside its first ADMIN transaction, before pending/effects. Domain conditions add
 to mandatory resource checks. A rejected callback rolls back and propagates its

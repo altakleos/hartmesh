@@ -108,6 +108,7 @@ def test_managed_activation_refuses_changed_original_record_before_start(managed
     bridge = provider._native_creation
     saved = bridge.residents.for_attachment(ATTACHMENT)
     actual = DockerStorageAdapter.__new__(DockerStorageAdapter)
+    actual._operator_only = False
     actual._backend = local
     actual._configured_mounts = ()
     actual._containment_scope = SimpleNamespace(provider=provider)
@@ -146,6 +147,7 @@ def test_managed_activation_and_resume_accept_the_original_open_target(managed, 
     with preparation_scope(adapter, plan):
         local.prepare_resident(ATTACHMENT, "hartmesh-space-" + ATTACHMENT, MOUNTS, admitted_labels)
     actual = DockerStorageAdapter.__new__(DockerStorageAdapter)
+    actual._operator_only = False
     actual._backend, actual._configured_mounts = local, ()
     actual._containment_scope = SimpleNamespace(provider=provider)
     actual._validate = Mock(return_value="validated")
