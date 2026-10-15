@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -11,6 +11,106 @@ import pytest_asyncio
 from test_agent_instances import instances as instances
 
 from deerflow.spaces.contract import PrincipalRef
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_home", [False, True])
+@pytest.mark.parametrize("custody", ["personal", "company"])
+async def test_unfinished_expiry_keeps_younger_intent_and_releases_the_old_home_in_the_same_pass(startup, monkeypatch, caplog, with_home, custody):
+    from sqlalchemy import select
+    from test_agent_instances import pending_creation
+    from test_compose_user_reclamation import ContainmentFixture
+
+    from deerflow.persistence.agent_instances.model import AgentInstanceRow
+    from deerflow.persistence.spaces.files import SpaceBackingRow
+
+    ss, app, config, sf, catalog, _adapter, _agents = startup
+    monkeypatch.setattr(ss, "RECHECK_SECONDS", 3600)
+    caplog.set_level(logging.INFO, logger=ss.__name__)
+    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    await ss._maintenance_step(app, timeout=30)
+    app.state.agent_execution.qualified_provider = ContainmentFixture(sf)
+    agents = app.state.agent_instances
+    old = await pending_creation(agents, with_home=with_home, custody=custody)
+    young = await pending_creation(agents, custody="company" if custody == "personal" else "personal")
+    slot = None
+    async with sf() as session, session.begin():
+        (await session.get(AgentInstanceRow, old.id)).created_at = datetime.now(UTC) - timedelta(hours=25)
+        if with_home:
+            slot = (await session.execute(select(SpaceBackingRow.slot_id).where(SpaceBackingRow.space_id == old.home_id))).scalar_one()
+    await ss._maintenance_step(app, timeout=30)
+    async with sf() as session:
+        row = await session.get(AgentInstanceRow, old.id)
+        if with_home:
+            assert row.status == "deleted"
+        else:
+            assert row is None
+        assert (await session.get(AgentInstanceRow, young.id)).status == "provisioning"
+        if with_home:
+            assert (await session.execute(select(SpaceBackingRow).where(SpaceBackingRow.space_id == old.home_id))).scalar_one_or_none() is None
+    kind = "assistant" if custody == "personal" else "employee"
+    assert f"agents: unfinished {kind} {old.id} removed after 24 hours" in caplog.text
+    if with_home:
+        assert slot not in agents.files.bound_slots[kind] and slot not in agents.files.unclaimed_slots[kind]
+        replacement = await pending_creation(agents, with_home=True, custody=custody)
+        async with sf() as session:
+            assert (await session.execute(select(SpaceBackingRow.slot_id).where(SpaceBackingRow.space_id == replacement.home_id))).scalar_one() == slot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_fails", [False, True])
+async def test_expiry_runs_without_an_adapter_and_continues_after_one_row_fails(startup, monkeypatch, caplog, first_fails):
+    from sqlalchemy import update
+    from test_agent_instances import pending_creation
+
+    from deerflow.persistence.agent_instances.model import AgentInstanceRow
+    from deerflow.spaces.contract import SpaceConflict
+
+    ss, app, config, sf, _catalog, _adapter, _agents = startup
+    monkeypatch.setattr(ss, "RECHECK_SECONDS", 3600)
+    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    await ss._maintenance_step(app, timeout=30)
+    agents = app.state.agent_instances
+    pending = [await pending_creation(agents, custody=custody) for custody in ("personal", "company")]
+    pending.sort(key=lambda row: row.id)
+    async with sf() as session, session.begin():
+        await session.execute(update(AgentInstanceRow).values(created_at=datetime.now(UTC) - timedelta(hours=25)))
+    original = agents.abandon_creation
+
+    async def abandon(instance_id):
+        if first_fails and instance_id == pending[0].id:
+            raise SpaceConflict("private content must not reach the journal")
+        return await original(instance_id)
+
+    monkeypatch.setattr(agents, "abandon_creation", abandon)
+    app.state.agent_execution.qualified_provider = None
+    app.state.agent_execution.storage_reason = "admission-failed"
+    await ss._maintenance_step(app, timeout=30)
+    async with sf() as session:
+        assert (await session.get(AgentInstanceRow, pending[0].id) is not None) is first_fails
+        assert await session.get(AgentInstanceRow, pending[1].id) is None
+    assert "private content must not reach the journal" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unfinished_scan_failure_logs_only_its_class_and_continues_release(monkeypatch, caplog):
+    from app.gateway import storage_spaces as ss
+
+    def failed_session():
+        raise RuntimeError("private SQL parameters and tenant content")
+
+    files = SimpleNamespace(settle_interrupted=AsyncMock(return_value=0))
+    app = SimpleNamespace(state=SimpleNamespace(storage_spaces=files, agent_instances=SimpleNamespace(_sf=failed_session), agent_execution=ss.ExecutionStatus(agents_ready_reported=True)))
+    monkeypatch.setattr(ss, "_resident_step", AsyncMock())
+    monkeypatch.setattr(ss, "storage_state", AsyncMock(return_value=ss.StorageState("ready")))
+    release = AsyncMock(return_value=1)
+    monkeypatch.setattr(ss, "finish_releases", release)
+    monkeypatch.setattr(ss, "assign_spaces", AsyncMock())
+    assert await ss._maintenance_step(app, timeout=5)
+    release.assert_awaited_once_with(app)
+    assert app.state.agent_execution.spaces_reclaimed == 1
+    assert "unfinished creation cleanup remains pending" in caplog.text and "RuntimeError" in caplog.text
+    assert "private SQL parameters and tenant content" not in caplog.text
 
 
 @pytest_asyncio.fixture

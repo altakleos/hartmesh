@@ -9,7 +9,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 STARTUP_BUDGET_SECONDS = 120
 ADAPTER_LIMIT_SECONDS = 30
 RECHECK_SECONDS = 60
+UNFINISHED_CREATION_SECONDS = 86400
 AGENTS_HOLD_PATH = Path(os.environ.get("HARTMESH_OPERATOR_DIR", "/srv/hartmesh/operator")) / "agents-hold"
 STORAGE_REASONS = ("disk-too-small", "storage-pool-missing", "inventory-unreadable", "host-unqualified", "admission-failed")
 EXECUTION_REASONS = ("storage-unavailable", "agents-none", "operator-hold", "host-replaced", "space-unverified", "space-not-assigned")
@@ -923,6 +924,26 @@ async def _resident_step(app, *, timeout):
     return True
 
 
+async def abandon_unfinished(app) -> int:
+    """Discard expired setup intents before this pass releases their Spaces."""
+    agents = getattr(app.state, "agent_instances", None)
+    if agents is None:
+        return 0
+    cutoff = datetime.now(UTC) - timedelta(seconds=UNFINISHED_CREATION_SECONDS)
+    async with agents._sf() as session:
+        rows = (await session.execute(select(AgentInstanceRow.id, AgentInstanceRow.custody).where(AgentInstanceRow.status == "provisioning", AgentInstanceRow.created_at < cutoff).order_by(AgentInstanceRow.id))).all()
+    removed = 0
+    for instance_id, custody in rows:
+        try:
+            await agents.abandon_creation(instance_id)
+        except Exception as error:
+            logger.warning("agents: unfinished creation cleanup remains pending (%s)", type(error).__name__)
+            continue
+        removed += 1
+        logger.info("agents: unfinished %s %s removed after 24 hours", "assistant" if custody == "personal" else "employee", instance_id)
+    return removed
+
+
 async def _maintenance_step(app, *, timeout: float) -> bool:
     status = app.state.agent_execution
     if getattr(app.state, "storage_spaces", None) is None:
@@ -933,6 +954,10 @@ async def _maintenance_step(app, *, timeout: float) -> bool:
             await _resident_step(app, timeout=0)
         except Exception:
             logger.exception("agents: startup accounting retry remains pending")
+        try:
+            await abandon_unfinished(app)
+        except Exception as error:
+            logger.warning("agents: unfinished creation cleanup remains pending (%s)", type(error).__name__)
         if (await storage_state(app)).state in ("off", "unavailable"):
             return
         runtime = getattr(app.state, "resident_runtime", None)

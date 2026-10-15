@@ -2,6 +2,7 @@
 
 import asyncio
 import uuid
+from datetime import datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -12,7 +13,7 @@ from deerflow.agent_instances.contract import AgentConflict, AgentDenied, AgentP
 from deerflow.agent_instances.directory import InstanceDirectory
 from deerflow.agent_instances.service import AgentInstances
 from deerflow.persistence.agent_instances.model import AgentDefinitionRevisionRow, AgentInstanceGrantRow, AgentInstanceRow, AgentLifecycleRow
-from deerflow.spaces.contract import InvalidPrincipal, Permission, PrincipalRef, SpaceDenied
+from deerflow.spaces.contract import InvalidPrincipal, Permission, PrincipalRef, SpaceConflict, SpaceDenied
 from deerflow.spaces.principals import HostPrincipalResolver
 
 
@@ -41,6 +42,289 @@ def definition(owner="alice", name="analyst", soul="Help with analysis."):
 
 async def create(service, *, actor=ALICE, creation_id=None, name="Analyst", custody="personal", supervisor=None, snapshot=None):
     return await service.create(actor=actor, creation_id=creation_id or operation(), name=name, custody=custody, supervisor=supervisor or actor, definition=snapshot or definition())
+
+
+async def pending_creation(service, *, with_home=False, actor=ALICE, custody="personal"):
+    snapshot = definition(actor.subject_id)
+    request = {"name": "Unfinished", "custody": custody, "supervisor_id": actor.subject_id, "definition_name": snapshot.config["name"]}
+    pending = await service._enroll(actor, request, snapshot, operation())
+    return await service._bind_home(actor, pending) if with_home else pending
+
+
+@pytest.mark.asyncio
+async def test_list_leaves_out_provisioning_rows_unless_include_provisioning(instances, monkeypatch):
+    import httpx
+    from test_agent_conversation_http import app_for
+
+    service, _files, _sf, _catalog = instances
+    ready = await create(service)
+    pending = await pending_creation(service)
+    app = app_for(service, None, None, monkeypatch, actor=ALICE)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", cookies={"access_token": "fixture"}) as client:
+        response = await client.get("/api/agent-instances")
+        assert response.status_code == 200, response.text
+        assert [row["id"] for row in response.json()["instances"]] == [ready.id]
+        response = await client.get("/api/agent-instances", params={"include_provisioning": "true"})
+        assert {row["id"] for row in response.json()["instances"]} == {ready.id, pending.id}
+
+
+@pytest.mark.asyncio
+async def test_list_filters_by_custody_and_puts_the_callers_own_assistants_first(instances, monkeypatch):
+    import httpx
+    from test_agent_conversation_http import app_for
+
+    service, _files, sf, _catalog = instances
+    other = await create(service, actor=BOB, snapshot=definition("bob"))
+    own = await create(service)
+    employee = await create(service, custody="company")
+    async with sf() as session, session.begin():
+        session.add(AgentInstanceGrantRow(instance_id=other.id, user_id="alice", permissions=int(AgentPermission.INSPECT)))
+        (await session.get(AgentInstanceGrantRow, (own.id, "alice"))).permissions = int(AgentPermission.USE)
+    app = app_for(service, None, None, monkeypatch, actor=ALICE)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", cookies={"access_token": "fixture"}) as client:
+        response = await client.get("/api/agent-instances", params={"custody": "personal"})
+        assert response.status_code == 200, response.text
+        assert [row["id"] for row in response.json()["instances"]] == [own.id, other.id]
+        assert response.json()["instances"][0]["permissions"] == int(AgentPermission.USE)
+        response = await client.get("/api/agent-instances", params={"custody": "company"})
+        assert [row["id"] for row in response.json()["instances"]] == [employee.id]
+        assert (await client.get("/api/agent-instances", params={"custody": "invalid"})).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_list_carries_the_callers_unfinished_creations(instances, monkeypatch):
+    import httpx
+    from test_agent_conversation_http import app_for
+
+    service, _files, _sf, _catalog = instances
+    personal = await pending_creation(service)
+    company = await pending_creation(service, custody="company")
+    await pending_creation(service, actor=BOB)
+    app = app_for(service, None, None, monkeypatch, actor=ALICE)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", cookies={"access_token": "fixture"}) as client:
+        response = await client.get("/api/agent-instances", params={"limit": 1, "offset": 500})
+        assert response.status_code == 200, response.text
+        assert response.json()["instances"] == []
+        assert [row["id"] for row in response.json()["unfinished"]] == [personal.id, company.id]
+        assert all(set(row) == {"id", "name", "custody", "created_at"} for row in response.json()["unfinished"])
+        assert all(datetime.fromisoformat(row["created_at"]).utcoffset() == timedelta(0) for row in response.json()["unfinished"])
+        response = await client.get("/api/agent-instances", params={"custody": "company", "limit": 1, "offset": 500})
+        assert [row["id"] for row in response.json()["unfinished"]] == [company.id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile,expected_name", [({"name": "Supervisor", "email": "supervisor@example.com"}, "Supervisor"), ({"name": None, "email": "supervisor@example.com"}, "supervisor@example.com"), (None, None)])
+async def test_an_administrators_list_of_ai_employees_holds_every_one_and_four_keys_for_one_without_a_grant(instances, monkeypatch, profile, expected_name):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    import httpx
+    from test_agent_conversation_http import app_for
+
+    from app.gateway import deps
+
+    service, _files, sf, _catalog = instances
+    assigned = await create(service, custody="company")
+    unassigned = await create(service, custody="company", supervisor=BOB)
+    async with sf() as session, session.begin():
+        await session.delete(await session.get(AgentInstanceGrantRow, (unassigned.id, "alice")))
+    app = app_for(service, None, None, monkeypatch, actor=ALICE)
+    repo = SimpleNamespace(get_user_by_id=AsyncMock(return_value=None if profile is None else SimpleNamespace(**profile)))
+    monkeypatch.setattr(deps, "get_user_repo", lambda: repo)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", cookies={"access_token": "fixture"}) as client:
+        response = await client.get("/api/agent-instances", params={"custody": "company"})
+        assert response.status_code == 200, response.text
+        entries = {row["id"]: row for row in response.json()["instances"]}
+        assert entries[assigned.id]["permissions"] == 7
+        assert entries[unassigned.id] == {"id": unassigned.id, "name": unassigned.name, "supervisor_name": expected_name, "status": "active"}
+        assert (await client.get("/api/agent-instances/" + unassigned.id)).status_code == 404
+        assert unassigned.id not in {row["id"] for row in (await client.get("/api/agent-instances")).json()["instances"]}
+    async with sf() as session:
+        assert await session.get(AgentInstanceGrantRow, (unassigned.id, "alice")) is None
+    limited = app_for(service, None, None, monkeypatch, actor=BOB)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=limited), base_url="http://test", cookies={"access_token": "fixture"}) as client:
+        response = await client.get("/api/agent-instances", params={"custody": "company"})
+        assert {row["id"] for row in response.json()["instances"]} == {unassigned.id}
+        assert response.json()["instances"][0]["permissions"] == 7
+
+
+@pytest.mark.asyncio
+async def test_abandon_creation_without_a_space_deletes_the_row_and_its_grants(instances, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    service, _files, sf, _catalog = instances
+    pending = await pending_creation(service)
+    monkeypatch.setattr(service.directory, "human", AsyncMock(side_effect=AssertionError("Host abandonment does not resolve a principal")))
+    assert await service.abandon_creation(pending.id) is None
+    async with sf() as session:
+        assert await session.get(AgentInstanceRow, pending.id) is None
+        assert await session.scalar(select(func.count()).select_from(AgentInstanceGrantRow).where(AgentInstanceGrantRow.instance_id == pending.id)) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("on_behalf_of", [None, "bob"])
+async def test_abandon_creation_with_a_space_marks_the_agent_and_its_space_deleted_together(instances, monkeypatch, on_behalf_of):
+    from unittest.mock import AsyncMock
+
+    from deerflow.persistence.spaces.files import SpaceBackingRow
+    from deerflow.persistence.spaces.model import SpaceEventRow, SpaceRow
+
+    service, files, sf, _catalog = instances
+    pending = await pending_creation(service, with_home=True)
+    async with sf() as session:
+        generation = (await session.get(SpaceRow, pending.home_id)).generation
+    with monkeypatch.context() as patch:
+        patch.setattr(service.directory, "human", AsyncMock(side_effect=AssertionError("Host abandonment does not resolve a principal")))
+        patch.setattr(files, "_volume", lambda *_args: pytest.fail("Abandonment marks rows; release owns file cleanup"))
+        assert await service.abandon_creation(pending.id, on_behalf_of=on_behalf_of) == pending.home_id
+    async with sf() as session:
+        agent, home = await session.get(AgentInstanceRow, pending.id), await session.get(SpaceRow, pending.home_id)
+        assert agent.status == home.status == "deleted"
+        assert agent.generation == pending.generation + 1 and home.generation == generation + 1
+        (event,) = (await session.scalars(select(SpaceEventRow).where(SpaceEventRow.space_id == home.id, SpaceEventRow.action == "delete"))).all()
+        assert (event.actor_kind, event.actor_id) == ("human", on_behalf_of or "alice")
+        assert event.details == {"retained_backups": False, "retained_binding": True, "by": "host", "cause": "creation-abandoned"}
+        assert await session.scalar(select(SpaceBackingRow).where(SpaceBackingRow.space_id == home.id)) is not None
+    assert (await service.personal_counts(actor=ALICE))["mine"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["active", "suspended", "archived", "deleted"])
+async def test_abandon_creation_refuses_a_row_that_is_not_provisioning(instances, status):
+    from deerflow.agent_instances.contract import Refusal
+    from deerflow.persistence.spaces.model import SpaceRow
+
+    service, _files, sf, _catalog = instances
+    agent = await create(service)
+    async with sf() as session, session.begin():
+        (await session.get(AgentInstanceRow, agent.id)).status = status
+    with pytest.raises(Refusal) as refused:
+        await service.abandon_creation(agent.id)
+    assert refused.value.reason == "not-removable"
+    async with sf() as session:
+        assert (await session.get(AgentInstanceRow, agent.id)).status == status
+        assert (await session.get(SpaceRow, agent.home_id)).status == "active"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exhausted", ["agent", "space"])
+async def test_abandon_creation_rolls_back_both_rows_when_a_generation_is_exhausted(instances, exhausted):
+    from deerflow.persistence.spaces.model import SpaceRow
+
+    service, _files, sf, _catalog = instances
+    pending = await pending_creation(service, with_home=True)
+    async with sf() as session, session.begin():
+        row = await session.get(AgentInstanceRow, pending.id) if exhausted == "agent" else await session.get(SpaceRow, pending.home_id)
+        row.generation = 2**31 - 1
+    with pytest.raises((AgentConflict, SpaceConflict)):
+        await service.abandon_creation(pending.id)
+    async with sf() as session:
+        assert (await session.get(AgentInstanceRow, pending.id)).status == "provisioning"
+        assert (await session.get(SpaceRow, pending.home_id)).status == "active"
+
+
+@pytest.mark.asyncio
+async def test_abandon_creation_restarts_with_parent_lock_when_a_home_was_bound_after_the_read(instances, monkeypatch):
+    from deerflow.persistence.spaces.model import SpaceRow
+
+    service, _files, sf, _catalog = instances
+    pending = await pending_creation(service)
+    reserve, bound = service._reserve_writer, []
+
+    async def bind_before_reserving(session):
+        if not bound:
+            bound.append(await service._bind_home(ALICE, pending))
+        await reserve(session)
+
+    monkeypatch.setattr(service, "_reserve_writer", bind_before_reserving)
+    assert await service.abandon_creation(pending.id) == bound[0].home_id
+    async with sf() as session:
+        assert (await session.get(AgentInstanceRow, pending.id)).status == "deleted"
+        assert (await session.get(SpaceRow, bound[0].home_id)).status == "deleted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_home", [False, True])
+@pytest.mark.parametrize("release_outcome", ["complete", "pending", "raises"])
+async def test_delete_removes_a_provisioning_row_with_or_without_a_space_and_refuses_any_other(instances, monkeypatch, with_home, release_outcome):
+    from unittest.mock import AsyncMock
+
+    import httpx
+    from test_agent_conversation_http import app_for
+
+    from app.gateway.refusals import refusal_handler
+    from deerflow.agent_instances.contract import Refusal
+    from deerflow.spaces.recovery import SpaceRecovery
+
+    service, _files, _sf, _catalog = instances
+    pending = await pending_creation(service, with_home=with_home)
+    app = app_for(service, None, None, monkeypatch, actor=ALICE)
+    app.add_exception_handler(Refusal, refusal_handler)
+    service.execution_probe = AsyncMock(side_effect=AssertionError("Removing an unfinished creation needs no execution admission"))
+    original = SpaceRecovery.host_release
+
+    async def reclaim(recovery, home_id):
+        if release_outcome == "raises":
+            raise OSError("private-reclamation-error")
+        if release_outcome == "pending":
+            return {"complete": False, "slot_released": False}
+        return await original(recovery, home_id)
+
+    release = AsyncMock(side_effect=reclaim)
+    monkeypatch.setattr(SpaceRecovery, "host_release", lambda recovery, home_id: release(recovery, home_id))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", cookies={"access_token": "fixture"}) as client:
+        path = "/api/agent-instances/" + pending.id
+        response = await client.delete(path)
+        assert response.status_code == 204 and response.content == b"", response.text
+        assert release.await_count == int(with_home)
+        assert (await client.delete(path)).status_code == 404
+        active = await create(service)
+        response = await client.delete("/api/agent-instances/" + active.id)
+        assert response.status_code == 409 and response.json()["reason"] == "not-removable"
+
+
+@pytest.mark.asyncio
+async def test_roles_route_serves_the_template_list_or_the_tenant_file(tmp_path, monkeypatch, caplog):
+    import json
+    from types import SimpleNamespace
+
+    import httpx
+    from test_agent_conversation_http import app_for
+    from test_tenant_bundle import _role
+
+    from app.gateway import deps
+    from app.gateway.routers import agent_instances as routes
+    from deerflow.config.app_config import AppConfig
+    from deerflow.skills.types import SkillCategory
+
+    config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}, "tenant_bundle": {"path": str(tmp_path)}, "ui": {"roles": [_role()]}})
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", lambda: config)
+    monkeypatch.setattr(
+        "deerflow.agents.lead_agent.prompt.get_enabled_skills_for_config", lambda *_args, **_kwargs: [SimpleNamespace(name="data-analysis", category=SkillCategory.PUBLIC), SimpleNamespace(name="private-value", category="custom")]
+    )
+    app = app_for(None, None, None, monkeypatch)
+    monkeypatch.setattr(deps, "get_config", lambda: config)
+    path = "/api/agent-instances/roles"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", cookies={"access_token": "fixture"}) as client:
+        response = await client.get(path)
+        assert response.status_code == 200, response.text
+        assert response.json() == {"roles": [{**_role(), "work_policy": None}]}
+        role = _role(id="tenant-researcher", skills=["data-analysis", "private-value", "not-installed"])
+        file = tmp_path / "roles.json"
+        file.write_text(json.dumps([role]), encoding="utf-8")
+        response = await client.get(path)
+        assert response.status_code == 200 and response.json()["roles"][0]["id"] == "tenant-researcher"
+        assert response.json()["roles"][0]["skills"] == ["data-analysis"]
+        assert "unknown skill" in caplog.text and "private-value" not in caplog.text and "not-installed" not in caplog.text
+        file.write_text("[]", encoding="utf-8")
+        assert (await client.get(path)).json() == {"roles": []}
+        file.write_text("{}", encoding="utf-8")
+        assert (await client.get(path)).json() == {"roles": [{**_role(), "work_policy": None}]}
+        monkeypatch.setattr(routes, "get_agents_api_config", lambda: SimpleNamespace(enabled=False))
+        assert (await client.get(path)).status_code == 403
+    denied = app_for(None, None, None, monkeypatch, permissions=[])
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=denied), base_url="http://test", cookies={"access_token": "fixture"}) as client:
+        assert (await client.get(path)).status_code == 403
 
 
 @pytest.mark.asyncio

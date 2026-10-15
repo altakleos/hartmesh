@@ -66,6 +66,9 @@ AI assistant/AI employee counts in `agents_api`, and optional frozen `ui.roles`
 briefs. Role briefs are deployment data, not platform business rules or runtime
 permissions. Their names/descriptions are single-line text; soul permits newlines.
 The Compose template supplies briefs but does not enable storage or agents here.
+Tenant `roles.json` uses this same frozen schema: absent/invalid falls back to
+`ui.roles`, while `[]` overrides it. Diagnostics name only indexes, known fields
+and rules. Role discovery removes disabled/private skills without exposing names.
 Its credential scanner recognizes `ui.roles[].work_policy.responsibilities[].key`
 as a public identifier; adjacent and nested credential fields remain protected.
 

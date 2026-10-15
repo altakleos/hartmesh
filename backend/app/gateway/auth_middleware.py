@@ -146,10 +146,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # constrain @require_permission routes, so any route outside the
             # explicit PAT policy is closed to PAT callers outright — an
             # all-scopes token must not reach undecorated mutation routes.
-            if not is_pat_allowed_route(request.method, get_request_route_path(request)):
+            route_path = get_request_route_path(request)
+            if not is_pat_allowed_route(request.method, route_path):
+                detail = "PAT credentials are not permitted on this route"
+                if request.method == "GET" and route_path == "/api/v1/auth/users":
+                    detail = "This endpoint requires interactive session authentication"
                 return JSONResponse(
                     status_code=403,
-                    content={"detail": "PAT credentials are not permitted on this route"},
+                    content={"detail": detail},
                 )
             auth_source = AUTH_SOURCE_PAT
         elif access_token:

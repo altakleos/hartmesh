@@ -158,6 +158,50 @@ async def test_typed_physical_exhaustion_retains_unfinished_identity_and_retry_n
     assert catalog.volumes[binding.slot_id].kind == "assistant"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_kind", ["personal", "company", "company-copy"])
+async def test_http_late_kind_capacity_refusal_retains_intent_and_exact_retry_resumes_it(instances, monkeypatch, request_kind):
+    import httpx
+
+    from app.gateway.routers import agent_instances as routes
+
+    service, _files, sf, catalog = instances
+    specs = list(catalog.volumes.values())
+    for spec, kind in zip(specs, ("assistant", "employee", "user", "company"), strict=True):
+        spec.kind = kind
+    policy(service)
+    custody = "personal" if request_kind == "personal" else "company"
+    await create(service, custody=custody)
+    body = {"creation_id": operation(), "name": "New AI assistant" if custody == "personal" else "New AI employee"}
+    if request_kind == "company-copy":
+        source = await create(service)
+        endpoint = f"/api/agent-instances/{source.id}/company-copy"
+        body["generation"] = source.generation
+    else:
+        endpoint = "/api/agent-instances"
+        body.update(custody=custody, definition_name="analyst")
+        monkeypatch.setattr(routes, "_load_definition", AsyncMock(return_value=definition()))
+    async with sf() as session:
+        original_bindings = await session.scalar(select(func.count()).select_from(SpaceBackingRow))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=http_app(service)), base_url="http://test") as client:
+        response = await client.post(endpoint, json=body)
+        assert response.status_code == 409, response.text
+        assert response.json()["reason"] == ("ai-assistant-none-free" if custody == "personal" else "ai-employee-limit")
+        assert response.json()["allowed"] == 4 and response.json()["in_use"] == 2
+        async with sf() as session:
+            pending = await session.scalar(select(AgentInstanceRow).where(AgentInstanceRow.creation_id == body["creation_id"]))
+            assert pending is not None and pending.status == "provisioning" and pending.home_id is None
+            pending_id = pending.id
+            assert await session.scalar(select(func.count()).select_from(SpaceBackingRow)) == original_bindings
+        specs[2].kind = "assistant" if custody == "personal" else "employee"
+        response = await client.post(endpoint, json=body)
+        assert response.status_code == 201, response.text
+        assert response.json()["id"] == pending_id and response.json()["status"] == "active"
+        async with sf() as session:
+            binding = await session.scalar(select(SpaceBackingRow).where(SpaceBackingRow.space_id == response.json()["home_id"]))
+            assert binding.slot_id == specs[2].slot_id
+
+
 async def sql_human(service, files, sf):
     from deerflow.spaces.principals import HostPrincipalResolver
 

@@ -8,7 +8,7 @@ import time
 import urllib.parse
 from ipaddress import ip_address, ip_network
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from starlette.responses import RedirectResponse
@@ -41,6 +41,7 @@ from app.gateway.auth.oidc_state import (
 )
 from app.gateway.auth.password import equalize_password_timing
 from app.gateway.auth.pat import PAT_MAX_NAME_LENGTH
+from app.gateway.auth.people import UserIdentifier, lookup_people
 from app.gateway.auth.repositories.sqlite import NoSeatLeft
 from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME, SESSION_PERSISTENCE_COOKIE_NAME, set_session_cookie
 from app.gateway.auth.session_cookie_state import SKIP_AUTH_CSRF_COOKIE_STATE_ATTR
@@ -622,6 +623,13 @@ class AddedUserResponse(BaseModel):
 
 
 _ADD_USER_ADMIN_DETAIL = "Admin role required to add people"
+
+
+@router.get("/users", dependencies=[Depends(require_session_source)])
+async def list_people(request: Request, response: Response, query: str | None = Query(None, min_length=2, max_length=320), ids: list[UserIdentifier] | None = Query(None), limit: int = Query(20, ge=1, le=50)):
+    await get_current_user_from_request(request)
+    response.headers["Cache-Control"] = "no-store"
+    return {"users": await lookup_people(query=query, ids=ids, limit=limit)}
 
 
 @router.post("/users", response_model=AddedUserResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_session_source)])

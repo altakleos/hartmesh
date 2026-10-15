@@ -1,6 +1,7 @@
 """Durable conversation authority and host-owned execution admission."""
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -87,6 +88,21 @@ class AgentConversations:
         async with self._sf() as session:
             row = await session.get(AgentConversationRow, thread_id)
             return row.instance_id if row else None
+
+    async def bindings(self, thread_ids: Sequence[str]) -> dict[str, dict]:
+        """One host metadata read; callers admit their thread page beforehand."""
+        if not thread_ids:
+            return {}
+        async with self._sf() as session:
+            rows = (
+                await session.execute(
+                    select(AgentConversationRow.thread_id, AgentInstanceRow.id, AgentInstanceRow.name, AgentInstanceRow.custody, AgentInstanceRow.status, AgentConversationRow.requester_id)
+                    .select_from(AgentConversationRow)
+                    .join(AgentInstanceRow, AgentInstanceRow.id == AgentConversationRow.instance_id)
+                    .where(AgentConversationRow.thread_id.in_(thread_ids))
+                )
+            ).all()
+        return {thread_id: {"id": identity, "name": name, "custody": custody, "status": status, "requester_id": requester} for thread_id, identity, name, custody, status, requester in rows}
 
     async def clause(self, user_id, *, permission=AgentPermission.INSPECT):
         """Current grants filter before pagination; creator ownership grants nothing."""

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Agent discovery and setup recovery
+
+The management API adds custody filters, role templates, activity and execution
+status, and paginated conversations with current permission checks. Thread
+responses identify AI assistants and AI employees from durable bindings. Company
+administrator inventory exposes a minimal summary without granting access.
+Session-only people lookup uses literal prefixes with closed registration and
+exact addresses with open registration. Tenant `roles.json` may override the
+configured briefs; private or disabled skills are excluded from role discovery.
+
+Unfinished creations are listed separately, can be removed by a manager and expire
+after 24 hours. Maintenance confirms containment and cleanup before reusing their
+typed storage slots, and metadata cleanup remains available without an adapter.
+
+There is no database schema, native evidence format or configuration-version change.
+
 ### Agent runtime controls
 
 The Work command API supports stopping an exact attempt while preserving its

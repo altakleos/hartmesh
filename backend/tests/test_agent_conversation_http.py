@@ -31,6 +31,8 @@ def app_for(agents, authority, threads, monkeypatch, *, actor=BOB, permissions=N
     config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
     monkeypatch.setattr(deps, "get_config", lambda: config)
     app.state.agent_instances = agents
+    app.state.agent_execution = SimpleNamespace(unverified=set())
+    app.state.storage_spaces = agents.files if agents is not None else None
     app.state.agent_conversations = authority
     app.state.thread_store = threads
     app.state.run_store = MemoryRunStore()

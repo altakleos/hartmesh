@@ -9,7 +9,7 @@ revoked grants. An instance cannot execute while provisioning is incomplete.
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from deerflow.agent_instances.contract import ALL_AGENT_PERMISSIONS, AgentConflict, AgentDenied, AgentInstance, AgentPermission, CompanyProvisioningDenied, DefinitionSnapshot, InstanceIdentity, Refusal
@@ -118,22 +118,45 @@ class AgentInstances:
     async def get(self, *, actor, instance_id, permission=AgentPermission.INSPECT, include_deleted=False):
         return await self._read(actor, instance_id, permission, include_deleted=include_deleted)
 
-    async def list(self, *, actor, limit=100, offset=0, include_deleted=False):
+    async def list(self, *, actor, limit=100, offset=0, include_deleted=False, custody=None, include_provisioning=True):
         await self._human(actor)
-        if type(limit) is not int or not 1 <= limit <= 500 or type(offset) is not int or offset < 0:
+        if type(limit) is not int or not 1 <= limit <= 500 or type(offset) is not int or offset < 0 or custody not in {None, "personal", "company"}:
             raise ValueError("Invalid instance pagination")
+        order = [AgentInstanceRow.created_at, AgentInstanceRow.id]
+        if custody == "personal":
+            order.insert(0, (AgentInstanceRow.owner_id == actor.subject_id).desc())
         async with self._sf() as session:
             results = (
                 await session.execute(
                     select(AgentInstanceRow, AgentInstanceGrantRow.permissions)
                     .join(AgentInstanceGrantRow, AgentInstanceGrantRow.instance_id == AgentInstanceRow.id)
-                    .where(AgentInstanceGrantRow.user_id == actor.subject_id, True if include_deleted else AgentInstanceRow.status != "deleted")
-                    .order_by(AgentInstanceRow.created_at, AgentInstanceRow.id)
+                    .where(
+                        AgentInstanceGrantRow.user_id == actor.subject_id,
+                        True if include_deleted else AgentInstanceRow.status != "deleted",
+                        True if include_provisioning else AgentInstanceRow.status != "provisioning",
+                        True if custody is None else AgentInstanceRow.custody == custody,
+                    )
+                    .order_by(*order)
                     .limit(limit)
                     .offset(offset)
                 )
             ).all()
         return [self._view(*value) for value in results]
+
+    async def unfinished(self, *, actor, custody=None):
+        """The creator's incomplete intents, independent of the normal page."""
+        await self._human(actor)
+        if custody not in {None, "personal", "company"}:
+            raise ValueError("Invalid agent custody")
+        async with self._sf() as session:
+            rows = (
+                await session.scalars(
+                    select(AgentInstanceRow)
+                    .where(AgentInstanceRow.creator_id == actor.subject_id, AgentInstanceRow.status == "provisioning", True if custody is None else AgentInstanceRow.custody == custody)
+                    .order_by(AgentInstanceRow.created_at, AgentInstanceRow.id)
+                )
+            ).all()
+        return [{"id": row.id, "name": row.name, "custody": row.custody, "created_at": row.created_at.replace(tzinfo=UTC) if row.created_at.tzinfo is None else row.created_at.astimezone(UTC)} for row in rows]
 
     async def personal_counts(self, *, actor):
         await self._human(actor)
@@ -174,6 +197,54 @@ class AgentInstances:
                 return None
             # Returned only to trusted host admission, never as a raw API row.
             return row.creation_request, await self._stored_definition(session, row.definition_revision)
+
+    async def abandon_creation(self, instance_id: str, *, on_behalf_of: str | None = None) -> str | None:
+        """Host cleanup of an unfinished intent; release alone owns its files."""
+        from deerflow.persistence.spaces.model import SpaceRow
+        from deerflow.spaces.recovery import SpaceRecovery
+
+        def removable(row):
+            if row is None:
+                raise AgentDenied("Agent instance is unavailable")
+            if row.status != "provisioning":
+                raise Refusal("Only an AI assistant or AI employee whose setting up did not finish can be removed this way.", reason="not-removable")
+
+        async def perform():
+            for _ in range(3):
+                async with self._sf() as session:
+                    original = await session.get(AgentInstanceRow, instance_id)
+                    if original is None:
+                        raise AgentDenied("Agent instance is unavailable")
+                    home_id = original.home_id
+                if home_id is None:
+                    async with self._sf() as session, session.begin():
+                        await self._reserve_writer(session)
+                        row = (await session.execute(select(AgentInstanceRow).where(AgentInstanceRow.id == instance_id).with_for_update())).scalar_one_or_none()
+                        removable(row)
+                        if row.home_id is not None:
+                            continue
+                        await session.execute(delete(AgentInstanceGrantRow).where(AgentInstanceGrantRow.instance_id == instance_id))
+                        await session.delete(row)
+                        return None
+                async with self.files.registry.host_locked([home_id]) as (session, homes):
+                    row = (await session.execute(select(AgentInstanceRow).where(AgentInstanceRow.id == instance_id).with_for_update())).scalar_one_or_none()
+                    removable(row)
+                    if row.home_id != home_id:
+                        continue
+                    home = homes.get(home_id)
+                    if home is None or not isinstance(home, SpaceRow):
+                        raise AgentConflict("The unfinished agent's Home is unavailable")
+                    if row.generation >= 2**31 - 1:
+                        raise AgentConflict("The generation is exhausted; the agent cannot be removed")
+                    actor = PrincipalRef("human", on_behalf_of or row.creator_id)
+                    SpaceRecovery._advance(session, home, actor, "delete", {"retained_backups": False, "retained_binding": True, "by": "host", "cause": "creation-abandoned"})
+                    home.status = row.status = "deleted"
+                    row.generation += 1
+                    row.updated_at = datetime.now(UTC)
+                    return home_id
+            raise AgentConflict("The unfinished agent's Home changed; retry the removal")
+
+        return await await_drained(perform())
 
     async def _enroll(self, actor, request, definition, creation_id):
         for attempt in range(3):
