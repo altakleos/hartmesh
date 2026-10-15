@@ -119,6 +119,17 @@ class NativeResidentIndex:
             self._items.pop(record.id)
             self._touch(record)
 
+    def _remove_restored(self, record, completion):
+        """Only the owning Gateway's durable absence completion may admit a foreign original."""
+        from deerflow.spaces.resident_restoration import _CompletionPermit
+
+        with self.lock:
+            if type(completion) is not _CompletionPermit or not isinstance(record, NativeResidentRecord) or record.phase != "retiring" or self._items.get(record.id) != record:
+                raise StorageHostUnqualified("Restored completion lacks its exact retained original")
+            completion.require_index(self, record)
+            self._items.pop(record.id)
+            self._touch(record)
+
     def records(self):
         with self.lock:
             return tuple(self._items.values())

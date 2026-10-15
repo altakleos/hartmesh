@@ -27,7 +27,7 @@ from deerflow.spaces.attachments import SpaceAttachments
 from deerflow.utils.file_io import run_file_io
 
 
-async def build(instances, fixture, tmp_path, *, missing, retain_previous=False):
+async def build(instances, fixture, tmp_path, *, missing, retain_previous=False, readonly=False):
     from app.gateway.resident_runtime import ResidentRuntime
     from app.gateway.storage_spaces import ExecutionStatus
 
@@ -36,7 +36,7 @@ async def build(instances, fixture, tmp_path, *, missing, retain_previous=False)
     adapter = ContainedProvider()
     attachments = SpaceAttachments(files, adapter)
     storage = files, sf, catalog, attachments, adapter
-    factory, record, _captured, objects, calls = await prepare(storage, fixture, space_id=identity.home_id, actor=identity.principal)
+    factory, record, _captured, objects, calls = await prepare(storage, fixture, space_id=identity.home_id, actor=identity.principal, readonly=readonly)
     previous = await attachments.retained_claims() if retain_previous else None
     await eligibility(storage, record, missing=missing)
     provider = _make_provider(tmp_path)

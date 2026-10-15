@@ -26,7 +26,7 @@ networks are observed, never owned or removed. Creation ACK pruning excludes the
 exact SQL correlation alone deduplicates a resident capacity charge.
 Create-only ACK pruning never removes teardown. Exact primary correlation is unique;
 publication retries reprove durability, and failed terminal fsync retains the record
-and FD in memory. Same-daemon mutations only; never infer a target from slot order.
+and FD in memory. Ordinary mutations require the same daemon; never infer a target from slot order.
 Pending survives restart; unknown/malformed/staging evidence fails closed and is
 never evicted. `ready`/`creation_ready` and `teardown_revision` are memory-only;
 IO methods belong off-loop. Teardown publication/completion closes the bridge's
@@ -48,6 +48,16 @@ refuse effects and completion. Recovery alone bridges each effect and terminal
 completion back to owning-loop eligibility using the suspended parent's borrowed
 session. The callback owns its deadline and drains fully, without another checkout
 or a worker Future timeout. Normal fenced retries remain observation-only.
+Private `resident_restoration.py` provides a distinct Gateway absence-only scope
+for acknowledged host replacements and stable roots on a changed device. It
+retains original v5 identities, independently checks original Shared revisions,
+and pins current devices/projections for the operation. Recheck the exact mapping,
+borrowed live-run snapshot, pending creates and original ID/name absence under
+Home, provider batch and sorted parents. Never grant foreign resource effects or
+install this scope globally. A private exact completion permit seals only after
+terminal journal fsync and absence; consume it for memory accounting even if the
+deadline expires or the owner starts closing. Drain workers before expiring the
+batch, and clear the exact registry claim after confirmed index completion.
 Compose agent counts remain disabled. Generic release uses the existing
 host-release proof and a native slot reservation before SQL locks; foreign native
 holders keep their backing and evidence. Released User policy stays in Gateway.

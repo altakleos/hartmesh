@@ -10,6 +10,12 @@ from pathlib import PurePosixPath
 from deerflow.spaces.filesystem import FilesystemUnavailable
 
 
+def _readonly_revision(backing_handle, slot_id, filesystem_uuid, source, root_inode, control_inode, identity):
+    """Stable digest of an explicitly captured projection's original facts."""
+    facts = (backing_handle, slot_id, filesystem_uuid, source, root_inode, control_inode, identity)
+    return hashlib.sha256(json.dumps(facts, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class ReadOnlyRoot:
     volume: object
@@ -41,8 +47,7 @@ class ReadOnlyRoot:
 
     @property
     def revision(self):
-        facts = (getattr(self.volume, "backing_handle", None), self.slot_id, self.volume.spec.filesystem_uuid, self.source, self.volume.root_inode, self.volume.control_inode, self.identity)
-        return hashlib.sha256(json.dumps(facts, separators=(",", ":")).encode("utf-8")).hexdigest()
+        return _readonly_revision(getattr(self.volume, "backing_handle", None), self.slot_id, self.volume.spec.filesystem_uuid, self.source, self.volume.root_inode, self.volume.control_inode, self.identity)
 
     def _identity(self):
         with self.volume.filesystem() as filesystem:

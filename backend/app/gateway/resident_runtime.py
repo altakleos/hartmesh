@@ -217,8 +217,10 @@ class ResidentRuntime:
 
     async def recover_originals(self, *, deadline):
         """Bounded recovery of the original startup set, before the complete census."""
+        from deerflow.community.aio_sandbox.native_resource_set import NativeResourceSet
         from deerflow.spaces.resident_containment import _fenced_facts
         from deerflow.spaces.resident_recovery import NativeResidentRecoveryScopes
+        from deerflow.spaces.resident_restoration import RestoredResidentCompletionScopes
 
         factory = getattr(self.attachments.provider, "_containment_scope", None)
         if factory is None:
@@ -229,11 +231,42 @@ class ResidentRuntime:
         await await_drained(run_sync_lifecycle_operation(bridge.assert_current, teardown=True))
         records = bridge.residents.records()
         if self._startup_record_ids is None:
-            async with asyncio.timeout_at(deadline), self.files.registry._sf() as session:
-                phases = dict((await session.execute(select(SpaceAttachmentRow.id, SpaceAttachmentRow.phase).where(SpaceAttachmentRow.id.in_([record.attachment_id for record in records])))).all())
-            self._startup_record_ids = frozenset(record.id for record in records if phases.get(record.attachment_id) in (None, "fenced"))
+            self._startup_record_ids = frozenset(record.id for record in records)
             self._startup_originals = {record.id: record for record in records if record.id in self._startup_record_ids}
         records = sorted((record for record in records if record.id in self._startup_record_ids), key=lambda record: record.id)
+        if not records:
+            return ()
+        # Ordinary current-device active attachments belong to reconciliation,
+        # not this four-original recovery budget. Classify before rotating so
+        # healthy records cannot starve the final census.
+        async with asyncio.timeout_at(deadline), self.files.registry._sf() as session:
+            phases = dict((await session.execute(select(SpaceAttachmentRow.id, SpaceAttachmentRow.phase).where(SpaceAttachmentRow.id.in_([record.attachment_id for record in records])))).all())
+
+        def candidates():
+            selected = []
+            for index, original in enumerate(records):
+                if time.monotonic() >= deadline:
+                    selected.extend(records[index:])
+                    break
+                if original.daemon_id != bridge.evidence.daemon_id or phases.get(original.attachment_id) in (None, "fenced"):
+                    selected.append(original)
+                    continue
+                try:
+                    changed = False
+                    for root in original.roots:
+                        if time.monotonic() >= deadline:
+                            changed = True
+                            break
+                        if self.files.catalog.verify(root.slot_id).device != root.device:
+                            changed = True
+                            break
+                except Exception:
+                    changed = True  # Unknown roots retain evidence and retry.
+                if changed or time.monotonic() >= deadline:
+                    selected.append(original)
+            return selected
+
+        records = await await_drained(run_sync_lifecycle_operation(candidates))
         if not records:
             return ()
         offset = self._recovery_cursor % len(records)
@@ -249,24 +282,62 @@ class ResidentRuntime:
                 continue
             async with asyncio.timeout_at(deadline), self.files.registry._sf() as session:
                 row = await session.get(SpaceAttachmentRow, record.attachment_id)
-                if row is not None and row.phase != "fenced":
-                    pending.append(record.attachment_id)
-                    continue
+                initial_phase = None if row is None else row.phase
                 expected = None if row is None else _fenced_facts(row)
                 scoped = [root for root in record.roots if root.space_id is not None]
                 home_id = scoped[0].space_id if len(scoped) == 1 and scoped[0].writable and scoped[0].destination == "/mnt/spaces/home" else None
                 owners = (await session.scalars(select(AgentInstanceRow).where(AgentInstanceRow.home_id == home_id))).all() if home_id is not None else []
                 identity = InstanceIdentity.from_row(owners[0]) if len(owners) == 1 else None
-            if time.monotonic() >= deadline or identity is None or record.daemon_id != bridge.evidence.daemon_id:
+                replacement = None
+                if record.daemon_id != bridge.evidence.daemon_id:
+                    mapping = await session.get(StorageHostReplacementRow, (record.daemon_id, bridge.evidence.daemon_id))
+                    if mapping is not None:
+                        replacement = (mapping.old_host_id, mapping.new_host_id, mapping.attachments_named, mapping.created_at)
+            foreign = record.daemon_id != bridge.evidence.daemon_id
+            if time.monotonic() >= deadline or identity is None or (foreign and replacement is None):
                 pending.append(record.attachment_id)
                 continue
+
+            def observe_absence():
+                reader = NativeResourceSet(self.provider._backend, guard=lambda: bridge.assert_current(teardown=True))
+                reader.deadline = deadline
+                return reader.prove_resident_absent(record)
+
+            try:
+                absent = await await_drained(run_sync_lifecycle_operation(observe_absence))
+            except Exception:
+                pending.append(record.attachment_id)
+                continue
+            # This observation selects a path; the owned scope repeats every
+            # proof under Home, provider-batch and original-parent exclusion.
+            if not absent:
+                if foreign:
+                    pending.append(record.attachment_id)
+                    continue
+                if initial_phase not in (None, "fenced"):
+                    pending.append(record.attachment_id)
+                    continue
+            restored_completion = foreign
+            if absent and not foreign:
+                try:
+                    restored_completion = await await_drained(run_sync_lifecycle_operation(lambda: any(self.files.catalog.verify(root.slot_id).device != root.device for root in record.roots)))
+                except Exception:
+                    pending.append(record.attachment_id)
+                    continue
             entry = self.registry.entry(identity)
             if entry.lock.locked():
                 pending.append(record.attachment_id)
                 continue
 
             def locally_idle():
-                if self.registry.in_flight(identity.id) or self.registry._has_reservation(entry.home_id) or entry.preparation is not None or entry.attachment_id not in (None, record.attachment_id):
+                if (
+                    not entry.lock.locked()
+                    or not entry.reconciling
+                    or self.registry.in_flight(identity.id)
+                    or self.registry._has_reservation(entry.home_id)
+                    or entry.preparation is not None
+                    or entry.attachment_id not in (None, record.attachment_id)
+                ):
                     raise AttachmentPending("Original resident recovery has a current local holder")
 
             async def eligible(session, original):
@@ -275,7 +346,7 @@ class ResidentRuntime:
                 if current is None or InstanceIdentity.from_row(current) != identity or entry.home_id != identity.home_id:
                     raise AttachmentPending("Original resident Home changed owner")
                 current_row = await session.get(SpaceAttachmentRow, original.attachment_id, populate_existing=True)
-                if (current_row is None) != (expected is None) or (current_row is not None and _fenced_facts(current_row) != expected):
+                if (current_row is None) != (expected is None) or (current_row is not None and initial_phase == "fenced" and _fenced_facts(current_row) != expected):
                     raise AttachmentPending("Original orphan SQL eligibility changed")
                 if current_row is not None:
                     self.attachments._closure_reason(current_row, None)
@@ -288,6 +359,12 @@ class ResidentRuntime:
                         identity.principal.subject_id,
                     ) or set(mounts) != set(original.correlation[4]):
                         raise AttachmentPending("Original fenced resident correlation changed")
+                    if initial_phase == "fence_pending" and _fenced_facts(current_row)[6:9] != expected[6:9]:
+                        raise AttachmentPending("Original resident closure attribution changed")
+                if foreign:
+                    mapping = await session.get(StorageHostReplacementRow, (original.daemon_id, bridge.evidence.daemon_id), populate_existing=True)
+                    if mapping is None or (mapping.old_host_id, mapping.new_host_id, mapping.attachments_named, mapping.created_at) != replacement:
+                        raise AttachmentPending("Original resident host replacement changed")
                 other = await session.scalar(select(SpaceAttachmentRow.id).join(SpaceMountRow).where(SpaceMountRow.space_id == entry.home_id, SpaceAttachmentRow.id != original.attachment_id, SpaceAttachmentRow.phase != "fenced").limit(1))
                 if other is not None:
                     raise AttachmentPending("Original resident Home has another unfenced incarnation")
@@ -304,13 +381,41 @@ class ResidentRuntime:
                 entry.reconciling = True
                 try:
                     locally_idle()
-                    async with NativeResidentRecoveryScopes(factory)(record, eligible=eligible, deadline=deadline) as scope:
-                        try:
-                            await scope.contain()
-                            await scope.finalize()
-                        finally:
-                            if scope.terminal_completed:
-                                await await_drained(self.registry.contained(record.attachment_id, (entry.home_id,), "container-absent"))
+                    if absent and restored_completion:
+                        restoration = RestoredResidentCompletionScopes(factory, record, eligible=eligible, deadline=deadline)
+                        reason = "host-replaced" if foreign else "container-absent"
+                        if expected is None:
+                            async with restoration.missing(self.attachments) as scope:
+                                try:
+                                    await scope.recover_missing()
+                                    await scope.finalize()
+                                finally:
+                                    if scope.terminal_completed:
+                                        await await_drained(self.registry.contained(record.attachment_id, (entry.home_id,), reason))
+                        else:
+                            try:
+                                if not await self.attachments._contain_restored_host(record.attachment_id, reason, scope_factory=restoration):
+                                    if not restoration.terminal_completed:
+                                        raise AttachmentPending("Restored resident completion remains pending")
+                            finally:
+                                if restoration.terminal_completed:
+                                    self.attachments.uncontained.pop(record.attachment_id, None)
+                                    if record.attachment_id in self.registry.retained or self.registry._associated.get(entry.home_id) == record.attachment_id or entry.attachment_id == record.attachment_id:
+                                        await await_drained(self.registry.contained(record.attachment_id, (entry.home_id,), reason))
+                            if initial_phase != "fenced":
+                                self.app.state.agent_execution.attachments_fenced += 1
+                    elif initial_phase not in (None, "fenced"):
+                        # The SQL phase may have changed after classification.
+                        # Normal reconciliation owns current-device open rows.
+                        continue
+                    else:
+                        async with NativeResidentRecoveryScopes(factory)(record, eligible=eligible, deadline=deadline) as scope:
+                            try:
+                                await scope.contain()
+                                await scope.finalize()
+                            finally:
+                                if scope.terminal_completed:
+                                    await await_drained(self.registry.contained(record.attachment_id, (entry.home_id,), "container-absent"))
                     logger.info("agents: recovered original resident resources %s", record.attachment_id)
                 except Exception as exc:
                     pending.append(record.attachment_id)
