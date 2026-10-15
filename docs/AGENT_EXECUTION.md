@@ -35,6 +35,10 @@ the paired graph is checked against the fresh primary inspection. A mismatch
 logs only known top-level field names, with unknown names shown as `other`.
 Mount list order is normalized using each complete record; all record fields
 and duplicate multiplicity remain part of the comparison.
+Workspace liveness accepts absence only with return code 1, empty or `[]` output
+and an exact known error naming the original container ID, including Docker 29's
+lowercase form. Confirmed loss enters original-resource containment; an outage
+or ambiguous reply retains the charge and prevents replacement.
 
 Creation, conversations, replies, activations and lifecycle changes check current
 execution readiness. AI assistant creation can refuse `ai-assistant-limit` with

@@ -5,6 +5,7 @@ import os
 from contextlib import asynccontextmanager
 from threading import Event, Lock
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from _storage_spaces_test_support import ALICE, home, operation
@@ -112,6 +113,41 @@ async def test_real_bound_scope_fences_then_finalizes_and_releases_batch(storage
     gate = factory.provider._owner_admission_gate()
     reservation = gate.reserve("another-owner", saved.roots[0].slot_id)
     gate.end_retirement(reservation)
+
+
+@pytest.mark.asyncio
+async def test_lowercase_absence_resumes_through_sql_fence_and_journal_before_replacement(storage, fixture, monkeypatch):
+    from deerflow.agent_instances.resident_preparation import _resume
+
+    factory, saved, _captured, objects, _calls = await prepare(storage, fixture, readonly=True)
+    mounts, adapter = storage[3], storage[4]
+    original = factory.provider._backend._run
+
+    def liveness(command, **kwargs):
+        if command[1] == "info":
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"ID": saved.daemon_id, "OSType": "linux"}), stderr="")
+        reply = original(command, **kwargs)
+        if command[1] == "inspect" and reply.returncode == 1:
+            return SimpleNamespace(returncode=1, stdout=reply.stdout, stderr="error: no such object: " + command[-1])
+        return reply
+
+    driver = DockerStorageAdapter(prepare=lambda _plan: None, runner=liveness, host_verifier=lambda: factory.provider._native_creation.assert_current(teardown=True))
+    monkeypatch.setattr(adapter, "container_state", driver.container_state, raising=False)
+    objects.pop(saved.container_id)
+    adapter.containers.pop(saved.container_id)
+    root = saved.roots[0]
+    instance = SimpleNamespace(id=operation(), home_id=root.space_id, principal=ALICE, name="Qualification AI employee")
+    execution = SimpleNamespace(instance=instance, home_generation=root.generation)
+    residents = SimpleNamespace(_restoration_started=False, claimed=Mock())
+    resources = [ResourceMount(root.space_id, root.generation, "home", True)]
+    assert await _resume(execution, residents, mounts, resources) is None
+    residents.claimed.assert_called_once_with(instance, saved.attachment_id, attempt_id=None)
+    async with storage[1]() as session:
+        assert (await session.get(SpaceAttachmentRow, saved.attachment_id)).phase == "fenced"
+    assert factory.provider._native_creation.residents.records() == ()
+    assert not mounts.uncontained
+    replacement = await mounts.attach(actor=ALICE, incarnation=operation(), resources=resources)
+    assert replacement.id != saved.attachment_id and replacement.container_id != saved.container_id
 
 
 @pytest.mark.asyncio

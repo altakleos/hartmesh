@@ -716,6 +716,8 @@ exception values or tenant contents, while agent execution remains unavailable.
 Resident startup comparison tolerates Docker health and exec observations while
 retaining checks for changes to identity, process state, configuration and mounts.
 Mount records compare independently of list order, keeping every field and duplicate.
+Confirmed workspace loss uses exact Docker absence replies, including Docker 29,
+then contains the original resources before admitting a replacement.
 Creation respects the configured allowance, counts unfinished and paused agents,
 and assigns files from the matching kind of prepared slot. Exact creation retries
 retain their identity and files. Default activation and the remaining product
