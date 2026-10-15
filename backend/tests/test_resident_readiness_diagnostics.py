@@ -76,3 +76,12 @@ async def test_ready_refresh_has_no_refusal_diagnostics(monkeypatch, caplog):
     assert await host.reconcile() is True
     assert (await ss.execution_state(app)).execution == "ready"
     assert "unqualified" not in caplog.text and "execution unavailable" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_tolerate_a_minimal_runtime_app(monkeypatch, caplog):
+    host, app = runtime(monkeypatch)
+    del app.state.agent_execution
+    host.workspace_qualified = False
+    assert (await ss.execution_state(app)).reason == "storage-unavailable"
+    assert "execution unavailable (workspace-unqualified;" in caplog.text

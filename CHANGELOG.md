@@ -29,6 +29,8 @@ Healthy background refreshes retain execution readiness; pending findings,
 failures and shutdown invalidate it without allowing stale success to restore it.
 Readiness refusals and invalidations identify fixed internal causes with counts,
 without recording tenant identifiers, metadata values or file contents.
+Reconciliation refreshes captured attachment facts under the workspace lock and
+rescans once after an already completed replacement, preserving uncertain charges.
 
 There is no database schema, native evidence format or configuration-version change.
 

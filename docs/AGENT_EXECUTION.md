@@ -49,6 +49,14 @@ bootstrap and an unqualified workspace. Invalidation logs name fixed reasons,
 and run-inventory logs count mismatches using fixed field labels. Attachment
 diagnostics use booleans for captured state and preparation; none records
 tenant identifiers, metadata keys or values, or file contents.
+Reconciliation rechecks a captured attachment's actor, host, mount scope, identity
+and phase under the Home lock before acting on it. An exactly fenced snapshot
+permits one whole-pass rescan only after its retained charge, association,
+preparation and uncertain-containment state are cleared. The new pass must
+qualify the replacement through the normal resume path under the original
+deadline. A filtered scan, a second change or uncertain identity remains pending;
+inspection failures retain captured charges. A failed scan before claims are
+processed closes accounting for restoration. Observation performs no cleanup.
 
 Creation, conversations, replies, activations and lifecycle changes check current
 execution readiness. AI assistant creation can refuse `ai-assistant-limit` with

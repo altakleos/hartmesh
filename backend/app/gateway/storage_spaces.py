@@ -211,7 +211,7 @@ def _execution_refusal(app, source):
         bool(getattr(runtime, "workspace_qualified", False)),
         bool(getattr(runtime, "accounting_retry", False)),
         getattr(runtime, "_qualification_revision", 0),
-        len(getattr(app.state.agent_execution, "pending_reconcile", ())),
+        len(getattr(getattr(app.state, "agent_execution", None), "pending_reconcile", ())),
         len(getattr(runtime, "foreign_run_blocks", ())),
     )
 
