@@ -106,7 +106,7 @@ async def test_delayed_ready_reports_containment_once_after_actual_readiness(mon
     monkeypatch.setattr(ss, "execution_state", execution)
     monkeypatch.setattr(ss, "finish_releases", AsyncMock(return_value=0))
     monkeypatch.setattr(ss, "assign_spaces", AsyncMock())
-    caplog.set_level("INFO")
+    caplog.set_level("INFO", logger=ss.__name__)
     await ss._maintenance_step(app, timeout=1)
     assert "agents: ready (" not in caplog.text
     execution.return_value = SimpleNamespace(execution="ready")
@@ -173,7 +173,7 @@ async def test_successful_owned_retry_wakes_maintenance_to_consume_and_report_re
         ready.set()
 
     monkeypatch.setattr(ss, "_agents_ready_line", report)
-    caplog.set_level("INFO")
+    caplog.set_level("INFO", logger=ss.__name__)
     loop = asyncio.create_task(ss._recheck_loop(app))
     try:
         await asyncio.wait_for(entered.wait(), 2)

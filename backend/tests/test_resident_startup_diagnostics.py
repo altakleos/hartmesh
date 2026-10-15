@@ -32,7 +32,7 @@ async def test_failed_bootstrap_logs_sources_and_state_without_exception_values(
             raise RuntimeError(secret) from cause
     except RuntimeError as error:
         failure = error
-    coordinator = SimpleNamespace(task=None, result=None, last_error=failure, poll=AsyncMock(return_value=None))
+    coordinator = SimpleNamespace(task=None, result=None, last_error=failure, poll=AsyncMock(return_value=None), invalidate=Mock())
     runtime = SimpleNamespace(accounting_retry=False, coordinator=coordinator, workspace_qualified=False)
     app = SimpleNamespace(state=SimpleNamespace(resident_runtime=runtime, agent_execution=SimpleNamespace(pending_reconcile=[])))
     caplog.set_level(logging.WARNING, logger=ss.__name__)
@@ -84,7 +84,7 @@ async def test_unfinished_retry_does_not_report_the_previous_failure(caplog):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("execution, reason", [("unavailable", "storage-unavailable"), ("ready", None)])
 async def test_startup_agent_line_follows_execution_readiness(monkeypatch, caplog, execution, reason):
-    status = SimpleNamespace(unverified={}, fit=None, file_operations_settled=0, attachments_fenced=0, attempts_settled=0)
+    status = ss.ExecutionStatus()
     app = SimpleNamespace(state=SimpleNamespace(agent_execution=status, storage_spaces=SimpleNamespace(catalog=SimpleNamespace(volumes={}))))
     monkeypatch.setattr(ss, "storage_state", AsyncMock(return_value=SimpleNamespace(state="ready")))
     monkeypatch.setattr(ss, "get_agents_api_config", lambda: SimpleNamespace(ai_assistants_per_user=1, ai_employees=1))
