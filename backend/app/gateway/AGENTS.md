@@ -2,7 +2,7 @@
 
 Storage and `storage_reclamation.py`: [guide](../../../docs/STORAGE_SPACES.md).
 
-Keep readiness; fence stale refresh results.
+Bound readiness logs; fence refresh results.
 
 Managed ordinary chats check first-conversation capacity before checkpoint seeding
 and durable run admission, preserving HTTP 507. Reuse recorded idempotency keys

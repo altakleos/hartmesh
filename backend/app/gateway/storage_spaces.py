@@ -200,11 +200,28 @@ async def install_operator_seats(repository, config: StorageSpacesConfig) -> Non
     repository.seats_allowed = seats_allowed
 
 
+def _execution_refusal(app, source):
+    runtime = getattr(app.state, "resident_runtime", None)
+    coordinator = getattr(runtime, "coordinator", None)
+    logger.warning(
+        "agents: execution unavailable (%s; initializer=%s; result=%s; workspace_qualified=%s; accounting_retry=%s; revision=%s; pending=%s; foreign=%s)",
+        source,
+        getattr(coordinator, "task", None) is not None,
+        getattr(coordinator, "result", None) is not None,
+        bool(getattr(runtime, "workspace_qualified", False)),
+        bool(getattr(runtime, "accounting_retry", False)),
+        getattr(runtime, "_qualification_revision", 0),
+        len(getattr(app.state.agent_execution, "pending_reconcile", ())),
+        len(getattr(runtime, "foreign_run_blocks", ())),
+    )
+
+
 async def execution_state(app, instance_id: str | None = None) -> ExecutionState:
     config = await run_file_io(get_agents_api_config)
     reason = None
     if (await storage_state(app)).state == "unavailable":
         reason = "storage-unavailable"
+        _execution_refusal(app, "storage-state")
     elif config.ai_assistants_per_user == config.ai_employees == 0:
         reason = "agents-none"
     elif await run_file_io(hold_present):
@@ -213,6 +230,8 @@ async def execution_state(app, instance_id: str | None = None) -> ExecutionState
         getattr(app.state, "resident_runtime", None) is None or app.state.resident_runtime.coordinator.result is None or not app.state.resident_runtime.workspace_qualified
     ):
         reason = "storage-unavailable"
+        runtime = getattr(app.state, "resident_runtime", None)
+        _execution_refusal(app, "runtime-missing" if runtime is None else "bootstrap-pending" if runtime.coordinator.result is None else "workspace-unqualified")
     elif instance_id is not None and getattr(app.state, "agent_instances", None) is not None:
         async with app.state.agent_instances._sf() as session:
             row = (await session.execute(select(AgentInstanceRow.home_id, SpaceBackingRow.slot_id).outerjoin(SpaceBackingRow, SpaceBackingRow.space_id == AgentInstanceRow.home_id).where(AgentInstanceRow.id == instance_id))).one_or_none()

@@ -720,6 +720,7 @@ Confirmed workspace loss uses exact Docker absence replies, including Docker 29,
 then contains the original resources before admitting a replacement.
 Healthy background reconciliation preserves confirmed execution readiness;
 uncertainty or shutdown invalidates it and fences stale refresh results.
+Readiness refusals log fixed causes and counts without tenant identifiers or payloads.
 Creation respects the configured allowance, counts unfinished and paused agents,
 and assigns files from the matching kind of prepared slot. Exact creation retries
 retain their identity and files. Default activation and the remaining product

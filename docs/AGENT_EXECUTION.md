@@ -44,6 +44,11 @@ are in flight. Initial qualification remains unavailable; pending findings,
 failures, cancellation, accounting invalidation and shutdown clear readiness.
 Refresh publication checks its captured revision and exact runtime bindings,
 so a stale success cannot restore readiness or reopen provider admission.
+Refusal logs distinguish unavailable storage, a missing runtime, pending
+bootstrap and an unqualified workspace. Invalidation logs name fixed reasons,
+and run-inventory logs count mismatches using fixed field labels. Attachment
+diagnostics use booleans for captured state and preparation; none records
+tenant identifiers, metadata keys or values, or file contents.
 
 Creation, conversations, replies, activations and lifecycle changes check current
 execution readiness. AI assistant creation can refuse `ai-assistant-limit` with
