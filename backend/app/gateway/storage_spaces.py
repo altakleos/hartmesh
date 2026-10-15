@@ -135,6 +135,7 @@ class ExecutionStatus:
     pending_reconcile: list[str] = field(default_factory=list)
     attachments_fenced: int = 0
     attempts_settled: int = 0
+    agents_ready_reported: bool = False
     file_operations_settled: int = 0
     qualified_provider: object | None = field(default=None, repr=False)
     user_spaces_reclaimed: int = 0
@@ -533,6 +534,20 @@ async def _metadata_step(app, *, timeout):
     return counts
 
 
+def _agents_ready_line(app):
+    status = app.state.agent_execution
+    if status.agents_ready_reported:
+        return
+    logger.info(
+        "agents: ready (%s %s fenced at start; %s work %s settled)",
+        status.attachments_fenced,
+        "attachment" if status.attachments_fenced == 1 else "attachments",
+        status.attempts_settled,
+        "attempt" if status.attempts_settled == 1 else "attempts",
+    )
+    status.agents_ready_reported = True
+
+
 async def _startup_lines(app, *, counts=None):
     status, files = app.state.agent_execution, app.state.storage_spaces
     verified = sum(slot not in status.unverified for slot in files.catalog.volumes)
@@ -579,7 +594,7 @@ async def _startup_lines(app, *, counts=None):
             if execution.execution == "unavailable":
                 logger.warning("agents: unavailable (%s)", execution.reason)
             else:
-                logger.info("agents: ready (%s attachments fenced at start; %s work attempts settled)", status.attachments_fenced, status.attempts_settled)
+                _agents_ready_line(app)
         keys = {"user": "HARTMESH_USERS", "assistant": "HARTMESH_USERS x HARTMESH_AI_ASSISTANTS_PER_USER", "employee": "HARTMESH_AI_EMPLOYEES", "company": "company allowance"}
         for kind, count in counts.items():
             if count.allowed_key < count.in_use and kind in ("assistant", "employee"):
@@ -837,6 +852,43 @@ async def reconcile_residents(app, *, attachment_ids=None, deadline):
     return await await_drained(runtime.reconcile_rows(attachment_ids=attachment_ids, deadline=deadline))
 
 
+def _wake_after_resident_success(app, runtime):
+    coordinator = runtime.coordinator
+    task = coordinator.task
+    wake = getattr(app.state, "storage_recheck_wake", None)
+    if task is None:
+        runtime._bootstrap_wake_task = None
+        return
+    if wake is None or getattr(runtime, "_bootstrap_wake_task", None) is task:
+        return
+    runtime._bootstrap_wake_task = task
+
+    def wake_if_current(_completed):
+        stop = getattr(app.state, "storage_recheck_stop", None)
+        if (
+            task.cancelled()
+            or task.exception() is not None
+            or getattr(app.state, "resident_runtime", None) is not runtime
+            or runtime.coordinator is not coordinator
+            or coordinator.task is not task
+            or coordinator._closing
+            or (stop is not None and stop.is_set())
+        ):
+            return
+        wake.set()
+
+    def completed(owned):
+        if owned.cancelled() or owned.exception() is not None:
+            return
+        maintenance = app.state.agent_execution.maintenance_task
+        if maintenance is not None and not maintenance.done():
+            maintenance.add_done_callback(wake_if_current)
+        else:
+            wake_if_current(owned)
+
+    task.add_done_callback(completed)
+
+
 async def _resident_step(app, *, timeout):
     runtime = getattr(app.state, "resident_runtime", None)
     if runtime is None:
@@ -845,7 +897,9 @@ async def _resident_step(app, *, timeout):
         runtime.coordinator.invalidate()
         runtime.accounting_retry = False
     result = await runtime.coordinator.poll(timeout=timeout)
-    if result is None and runtime.coordinator.task is None and runtime.coordinator.last_error is not None:
+    _wake_after_resident_success(app, runtime)
+    failed = result is None and runtime.coordinator.task is None and runtime.coordinator.last_error is not None
+    if failed:
         logger.warning(
             "agents: bootstrap unavailable (%s; initializer=%s; result=%s; workspace_qualified=%s; pending=%s)",
             _bootstrap_error_locations(runtime.coordinator.last_error),
@@ -854,10 +908,12 @@ async def _resident_step(app, *, timeout):
             runtime.workspace_qualified,
             len(app.state.agent_execution.pending_reconcile),
         )
-    if runtime.accounting_retry:
+    if failed or runtime.accounting_retry:
         if runtime.coordinator.task is None:
             runtime.coordinator.invalidate()
             runtime.accounting_retry = False
+            await runtime.coordinator.poll(timeout=0)
+            _wake_after_resident_success(app, runtime)
         return False
     if result is None:
         return False
@@ -906,6 +962,8 @@ async def _maintenance_step(app, *, timeout: float) -> bool:
             status.file_operations_settled += await app.state.storage_spaces.settle_interrupted()
         except Exception:
             logger.exception("storage: operation settlement failed; existing facts are kept")
+        if not status.agents_ready_reported and (await execution_state(app)).execution == "ready":
+            _agents_ready_line(app)
 
     if status.maintenance_task is not None and status.maintenance_task.done():
         status.maintenance_task.result()
@@ -987,18 +1045,27 @@ async def _admission_recheck(app):
 
 async def _recheck_loop(app):
     stop = app.state.storage_recheck_stop
+    wake = getattr(app.state, "storage_recheck_wake", None)
     try:
         await storage_recheck(app)
     except Exception:
         logger.exception("storage: availability recheck failed; existing facts are kept")
     while not stop.is_set():
+        async with asyncio.TaskGroup() as group:
+            waits = [group.create_task(stop.wait())]
+            if wake is not None:
+                waits.append(group.create_task(wake.wait()))
+            await asyncio.wait(waits, timeout=RECHECK_SECONDS, return_when=asyncio.FIRST_COMPLETED)
+            for task in waits:
+                task.cancel()
+        if wake is not None:
+            wake.clear()
+        if stop.is_set():
+            break
         try:
-            await asyncio.wait_for(stop.wait(), timeout=RECHECK_SECONDS)
-        except TimeoutError:
-            try:
-                await storage_recheck(app)
-            except Exception:
-                logger.exception("storage: availability recheck failed; existing facts are kept")
+            await storage_recheck(app)
+        except Exception:
+            logger.exception("storage: availability recheck failed; existing facts are kept")
 
 
 async def drain_storage_spaces(app):
@@ -1197,4 +1264,5 @@ async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session
         counts = None
     await _startup_lines(app, counts=counts)
     app.state.storage_recheck_stop = asyncio.Event()
+    app.state.storage_recheck_wake = asyncio.Event()
     app.state.storage_recheck_task = asyncio.create_task(_recheck_loop(app))

@@ -57,6 +57,14 @@ qualify the replacement through the normal resume path under the original
 deadline. A filtered scan, a second change or uncertain identity remains pending;
 inspection failures retain captured charges. A failed scan before claims are
 processed closes accounting for restoration. Observation performs no cleanup.
+The existing maintenance loop also wakes after expired-run recovery. A consumed
+failed initializer starts one fresh owned pass in that invocation; an unfinished
+initializer remains owned. Successful completion wakes that same loop to consume
+the result after its maintenance owner drains; failed tasks retain the normal
+retry interval. Stop and wake waiters drain with the same loop. This
+changes scheduling only: peer lease takeover and current native proof still
+precede recovery. When startup qualification finishes later, actual execution
+readiness reports its confirmed containment counts once.
 
 Creation, conversations, replies, activations and lifecycle changes check current
 execution readiness. AI assistant creation can refuse `ai-assistant-limit` with

@@ -31,6 +31,10 @@ Readiness refusals and invalidations identify fixed internal causes with counts,
 without recording tenant identifiers, metadata values or file contents.
 Reconciliation refreshes captured attachment facts under the workspace lock and
 rescans once after an already completed replacement, preserving uncertain charges.
+Expired-lease recovery wakes maintenance and consumed bootstrap failures schedule
+one fresh owned pass immediately. Successful completion wakes the same loop to
+consume the result. Delayed readiness reports confirmed containment
+counts once, while unfinished initializers and valid peer leases remain protected.
 
 There is no database schema, native evidence format or configuration-version change.
 

@@ -723,6 +723,9 @@ uncertainty or shutdown invalidates it and fences stale refresh results.
 Readiness refusals log fixed causes and counts without tenant identifiers or payloads.
 Reconciliation checks captured attachments under the workspace lock. A confirmed
 completed replacement permits one fresh scan; uncertain claims keep their charge.
+Expired-run recovery wakes the existing maintenance loop. Consuming a failed
+initializer schedules its next owned pass immediately; live peer leases stay
+protected. Delayed startup readiness reports confirmed containment counts once.
 Creation respects the configured allowance, counts unfinished and paused agents,
 and assigns files from the matching kind of prepared slot. Exact creation retries
 retain their identity and files. Default activation and the remaining product
