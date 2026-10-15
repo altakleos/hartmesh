@@ -113,15 +113,18 @@ class NativeResourceSet:
             raise StorageHostUnqualified("Native graph inspection is unconfirmed") from exc
 
     def _member(self, kind, identity, name, created):
-        entry, named = self.inspect(kind, identity), self.inspect(kind, name)
-        if entry is None and named is None:
-            return None
-        if entry is None or named is None or entry.get("Id") != named.get("Id") or entry.get("Name") != named.get("Name") or entry.get("Created") != created or named.get("Created") != created:
-            raise StorageHostUnqualified("Native graph member identity or original name changed")
         expected_name = "/" + name if kind == "container" else name
-        if entry.get("Name") != expected_name:
-            raise StorageHostUnqualified("Native graph member no longer has its original name")
-        return entry
+        for _ in range(2):
+            entry, named = self.inspect(kind, identity), self.inspect(kind, name)
+            if entry is None and named is None:
+                return None
+            if any(value is not None and (value.get("Id") != identity or value.get("Name") != expected_name or value.get("Created") != created) for value in (entry, named)):
+                raise StorageHostUnqualified("Native graph member identity or original name changed")
+            if entry is not None and named is not None:
+                return entry
+            # Auto-removal can cross these reads. Recheck both original references
+            # under this reader's existing deadline and lifecycle guards.
+        raise StorageHostUnqualified("Native graph member identity or original name changed")
 
     def inventory_paired(self):
         """All-state immutable facts, including secondaries without a primary."""

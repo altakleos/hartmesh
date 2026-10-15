@@ -23,6 +23,10 @@ without a card. Ordinary chats keep their three approval options. Approval cards
 include structured site, port and duration fields. Fresh workspace preparation
 reports its existing starting phase; resuming a workspace does not.
 
+Sandbox cleanup tolerates automatic removal completing between ID and name
+inspection, with one bounded recheck of both original references. Unconfirmed or
+changed resources continue to retain their cleanup records and capacity.
+
 There is no database schema, native evidence format or configuration-version change.
 
 ### Direct agent file writes

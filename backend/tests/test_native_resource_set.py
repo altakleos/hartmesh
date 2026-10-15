@@ -248,3 +248,85 @@ def test_duplicate_key_reply_still_logs_only_structural_diagnostics(caplog):
         reader.inspect("container", CID)
     assert "stdout_shape=invalid-json stderr_template=unknown" in caplog.text
     assert all(value not in caplog.text for value in (CID, "private-key", "private-value", "private-other", "private-token"))
+
+
+def member_reader(kind, observations, *, guard=None):
+    """Script independent ID/name reads without a Docker daemon."""
+    calls = []
+    replies = iter(observations)
+
+    def run(command, **kwargs):
+        calls.append(command[-1])
+        value = next(replies)
+        if value is None:
+            error = "Error: No such object: " if kind == "container" else "Error: No such network: "
+            return SimpleNamespace(returncode=1, stdout="[]", stderr=error + command[-1])
+        return SimpleNamespace(returncode=0, stdout=json.dumps([value]), stderr="")
+
+    return NativeResourceSet(SimpleNamespace(_run=run), guard=guard), calls
+
+
+@pytest.mark.parametrize("kind", ["container", "network"])
+@pytest.mark.parametrize("present_first", [True, False])
+@pytest.mark.parametrize("recovery", ["absent", "original"])
+def test_split_member_observation_rechecks_both_original_references(kind, present_first, recovery):
+    original = {"Id": CID, "Name": "/original" if kind == "container" else "original", "Created": STAMP}
+    first_pair = [original, None] if present_first else [None, original]
+    recovered = None if recovery == "absent" else original
+    guards = []
+    reader, calls = member_reader(kind, [*first_pair, recovered, recovered], guard=lambda: guards.append(True))
+    deadline = reader.deadline
+    assert reader._member(kind, CID, "original", STAMP) == recovered
+    assert calls == [CID, "original", CID, "original"]
+    assert len(guards) == 8 and reader.deadline == deadline
+
+
+@pytest.mark.parametrize("present_first", [True, False])
+@pytest.mark.parametrize("field,value", [("Id", "7" * 64), ("Name", "/changed"), ("Created", "2026-01-01T00:00:00Z")])
+def test_split_observation_never_retries_a_changed_surviving_identity(present_first, field, value):
+    original = {"Id": CID, "Name": "/original", "Created": STAMP}
+    changed = {**original, field: value}
+    pair = [changed, None] if present_first else [None, changed]
+    reader, calls = member_reader("container", [*pair, original, original])
+    with pytest.raises(StorageHostUnqualified):
+        reader._member("container", CID, "original", STAMP)
+    assert len(calls) <= 2
+
+
+@pytest.mark.parametrize("recovery", ["split", "reused-name", "changed-created", "malformed"])
+def test_member_recheck_refuses_unresolved_or_replaced_original(recovery):
+    original = {"Id": CID, "Name": "/original", "Created": STAMP}
+    second_pair = {
+        "split": [original, None],
+        "reused-name": [None, {**original, "Id": "7" * 64}],
+        "changed-created": [{**original, "Created": "2026-01-01T00:00:00Z"}, original],
+        "malformed": [{}, None],
+    }[recovery]
+    reader, calls = member_reader("container", [original, None, *second_pair])
+    with pytest.raises(StorageHostUnqualified):
+        reader._member("container", CID, "original", STAMP)
+    assert len(calls) <= 4
+
+
+@pytest.mark.parametrize("lost", ["deadline", "guard"])
+def test_member_recheck_keeps_original_deadline_and_lifecycle_guard(monkeypatch, lost):
+    from deerflow.community.aio_sandbox import native_resource_set
+
+    original = {"Id": CID, "Name": "/original", "Created": STAMP}
+    now = [0]
+    monkeypatch.setattr(native_resource_set, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    guarded = []
+
+    def guard():
+        guarded.append(True)
+        if len(guarded) == 4 and lost == "deadline":
+            now[0] = 31
+        if len(guarded) == 5 and lost == "guard":
+            raise StorageHostUnqualified("Lifecycle proof lost")
+
+    reader, calls = member_reader("container", [original, None, None, None], guard=guard)
+    with pytest.raises(StorageHostUnqualified):
+        reader._member("container", CID, "original", STAMP)
+    assert calls == [CID, "original"]
+    assert reader.deadline == 30
+    assert len(guarded) == (4 if lost == "deadline" else 5)
