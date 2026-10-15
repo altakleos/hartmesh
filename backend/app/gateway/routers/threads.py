@@ -444,6 +444,7 @@ class ThreadResponse(_MetadataRedactingResponse):
     metadata: dict[str, Any] = Field(default_factory=dict, description="Thread metadata")
     values: dict[str, Any] = Field(default_factory=dict, description="Current state channel values")
     interrupts: dict[str, Any] = Field(default_factory=dict, description="Pending interrupts")
+    agent_instance: dict[str, Any] | None = Field(default=None, description="The AI assistant or AI employee this conversation belongs to, or null")
 
 
 class ThreadCreateRequest(BaseModel):
@@ -1317,6 +1318,7 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
     Delegates to the configured ThreadMetaStore implementation
     (SQL-backed for sqlite/postgres, Store-backed for memory mode).
     """
+    from app.gateway.agent_discovery import thread_bindings
     from app.gateway.deps import get_thread_store
     from deerflow.persistence.thread_meta import InvalidMetadataFilterError
 
@@ -1335,6 +1337,7 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
         )
     except InvalidMetadataFilterError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    bindings = await thread_bindings(request.app, [row["thread_id"] for row in rows])
     return [
         ThreadResponse(
             thread_id=r["thread_id"],
@@ -1347,6 +1350,7 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
             metadata=r.get("metadata", {}),
             values={"title": r["display_name"]} if r.get("display_name") else {},
             interrupts={},
+            agent_instance=bindings.get(r["thread_id"]),
         )
         for r in rows
     ]
@@ -1416,6 +1420,7 @@ async def move_thread(thread_id: ThreadId, body: ThreadMoveRequest, request: Req
 @require_permission("threads", "read", owner_check=True)
 async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
     """Get thread info from metadata plus the graph's materialized state."""
+    from app.gateway.agent_discovery import thread_bindings
     from app.gateway.deps import get_thread_store
 
     thread_store = get_thread_store(request)
@@ -1454,6 +1459,7 @@ async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
         }
     stored_status = record.get("status", "idle")
     status = _derive_thread_status(snapshot, pending_writes, fallback_status=stored_status) if checkpoint_id else stored_status
+    bindings = await thread_bindings(request.app, [thread_id])
 
     return ThreadResponse(
         thread_id=thread_id,
@@ -1462,6 +1468,7 @@ async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
         updated_at=coerce_iso(record.get("updated_at", "")),
         metadata=record.get("metadata", {}),
         values=serialize_channel_values_for_api(snapshot.values),
+        agent_instance=bindings.get(thread_id),
     )
 
 

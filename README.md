@@ -744,6 +744,21 @@ and assigns files from the matching kind of prepared slot. Exact creation retrie
 retain their identity and files. Default activation and the remaining product
 screens are staged separately.
 
+The management API supports separate AI assistant and AI employee lists, role
+templates, activity and execution status, and paginated conversations. Inspect
+permits shared conversation and running-work details; Use alone keeps conversation
+reads within the caller's existing access. Company administrators can inventory
+AI employees without gaining access to their files or conversations. Role templates
+come from the tenant bundle's optional `roles.json`, falling back to `ui.roles`;
+an empty list deliberately removes the templates. Only enabled public skills are
+offered. Templates carry no permissions.
+
+People lookup requires an interactive session. It searches literal address
+prefixes when registration is closed and exact addresses when registration is
+open. Unfinished setup attempts appear separately from the normal agent list.
+A manager can remove them, and maintenance removes attempts older than 24 hours,
+reclaiming any assigned Space after containment and cleanup are confirmed.
+
 An operator hold or unavailable execution blocks new conversations, replies,
 Work activations and lifecycle changes before durable admission. Current grants
 are checked first; exact Work retries retain their recorded admission. Deleting

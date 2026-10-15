@@ -16,6 +16,7 @@ The generic layout is:
 * ``starters.json`` -- Home's starter list, the same shape ``ui.starters``
   takes in ``config.yaml`` and validated by the same rules, because it is the
   same list arriving from a different file;
+* ``roles.json`` -- optional agent briefs, validated as ``ui.roles``;
 
 Skills own additional resources and validation; this loader never enumerates them.
 
@@ -39,7 +40,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from deerflow.config.ui_config import StarterConfig, UiConfig, first_control_or_reordering_character
+from deerflow.config.ui_config import RoleConfig, StarterConfig, UiConfig, first_control_or_reordering_character
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,7 @@ class TenantBundle:
     problems: tuple[str, ...]
     provider_name: str | None = None
     support_url: str | None = None
+    roles: tuple[RoleConfig, ...] | None = None
 
 
 EMPTY_BUNDLE = TenantBundle(path=None, present=False, company_name=None, primary=None, secondary=None, logo=None, starters=None, problems=())
@@ -105,6 +107,7 @@ def load_tenant_bundle(path: str | Path | None) -> TenantBundle:
         company_name, primary, secondary, logo = _read_brand(root, problems)
         provider_name, support_url = _read_provider(root, problems)
         starters = _read_starters(root, problems)
+        roles = _read_roles(root, problems)
     except OSError:
         return _unusable(root, "tenant bundle directory cannot be read")
     return TenantBundle(
@@ -118,6 +121,7 @@ def load_tenant_bundle(path: str | Path | None) -> TenantBundle:
         problems=tuple(problems),
         provider_name=provider_name,
         support_url=support_url,
+        roles=roles,
     )
 
 
@@ -265,6 +269,26 @@ def _starter_rules(error: ValidationError) -> str:
         loc = ".".join(str(part) for part in item["loc"] if isinstance(part, int) or part in known)
         rules.append(f"{loc}: {item['type']}" if loc else item["type"])
     return "; ".join(rules)
+
+
+def _read_roles(root: Path, problems: list[str]) -> tuple[RoleConfig, ...] | None:
+    data = _read_json(root / "roles.json", problems)
+    if data is None:
+        return None
+    if data is _MALFORMED or not isinstance(data, list):
+        problems.append("roles.json: not a JSON list")
+        return None
+    try:
+        resolved = UiConfig.model_validate({"roles": data}).roles
+    except ValidationError as error:
+        known = set(RoleConfig.model_fields)
+        rules = []
+        for item in error.errors(include_input=False, include_url=False):
+            loc = ".".join(str(part) for part in item["loc"] if isinstance(part, int) or part in known)
+            rules.append(f"{loc}: {item['type']}" if loc else item["type"])
+        problems.append("roles.json: " + "; ".join(rules))
+        return None
+    return tuple(resolved)
 
 
 _last_reported_problems: tuple[str, ...] | None = None

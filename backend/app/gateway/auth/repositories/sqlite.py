@@ -731,6 +731,20 @@ class SQLiteUserRepository(UserRepository):
             rows = (await session.execute(select(UserRow).order_by(UserRow.created_at, UserRow.id))).scalars().all()
             return [await self._load(session, row) for row in rows]  # type: ignore[misc]
 
+    async def lookup_users(self, *, query: str | None = None, ids: list[str] | None = None, exact: bool = False, offset: int = 0) -> list[User]:
+        """A bounded candidate page; the directory filters live accounts before its limit."""
+        statement = select(UserRow).order_by(func.lower(UserRow.email), UserRow.id).limit(50).offset(offset)
+        if ids is not None:
+            statement = statement.where(UserRow.id.in_(ids))
+        elif query is not None:
+            address = func.lower(UserRow.email)
+            statement = statement.where(address == query.lower() if exact else address.startswith(query.lower(), autoescape=True, escape="\\"))
+        else:
+            raise ValueError("Account lookup requires a query or IDs")
+        async with self._sf() as session:
+            rows = (await session.scalars(statement)).all()
+            return [await self._load(session, row) for row in rows]  # type: ignore[misc]
+
     # ── Identities the deployer turned off ────────────────────────────
 
     async def is_identity_disabled(self, issuer: str, subject: str) -> bool:

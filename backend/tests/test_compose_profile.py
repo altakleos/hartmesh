@@ -38,6 +38,31 @@ CATALOG = PROFILE / "providers"
 IMAGES = PROFILE / "images.txt"
 RELEASE = "2.1.0+hartmesh.5"
 RELEASE_IMAGE_TAG = "v2.1.0-hartmesh.5"
+
+
+def test_template_carries_the_default_roles():
+    from deerflow.config.ui_config import UiConfig
+
+    config = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    roles = UiConfig.model_validate(config["ui"]).roles
+    assert [role.id for role in roles] == ["reporting-analyst", "researcher", "newsletter-writer"]
+    expected = {
+        "reporting-analyst": ("reporting analyst", ["business-report", "data-analysis"], ["periodic-review", "data-questions"]),
+        "researcher": ("researcher", ["deep-research", "consulting-analysis"], ["market-research", "briefings"]),
+        "newsletter-writer": ("newsletter writer", ["newsletter-generation", "deep-research"], ["newsletter"]),
+    }
+    for role in roles:
+        opening, skills, responsibilities = expected[role.id]
+        assert role.soul.startswith("You are a " + opening + " at this company")
+        assert "your own files" in role.soul
+        assert not any(word in role.soul.casefold() for word in ("space", "/mnt/", "gib", "quota"))
+        assert role.skills == skills
+        assert all((REPO_ROOT / "skills" / "public" / skill / "SKILL.md").is_file() for skill in skills)
+        policy = role.work_policy.model_dump(mode="json")
+        assert {key: value for key, value in policy.items() if key != "responsibilities"} == {"enabled": True, "default_priority": "normal", "review_required": True, "allow_derived": False, "max_derived_per_activation": 3}
+        assert [row["key"] for row in policy["responsibilities"]] == responsibilities
+
+
 CONTRACT_KEYS = {
     "HARTMESH_TENANT",
     "HARTMESH_PUBLIC_HOST",

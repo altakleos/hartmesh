@@ -30,6 +30,43 @@ from deerflow.config.ui_config import StarterConfig
 PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 16
 
 
+def _role(**changes):
+    return {"id": "researcher", "name": "Researcher", "description": "Researches a question.", "soul": "You research carefully and keep notes in your own files.", "skills": ["data-analysis"], **changes}
+
+
+def test_roles_json_replaces_the_template_roles_and_an_empty_list_leaves_none(tmp_path):
+    assert load_tenant_bundle(tmp_path).roles is None
+    path = tmp_path / "roles.json"
+    path.write_text(json.dumps([_role()]), encoding="utf-8")
+    bundle = load_tenant_bundle(tmp_path)
+    assert bundle.roles[0].model_dump(mode="json") == {**_role(), "work_policy": None}
+    assert not bundle.problems
+    path.write_text("[]", encoding="utf-8")
+    assert load_tenant_bundle(tmp_path).roles == ()
+
+
+@pytest.mark.parametrize("change", ["not-list", "malformed", "unknown-key", "control", "duplicates", "too-many", "policy-key"])
+def test_malformed_roles_json_keeps_the_template_roles_and_names_the_rule(tmp_path, change):
+    value = [_role()]
+    if change == "not-list":
+        value = {"private-key": "private-value"}
+    elif change == "unknown-key":
+        value[0]["private-key"] = "private-value"
+    elif change == "control":
+        value[0]["soul"] = "private-value\x00"
+    elif change == "duplicates":
+        value.append(_role())
+    elif change == "too-many":
+        value = [_role(id="role-" + str(index)) for index in range(9)]
+    elif change == "policy-key":
+        value[0]["work_policy"] = {"private-key": "private-value"}
+    (tmp_path / "roles.json").write_text("{" if change == "malformed" else json.dumps(value), encoding="utf-8")
+    bundle = load_tenant_bundle(tmp_path)
+    assert bundle.roles is None and len(bundle.problems) == 1
+    assert bundle.problems[0].startswith("roles.json: ")
+    assert all(word not in bundle.problems[0] for word in ("private-key", "private-value"))
+
+
 def _bundle(tmp_path: Path, brand: dict | str | None = None, *, logo_bytes: bytes | None = PNG, logo_name: str = "logo.png") -> Path:
     root = tmp_path / "tenant"
     root.mkdir(parents=True)

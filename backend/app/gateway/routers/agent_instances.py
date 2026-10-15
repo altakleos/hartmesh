@@ -1,5 +1,6 @@
 """Persistent instance management; request metadata never authenticates agents."""
 
+import logging
 from dataclasses import asdict
 from typing import Literal
 
@@ -47,6 +48,7 @@ class InstanceRoute(APIRoute):
 
 
 router = APIRouter(prefix="/api/agent-instances", tags=["agent-instances"], route_class=InstanceRoute)
+logger = logging.getLogger(__name__)
 
 
 async def _service(request: Request) -> AgentInstances:
@@ -112,13 +114,25 @@ async def _load_definition(request, actor, name):
     return await run_file_io(load)
 
 
+@router.get("/roles")
+@require_permission("agents", "read")
+async def list_roles(request: Request):
+    from deerflow.agent_instances.roles import role_templates
+
+    if not (await run_file_io(get_agents_api_config)).enabled:
+        raise HTTPException(403, "Agent management API is disabled")
+    return {"roles": await run_file_io(role_templates)}
+
+
 @router.get("")
 @require_permission("agents", "read")
-async def list_instances(request: Request, limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0), include_deleted: bool = False):
+async def list_instances(request: Request, limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0), include_deleted: bool = False, custody: Literal["personal", "company"] | None = None, include_provisioning: bool = False):
+    from app.gateway.agent_discovery import list_instances as listing
+
     service = await _service(request)
     actor = await _actor(request)
-    instances = await service.list(actor=actor, limit=limit, offset=offset, include_deleted=include_deleted)
-    return {"instances": [jsonable_encoder(asdict(instance)) for instance in instances], "ai_assistants": await service.personal_counts(actor=actor)}
+    instances = await listing(service, actor=actor, custody=custody, limit=limit, offset=offset, include_deleted=include_deleted, include_provisioning=include_provisioning)
+    return {"instances": instances, "ai_assistants": await service.personal_counts(actor=actor), "unfinished": jsonable_encoder(await service.unfinished(actor=actor, custody=custody))}
 
 
 @router.post("", status_code=201)
@@ -147,6 +161,7 @@ async def create_instance(body: CreateInstance, request: Request):
 @router.get("/{instance_id}")
 @require_permission("agents", "read")
 async def get_instance(instance_id: str, request: Request, include_deleted: bool = False):
+    from app.gateway.agent_discovery import detail
     from deerflow.agent_instances.contract import AgentPermission
 
     service = await _service(request)
@@ -159,7 +174,42 @@ async def get_instance(instance_id: str, request: Request, include_deleted: bool
             instance = await service.get(actor=actor, instance_id=instance_id, permission=AgentPermission.USE, include_deleted=include_deleted)
         except AgentDenied:
             instance = await service.get(actor=actor, instance_id=instance_id, permission=AgentPermission.MANAGE, include_deleted=include_deleted)
-    return jsonable_encoder(asdict(instance))
+    return await detail(request.app, service, instance, actor=actor)
+
+
+@router.get("/{instance_id}/conversations")
+@require_permission("agents", "read")
+@require_permission("threads", "read")
+async def list_conversations(instance_id: str, request: Request, limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)):
+    from app.gateway.agent_discovery import conversations
+    from deerflow.agent_instances.contract import AgentPermission
+
+    service = await _service(request)
+    actor = await _actor(request)
+    try:
+        instance = await service.get(actor=actor, instance_id=instance_id, permission=AgentPermission.INSPECT)
+    except AgentDenied:
+        instance = await service.get(actor=actor, instance_id=instance_id, permission=AgentPermission.USE)
+    return {"conversations": await conversations(request.app, service, instance, actor=actor, limit=limit, offset=offset)}
+
+
+@router.delete("/{instance_id}", status_code=204)
+@require_permission("agents", "write")
+@require_permission("agents", "read")
+async def remove_unfinished_instance(instance_id: str, request: Request):
+    from deerflow.agent_instances.contract import AgentPermission
+    from deerflow.spaces.recovery import SpaceRecovery
+
+    service = await _service(request)
+    actor = await _actor(request)
+    await service.get(actor=actor, instance_id=instance_id, permission=AgentPermission.MANAGE)
+    home_id = await service.abandon_creation(instance_id, on_behalf_of=actor.subject_id)
+    if home_id is not None:
+        try:
+            await SpaceRecovery(service.files).host_release(home_id)
+        except Exception as exc:
+            logger.warning("Unfinished agent release remains pending: cause=%s", type(exc).__name__)
+    return Response(status_code=204)
 
 
 @router.post("/{instance_id}/company-copy", status_code=201)

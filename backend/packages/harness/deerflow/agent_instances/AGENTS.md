@@ -57,6 +57,16 @@ Append migrations after `0034`; preserve published fixtures and register models
 in `persistence/models/__init__.py`. No creator/user deletion cascade may erase
 company identity or homes.
 
+Discovery projections live in `app.gateway.agent_discovery`: bindings come from
+one durable batch read; metadata grants no identity. Reuse conversation authority
+before pagination, retaining Inspect-required protected context. Running details
+and Home state require Inspect; quota bytes never leave the detail projection.
+Administrator inventory adds four summary fields without granting access.
+`abandon_creation` locks Home before instance, retains bound deletion evidence and
+never resolves humans or performs file effects under that lock. Gateway maintenance
+expires 24-hour intents before release, including when no adapter is available;
+per-row failure cannot prevent other cleanup. Keep it in the owned maintenance task.
+
 `test_agent_instances.py` covers both SQL backends and actual storage APIs with
 injected directories/backings; these fixtures never qualify native quotas. The
 mandatory Storage Spaces Linux Docker tier owns native filesystem proof.
