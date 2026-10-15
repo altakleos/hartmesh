@@ -1,12 +1,14 @@
 """Actorless reclamation, authorized by immutable deletion and durable progress."""
 
+import logging
 from copy import deepcopy
+from types import SimpleNamespace
 from uuid import uuid4
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select
 
 from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperationRow
-from deerflow.persistence.spaces.model import SpaceEventRow
+from deerflow.persistence.spaces.model import SpaceEventRow, SpaceRow
 from deerflow.spaces.attachments import SpaceAttachments
 from deerflow.spaces.backings import BackingUnavailable
 from deerflow.spaces.release_filesystem import ReleaseFilesystem, ReleaseParentUnavailable, _digest
@@ -16,6 +18,7 @@ from deerflow.utils.file_io import await_drained, run_file_io
 _BINDING = ("backing_handle", "space_id", "slot_id", "filesystem_uuid", "max_bytes", "max_inodes", "root_inode", "control_inode")
 _WRITER = "host:space-release"
 _REFUSAL = {"complete": False, "slot_released": False}
+logger = logging.getLogger(__name__)
 
 
 async def _snapshot(session, row, admission):
@@ -42,14 +45,23 @@ async def _snapshot(session, row, admission):
     return request, binding
 
 
+async def _release_ledgers(session, space_id, *, pending=False):
+    """Retain recognizable progress even when its request field is damaged."""
+    query = select(SpaceFileOperationRow).where(SpaceFileOperationRow.space_id == space_id)
+    if pending:
+        query = query.where(SpaceFileOperationRow.phase == "pending")
+    rows = (await session.scalars(query)).all()
+    selected = []
+    for row in rows:
+        request = row.request if isinstance(row.request, dict) else {}
+        result = row.result if isinstance(row.result, dict) else {}
+        if request.get("action") in {"host-release", "release"} or (row.actor_kind, row.actor_id) == ("nonhuman", _WRITER) or "release" in result:
+            selected.append(row)
+    return selected
+
+
 async def _intent(session, space_id):
-    rows = (
-        await session.scalars(
-            select(SpaceFileOperationRow).where(
-                SpaceFileOperationRow.space_id == space_id, or_(SpaceFileOperationRow.request["action"].as_string() == "host-release", and_(SpaceFileOperationRow.actor_kind == "nonhuman", SpaceFileOperationRow.actor_id == _WRITER))
-            )
-        )
-    ).all()
+    rows = await _release_ledgers(session, space_id)
     if len(rows) > 1:
         raise SpaceOperationPending("Conflicting host release intents require inspection")
     if not rows:
@@ -133,24 +145,125 @@ async def _discard(session, space_id, operation_id=None):
             operation.result = {"resolution": "host-discarded"}
 
 
+class _ReleaseComplete(Exception):
+    def __init__(self, answer, *, binding=None):
+        self.answer, self.binding = answer, binding
+
+
+class _HostReleasePolicy:
+    def __init__(self, recovery, space_id, *, admission, lock_admission):
+        self.recovery, self.space_id = recovery, space_id
+        self.admission, self.lock_admission = admission, lock_admission
+
+    def locked(self):
+        return self.recovery.registry.host_locked([self.space_id], _before_lock=self.lock_admission)
+
+    async def snapshot(self, session, row):
+        return await _snapshot(session, row, self.admission)
+
+    async def current(self, session, rows, request):
+        return await _current(session, rows, request, self.admission)
+
+    async def intent(self, session, space_id):
+        return await _intent(session, space_id)
+
+    @staticmethod
+    def validate(operation, initial):
+        return _validate_intent(operation, initial)
+
+    @staticmethod
+    def new_id():
+        return uuid4().hex
+
+    @staticmethod
+    def create(session, space_id, operation_id, initial, request):
+        session.add(
+            SpaceFileOperationRow(space_id=space_id, operation_id=operation_id, actor_kind="nonhuman", actor_id=_WRITER, generation=initial["generation"], phase="pending", request=request, result={"schema_version": 1, "stage": "intent"})
+        )
+
+    @staticmethod
+    def checkpoint(operation, checkpoint):
+        operation.result = checkpoint
+
+    @staticmethod
+    def finish(operation, checkpoint):
+        operation.phase = "complete"
+        operation.result = {**checkpoint, "outcome": "reclaimed"}
+
+    @staticmethod
+    def outcome(initial, *, released, newly):
+        return {"complete": True, "slot_released": released, "newly_reclaimed": newly, "cause": initial["delete"]["details"].get("cause")}
+
+    async def absent(self, session, initial):
+        answer = self.outcome(initial, released=True, newly=False)
+        ledgers = await _release_ledgers(session, self.space_id)
+        if len(ledgers) != 1:
+            return answer
+        operation = ledgers[0]
+        if (operation.actor_kind, operation.actor_id, operation.phase) != ("nonhuman", _WRITER, "complete"):
+            return answer
+        if operation.generation != initial["generation"]:
+            raise SpaceOperationPending("Completed host release generation changed")
+        self.recovery.files._operation_id(operation.operation_id)
+        request, result = operation.request, operation.result
+        if not isinstance(request, dict) or not isinstance(result, dict) or result.get("outcome") != "reclaimed":
+            raise SpaceOperationPending("Completed host release proof is malformed")
+        binding = request.get("binding")
+        row = await session.get(SpaceRow, self.space_id)
+        if not isinstance(binding, dict) or set(binding) != set(_BINDING) or binding["space_id"] != row.id or binding["backing_handle"] != row.backing_handle:
+            raise SpaceOperationPending("Completed host release binding changed")
+        _request, checkpoint = _validate_intent(
+            SimpleNamespace(request=request, result={key: value for key, value in result.items() if key != "outcome"}),
+            {**initial, "binding": binding},
+        )
+        if checkpoint is None:
+            raise SpaceOperationPending("Completed host release lacks a physical checkpoint")
+        if await session.scalar(select(SpaceBackingRow.backing_handle).where(SpaceBackingRow.slot_id == binding["slot_id"])) is None:
+            raise _ReleaseComplete(answer, binding=binding)
+        return answer
+
+    def forgotten(self, session, initial):
+        pass
+
+    def own_workflow(self, owner):
+        return None
+
+    @staticmethod
+    def reset_workflow(token):
+        if token is not None:
+            from deerflow.spaces.workflows import _owner
+
+            _owner.reset(token)
+
+    @staticmethod
+    def raise_error(error):
+        raise SpaceOperationPending("Release is incomplete; repeat it") from error
+
+
 async def host_release(recovery, space_id, *, admission=None, publication=None, lock_admission=None, retain_unverified=False, before_publication=None):
-    files, registry = recovery.files, recovery.registry
+    policy = _HostReleasePolicy(recovery, space_id, admission=admission, lock_admission=lock_admission)
+    return await _release(recovery, space_id, policy, publication=publication, retain_unverified=retain_unverified, before_publication=before_publication)
+
+
+async def _release(recovery, space_id, policy, *, publication=None, retain_unverified=False, before_publication=None):
+    """One drained physical engine; each policy supplies fresh SQL authority."""
+    files = recovery.files
 
     async def perform():
         claims = files._claim_snapshot()
         owner = None
+        workflow = None
         try:
-            async with registry.host_locked([space_id], _before_lock=lock_admission) as (session, rows):
-                snapshot = await _snapshot(session, rows.get(space_id), admission)
+            async with policy.locked() as (session, rows):
+                snapshot = await policy.snapshot(session, rows.get(space_id))
                 if snapshot is None:
                     return dict(_REFUSAL)
                 initial, binding = snapshot
-                cause = initial["delete"]["details"].get("cause")
                 if binding is None:
-                    return {"complete": True, "slot_released": True, "newly_reclaimed": False, "cause": cause}
-                operation = await _intent(session, space_id)
+                    return await policy.absent(session, initial)
+                operation = await policy.intent(session, space_id)
                 if operation is not None:
-                    request, checkpoint = _validate_intent(operation, initial)
+                    request, checkpoint = policy.validate(operation, initial)
                     operation_id = operation.operation_id
                     files._operation_id(operation_id)
                 else:
@@ -179,68 +292,70 @@ async def host_release(recovery, space_id, *, admission=None, publication=None, 
                     return dict(_REFUSAL)
                 # Effect-free branch is selected before creating any release
                 # intent. The physical slot stays uncertain and is not counted.
-                async with registry.host_locked([space_id], _before_lock=lock_admission) as (session, rows):
-                    current = await _current(session, rows, initial, admission)
-                    if await _intent(session, space_id) is not None:
+                async with policy.locked() as (session, rows):
+                    current = await policy.current(session, rows, initial)
+                    if await policy.intent(session, space_id) is not None:
                         raise SpaceOperationPending("Release progress appeared during verification")
                     if publication is not None:
                         await publication(session)
                     await _discard(session, space_id)
+                    policy.forgotten(session, initial)
                     await session.delete(current)
+                kind = getattr(files.catalog.volumes.get(slot), "kind", None)
+                logger.warning("storage: space %s (%s) released without emptying (unverified); run storage-init forget %s --discard to reclaim it", slot, kind, slot)
                 if expected is not None:
                     files._publish_claim(slot, expected, binding.backing_handle, "unclaimed")
-                return {"complete": True, "slot_released": False, "newly_reclaimed": False, "cause": cause}
+                return policy.outcome(initial, released=False, newly=False)
             if request is None:
-                async with registry.host_locked([space_id], _before_lock=lock_admission) as (session, rows):
-                    await _current(session, rows, initial, admission)
-                    operation = await _intent(session, space_id)
+                async with policy.locked() as (session, rows):
+                    await policy.current(session, rows, initial)
+                    operation = await policy.intent(session, space_id)
                     if operation is not None:
-                        request, checkpoint = _validate_intent(operation, initial)
+                        request, checkpoint = policy.validate(operation, initial)
                         operation_id = operation.operation_id
                     else:
-                        operation_id = uuid4().hex
+                        operation_id = policy.new_id()
                         request = {**initial, "physical": physical}
-                        session.add(
-                            SpaceFileOperationRow(
-                                space_id=space_id, operation_id=operation_id, actor_kind="nonhuman", actor_id=_WRITER, generation=initial["generation"], phase="pending", request=request, result={"schema_version": 1, "stage": "intent"}
-                            )
-                        )
+                        policy.create(session, space_id, operation_id, initial, request)
             files._operation_id(operation_id)
             await run_file_io(owner.configure, request, operation_id)
             if await run_file_io(owner.foreign_journals):
                 raise SpaceOperationPending("Conflicting sibling release evidence requires inspection")
             if checkpoint is None:
                 await run_file_io(owner.acquire_existing)
-                async with registry.host_locked([space_id], _before_lock=lock_admission) as (session, rows):
-                    await _current(session, rows, request, admission)
-                    operation = await _intent(session, space_id)
-                    _validate_intent(operation, initial)
+                workflow = policy.own_workflow(owner)
+                async with policy.locked() as (session, rows):
+                    await policy.current(session, rows, request)
+                    operation = await policy.intent(session, space_id)
+                    policy.validate(operation, initial)
                     # Full-slot bootstrap holds SQL ownership until durable
                     # journal ownership exists; independent retries cannot race.
                     await run_file_io(owner.initialize)
+                    if workflow is None:
+                        workflow = policy.own_workflow(owner)
                 for name in ("data", "control"):
-                    async with registry.host_locked([space_id], _before_lock=lock_admission) as (session, rows):
-                        await _current(session, rows, request, admission)
+                    async with policy.locked() as (session, rows):
+                        await policy.current(session, rows, request)
                         await run_file_io(owner.rotate, name)
                 for name in ("data", "control"):
-                    async with registry.host_locked([space_id], _before_lock=lock_admission) as (session, rows):
-                        await _current(session, rows, request, admission)
+                    async with policy.locked() as (session, rows):
+                        await policy.current(session, rows, request)
                         await run_file_io(owner.purge_retired, name)
-                async with registry.host_locked([space_id], _before_lock=lock_admission) as (session, rows):
-                    await _current(session, rows, request, admission)
-                    operation = await _intent(session, space_id)
-                    _validate_intent(operation, initial)
+                async with policy.locked() as (session, rows):
+                    await policy.current(session, rows, request)
+                    operation = await policy.intent(session, space_id)
+                    policy.validate(operation, initial)
                     checkpoint = await run_file_io(owner.checkpoint)
-                    operation.result = checkpoint
+                    policy.checkpoint(operation, checkpoint)
                 # Confirmed checkpoint precedes every journal-removal effect.
             if before_publication is not None:
                 # Includes checkpoint retries. External containment proof must
                 # finish before borrowing the final SQL writer/parent locks.
                 await before_publication()
-            async with registry.host_locked([space_id], _before_lock=lock_admission) as (session, rows):
-                current = await _current(session, rows, request, admission)
-                operation = await _intent(session, space_id)
-                _request, saved = _validate_intent(operation, initial)
+            async with policy.locked() as (session, rows):
+                current = await policy.current(session, rows, request)
+                operation = await policy.intent(session, space_id)
+                _request, saved = policy.validate(operation, initial)
                 if saved != checkpoint:
                     raise SpaceOperationPending("Release checkpoint changed before publication")
                 await run_file_io(owner.finish, checkpoint)
@@ -248,17 +363,28 @@ async def host_release(recovery, space_id, *, admission=None, publication=None, 
                     await publication(session)
                 await _discard(session, space_id, operation_id)
                 await session.delete(current)
-                operation.phase = "complete"
-                operation.result = {**checkpoint, "outcome": "reclaimed"}
+                policy.finish(operation, checkpoint)
             if expected is not None:
                 files._publish_claim(slot, expected, None, "free")
-            return {"complete": True, "slot_released": True, "newly_reclaimed": True, "cause": cause}
+            return policy.outcome(initial, released=True, newly=True)
+        except _ReleaseComplete as completed:
+            if completed.binding is not None:
+                binding = completed.binding
+                slot = binding["slot_id"]
+                expected = files._binding_claim(claims, slot)
+                if expected is not None and (expected.handle, expected.phase) == (binding["backing_handle"], "bound"):
+                    released = completed.answer["slot_released"]
+                    files._publish_claim(slot, expected, None if released else binding["backing_handle"], "free" if released else "unclaimed")
+            return completed.answer
         except SpaceOperationPending:
             raise
         except Exception as exc:
-            raise SpaceOperationPending("Release is incomplete; repeat it") from exc
+            policy.raise_error(exc)
         finally:
-            if owner is not None:
-                await run_file_io(owner.close)
+            try:
+                if owner is not None:
+                    await run_file_io(owner.close)
+            finally:
+                policy.reset_workflow(workflow)
 
     return await await_drained(perform())

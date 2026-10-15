@@ -518,7 +518,7 @@ class TestStartupSweep:
         app.state.startup_trash_sweep_task = task
         await asyncio.wait_for(started.wait(), timeout=5)
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.WARNING, logger=gateway_app.__name__):
             await gateway_app._shutdown_startup_trash_sweep(app)
 
         assert observed_cancel.is_set()
@@ -556,7 +556,7 @@ class TestStartupSweep:
             raise TimeoutError
 
         monkeypatch.setattr(asyncio, "wait_for", deadline_landing_after_the_finish)
-        with caplog.at_level(logging.INFO):
+        with caplog.at_level(logging.INFO, logger=gateway_app.__name__):
             await gateway_app._shutdown_startup_trash_sweep(app)
 
         assert task.done() and not task.cancelled()

@@ -4,14 +4,18 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
-from deerflow.agent_instances.contract import AgentConflict, AgentDenied, AgentPermission, DefinitionSnapshot
+from deerflow.agent_instances.contract import AgentConflict, AgentDenied, AgentPermission, DefinitionSnapshot, Refusal
 from deerflow.persistence.agent_instances.model import AgentDefinitionRevisionRow, AgentInstanceGrantRow, AgentInstanceRow, AgentLifecycleRow
 from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceMountRow
 from deerflow.persistence.spaces.model import SpaceGrantRow, SpaceRow
 from deerflow.spaces.attachments import AttachmentPending
-from deerflow.spaces.contract import MutationMode, Permission, PrincipalRef, SpaceConflict, validate_generation
+from deerflow.spaces.contract import MutationMode, Permission, PrincipalRef, SpaceConflict, SpaceNotFound, validate_generation
+from deerflow.spaces.recovery import SpaceRecovery
 from deerflow.spaces.registry import _stored_permissions
 from deerflow.utils.file_io import await_drained
+
+WORK_IN_FLIGHT_DETAIL = "{name} is working right now. Apply the change when {name} is idle, or send it again without only_if_idle to stop that work."
+_GRANT_CHANGED = "The member's grant on the files changed; abandon the operation again"
 
 
 class _Complete(Exception):
@@ -30,7 +34,7 @@ class InstanceLifecycle:
         view = self.agents._view(row, grant.permissions)
         if not view.permissions & AgentPermission.MANAGE:
             raise AgentDenied("Agent lifecycle requires current Manage")
-        await self.agents._human(actor)
+        await self.agents._human(actor, session=session)
         return row, grant, view
 
     @staticmethod
@@ -45,9 +49,9 @@ class InstanceLifecycle:
             SpaceFiles._operation_id(key)
 
     async def _restore_ready(self, session, view):
-        await self.agents._human(view.supervisor)
+        await self.agents._human(view.supervisor, session=session)
         if view.custody == "personal":
-            await self.agents._human(PrincipalRef("human", view.owner_id))
+            await self.agents._human(PrincipalRef("human", view.owner_id), session=session)
         await self.agents._stored_definition(session, view.definition_revision)
         home = await session.get(SpaceRow, view.home_id)
         grant = await session.get(SpaceGrantRow, (view.home_id, view.principal.kind, view.principal.subject_id))
@@ -57,13 +61,74 @@ class InstanceLifecycle:
         await self.agents.files._volume(session, home)
 
     async def _grant_ready(self, session, actor, instance_id, member, permissions):
-        if member == actor and not permissions & int(AgentPermission.MANAGE):
+        required = int(AgentPermission.INSPECT | AgentPermission.MANAGE)
+        if member == actor and permissions & required != required:
             raise AgentDenied("Do not retire your own lifecycle management grant")
         if permissions & int(AgentPermission.MANAGE) == 0:
             managers = (await session.execute(select(AgentInstanceGrantRow).where(AgentInstanceGrantRow.instance_id == instance_id))).scalars().all()
-            live = [g for g in managers if g.user_id != member.subject_id and g.permissions & int(AgentPermission.MANAGE) and await self.agents.directory.human(PrincipalRef("human", g.user_id)) is not None]
+            live = [g for g in managers if g.user_id != member.subject_id and g.permissions & int(AgentPermission.MANAGE) and await self._human_or_none(session, PrincipalRef("human", g.user_id)) is not None]
             if not live:
                 raise AgentDenied("Retain a current human manager")
+
+    async def _human_or_none(self, session, member):
+        lookup = self.agents.directory.human
+        borrowed = getattr(lookup, "in_session", None)
+        resolved = await borrowed(member, session) if callable(borrowed) else await lookup(member)
+        return resolved if resolved is not None and resolved.reference == member else None
+
+    @staticmethod
+    def _file_permissions(permissions):
+        if not permissions & int(AgentPermission.INSPECT):
+            return Permission(0)
+        return Permission.READ | Permission.EXPORT | (Permission.WRITE | Permission.ADMIN if permissions & int(AgentPermission.MANAGE) else Permission(0))
+
+    @staticmethod
+    async def _stored_file_grant(session, home_id, member):
+        grant = await session.get(SpaceGrantRow, (home_id, member.kind, member.subject_id))
+        return _stored_permissions(grant.permissions, MutationMode.NATIVE) if grant is not None else Permission(0)
+
+    async def _committed_file_permissions(self, session, instance_id, member):
+        grant = await session.get(AgentInstanceGrantRow, (instance_id, member.subject_id))
+        if grant is None or await self._human_or_none(session, member) is None:
+            return Permission(0)
+        return self._file_permissions(grant.permissions)
+
+    async def _sync_file_grant(self, actor, view, operation_id, *, compensate=False, expected_generation=None):
+        """Write files first, fenced by the exact still-suspended intent."""
+        async with self.agents._sf() as session:
+            intent = await session.get(AgentLifecycleRow, (view.id, operation_id))
+            if intent is None or intent.phase != "pending" or intent.request.get("action") != "grant":
+                return None
+            request, generation = dict(intent.request), intent.generation
+            self._match(intent, actor, generation, request, company=view.custody == "company")
+            if compensate and (view.generation != expected_generation or view.generation != generation + 1 or view.status != "suspended"):
+                raise AgentConflict("Lifecycle generation changed")
+            member = PrincipalRef("human", request["member_id"])
+            target = await self._committed_file_permissions(session, view.id, member) if compensate else self._file_permissions(request["permissions"])
+        home = await self.agents.files.registry.get(actor=actor, space_id=view.home_id, permission=Permission.ADMIN)
+
+        async def admission(session):
+            row, _grant, current = await self._parent(session, actor, view.id)
+            live = await session.get(AgentLifecycleRow, (view.id, operation_id))
+            if live is None or live.phase != "pending":
+                raise AgentConflict("Lifecycle intent is unavailable")
+            self._match(live, actor, generation, request, company=current.custody == "company")
+            if row.status != "suspended" or row.generation != generation + 1 or current.home_id != live.home_id or current.home_id != view.home_id:
+                raise AgentConflict("Lifecycle generation changed")
+            if compensate and row.generation != expected_generation:
+                raise AgentConflict("Lifecycle generation changed")
+            if not await self._scope_fenced(session, live):
+                raise AgentConflict("Confirm captured containment before changing file access")
+            if compensate and await self._committed_file_permissions(session, view.id, member) != target:
+                raise AgentConflict(_GRANT_CHANGED)
+            if not compensate:
+                await self._grant_ready(session, actor, view.id, member, request["permissions"])
+
+        async with self.agents._sf() as session:
+            stored = await self._stored_file_grant(session, home.id, member)
+        if stored != target:
+            await self.agents.files.registry.set_grant(actor=actor, space_id=home.id, subject=member, permissions=target, expected_generation=home.generation, acknowledge_existing_data=True, admission=admission)
+        return member, target
 
     async def abandon(self, *, actor, instance_id, expected_generation, operation_id):
         """Resolve obsolete intent without effects or reactivating a resident."""
@@ -72,15 +137,17 @@ class InstanceLifecycle:
         view = await self.agents.get(actor=actor, instance_id=instance_id, permission=AgentPermission.MANAGE, include_deleted=True)
         async with self.agents._sf() as session:
             terminal = await session.get(AgentLifecycleRow, (instance_id, operation_id))
-            if terminal is not None and terminal.phase == "abandoned" and terminal.home_id == view.home_id and (terminal.actor_id == actor.subject_id or view.custody == "company"):
-                await self.agents.files.registry.get(actor=actor, space_id=view.home_id, permission=Permission.ADMIN)
-                return {"instance": view, "complete": True, "abandoned": True, "operation_id": operation_id}
+            abandoned = terminal is not None and terminal.phase == "abandoned" and terminal.home_id == view.home_id and (terminal.actor_id == actor.subject_id or view.custody == "company")
+        if abandoned:
+            await self.agents.files.registry.get(actor=actor, space_id=view.home_id, permission=Permission.ADMIN)
+            return {"instance": view, "complete": True, "abandoned": True, "operation_id": operation_id}
         if getattr(self.agents.files, "attachments", None) is None:
             from deerflow.agent_instances.runtime import qualified_attachments
 
             await qualified_attachments(self.agents.files)
 
         async def perform():
+            reset = await self._sync_file_grant(actor, view, operation_id, compensate=True, expected_generation=expected_generation)
             async with self.agents.files.registry.admitted(actor=actor, requests={view.home_id: (Permission.ADMIN, None)}) as (session, homes):
                 row, grant, current = await self._parent(session, actor, instance_id)
                 intent = await session.get(AgentLifecycleRow, (instance_id, operation_id))
@@ -92,6 +159,10 @@ class InstanceLifecycle:
                     raise AgentConflict("Lifecycle generation changed")
                 if not await self._scope_fenced(session, intent):
                     raise AgentConflict("Confirm captured containment before abandoning the operation")
+                if reset is not None:
+                    member, target = reset
+                    if await self._committed_file_permissions(session, instance_id, member) != target or await self._stored_file_grant(session, current.home_id, member) != target:
+                        raise AgentConflict(_GRANT_CHANGED)
                 intent.phase = "abandoned"
                 intent.home_generation = homes[current.home_id][0].generation
                 intent.resolved_by = actor.subject_id
@@ -147,7 +218,7 @@ class InstanceLifecycle:
         current = await session.scalar(select(SpaceAttachmentRow.id).join(SpaceMountRow, SpaceMountRow.attachment_id == SpaceAttachmentRow.id).where(SpaceMountRow.space_id == intent.home_id, SpaceAttachmentRow.phase != "fenced").limit(1))
         return current is None
 
-    async def change(self, *, actor, instance_id, expected_generation, operation_id, action, definition=None, supervisor=None, member=None, permissions=None):
+    async def change(self, *, actor, instance_id, expected_generation, operation_id, action, definition=None, supervisor=None, member=None, permissions=None, only_if_idle=False, runs_in_flight=None):
         validate_generation(expected_generation)
         self.agents.files._operation_id(operation_id)
         if action not in {"suspend", "archive", "delete", "restore", "adopt", "supervise", "grant"}:
@@ -173,6 +244,8 @@ class InstanceLifecycle:
 
         async def perform():
             view = await self.agents.get(actor=actor, instance_id=instance_id, permission=AgentPermission.MANAGE, include_deleted=True)
+            if action == "restore" and view.status == "deleted":
+                raise SpaceNotFound("Space is unavailable")
             async with self.agents._sf() as session:
                 existing = await session.get(AgentLifecycleRow, (instance_id, operation_id))
                 if existing is not None:
@@ -186,7 +259,8 @@ class InstanceLifecycle:
                         ids = []
                 else:
                     ids = None
-                    home_generation = (await self.agents.files.registry.get(actor=actor, space_id=view.home_id, permission=Permission.ADMIN)).generation
+            if ids is None:
+                home_generation = (await self.agents.files.registry.get(actor=actor, space_id=view.home_id, permission=Permission.ADMIN)).generation
             attachments = getattr(self.agents.files, "attachments", None)
             if attachments is None:
                 from deerflow.agent_instances.runtime import qualified_attachments
@@ -194,6 +268,10 @@ class InstanceLifecycle:
                 _provider, attachments = await qualified_attachments(self.agents.files)
 
             async def withdraw(session, identities):
+                if only_if_idle and runs_in_flight is not None:
+                    run_ids = list(runs_in_flight())
+                    if run_ids:
+                        raise Refusal(WORK_IN_FLIGHT_DETAIL.format(name=view.name), reason="work-in-flight", run_ids=run_ids)
                 row, grant, current = await self._parent(session, actor, instance_id)
                 if current.home_id != view.home_id:
                     raise AgentConflict("Lifecycle Home identity changed")
@@ -212,13 +290,13 @@ class InstanceLifecycle:
                 if action == "restore" and (current.status == "active" or candidates):
                     raise AgentConflict("Restore requires an inactive agent without conflicting native views")
                 if action != "restore" and current.status == "deleted":
-                    raise AgentDenied("Restore the removed agent before modifying it")
+                    raise AgentDenied("Removed agents are unavailable")
                 if len(candidates) > 32:
                     raise AgentConflict("Containment scope exceeds the qualified bound")
                 if supervisor is not None:
-                    await self.agents._human(supervisor)
+                    await self.agents._human(supervisor, session=session)
                 if member is not None and permissions:
-                    await self.agents._human(member)
+                    await self.agents._human(member, session=session)
                 if action == "grant":
                     await self._grant_ready(session, actor, instance_id, member, permissions)
                 if definition is not None:
@@ -261,6 +339,9 @@ class InstanceLifecycle:
                         raise AgentConflict("Lifecycle withdrawal was not committed; refresh before retrying") from None
                 return {"instance": await self.agents.get(actor=actor, instance_id=instance_id, permission=AgentPermission.MANAGE, include_deleted=True), "complete": False, "operation_id": operation_id}
 
+            if action == "grant":
+                await self._sync_file_grant(actor, view, operation_id)
+
             async def finalize():
                 async with self.agents.files.registry.admitted(actor=actor, requests={view.home_id: (Permission.ADMIN, None)}) as (session, homes):
                     row, grant, current = await self._parent(session, actor, instance_id)
@@ -274,6 +355,12 @@ class InstanceLifecycle:
                         raise AgentConflict("Lifecycle generation changed")
                     if not await self._scope_fenced(session, intent):
                         raise AttachmentPending("Lifecycle containment is not confirmed")
+                    if action == "delete":
+                        home = homes[current.home_id][0]
+                        if home.generation >= 2**31 - 1:
+                            raise AgentConflict("The agent's Space generation is exhausted")
+                        home.status = "deleted"
+                        SpaceRecovery._advance(session, home, actor, "delete", {"retained_backups": False, "retained_binding": True, "cause": "agent-deleted"})
                     intent.home_generation = homes[current.home_id][0].generation
                     if action == "restore":
                         await self._restore_ready(session, current)
@@ -282,13 +369,15 @@ class InstanceLifecycle:
                             raise AgentConflict("Adopted definition revision changed")
                         row.definition_revision = definition.revision
                     if supervisor is not None:
-                        await self.agents._human(supervisor)
+                        await self.agents._human(supervisor, session=session)
                         row.supervisor_id = supervisor.subject_id
                     if member is not None:
                         await self._grant_ready(session, actor, instance_id, member, permissions)
+                        if await self._stored_file_grant(session, current.home_id, member) != self._file_permissions(permissions):
+                            raise AgentConflict("The member's grant on the files changed; retry the operation")
                         member_grant = await session.get(AgentInstanceGrantRow, (instance_id, member.subject_id))
                         if permissions:
-                            await self.agents._human(member)
+                            await self.agents._human(member, session=session)
                             if member_grant is None:
                                 session.add(AgentInstanceGrantRow(instance_id=instance_id, user_id=member.subject_id, permissions=permissions))
                             else:

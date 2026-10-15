@@ -138,7 +138,7 @@ class CopyRequest(StrictRequest):
 class LifecycleRequest(StrictRequest):
     operation_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     generation: int = Field(ge=1)
-    action: Literal["backup", "restore", "archive", "delete"]
+    action: Literal["backup", "restore", "archive", "delete", "release"]
     backup_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
 
 
@@ -205,6 +205,8 @@ async def resource_lifecycle(space_id: str, body: LifecycleRequest, request: Req
     if (body.action == "restore") != (body.backup_id is not None):
         raise ValueError("Only restore requires a resource backup identity")
     service, actor = _service(request), await _actor(request)
+    if body.action == "release":
+        return await SpaceRecovery(service).release(actor=actor, space_id=space_id, expected_generation=body.generation, operation_id=body.operation_id)
     await _chat_lifecycle_guard(service, actor, space_id, body.generation)
     recovery = SpaceRecovery(service)
     if body.action in {"archive", "delete"}:
@@ -237,9 +239,13 @@ async def rename_space(space_id: str, body: RenameSpace, request: Request):
 @router.put("/{space_id}/grants")
 async def set_grant(space_id: str, body: GrantRequest, request: Request):
     service, actor = _service(request), await _actor(request)
+    await service.registry.get(actor=actor, space_id=space_id, permission=Permission.ADMIN, expected_generation=body.generation)
     if service.user_spaces is False:
-        await service.registry.get(actor=actor, space_id=space_id, permission=Permission.ADMIN, expected_generation=body.generation)
         raise Refusal("This storage belongs to a person, an AI assistant, an AI employee or the company; who may use it, and whether it is kept, is decided in the product", reason="owned-space")
+    agents = getattr(request.app.state, "agent_instances", None)
+    owner = await agents.space_owner(space_id) if agents is not None else None
+    if owner is not None and owner.status != "deleted":
+        raise Refusal("These files belong to an AI assistant or AI employee; change access through agent management.", reason="owned-space")
     space = await service.registry.set_grant(
         actor=actor,
         space_id=space_id,

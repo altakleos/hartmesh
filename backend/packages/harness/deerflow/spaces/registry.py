@@ -124,6 +124,26 @@ class SpaceRegistry:
         return admitted
 
     @asynccontextmanager
+    async def admitted_deleted(self, *, actor: PrincipalRef, space_id: str, operation_id: tuple[str, str] | None = None):
+        """Admit explicit release with fresh stored ADMIN on one tombstone."""
+        await self._actor(actor)
+        async with self.host_locked([space_id]) as (session, rows):
+            row = rows.get(space_id)
+            grant = await self._grant(session, row, actor) if row is not None else None
+            if row is None or row.status != "deleted" or grant is None:
+                raise SpaceNotFound("Space is unavailable")
+            if not _stored_permissions(grant.permissions, MutationMode(row.mode)) & Permission.ADMIN:
+                raise SpaceDenied("Space operation is not granted")
+            await self._actor(actor, session=session)
+            if self.operation_guard is not None:
+                await self.operation_guard(session, {space_id: (row, grant)}, {space_id: (Permission.ADMIN, None)}, operation_id)
+            from deerflow.spaces.attachments import SpaceAttachments
+
+            if await SpaceAttachments._current(session, [space_id], lock=True):
+                raise SpaceConflict("The storage attachment must be fenced before this operation")
+            yield session, row, grant
+
+    @asynccontextmanager
     async def _mutation(self, *, actor: PrincipalRef, space_id: str, expected_generation: int, action: str, details: dict):
         async with self.admitted(actor=actor, requests={space_id: (Permission.ADMIN, expected_generation)}) as (session, admitted):
             row, grant = admitted[space_id]

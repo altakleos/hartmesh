@@ -151,6 +151,13 @@ path effects precede binding/domain publication commit; postcommit caches use CA
 Capacity's read-only prefix check excludes unresolved sibling journals. Domain
 scheduling arrives after provider containment qualification.
 
+`caller_release.py` shares that physical engine with fresh deleted-native/stored
+ADMIN admission and its own caller/generation/operation receipt. Keep false replies
+durable; never rewrite retention events. Recognizable damaged or competing release
+ledgers block discard. Confirm commit before logs/cache changes. Completed claim
+repair requires canonical ledger metadata, checkpoint proof, no new SQL owner and
+the exact original cache token. Caller workflow ownership begins after its lock.
+
 `binding_verified` projects facts after closing its SQL session; it grants no
 admission. Assignable-slot snapshots exclude bound/unclaimed/unverified slots,
 independently of account-seat occupancy. `user_spaces` gates `create` only;

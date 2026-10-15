@@ -305,11 +305,18 @@ or Project mounts. Existing storage audience/copy checks remain authoritative.
 `operation_id`, and `action`: `suspend`, `archive`, `delete`, `restore`, `adopt`,
 `supervise`, or `grant`. Adoption takes caller-visible `definition_name`, supervision
 takes `supervisor_id`, and grants take `member_id` plus explicit permission bits
-(Use1/Inspect2/Manage4; zero revokes). Agent access and storage membership are
-separate; manage resource grants through Spaces. Domain Manage and current Home
+(Use1/Inspect2/Manage4; zero revokes). Inspect grants Home READ/EXPORT; Inspect
+plus Manage grants READ/WRITE/EXPORT/ADMIN. Membership without Inspect removes
+the file grant. Generic Space grant routes refuse a live agent's Home.
+Domain Manage and current Home
 ADMIN are mandatory, alongside provider `agents:read`/`agents:write` ceilings.
 
-Suspension/archive/removal preserve principal, Home bytes, human storage grants
+Optional `only_if_idle: true` checks the owning registry's actual run IDs inside
+withdrawal before changing state. Busy requests return HTTP409 `work-in-flight`
+with `run_ids`. The flag is not stored, so the same operation may be retried
+without it. File activity and capacity reservations are not this run snapshot.
+
+Suspension/archive preserve principal, Home bytes, human storage grants
 and independently owned Projects. Qualified Storage Spaces retirement records the
 exact attachment scope and inactive agent generation atomically before physical
 effects. HTTP202 means containment remains pending, never that the writer stopped.
@@ -317,7 +324,14 @@ GET `/lifecycle` supplies current operation status and captured retry requests.
 Retries reuse the same identity/scope; completed retries cannot stop replacement
 writers. Renaming cannot strand a pending intent. Owned mutations drain cancellation.
 
-Restore requires a retained active, qualified Home, current resident read/write
+Delete commits the agent and Home tombstones together, advancing the Home
+generation and recording `retained_backups: false` with cause `agent-deleted`.
+The route then makes one guarded host release attempt. HTTP200 includes
+`space_released`, false for incomplete or unverified cleanup; HTTP202 and abandoned
+operations omit it. Maintenance retries bindings that remain. Uncertain release
+proof is retained until physical reclamation can be confirmed.
+
+Deleted agents cannot be restored. Restore requires a retained active, qualified Home, current resident read/write
 grants, a live supervisor/custodian and a valid adopted definition. Conflicting or
 unresolved native views prevent restoration. It restores no old membership and
 does not reconstruct deleted Space backing. Use qualified Space recovery separately
@@ -329,8 +343,11 @@ adoption retries do not require the mutable source definition to survive.
 `POST /api/agent-instances/{id}/lifecycle/abandon` takes the pending operation ID
 and current instance generation. Current Manage/Home ADMIN may abandon obsolete
 intents only after their exact captured attachment scope is fenced. It records
-`phase=abandoned` and the resolver, keeps grants/request/actor and suspended status,
-and performs no provider effects. Use normal supervision/restore afterward.
+`phase=abandoned` and the resolver, retains the request/actor and suspended status,
+and performs no provider effects. An unfinished grant first resets Home access
+from current committed membership; a retired human receives no file grant.
+Reset failure or a changed grant leaves the intent pending. The final transaction
+rechecks both membership and file access. Use normal supervision/restore afterward.
 Abandoned retries are terminal and cannot replay old grants or stop replacements.
 
 `POST /api/agent-instances/{personal-id}/company-copy` takes a creation identity,

@@ -740,6 +740,13 @@ files of an agent that still exists. Work records expose execution availability,
 workspace readiness and containment receipts; capacity counts include hidden
 assignments while their details require Inspect.
 
+Deleting an AI assistant or AI employee marks its files deleted atomically, then
+tries to reclaim its typed storage slot. The response reports `space_released`;
+uncertain cleanup stays charged for maintenance to retry. Deleted agents cannot
+be restored. Access changes map Inspect to file reading/export, and Inspect plus
+Manage to file administration; chat-only members receive no file grant. Managers
+can send `only_if_idle: true` to refuse a change while a run is in flight.
+
 Releasing a disabled account also deletes its personal AI assistants and marks
 their bound files for cleanup, preserving company AI employees. An unfinished
 creation without a files Space is removed with its grants. Unknown cleanup

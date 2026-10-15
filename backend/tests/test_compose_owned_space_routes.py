@@ -16,6 +16,23 @@ MOUNTS_DETAIL = "This storage is mounted by chat sandboxes that are not recorded
 OWNED_DETAIL = "This storage belongs to a person, an AI assistant, an AI employee or the company; who may use it, and whether it is kept, is decided in the product"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["none", "user", "company"])
+async def test_explicit_deleted_space_release_dispatches_before_chat_lifecycle_guards(space_file_storage, role):
+    from test_storage_spaces_release import deleted
+
+    from deerflow.persistence.spaces.files import SpaceBackingRow
+
+    files, sf, _catalog = space_file_storage
+    space = await resource(files, sf, role)
+    await deleted(sf, space, retained=True)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=request_app(files)), base_url="http://test") as client:
+        response = await client.post(f"/api/spaces/{space.id}/lifecycle", json={"generation": 2, "operation_id": operation(), "action": "release"})
+        assert response.status_code == 200 and response.json() == {"complete": True, "slot_released": True}, response.text
+    async with sf() as session:
+        assert await session.get(SpaceBackingRow, space.backing_handle) is None
+
+
 async def resource(files, sf, role):
     if role == "company":
         space = await files.create(actor=ALICE, name="Company", custody=Custody.company(), mode=MutationMode.NATIVE)

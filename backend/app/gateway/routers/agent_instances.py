@@ -280,6 +280,7 @@ class LifecycleChange(StrictRequest):
     supervisor_id: str | None = Field(default=None, min_length=1, max_length=128)
     member_id: str | None = Field(default=None, min_length=1, max_length=128)
     permissions: int | None = Field(default=None, ge=0, le=7)
+    only_if_idle: bool = False
 
     @model_validator(mode="after")
     def fields_match_action(self):
@@ -332,8 +333,15 @@ async def change_lifecycle(instance_id: str, body: LifecycleChange, request: Req
         supervisor=PrincipalRef("human", body.supervisor_id) if body.supervisor_id is not None else None,
         member=PrincipalRef("human", body.member_id) if body.member_id is not None else None,
         permissions=body.permissions,
+        only_if_idle=body.only_if_idle,
+        runs_in_flight=(lambda: service.residents.in_flight(instance_id)) if service.residents is not None else None,
     )
     response.status_code = 200 if result["complete"] else 202
+    if body.action == "delete" and result["complete"] and not result.get("abandoned") and result["instance"].status == "deleted":
+        from app.gateway.storage_reclamation import release_deleted_space
+
+        release = await release_deleted_space(request.app, result["instance"].home_id)
+        result["space_released"] = release.get("complete") is True and release.get("slot_released") is True
     return {**result, "instance": jsonable_encoder(asdict(result["instance"]))}
 
 
