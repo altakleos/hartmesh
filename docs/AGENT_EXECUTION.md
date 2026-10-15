@@ -15,13 +15,65 @@ Managed-storage availability is separate from agent identity. `/api/features`
 reports `agent_instances.execution` as `ready` or `unavailable` with a bounded
 reason; `/health` maps this to state words `ready`, `none`, `held` or `unavailable`
 (and `off` with storage disabled). Current reasons include `storage-unavailable`,
-`agents-none`, `space-unverified` and `space-not-assigned`. Hold/host-replacement
-enforcement is not activated yet. AI assistant/AI employee allowances expose
+`agents-none`, `space-unverified`, `space-not-assigned`, `operator-hold` and
+`host-replaced`. AI assistant/AI employee allowances expose
 `allowed` and `in_use` counts, never bytes. An execution admission refusal carries
 HTTP 409 with a public `detail`, `reason: execution-unavailable` and a separate
 `execution_reason`. Feature file routes instead use a structured `detail` with
 `code`, `reason` and a public message. The Compose renderer still writes both
-agent creation counts as zero.
+explicit agent creation counts; both default to zero until default activation.
+
+Startup logs report storage and agent execution readiness separately. A prepared
+storage pool can coexist with `agents: unavailable (storage-unavailable)` while
+resident initialization is incomplete. Failed initialization reports bounded
+error types and source locations plus qualification state; exception values,
+tenant contents and source text are omitted.
+Resident graph qualification excludes only Docker's observational `ExecIDs` and
+`State.Health` fields from snapshot equality. Identity, process state, restart
+count, complete configuration, mounts and network facts still have to match;
+the paired graph is checked against the fresh primary inspection. A mismatch
+logs only known top-level field names, with unknown names shown as `other`.
+Mount list order is normalized using each complete record; all record fields
+and duplicate multiplicity remain part of the comparison.
+Workspace liveness accepts absence only with return code 1, empty or `[]` output
+and an exact known error naming the original container ID, including Docker 29's
+lowercase form. Confirmed loss enters original-resource containment; an outage
+or ambiguous reply retains the charge and prevents replacement.
+Routine reconciliation keeps the last confirmed readiness while healthy checks
+are in flight. Initial qualification remains unavailable; pending findings,
+failures, cancellation, accounting invalidation and shutdown clear readiness.
+Refresh publication checks its captured revision and exact runtime bindings,
+so a stale success cannot restore readiness or reopen provider admission.
+Refusal logs distinguish unavailable storage, a missing runtime, pending
+bootstrap and an unqualified workspace. Invalidation logs name fixed reasons,
+and run-inventory logs count mismatches using fixed field labels. Attachment
+diagnostics use booleans for captured state and preparation; none records
+tenant identifiers, metadata keys or values, or file contents.
+Reconciliation rechecks a captured attachment's actor, host, mount scope, identity
+and phase under the Home lock before acting on it. An exactly fenced snapshot
+permits one whole-pass rescan only after its retained charge, association,
+preparation and uncertain-containment state are cleared. The new pass must
+qualify the replacement through the normal resume path under the original
+deadline. A filtered scan, a second change or uncertain identity remains pending;
+inspection failures retain captured charges. A failed scan before claims are
+processed closes accounting for restoration. Observation performs no cleanup.
+The existing maintenance loop also wakes after expired-run recovery. A consumed
+failed initializer starts one fresh owned pass in that invocation; an unfinished
+initializer remains owned. Successful completion wakes that same loop to consume
+the result after its maintenance owner drains; failed tasks retain the normal
+retry interval. Stop and wake waiters drain with the same loop. This
+changes scheduling only: peer lease takeover and current native proof still
+precede recovery. When startup qualification finishes later, actual execution
+readiness reports its confirmed containment counts once.
+
+Creation, conversations, replies, activations and lifecycle changes check current
+execution readiness. AI assistant creation can refuse `ai-assistant-limit` with
+`{per_user, mine, allowed, in_use}` or `ai-assistant-none-free`. AI employee
+creation can refuse `ai-employee-limit` with `{allowed, in_use}`; a caller without
+current company provisioning authority gets 403. The instance list also returns
+`ai_assistants` personal counts. Custody selects the kind: `personal` takes an
+assistant slot and `company` an employee slot. Unfinished and inactive instances
+count toward allowances; exact creation retries preserve admitted identities.
 
 
 `POST /api/agent-instances` requires provider permissions `agents:read` and
@@ -103,6 +155,19 @@ unsupported; a configured Shared bind is not an ordinary attachment mount edge.
 A new chat or completed run reuses the admitted attachment. Lease
 expiry, SDK closure and chat deletion do not retire a physical writer or Home.
 
+A workspace takes one of `sandbox.replicas` slots. At most two runs share it;
+Work attempts are globally limited to `max(1, replicas - 1)`, including launch
+reservations. Admission reports `busy`, `run-limit`, `work-limit`,
+`restarting` or `starting-elsewhere` when those boundaries refuse work.
+The host contains orphaned workspaces at startup, after 1800 idle seconds,
+after a failed start or an uncertain end, with recorded attribution. A running
+workspace with no run survives a Gateway restart. Closing a workspace under a
+run stops it by its next model call with `ResidentInterrupted` and the recorded
+reason. A busy Space refuses a new message with `storage-busy` and `cause`;
+starting or closing workspaces retain their charge until confirmed containment.
+Graceful Gateway shutdown records `gateway_stopped` on interrupted runs. This
+managed resident lifecycle assumes one Gateway worker.
+
 Ordinary wiki, repository and database edits persist in Home without an artifact
 manifest or automatic delivery requirement. Explicit output presentation uses
 Home's `outputs/` and the existing Space download path. Checkpoint branches keep
@@ -163,9 +228,10 @@ This integration adds no database migration or configuration-version change.
 Private native evidence adds explicit schema-3 zero-slot create and schema-4
 zero-slot teardown records for managed chats without User storage. Existing
 schema-1 creates and schema-2 teardowns keep their validation rules. Compose
-agent counts remain disabled. Strict durable cleanup of untracked resident graphs
-is a subsequent stage: unexplained primaries or secondary resources currently
-keep capacity admission closed rather than being removed from census alone.
+agent counts now apply when explicitly set. Strict recovery uses retained original
+container, network and backing identities, even when an attachment row is absent
+or fenced. Live leases and unfinished create operations remain protected;
+unexplained resources keep admission closed until their identity is resolved.
 
 ## Instance memory
 

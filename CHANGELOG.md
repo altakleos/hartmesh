@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Compose agent qualification
+
+The scripted acceptance model supports deterministic Work outcomes and held
+attempts. Required CI adds seven real bundle cases for AI assistant file
+persistence, runtime placement, Work outcomes/capacity and graceful/forced restart
+recovery. Native qualification now uses real resident admission and verifies host
+containment before replacement. Named-case gates reject skips or missing cases;
+operator docs describe holds, recovery and workspace cleanup. Default activation
+and remaining product controls stay deferred.
+
+Startup agent readiness reflects execution admission. Resident initialization
+failures produce bounded source diagnostics without exception values or tenant
+contents, so an unavailable resident is no longer logged as ready.
+Resident census ignores changing health and exec observations while preserving
+identity, process state, mount and network comparisons across fresh inspections.
+Mount list ordering is normalized without discarding record fields or duplicates.
+Workspace liveness recognizes exact Docker 29 absence replies and refuses
+ambiguous replies, allowing original-resource containment before replacement.
+Healthy background refreshes retain execution readiness; pending findings,
+failures and shutdown invalidate it without allowing stale success to restore it.
+Readiness refusals and invalidations identify fixed internal causes with counts,
+without recording tenant identifiers, metadata values or file contents.
+Reconciliation refreshes captured attachment facts under the workspace lock and
+rescans once after an already completed replacement, preserving uncertain charges.
+Expired-lease recovery wakes maintenance and consumed bootstrap failures schedule
+one fresh owned pass immediately. Successful completion wakes the same loop to
+consume the result. Delayed readiness reports confirmed containment
+counts once, while unfinished initializers and valid peer leases remain protected.
+
+There is no database schema, native evidence format or configuration-version change.
+
 ### Typed AI agent creation and execution admission
 
 Explicit managed Compose counts now enable AI assistants and AI employees with

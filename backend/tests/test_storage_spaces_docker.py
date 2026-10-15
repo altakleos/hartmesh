@@ -181,6 +181,47 @@ def test_liveness_absence_requires_current_daemon_after_inspection():
     assert provider.container_state(ID, TOKEN) == "unknown"
 
 
+@pytest.mark.parametrize("output", ["", "[]"])
+@pytest.mark.parametrize("template", ["Error: No such object: ", "error: no such object: ", "Error response from daemon: No such container: "])
+def test_liveness_accepts_only_exact_qualified_absence_templates(output, template):
+    docker = Docker()
+
+    def absent(command, **kwargs):
+        if command[1] == "inspect":
+            docker.calls.append(command)
+            return SimpleNamespace(returncode=1, stdout=output, stderr=template + ID)
+        return docker(command, **kwargs)
+
+    provider = adapter(absent)
+    assert provider.container_state(ID, TOKEN) == "gone"
+    assert not any(command[1] in {"rm", "stop", "start"} for command in docker.calls)
+
+
+@pytest.mark.parametrize(
+    "code,output,error",
+    [
+        (2, "", "Error: No such object: " + ID),
+        (125, "", "Error: No such object: " + ID),
+        (1, "[{}]", "Error: No such object: " + ID),
+        (1, "unexpected", "error: no such object: " + ID),
+        (1, "", "error: no such object: " + "f" * 64),
+        (1, "", "error: no such object: " + ID + "\nadditional error"),
+        (1, "", "Cannot connect to the Docker daemon"),
+    ],
+)
+def test_liveness_ambiguous_absence_stays_unknown(code, output, error):
+    docker = Docker()
+
+    def uncertain(command, **kwargs):
+        if command[1] == "inspect":
+            return SimpleNamespace(returncode=code, stdout=output, stderr=error)
+        return docker(command, **kwargs)
+
+    provider = adapter(uncertain)
+    assert provider.container_state(ID, TOKEN) == "unknown"
+    assert not any(command[1] in {"rm", "stop", "start"} for command in docker.calls)
+
+
 def test_removal_requires_current_daemon_after_absence_reply():
     docker = Docker()
     provider = adapter(docker)

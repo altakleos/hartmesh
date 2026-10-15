@@ -21,6 +21,10 @@ deadline; send no additional destructive command from an ambiguous inventory.
 Restricted sets use `native_resource_set.py` to inspect original primary, relay
 and networks, labels and exact membership. Persist the complete set before any
 effect; survivor recovery never derives identities from current names or policy.
+Resident census equality excludes only `ExecIDs` and `State.Health`. Compare all
+other inspection facts and qualify the paired graph against the fresh primary.
+Normalize mount list order using full records; retain all fields and duplicates.
+Mismatch logs expose only known top-level field names, never unknown names/values.
 Absence replies require return code 1, empty output and an exact known template
 bound to the inspected reference, including Docker 29's lowercase object error.
 Unexpected replies log bounded structural facts, never names or payload contents.

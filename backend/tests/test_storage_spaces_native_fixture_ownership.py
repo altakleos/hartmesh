@@ -1,6 +1,8 @@
 """An ambiguous create must not permit deleting an owned fixture's backing."""
 
+import ast
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -33,3 +35,28 @@ def test_exact_capture_keeps_owned_identity_and_never_clears_earlier_uncertainty
     assert prepare_consumer_container(plan, "fixture-image", "pass", containers, containment, runner=acknowledged) == "c" * 64
     assert containers == [("c" * 64, plan.id)]
     assert containment["confirmed"] is previously_confirmed
+
+
+def test_resident_native_fixture_uses_real_provider_registry_and_dedicated_inodes():
+    # Parse as data. Importing/collecting the mounted-volume suite locally is
+    # forbidden, including merely to borrow one of its fixtures.
+    tree = ast.parse(Path(__file__).with_name("test_storage_spaces_volume_native.py").read_text(encoding="utf-8"))
+    functions = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    setup = ast.unparse(functions["resident_runtime"])
+    assert any(isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "pytest_asyncio" and node.attr == "fixture" for node in functions["resident_runtime"].decorator_list)
+    assert "run_file_io(AioSandboxProvider)" in setup and "ResidentRegistry(" in setup and "RunManager()" in setup
+    assert "qualified_attachments(" in setup and "settle_contained(" in setup
+    assert "begin_restore(" in setup and "finish_restore(" in setup and "retained_claims(" in setup
+    assert "external_native_claims" in setup and "shutdown" in setup and "unregister" in setup
+    assert "4096" in ast.unparse(functions["resident_prepared"])
+    native = ast.unparse(functions["test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol"])
+    assert "resident_runtime" in native and "object.__new__" not in native and "native_prepare(" in native
+    fixture_values = [
+        ast.unparse(node.value)
+        for node in ast.walk(functions["test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol"])
+        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "runtime" for target in node.targets)
+    ]
+    assert fixture_values == ["resident_runtime"], "Presentation context must not replace the resident fixture"
+    containment = ast.unparse(functions["test_host_containment_removes_the_real_container_and_the_next_run_attaches_afresh"])
+    for fact in ("contain_host", "fenced_by_kind", "fenced_by_id", "fence_reason", "fenced_at", "subprocess.run"):
+        assert fact in containment

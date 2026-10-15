@@ -118,12 +118,13 @@ async def test_unique_active_workspace_is_qualified_before_association(execution
 
 
 @pytest.mark.asyncio
-async def test_foreign_inflight_run_preserves_attachment_and_unresolved_attempt(execution, fixture, monkeypatch):
+async def test_foreign_inflight_run_preserves_attachment_and_unresolved_attempt(execution, fixture, monkeypatch, caplog):
     from test_work_execution import activation
 
     service, admitted, row, sf = execution
     scope = await service.reserve(execution=admitted, work_id=row["id"], request=activation(admitted, row))
     module, app, host, _attachments, adapter, claim = await build(execution, fixture, monkeypatch)
+    host.workspace_qualified = True
     app.state.run_store.list_inflight.return_value = [{"run_id": "foreign-live", "metadata": {"agent_instance_id": admitted.instance.id}, "lease_expires_at": "2099-01-01T00:00:00Z", "owner_instance_id": "foreign-worker"}]
     assert await module.reconcile_residents(app, deadline=time.monotonic() + 10) == [claim.id]
     async with sf() as session:
@@ -131,6 +132,8 @@ async def test_foreign_inflight_run_preserves_attachment_and_unresolved_attempt(
         assert (await session.get(AgentWorkAttemptRow, scope.attempt_id)).status == "starting"
     assert claim.container_id in adapter.containers and host.registry.external_slots() == 1
     assert host.foreign_run_blocks
+    assert host.workspace_qualified is False
+    assert "workspace unqualified (reconcile-foreign;" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -225,7 +228,7 @@ async def test_historical_startup_recovery_cannot_close_a_newer_workspace(execut
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_home_claims_stay_counted_without_usable_association(execution, fixture, monkeypatch):
+async def test_ambiguous_home_claims_stay_counted_without_usable_association(execution, fixture, monkeypatch, caplog):
     module, app, host, attachments, adapter, first = await build(execution, fixture, monkeypatch)
     admitted = execution[1]
     second = await attachments.attach(actor=admitted.instance.principal, incarnation=operation(), resources=(ResourceMount(admitted.instance.home_id, admitted.home_generation, "home", True),))
@@ -234,6 +237,7 @@ async def test_ambiguous_home_claims_stay_counted_without_usable_association(exe
     assert set(await module.reconcile_residents(app, deadline=time.monotonic() + 10)) == {first.id, second.id}
     assert host.registry.external_slots() == 2 and len(adapter.containers) == 2
     assert host.registry.homes[admitted.instance.home_id].attachment_id is None
+    assert caplog.text.count("workspace unqualified (reconcile-ambiguous-association;") == 2
 
 
 @pytest.mark.asyncio
@@ -265,7 +269,7 @@ async def test_healthy_local_work_run_is_associated_without_orphan_containment(e
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("arriving", ["run", "reservation"])
-async def test_waiting_reconcile_rechecks_new_home_activity_before_orphan_containment(execution, fixture, monkeypatch, arriving):
+async def test_waiting_reconcile_rechecks_new_home_activity_before_orphan_containment(execution, fixture, monkeypatch, arriving, caplog):
     from test_work_execution import activation, run_record
 
     service, admitted, row, sf = execution
@@ -303,6 +307,7 @@ async def test_waiting_reconcile_rechecks_new_home_activity_before_orphan_contai
             assert (await session.get(SpaceAttachmentRow, claim.id)).phase == "active"
             assert (await session.get(AgentWorkAttemptRow, scope.attempt_id)).status == "starting"
         assert claim.container_id in adapter.containers
+        assert "workspace unqualified (reconcile-busy-ineligible;" in caplog.text
     finally:
         if entry.lock.locked():
             entry.lock.release()

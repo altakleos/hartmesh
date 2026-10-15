@@ -235,7 +235,8 @@ class DockerStorageAdapter:
         if result.returncode:
             # A daemon outage, permissions error or malformed reply is not
             # authoritative absence. Bind even the absence reply to this ID.
-            if result.stderr.strip() in ("Error: No such object: " + container, "Error response from daemon: No such container: " + container):
+            absent = ("Error: No such object: " + container, "error: no such object: " + container, "Error response from daemon: No such container: " + container)
+            if result.returncode == 1 and result.stdout.strip() in ("", "[]") and result.stderr.strip() in absent:
                 return None
             raise StorageAdapterUnsupported("Docker cannot establish container containment")
         try:

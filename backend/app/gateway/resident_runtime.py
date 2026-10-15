@@ -28,6 +28,10 @@ from deerflow.utils.file_io import await_drained
 logger = logging.getLogger(__name__)
 
 
+class _ResidentSnapshotChanged(Exception):
+    pass
+
+
 class ResidentRuntime:
     def __init__(self, app, *, registry, admission, entered):
         self.app, self.registry, self.admission = app, registry, admission
@@ -35,6 +39,7 @@ class ResidentRuntime:
         self.files = app.state.storage_spaces
         self.foreign_run_blocks = frozenset()
         self.workspace_qualified = False
+        self._qualification_revision = 0
         self._closing_tasks = None
         self._closing = False
         self._operations = set()
@@ -80,9 +85,14 @@ class ResidentRuntime:
     def _pending_facts(bridge):
         return tuple(sorted((key, id(value), value.attempt, value.verified, value.acknowledged, value.submitted) for key, value in bridge.handoffs._items.items()))
 
-    def invalidate_accounting(self):
-        """Close immediately; retain any initializer until its outcome is read."""
+    def _invalidate_workspace(self, source="accounting-invalidated"):
+        self._qualification_revision += 1
         self.workspace_qualified = False
+        logger.warning("agents: workspace unqualified (%s; revision=%s)", source, self._qualification_revision)
+
+    def invalidate_accounting(self, source="accounting-invalidated"):
+        """Close immediately; retain any initializer until its outcome is read."""
+        self._invalidate_workspace(source)
         self.provider.external_changed(self.admission.close)
         self.accounting_retry = True
 
@@ -322,26 +332,37 @@ class ResidentRuntime:
             rows = await self.app.state.run_store.list_inflight()
             self._validate_run_snapshot(rows)
         except Exception as exc:
-            self.invalidate_accounting()
+            self.invalidate_accounting("run-inventory-error")
             raise StorageRuntimeUnavailable("The complete durable inflight run inventory is unavailable") from exc
         manager = self.registry.run_manager
         foreign = set()
+        mismatches = set()
         for row in rows:
             local = manager._runs.get(row["run_id"])
-            if (
-                local is None
-                or local.task is None
-                or local.task.done()
-                or local.ownership_lost
-                or local.metadata != row.get("metadata", {})
-                or row.get("owner_worker_id") != local.owner_worker_id
-                or row.get("thread_id") != local.thread_id
-                or row.get("user_id") != local.user_id
-            ):
+            mismatch = None
+            if local is None:
+                mismatch = "local-missing"
+            elif local.task is None:
+                mismatch = "task-missing"
+            elif local.task.done():
+                mismatch = "task-done"
+            elif local.ownership_lost:
+                mismatch = "ownership-lost"
+            elif local.metadata != row.get("metadata", {}):
+                mismatch = "metadata"
+            elif row.get("owner_worker_id") != local.owner_worker_id:
+                mismatch = "worker"
+            elif row.get("thread_id") != local.thread_id:
+                mismatch = "thread"
+            elif row.get("user_id") != local.user_id:
+                mismatch = "user"
+            if mismatch is not None:
                 foreign.add(row["run_id"])
+                mismatches.add(mismatch)
         self.foreign_run_blocks = frozenset(foreign)
         if foreign:
-            self.invalidate_accounting()
+            logger.warning("agents: run inventory unqualified (foreign=%s; fields=%s)", len(foreign), ",".join(sorted(mismatches)))
+            self.invalidate_accounting("run-inventory-foreign")
         return rows
 
     async def owner_of(self, home_id):
@@ -378,6 +399,18 @@ class ResidentRuntime:
         return result
 
     async def reconcile_rows(self, *, attachment_ids=None, deadline):
+        for refresh in range(2):
+            try:
+                return await self._reconcile_rows(attachment_ids=attachment_ids, deadline=deadline)
+            except _ResidentSnapshotChanged as changed:
+                if refresh or attachment_ids is not None or time.monotonic() >= deadline:
+                    self._invalidate_workspace("reconcile-snapshot")
+                    return [changed.args[0]]
+            except BaseException:
+                self.invalidate_accounting("reconcile-scan-error")
+                raise
+
+    async def _reconcile_rows(self, *, attachment_ids=None, deadline):
         """Associate only unique qualified Homes; preserve foreign live owners."""
         runs = await self.inventory_runs()
         foreign_instances = {row.get("metadata", {}).get("agent_instance_id") for row in runs if row["run_id"] in self.foreign_run_blocks}
@@ -388,8 +421,6 @@ class ResidentRuntime:
         if attachment_ids is not None:
             selected = frozenset(attachment_ids)
             claims = tuple(claim for claim in claims if claim.id in selected)
-        for claim in claims:
-            self.registry.retain(claim)
         async with self.app.state.agent_instances._sf() as session:
             rows = (await session.execute(select(AgentInstanceRow, SpaceRow.generation).outerjoin(SpaceRow, SpaceRow.id == AgentInstanceRow.home_id))).all()
             by_home = {}
@@ -416,42 +447,71 @@ class ResidentRuntime:
         enabled = (await run_sync_lifecycle_operation(get_agents_api_config)).enabled
         pending = []
         for claim in claims:
+            owners = [owner for resource in claim.resources for owner in by_home.get(resource.space_id, ())]
+            if len(owners) != 1:
+                self.registry.retain(claim)
             claim_orphaned = orphaned | startup_orphaned if claim.id in self._startup_claims else orphaned
             if time.monotonic() >= deadline:
+                self.registry.retain(claim)
+                self._invalidate_workspace("reconcile-deadline")
                 pending.append(claim.id)
                 continue
             if claim.container_id is None:
+                self.registry.retain(claim)
                 # An empty daemon listing cannot drain an earlier unreturned
                 # request. Retain the preparation until exact recovery exists.
+                self._invalidate_workspace("reconcile-preparing")
                 pending.append(claim.id)
                 continue
-            owners = [owner for resource in claim.resources for owner in by_home.get(resource.space_id, ())]
             if len(owners) > 1:
+                self._invalidate_workspace("reconcile-owners")
                 pending.append(claim.id)
                 continue
             identity, generation = owners[0] if owners else (None, None)
             if identity is not None and identity.id in foreign_instances:
+                self.registry.retain(claim)
+                self._invalidate_workspace("reconcile-foreign")
                 pending.append(claim.id)
                 continue
             entry = self.registry.entry(identity) if identity is not None else None
+            refusal = "containment-unconfirmed"
+
+            def unconfirmed(source):
+                nonlocal refusal
+                refusal = source
+                return False
 
             async def reconcile():
-                nonlocal identity, generation, enabled
+                nonlocal claim, identity, generation, enabled
                 if entry is not None:
+                    state = await self.attachments.inspect_preparation(actor=claim.actor, incarnation=claim.incarnation, resources=claim.resources, host_id=claim.host_id)
+                    if state is None or (state.id, state.container_id) != (claim.id, claim.container_id):
+                        raise StorageRuntimeUnavailable("Captured attachment correlation changed")
+                    if state.phase == "fenced":
+                        if claim.id not in self.registry.retained and claim.id not in self.registry._associated.values() and entry.attachment_id != claim.id and entry.preparation is None and claim.id not in self.attachments.uncontained:
+                            raise _ResidentSnapshotChanged(claim.id)
+                        return unconfirmed("containment-unconfirmed")
+                    fresh = replace(claim, phase=state.phase)
+                    if self.registry._merge_retained(claim, fresh) != fresh:
+                        raise StorageRuntimeUnavailable("Captured attachment phase regressed")
+                    claim = fresh
+                    self.registry.retain(claim)
+                    if time.monotonic() >= deadline:
+                        return unconfirmed("deadline")
                     busy = bool(self.registry.in_flight(identity.id) or self.registry._has_reservation(entry.home_id) or entry.preparation is not None)
                     if busy and (identity.id in claim_orphaned or identity.status != "active" or claim.phase != "active" or not enabled):
-                        return False
+                        return unconfirmed("busy-ineligible")
                     current_runs = await self.inventory_runs()
                     if any(row.get("metadata", {}).get("agent_instance_id") == identity.id and row["run_id"] in self.foreign_run_blocks for row in current_runs):
-                        return False
+                        return unconfirmed("foreign-owner")
                     async with self.app.state.agent_instances._sf() as session:
                         current = (await session.execute(select(AgentInstanceRow, SpaceRow.generation).outerjoin(SpaceRow, SpaceRow.id == AgentInstanceRow.home_id).where(AgentInstanceRow.id == identity.id))).one_or_none()
                         if current is None or current[0].home_id != entry.home_id:
-                            return False
+                            return unconfirmed("owner-changed")
                         identity, generation = InstanceIdentity.from_row(current[0]), current[1]
                     enabled = (await run_sync_lifecycle_operation(get_agents_api_config)).enabled
                 if claim.host_id != self.attachments.provider.host_id and claim.host_id not in replacements:
-                    return False
+                    return unconfirmed("host-unqualified")
                 if claim.host_id != self.attachments.provider.host_id:
                     reason = "host-replaced"
                 elif not enabled:
@@ -465,7 +525,7 @@ class ResidentRuntime:
                 elif claim.phase == "active":
                     touching = [item for item in self.registry.retained.values() if any(resource.space_id == identity.home_id for resource in item.resources)]
                     if len(touching) != 1:
-                        return False
+                        return unconfirmed("ambiguous-association")
                     expected = (ResourceMount(identity.home_id, generation, "home", True),)
                     if claim.actor != identity.principal or claim.resources != expected or await self.attachments.container_state(claim.id) != "running":
                         reason = "container-absent"
@@ -482,9 +542,9 @@ class ResidentRuntime:
                 # The Home fence stays installed through the awaited effect.
                 # Recheck submitted activity after qualification/config awaits.
                 if entry is not None and (self.registry.in_flight(identity.id) or self.registry._has_reservation(entry.home_id) or entry.preparation is not None):
-                    return False
+                    return unconfirmed("busy-containment")
                 if not await self.attachments.contain_host(claim.id, reason):
-                    return False
+                    return unconfirmed("containment-unconfirmed")
                 self.app.state.agent_execution.attachments_fenced += 1
                 return True
 
@@ -499,8 +559,20 @@ class ResidentRuntime:
                         finally:
                             entry.reconciling = False
                 if not confirmed:
+                    self._invalidate_workspace("reconcile-" + refusal)
+                    logger.warning(
+                        "agents: attachment unqualified (active=%s; cid_present=%s; retained_equal=%s; preparation=%s)",
+                        claim.phase == "active",
+                        claim.container_id is not None,
+                        self.registry.retained.get(claim.id) == claim,
+                        entry is not None and entry.preparation is not None,
+                    )
                     pending.append(claim.id)
+            except _ResidentSnapshotChanged:
+                raise
             except Exception:
+                self.registry.retain(claim)
+                self._invalidate_workspace("reconcile-error")
                 logger.exception("agents: attachment reconciliation remains pending")
                 pending.append(claim.id)
         return pending
@@ -549,14 +621,44 @@ class ResidentRuntime:
     async def reconcile(self):
         from app.gateway.storage_spaces import reconcile_residents, storage_state
 
-        self.workspace_qualified = False
-        await self.apply_hold()
-        self.app.state.agent_execution.pending_reconcile = await reconcile_residents(self.app, deadline=time.monotonic() + 60)
-        if not self._startup_settled:
-            await self.settle_pending(startup=True)
-            self._startup_settled = not self.foreign_run_blocks
-        self.workspace_qualified = not self.app.state.agent_execution.pending_reconcile and (await storage_state(self.app)).state not in {"off", "unavailable"}
-        return self.workspace_qualified
+        self.coordinator._owning_loop()
+        revision = self._qualification_revision
+        bound = self.registry, self.provider, self.attachments, self.files, self.admission, self.coordinator
+        try:
+            await self.apply_hold()
+            pending = await reconcile_residents(self.app, deadline=time.monotonic() + 60)
+            self.app.state.agent_execution.pending_reconcile = pending
+            if pending:
+                self._invalidate_workspace("reconcile-pending")
+            if not self._startup_settled:
+                await self.settle_pending(startup=True)
+                self._startup_settled = not self.foreign_run_blocks
+            qualified = not pending and (await storage_state(self.app)).state not in {"off", "unavailable"}
+        except BaseException:
+            self._invalidate_workspace("refresh-error")
+            raise
+        if revision != self._qualification_revision:
+            return False
+        current = self.registry, self.provider, self.attachments, self.files, self.admission, self.coordinator
+        if any(original is not fresh for original, fresh in zip(bound, current)) or self.accounting_retry or self._closing or self.app.state.resident_runtime is not self:
+            self._invalidate_workspace("refresh-binding")
+            return False
+        if not qualified:
+            self._invalidate_workspace("refresh-storage")
+            return False
+        # One owning-loop publication after all awaited checks. Reconciliation
+        # cannot reopen the provider lifecycle or certify fresh accounting.
+        try:
+
+            def publish():
+                self.coordinator._require_bound_locked()
+                self.workspace_qualified = True
+
+            self.provider.external_changed(publish)
+        except BaseException:
+            self._invalidate_workspace("refresh-publication")
+            raise
+        return True
 
     async def settle_pending(self, *, startup=False):
         """Settle only drained attempts; an unknown commit keeps its charge."""
@@ -567,6 +669,7 @@ class ResidentRuntime:
 
     def seal(self):
         """Seal before run drainage and keep the actual owned worker tasks."""
+        self._invalidate_workspace("shutdown")
         self._closing = True
         self.provider.external_changed(self.admission.seal)
         if self._closing_tasks is None:

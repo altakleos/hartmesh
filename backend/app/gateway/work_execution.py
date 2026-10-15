@@ -180,3 +180,6 @@ async def contain_orphaned_work(app, recovered_runs):
             await runtime.settle(instance_id=instance_id, reason="run-orphaned", attachment_id=attachment_id)
         except Exception:
             logger.exception("agents: recovered run %s retains its pending Work containment", record.run_id)
+    wake = getattr(app.state, "storage_recheck_wake", None)
+    if recovered_runs and wake is not None:
+        wake.set()

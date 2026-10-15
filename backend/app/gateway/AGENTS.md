@@ -2,6 +2,8 @@
 
 Storage and `storage_reclamation.py`: [guide](../../../docs/STORAGE_SPACES.md).
 
+One owner for retries; retain uncertainty.
+
 Managed ordinary chats check first-conversation capacity before checkpoint seeding
 and durable run admission, preserving HTTP 507. Reuse recorded idempotency keys
 first, and recheck after a capacity refusal for peer admissions; keep payload and

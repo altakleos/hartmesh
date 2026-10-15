@@ -373,6 +373,8 @@ failure cannot reopen closure. Fully empty legacy fenced metadata stays unchange
 partial attribution refuses. `uncontained` holds valid host retry inputs, distinct
 from durable first attribution. Read-only liveness proves the current daemon before
 and after inspection; malformed Running is unknown, and stopped still needs removal.
+Absence requires code 1, empty/`[]` output and an exact CID-bound error, including
+Docker 29's lowercase object template. Ambiguity retains the original charge.
 
 `inspect_preparation` and bounded `retained_claims` read exact durable mount facts only.
 Validate closure facts; failed or mismatched reads never imply absence. Resolve

@@ -45,6 +45,19 @@ def _name(value):
     return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", value) is not None
 
 
+def _resident_snapshot(entry):
+    """Exclude only observations that change without changing the container."""
+    snapshot = {key: value for key, value in entry.items() if key != "ExecIDs"}
+    if isinstance(snapshot.get("State"), dict):
+        snapshot["State"] = {key: value for key, value in snapshot["State"].items() if key != "Health"}
+    if isinstance(snapshot.get("Mounts"), list):
+        try:
+            snapshot["Mounts"] = sorted(snapshot["Mounts"], key=lambda mount: json.dumps(mount, sort_keys=True, separators=(",", ":"), allow_nan=False))
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise StorageHostUnqualified("Resident mount snapshot is malformed") from exc
+    return snapshot
+
+
 class NativeResourceSet:
     """The caller retains its daemon and canonical lifecycle fences throughout IO."""
 
@@ -161,13 +174,43 @@ class NativeResourceSet:
         """Shared graph rules without inventing a chat owner or teardown permit."""
         record = SimpleNamespace(container_id=primary["Id"], sandbox_id=attachment_id, network_mode=network_mode, policy_digest=policy_digest, resources=resources)
         entries = {("container", primary["Id"]): self._member("container", primary["Id"], primary["Name"][1:], primary["Created"])}
-        if entries[("container", primary["Id"])] != primary:
+        fresh = entries[("container", primary["Id"])]
+        if fresh is None:
+            raise StorageHostUnqualified("Resident primary disappeared during graph qualification")
+        before, after = _resident_snapshot(primary), _resident_snapshot(fresh)
+        if before != after:
+            known = {
+                "Id",
+                "Name",
+                "Created",
+                "State",
+                "RestartCount",
+                "Config",
+                "HostConfig",
+                "Mounts",
+                "NetworkSettings",
+                "Image",
+                "Driver",
+                "GraphDriver",
+                "Path",
+                "Args",
+                "Platform",
+                "AppArmorProfile",
+                "ProcessLabel",
+                "MountLabel",
+                "ResolvConfPath",
+                "HostsPath",
+                "LogPath",
+                "HostnamePath",
+            }
+            fields = {key if key in known else "other" for key in before.keys() | after.keys() if key not in before or key not in after or before[key] != after[key]}
+            logger.warning("Resident graph snapshot changed: fields=%s", ",".join(sorted(fields)))
             raise StorageHostUnqualified("Resident primary changed during graph qualification")
         for resource in resources:
             entries[(resource.kind, resource.identity)] = self._member(resource.kind, resource.identity, resource.name, resource.created_at)
             if entries[(resource.kind, resource.identity)] is None:
                 raise StorageHostUnqualified("Resident paired graph is incomplete")
-        self._paired_graph(record, entries, primary)
+        self._paired_graph(record, entries, fresh)
 
     def qualify_resident_record(self, record):
         """Inspect original actorless members and mounts, including partial cleanup."""

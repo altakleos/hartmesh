@@ -58,9 +58,14 @@ separate instance scope, with current audience checks and stale-write fencing.
 Qualified workspaces support the provider's restricted network and read-only
 Shared binding alongside Home, without publishing a sandbox or relay port.
 Storage and agent counts remain opt-in while the Compose rollout continues.
-Shared chat/workspace capacity accounting and worker lifecycle hooks are staged
-for coordinated Gateway integration. The optional hooks retain uncertain starts
-and complete cleanup before releasing capacity; see the
+Required CI now checks seventeen shipped-bundle storage and agent journeys,
+including Work outcomes, concurrent ordinary chat, idle workspace reuse and
+interrupted-attempt containment. Native CI uses real resident admission and
+proves original-container removal before replacement. See the
+[qualification limits](docs/AI_EMPLOYEE_QUALIFICATION.md).
+Shared chat/workspace capacity accounting and worker lifecycle hooks are installed
+in the Gateway. They retain uncertain starts and complete cleanup before releasing
+capacity; see the
 [registry foundation](backend/docs/RESIDENT_REGISTRY.md).
 Its restart foundation counts each uncertain durable attachment separately and
 requires a complete validated snapshot before opening admission.
@@ -705,6 +710,22 @@ Shutdown drains pending launches before stopping their workers. The existing
 minute-long maintenance cycle retries qualification, closes eligible workspaces
 and completes authorized releases for every Space kind. Explicit Compose AI
 assistant and AI employee counts now take effect when managed storage is enabled.
+Startup logs distinguish prepared storage from agent execution readiness. Failed
+resident initialization logs bounded error types and source locations without
+exception values or tenant contents, while agent execution remains unavailable.
+Resident startup comparison tolerates Docker health and exec observations while
+retaining checks for changes to identity, process state, configuration and mounts.
+Mount records compare independently of list order, keeping every field and duplicate.
+Confirmed workspace loss uses exact Docker absence replies, including Docker 29,
+then contains the original resources before admitting a replacement.
+Healthy background reconciliation preserves confirmed execution readiness;
+uncertainty or shutdown invalidates it and fences stale refresh results.
+Readiness refusals log fixed causes and counts without tenant identifiers or payloads.
+Reconciliation checks captured attachments under the workspace lock. A confirmed
+completed replacement permits one fresh scan; uncertain claims keep their charge.
+Expired-run recovery wakes the existing maintenance loop. Consuming a failed
+initializer schedules its next owned pass immediately; live peer leases stay
+protected. Delayed startup readiness reports confirmed containment counts once.
 Creation respects the configured allowance, counts unfinished and paused agents,
 and assigns files from the matching kind of prepared slot. Exact creation retries
 retain their identity and files. Default activation and the remaining product
