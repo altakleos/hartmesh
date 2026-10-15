@@ -25,6 +25,8 @@ identity, process state, mount and network comparisons across fresh inspections.
 Mount list ordering is normalized without discarding record fields or duplicates.
 Workspace liveness recognizes exact Docker 29 absence replies and refuses
 ambiguous replies, allowing original-resource containment before replacement.
+Healthy background refreshes retain execution readiness; pending findings,
+failures and shutdown invalidate it without allowing stale success to restore it.
 
 There is no database schema, native evidence format or configuration-version change.
 

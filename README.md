@@ -718,6 +718,8 @@ retaining checks for changes to identity, process state, configuration and mount
 Mount records compare independently of list order, keeping every field and duplicate.
 Confirmed workspace loss uses exact Docker absence replies, including Docker 29,
 then contains the original resources before admitting a replacement.
+Healthy background reconciliation preserves confirmed execution readiness;
+uncertainty or shutdown invalidates it and fences stale refresh results.
 Creation respects the configured allowance, counts unfinished and paused agents,
 and assigns files from the matching kind of prepared slot. Exact creation retries
 retain their identity and files. Default activation and the remaining product

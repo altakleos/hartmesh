@@ -124,6 +124,7 @@ async def test_foreign_inflight_run_preserves_attachment_and_unresolved_attempt(
     service, admitted, row, sf = execution
     scope = await service.reserve(execution=admitted, work_id=row["id"], request=activation(admitted, row))
     module, app, host, _attachments, adapter, claim = await build(execution, fixture, monkeypatch)
+    host.workspace_qualified = True
     app.state.run_store.list_inflight.return_value = [{"run_id": "foreign-live", "metadata": {"agent_instance_id": admitted.instance.id}, "lease_expires_at": "2099-01-01T00:00:00Z", "owner_instance_id": "foreign-worker"}]
     assert await module.reconcile_residents(app, deadline=time.monotonic() + 10) == [claim.id]
     async with sf() as session:
@@ -131,6 +132,7 @@ async def test_foreign_inflight_run_preserves_attachment_and_unresolved_attempt(
         assert (await session.get(AgentWorkAttemptRow, scope.attempt_id)).status == "starting"
     assert claim.container_id in adapter.containers and host.registry.external_slots() == 1
     assert host.foreign_run_blocks
+    assert host.workspace_qualified is False
 
 
 @pytest.mark.asyncio

@@ -113,6 +113,7 @@ async def test_host_final_drain_includes_terminal_status_worker_still_completing
     record.task = asyncio.create_task(completion())
     await entered.wait()
     host = ResidentRuntime.__new__(ResidentRuntime)
+    host._qualification_revision = 0
     host.provider = SimpleNamespace(external_changed=lambda change: change())
     host.admission = ProviderAdmission()
     host.admission.bind(host.provider)
@@ -141,6 +142,7 @@ async def test_final_drain_waits_for_owned_launch_then_its_new_worker():
 
     manager = RunManager()
     host = ResidentRuntime.__new__(ResidentRuntime)
+    host._qualification_revision = 0
     host.provider = SimpleNamespace(external_changed=lambda change: change())
     host.admission = ProviderAdmission()
     host.admission.bind(host.provider)

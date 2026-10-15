@@ -39,6 +39,11 @@ Workspace liveness accepts absence only with return code 1, empty or `[]` output
 and an exact known error naming the original container ID, including Docker 29's
 lowercase form. Confirmed loss enters original-resource containment; an outage
 or ambiguous reply retains the charge and prevents replacement.
+Routine reconciliation keeps the last confirmed readiness while healthy checks
+are in flight. Initial qualification remains unavailable; pending findings,
+failures, cancellation, accounting invalidation and shutdown clear readiness.
+Refresh publication checks its captured revision and exact runtime bindings,
+so a stale success cannot restore readiness or reopen provider admission.
 
 Creation, conversations, replies, activations and lifecycle changes check current
 execution readiness. AI assistant creation can refuse `ai-assistant-limit` with

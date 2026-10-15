@@ -179,6 +179,7 @@ async def test_langgraph_shutdown_drains_late_admission_before_manager_snapshot(
         async with langgraph_runtime(app, config):
             manager = app.state.run_manager
             host = ResidentRuntime.__new__(ResidentRuntime)
+            host._qualification_revision = 0
             host.app = app
             host.provider = SimpleNamespace(external_changed=lambda change: change())
             host.admission = ProviderAdmission()

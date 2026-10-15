@@ -35,6 +35,7 @@ class ResidentRuntime:
         self.files = app.state.storage_spaces
         self.foreign_run_blocks = frozenset()
         self.workspace_qualified = False
+        self._qualification_revision = 0
         self._closing_tasks = None
         self._closing = False
         self._operations = set()
@@ -80,9 +81,13 @@ class ResidentRuntime:
     def _pending_facts(bridge):
         return tuple(sorted((key, id(value), value.attempt, value.verified, value.acknowledged, value.submitted) for key, value in bridge.handoffs._items.items()))
 
+    def _invalidate_workspace(self):
+        self._qualification_revision += 1
+        self.workspace_qualified = False
+
     def invalidate_accounting(self):
         """Close immediately; retain any initializer until its outcome is read."""
-        self.workspace_qualified = False
+        self._invalidate_workspace()
         self.provider.external_changed(self.admission.close)
         self.accounting_retry = True
 
@@ -418,19 +423,23 @@ class ResidentRuntime:
         for claim in claims:
             claim_orphaned = orphaned | startup_orphaned if claim.id in self._startup_claims else orphaned
             if time.monotonic() >= deadline:
+                self._invalidate_workspace()
                 pending.append(claim.id)
                 continue
             if claim.container_id is None:
                 # An empty daemon listing cannot drain an earlier unreturned
                 # request. Retain the preparation until exact recovery exists.
+                self._invalidate_workspace()
                 pending.append(claim.id)
                 continue
             owners = [owner for resource in claim.resources for owner in by_home.get(resource.space_id, ())]
             if len(owners) > 1:
+                self._invalidate_workspace()
                 pending.append(claim.id)
                 continue
             identity, generation = owners[0] if owners else (None, None)
             if identity is not None and identity.id in foreign_instances:
+                self._invalidate_workspace()
                 pending.append(claim.id)
                 continue
             entry = self.registry.entry(identity) if identity is not None else None
@@ -499,8 +508,10 @@ class ResidentRuntime:
                         finally:
                             entry.reconciling = False
                 if not confirmed:
+                    self._invalidate_workspace()
                     pending.append(claim.id)
             except Exception:
+                self._invalidate_workspace()
                 logger.exception("agents: attachment reconciliation remains pending")
                 pending.append(claim.id)
         return pending
@@ -549,14 +560,44 @@ class ResidentRuntime:
     async def reconcile(self):
         from app.gateway.storage_spaces import reconcile_residents, storage_state
 
-        self.workspace_qualified = False
-        await self.apply_hold()
-        self.app.state.agent_execution.pending_reconcile = await reconcile_residents(self.app, deadline=time.monotonic() + 60)
-        if not self._startup_settled:
-            await self.settle_pending(startup=True)
-            self._startup_settled = not self.foreign_run_blocks
-        self.workspace_qualified = not self.app.state.agent_execution.pending_reconcile and (await storage_state(self.app)).state not in {"off", "unavailable"}
-        return self.workspace_qualified
+        self.coordinator._owning_loop()
+        revision = self._qualification_revision
+        bound = self.registry, self.provider, self.attachments, self.files, self.admission, self.coordinator
+        try:
+            await self.apply_hold()
+            pending = await reconcile_residents(self.app, deadline=time.monotonic() + 60)
+            self.app.state.agent_execution.pending_reconcile = pending
+            if pending:
+                self._invalidate_workspace()
+            if not self._startup_settled:
+                await self.settle_pending(startup=True)
+                self._startup_settled = not self.foreign_run_blocks
+            qualified = not pending and (await storage_state(self.app)).state not in {"off", "unavailable"}
+        except BaseException:
+            self._invalidate_workspace()
+            raise
+        if revision != self._qualification_revision:
+            return False
+        current = self.registry, self.provider, self.attachments, self.files, self.admission, self.coordinator
+        if any(original is not fresh for original, fresh in zip(bound, current)) or self.accounting_retry or self._closing or self.app.state.resident_runtime is not self:
+            self._invalidate_workspace()
+            return False
+        if not qualified:
+            self._invalidate_workspace()
+            return False
+        # One owning-loop publication after all awaited checks. Reconciliation
+        # cannot reopen the provider lifecycle or certify fresh accounting.
+        try:
+
+            def publish():
+                self.coordinator._require_bound_locked()
+                self.workspace_qualified = True
+
+            self.provider.external_changed(publish)
+        except BaseException:
+            self._invalidate_workspace()
+            raise
+        return True
 
     async def settle_pending(self, *, startup=False):
         """Settle only drained attempts; an unknown commit keeps its charge."""
@@ -567,6 +608,7 @@ class ResidentRuntime:
 
     def seal(self):
         """Seal before run drainage and keep the actual owned worker tasks."""
+        self._invalidate_workspace()
         self._closing = True
         self.provider.external_changed(self.admission.seal)
         if self._closing_tasks is None:
