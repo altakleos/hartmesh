@@ -44,6 +44,9 @@ class AgentInstances:
         self.execution_probe = None
         self.allowance_of = None
         self.residents = None
+        from deerflow.agent_instances.agent_files import AgentFiles
+
+        self.agent_files = AgentFiles(self)
 
     async def _human(self, actor, *, session=None):
         if not isinstance(actor, PrincipalRef) or actor.kind != "human":

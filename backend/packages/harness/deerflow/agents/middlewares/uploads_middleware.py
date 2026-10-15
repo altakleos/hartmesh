@@ -206,7 +206,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             return 0
         return size if size >= 0 else 0
 
-    def _files_from_kwargs(self, message: HumanMessage, uploads_dir: Path | None = None) -> list[dict] | None:
+    def _files_from_kwargs(self, message: HumanMessage, uploads_dir: Path | None = None, *, execution=None) -> list[dict] | None:
         """Extract file info from message additional_kwargs.files.
 
         The frontend sends uploaded file metadata in additional_kwargs.files
@@ -230,14 +230,22 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             if not isinstance(f, dict):
                 continue
             filename = f.get("filename") or ""
-            if not filename or Path(filename).name != filename or is_upload_staging_file(filename):
+            if not isinstance(filename, str) or not filename or Path(filename).name != filename or is_upload_staging_file(filename):
                 continue
-            if uploads_dir is not None and not (uploads_dir / filename).is_file():
+            size = self._coerce_file_size(f.get("size"))
+            if execution is not None:
+                from deerflow.agent_instances.presentation import upload_metadata
+
+                metadata = upload_metadata(execution, filename)
+                if metadata is None:
+                    continue
+                size = metadata.st_size
+            elif uploads_dir is not None and not (uploads_dir / filename).is_file():
                 continue
             files.append(
                 {
                     "filename": filename,
-                    "size": self._coerce_file_size(f.get("size")),
+                    "size": size,
                     "path": f"/mnt/user-data/uploads/{filename}",
                     "extension": Path(filename).suffix,
                 }
@@ -263,28 +271,35 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         if not isinstance(last_message, HumanMessage):
             return {"uploaded_files": []}
 
-        from deerflow.spaces.chat_paths import ChatStoragePaths
+        from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
 
-        current = peek_scoped_paths()
-        locations = current if not self._explicit_paths and isinstance(current, ChatStoragePaths) else self._paths
-        if isinstance(locations, ChatStoragePaths) and not locations.has_personal_files:
-            return {"uploaded_files": []}
+        execution = (runtime.context or {}).get(AGENT_EXECUTION_CONTEXT_KEY)
+        if not isinstance(execution, AgentExecution):
+            execution = None
+        if execution is not None:
+            uploads_dir = None
+            new_files = self._files_from_kwargs(last_message, execution=execution) or []
+        else:
+            from deerflow.spaces.chat_paths import ChatStoragePaths
 
-        # Resolve uploads directory for existence checks
-        thread_id = (runtime.context or {}).get("thread_id")
-        if thread_id is None:
-            try:
-                from langgraph.config import get_config
+            current = peek_scoped_paths()
+            locations = current if not self._explicit_paths and isinstance(current, ChatStoragePaths) else self._paths
+            if isinstance(locations, ChatStoragePaths) and not locations.has_personal_files:
+                return {"uploaded_files": []}
 
-                thread_id = get_config().get("configurable", {}).get("thread_id")
-            except RuntimeError:
-                pass
-        uploads_dir = locations.sandbox_uploads_dir(thread_id, user_id=resolve_runtime_user_id(runtime)) if thread_id else None
+            # Resolve uploads directory for ordinary conversation existence checks.
+            thread_id = (runtime.context or {}).get("thread_id")
+            if thread_id is None:
+                try:
+                    from langgraph.config import get_config
 
-        # Get newly uploaded files from the current message's additional_kwargs.files
-        new_files = self._files_from_kwargs(last_message, uploads_dir) or []
+                    thread_id = get_config().get("configurable", {}).get("thread_id")
+                except RuntimeError:
+                    pass
+            uploads_dir = locations.sandbox_uploads_dir(thread_id, user_id=resolve_runtime_user_id(runtime)) if thread_id else None
+            new_files = self._files_from_kwargs(last_message, uploads_dir) or []
         if not new_files:
-            if (last_message.additional_kwargs or {}).get("files"):
+            if execution is None and (last_message.additional_kwargs or {}).get("files"):
                 logger.info(
                     "UploadsMiddleware: files metadata was present but no files were found on disk (thread_id=%s, uploads_dir=%s)",
                     thread_id,
@@ -307,7 +322,8 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 # builder never touches the disk.
                 file["has_text_form"] = bool(outline or preview) or not is_binary_file(phys_path)
 
-        logger.debug(f"Current uploads: {[f['filename'] for f in new_files]}")
+        if execution is None:
+            logger.debug(f"Current uploads: {[f['filename'] for f in new_files]}")
 
         # Create files message and prepend to the last human message content
         files_message = self._create_files_message(
@@ -358,4 +374,10 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         The runtime itself is also passed explicitly for the authoritative
         ``runtime.context["user_id"]`` channel.
         """
-        return await run_in_executor(None, self.before_agent, state, runtime)
+        from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
+        from deerflow.utils.file_io import await_drained
+
+        scan = run_in_executor(None, self.before_agent, state, runtime)
+        if isinstance((runtime.context or {}).get(AGENT_EXECUTION_CONTEXT_KEY), AgentExecution):
+            return await await_drained(scan)
+        return await scan

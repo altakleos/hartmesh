@@ -23,6 +23,7 @@ from app.gateway.deps import langgraph_runtime
 from app.gateway.health import READINESS_CHECKPOINTER_CONFIG_ATTR, readiness_payload
 from app.gateway.routers import (
     account_export,
+    agent_home,
     agent_instances,
     agent_work,
     agents,
@@ -1275,6 +1276,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)
     app.include_router(agent_instances.router)
+    app.include_router(agent_home.router)
     app.include_router(agent_work.router)
     app.include_router(human_input.router)
     # Projects API is mounted at /api/projects
