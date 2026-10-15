@@ -12,6 +12,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command, Overwrite
 
+from deerflow.agent_instances.runtime import check_network_decision, network_card_allowed, network_denial_artifact
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
@@ -40,7 +41,7 @@ _NETWORK_POLICY_DECISIONS = frozenset({"deny", "allow_temporary", "allow_sandbox
 
 
 def _network_approval_is_non_interactive(context: Mapping[str, object]) -> bool:
-    return not resolve_run_interaction_policy({"context": context}).allows_clarification
+    return network_card_allowed(context) is False or not resolve_run_interaction_policy({"context": context}).allows_clarification
 
 
 class SandboxMiddlewareState(AgentState):
@@ -341,6 +342,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         marker = (sandbox_id, response["request_id"], decision)
         if marker in applied:
             return
+        check_network_decision(context, decision)
         provider = get_sandbox_provider()
         if provider.sandbox_network_mode() != "allowlist":
             return
@@ -593,6 +595,8 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if provider.sandbox_network_mode() != "allowlist":
             return result
         if _network_approval_is_non_interactive(context) or context.get("is_subagent"):
+            if network_card_allowed(context) is not None:
+                return await run_sync_lifecycle_operation(network_denial_artifact, provider, sandbox_id, result)
             if not await provider.deny_pending_network_policy_events_async(sandbox_id):
                 logger.warning("Failed to drain sandbox network policy events for non-interactive sandbox %s", sandbox_id)
             return result
@@ -614,6 +618,8 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if provider.sandbox_network_mode() != "allowlist":
             return result
         if _network_approval_is_non_interactive(context) or context.get("is_subagent"):
+            if network_card_allowed(context) is not None:
+                return network_denial_artifact(provider, sandbox_id, result)
             if not provider.deny_pending_network_policy_events(sandbox_id):
                 logger.warning("Failed to drain sandbox network policy events for non-interactive sandbox %s", sandbox_id)
             return result
@@ -657,10 +663,11 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                     "question": f"Allow this sandbox to connect to {host}:{port}?",
                     "context": "Private, loopback, link-local, multicast, and cloud metadata addresses can never be approved.",
                     "input_mode": "single_choice",
+                    "details": {"host": host, "port": port, "ttl_seconds": ttl_seconds},
                     "options": [
                         {"id": "deny", "label": "Deny", "value": "Deny network access"},
                         {"id": "allow_temporary", "label": f"Allow for {ttl_label}", "value": f"Allow network access for {ttl_label}"},
-                        {"id": "allow_sandbox", "label": "Allow for this sandbox", "value": "Allow network access for this sandbox"},
+                        *([{"id": "allow_sandbox", "label": "Allow for this sandbox", "value": "Allow network access for this sandbox"}] if network_card_allowed(getattr(request.runtime, "context", None)) is None else []),
                     ],
                 }
             },

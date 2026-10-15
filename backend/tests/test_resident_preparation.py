@@ -58,6 +58,45 @@ async def prepare(parts):
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("managed", [False, True])
+@pytest.mark.parametrize("resume", [False, True])
+async def test_fresh_attach_marks_workspace_starting_before_the_container_is_created(tmp_path, monkeypatch, managed, resume):
+    from contextlib import contextmanager
+
+    from deerflow.agent_instances import resident_preparation
+    from deerflow.runtime.turn_phases import TurnPhase
+
+    parts = setup(tmp_path, monkeypatch)
+    admitted, _environment, _registry, mounts, attached, config, client = parts
+    spans = []
+    active = []
+
+    @contextmanager
+    def span(phase):
+        spans.append(phase)
+        active.append(phase)
+        try:
+            yield
+        finally:
+            active.pop()
+
+    async def attach(**_kwargs):
+        assert active == [TurnPhase.SANDBOX_CREATE]
+        return attached
+
+    mounts.attach.side_effect = attach
+    mounts.resume.return_value = attached if resume else None
+    monkeypatch.setattr(runtime, "phase_span", span, raising=False)
+    monkeypatch.setattr(resident_preparation, "phase_span", span)
+    monkeypatch.setattr(runtime, "_prepare_client", AsyncMock(return_value=client))
+    if not managed:
+        admitted.authority.instances.residents = None
+    assert await runtime.prepare_environment(admitted, app_config=config, run_id="run") is client
+    assert spans == ([] if resume else [TurnPhase.SANDBOX_CREATE]) and not active
+    assert mounts.attach.await_count == (0 if resume else 1)
+
+
+@pytest.mark.anyio
 async def test_new_preparation_claims_exact_attachment_before_client_and_publishes_handoff(tmp_path, monkeypatch):
     parts = setup(tmp_path, monkeypatch)
     execution, environment, registry, mounts, attached, _config, client = parts

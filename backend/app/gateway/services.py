@@ -1925,6 +1925,8 @@ async def _start_run(
                 for key in ("agent_name", "is_bootstrap", "secrets", "github_token", "channel_name"):
                     values.pop(key, None)
                 values["agent_name"] = instance_execution.definition.config["name"]
+                if work_attempt is not None:
+                    values["interaction_mode"] = "autonomous"
             config["context"]["__agent_execution"] = instance_execution
             run_metadata.update(
                 {

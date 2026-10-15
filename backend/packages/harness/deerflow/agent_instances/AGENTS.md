@@ -201,6 +201,20 @@ outcome, attempt or activation writes to the human command DTO. `work_policy`
 is human-managed and becomes effective only through existing definition adoption;
 model self-update cannot change it or synthesize defaults into old snapshots.
 
+`stop` requires Inspect and Manage, or Use by the named attempt's requester,
+plus `runs:cancel`, including receipt replay. Only starting/running attempts
+accept new stops. Both HTTP and human-input plugin callers pass the validated
+attempt id to cancellation dispatch; never cancel a newer attempt on replay.
+Stopping preserves the assignment. Confirmed nonsuccess becomes cancelled;
+uncertain cleanup stays uncertain and success may win.
+
+Runtime network rules live in `runtime.py`; sandbox middleware calls its three
+helpers. Work/unattended/subagent calls deny and mark their own tool result;
+only interactive human managers receive an agent card, with temporary access.
+The instance provider delegates network mode, TTL and decisions to its baseline.
+Work's server-owned autonomous mode follows caller-key scrubbing, and its prompt
+adds the question rule only with `report_work`, outside delegated scopes.
+
 Mutations reserve the SQLite writer or lock sorted source resources → instance
 → Work. Capture persisted decision sources before locking and compare them again
 under the parent/Work locks. Idempotency binds instance/actor-kind/actor/Work/exact

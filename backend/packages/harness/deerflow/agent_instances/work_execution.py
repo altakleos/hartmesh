@@ -638,7 +638,8 @@ class WorkExecution:
                         # host settlement may resolve withdrawn lifecycle scope.
                         return attempt.status
                     stale = row.assignment_revision != attempt.assignment_revision or lifecycle_stale
-                    attempt.status = "cancelled" if stale or status == "interrupted" else "succeeded" if status == "success" else "failed"
+                    cancelled = stale or status == "interrupted" or (attempt.status == "stopping" and status != "success")
+                    attempt.status = "cancelled" if cancelled else "succeeded" if status == "success" else "failed"
                     attempt.settled_at = datetime.now(UTC)
                     promote = not stale and status == "success" and attempt.candidate and row.status == "open"
                     if promote:

@@ -111,6 +111,13 @@ start an AI employee attempt; saving an assignment or response never starts a ru
 The Work page separates progress, blockers, execution attempts and human review.
 Current Inspect grants control visibility; referenced files retain separate access
 checks. Uncertain execution requires qualified containment and explicit recovery.
+The Work command API can stop one exact running attempt without cancelling the
+assignment. It requires the run cancellation capability and current Inspect,
+plus Manage or Use as that attempt's requester. Work attempts run autonomously:
+questions go through `report_work` to the supervisor, and blocked workspace
+connections are denied and marked on the tool result while the attempt continues.
+Interactive agent conversations offer human managers temporary site approval;
+ordinary chats retain their existing network approval options.
 [Attention](docs/HUMAN_INPUT_REQUESTS.md) gives human collaborators addressed
 requests for information, decisions and review, with current-access counts,
 routing recovery and attributed replies. Responses never start an AI employee

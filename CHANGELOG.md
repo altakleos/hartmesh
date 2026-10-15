@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Agent runtime controls
+
+The Work command API supports stopping an exact attempt while preserving its
+assignment. Current grants and the run cancellation capability are required on
+retries as well; an old stop receipt cannot cancel a newer attempt. Confirmed
+terminal nonsuccess after a stop is cancelled, while unconfirmed cleanup remains
+uncertain and a successful run can still finish successfully.
+
+Work attempts run autonomously and request human input through `report_work`.
+Ordinary agent conversations retain clarification and Gateway `web_fetch` tools.
+Workspace network approvals offer human managers temporary access; Work,
+unattended and delegated calls record denied sites on their own tool results
+without a card. Ordinary chats keep their three approval options. Approval cards
+include structured site, port and duration fields. Fresh workspace preparation
+reports its existing starting phase; resuming a workspace does not.
+
+Sandbox cleanup tolerates automatic removal completing between ID and name
+inspection, with one bounded recheck of both original references. Unconfirmed or
+changed resources continue to retain their cleanup records and capacity.
+
+There is no database schema, native evidence format or configuration-version change.
+
 ### Direct agent file writes
 
 AI assistant and AI employee conversations accept uploads directly into their

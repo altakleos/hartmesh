@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from sqlalchemy import select
 
-from deerflow.agent_instances.contract import AgentConflict, AgentDenied, AgentPermission
+from deerflow.agent_instances.contract import AgentConflict, AgentDenied, AgentPermission, Refusal
 from deerflow.agent_instances.work_contract import AssignmentFields, DelegateWork, WorkBlocker, WorkCommand, WorkOutcome, WorkReview, WorkSource
 from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow, AgentInstanceRow, AgentLifecycleRow
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow, AgentWorkRow
@@ -351,16 +351,29 @@ class AgentWork:
                     if candidate is not None:
                         await session.execute(select(SpaceRow).where(SpaceRow.id == candidate.home_id).with_for_update())
                 await self._lock_sources(session, decision_sources if request.action == "decide" else request.sources)
-                parent, _ = await self._parent(session, actor, instance_id, DELEGATE if request.action == "input" else MANAGE, lock=True)
+                permission = INSPECT if request.action == "stop" else DELEGATE if request.action == "input" else MANAGE
+                parent, view = await self._parent(session, actor, instance_id, permission, lock=True)
                 row = await self._row(session, instance_id, work_id, lock=True)
+                if request.action == "stop":
+                    # A replay still dispatches cancellation, so authority must
+                    # be current even when the exact receipt already exists.
+                    if not can_stop:
+                        raise AgentDenied("Changing active Work requires the run cancellation capability")
+                    attempt = await session.get(AgentWorkAttemptRow, request.attempt_id)
+                    if attempt is None or attempt.work_id != row.id:
+                        raise Refusal("There is no running attempt to stop", reason="no-running-attempt", status=409)
+                    if not view.permissions & AgentPermission.MANAGE and not (view.permissions & AgentPermission.USE and attempt.requester_id == actor.subject_id):
+                        raise AgentDenied("Stopping an attempt requires Manage or its requester")
                 receipt = await self._receipt(session, actor, parent, request, work_id)
                 if receipt is not None:
                     return receipt
                 if row.revision != request.expected_revision or row.assignment_revision != request.expected_assignment_revision or row.revision >= 2147483647:
                     raise AgentConflict("Work changed; reload before acting")
                 active_attempt = await session.scalar(select(AgentWorkAttemptRow).where(AgentWorkAttemptRow.work_id == row.id, AgentWorkAttemptRow.status.in_(UNRESOLVED)))
+                if request.action == "stop" and (active_attempt is None or active_attempt.id != request.attempt_id or active_attempt.status not in {"starting", "running"}):
+                    raise Refusal("There is no running attempt to stop", reason="no-running-attempt", status=409)
                 if active_attempt is not None:
-                    if request.action not in {"edit", "cancel", "reconcile_attempt"}:
+                    if request.action not in {"edit", "cancel", "stop", "reconcile_attempt"}:
                         raise AgentConflict("An unresolved attempt requires host reconciliation")
                     if request.action != "reconcile_attempt" and not can_stop:
                         raise AgentDenied("Changing active Work requires the run cancellation capability")

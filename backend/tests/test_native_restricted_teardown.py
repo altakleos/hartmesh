@@ -214,6 +214,53 @@ def test_canonical_cleanup_qualifies_docker_29_lowercase_primary_and_relay_absen
         discard_sandbox_lease_manager(provider)
 
 
+@pytest.mark.parametrize("present_first", [True, False])
+@pytest.mark.parametrize("persistent", [False, True])
+def test_auto_removal_between_reads_finishes_or_retains_original_cleanup(fixture, present_first, persistent):
+    engine = Engine(fixture)
+    primary = engine.objects[("container", CID)]
+    primary["HostConfig"]["AutoRemove"] = True
+    stale = deepcopy(primary)
+    stale["State"].update(Running=False, Status="exited")
+    inspect = engine.inspect
+    reads = []
+    inject = [True]
+
+    def removing(command, **kwargs):
+        response = inspect(command, **kwargs)
+        reference = command[-1]
+        if inject[0] and command[1] == "inspect" and ("container", CID) not in engine.objects and reference in (CID, primary["Name"][1:]):
+            reads.append(reference)
+            if (persistent or len(reads) <= 2) and (reference == CID) == present_first:
+                return SimpleNamespace(returncode=0, stdout=json.dumps([stale]), stderr="")
+        return response
+
+    engine.inspect = removing
+    provider = engine.provider
+    provider._warm_pool["native"] = (engine.info, 0)
+    provider._warm_pool_identity["native"] = engine.info.owner
+    try:
+        done = provider._destroy_warm_entry("native", engine.info, reason="idle_timeout", still_reapable=lambda: True)
+        assert done is not persistent
+        assert reads[:4] == [CID, primary["Name"][1:]] * 2
+        if persistent:
+            (saved,) = engine.bridge.evidence.snapshot().teardowns
+            assert engine.bridge.teardowns.records() == (saved,) and provider._warm_pool
+            with provider._lock:
+                assert provider._counted_slots_locked()[1:] == (0, 1, 0)
+            assert ("container", PROXY) in engine.objects
+            assert not any(command[1] in ("stop", "rm") and command[-1] != CID or command[1:3] == ["network", "rm"] for command in engine.calls)
+            inject[0] = False
+            assert provider._destroy_warm_entry("native", engine.info, reason="idle_timeout", still_reapable=lambda: True)
+        assert not engine.objects and not provider._warm_pool
+        assert engine.bridge.evidence.snapshot().teardowns == () and engine.bridge.teardowns.records() == ()
+        assert ["docker", "rm", CID] not in engine.calls
+        assert ["docker", "network", "rm", INTERNAL] in engine.calls
+        assert ["docker", "network", "rm", EGRESS] in engine.calls
+    finally:
+        discard_sandbox_lease_manager(provider)
+
+
 @pytest.mark.asyncio
 async def test_primary_gone_relay_failure_restart_keeps_scope_closed_until_original_set_absent(fixture, tmp_path):
     engine = Engine(fixture)
