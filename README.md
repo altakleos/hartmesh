@@ -782,6 +782,9 @@ outcomes keep capacity charged until containment and release are confirmed.
 
 Managed AI employee preparation records its original container, networks and
 qualified mounts before activation. Reuse checks that same prepared environment.
+If unrelated chat cleanup changes native accounting during that check, maintenance
+requalifies and retries once without replacing the workspace or interrupting its
+running task. Unconfirmed ownership, resources or accounting keep execution closed.
 Cleanup retains the original evidence and capacity charge until resource absence,
 SQL closure and journal completion are confirmed. Interrupted cleanup retries
 the original resources; a completed cleanup retry checks current absence without
@@ -791,6 +794,11 @@ cleanup when its attachment row is missing or already fenced. Recovery preserves
 live runs and unfinished create requests, retries within a bounded pass, and
 requires a fresh complete census before opening capacity. Ambiguous or changed
 resources remain reserved for investigation.
+An explicitly recorded host replacement can also finish an absent original
+workspace before startup opens capacity. A remounted filesystem may have a new
+device number, but its UUID, backing identity, paths and inodes must still match.
+This completion checks the original resources by both ID and name, issues no
+container removal commands, and keeps uncertain outcomes charged for retry.
 
 Managed deployments refuse generic Space grant changes. User and Company storage
 also refuse generic backup, restore, archive, delete and acceptance of uncertain

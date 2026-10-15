@@ -24,6 +24,14 @@ NATIVE_CREATE_HANDOFF = ContextVar("native_create_handoff", default=None)
 _SLOT_PREFIX = "hartmesh.storage.space."
 
 
+class _NativeAccountingStale(StorageRuntimeUnavailable):
+    """A current owner observed changed durable accounting, not a graph proof."""
+
+    def __init__(self, bridge):
+        super().__init__("Native teardown evidence has no current restored accounting")
+        self.bridge = bridge
+
+
 def _facts(record):
     return record.id, record.daemon_id, record.owner_id, record.thread_id, record.name, record.slots
 
@@ -317,7 +325,7 @@ class NativeCreateBridge:
             or frozenset(snapshot.residents) != frozenset(self.residents.records())
         ):
             self._installed = False
-            raise StorageRuntimeUnavailable("Native teardown evidence has no current restored accounting")
+            raise _NativeAccountingStale(self)
         return snapshot.pending_creates(self.evidence.daemon_id)
 
     def assert_candidate_current(self, info, *, teardown=False, known_live=False):

@@ -154,6 +154,9 @@ class SpaceAttachments:
     async def _containment(self, stack, scope, space_ids):
         """Private host exclusion precedes every expanded SQL parent phase."""
         factory = getattr(self.provider, "_containment_scope", None)
+        return await self._enter_containment(stack, scope, space_ids, factory)
+
+    async def _enter_containment(self, stack, scope, space_ids, factory):
         if factory is None or not scope:
             return None, space_ids
         native = await stack.enter_async_context(factory(self, scope))
@@ -417,6 +420,15 @@ class SpaceAttachments:
 
     async def contain_host(self, attachment_id: str, reason: str) -> bool:
         """Contain by explicit host authority, without a human grant or event."""
+        return await self._contain_host(attachment_id, reason, getattr(self.provider, "_containment_scope", None))
+
+    async def _contain_restored_host(self, attachment_id, reason, *, scope_factory):
+        """An owning Gateway supplies one exact absence-only recovery scope."""
+        if not callable(scope_factory):
+            raise ValueError("Restored containment requires its explicit owned scope")
+        return await self._contain_host(attachment_id, reason, scope_factory)
+
+    async def _contain_host(self, attachment_id, reason, scope_factory):
         self._identifier(attachment_id)
         if not isinstance(reason, str) or reason not in HOST_FENCE_REASONS:
             raise ValueError("Host containment requires a host closure reason")
@@ -434,7 +446,7 @@ class SpaceAttachments:
                     scope = await self._mount_scope(session, [attachment_id])
                 space_ids = sorted(fact[0] for fact in scope[attachment_id])
                 async with AsyncExitStack() as stack:
-                    native, parent_ids = await self._containment(stack, scope, space_ids)
+                    native, parent_ids = await self._enter_containment(stack, scope, space_ids, scope_factory)
                     async with self.registry.host_locked(parent_ids) as (session, parents):
                         if set(parents) != set(parent_ids):
                             raise AttachmentPending("Attachment resources are unavailable")

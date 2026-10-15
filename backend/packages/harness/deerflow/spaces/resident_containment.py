@@ -119,15 +119,7 @@ class _RootAdmission:
                 if parent is None or parent.backing_handle != root.backing_handle or (root.space_id is not None and parent.id != root.space_id):
                     raise AttachmentPending("Resident backing no longer belongs to its captured parent")
                 volume = await self.factory.files._volume(session, parent)
-                if (volume.spec.slot_id, volume.spec.filesystem_uuid, volume.device, volume.root_inode, volume.control_inode, volume.backing_handle) != (
-                    root.slot_id,
-                    root.filesystem_uuid,
-                    root.device,
-                    root.root_inode,
-                    root.control_inode,
-                    root.backing_handle,
-                ):
-                    raise AttachmentPending("Resident qualified physical roots changed")
+                self._check_volume(root, volume)
                 volumes[root.backing_handle] = volume
         self.volumes = volumes
         await await_drained(run_sync_lifecycle_operation(self._guard_all_roots))
@@ -155,15 +147,7 @@ class _RootAdmission:
                     self.worker.assert_current()
                     physical = self.factory.files.catalog.verify(root.slot_id, previous=previous.physical)
                     bound = verify_bound(physical, root.backing_handle)
-                    if (bound.spec.slot_id, bound.spec.filesystem_uuid, bound.device, bound.root_inode, bound.control_inode, bound.backing_handle) != (
-                        root.slot_id,
-                        root.filesystem_uuid,
-                        root.device,
-                        root.root_inode,
-                        root.control_inode,
-                        root.backing_handle,
-                    ):
-                        raise AttachmentPending("Resident recovery physical root changed")
+                    self._check_volume(root, bound)
                     self.worker.assert_current()
                     return bound
 
@@ -176,6 +160,21 @@ class _RootAdmission:
         for record in self.originals.values():
             self.guard_roots(record)
 
+    def _check_volume(self, root, volume):
+        if (volume.spec.slot_id, volume.spec.filesystem_uuid, volume.device, volume.root_inode, volume.control_inode, volume.backing_handle) != (
+            root.slot_id,
+            root.filesystem_uuid,
+            root.device,
+            root.root_inode,
+            root.control_inode,
+            root.backing_handle,
+        ):
+            raise AttachmentPending("Resident qualified physical roots changed")
+
+    def _check_projection(self, root, projection):
+        if NativeResidentRoot.from_readonly(projection) != root:
+            raise AttachmentPending("Resident read-only projection changed")
+
     def guard_roots(self, record):
         for root in record.roots:
             volume = self.volumes.get(root.backing_handle)
@@ -186,8 +185,7 @@ class _RootAdmission:
             if root.space_id is None:
                 relative = str(PurePosixPath(root.source).relative_to(PurePosixPath(str(volume.data_path))))
                 projection = ReadOnlyRoot.capture(volume, relative, root.destination)
-                if NativeResidentRoot.from_readonly(projection) != root:
-                    raise AttachmentPending("Resident read-only projection changed")
+                self._check_projection(root, projection)
             elif root.source != str(volume.data_path) or root.source_inode != volume.root_inode:
                 raise AttachmentPending("Resident original writable source changed")
 

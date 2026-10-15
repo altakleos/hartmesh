@@ -110,6 +110,12 @@ Native bridge qualification/current proof restores all typed indexes from one
 mixed snapshot before publication. `native_teardown.py` retains bounded pending
 accounting, exact member ID/typed-name collision guards and restore tombstones.
 The journal revision closes readiness until the restored set exactly matches.
+Only the bridge's typed `_NativeAccountingStale` identifies this snapshot mismatch.
+Gateway reconciliation may requalify that same bridge/provider/owner once, after
+resume has released SQL admission and the Home lock. Retry complete fresh row,
+run, authority and graph reads under the original deadline; never retry unknown
+graph replies or classify errors by message. Failed refresh retains the charge
+and closes accounting. Requalification never occurs under metadata or SQL locks.
 An absent primary still consumes capacity; deduplicate only its exact known ID.
 Matching owner/name/explicit-target admission refuses unresolved evidence.
 Independent same-owner sets remain separately counted and can be cleaned under

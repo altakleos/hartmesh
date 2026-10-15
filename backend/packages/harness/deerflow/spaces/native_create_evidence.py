@@ -495,12 +495,28 @@ class NativeCreateEvidence:
 
     def retire_resident(self, record):
         """Monotonic retirement publication precedes every resource effect."""
+        return self._retire_resident(record)
+
+    def _retire_restored_resident(self, record, completion):
+        self._require_restored_completion(completion, record)
+        return self._retire_resident(record, completion=completion)
+
+    def _require_restored_completion(self, completion, record):
+        from deerflow.spaces.resident_restoration import _CompletionPermit
+
+        if type(completion) is not _CompletionPermit:
+            raise StorageHostUnqualified("Restored completion requires its exact Gateway permit")
+        completion.require_journal(self, record)
+
+    def _retire_resident(self, record, *, completion=None):
         if not isinstance(record, NativeResidentRecord):
             raise StorageHostUnqualified("Resident retirement requires its exact original evidence")
         with self._lock:
             self._encode_teardown(record)
             self._assert_current()
-            if record.daemon_id != self.daemon_id or record.id in self._teardown_removals:
+            if completion is not None:
+                self._require_restored_completion(completion, record)
+            if (completion is None and record.daemon_id != self.daemon_id) or record.id in self._teardown_removals:
                 raise StorageHostUnqualified("Resident retirement lacks its current durable original record")
             saved, metadata = self._read(record.id + ".json")
             if saved != record:
@@ -532,6 +548,12 @@ class NativeCreateEvidence:
         if not isinstance(record, NativeResidentRecord) or record.phase != "retiring":
             raise StorageHostUnqualified("Resident completion requires its admitted retiring record")
         return self._finish_retained(record)
+
+    def _finish_restored_resident(self, record, completion):
+        if not isinstance(record, NativeResidentRecord) or record.phase != "retiring":
+            raise StorageHostUnqualified("Restored completion requires its exact retiring original")
+        self._require_restored_completion(completion, record)
+        self._finish_retained(record, completion=completion)
 
     def begin_teardown(self, record):
         """Persist correlation before effects; the record grants no authority."""
@@ -597,10 +619,12 @@ class NativeCreateEvidence:
             raise StorageHostUnqualified("Chat completion requires its exact chat evidence type")
         return self._finish_retained(record)
 
-    def _finish_retained(self, record):
+    def _finish_retained(self, record, *, completion=None):
         with self._lock:
             self._encode_teardown(record)
-            if record.daemon_id != self.daemon_id:
+            if completion is not None:
+                self._require_restored_completion(completion, record)
+            elif record.daemon_id != self.daemon_id:
                 raise StorageHostUnqualified("Cannot remove teardown evidence for another daemon")
             records, _ = self._scan()
             if not any(saved == record for saved, _metadata in records):
@@ -640,6 +664,10 @@ class NativeCreateEvidence:
                 pass
             else:
                 raise StorageHostUnqualified("Native teardown evidence removal is unconfirmed")
+            if completion is not None:
+                # The fsync and exact absence are confirmed. Seal before
+                # fallible FD cleanup or the following complete census.
+                completion.seal_journal(self, record)
             self._teardown_removals.pop(record.id)
             os.close(removal.descriptor)
             self._scan()
