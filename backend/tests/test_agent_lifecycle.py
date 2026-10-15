@@ -109,7 +109,7 @@ async def test_adoption_and_supervision_preserve_identity_and_do_not_reactivate_
 
 
 @pytest.mark.asyncio
-async def test_delete_retains_home_and_explicit_restore_does_not_replay_old_grants(instances):
+async def test_delete_hides_home_files_and_refuses_restore(instances):
     agents, authority, sf, lifecycle, attachments, provider, memory = await lifecycle_fixture(instances)
     agent = await create(agents, custody="company", supervisor=BOB)
     home = await agents.files.registry.get(actor=ALICE, space_id=agent.home_id)
@@ -118,9 +118,12 @@ async def test_delete_retains_home_and_explicit_restore_does_not_replay_old_gran
     with pytest.raises(AgentDenied):
         await agents.get(actor=ALICE, instance_id=agent.id)
     assert (await agents.get(actor=ALICE, instance_id=agent.id, include_deleted=True)).status == "deleted"
-    assert await agents.files.read(actor=ALICE, space_id=home.id, path="wiki.txt", max_bytes=100) == b"Retained knowledge"
-    restored = await lifecycle.change(actor=ALICE, instance_id=agent.id, expected_generation=removed["instance"].generation, operation_id=operation(), action="restore")
-    assert restored["instance"].status == "active" and restored["instance"].home_id == home.id
+    from deerflow.spaces.contract import SpaceNotFound
+
+    with pytest.raises(SpaceNotFound):
+        await agents.files.read(actor=ALICE, space_id=home.id, path="wiki.txt", max_bytes=100)
+    with pytest.raises(SpaceNotFound):
+        await lifecycle.change(actor=ALICE, instance_id=agent.id, expected_generation=removed["instance"].generation, operation_id=operation(), action="restore")
 
 
 @pytest.mark.asyncio

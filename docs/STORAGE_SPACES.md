@@ -33,6 +33,21 @@ That label is provenance, never a directory identity. There is no database schem
 change and storage defaults remain disabled. Native byte/inode/held-descriptor
 qualification runs only in the mandatory Linux Docker CI tier.
 
+Explicit `POST /api/spaces/{id}/lifecycle` with `action: release` instead requires
+a current stored ADMIN grant on a deleted native Space, the captured generation
+and a UUID-hex operation ID. Every attachment must be fenced. It returns
+`{complete, slot_released}` directly and may reclaim a human-deleted Space whose
+backups were retained. It uses the same drained physical engine with its own
+caller-bound durable receipt; it never changes the delete event to authorize host
+cleanup. Retries recheck current ADMIN and preserve a recorded false result.
+Competing or malformed release progress remains pending for inspection.
+
+An unverified explicit release removes only its SQL binding, leaves bytes untouched
+and keeps the slot unclaimed. Success is logged after commit. Maintenance retains
+unverified bindings. A lost commit acknowledgment can repair an old cached charge
+only after validating completed proof and confirming no new SQL owner; claim-token
+comparison protects later in-process allocations.
+
 ## Extension storage contract
 
 The dependency-free `deerflow-extension-api` 0.2.7 adds `StorageActor`,

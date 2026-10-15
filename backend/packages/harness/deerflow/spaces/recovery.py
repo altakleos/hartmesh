@@ -37,6 +37,14 @@ class SpaceRecovery:
 
         return await host_release(self, space_id, admission=admission, publication=publication, lock_admission=lock_admission, retain_unverified=retain_unverified, before_publication=before_publication)
 
+    async def release(self, *, actor, space_id, expected_generation, operation_id):
+        """Explicit current ADMIN cleanup of a deleted native Space."""
+        from deerflow.spaces.caller_release import release
+
+        validate_generation(expected_generation)
+        self.files._operation_id(operation_id)
+        return await release(self, actor=actor, space_id=space_id, expected_generation=expected_generation, operation_id=operation_id)
+
     async def _quiesce(self, actor, space_id, generation, operation_id=None, attachment_ids=None):
         # Lifecycle actions explicitly close RO handles as well as writers.
         # Ordinary ADMIN admission no longer proves writer exclusion.

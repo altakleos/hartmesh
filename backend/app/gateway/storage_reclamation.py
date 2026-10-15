@@ -174,8 +174,33 @@ async def reclaim_released_user_spaces(app):
     return reclaimed
 
 
-async def finish_releases(app):
-    """Release every kind without bypassing the released-account User policy."""
+async def _release_candidate(files, session, space_id, *, allow_unverified=False, agents=None):
+    row = await session.get(SpaceRow, space_id)
+    if row is None or row.status != "deleted" or row.mode != "native":
+        raise SpaceConflict("Only a deleted native Space can be released")
+    binding = await session.get(SpaceBackingRow, row.backing_handle)
+    expected_space = tuple(getattr(row, name) for name in _SPACE)
+    if binding is None:
+        return None, None, expected_space, None
+    try:
+        spec = files._binding_spec(binding)
+    except BackingUnavailable:
+        if not allow_unverified:
+            raise
+        spec = files.catalog.volumes.get(binding.slot_id)
+    kind = getattr(spec, "kind", None)
+    if spec is None and allow_unverified and agents is not None:
+        from deerflow.persistence.agent_instances.model import AgentInstanceRow
+
+        owners = (await session.scalars(select(AgentInstanceRow).where(AgentInstanceRow.home_id == space_id))).all()
+        if len(owners) == 1 and owners[0].status == "deleted":
+            kind = {"personal": "assistant", "company": "employee"}.get(owners[0].custody)
+    if kind not in {"assistant", "employee", "company"}:
+        raise SpaceConflict("This Space requires its owner's release policy")
+    return binding.slot_id, kind, expected_space, tuple(getattr(binding, name) for name in _BINDING)
+
+
+async def _release_deleted_space(app, space_id, *, retain_unverified, expected=None):
     from app.gateway.storage_spaces import storage_state
     from deerflow.persistence.agent_instances.model import AgentInstanceRow
 
@@ -184,56 +209,83 @@ async def finish_releases(app):
     provider = getattr(status, "qualified_provider", None)
     retire = getattr(provider, "_native_retirement_scope", None)
     if files is None or not callable(retire) or (await storage_state(app)).state in ("off", "unavailable"):
-        return 0
-    reclaimed = await reclaim_released_user_spaces(app)
+        return {"complete": False, "slot_released": False}
     runtime = getattr(app.state, "resident_runtime", None)
+    agents = getattr(app.state, "agent_instances", None)
     if runtime is not None:
         await runtime.inventory_runs()
         if runtime.foreign_run_blocks:
-            return reclaimed
+            raise SpaceConflict("A foreign durable owner remains live")
+    async with files.registry._sf() as session:
+        candidate = await _release_candidate(files, session, space_id, allow_unverified=not retain_unverified, agents=agents)
+    if expected is not None and candidate != expected:
+        raise SpaceConflict("Deleted Space or backing changed before release")
+    slot, _kind, _space, _binding = candidate
+
+    async def admitted(session, scope=None):
+        if getattr(app.state, "agent_execution", None) is not status or status.qualified_provider is not provider or status.storage_reason is not None or getattr(app.state, "storage_spaces", None) is not files:
+            raise SpaceConflict("The release lost its qualified provider")
+        if scope is not None:
+            scope.assert_current()
+        if await _release_candidate(files, session, space_id, allow_unverified=not retain_unverified, agents=agents) != candidate:
+            raise SpaceConflict("Deleted Space or backing changed before release")
+        if runtime is not None and runtime.foreign_run_blocks:
+            raise SpaceConflict("A foreign durable owner remains live")
+        if runtime is not None or agents is not None:
+            owners = (await session.scalars(select(AgentInstanceRow).where(AgentInstanceRow.home_id == space_id).with_for_update())).all()
+            if len(owners) > 1 or any(owner.status != "deleted" for owner in owners):
+                raise SpaceConflict("The agent's Home is still owned")
+            if runtime is not None and (runtime.registry._has_reservation(space_id) or any(runtime.registry.in_flight(owner.id) for owner in owners)):
+                raise SpaceConflict("The agent's Home is still in use")
+
+    if slot is None:
+        # A completed replay has no physical resource to reserve. The kernel
+        # rechecks the exact absent binding and deletion under the Home lock.
+        return await SpaceRecovery(files).host_release(space_id, admission=admitted, retain_unverified=retain_unverified)
+    async with _retirement_scope(retire, "space:" + space_id, slot) as scope:
+
+        async def admission(session):
+            await admitted(session, scope)
+
+        return await SpaceRecovery(files).host_release(space_id, admission=admission, retain_unverified=retain_unverified, before_publication=scope.prove_absent)
+
+
+async def release_deleted_space(app, space_id, *, retain_unverified=False, _expected=None):
+    """One kernel release inside the current Gateway containment policy."""
+    try:
+        return await _release_deleted_space(app, space_id, retain_unverified=retain_unverified, expected=_expected)
+    except Exception as error:
+        # Log only an error class; tenant identities and exception payloads do
+        # not belong in the operator journal. Cancellation still propagates.
+        if _expected is not None:
+            logger.warning("storage: space %s (%s) not released: %s", _expected[0], _expected[1], type(error).__name__)
+        else:
+            logger.warning("storage: deleted space not released (%s)", type(error).__name__)
+        return {"complete": False, "slot_released": False}
+
+
+async def finish_releases(app):
+    """Release every kind without bypassing the released-account User policy."""
+    from app.gateway.storage_spaces import storage_state
+
+    files = getattr(app.state, "storage_spaces", None)
+    status = getattr(app.state, "agent_execution", None)
+    provider = getattr(status, "qualified_provider", None)
+    if files is None or not callable(getattr(provider, "_native_retirement_scope", None)) or (await storage_state(app)).state in ("off", "unavailable"):
+        return 0
+    reclaimed = await reclaim_released_user_spaces(app)
     candidates = []
     async with files.registry._sf() as session:
-        rows = (
-            await session.execute(select(SpaceRow, SpaceBackingRow).join(SpaceBackingRow, SpaceBackingRow.backing_handle == SpaceRow.backing_handle).where(SpaceRow.status == "deleted", SpaceRow.mode == "native").order_by(SpaceRow.id))
-        ).all()
-        for row, binding in rows:
+        ids = (await session.scalars(select(SpaceRow.id).join(SpaceBackingRow, SpaceBackingRow.backing_handle == SpaceRow.backing_handle).where(SpaceRow.status == "deleted", SpaceRow.mode == "native").order_by(SpaceRow.id))).all()
+        for space_id in ids:
             try:
-                kind = getattr(files._binding_spec(binding), "kind", None)
-            except BackingUnavailable:
+                candidate = await _release_candidate(files, session, space_id)
+            except (BackingUnavailable, SpaceConflict):
                 continue
-            if kind in {"assistant", "employee", "company"}:
-                candidates.append((row.id, binding.slot_id, kind, tuple(getattr(row, name) for name in _SPACE), tuple(getattr(binding, name) for name in _BINDING)))
-    for space_id, slot, kind, expected_space, expected_binding in candidates:
-        try:
-            # The opaque host resource key reserves the slot; it supplies no
-            # human identity and cannot authorize a foreign native holder.
-            async with _retirement_scope(retire, "space:" + space_id, slot) as scope:
-
-                async def admission(session):
-                    if status.qualified_provider is not provider or status.storage_reason is not None:
-                        raise SpaceConflict("The release lost its qualified provider")
-                    scope.assert_current()
-                    row = await session.get(SpaceRow, space_id)
-                    binding = await session.get(SpaceBackingRow, expected_binding[0])
-                    if (
-                        row is None
-                        or binding is None
-                        or tuple(getattr(row, name) for name in _SPACE) != expected_space
-                        or tuple(getattr(binding, name) for name in _BINDING) != expected_binding
-                        or getattr(files._binding_spec(binding), "kind", None) != kind
-                    ):
-                        raise SpaceConflict("Deleted Space or backing changed before release")
-                    if runtime is not None:
-                        if runtime.foreign_run_blocks:
-                            raise SpaceConflict("A foreign durable owner remains live")
-                        owners = (await session.scalars(select(AgentInstanceRow).where(AgentInstanceRow.home_id == space_id).with_for_update())).all()
-                        if len(owners) > 1 or any(owner.status != "deleted" or runtime.registry.in_flight(owner.id) or runtime.registry._has_reservation(space_id) for owner in owners):
-                            raise SpaceConflict("The agent's Home is still owned")
-
-                result = await SpaceRecovery(files).host_release(space_id, admission=admission, retain_unverified=True, before_publication=scope.prove_absent)
-            if all(result.get(key) is True for key in ("complete", "slot_released", "newly_reclaimed")):
-                reclaimed += 1
-                logger.info("storage: %s space reclaimed (%s)", kind, slot)
-        except Exception:
-            logger.exception("storage: deleted %s Space %s remains pending", kind, space_id)
+            candidates.append((space_id, candidate))
+    for space_id, candidate in candidates:
+        result = await release_deleted_space(app, space_id, retain_unverified=True, _expected=candidate)
+        if all(result.get(key) is True for key in ("complete", "slot_released", "newly_reclaimed")):
+            reclaimed += 1
+            logger.info("storage: %s space reclaimed (%s)", candidate[1], candidate[0])
     return reclaimed

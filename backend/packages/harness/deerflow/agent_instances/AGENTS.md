@@ -153,14 +153,24 @@ Lifecycle uses the host-only callback inside qualified attachment retirement:
 resource→attachment→instance, capture exact intent/IDs and withdraw generation
 before effects. Pending never proves containment. Empty/completed retries never
 retire replacements; finalization proves captured IDs fenced under current ADMIN
-and Manage before reconciling Home generation. Retain Home/grants and preserve
-current rights on restore. Company delegates resolve exact intents with original
+and Manage before reconciling Home generation. Delete commits both tombstones and
+the false-retention event atomically; Gateway then makes one guarded host release.
+Deleted agents cannot restore. Preserve current rights on other restores.
+Company delegates resolve exact intents with original
 actor plus resolver attribution; personal intents remain actor-bound. Fresh adoption
 requires current ownership; retry uses the committed immutable snapshot. Rename
 must reject pending lifecycle intents. Explicit company targets copy approved
 business data, then use existing resource/memory transfer; no private inheritance.
 
-Managers with current Home ADMIN can abandon an obsolete pending lifecycle operation only after its exact captured environments and all current Home attachments are confirmed fenced. Finalization rechecks every current attachment under the Space parent lock without expanding the captured retirement scope. The intent and original actor remain recorded; grants are unchanged and the agent stays suspended until explicit restore. Existing-chat legacy uploads, browser and sidecar actions require a positive unbound lookup.
+Manage/Home ADMIN may abandon only after captured and current attachments are fenced.
+Keep original attribution and suspended status. Grant actions map Inspect to17,
+Inspect+Manage to27, otherwise0; write Home access before instance membership.
+Abandon resets from current membership, removing retired recipients. Fence caller
+generation before compensation, then recheck membership/file grants under Home→instance
+locks. Failure stays pending. Borrow human reads; never nest pool checkouts.
+`only_if_idle` checks actual registry run IDs first in withdrawal, never stored
+identity or broad reservations. Generic Space grants cannot bypass live ownership.
+Existing-chat legacy actions need a positive unbound lookup.
 
 The authority middleware adds the current AI employee display name only as
 sanitized transient human-role data; never interpolate editable identity into

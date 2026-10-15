@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Agent lifecycle and file access
+
+Agent deletion atomically deletes its Home and makes one guarded reclamation
+attempt, reporting whether its typed slot was freed. Maintenance retries uncertain
+cleanup. Deleted AI assistants and AI employees cannot be restored. Explicit Space
+release requires a current stored ADMIN grant, deleted native storage and fenced
+attachments; unverifiable storage is left untouched and unavailable for allocation.
+Durable release retries preserve interrupted filesystem proof and repair an old
+capacity charge only from a validated completed receipt.
+
+Lifecycle requests accept `only_if_idle`, using actual in-flight runs. Inspect
+maps to READ/EXPORT on the agent's files; Inspect plus Manage also grants WRITE
+and ADMIN. Other memberships remove the file grant. Abandoning an unfinished grant
+restores file access from current committed membership, with generation and race
+checks. Generic Spaces grant routes preserve live agent ownership.
+
+There is no database schema, native evidence format or configuration-version change.
+
 ### Compose agent qualification
 
 The scripted acceptance model supports deterministic Work outcomes and held
