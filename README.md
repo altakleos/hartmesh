@@ -782,6 +782,9 @@ outcomes keep capacity charged until containment and release are confirmed.
 
 Managed AI employee preparation records its original container, networks and
 qualified mounts before activation. Reuse checks that same prepared environment.
+If unrelated chat cleanup changes native accounting during that check, maintenance
+requalifies and retries once without replacing the workspace or interrupting its
+running task. Unconfirmed ownership, resources or accounting keep execution closed.
 Cleanup retains the original evidence and capacity charge until resource absence,
 SQL closure and journal completion are confirmed. Interrupted cleanup retries
 the original resources; a completed cleanup retry checks current absence without

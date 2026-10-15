@@ -32,6 +32,12 @@ class _ResidentSnapshotChanged(Exception):
     pass
 
 
+class _ResidentAccountingChanged(Exception):
+    def __init__(self, attachment_id, bridge):
+        super().__init__(attachment_id)
+        self.bridge = bridge
+
+
 class ResidentRuntime:
     def __init__(self, app, *, registry, admission, entered):
         self.app, self.registry, self.admission = app, registry, admission
@@ -504,9 +510,61 @@ class ResidentRuntime:
         return result
 
     async def reconcile_rows(self, *, attachment_ids=None, deadline):
+        provider, attachments = self.provider, self.attachments
+        bridge = getattr(provider, "_native_creation", None)
+        owner = getattr(provider, "_pool_runtime_owner", None)
+        backend, adapter = provider._backend, attachments.provider
+
+        def require_binding():
+            if (
+                self._closing
+                or time.monotonic() >= deadline
+                or self.app.state.resident_runtime is not self
+                or self.provider is not provider
+                or self.attachments is not attachments
+                or self.registry.provider is not provider
+                or self.registry.attachments is not attachments
+                or attachments.provider is not adapter
+                or provider._backend is not backend
+                or getattr(provider, "_native_creation", None) is not bridge
+                or getattr(backend, "_native_creation", None) is not bridge
+                or getattr(provider, "_pool_runtime_owner", None) is not owner
+                or owner is None
+                or not owner.accepts(provider)
+                or owner.native_create_evidence is not bridge.evidence
+            ):
+                raise StorageRuntimeUnavailable("Resident accounting refresh lost its original runtime or deadline")
+
+        def refresh_accounting():
+            require_binding()
+            bridge.qualify()
+            require_binding()
+
+        accounting_refreshed = False
         for refresh in range(2):
             try:
-                return await self._reconcile_rows(attachment_ids=attachment_ids, deadline=deadline)
+                pending = await self._reconcile_rows(attachment_ids=attachment_ids, deadline=deadline)
+                if accounting_refreshed:
+                    require_binding()
+                return pending
+            except _ResidentAccountingChanged as changed:
+                if not refresh and changed.bridge is bridge:
+                    try:
+                        # The failed resume has unwound SQL admission and the
+                        # Home lock. Drain the blocking proof before retrying
+                        # all row/run/authority/graph reads under this budget.
+                        async with asyncio.timeout_at(deadline):
+                            await await_drained(run_sync_lifecycle_operation(refresh_accounting))
+                        require_binding()
+                        accounting_refreshed = True
+                        continue
+                    except Exception:
+                        logger.exception("agents: native accounting refresh remains pending")
+                    except BaseException:
+                        self.invalidate_accounting("reconcile-refresh-cancelled")
+                        raise
+                self.invalidate_accounting("reconcile-accounting")
+                return [changed.args[0]]
             except _ResidentSnapshotChanged as changed:
                 if refresh or attachment_ids is not None or time.monotonic() >= deadline:
                     self._invalidate_workspace("reconcile-snapshot")
@@ -635,7 +693,19 @@ class ResidentRuntime:
                     if claim.actor != identity.principal or claim.resources != expected or await self.attachments.container_state(claim.id) != "running":
                         reason = "container-absent"
                     else:
-                        resumed = await self.attachments.resume(actor=identity.principal, resources=expected, incarnation=claim.incarnation)
+                        try:
+                            resumed = await self.attachments.resume(actor=identity.principal, resources=expected, incarnation=claim.incarnation)
+                        except Exception as exc:
+                            from deerflow.community.aio_sandbox.native_creation import _NativeAccountingStale
+
+                            cause = exc
+                            for _ in range(8):
+                                if isinstance(cause, _NativeAccountingStale):
+                                    raise _ResidentAccountingChanged(claim.id, cause.bridge) from exc
+                                cause = cause.__cause__
+                                if cause is None:
+                                    break
+                            raise
                         fresh = await self.attachments.retained_attachment(claim.id)
                         if resumed is None or resumed.id != claim.id or resumed.container_id != claim.container_id or fresh is None:
                             raise StorageRuntimeUnavailable("Workspace resume lost its exact retained identity")
@@ -673,7 +743,7 @@ class ResidentRuntime:
                         entry is not None and entry.preparation is not None,
                     )
                     pending.append(claim.id)
-            except _ResidentSnapshotChanged:
+            except (_ResidentSnapshotChanged, _ResidentAccountingChanged):
                 raise
             except Exception:
                 self.registry.retain(claim)
