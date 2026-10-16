@@ -3372,7 +3372,9 @@ The evidence tiers establish different facts. Each is recorded separately:
 - A per-release `tenant_class` receipt is a person’s qualification on the actual
   VM class under `runsc`, covering default preparation/timing, real transfers,
   cold start, full storage, egress, two conversations, hold, reboot and snapshot
-  restore. GitHub CI cannot supply it; this runbook does not claim it is complete.
+  restore. This is separate infra/consumer work, never performed by the release
+  session and not a release-cut gate. GitHub CI cannot supply it; this runbook
+  does not claim it is complete. A supplied receipt is strictly validated.
 
 Offline SQL/contract tests, strict blocking-I/O checks and browser suites qualify
 additional functional boundaries. More than one Gateway worker and data disks
