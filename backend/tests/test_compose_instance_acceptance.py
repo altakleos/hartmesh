@@ -1190,10 +1190,13 @@ def test_file_given_while_the_workspace_runs_is_read_by_the_running_agent(compos
 def test_file_given_while_no_workspace_runs_is_present_at_the_next_run(compose, session, employee):
     previous, _entry = workspace(compose, employee)
     assert compose.ai("close-workspace", employee["instance"]["id"])["verdict"] == "closed"
-    files = give_file(session, employee, MARKER + b"-while-closed")
+    content = MARKER + b"-while-closed"
+    files = give_file(session, employee, content)
     assert not any(entry["Name"].startswith("/hartmesh-space-") for entry in compose.containers())
     session.run(employee["thread_id"], files=files)
-    assert workspace(compose, employee)[0]["container_id"] != previous["container_id"]
+    current, _entry = workspace(compose, employee)
+    assert current["container_id"] != previous["container_id"]
+    assert compose.invoke(["docker", "exec", current["container_id"], "cat", "/mnt/user-data/uploads/input.txt"]).stdout.encode() == content
 
 
 def test_forty_mebibyte_file_arrives_with_the_same_sha256(compose, session, employee, tmp_path):

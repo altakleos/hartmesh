@@ -72,7 +72,7 @@ Resume. Attention routes questions to eligible people by name; a reply starts no
 Qualified workspaces support the provider's restricted network and read-only
 Shared binding alongside Home, without publishing a sandbox or relay port.
 Storage and agent counts remain opt-in while the Compose rollout continues.
-Required CI now checks seventeen shipped-bundle storage and agent journeys,
+Required CI now checks 27 shipped-bundle storage and agent journeys,
 including Work outcomes, concurrent ordinary chat, idle workspace reuse and
 interrupted-attempt containment. Native CI uses real resident admission and
 proves original-container removal before replacement. See the
