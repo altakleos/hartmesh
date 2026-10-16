@@ -418,9 +418,11 @@ class SpaceAttachments:
             raise AttachmentPending("Cross-host containment requires a recorded host replacement")
         return True
 
-    async def contain_host(self, attachment_id: str, reason: str) -> bool:
-        """Contain by explicit host authority, without a human grant or event."""
-        return await self._contain_host(attachment_id, reason, getattr(self.provider, "_containment_scope", None))
+    async def contain_host(self, attachment_id: str, reason: str, *, admission=None) -> bool:
+        """Host containment with optional domain admission before any closure intent."""
+        if admission is not None and not callable(admission):
+            raise ValueError("Host containment admission must be callable")
+        return await self._contain_host(attachment_id, reason, getattr(self.provider, "_containment_scope", None), admission=admission)
 
     async def _contain_restored_host(self, attachment_id, reason, *, scope_factory):
         """An owning Gateway supplies one exact absence-only recovery scope."""
@@ -428,7 +430,7 @@ class SpaceAttachments:
             raise ValueError("Restored containment requires its explicit owned scope")
         return await self._contain_host(attachment_id, reason, scope_factory)
 
-    async def _contain_host(self, attachment_id, reason, scope_factory):
+    async def _contain_host(self, attachment_id, reason, scope_factory, *, admission=None):
         self._identifier(attachment_id)
         if not isinstance(reason, str) or reason not in HOST_FENCE_REASONS:
             raise ValueError("Host containment requires a host closure reason")
@@ -437,6 +439,7 @@ class SpaceAttachments:
             stored_reason = reason
             retry_reason = reason
             unknown_attachment = False
+            callback_rejected = False
             try:
                 async with self.registry._sf() as session:
                     row = await session.get(SpaceAttachmentRow, attachment_id)
@@ -454,6 +457,12 @@ class SpaceAttachments:
                         if native is not None:
                             await native.admit(session, records)
                         record = records[attachment_id]
+                        if admission is not None:
+                            try:
+                                await admission(session, ((record.id, record.container_id),))
+                            except Exception:
+                                callback_rejected = True
+                                raise
                         if record.phase != "fenced":
                             replaced = await self._host_eligible(session, record)
                             retry_reason = stored_reason = "host-replaced" if replaced else reason
@@ -476,7 +485,7 @@ class SpaceAttachments:
                     if native is not None:
                         await native.finalize()
             except Exception as exc:
-                if unknown_attachment:
+                if unknown_attachment or callback_rejected:
                     raise
                 # Inputs for host replay, rather than historical attribution:
                 # a first human closure reason is not a valid host API input.

@@ -138,11 +138,13 @@ def _validate_intent(operation, snapshot):
 
 
 async def _discard(session, space_id, operation_id=None):
+    from deerflow.spaces.settlement import host_settlement_result
+
     operations = (await session.scalars(select(SpaceFileOperationRow).where(SpaceFileOperationRow.space_id == space_id, SpaceFileOperationRow.phase == "pending"))).all()
     for operation in operations:
         if operation.operation_id != operation_id:
             operation.phase = "failed"
-            operation.result = {"resolution": "host-discarded"}
+            operation.result = host_settlement_result({"resolution": "host-discarded"})
 
 
 class _ReleaseComplete(Exception):

@@ -79,7 +79,10 @@ async def test_release_renews_roots_preserves_tombstone_and_recycles_only_after_
             events = (await session.scalars(select(SpaceEventRow).where(SpaceEventRow.space_id == space.id))).all()
             assert len(events) == 2
             pending = await session.get(SpaceFileOperationRow, (space.id, pending_id))
-            assert pending.phase == "failed" and pending.result == {"resolution": "host-discarded"}
+            from _storage_spaces_test_support import assert_host_settlement
+
+            assert pending.phase == "failed"
+            assert_host_settlement(pending.result, {"resolution": "host-discarded"})
             intents = (await session.scalars(select(SpaceFileOperationRow).where(SpaceFileOperationRow.actor_id == "host:space-release"))).all()
             assert len(intents) == 1 and intents[0].phase == "complete"
             assert intents[0].actor_kind == "nonhuman" and intents[0].request["action"] == "host-release"

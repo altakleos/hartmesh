@@ -1,5 +1,89 @@
 # Storage Spaces
 
+## AI agent operator commands
+
+Run these commands inside the backend image with the same configuration,
+database, home directory, storage mounts and Docker socket as its Gateway:
+
+```bash
+python -m app.gateway.agent_instances list
+python -m app.gateway.agent_instances status
+python -m app.gateway.agent_instances verify
+python -m app.gateway.agent_instances close-workspace <instance-id>
+python -m app.gateway.agent_instances export <instance-id>
+python -m app.gateway.agent_instances supervise <instance-id> --email person@example.com
+python -m app.gateway.agent_instances delete <instance-id>
+python -m app.gateway.agent_instances adopt-host --from <old-engine-id> --acknowledge-old-host-gone
+python -m app.gateway.agent_instances settle --space <space-id> --operation <operation-id>
+```
+
+Each invocation writes one JSON document on one line to stdout and diagnostics
+to stderr. Exit 0 means the command completed; exit 1 means refusal or operational
+failure; exit 2 means verification or recovery remains unfinished. Inspect the
+document's `verdict`, unconfirmed IDs and `note`. There is no `--json` flag.
+Storage must be enabled. These commands do not initialize the Gateway runtime.
+
+`list --all` includes deleted AI assistants and AI employees whose slots were
+released. `status` observes the actual running Gateway lifetime through a private,
+process-checked receipt; missing or stale evidence fails the command rather than
+inventing a start time. A daemon outage with valid Gateway evidence remains a
+status response. Only `status` and `verify` use a temporary qualification probe.
+
+Workspace closure, export, supervision recovery and deletion accept
+`--end-running-work` and `--wait-seconds` (default 120). Without the first flag,
+live leased runs refuse closure. The flag authorizes workspace removal; the
+Gateway ends runs and settles Work. Lease expiry alone does not confirm an ended
+run. The command waits only for captured run and attempt IDs and reports anything
+still unconfirmed. A normally completed attempt can have a null containment reason.
+
+`export` verifies the Home and disk headroom before closing its workspace, then
+creates a private, exclusive tar archive under
+`/srv/hartmesh/home/agent-exports/`. It preserves symbolic links without following
+them and rejects special nodes or source replacements. Completed archives remain
+available even when the wait for Gateway settlement expires. Nothing removes
+these archives automatically; the operator owns their retention.
+
+`supervise` recovers a company AI employee only when its supervisor and every
+other human manager cannot sign in. Select a unique account with `--email`, or
+use `--issuer` plus `--subject`. The command closes the workspace, gives the live
+human account Use/Inspect/Manage, then Home read/write/administer/export, and runs
+the product lifecycle as that person. Its exact immutable recovery intent allows
+interrupted grants to resume without granting a different target or host authority.
+If a product lifecycle is pending, `manager_added` means the human manager has
+access and must resolve the product operation. Existing supervision returns its
+actual current grants without adding permissions. AI assistants remain personal
+and cannot be handed to another owner through this command.
+
+`delete` applies only to orphaned AI agents. It records deletion and waits for the
+running Gateway's guarded reclamation; it does not empty or free a slot itself.
+An unconfirmed release stays allocated. The Gateway writes the operator-deletion
+audit line only after actual verified reclamation.
+
+Use `adopt-host` only after the old Docker host is powered off or destroyed.
+Its acknowledgment records that exact replacement; the command neither removes
+resources nor rewrites native evidence. Gateway reconciliation owns subsequent
+absence verification and cleanup.
+
+`settle` inspects and reconciles one exact pending file operation, leaving other
+operations alone. If its evidence cannot establish an outcome, it remains pending
+with exit 2. After inspecting the reported request, receipt and files, explicit
+`--discard` records only that row as failed with host/operator attribution and
+changes no files. It preserves malformed receipts and abandoned stages for
+inspection. An occupied workflow lock refuses both paths.
+
+No database schema change is needed for these commands. Host settlement records
+its actual UTC completion time in existing result JSON; historical rows receive
+no invented completion time. Recovery and handoff events use the existing Space
+event stream. Storage and agent defaults remain opt-in.
+
+The `agent_operator_*` service graph shares pure storage constructors with the
+Gateway. It never enters Gateway startup, acquires provider/runtime ownership or
+starts maintenance. Native evidence readers open lazily and cannot publish or
+prune records. Domain admission callbacks borrow the owning SQL transaction.
+`gateway_observation.py` publishes a bounded private lifetime receipt with an
+exact held lifetime lock; it grants no native authority and its publication
+failure does not prevent Gateway startup.
+
 ## Host reclamation foundation
 
 The private host recovery method reclaims already-deleted native Spaces only

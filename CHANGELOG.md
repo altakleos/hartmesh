@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### AI agent operator commands
+
+The backend adds nine JSON operator commands for managed-storage inspection,
+workspace closure, external file export, orphaned AI employee supervision,
+orphaned AI agent deletion, replaced-host acknowledgment and targeted file
+settlement. Workspace closure waits for the Gateway's actual run and attempt
+outcomes. Supervision recovery retains exact interruption evidence, rechecks
+current human accounts at each authority boundary and supports a durable handoff
+when a product lifecycle is pending. Deletion leaves slot reclamation to the
+Gateway, which logs operator deletion after confirmed reclamation.
+
+Status counters use the running Gateway's observed lifetime and committed host
+transitions. Host file settlement records its actual UTC completion time in the
+existing result JSON. External archives retain links without following them and
+reject source replacements during traversal.
+
+There is no database schema, native evidence format or configuration-version change.
+
 ### Agent discovery and setup recovery
 
 The management API adds custody filters, role templates, activity and execution
