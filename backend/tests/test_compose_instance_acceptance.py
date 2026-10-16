@@ -1380,6 +1380,19 @@ def test_closing_the_workspace_under_a_held_attempt_ends_its_run_with_the_reason
 
 
 def test_a_killed_workspace_ends_its_run_with_the_reason_container_absent(compose, session, employee):
+    # The preceding operator closure can overlap maintenance while its run
+    # drains. Wait for the next qualification pass before this separate fault.
+    last_execution = None
+    deadline = time.monotonic() + 90
+    while True:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, f"Agent execution did not requalify after operator closure: {last_execution!r}"
+        last_execution = session.request("GET", "/api/features", timeout=min(10, remaining)).json()["agent_instances"]
+        assert time.monotonic() < deadline, f"Agent qualification response missed its deadline: {last_execution!r}"
+        if last_execution["enabled"] is True and last_execution["execution"] == "ready" and last_execution["reason"] is None:
+            break
+        time.sleep(min(5, max(0, deadline - time.monotonic())))
+
     held, identity = held_attempt(compose, session, employee)
     started = time.monotonic()
     compose.invoke(["docker", "kill", identity["container_id"]])
