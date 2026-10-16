@@ -25,6 +25,7 @@ import {
   type ConversationProps,
 } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
+import { useConversationFiles } from "@/components/workspace/chats/conversation-files";
 import { extractArtifactsFromThread } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { getArtifactArchiveCandidatesByGroupIndex } from "@/core/messages/artifact-archive";
@@ -81,7 +82,11 @@ import {
   parseSubtaskResult,
 } from "@/core/tasks/subtask-result";
 import type { AgentThreadState } from "@/core/threads";
-import { runActivityLabel, useTurnProgress } from "@/core/turn-progress";
+import {
+  runActivityLabel,
+  useTurnProgress,
+  useWorkspaceStartingLong,
+} from "@/core/turn-progress";
 import { cn } from "@/lib/utils";
 
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
@@ -351,6 +356,10 @@ export function MessageList({
   // The stages arrive before any model token, so the first honest word
   // appears within the run's first moments rather than at its first tool call.
   const turnProgress = useTurnProgress(threadId);
+  const conversation = useConversationFiles();
+  const workspaceStartingLong = useWorkspaceStartingLong(
+    conversation.agent ? turnProgress : null,
+  );
   const activityLabel = useMemo(
     () =>
       runActivityLabel({
@@ -358,8 +367,17 @@ export function MessageList({
         messages,
         progress: turnProgress,
         t,
+        agentName: conversation.agent?.name,
+        workspaceStartingLong,
       }),
-    [thread.isLoading, messages, turnProgress, t],
+    [
+      thread.isLoading,
+      messages,
+      turnProgress,
+      t,
+      conversation.agent?.name,
+      workspaceStartingLong,
+    ],
   );
   const chapters = useMemo(
     () =>

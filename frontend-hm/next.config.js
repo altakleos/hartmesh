@@ -16,8 +16,9 @@ function getInternalServiceURL(envKey, fallbackURL) {
 
 /** @type {import("next").NextConfig} */
 const config = {
+  distDir: process.env.NEXT_DIST_DIR || ".next",
   typescript: {
-    tsconfigPath: "tsconfig.build.json",
+    tsconfigPath: process.env.NEXT_TSCONFIG_PATH || "tsconfig.build.json",
   },
   output:
     process.env.NEXT_CONFIG_BUILD_OUTPUT === "standalone"

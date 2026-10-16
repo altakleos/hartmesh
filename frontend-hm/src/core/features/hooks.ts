@@ -6,6 +6,7 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import {
   type FeaturesResponse,
   fetchFeatures,
+  selectAgentInstances,
   selectBranding,
   selectCustomerAdministration,
   selectBrowserControlEnabled,
@@ -95,6 +96,13 @@ export function useStorageSpacesEnabled() {
   return { enabled: !isError && data === true, isLoading: isPending };
 }
 
+/** Storage administration belongs outside the business workspace for every role. */
+export function useSpacesPageVisible() {
+  const { enabled } = useStorageSpacesEnabled();
+  const { profile } = useWorkspacePresentation();
+  return enabled && profile !== "business";
+}
+
 export function useStorage() {
   const query = useFeatures(selectStorageState, {
     refetchInterval: (query) =>
@@ -107,6 +115,18 @@ export function useStorage() {
     ...(query.isError
       ? selectStorageState(undefined)
       : (query.data ?? selectStorageState(undefined))),
+    isLoading: query.isPending,
+    dataUpdatedAt: query.dataUpdatedAt,
+    refetch: query.refetch,
+  };
+}
+
+export function useAgentInstances() {
+  const query = useFeatures(selectAgentInstances);
+  return {
+    ...(query.isError
+      ? selectAgentInstances(undefined)
+      : (query.data ?? selectAgentInstances(undefined))),
     isLoading: query.isPending,
     dataUpdatedAt: query.dataUpdatedAt,
     refetch: query.refetch,

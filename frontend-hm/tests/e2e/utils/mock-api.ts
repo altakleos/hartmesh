@@ -33,6 +33,13 @@ const MOCK_AUTH_USER = {
 
 export type MockThread = {
   thread_id: string;
+  agent_instance?: {
+    id: string;
+    name: string;
+    custody: "personal" | "company";
+    status: string;
+    requester_id: string;
+  } | null;
   title?: string;
   updated_at?: string;
   agent_name?: string;
@@ -108,6 +115,7 @@ export type MockAPIOptions = {
   };
   features?: {
     agentsApiEnabled?: boolean;
+    agentInstancesEnabled?: boolean;
     browserControlEnabled?: boolean;
     mcpTasksEnabled?: boolean;
   };
@@ -368,6 +376,10 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   }
   const featureFlags = {
     agentsApiEnabled: options?.features?.agentsApiEnabled ?? true,
+    agentInstancesEnabled:
+      options?.features?.agentInstancesEnabled ??
+      options?.features?.agentsApiEnabled ??
+      true,
     browserControlEnabled: options?.features?.browserControlEnabled ?? true,
     mcpTasksEnabled: options?.features?.mcpTasksEnabled ?? true,
   };
@@ -381,6 +393,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
   const threadSearchResult = (thread: MockThread) => ({
     thread_id: thread.thread_id,
+    agent_instance: thread.agent_instance ?? null,
     created_at: "2025-01-01T00:00:00Z",
     updated_at: thread.updated_at ?? "2025-01-01T00:00:00Z",
     metadata: {
@@ -1405,6 +1418,15 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   // Feature flags — frontend gates UI (e.g. agents/browser) on these. Default to
   // enabled so existing tests exercise the normal path; tests that need the
   // disabled state override this route after calling mockLangGraphAPI.
+  void page.route("**/api/human-input**", (route) =>
+    route.fulfill({
+      json: {
+        requests: [],
+        counts: { pending: 0, routing: 0, answered: 0 },
+        has_more: false,
+      },
+    }),
+  );
   void page.route("**/api/features", (route) => {
     if (route.request().method() === "GET") {
       return route.fulfill({
@@ -1412,6 +1434,13 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         contentType: "application/json",
         body: JSON.stringify({
           agents_api: { enabled: featureFlags.agentsApiEnabled },
+          agent_instances: {
+            enabled: featureFlags.agentInstancesEnabled,
+            execution: "ready",
+            reason: null,
+            ai_assistants: { per_user: 3, allowed: 8, in_use: 0, mine: 0 },
+            ai_employees: { allowed: 4, in_use: 0 },
+          },
           browser_control: { enabled: featureFlags.browserControlEnabled },
           mcp_tasks: { enabled: featureFlags.mcpTasksEnabled },
           storage_spaces: {

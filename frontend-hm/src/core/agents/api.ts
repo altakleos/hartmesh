@@ -1,3 +1,4 @@
+import { awaitAbortable } from "@/core/api/abort";
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 export { fetchAgentsApiEnabled } from "@/core/features/api";
@@ -5,6 +6,43 @@ export { fetchAgentsApiEnabled } from "@/core/features/api";
 import type { Agent, CreateAgentRequest, UpdateAgentRequest } from "./types";
 
 const BACKEND_UNAVAILABLE_STATUSES = new Set([502, 503, 504]);
+
+function definitionRequest(
+  url: string,
+  init?: RequestInit,
+  signal?: AbortSignal,
+) {
+  signal?.throwIfAborted();
+  if (!signal) return init ? fetch(url, init) : fetch(url);
+  return awaitAbortable(fetch(url, { ...init, signal }), signal, (late) => {
+    void late.body?.cancel().catch(() => undefined);
+  });
+}
+
+function definitionJSON<T>(
+  response: Response,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (signal?.aborted) {
+    void response.body?.cancel().catch(() => undefined);
+    signal.throwIfAborted();
+  }
+  const reading = response.json() as Promise<T>;
+  return signal ? awaitAbortable(reading, signal) : reading;
+}
+
+async function definitionFailure(
+  response: Response,
+  signal?: AbortSignal,
+): Promise<{ detail?: string }> {
+  try {
+    return await definitionJSON<{ detail?: string }>(response, signal);
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (error instanceof Error && error.name === "AbortError") throw error;
+    return {};
+  }
+}
 
 export class AgentNameCheckError extends Error {
   constructor(
@@ -32,59 +70,106 @@ export class AgentsApiDisabledError extends Error {
   }
 }
 
+/** Adoption creates a missing source only after an authoritative 404. */
+export class AgentDefinitionError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "AgentDefinitionError";
+  }
+}
+
 function isAgentsApiDisabledDetail(detail: string | undefined): boolean {
   return typeof detail === "string" && detail.includes("agents_api.enabled");
 }
 
-export async function listAgents(): Promise<Agent[]> {
-  const res = await fetch(`${getBackendBaseURL()}/api/agents`);
+export async function listAgents(signal?: AbortSignal): Promise<Agent[]> {
+  const res = await definitionRequest(
+    `${getBackendBaseURL()}/api/agents`,
+    undefined,
+    signal,
+  );
   if (!res.ok) throw new Error(`Failed to load agents: ${res.statusText}`);
-  const data = (await res.json()) as { agents: Agent[] };
+  const data = await definitionJSON<{ agents: Agent[] }>(res, signal);
   return data.agents;
 }
 
-export async function getAgent(name: string): Promise<Agent> {
-  const res = await fetch(`${getBackendBaseURL()}/api/agents/${name}`);
-  if (!res.ok) throw new Error(`Agent '${name}' not found`);
-  return res.json() as Promise<Agent>;
+export async function getAgent(
+  name: string,
+  signal?: AbortSignal,
+): Promise<Agent> {
+  const res = await definitionRequest(
+    `${getBackendBaseURL()}/api/agents/${name}`,
+    undefined,
+    signal,
+  );
+  if (!res.ok)
+    throw new AgentDefinitionError(
+      res.status,
+      res.status === 404
+        ? `Agent '${name}' not found`
+        : `Failed to load agent (${res.status})`,
+    );
+  return definitionJSON<Agent>(res, signal);
 }
 
-export async function createAgent(request: CreateAgentRequest): Promise<Agent> {
-  const res = await fetch(`${getBackendBaseURL()}/api/agents`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-  });
+export async function createAgent(
+  request: CreateAgentRequest,
+  signal?: AbortSignal,
+): Promise<Agent> {
+  const res = await definitionRequest(
+    `${getBackendBaseURL()}/api/agents`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+    signal,
+  );
   if (!res.ok) {
-    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    const err = await definitionFailure(res, signal);
     if (isAgentsApiDisabledDetail(err.detail)) {
       throw new AgentsApiDisabledError(err.detail!);
     }
     throw new Error(err.detail ?? `Failed to create agent: ${res.statusText}`);
   }
-  return res.json() as Promise<Agent>;
+  return definitionJSON<Agent>(res, signal);
 }
 
 export async function updateAgent(
   name: string,
   request: UpdateAgentRequest,
+  signal?: AbortSignal,
 ): Promise<Agent> {
-  const res = await fetch(`${getBackendBaseURL()}/api/agents/${name}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-  });
+  const res = await definitionRequest(
+    `${getBackendBaseURL()}/api/agents/${name}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+    signal,
+  );
   if (!res.ok) {
-    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    const err = await definitionFailure(res, signal);
     throw new Error(err.detail ?? `Failed to update agent: ${res.statusText}`);
   }
-  return res.json() as Promise<Agent>;
+  return definitionJSON<Agent>(res, signal);
 }
 
-export async function deleteAgent(name: string): Promise<void> {
-  const res = await fetch(`${getBackendBaseURL()}/api/agents/${name}`, {
-    method: "DELETE",
-  });
+export async function deleteAgent(
+  name: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await definitionRequest(
+    `${getBackendBaseURL()}/api/agents/${name}`,
+    {
+      method: "DELETE",
+    },
+    signal,
+  );
   if (!res.ok) throw new Error(`Failed to delete agent: ${res.statusText}`);
 }
 

@@ -52,7 +52,7 @@ export function useAgentsApiEnabled() {
 export function useAgents() {
   const { data, isLoading, error } = useQuery({
     queryKey: ["agents"],
-    queryFn: () => listAgents(),
+    queryFn: ({ signal }) => listAgents(signal),
   });
   return { agents: data ?? [], isLoading, error };
 }

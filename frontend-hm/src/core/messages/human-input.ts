@@ -45,6 +45,7 @@ export type HumanInputRequest = {
   input_mode: HumanInputMode;
   options?: HumanInputOption[];
   fields?: HumanInputField[];
+  details?: { host: string; port: number; ttl_seconds: number };
 };
 
 export type HumanInputResponse =
@@ -306,6 +307,17 @@ export function parseHumanInputRequest(
   ) {
     return null;
   }
+  const details =
+    isRecord(value.details) &&
+    typeof value.details.host === "string" &&
+    Number.isInteger(value.details.port) &&
+    Number.isInteger(value.details.ttl_seconds)
+      ? {
+          host: value.details.host,
+          port: value.details.port as number,
+          ttl_seconds: value.details.ttl_seconds as number,
+        }
+      : undefined;
 
   return {
     version: value.version,
@@ -326,6 +338,7 @@ export function parseHumanInputRequest(
     input_mode: value.input_mode,
     ...(options ? { options } : {}),
     ...(fields ? { fields } : {}),
+    ...(details ? { details } : {}),
   };
 }
 

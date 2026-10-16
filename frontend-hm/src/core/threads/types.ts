@@ -1,5 +1,6 @@
 import type { Message, Thread } from "@langchain/langgraph-sdk";
 
+import type { AgentInstance } from "../agent-instances/api";
 import type { Todo } from "../todos";
 
 export interface GoalState {
@@ -49,6 +50,11 @@ export interface AgentThreadContext extends Record<string, unknown> {
 
 export interface AgentThread extends Thread<AgentThreadState> {
   context?: AgentThreadContext;
+  agent_instance?:
+    | (Pick<AgentInstance, "id" | "name" | "status" | "custody"> & {
+        requester_id: string;
+      })
+    | null;
 }
 
 export interface RunMessage {

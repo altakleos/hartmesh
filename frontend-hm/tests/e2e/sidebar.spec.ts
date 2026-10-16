@@ -30,7 +30,7 @@ test.describe("Sidebar navigation", () => {
     await expect(page).toHaveURL(/\/workspace\/agents/);
   });
 
-  test("Agents button is disabled with a hover tooltip when agents_api is off", async ({
+  test("Agents button is disabled with a hover tooltip when agent_instances is off", async ({
     page,
   }) => {
     mockLangGraphAPI(page);
@@ -38,7 +38,14 @@ test.describe("Sidebar navigation", () => {
       route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ agents_api: { enabled: false } }),
+        body: JSON.stringify({
+          agents_api: { enabled: true },
+          agent_instances: {
+            enabled: false,
+            execution: "unavailable",
+            reason: null,
+          },
+        }),
       }),
     );
 

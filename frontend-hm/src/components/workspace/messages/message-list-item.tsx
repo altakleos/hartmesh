@@ -11,6 +11,7 @@ import {
 import {
   memo,
   useCallback,
+  useId,
   useMemo,
   useState,
   type ImgHTMLAttributes,
@@ -31,6 +32,10 @@ import { Task, TaskTrigger } from "@/components/ai-elements/task";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  isConversationFileURL,
+  useConversationFiles,
+} from "@/components/workspace/chats/conversation-files";
 import {
   deleteFeedback,
   upsertFeedback,
@@ -303,6 +308,8 @@ function MessageImage({
   artifactPaths: readonly string[];
   maxWidth?: string;
 }) {
+  const files = useConversationFiles();
+  const descriptionId = useId();
   if (!src) return null;
 
   // `maxWidth` is applied inline rather than through a `max-w-[${maxWidth}]`
@@ -326,6 +333,26 @@ function MessageImage({
   }
 
   const url = resolveMessageImageURL(src, threadId, artifactPaths);
+
+  if (files.locked && isConversationFileURL(url, threadId)) {
+    return (
+      <>
+        <span
+          role="img"
+          aria-label={alt}
+          title={files.sentence ?? undefined}
+          aria-describedby={files.sentence ? descriptionId : undefined}
+        >
+          {alt}
+        </span>
+        {files.sentence && (
+          <span id={descriptionId} className="sr-only">
+            {files.sentence}
+          </span>
+        )}
+      </>
+    );
+  }
 
   return (
     <a href={url} target="_blank" rel="noopener noreferrer">
@@ -706,6 +733,7 @@ function RichFileCard({
   threadId: string;
 }) {
   const { t } = useI18n();
+  const conversation = useConversationFiles();
   const isUploading = file.status === "uploading";
   const isImage = isImageFile(file.filename);
 
@@ -740,7 +768,7 @@ function RichFileCard({
 
   const fileUrl = resolveArtifactURL(file.path, threadId);
 
-  if (isImage) {
+  if (isImage && !conversation.agent && !conversation.locked) {
     return (
       <a
         href={fileUrl}
@@ -767,7 +795,15 @@ function RichFileCard({
           className="text-foreground truncate text-sm font-medium"
           title={file.filename}
         >
-          {file.filename}
+          {conversation.agent && !conversation.locked ? (
+            <a
+              href={`/workspace/instances?instance=${conversation.agent.id}&tab=files&folder=uploads`}
+            >
+              {file.filename}
+            </a>
+          ) : (
+            file.filename
+          )}
         </span>
       </div>
       <div className="flex items-center justify-between gap-2">

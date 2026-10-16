@@ -2,22 +2,34 @@
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ActorName } from "@/components/workspace/actor-name";
 import { RequestInput } from "@/components/workspace/attention/create";
+import { useSupervisorName } from "@/components/workspace/person-name";
 import * as api from "@/core/agent-instances/api";
+import { readRefusal, type Refusal } from "@/core/agent-instances/errors";
+import type { AgentBlock } from "@/core/agent-instances/presentation";
+import { workAttemptLabel } from "@/core/agent-instances/work-presentation";
 import type { WorkPolicy } from "@/core/agents/types";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useFileActionLifetime } from "@/core/file-areas/file-action-lifetime";
 import { useI18n } from "@/core/i18n/hooks";
 import { getSpace, listSpaces } from "@/core/spaces/api";
 import { useSpaceActionSignal } from "@/core/spaces/lifetime";
-import { pathOfThread } from "@/core/threads/utils";
+
+import { WorkActivation, WorkActivationRefusal } from "./work-activation";
+import {
+  WorkAttemptBox,
+  WorkContainedNotice,
+  type WorkInstance,
+} from "./work-attempt-box";
 
 interface Props {
-  instance: api.AgentInstance;
+  instance: WorkInstance;
+  unavailable?: AgentBlock | null;
   policy?: WorkPolicy | null;
   canRead: boolean;
   canWrite: boolean;
@@ -69,10 +81,12 @@ function WorkControls({
   canStop = false,
   initialWork,
   lifecycleOperations = [],
+  unavailable,
 }: Props) {
   const { user } = useAuth();
   const { t } = useI18n();
   const copy = t.agentWork;
+  const supervisor = useSupervisorName(instance.supervisor.subject_id);
   const client = useQueryClient();
   const account = useFileActionLifetime();
   const captureSignal = useSpaceActionSignal();
@@ -88,6 +102,12 @@ function WorkControls({
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
+  const [activationFailure, setActivationFailure] = useState<{
+    work: string;
+    refusal: Refusal;
+    action: string;
+  } | null>(null);
+  const createdConversations = useRef(new Map<string, string>());
   const [formVersion, setFormVersion] = useState(0);
   const key = [
     "agent-work",
@@ -115,6 +135,14 @@ function WorkControls({
     gcTime: 0,
     refetchInterval: 3000,
   });
+  useEffect(() => {
+    if (
+      activationFailure &&
+      detail.data?.id === activationFailure.work &&
+      unresolved(detail.data)
+    )
+      setActivationFailure(null);
+  }, [activationFailure, detail.data]);
   async function execute(intent: Pending) {
     if (busyRef.current || !account.active) return;
     busyRef.current = true;
@@ -122,6 +150,7 @@ function WorkControls({
     setBusy(true);
     setPending(intent);
     setError(null);
+    setActivationFailure(null);
     try {
       if (intent.kind === "activate" && !intent.body.thread_id) {
         const chat = await api.createInstanceConversation(
@@ -135,6 +164,7 @@ function WorkControls({
           body: { ...intent.body, thread_id: chat.thread_id },
         };
         setPending(intent);
+        createdConversations.current.set(intent.work, chat.thread_id);
       }
       const result =
         intent.kind === "delegate"
@@ -154,6 +184,8 @@ function WorkControls({
               );
       if (signal.aborted || !account.active) return;
       setPending(null);
+      if (intent.kind === "activate")
+        createdConversations.current.delete(intent.work);
       setSelected(result.id);
       setSuggested("");
       setFormVersion((value) => value + 1);
@@ -166,11 +198,15 @@ function WorkControls({
         failure instanceof api.InstanceApiError &&
         failure.status >= 400 &&
         failure.status < 500;
+      let observed: api.WorkRecord | null = null;
       if (definite) {
         let unreserved = intent.kind !== "activate" || !intent.body.thread_id;
         if (intent.kind === "activate" && !unreserved) {
           try {
             const current = await api.getWork(instance.id, intent.work, signal);
+            if (signal.aborted || !account.active) return;
+            observed = current;
+            client.setQueryData([...key, "record", intent.work], current);
             unreserved =
               current.attempt?.activation_id !== intent.body.operation_id;
           } catch {
@@ -180,7 +216,25 @@ function WorkControls({
         if (signal.aborted || !account.active) return;
         if (unreserved) setPending(null);
       }
-      setError(definite ? failure.message : copy.unconfirmed);
+      if (
+        definite &&
+        intent.kind === "activate" &&
+        observed &&
+        unresolved(observed)
+      ) {
+        setPending(null);
+      } else if (definite && intent.kind === "activate" && observed) {
+        setActivationFailure({
+          work: intent.work,
+          refusal: readRefusal(failure) ?? { extra: {} },
+          action: observed.attempt ? copy.resume : copy.activate,
+        });
+      } else
+        setError(
+          definite && intent.kind !== "activate"
+            ? t.agentInstances.operationError
+            : copy.unconfirmed,
+        );
       if (definite) await client.invalidateQueries({ queryKey: key });
     } finally {
       busyRef.current = false;
@@ -192,7 +246,7 @@ function WorkControls({
     return (
       <section>
         <h3>{copy.title}</h3>
-        <p>{copy.visibility}</p>
+        <p>{copy.visibility(supervisor)}</p>
       </section>
     );
   return (
@@ -201,8 +255,10 @@ function WorkControls({
       aria-label={copy.title}
     >
       <h3 className="font-semibold">{copy.title}</h3>
-      <p role="status">{copy.recordsOnly}</p>
-      <p className="text-muted-foreground text-sm">{copy.sharedNotice}</p>
+      <p role="status">{copy.recordsOnly(instance.name)}</p>
+      <p className="text-muted-foreground text-sm">
+        {copy.sharedNotice(instance.name)}
+      </p>
       {policy?.responsibilities?.length ? (
         <div>
           <h4>{copy.responsibilities}</h4>
@@ -213,8 +269,19 @@ function WorkControls({
           </ul>
         </div>
       ) : null}
-      {!policy?.enabled && <p>{copy.policyDisabled}</p>}
+      {!policy?.enabled && <p>{copy.policyDisabled(instance.name)}</p>}
       {error && <p role="alert">{error}</p>}
+      {selected === activationFailure?.work &&
+        !detail.isError &&
+        detail.data &&
+        !unresolved(detail.data) && (
+          <WorkActivationRefusal
+            instance={instance}
+            refusal={activationFailure.refusal}
+            action={activationFailure.action}
+            capacity={records.isError ? undefined : records.data?.work_capacity}
+          />
+        )}
       {pending && (
         <Button disabled={busy} onClick={() => void execute(pending)}>
           {copy.retry}
@@ -245,11 +312,13 @@ function WorkControls({
             }
           />
         )}
-      {!collaborate && <p>{copy.visibility}</p>}
+      {!(instance.permissions & 1) && (
+        <p>{copy.giveNeedsChat(instance.name, supervisor)}</p>
+      )}
       {records.isPending ? (
         <p>{t.common.loading}</p>
       ) : records.error ? (
-        <p role="alert">{records.error.message}</p>
+        <p role="alert">{t.agentInstances.operationError}</p>
       ) : (
         <>
           {!records.data?.work.length && <p>{copy.empty}</p>}
@@ -281,8 +350,8 @@ function WorkControls({
                       </Button>
                       {record.attempt && (
                         <p className="text-sm">
-                          {copy.execution}:{" "}
-                          {copy.attemptStatus[record.attempt.status]}
+                          {copy.execution(instance.name)}:{" "}
+                          {copy.attemptStatus[workAttemptLabel(record)!]}
                         </p>
                       )}
                       <p className="text-sm">{record.next_action}</p>
@@ -317,11 +386,12 @@ function WorkControls({
         (detail.isPending ? (
           <p>{t.common.loading}</p>
         ) : detail.error ? (
-          <p role="alert">{detail.error.message}</p>
+          <p role="alert">{t.agentInstances.operationError}</p>
         ) : (
           detail.data && (
             <div>
               <RequestInput
+                instance={instance}
                 key={`request:${selected}:${formVersion}`}
                 record={detail.data}
                 manager={manage}
@@ -332,18 +402,22 @@ function WorkControls({
               <WorkDetail
                 key={`${selected}:${formVersion}`}
                 record={detail.data}
+                instance={instance}
+                lifecyclePending={lifecyclePending}
+                unavailable={unavailable}
+                capacity={
+                  records.isError ? undefined : records.data?.work_capacity
+                }
+                changed={() => void client.invalidateQueries({ queryKey: key })}
                 policy={policy}
                 manager={manage}
                 collaborate={collaborate}
-                disabled={disabled}
+                disabled={disabled || records.isError || records.isPending}
                 canStop={canStop}
                 canCreateConversation={canCreateConversation}
                 canActivate={
                   collaborate &&
                   canActivate &&
-                  !!policy?.enabled &&
-                  instance.status === "active" &&
-                  !lifecyclePending &&
                   (!!detail.data.attempt?.thread_id || canCreateConversation)
                 }
                 activate={(record, recover = false, newConversation = false) =>
@@ -360,8 +434,11 @@ function WorkControls({
                             expected_assignment_revision:
                               record.assignment_revision,
                             thread_id: newConversation
-                              ? ""
-                              : (record.attempt?.thread_id ?? ""),
+                              ? (createdConversations.current.get(record.id) ??
+                                "")
+                              : (createdConversations.current.get(record.id) ??
+                                record.attempt?.thread_id ??
+                                ""),
                           },
                   })
                 }
@@ -374,26 +451,33 @@ function WorkControls({
                   void execute({ kind: "command", work: selected, body })
                 }
               />
-              {manage && unresolved(detail.data) && instance.home_id && (
-                <AttemptRecovery
-                  record={detail.data}
-                  homeId={instance.home_id}
-                  operations={lifecycleOperations}
-                  disabled={
-                    busy ||
-                    lifecyclePending ||
-                    (pending !== null &&
-                      (pending.kind !== "activate" ||
-                        pending.work !== selected ||
-                        pending.body.operation_id !==
-                          detail.data.attempt?.activation_id))
-                  }
-                  queryKey={key}
-                  submit={(body) =>
-                    void execute({ kind: "command", work: selected, body })
-                  }
-                />
-              )}
+              {detail.data.attempt &&
+                ["stopping", "uncertain"].includes(
+                  detail.data.attempt.status,
+                ) && (
+                  <AttemptRecovery
+                    key={`${detail.data.id}:${detail.data.attempt.id}`}
+                    record={detail.data}
+                    name={instance.name}
+                    homeId={instance.home_id}
+                    manager={manage}
+                    supervisor={supervisor}
+                    operations={lifecycleOperations}
+                    disabled={
+                      busy ||
+                      lifecyclePending ||
+                      (pending !== null &&
+                        (pending.kind !== "activate" ||
+                          pending.work !== selected ||
+                          pending.body.operation_id !==
+                            detail.data.attempt?.activation_id))
+                    }
+                    queryKey={key}
+                    submit={(body) =>
+                      void execute({ kind: "command", work: selected, body })
+                    }
+                  />
+                )}
             </div>
           )
         ))}
@@ -403,6 +487,9 @@ function WorkControls({
 
 function AttemptRecovery({
   record,
+  name,
+  manager,
+  supervisor,
   homeId,
   operations,
   disabled,
@@ -410,7 +497,10 @@ function AttemptRecovery({
   submit,
 }: {
   record: api.WorkRecord;
-  homeId: string;
+  name: string;
+  manager: boolean;
+  supervisor: string;
+  homeId: string | null;
   operations: api.LifecycleOperation[];
   disabled: boolean;
   queryKey: unknown[];
@@ -421,102 +511,120 @@ function AttemptRecovery({
   const [basis, setBasis] = useState(record);
   const [operation, setOperation] = useState("");
   const [note, setNote] = useState("");
+  const [aged, setAged] = useState(false);
+  useEffect(() => {
+    setAged(false);
+    const start = Date.parse(record.updated_at);
+    if (!Number.isFinite(start)) return;
+    const timer = setTimeout(
+      () => setAged(true),
+      Math.max(0, 120_000 - (Date.now() - start)),
+    );
+    return () => clearTimeout(timer);
+  }, [record.updated_at]);
   const home = useQuery({
     queryKey: [...queryKey, "recovery-home", homeId],
-    queryFn: ({ signal }) => getSpace(homeId, signal),
+    queryFn: ({ signal }) => getSpace(homeId!, signal),
+    enabled: manager && !!homeId,
     retry: false,
     gcTime: 0,
     staleTime: 0,
   });
-  const receipts = operations.filter(
-    (item) =>
-      item.complete &&
-      record.attempt?.instance_generation !== undefined &&
-      item.generation >= record.attempt.instance_generation,
-  );
-  if (
-    home.error ||
-    !home.data ||
-    !(home.data.permissions & 8) ||
-    !receipts.length
-  )
-    return null;
+  const receipts = operations
+    .filter(
+      (item) =>
+        item.complete &&
+        !item.abandoned &&
+        record.attempt?.instance_generation !== undefined &&
+        item.generation >= record.attempt.instance_generation,
+    )
+    .sort((a, b) => b.generation - a.generation);
+  if (!manager || home.error || !home.data || !(home.data.permissions & 8))
+    return aged ? <p>{copy.unresolvedAsk(supervisor)}</p> : null;
   return (
-    <form
-      className="mt-3 space-y-2 rounded border p-3"
-      onSubmit={(event) => {
-        event.preventDefault();
-        if (
-          disabled ||
-          !operation ||
-          !note.trim() ||
-          basis.revision !== record.revision ||
-          !basis.attempt
-        )
-          return;
-        submit({
-          operation_id: api.operationID(),
-          action: "reconcile_attempt",
-          expected_revision: basis.revision,
-          expected_assignment_revision: basis.assignment_revision,
-          attempt_id: basis.attempt.id,
-          containment_operation_id: operation,
-          note: note.trim(),
-        });
-      }}
-    >
-      <h5>{copy.reconcileAttempt}</h5>
-      <p>{copy.containmentNotice}</p>
-      <label>
-        {copy.containmentReceipt}
-        <select
-          value={operation}
-          disabled={disabled}
-          onChange={(event) => setOperation(event.target.value)}
-        >
-          <option value="">—</option>
-          {receipts.map((item) => (
-            <option key={item.operation_id} value={item.operation_id}>
-              {item.action} · {item.operation_id}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        {copy.note}
-        <textarea
-          required
-          maxLength={4096}
-          disabled={disabled}
-          value={note}
-          onChange={(event) => setNote(event.target.value)}
-        />
-      </label>
-      {basis.revision !== record.revision && (
-        <Button
-          type="button"
-          variant="outline"
-          onClick={() => {
-            setBasis(record);
-            setNote("");
-            setOperation("");
+    <details>
+      <summary>{copy.advanced}</summary>
+      {!receipts.length ? (
+        <p>{copy.manualFirst(name)}</p>
+      ) : (
+        <form
+          className="mt-3 space-y-2 rounded border p-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (
+              disabled ||
+              !operation ||
+              !note.trim() ||
+              basis.revision !== record.revision ||
+              !basis.attempt
+            )
+              return;
+            submit({
+              operation_id: api.operationID(),
+              action: "reconcile_attempt",
+              expected_revision: basis.revision,
+              expected_assignment_revision: basis.assignment_revision,
+              attempt_id: basis.attempt.id,
+              containment_operation_id: operation,
+              note: note.trim(),
+            });
           }}
         >
-          {copy.resetResponse}
-        </Button>
+          <h5>{copy.reconcileAttempt}</h5>
+          <p>{copy.containmentNotice(name)}</p>
+          <label>
+            {copy.containmentReceipt(name)}
+            <select
+              value={operation}
+              disabled={disabled}
+              onChange={(event) => setOperation(event.target.value)}
+            >
+              <option value="">—</option>
+              {receipts.map((item, index) => (
+                <option key={item.operation_id} value={item.operation_id}>
+                  {t.agentInstances.lifecycleAction[item.action]}
+                  {index === 0 ? ` ${copy.latest}` : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            {copy.note}
+            <textarea
+              required
+              maxLength={4096}
+              disabled={disabled}
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+            />
+          </label>
+          {basis.revision !== record.revision && (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setBasis(record);
+                setNote("");
+                setOperation("");
+              }}
+            >
+              {copy.resetResponse}
+            </Button>
+          )}
+          <Button
+            type="submit"
+            disabled={
+              disabled ||
+              !operation ||
+              !note.trim() ||
+              basis.revision !== record.revision
+            }
+          >
+            {copy.reconcileAttempt}
+          </Button>
+        </form>
       )}
-      <Button
-        type="submit"
-        disabled={
-          disabled ||
-          !operation ||
-          !note.trim() ||
-          basis.revision !== record.revision
-        }
-      >
-        {copy.reconcileAttempt}
-      </Button>
-    </form>
+    </details>
   );
 }
 
@@ -802,6 +910,11 @@ function Sources({ sources }: { sources: api.VisibleWorkSource[] }) {
 
 function WorkDetail({
   record,
+  instance,
+  lifecyclePending,
+  unavailable,
+  capacity,
+  changed,
   policy,
   manager,
   collaborate,
@@ -815,6 +928,11 @@ function WorkDetail({
   canCreateConversation,
 }: {
   record: api.WorkRecord;
+  instance: WorkInstance;
+  lifecyclePending: boolean;
+  unavailable?: AgentBlock | null;
+  capacity?: api.WorkCapacity;
+  changed: () => void;
   policy?: WorkPolicy | null;
   manager: boolean;
   collaborate: boolean;
@@ -835,7 +953,6 @@ function WorkDetail({
   const { t } = useI18n();
   const copy = t.agentWork;
   const [editing, setEditing] = useState<api.WorkRecord | null>(null);
-  const [newConversation, setNewConversation] = useState(false);
   const [note, setNote] = useState("");
   const [acceptanceBasis, setAcceptanceBasis] = useState<api.WorkRecord | null>(
     null,
@@ -876,7 +993,7 @@ function WorkDetail({
       </p>
       <p className="whitespace-pre-wrap">{record.success_criteria}</p>
       <p>
-        {copy.creator}: {record.creator_id}
+        {copy.creator}: <ActorName id={record.creator_id} instance={instance} />
       </p>
       <p>
         {copy.lastActivity}: {new Date(record.updated_at).toLocaleString()}
@@ -896,66 +1013,50 @@ function WorkDetail({
           {copy.nextAction}: {record.next_action}
         </p>
       )}
-      {record.needs_mandate_reconciliation && (
-        <p role="status">{copy.reconcileNeeded}</p>
-      )}
       <Sources sources={record.sources} />
-      {record.attempt && (
-        <section aria-label={copy.execution} className="rounded border p-3">
-          <h5>
-            {copy.execution}: {copy.attemptStatus[record.attempt.status]}
-          </h5>
-          {record.attempt.thread_id && (
-            <Link href={pathOfThread({ thread_id: record.attempt.thread_id })}>
-              {copy.openConversation}
-            </Link>
-          )}
-          {record.attempt.candidate && !record.outcome && (
-            <>
-              <p>{copy.candidate}</p>
-              <p>{record.attempt.candidate.statement}</p>
-              <Sources sources={record.attempt.candidate.sources} />
-            </>
-          )}
-          {record.attempt.status === "uncertain" && <p>{copy.uncertain}</p>}
-        </section>
-      )}
-      {canActivate &&
-        record.execution_available &&
-        editable &&
-        !record.needs_mandate_reconciliation &&
-        !active && (
-          <div>
-            {record.attempt && canCreateConversation && (
-              <label className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={newConversation}
-                  disabled={disabled}
-                  onChange={(event) => setNewConversation(event.target.checked)}
-                />
-                {copy.newConversation}
-              </label>
-            )}
-            <Button
-              disabled={disabled}
-              onClick={() => activate(record, false, newConversation)}
-            >
-              {record.attempt ? copy.resume : copy.activate}
-            </Button>
-          </div>
-        )}
+      <WorkAttemptBox
+        instance={instance}
+        record={record}
+        manager={manager}
+        collaborate={collaborate}
+        canStop={canStop}
+        canResume={canActivate && editable && !active}
+        disabled={disabled}
+        queryKey={queryKey}
+        changed={changed}
+        activation={
+          <WorkActivation
+            instance={instance}
+            record={record}
+            allowed={canActivate}
+            policyEnabled={!!policy?.enabled}
+            pending={lifecyclePending}
+            unavailable={unavailable}
+            capacity={capacity}
+            disabled={disabled}
+            canCreateConversation={canCreateConversation}
+            activate={(newConversation) =>
+              activate(record, false, newConversation)
+            }
+          />
+        }
+      />
       {canActivate &&
         active &&
         record.attempt?.requester_id === user?.id &&
+        record.attempt?.status === "starting" &&
+        !record.attempt?.run_id &&
         record.attempt?.activation_request && (
-          <Button
-            variant="outline"
-            disabled={disabled}
-            onClick={() => activate(record, true)}
-          >
-            {copy.recoverActivation}
-          </Button>
+          <div>
+            <Button
+              variant="outline"
+              disabled={disabled}
+              onClick={() => activate(record, true)}
+            >
+              {copy.recoverActivation}
+            </Button>
+            <p>{copy.recoverActivationNote}</p>
+          </div>
         )}
       {record.suggestion && (
         <section>
@@ -981,10 +1082,13 @@ function WorkDetail({
       <p className="text-muted-foreground text-sm">{copy.unchecked}</p>
       {record.review && (
         <p>
-          {copy.acceptedBy}: {record.review.actor_id}
+          {copy.acceptedBy}:{" "}
+          <ActorName id={record.review.actor_id} instance={instance} />
         </p>
       )}
-      {record.review_state === "reported" && <p>{copy.reportedComplete}</p>}
+      {record.review_state === "reported" && (
+        <p>{copy.reportedComplete(instance.name)}</p>
+      )}
       {record.blocker && (
         <p className="whitespace-pre-wrap">{record.blocker.question}</p>
       )}
@@ -1121,7 +1225,7 @@ function WorkDetail({
         record.status === "blocked" &&
         record.blocker && (
           <>
-            <p>{copy.inputNotice}</p>
+            <p>{copy.inputNotice(instance.name)}</p>
             {collaborate && (
               <Button
                 disabled={disabled || !note.trim()}
@@ -1154,16 +1258,20 @@ function WorkDetail({
         <summary>{copy.history}</summary>
         {history.isFetching && <p>{t.common.loading}</p>}
         {history.error ? (
-          <p role="alert">{history.error.message}</p>
+          <p role="alert">{t.agentInstances.operationError}</p>
         ) : (
           history.data?.events.map((event) => (
             <div className="my-2 rounded border p-2" key={event.id}>
               <p>
-                {copy[event.actor_kind]}: {event.actor_id} ·{" "}
-                {new Date(event.created_at).toLocaleString()} ·{" "}
-                {typeof copy[event.action as keyof typeof copy] === "string"
-                  ? (copy[event.action as keyof typeof copy] as string)
-                  : event.action}
+                <ActorName
+                  id={event.actor_id}
+                  kind={event.actor_kind}
+                  instance={instance}
+                />{" "}
+                · {new Date(event.created_at).toLocaleString()} ·{" "}
+                {Object.hasOwn(copy.event, event.action)
+                  ? copy.event[event.action as keyof typeof copy.event]
+                  : copy.event.other}
               </p>
               <p>
                 {event.record.objective} · {copy[event.record.status]}
@@ -1174,20 +1282,30 @@ function WorkDetail({
               )}
               {event.record.outcome && <p>{event.record.outcome.statement}</p>}
               {event.report?.statement && <p>{event.report.statement}</p>}
+              {event.action === "attempt_contained" && (
+                <WorkContainedNotice
+                  reason={event.report?.reason ?? ""}
+                  instance={instance}
+                />
+              )}
               {event.report?.sources && (
                 <Sources sources={event.report.sources} />
               )}
               {event.report?.status && (
                 <p>
-                  {copy.execution}:{" "}
+                  {copy.execution(instance.name)}:{" "}
                   {copy.attemptStatus[
                     event.report.status as keyof typeof copy.attemptStatus
-                  ] ?? event.report.status}
+                  ] ?? copy.event.other}
                 </p>
               )}
               {event.record.review && (
                 <p>
-                  {copy.acceptedBy}: {event.record.review.actor_id}
+                  {copy.acceptedBy}:{" "}
+                  <ActorName
+                    id={event.record.review.actor_id}
+                    instance={instance}
+                  />
                 </p>
               )}
               <Sources sources={event.record.sources} />

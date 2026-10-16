@@ -1,14 +1,17 @@
-import type { WorkPolicy } from "@/core/agents/types";
+import type { CreateAgentRequest, WorkPolicy } from "@/core/agents/types";
 import { awaitAbortable } from "@/core/api/abort";
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
+import type { ExecutionReason } from "@/core/features/api";
 import type { UserMemory } from "@/core/memory/types";
+
+export type Custody = "personal" | "company";
 
 export interface AgentInstance {
   id: string;
   name: string;
   principal: { kind: "nonhuman"; subject_id: string };
-  custody: "personal" | "company";
+  custody: Custody;
   owner_id: string | null;
   creator_id: string;
   supervisor: { kind: "human"; subject_id: string };
@@ -19,11 +22,82 @@ export interface AgentInstance {
   permissions: number;
 }
 
+export interface AgentInstanceSummary {
+  id: string;
+  name: string;
+  supervisor_name: string | null;
+  status: AgentInstance["status"];
+}
+
+export interface AgentInstanceDetail extends AgentInstance {
+  activity: {
+    running_runs: number;
+    running: {
+      run_id: string;
+      thread_id: string;
+      requester_id: string;
+      work_id: string | null;
+      objective: string | null;
+    }[];
+    last_active_at: string | null;
+    open_conversations: number;
+  };
+  home: {
+    state: "available" | "busy" | "unverified";
+    workspace: "running" | "starting" | "absent";
+  } | null;
+  execution: {
+    execution: "ready" | "unavailable";
+    reason: ExecutionReason | null;
+  };
+}
+
+export interface InstanceRole {
+  id: string;
+  name: string;
+  description: string;
+  soul: string;
+  skills: string[];
+  work_policy: WorkPolicy | null;
+}
+
+export interface InstanceConversation {
+  thread_id: string;
+  requester_id: string;
+  title: string | null;
+  updated_at: string;
+  running: boolean;
+}
+
+export type AgentListEntry = AgentInstance | AgentInstanceSummary;
+
+export function isFullInstance(entry: AgentListEntry): entry is AgentInstance {
+  return "permissions" in entry;
+}
+
+export interface UnfinishedCreation {
+  id: string;
+  name: string;
+  custody: Custody;
+  created_at: string;
+}
+
+export interface InstanceList {
+  instances: AgentListEntry[];
+  ai_assistants: {
+    per_user: number;
+    allowed: number;
+    in_use: number;
+    mine: number;
+  };
+  unfinished: UnfinishedCreation[];
+}
+
 export interface CreateInstance {
   creation_id: string;
   name: string;
   definition_name: string;
-  custody: "personal" | "company";
+  custody: Custody;
   supervisor_id?: string;
 }
 
@@ -42,6 +116,7 @@ export interface LifecycleChange {
   supervisor_id?: string;
   member_id?: string;
   permissions?: number;
+  only_if_idle?: boolean;
 }
 
 export interface LifecycleOperation {
@@ -57,8 +132,29 @@ export class InstanceApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    public reason?: string,
+    public executionReason?: string,
+    public extra: Record<string, unknown> = {},
   ) {
     super(message);
+    this.name = "InstanceApiError";
+  }
+
+  static fromResponse(status: number, payload: unknown): InstanceApiError {
+    const body =
+      typeof payload === "object" && payload !== null && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>)
+        : {};
+    const { reason, execution_reason: executionReason, ...extra } = body;
+    return new InstanceApiError(
+      status,
+      typeof body.detail === "string"
+        ? body.detail
+        : `Agent operation failed (${status})`,
+      typeof reason === "string" ? reason : undefined,
+      typeof executionReason === "string" ? executionReason : undefined,
+      extra,
+    );
   }
 }
 
@@ -66,6 +162,10 @@ function base(id?: string) {
   if (id && !/^[0-9a-f]{32}$/.test(id))
     throw new Error("Invalid instance identity");
   return `${getBackendBaseURL()}/api/agent-instances${id ? `/${id}` : ""}`;
+}
+
+export function instanceBaseURL(id: string) {
+  return base(id);
 }
 
 export async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -80,19 +180,10 @@ export async function request<T>(url: string, init?: RequestInit): Promise<T> {
       void late.body?.cancel().catch(() => undefined);
     },
   );
+  if (response.status === 204) return undefined as T;
   const payload: unknown = await awaitAbortable(response.json(), signal);
-  if (!response.ok) {
-    const detail =
-      typeof payload === "object" && payload !== null && "detail" in payload
-        ? payload.detail
-        : undefined;
-    throw new InstanceApiError(
-      response.status,
-      typeof detail === "string"
-        ? detail
-        : `Agent operation failed (${response.status})`,
-    );
-  }
+  if (!response.ok)
+    throw InstanceApiError.fromResponse(response.status, payload);
   return payload as T;
 }
 
@@ -114,29 +205,55 @@ export function operationID() {
   return crypto.randomUUID().replaceAll("-", "");
 }
 
-export function listInstances(offset = 0, signal?: AbortSignal) {
-  return request<{ instances: AgentInstance[] }>(
-    `${base()}?include_deleted=true&limit=100&offset=${offset}`,
-    { signal },
-  );
+export function listInstances(
+  custody?: Custody,
+  offset = 0,
+  signal?: AbortSignal,
+) {
+  const query = new URLSearchParams({ limit: "100", offset: String(offset) });
+  if (custody) query.set("custody", custody);
+  return request<InstanceList>(`${base()}?${query}`, { signal });
+}
+
+export function removeUnfinished(id: string, signal?: AbortSignal) {
+  return request<void>(base(id), { method: "DELETE", signal });
 }
 
 export function getInstance(id: string, signal?: AbortSignal) {
-  return request<AgentInstance>(`${base(id)}?include_deleted=true`, { signal });
+  return request<AgentInstanceDetail>(`${base(id)}?include_deleted=true`, {
+    signal,
+  });
+}
+
+export function listInstanceRoles(signal?: AbortSignal) {
+  return request<{ roles: InstanceRole[] }>(`${base()}/roles`, { signal });
+}
+
+export function listInstanceConversations(
+  id: string,
+  offset = 0,
+  signal?: AbortSignal,
+) {
+  return request<{ conversations: InstanceConversation[] }>(
+    `${base(id)}/conversations?limit=50&offset=${offset}`,
+    { signal },
+  );
 }
 
 export function createInstance(body: CreateInstance, signal?: AbortSignal) {
   return write<AgentInstance>(base(), "POST", body, signal);
 }
 
+export interface CompanyCopyRequest {
+  creation_id: string;
+  generation: number;
+  name: string;
+  supervisor_id?: string;
+}
+
 export function createCompanyCopy(
   id: string,
-  body: {
-    creation_id: string;
-    generation: number;
-    name: string;
-    supervisor_id?: string;
-  },
+  body: CompanyCopyRequest,
   signal?: AbortSignal,
 ) {
   return write<AgentInstance>(`${base(id)}/company-copy`, "POST", body, signal);
@@ -154,13 +271,7 @@ export function renameInstance(
 export function getInstanceDefinition(id: string, signal?: AbortSignal) {
   return request<{
     revision: string;
-    config: {
-      name: string;
-      description?: string;
-      model?: string;
-      memory_enabled?: boolean;
-      work_policy?: WorkPolicy | null;
-    };
+    config: CreateAgentRequest & { memory_enabled?: boolean };
     soul: string;
   }>(`${base(id)}/definition`, { signal });
 }
@@ -188,6 +299,7 @@ export function changeInstanceLifecycle(
     instance: AgentInstance;
     complete: boolean;
     operation_id: string;
+    space_released?: boolean;
   }>(`${base(id)}/lifecycle`, "POST", body, signal);
 }
 
@@ -334,9 +446,12 @@ export interface WorkRecord extends Omit<WorkAssignment, "sources"> {
     candidate?: WorkRecord["outcome"];
     settled_at?: string | null;
     instance_generation?: number;
+    workspace?: "starting" | "ready" | null;
+    contained?: { reason: string; at: string } | null;
   } | null;
   execution_available: boolean;
-  availability: "explicit_activation" | "records_only";
+  execution_reason?: ExecutionReason | null;
+  availability: "explicit_activation" | "records_only" | "unavailable";
   work_enabled: boolean;
   needs_mandate_reconciliation: boolean;
   current_contents: "not_checked";
@@ -376,7 +491,7 @@ export interface WorkCommand extends Partial<WorkAssignment> {
 export interface WorkEvent {
   id: string;
   actor_id: string;
-  actor_kind: "human" | "nonhuman";
+  actor_kind: "human" | "nonhuman" | "host";
   action: string;
   revision: number;
   assignment_revision: number;
@@ -388,8 +503,22 @@ export interface WorkEvent {
     attempt_id?: string;
     run_id?: string;
     status?: string;
+    reason?: string;
+    attachment_id?: string;
   } | null;
   record: WorkRecord;
+}
+export interface WorkCapacity {
+  max: number;
+  in_use: number;
+  running: {
+    instance_id: string;
+    instance_name: string;
+    work_id: string | null;
+    objective: string;
+    started_at: string | null;
+    requester_id: string | null;
+  }[];
 }
 function workBase(instance: string, work?: string) {
   if (work && !/^[0-9a-f]{32}$/.test(work))
@@ -397,10 +526,13 @@ function workBase(instance: string, work?: string) {
   return `${base(instance)}/work${work ? `/${work}` : ""}`;
 }
 export function listWork(instance: string, offset = 0, signal?: AbortSignal) {
-  return request<{ work: WorkRecord[] }>(
-    `${workBase(instance)}?limit=50&offset=${offset}`,
-    { signal },
-  );
+  return request<{
+    work: WorkRecord[];
+    execution_available?: boolean;
+    execution_reason?: ExecutionReason | null;
+    availability?: "explicit_activation" | "unavailable";
+    work_capacity?: WorkCapacity;
+  }>(`${workBase(instance)}?limit=50&offset=${offset}`, { signal });
 }
 export function getWork(instance: string, work: string, signal?: AbortSignal) {
   return request<WorkRecord>(workBase(instance, work), { signal });
@@ -415,7 +547,7 @@ export function delegateWork(
 export function commandWork(
   instance: string,
   work: string,
-  body: WorkCommand,
+  body: WorkCommand | WorkStopCommand,
   signal?: AbortSignal,
 ) {
   return write<WorkRecord>(
@@ -424,6 +556,15 @@ export function commandWork(
     body,
     signal,
   );
+}
+
+export interface WorkStopCommand {
+  operation_id: string;
+  expected_revision: number;
+  expected_assignment_revision: number;
+  action: "stop";
+  attempt_id: string;
+  note?: string;
 }
 export interface WorkActivation {
   operation_id: string;

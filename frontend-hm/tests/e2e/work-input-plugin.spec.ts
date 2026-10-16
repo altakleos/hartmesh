@@ -18,6 +18,14 @@ async function install(
   options: { enabled?: boolean; broken?: boolean } = {},
 ) {
   mockLangGraphAPI(page);
+  await page.route("**/api/features", (route) =>
+    route.fulfill({
+      json: {
+        agents_api: { enabled: true },
+        agent_instances: { enabled: true, execution: "ready", reason: null },
+      },
+    }),
+  );
   await page.route("**/api/plugins", (route) =>
     route.fulfill({
       json: [

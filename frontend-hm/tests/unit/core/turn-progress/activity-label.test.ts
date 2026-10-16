@@ -33,6 +33,38 @@ const call = (id: string, description?: string) =>
   }) as never;
 
 describe("runActivityLabel", () => {
+  test("names the agent's preparation and workspace start, with a longer-start explanation", () => {
+    expect(
+      runActivityLabel({
+        isLoading: true,
+        messages: [human],
+        progress: stage("preparing"),
+        t: enUS,
+        agentName: "Researcher",
+      }),
+    ).toBe("Getting Researcher ready…");
+    expect(
+      runActivityLabel({
+        isLoading: true,
+        messages: [human],
+        progress: stage("workspace_starting"),
+        t: enUS,
+        agentName: "Researcher",
+      }),
+    ).toBe("Starting Researcher's workspace…");
+    expect(
+      runActivityLabel({
+        isLoading: true,
+        messages: [human],
+        progress: stage("workspace_starting"),
+        t: enUS,
+        agentName: "Researcher",
+        workspaceStartingLong: true,
+      }),
+    ).toBe(
+      "Still starting Researcher's workspace. After a quiet period this can take up to two minutes.",
+    );
+  });
   test("names the stage while the run has produced nothing the person can see", () => {
     expect(
       runActivityLabel({

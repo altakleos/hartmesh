@@ -14,6 +14,13 @@ test("Attention discovers addressed input without opening an AI employee and rep
     route.fulfill({
       json: {
         agents_api: { enabled: true },
+        agent_instances: {
+          enabled: true,
+          execution: "ready",
+          reason: null,
+          ai_assistants: { per_user: 3, allowed: 8, in_use: 1, mine: 1 },
+          ai_employees: { allowed: 4, in_use: 1 },
+        },
         storage_spaces: { enabled: true },
       },
     }),
@@ -139,7 +146,7 @@ test("Attention discovers addressed input without opening an AI employee and rep
     .fill("Use the revised installation guide.");
   await page.getByRole("button", { name: "Supply response" }).click();
   await expect(
-    page.getByRole("status").filter({ hasText: "Saved response receipt" }),
+    page.getByRole("status").filter({ hasText: "Saved at" }),
   ).toBeVisible();
   await expect(
     page.getByText("Use the revised installation guide.", { exact: true }),

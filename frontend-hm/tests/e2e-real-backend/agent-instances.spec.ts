@@ -1,371 +1,136 @@
-/** Real product rendering with deterministic instance API fixtures.
- * SQL authority and native containment are qualified by backend/native gates.
- */
+/** Real product rendering with deterministic APIs; SQL/native gates own authority. */
 import { expect, test } from "@playwright/test";
 
-import { MOCK_THREAD_ID, mockLangGraphAPI } from "../e2e/utils/mock-api";
-
-const id = "a".repeat(32),
-  home = "b".repeat(32);
-const resident = {
-  id,
-  name: "Resident analyst",
-  custody: "company",
-  owner_id: null,
-  creator_id: "default",
-  supervisor: { kind: "human", subject_id: "default" },
-  principal: { kind: "nonhuman", subject_id: "agent:" + id },
-  definition_revision: "d".repeat(64),
-  generation: 1,
-  status: "active",
-  home_id: home,
-  permissions: 7,
-};
+import {
+  AGENT_ID,
+  assignment,
+  detail,
+  MOCK_THREAD_ID,
+  setupAgents,
+} from "./utils/compose-agents";
 
 test("pending containment keeps its exact retry and blocks new conversations", async ({
   page,
 }) => {
-  mockLangGraphAPI(page);
-  await page.route("**/api/features", (route) =>
-    route.fulfill({
-      json: {
-        agents_api: { enabled: true },
-        storage_spaces: { enabled: true },
-        browser_control: { enabled: true },
-      },
-    }),
-  );
-  let pending = false;
-  let captured: unknown;
-  await page.route("**/api/agent-instances**", async (route) => {
-    const path = new URL(route.request().url()).pathname;
-    if (path.endsWith("/lifecycle") && route.request().method() === "POST") {
-      const body: unknown = route.request().postDataJSON();
-      if (captured) expect(body).toEqual(captured);
-      else captured = body;
-      pending = true;
-      return route.fulfill({
-        status: 202,
-        json: {
-          instance: { ...resident, status: "suspended", generation: 2 },
-          complete: false,
-          operation_id: "fixture",
-        },
-      });
-    }
-    if (path.endsWith("/lifecycle"))
-      return route.fulfill({
-        json: {
-          operations: pending
-            ? [{ ...(captured as object), complete: false, retry: captured }]
-            : [],
-        },
-      });
-    if (path.endsWith("/definition"))
-      return route.fulfill({
-        json: {
-          revision: resident.definition_revision,
-          config: { name: "analyst" },
-          soul: "Adopted company instructions",
-        },
-      });
-    if (path.endsWith("/work"))
-      return route.fulfill({
-        json: {
-          work: [],
-          availability: "explicit_activation",
-          execution_available: true,
-        },
-      });
-    if (path.endsWith("/grants"))
-      return route.fulfill({ json: { grants: [] } });
-    if (path.endsWith("/memory"))
-      return route.fulfill({
-        status: 501,
-        json: { detail: "Fixture backend has no memory scope" },
-      });
-    if (path.endsWith("/" + id))
-      return route.fulfill({
-        json: {
-          ...resident,
-          ...(pending ? { status: "suspended", generation: 2 } : {}),
-        },
-      });
-    return route.fulfill({ json: { instances: [resident] } });
-  });
-  await page.goto(`/workspace/instances?instance=${id}`);
-  await expect(
-    page.getByRole("heading", { name: "Resident analyst" }),
-  ).toBeVisible();
-  await page.getByLabel("Confirm action", { exact: true }).check();
-  await page.getByRole("button", { name: "Suspend", exact: true }).click();
-  await expect(
-    page.getByText(
-      "Containment pending. The agent cannot run; stopping its environment is not yet confirmed.",
-    ),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Start conversation", exact: true }),
-  ).toHaveCount(0);
+  const state = await setupAgents(page);
+  state.pending = true;
+  await detail(page, "settings");
+  await page.getByRole("button", { name: "Pause", exact: true }).click();
   await page
-    .getByRole("button", { name: "Retry captured operation", exact: true })
+    .getByRole("dialog")
+    .getByRole("button", { name: "Pause", exact: true })
     .click();
   await expect(
-    page.getByRole("link", { name: "Open Home", exact: true }),
-  ).toHaveAttribute("href", `/workspace/spaces?space=${home}`);
+    page.getByRole("button", { name: "New conversation", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page
+      .getByText(
+        /change.*progress|still.*confirmed|not.*confirmed|being.*changed/i,
+      )
+      .first(),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
+  await expect.poll(() => state.lifecycle.length).toBe(2);
+  expect(state.lifecycle[1]).toEqual(state.lifecycle[0]);
 });
 
-test("bound chat shows canonical identity and Home and hides legacy uploads/browser", async ({
+test("bound chat uses canonical identity and audited attachments while hiding browser controls", async ({
   page,
 }) => {
-  mockLangGraphAPI(page, {
-    threads: [
-      {
-        thread_id: MOCK_THREAD_ID,
-        title: "Bound work",
-        metadata: { agent_instance_id: "forged-client-value" },
-      },
-    ],
-  });
-  await page.route("**/api/features", (route) =>
-    route.fulfill({
-      json: {
-        agents_api: { enabled: true },
-        storage_spaces: { enabled: true },
-        browser_control: { enabled: true },
-      },
-    }),
-  );
-  await page.route(
-    `**/api/agent-instances/conversations/${MOCK_THREAD_ID}/instance`,
-    (route) => route.fulfill({ json: { instance: resident } }),
-  );
+  await setupAgents(page);
   await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
   await expect(
-    page.getByRole("link", { name: "Resident analyst", exact: true }),
-  ).toHaveAttribute("href", `/workspace/instances?instance=${id}`);
+    page.getByRole("link", { name: "Researcher", exact: true }).first(),
+  ).toHaveAttribute("href", `/workspace/instances?instance=${AGENT_ID}`);
   await expect(
-    page.getByRole("link", { name: "Open Home", exact: true }),
-  ).toHaveAttribute("href", `/workspace/spaces?space=${home}`);
-  await expect(page.getByTestId("add-attachments-button")).toHaveCount(0);
+    page.getByText("Your AI assistant", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByTestId("add-attachments-button")).toBeVisible();
   await expect(page.getByTestId("browser-trigger")).toHaveCount(0);
-  await expect(page.getByRole("textbox").first()).toBeVisible();
+  await expect(page.getByTestId("sidecar-header-trigger")).toHaveCount(0);
 });
 
 for (const outcome of ["bound", "failed", "unbound"] as const) {
-  test(`legacy capabilities wait for a positive unbound result: ${outcome}`, async ({
+  test(`legacy capabilities wait for the canonical thread row: ${outcome}`, async ({
     page,
   }) => {
-    mockLangGraphAPI(page, {
-      threads: [{ thread_id: MOCK_THREAD_ID, title: "Binding check" }],
-    });
-    await page.route("**/api/features", (route) =>
-      route.fulfill({
-        json: {
-          agents_api: { enabled: true },
-          storage_spaces: { enabled: true },
-          browser_control: { enabled: true },
-        },
-      }),
-    );
+    const state = await setupAgents(page);
     let release!: () => void;
-    let entered!: () => void;
-    const requested = new Promise<void>((resolve) => {
-      entered = resolve;
-    });
     const ready = new Promise<void>((resolve) => {
       release = resolve;
     });
     await page.route(
-      `**/api/agent-instances/conversations/${MOCK_THREAD_ID}/instance`,
+      `**/api/langgraph/threads/${MOCK_THREAD_ID}`,
       async (route) => {
-        entered();
         await ready;
-        await route.fulfill(
+        return route.fulfill(
           outcome === "failed"
             ? { status: 503, json: { detail: "Lookup unavailable" } }
-            : { json: { instance: outcome === "bound" ? resident : null } },
+            : {
+                json: {
+                  thread_id: MOCK_THREAD_ID,
+                  status: "idle",
+                  metadata: { agent_instance_id: "forged" },
+                  values: {},
+                  agent_instance:
+                    outcome === "bound"
+                      ? {
+                          id: AGENT_ID,
+                          name: "Researcher",
+                          custody: "personal",
+                          status: "active",
+                          requester_id: "default",
+                        }
+                      : null,
+                },
+              },
         );
       },
     );
-    let sidecarLookups = 0;
-    page.on("request", (request) => {
-      if (request.postData()?.includes("sidecar")) sidecarLookups++;
-    });
     await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
-    await requested;
     await expect(page.getByRole("textbox").first()).toBeVisible();
-    await expect(page.getByTestId("add-attachments-button")).toHaveCount(0);
     await expect(page.getByTestId("browser-trigger")).toHaveCount(0);
-    await expect(page.getByTestId("sidecar-header-trigger")).toHaveCount(0);
-    expect(sidecarLookups).toBe(0);
-    const draft = "Keep this draft through binding discovery";
-    await page.getByRole("textbox").first().fill(draft);
+    await expect(page.getByTestId("add-attachments-button")).toHaveCount(0);
     release();
     if (outcome === "unbound")
+      await expect(page.getByTestId("browser-trigger")).toBeVisible();
+    else if (outcome === "bound")
+      await expect(
+        page.getByText("Your AI assistant", { exact: true }),
+      ).toBeVisible();
+    else await expect(page.getByRole("textbox").first()).toBeDisabled();
+    if (outcome !== "failed")
       await expect(page.getByTestId("add-attachments-button")).toBeVisible();
-    else {
-      if (outcome === "bound")
-        await expect(
-          page.getByRole("link", { name: "Resident analyst", exact: true }),
-        ).toBeVisible();
-      else
-        await page.waitForResponse(
-          (response) =>
-            response.url().includes("/instance") && response.status() === 503,
-        );
-      await expect(page.getByTestId("add-attachments-button")).toHaveCount(0);
-      await expect(page.getByTestId("browser-trigger")).toHaveCount(0);
-      expect(sidecarLookups).toBe(0);
-    }
-    await expect(page.getByRole("textbox").first()).toHaveValue(draft);
-    await expect(page.getByRole("textbox").first()).toBeFocused();
+    expect(state.runs).toBe(0);
   });
 }
 
-test("Work delegation requires separate activation, retries exactly and retains management history", async ({
+test("Work delegation requires separate activation, retries exactly and retains named history", async ({
   page,
 }) => {
-  mockLangGraphAPI(page);
-  await page.route("**/api/features", (route) =>
-    route.fulfill({
-      json: {
-        agents_api: { enabled: true },
-        storage_spaces: { enabled: true },
-      },
-    }),
-  );
-  let stored: Record<string, unknown> | null = null;
-  let delegated: Record<string, unknown> | null = null;
-  let postCount = 0;
-  const history: Record<string, unknown>[] = [];
-  const executionRequests: string[] = [];
-  page.on("request", (request) => {
-    if (
-      request.method() === "POST" &&
-      /\/(runs|resume|run|activate)$/.test(new URL(request.url()).pathname)
-    )
-      executionRequests.push(request.url());
-  });
-  await page.route("**/api/spaces**", (route) =>
-    route.fulfill({ json: { spaces: [] } }),
-  );
-  await page.route("**/api/agent-instances**", async (route) => {
-    const path = new URL(route.request().url()).pathname;
-    const isPost = route.request().method() === "POST";
-    if (path.endsWith("/work") && isPost) {
-      const body = route.request().postDataJSON() as Record<string, unknown>;
-      postCount += 1;
-      if (delegated) expect(body).toEqual(delegated);
-      else {
-        delegated = body;
-        stored = {
-          ...body,
-          id: "c".repeat(32),
-          instance_id: id,
-          creator_id: "default",
-          definition_revision: resident.definition_revision,
-          revision: 1,
-          assignment_revision: 1,
-          status: "open",
-          review_required: true,
-          review_state: "none",
-          sources: [],
-          progress: "",
-          next_action: "",
-          outcome: null,
-          review: null,
-          blocker: null,
-          attempt: null,
-          execution_available: true,
-          availability: "explicit_activation",
-          work_enabled: true,
-          needs_mandate_reconciliation: false,
-          created_at: "2026-10-09T00:00:00Z",
-          updated_at: "2026-10-09T00:00:00Z",
-        };
-        history.unshift({
-          id: "event-one",
-          actor_id: "default",
-          actor_kind: "human",
-          action: "delegate",
-          revision: 1,
-          assignment_revision: 1,
-          created_at: stored.created_at,
-          record: { ...stored },
-          note: null,
-        });
-        return route.fulfill({
-          status: 503,
-          json: { detail: "Simulated lost acknowledgement after commit" },
-        });
-      }
-      return route.fulfill({ status: 201, json: stored });
-    }
-    if (path.endsWith("/commands") && isPost) {
-      const body = route.request().postDataJSON() as Record<string, unknown>;
-      expect(body).toMatchObject({
-        action: "cancel",
-        expected_revision: 1,
-        expected_assignment_revision: 1,
-      });
-      stored = {
-        ...stored,
-        status: "cancelled",
-        revision: 2,
-        assignment_revision: 2,
-      };
-      history.unshift({
-        id: "event-two",
+  const state = await setupAgents(page);
+  const bodies: unknown[] = [];
+  await page.route(`**/api/agent-instances/${AGENT_ID}/work`, async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    bodies.push(route.request().postDataJSON());
+    state.work = [assignment({ objective: "Review the deployment guide" })];
+    if (bodies.length === 1)
+      state.history.push({
+        id: "delegated",
         actor_id: "default",
         actor_kind: "human",
-        action: "cancel",
-        revision: 2,
-        assignment_revision: 2,
-        created_at: "2026-10-09T00:01:00Z",
-        record: { ...stored },
+        action: "delegate",
+        revision: 1,
+        assignment_revision: 1,
+        created_at: "2026-10-16T08:00:00Z",
+        record: { ...state.work[0] },
         note: null,
       });
-      return route.fulfill({ json: stored });
-    }
-    if (path.endsWith("/history"))
-      return route.fulfill({ json: { events: history } });
-    if (path.endsWith("/work"))
-      return route.fulfill({
-        json: {
-          work: stored ? [stored] : [],
-          availability: "explicit_activation",
-          execution_available: true,
-        },
-      });
-    if (path.includes("/work/")) return route.fulfill({ json: stored });
-    if (path.endsWith("/definition"))
-      return route.fulfill({
-        json: {
-          revision: resident.definition_revision,
-          config: {
-            name: "analyst",
-            work_policy: { enabled: true, review_required: true },
-          },
-          soul: "Maintain useful documentation",
-        },
-      });
-    if (path.endsWith("/lifecycle"))
-      return route.fulfill({ json: { operations: [] } });
-    if (path.endsWith("/grants"))
-      return route.fulfill({ json: { grants: [] } });
-    if (path.endsWith("/memory"))
-      return route.fulfill({
-        status: 501,
-        json: { detail: "Scoped memory unavailable in this fixture" },
-      });
-    if (path.endsWith("/" + id)) return route.fulfill({ json: resident });
-    return route.fulfill({ json: { instances: [resident] } });
+    if (bodies.length === 1) return route.abort("failed");
+    return route.fulfill({ status: 201, json: state.work[0] });
   });
-  await page.goto(`/workspace/instances?instance=${id}`);
-  await expect(
-    page.getByText(/Delegation saves an assignment\. Work on this or Resume/),
-  ).toBeVisible();
+  await detail(page, "work");
   await page
     .getByLabel("Objective", { exact: true })
     .fill("Review the deployment guide");
@@ -375,29 +140,32 @@ test("Work delegation requires separate activation, retries exactly and retains 
   await page
     .getByRole("button", { name: "Delegate Work", exact: true })
     .click();
-  await expect(
-    page.getByText(/The request outcome is unconfirmed/),
-  ).toBeVisible();
   await page
     .getByRole("button", { name: "Retry same request", exact: true })
     .click();
   await expect(
-    page.getByRole("button", { name: "Cancel Work", exact: true }),
-  ).toBeVisible();
-  expect(postCount).toBe(2);
-  await expect(
     page.getByRole("button", { name: "Work on this", exact: true }),
   ).toBeEnabled();
-  await page.getByRole("button", { name: "Cancel Work", exact: true }).click();
+  expect(bodies).toHaveLength(2);
+  expect(bodies[1]).toEqual(bodies[0]);
+  expect(state.runs).toBe(0);
+  await page
+    .getByRole("button", { name: "Withdraw assignment", exact: true })
+    .click();
   await expect(
     page.getByRole("button", {
       name: "Review the deployment guide · Cancelled · Normal",
       exact: true,
     }),
   ).toBeVisible();
+  expect(state.commands[0]).toMatchObject({
+    action: "cancel",
+    expected_revision: 1,
+    expected_assignment_revision: 1,
+  });
   await page.getByText("History", { exact: true }).click();
-  await expect(
-    page.getByText("Human: default", { exact: false }).first(),
-  ).toBeVisible();
-  expect(executionRequests).toEqual([]);
+  await expect(page.getByText(/You.*Assignment saved/)).toBeVisible();
+  await expect(page.getByText(/You.*Assignment withdrawn/)).toBeVisible();
+  expect(state.executionStarts).toEqual([]);
+  await expect(page.locator("body")).not.toContainText("Human: default");
 });

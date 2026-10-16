@@ -10,6 +10,13 @@ import {
 
 const state = rs.hoisted(() => ({
   enabled: false,
+  visible: true,
+  userSpaces: true,
+  agentEnabled: false,
+  recoveryAvailable: false,
+  agentHomes: [] as AgentInstance[],
+  agentDetail: rs.fn(),
+  agentRefetch: rs.fn(),
   readOnly: false,
   exportable: true,
   spaceError: null as Error | null,
@@ -29,7 +36,20 @@ const state = rs.hoisted(() => ({
 }));
 rs.mock("@/core/features", () => ({
   useStorageSpacesEnabled: () => ({ enabled: state.enabled, isLoading: false }),
+  useStorage: () => ({ userSpaces: state.userSpaces }),
+  useSpacesPageVisible: () => state.visible,
+  useAgentInstances: () => ({ known: true, enabled: state.agentEnabled }),
   useDocumentTitle: () => undefined,
+}));
+rs.mock("@/core/agent-instances/hooks", () => ({
+  useAgentHomes: () => ({
+    data: state.agentHomes,
+    isPending: false,
+    refetch: state.agentRefetch,
+  }),
+}));
+rs.mock("@/core/agent-instances/api", () => ({
+  getInstance: state.agentDetail,
 }));
 rs.mock("@/core/auth/AuthProvider", () => ({
   useAuth: () => ({ user: { id: "alice" } }),
@@ -52,7 +72,12 @@ rs.mock("@/core/spaces/hooks", () => ({
     },
     refetch: rs.fn(),
   }),
-  useSpaceRecovery: () => ({ data: undefined, refetch: rs.fn() }),
+  useSpaceRecovery: () => ({
+    data: state.recoveryAvailable
+      ? { backups: [], attachments: [], operations: [], can_fence: true }
+      : undefined,
+    refetch: rs.fn(),
+  }),
   useSpaceFiles: () => ({
     data: { files: state.files, truncated: false },
     refetch: rs.fn(),
@@ -70,9 +95,15 @@ rs.mock("@/components/workspace/workspace-container", () => ({
 }));
 
 import SpacesPage from "@/app/workspace/spaces/page";
+import type { AgentInstance } from "@/core/agent-instances/api";
 import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
 import { I18nProvider } from "@/core/i18n/context";
-import { createSpace, readSpaceText, writeSpaceFile } from "@/core/spaces/api";
+import {
+  changeSpaceLifecycle,
+  createSpace,
+  readSpaceText,
+  writeSpaceFile,
+} from "@/core/spaces/api";
 
 function show() {
   return render(
@@ -86,6 +117,15 @@ function show() {
 
 beforeEach(() => {
   state.enabled = false;
+  state.visible = true;
+  state.userSpaces = true;
+  state.agentEnabled = false;
+  state.recoveryAvailable = false;
+  state.agentHomes = [];
+  state.agentDetail
+    .mockReset()
+    .mockResolvedValue({ activity: { running_runs: 0 } });
+  state.agentRefetch.mockReset().mockResolvedValue({ data: [] });
   state.readOnly = false;
   state.exportable = true;
   state.spaceError = null;
@@ -102,12 +142,146 @@ beforeEach(() => {
     },
   ];
   rs.mocked(createSpace).mockReset();
+  rs.mocked(changeSpaceLifecycle).mockReset();
   rs.mocked(writeSpaceFile).mockReset();
   rs.mocked(readSpaceText).mockResolvedValue({
     text: "<script>safe as text</script>",
     sha256: "b".repeat(64),
     concurrency: "exclusive-host-window",
   });
+});
+
+it("rejects cached ownership returned alongside a failed discovery refresh", async () => {
+  state.enabled = true;
+  state.agentEnabled = true;
+  state.recoveryAvailable = true;
+  const old = {
+    id: "d".repeat(32),
+    name: "Stale named owner",
+    home_id: "a".repeat(32),
+    status: "active",
+    permissions: 7,
+  };
+  state.agentRefetch.mockResolvedValue({
+    data: [old],
+    error: new Error("refresh failed"),
+  });
+  rs.mocked(changeSpaceLifecycle).mockRejectedValue(
+    Object.assign(new Error("private diagnostic"), {
+      status: 409,
+      reason: "owned-space",
+    }),
+  );
+  show();
+  fireEvent.click(screen.getByRole("button", { name: "Backups and recovery" }));
+  fireEvent.click(screen.getByRole("button", { name: "Archive space" }));
+  await waitFor(() => expect(state.agentRefetch).toHaveBeenCalledTimes(1));
+  expect(screen.queryByRole("link", { name: "Access" })).toBeNull();
+  expect(screen.queryByText(/Stale named owner/)).toBeNull();
+  expect(screen.queryByRole("button", { name: "Archive space" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Refresh" })).toBeDefined();
+});
+
+it("identifies the granted agent by home_id before showing recovery controls", async () => {
+  state.enabled = true;
+  state.agentEnabled = true;
+  state.agentHomes = [
+    {
+      id: "d".repeat(32),
+      name: "Researcher",
+      home_id: "a".repeat(32),
+      status: "active",
+      permissions: 7,
+    } as AgentInstance,
+  ];
+  show();
+  fireEvent.click(screen.getByRole("button", { name: "Backups and recovery" }));
+  expect(screen.queryByRole("button", { name: "Archive space" })).toBeNull();
+  expect(
+    screen.getByRole("link", { name: "Access" }).getAttribute("href"),
+  ).toBe(`/workspace/instances?instance=${"d".repeat(32)}&tab=access`);
+  await waitFor(() => expect(state.agentDetail).toHaveBeenCalledTimes(1));
+});
+
+it("does not offer New space when the deployment disables user spaces", () => {
+  state.enabled = true;
+  state.userSpaces = false;
+  show();
+  expect(screen.queryByRole("button", { name: "New space" })).toBeNull();
+});
+
+it("explains a refused creation using the current locale instead of the server's text", async () => {
+  state.enabled = true;
+  rs.mocked(createSpace).mockRejectedValueOnce(
+    Object.assign(new Error("private server diagnostic"), { status: 403 }),
+  );
+  show();
+  fireEvent.click(screen.getByRole("button", { name: "New space" }));
+  fireEvent.change(screen.getByLabelText("Space name"), {
+    target: { value: "New" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Create" }));
+  await waitFor(() =>
+    expect(screen.getByRole("alert").textContent).toBe(
+      "New Spaces cannot be created here.",
+    ),
+  );
+  expect(screen.queryByText("private server diagnostic")).toBeNull();
+});
+
+it("retires a pending creation when storage controls cease to be available", async () => {
+  state.enabled = true;
+  let finish!: (value: Awaited<ReturnType<typeof createSpace>>) => void;
+  let signal: AbortSignal | undefined;
+  rs.mocked(createSpace).mockImplementationOnce(
+    (_name, _custody, requestSignal) => {
+      signal = requestSignal;
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    },
+  );
+  const tree = () => (
+    <I18nProvider initialLocale="en-US">
+      <FileActionLifetimeProvider>
+        <SpacesPage />
+      </FileActionLifetimeProvider>
+    </I18nProvider>
+  );
+  const view = render(tree());
+  fireEvent.click(screen.getByRole("button", { name: "New space" }));
+  fireEvent.change(screen.getByLabelText("Space name"), {
+    target: { value: "New" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Create" }));
+  await waitFor(() => expect(createSpace).toHaveBeenCalledTimes(1));
+  state.visible = false;
+  view.rerender(tree());
+  expect(signal?.aborted).toBe(true);
+  await act(async () =>
+    finish({ id: "d".repeat(32) } as Awaited<ReturnType<typeof createSpace>>),
+  );
+  expect(state.navigate).not.toHaveBeenCalled();
+});
+
+it("shows the Spaces guidance and kind links without storage controls in the business profile", () => {
+  state.enabled = true;
+  state.visible = false;
+  show();
+  expect(screen.getByRole("heading", { name: "Spaces" })).toBeDefined();
+  expect(
+    screen.getByText(
+      "The files of an AI assistant or an AI employee are on the Files tab of that AI assistant or AI employee.",
+    ),
+  ).toBeDefined();
+  expect(
+    screen.getByRole("link", { name: "My assistants" }).getAttribute("href"),
+  ).toBe("/workspace/assistants");
+  expect(
+    screen.getByRole("link", { name: "AI employees" }).getAttribute("href"),
+  ).toBe("/workspace/employees");
+  expect(screen.queryByRole("button", { name: "New space" })).toBeNull();
+  expect(screen.queryByLabelText("Spaces")).toBeNull();
 });
 
 it("READ without EXPORT or WRITE can preview literal text", async () => {

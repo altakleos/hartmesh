@@ -2,6 +2,7 @@
 
 import { Client as LangGraphClient } from "@langchain/langgraph-sdk/client";
 
+import { readRefusal, rememberRefusal } from "../agent-instances/errors";
 import { getLangGraphBaseURL } from "../config";
 import { FileAreaRequestError, readFileAreaFailure } from "../file-areas/http";
 import type { StorageRefusal } from "../file-areas/storage-state";
@@ -274,6 +275,10 @@ async function* recoverStreamReplayGaps({
   while (true) {
     let gap: StreamReplayGapData | undefined;
     for await (const entry of stream) {
+      if (threadId && entry.event === "error") {
+        const refusal = readRefusal(entry.data);
+        if (refusal) rememberRefusal(threadId, refusal);
+      }
       if (entry.event === "gap") {
         gap = parseStreamReplayGap(entry.data);
         break;
@@ -332,6 +337,8 @@ async function* handleInactiveRunStream({
   try {
     yield* stream;
   } catch (error) {
+    const refusal = readRefusal(error);
+    if (threadId && refusal) rememberRefusal(threadId, refusal);
     const runId = expectedRunId();
     if (runId && isInactiveRunStreamError(error)) {
       clearReconnectRun(threadId, runId);

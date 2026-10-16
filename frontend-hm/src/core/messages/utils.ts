@@ -1,5 +1,7 @@
 import type { AIMessage, Message } from "@langchain/langgraph-sdk";
 
+import { extractHumanInputRequest } from "./human-input";
+
 interface GenericMessageGroup<T = string> {
   type: T;
   id: string | undefined;
@@ -852,7 +854,11 @@ function presentedFilesOfToolResult(message: Message): string[] {
 }
 
 export function isClarificationToolMessage(message: Message) {
-  return message.type === "tool" && message.name === "ask_clarification";
+  return (
+    message.type === "tool" &&
+    (message.name === "ask_clarification" ||
+      extractHumanInputRequest(message) !== null)
+  );
 }
 
 export function extractPresentFilesFromMessage(message: Message) {

@@ -49,11 +49,15 @@ export function runActivityLabel({
   messages,
   progress,
   t,
+  agentName,
+  workspaceStartingLong = false,
 }: {
   isLoading: boolean;
   messages: Message[];
   progress: TurnProgress | null;
   t: Translations;
+  agentName?: string;
+  workspaceStartingLong?: boolean;
 }): string | null {
   if (!isLoading || !progress) return null;
   if (
@@ -65,9 +69,15 @@ export function runActivityLabel({
   }
   switch (progress.stage) {
     case "preparing":
-      return t.runProgress.preparing;
+      return agentName
+        ? t.runProgress.residentPreparing(agentName)
+        : t.runProgress.preparing;
     case "workspace_starting":
-      return t.runProgress.workspaceStarting;
+      return agentName
+        ? workspaceStartingLong
+          ? t.runProgress.residentStartingLong(agentName)
+          : t.runProgress.residentStarting(agentName)
+        : t.runProgress.workspaceStarting;
     case "thinking":
       return t.runProgress.thinking;
     default:

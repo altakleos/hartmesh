@@ -15,7 +15,19 @@ import type { Translations } from "./types";
 
 export function createEnUS(product: string): Translations {
   return {
+    people: {
+      you: "You",
+      youInline: "you",
+      aManager: "a manager",
+      formerNamed: (person) => `${person} (no longer active)`,
+      former: "a former colleague",
+      unknown: "a colleague",
+    },
     attention: {
+      navCount: (pending, routing) =>
+        routing === 0
+          ? `${pending} waiting for your reply`
+          : `${pending} waiting for your reply, ${routing} waiting for a recipient`,
       title: "Attention",
       pending: "Needs your input",
       routing: "Needs routing",
@@ -24,21 +36,21 @@ export function createEnUS(product: string): Translations {
       empty: "No requests in this view.",
       unavailable:
         "Attention is unavailable with the current deployment or permissions.",
-      notice:
-        "Replies are saved without starting a run. Open Work to explicitly resume the AI employee.",
+      notice: (name) =>
+        `A reply is saved and starts nothing. To let ${name ?? "the AI assistant or AI employee"} continue, open the assignment and press Resume.`,
       question: "Question",
       reason: "Why it is needed",
       expected: "Expected response",
       information: "Information",
       decision: "Decision",
       review: "Outcome review",
-      recipient: "Human recipient ID",
+      recipient: "Who should answer",
       defaultRecipient: "Leave blank to use the eligible human supervisor.",
       create: "Request human input",
       purpose: "Purpose",
       choices: "Choices (one per line, optional)",
-      shared:
-        "Questions and responses are shared with current Work inspectors.",
+      shared: (name) =>
+        `Everyone who can see all of ${name}'s work can read questions and replies.`,
       send: "Supply response",
       supplied: "Information supplied",
       cannot_provide: "Cannot provide",
@@ -63,7 +75,7 @@ export function createEnUS(product: string): Translations {
         "The request changed. Review its current question and routing before replying.",
       retry: "Retry exact submission",
       unconfirmed:
-        "Persistence is unconfirmed. Retry the exact submission to recover its receipt.",
+        "It is not confirmed that this was saved. Retry the exact submission; nothing is saved twice.",
       receipt: "Saved response receipt",
       saved: "Saved",
       closed: "Closed",
@@ -73,74 +85,114 @@ export function createEnUS(product: string): Translations {
       file: "Existing file reference",
       space: "Space",
       path: "Relative file path",
-      fileNotice:
-        "References do not upload or mount files for the AI employee. Use the authorized Home storage controls for transfers; an exclusive write window is required. Upload and reply are separate operations.",
+      fileNotice: (name) =>
+        `A reference points to a file that ${name} already has; it does not give the file to ${name}. Give ${name} the file first, on ${name}'s Files tab or by attaching it in a conversation with ${name}, then reference it here.`,
       requestLink: "View requests in Attention",
       unchecked: "Current file contents are unchecked.",
-      noAssessment:
-        "Information awaits assessment. An authorized human can open Work and explicitly resume the AI employee.",
+      noAssessment: (name) =>
+        `The reply is saved. To let ${name} use it, open the assignment and press Resume.`,
       outcome: "Submitted outcome statement",
       state: "Request state",
       activity: "Last activity",
-      recipientMissing: "An eligible human recipient is needed.",
+      recipientMissing: "Nobody yet. A manager needs to choose someone.",
       readState: "Read through revision",
       sources: "Source references",
       createUnavailable:
         "New requests require active, reconciled Work with an enabled policy.",
+      noPermission: "You do not have permission to see requests.",
+      unavailableStill: (name) =>
+        `You can still read requests and reply. Replies are kept until ${name ?? "AI assistants and AI employees"} can work again.`,
+      loadError:
+        "Requests could not be loaded. Check your connection and refresh.",
+      emptyPending:
+        "Nothing needs your input. When an AI assistant or AI employee needs a file, a fact or a decision from you, the request appears here.",
+      recipientDefault: (supervisor) => `${supervisor} (supervisor)`,
+      recipientNone: "Nobody yet",
+      savedAt: (time) => `Saved at ${time}.`,
+      readCurrent: "You have read the latest version.",
+      readStale: "Changed since you read it.",
+      sourceUnavailable: "This file is no longer available to you.",
+      closedReason: {
+        resolved: "answered and checked",
+        superseded: "replaced by a new question",
+        withdrawn: "withdrawn",
+      },
+      event: {
+        create: "Question asked",
+        respond: "Reply given",
+        route: "Recipient changed",
+        withdraw: "Question withdrawn",
+        assess: "Reply checked",
+        decide: "Decision recorded",
+        accept: "Outcome accepted",
+        edit: "Closed: the assignment was edited",
+        cancel: "Closed: the assignment was withdrawn",
+        reopen: "Closed: the assignment was reopened",
+        changes_requested: "Closed: changes were requested",
+        reconcile_mandate: "Checked against the updated brief",
+        other: "Updated",
+      },
     },
     agentWork: {
-      newConversation: "Use a new execution conversation",
-      reconcileAttempt: "Reconcile contained attempt",
-      containmentReceipt: "Completed containment operation",
-      containmentNotice:
-        "The server verifies that this exact prior environment is fenced. Recovery preserves reports and effects; it does not declare success or resume execution.",
-
+      stopPending: (name) => `Stopping ${name}. This can take up to a minute.`,
+      stopNothing: (name) =>
+        `There is nothing to stop: ${name} has already stopped working on this.`,
+      stopFailed: "The work could not be stopped. Try again.",
+      newConversation: "Use a new conversation",
+      reconcileAttempt: "Close this by hand",
+      containmentReceipt: (name) =>
+        `The change that closed ${name}'s workspace`,
+      containmentNotice: (name) =>
+        `Use this only if the work stays unresolved. Closing the work records that ${name}'s workspace was closed. The work is not marked done, and ${name} is not started again.`,
       responsibilities: "Responsibilities",
       currentWork: "Current work on this page",
       needsInput: "Needs attention on this page",
       recentOutcomes: "Recent outcomes on this page",
       activate: "Work on this",
       resume: "Resume",
-      recoverActivation: "Recover activation receipt",
-      execution: "Execution attempt",
-      openConversation: "Open execution conversation",
+      recoverActivation: "Try starting again",
+      execution: (name) => `${name}'s work`,
+      openConversation: "Open the assignment's conversation",
       candidate:
         "Completion report awaiting confirmation; not submitted for review.",
-      uncertain:
-        "Execution or cleanup remains uncertain. A manager with Home ADMIN must contain the prior environment and reconcile this attempt before another activation.",
+      uncertain: (name) =>
+        `${name}'s last step did not report back. ${name}'s workspace is being closed safely; this usually takes under a minute.`,
       suggestion: "Suggested follow-up",
       delegateSuggestion: "Prepare delegation",
       attemptStatus: {
         starting: "Starting",
-        running: "Running",
-        stopping: "Stop pending",
-        uncertain: "Outcome uncertain",
+        running: "Working",
+        stopping: "Stopping…",
+        uncertain: "Checking what happened",
         succeeded: "Finished",
         failed: "Failed",
-        cancelled: "Cancelled",
+        cancelled: "Stopped",
+        contained: "Interrupted",
+        notStarted: "Did not start",
+        noResult: "Ended without a result",
       },
       resetResponse: "Reset response for current record",
       replaceUnavailable:
         "Replace the reference list, including removal of unavailable references.",
       title: "Work",
-      recordsOnly:
-        "Delegation saves an assignment. Work on this or Resume explicitly starts the AI employee; replies and due targets never start a run.",
-      visibility:
-        "Tracked delegation requires Use and Inspect, including visibility into this AI employee’s shared work.",
-      policyDisabled:
-        "To delegate, enable Work in the definition’s settings, then deliberately adopt that definition for this AI employee. Existing records remain available.",
+      recordsOnly: (name) =>
+        `Saving an assignment starts nothing. ${name} starts when someone presses Work on this or Resume.`,
+      visibility: (supervisor) =>
+        `To see and give assignments you need “Can chat” and “Can see all work”. Ask ${supervisor}.`,
+      policyDisabled: (name) =>
+        `Assignments are switched off for ${name}. On ${name}'s Settings tab a manager can switch them on. Assignments saved earlier stay readable.`,
       policyEnabled: "Enable tracked Work",
       policyNotice:
-        "This changes the definition. Existing AI employees keep their adopted policy until a manager adopts the updated definition. Execution requires a separate explicit activation.",
+        "This changes the definition. AI assistants and AI employees that use it keep their present setting until a manager applies the updated brief. Nothing starts by itself.",
       reviewRequired: "Require human review",
       responsibility: "Responsibility",
       objective: "Objective",
       criteria: "Success criteria",
       priority: "Priority",
-      due: "Due target (local time; does not schedule execution)",
+      due: "Due (local time; nothing starts by itself)",
       delegate: "Delegate Work",
-      sharedNotice:
-        "The assignment and notes are shared with this AI employee’s Inspect audience. Include only information you intend to share.",
+      sharedNotice: (name) =>
+        `Everyone who can see all of ${name}'s work can read an assignment and its notes. Write only what you mean to share.`,
       empty: "No Work records yet.",
       open: "Open",
       blocked: "Blocked",
@@ -154,18 +206,18 @@ export function createEnUS(product: string): Translations {
       edit: "Edit assignment",
       save: "Save assignment",
       cancelEdit: "Discard draft",
-      cancel: "Cancel Work",
+      cancel: "Withdraw assignment",
       reopen: "Reopen Work",
       changes_requested: "Request changes",
-      reconcile_mandate: "Revalidate under adopted mandate",
+      reconcile_mandate: "Confirm for the updated brief",
       accept: "Accept outcome statement",
-      reconcileNeeded:
-        "The adopted mandate changed. A manager must revalidate this assignment before future execution.",
+      reconcileNeeded: (name) =>
+        `${name}'s brief changed after this assignment was saved. A manager has to confirm that the assignment still fits before ${name} can work on it.`,
       note: "Note or response",
       input: "Supply factual input",
       decide: "Record manager decision",
-      inputNotice:
-        "Factual input does not resolve a blocker or approve a decision. No response starts execution.",
+      inputNotice: (name) =>
+        `Information given here does not settle the question or approve a decision, and starts nothing. To let ${name} continue, press Resume.`,
       unchecked:
         "Current contents not checked. References do not certify that a file exists or that its contents were reviewed.",
       acceptUnchecked:
@@ -189,15 +241,535 @@ export function createEnUS(product: string): Translations {
       nextAction: "Next action",
       lastActivity: "Last activity",
       acceptedBy: "Accepted by human reviewer",
-      reportedComplete: "AI employee reported complete",
+      reportedComplete: (name) => `${name} reported complete`,
       creator: "Delegated by",
       human: "Human",
       nonhuman: "AI employee",
+      stop: "Stop",
+      stopConfirm: (name) =>
+        `Stop ${name} working on this? What ${name} has done so far stays in ${name}'s files, and the assignment stays open so you can press Resume later.`,
+      stopNow: "Stop now",
+      keepWorking: "Keep working",
+      stopped: (person, time) =>
+        `Stopped by ${person} at ${time}. Press Resume to continue.`,
+      stoppedByEdit: (person) =>
+        `Stopped because ${person} edited the assignment. Press Resume to continue with the new version.`,
+      stoppedByWithdraw: (person) =>
+        `Stopped because ${person} withdrew the assignment.`,
+      stoppedByService: (name) =>
+        `Stopped because the service was restarted or maintained. What ${name} had done is kept in ${name}'s files. Press Resume to continue.`,
+      stoppedPlain: "Stopped. Press Resume to continue.",
+      uncertainWaiting: (name) =>
+        `${name}'s last step did not report back. ${name}'s workspace will be closed when ${name}'s other conversations finish; this assignment can be resumed after that.`,
+      attemptFailed: (name, support) =>
+        `${name} stopped working on this because of an error. Press Resume to try again; if this keeps happening, ask ${support}.`,
+      endedWithoutReport: (name) =>
+        `${name} stopped without reporting a result or asking a question on this assignment. What ${name} wrote last is in the conversation. If ${name} asked something there, answer in the conversation or edit the assignment first. Then press Resume.`,
+      recoverActivationNote: "This does not start the work a second time.",
+      giveNeedsChat: (name, supervisor) =>
+        `To give ${name} an assignment you also need “Can chat”. Ask ${supervisor}.`,
+      advanced: "Advanced",
+      latest: "(latest)",
+      manualFirst: (name) =>
+        `Pause ${name} and resume ${name} on ${name}'s Settings tab, then return here.`,
+      unresolvedAsk: (supervisor) => `Ask ${supervisor} to look at this.`,
+      host: "The service",
+      attempt: {
+        busy: (name, action) =>
+          `Too much is running at once, so ${name} could not start. Press ${action} again in a minute.`,
+        runLimit: (name, action) =>
+          `${name} is already working in two conversations. Press ${action} when one of them finishes.`,
+        restarting: (name, action) =>
+          `${name}'s workspace is restarting. Press ${action} again in a few minutes.`,
+        startingElsewhere: (name, action) =>
+          `Another conversation is starting ${name}. Press ${action} again in a moment.`,
+        startFailed: (name, action, support) =>
+          `${name}'s workspace could not start, so no work was done. Press ${action} to try again; if this keeps happening, ask ${support}.`,
+        full: (name, support) =>
+          `${name}'s files are full, so ${name} cannot start. Delete files on ${name}'s Files tab, or ask ${support} for more room.`,
+        fullAsk: (name, supervisor, support) =>
+          `${name}'s files are full, so ${name} cannot start. Ask ${supervisor} to delete files, or ask ${support} for more room.`,
+      },
+      workLimit: {
+        one: "Another assignment is running, and only one can run at a time here. You can start this one when the other finishes.",
+        many: (count) =>
+          `${count} assignments are running, the most that can run at once here. You can start this one when one of them finishes.`,
+        which: (agent, objective, time, person) =>
+          `${agent} is working on “${objective}”, started at ${time} by ${person}.`,
+        starting: (agent) => `${agent} is starting an assignment.`,
+        free: (name) => `A place is free. ${name} can start now.`,
+      },
+      event: {
+        delegate: "Assignment saved",
+        activate: "Work started",
+        progress: "Progress reported",
+        outcome: "Completion reported",
+        request_input: "Asked for input",
+        revise_input: "Question changed",
+        assess_input: "Reply checked",
+        suggest: "Follow-up suggested",
+        derive: "Follow-up assignment created",
+        derived: "Created from another assignment",
+        human_response: "Reply given",
+        request_route: "Question sent to someone else",
+        request_withdraw: "Question withdrawn",
+        input: "Information given",
+        decide: "Decision recorded",
+        accept: "Outcome accepted",
+        edit: "Assignment edited",
+        cancel: "Assignment withdrawn",
+        reopen: "Assignment reopened",
+        changes_requested: "Changes requested",
+        reconcile_mandate: "Checked against the updated brief",
+        reconcile_attempt: "Closed by hand",
+        stop: "Stop requested",
+        attempt_settled: "Work ended",
+        attempt_uncertain: "Work ended without confirmation",
+        attempt_contained: "Interrupted",
+        other: "Updated",
+      },
+      contained: {
+        containerAbsent: (name) =>
+          `${name}'s workspace stopped unexpectedly while ${name} was working on this.`,
+        runOrphaned: (name) =>
+          `The service restarted while ${name} was working on this.`,
+        runNeverStarted: (name) =>
+          `The request to start ${name} was not completed. Nothing was changed.`,
+        startFailed: (name, support) =>
+          `${name}'s workspace could not start, so no work was done. Press Resume to try again; if this keeps happening, ask ${support}.`,
+        outcomeUncertain: (name) =>
+          `${name}'s last step did not report back, so ${name}'s workspace was closed to keep the files safe. Check the files before you continue.`,
+        idle: (name) =>
+          `${name} did not finish this, and ${name}'s workspace closed after a period without activity.`,
+        lifecycle: (name) =>
+          `A manager paused or retired ${name}, or changed ${name}'s access, supervisor or brief, while ${name} was working on this. That closed ${name}'s workspace.`,
+        storageRecovery: (provider, name) =>
+          `${provider} restored or repaired ${name}'s files while ${name} was working on this, which closed ${name}'s workspace. Check the files before you continue.`,
+        operator: (name, provider) =>
+          `${name}'s workspace was closed for maintenance by ${provider} while ${name} was working on this.`,
+        hostReplaced: (name) =>
+          `The service moved to a new server while ${name} was working on this. ${name}'s files are as of the last backup; check the files before you continue.`,
+        unknown: (name) => `${name}'s work on this was interrupted.`,
+        kept: (name) =>
+          `What ${name} had done is kept in ${name}'s files; nothing was submitted for review.`,
+        candidate: (name) =>
+          `${name} had written a completion report before this happened; the report was not submitted. Press Resume so ${name} can check the work and report again.`,
+      },
+    },
+    sandboxNetwork: {
+      title: "A site is blocked",
+      blocked: (name, host, minutes, provider) =>
+        `${name} tried to reach ${host}, which is not on the list of sites allowed here. Allow ${host} for ${minutes} minutes for all of ${name}'s conversations and assignments, or keep ${host} blocked. The permanent list is set by ${provider}.`,
+      neverAllowed:
+        "Addresses inside the company network can never be allowed.",
+      allow: (minutes) => `Allow for ${minutes} minutes`,
+      keepBlocked: "Keep blocked",
+      allowed: (host, minutes, name) =>
+        `${host} is allowed for ${minutes} minutes. Ask ${name} to try again, or press Resume on an assignment that needed ${host}.`,
+      kept: (host) => `${host} stays blocked.`,
+      managersOnly: (name) =>
+        `Only people who can manage ${name} can allow a site.`,
+      deniedAsk: (name, host, supervisor, support) =>
+        `${name} could not reach ${host}, which is not on the list of sites allowed here. Ask ${supervisor} to allow ${host} for a short time, or ask ${support} to have ${host} added to the list.`,
+      denied: (name, host, provider) =>
+        `${name} could not reach ${host}, which is not on the list of sites allowed here. To allow ${host} for a short time, ask ${name} to reach ${host} in a conversation of your own and allow the site when asked. Then ask ${name} to try again, or, for an assignment that has ended, press Resume. The permanent list is set by ${provider}.`,
     },
     agentInstances: {
+      welcome: {
+        title: (name) => `${name} is ready`,
+        body: (name) =>
+          `${name} keeps files and a memory from one conversation to the next.`,
+        ownFiles: (name) =>
+          `${name} works in ${name}'s own files, not in your files or your browser. To give ${name} a file, attach it here.`,
+        assistantNoMyFiles: (name) => `${name} does not see My files.`,
+        sharedReadable: (name) => `${name} can read Shared.`,
+        prefilled:
+          "A first message is ready in the message box. Nothing is sent until you press Send.",
+        firstMessage: (name) =>
+          `Hello ${name}. Please give a short introduction: the role, the kind of work to ask for, and how to hand over files.`,
+        tipFiles: (name) => `Attach a file to give it to ${name}.`,
+        tipWork: (name) => `Give ${name} an assignment on the Work tab.`,
+        tipAccess: "Add colleagues on the Access tab.",
+        companyNotice: (name) =>
+          `Conversations with an AI employee can be read by everyone who can see all of ${name}'s work.`,
+      },
+      chat: {
+        subline: (kind, own, owner, supervisor) =>
+          kind === "company"
+            ? `AI employee · supervised by ${supervisor}`
+            : own
+              ? "Your AI assistant"
+              : `${owner}'s AI assistant`,
+        alsoWorking: "Also working in another conversation",
+        colleagues: (person, name) =>
+          `This is ${person}'s conversation with ${name}. ${person} can read what you send here.`,
+      },
+      fileNeedsInspect: (name, supervisor) =>
+        `To open ${name}'s files you need “Can see all work”. Ask ${supervisor}.`,
+      busy: (name) =>
+        `Too much is running at once, so ${name} could not start. Send your message again in a minute.`,
+      conversationLimit: (name) =>
+        `${name} is already working in two conversations. Send your message again when one of them finishes.`,
+      restarting: (name) =>
+        `${name}'s workspace is restarting and waits for another conversation to finish. Send your message again in a few minutes.`,
+      startingElsewhere: (name) =>
+        `Another conversation is starting ${name}. Send your message again in a moment.`,
+      fullStart: (name, support) =>
+        `${name}'s files are full, so ${name} cannot start. Delete files on ${name}'s Files tab, or ask ${support} for more room.`,
+      fullStartAsk: (name, supervisor, support) =>
+        `${name}'s files are full, so ${name} cannot start. Ask ${supervisor} to delete files, or ask ${support} for more room.`,
+      interruptedByManager: (name) =>
+        `A manager changed ${name}'s settings, which restarted ${name}'s workspace and stopped this reply. Nothing saved in ${name}'s files was lost. Send your message again to continue.`,
+      interruptedByRecovery: (provider, name) =>
+        `${provider} restored or repaired ${name}'s files, which closed ${name}'s workspace and stopped this reply. Send your message again in a few minutes. If files were restored, check the files first.`,
+      interrupted: (name) =>
+        `${name}'s workspace was restarted, which stopped this reply. Send your message again.`,
+      interruptedByService:
+        "The service was restarted, which stopped this reply. Send your message again.",
+      bringBack: "Bring back",
+      makeEmployee: "Make an AI employee with this brief",
+      makeEmployeeNotice:
+        "This adds a separate AI employee with the same brief. Files and memory are not copied; add the files you want on the new AI employee's Files tab.",
+      files: {
+        root: (name) => `${name}'s files`,
+        name: "Name",
+        size: "Size",
+        modified: "Changed",
+        uploadsHint: (name) => `Files people gave ${name}`,
+        outputsHint: (name) => `Files ${name} produced`,
+        producedBy: (name, date) => `Produced by ${name} on ${date}`,
+        add: "Add files",
+        drop: (name) => `Drop files here to give them to ${name}`,
+        choose: "Choose files",
+        newFolder: "New folder",
+        folderName: "Folder name",
+        newName: "New name",
+        deleteConfirm: (file) => `Delete ${file}? This cannot be undone.`,
+        needsInspect: (name, supervisor) =>
+          `To see ${name}'s files you need “Can see all work”. Ask ${supervisor}.`,
+        readOnlyHint: (name) =>
+          `To give ${name} a file, attach it in a conversation with ${name}.`,
+        emptyRoot: (name) =>
+          `Nothing here yet. Drop files to give them to ${name}.`,
+        emptyRootReader: "Nothing here yet.",
+        uploading: (percent) => `Uploading… ${percent}%`,
+        saved: (name) => `Saved in ${name}'s files`,
+        savedAs: (file) => `Saved as ${file}`,
+        refused: (file) => `${file} could not be saved. Try again.`,
+        noAccess: (name) => `You can no longer give files to ${name}.`,
+        full: (name, support) =>
+          `${name}'s files are full. Delete files on ${name}'s Files tab, or ask ${support} for more room.`,
+        fullAsk: (name, supervisor, support) =>
+          `${name}'s files are full. Ask ${supervisor} to delete files, or ask ${support} for more room.`,
+        tooLarge: (file, max) =>
+          `${file} is larger than ${max}, the most one file can be.`,
+        listFailed: (name) => `${name}'s files could not be loaded. Refresh.`,
+        accessNotSaved: (name) =>
+          `Your access to ${name}'s files has not been saved yet. Ask a manager to save your access on ${name}'s Access tab.`,
+        listLive: (name) =>
+          `${name} is working; files may change while you look.`,
+        invalidName: "That name cannot be used.",
+        reserved: (name) => `That folder is kept for ${name}'s own tools.`,
+        nameTaken: "Something with that name already exists here.",
+        fileChanged:
+          "This file changed after you opened it. Reload it; your text stays here.",
+        folderNotEmpty: "Empty this folder before deleting it.",
+        notActive: (name) =>
+          `${name} is paused or retired, so ${name}'s files cannot be changed.`,
+        notFound: "That file or folder is no longer there. Refresh the list.",
+        actionFailed: "That did not work. Try again.",
+      },
+      memoryTooLarge:
+        "That is too large for a memory import. Paste the text of a file made with Export memory.",
+      memoryInvalid:
+        "That is not a memory export. Paste the text of a file made with Export memory.",
+      create: {
+        title: (kind) =>
+          kind === "personal" ? "Add an AI assistant" : "Add an AI employee",
+        step: (n) => `Step ${n} of 2`,
+        namePlaceholder: "For example: Reporting analyst",
+        nameHelp: (kind) =>
+          kind === "personal"
+            ? "The name people see wherever this AI assistant appears."
+            : "The name people see wherever this AI employee appears.",
+        nameInvalid: "Use a name of 1 to 128 characters.",
+        roleHeading: (name) => `What will ${name} do?`,
+        roleHeadingUnnamed: (kind) =>
+          kind === "personal"
+            ? "What will this AI assistant do?"
+            : "What will this AI employee do?",
+        roleBlank: "Blank brief",
+        roleBlankDescription: "Describe the role yourself.",
+        rolesNone: "No ready-made roles are set up. Describe the role below.",
+        rolesFailed:
+          "The ready-made roles could not be loaded. Describe the role below, or try again.",
+        replaceBrief: "Replace the brief you edited with this role's brief?",
+        keepBrief: "Keep your brief",
+        useRoleBrief: "Use the role's brief",
+        brief: (name) => `What ${name} is responsible for`,
+        briefUnnamed: (kind) =>
+          kind === "personal"
+            ? "What this AI assistant is responsible for"
+            : "What this AI employee is responsible for",
+        briefHelp: (name) =>
+          `These become ${name}'s standing instructions. You can change them later on ${name}'s Settings tab.`,
+        briefHelpUnnamed: (kind) =>
+          kind === "personal"
+            ? "These become this AI assistant's standing instructions. You can change them later on the Settings tab."
+            : "These become this AI employee's standing instructions. You can change them later on the Settings tab.",
+        briefPlaceholder:
+          "Describe the role in a few sentences: what to do, what to keep, and when to ask a person.",
+        briefRequired: "Write a few words about the role.",
+        briefTooLong: "The brief is too long. Keep it under 16,000 characters.",
+        useCustomAgent: "Use one of your custom agents",
+        useRole: "Describe the role instead",
+        customAgent: "Custom agent",
+        customAgentNone: "You have no custom agents.",
+        next: "Next",
+        back: "Back",
+        supervisorHeading: (name) => `Who is responsible for ${name}`,
+        supervisorHelp: (name) =>
+          `The person responsible for ${name}. Questions from ${name} go to this person first.`,
+        settingUp: (name) => `Setting up ${name}…`,
+        slow: "This is taking longer than usual. Keep this window open.",
+        unconfirmed: (name) =>
+          `It is not confirmed that ${name} was added. Press Try again; a second one is not added.`,
+        failed: (name) => `${name} could not be added. Try again.`,
+        briefFailed: "The brief could not be saved. Try again.",
+        companyRefused: "Only an administrator can add an AI employee.",
+        addedNoConversation: (name) =>
+          `${name} was added. A first conversation could not be opened; press New conversation to try again.`,
+      },
+      filesBusy: (name) =>
+        `${name}'s files are being changed right now and cannot be used. Try again in a few minutes.`,
+      assistants: {
+        title: "My assistants",
+        description:
+          "An AI assistant is yours: it keeps a brief, files and a memory from one conversation to the next, and only you use it unless you add colleagues. It does not see your files in My files; you give it files.",
+        add: "Add AI assistant",
+        none: "No AI assistants yet.",
+        othersHeading: "AI assistants colleagues gave you access to",
+        ownerLine: (owner) => `${owner}'s AI assistant`,
+        allowance: (count, max, name) =>
+          max === 1
+            ? count === 0
+              ? "You can add 1 AI assistant."
+              : `${name} is your AI assistant. Each person can have 1.`
+            : `You have ${count} of the ${max} AI assistants each person can have.`,
+        limitReached: (count, max, name) =>
+          max === 1
+            ? `You already have an AI assistant, ${name}, and each person can have one. Delete ${name} on ${name}'s Settings tab to add another, or ask an administrator for an AI employee.`
+            : `You already have ${count} AI assistants, the most each person can have. Delete one on that AI assistant's Settings tab to add another, or ask an administrator for an AI employee.`,
+        limitUnfinished: (name) =>
+          `Setting up ${name} did not finish, and ${name} counts as one of your AI assistants. Finish or remove ${name} under “Not finished” first.`,
+        noneFree: (administrator, provider) =>
+          `No AI assistant can be added right now: all the AI assistants allowed here are in use. Ask ${administrator ? `${provider} to allow more` : "an administrator"}.`,
+        noPermission:
+          "You do not have permission to add an AI assistant. Ask an administrator.",
+        notOffered: "AI assistants are not offered here.",
+        listFailed:
+          "Your AI assistants could not be loaded. Check your connection and refresh.",
+      },
+      employees: {
+        title: "AI employees",
+        description:
+          "An AI employee belongs to the company: it keeps working when people leave, has a supervisor, and is always marked as AI.",
+        add: "Add AI employee",
+        none: "No AI employees yet.",
+        adminsAdd: "Administrators add AI employees.",
+        supervisorLine: (supervisor) => `supervised by ${supervisor}`,
+        allowance: (count, max) => `${count} of ${max} AI employees`,
+        limitReached: (max, provider) =>
+          `All ${max} AI employees allowed here are taken. Delete one that is no longer needed, or ask ${provider} to allow more.`,
+        notOffered: "AI employees are not offered here.",
+        listFailed:
+          "AI employees could not be loaded. Check your connection and refresh.",
+      },
+      group: {
+        active: "Active",
+        paused: "Paused",
+        retired: "Retired",
+        unfinished: "Not finished",
+      },
+      unfinished: (name) => `Setting up ${name} did not finish.`,
+      finishSetup: "Finish setting up",
+      remove: "Remove",
+      unfinishedElsewhere: (name) =>
+        `To finish, use the browser in which ${name} was added. Otherwise remove ${name} and add ${name} again. An unfinished AI assistant or AI employee is removed after 24 hours.`,
+      unfinishedCompleted: (name) =>
+        `${name} has been set up in the meantime, so nothing was removed.`,
+      access: {
+        heading: (name) => `Who can work with ${name}`,
+        use: "Can chat",
+        inspect: "Can see all work",
+        manage: "Can manage",
+        useHelp: (name) =>
+          `Start conversations with ${name} and attach files. Opening ${name}'s files needs “Can see all work”.`,
+        inspectHelp: (name) =>
+          `Open ${name}'s files, and read every conversation, the Work tab and ${name}'s memory.`,
+        chatOnlyNote: (person, name) =>
+          `With “Can chat” alone, ${person} can talk with ${name} and attach files, but cannot open the files ${name} produces, give assignments or see other people's conversations.`,
+        manageHelp: (name) =>
+          `Change the brief, access and files; pause, retire or delete ${name}.`,
+        supervisorNote: (name) =>
+          `Responsible for ${name}. Questions from ${name} go to this person first.`,
+        supervisorHint: (name) =>
+          `Only a person who can manage ${name} can be the supervisor. Give “Can manage” first.`,
+        filesFollow: (name) =>
+          `People who can see all of ${name}'s work can open ${name}'s files. People who can also manage can change them.`,
+        onlyYou: "Only you have access.",
+        manageIncludes: "“Can manage” includes “Can see all work”.",
+        manageNeedsInspect: (name) =>
+          `To manage ${name} you also need “Can see all work”. Ask another manager to give it to you.`,
+        lastManager: (name) =>
+          `${name} needs at least one person who can manage. Give “Can manage” to someone else first.`,
+        ownManage:
+          "You cannot remove your own “Can manage”. Ask another manager.",
+        add: "Add a colleague",
+        searchHint: "Type the beginning of your colleague's email address.",
+        noResults: "No colleague matches.",
+        searchHintFull:
+          "Type your colleague's full email address, then press Find.",
+        find: "Find",
+        notFoundFull:
+          "No one at your company has an account with that email address. Check the spelling, or ask an administrator to add the person.",
+        searchFailed: "The search did not work. Try again.",
+        alreadyHasAccess: (person) => `${person} already has access.`,
+        saved: "Saved.",
+        remove: "Remove access",
+        removeConfirm: (person, name) =>
+          `Remove ${person}'s access to ${name}? ${person} will no longer see ${name}'s conversations or files.`,
+      },
+      interrupt: {
+        title: (name) => `${name} is working right now`,
+        body: (change, name, list) =>
+          `${change} restarts ${name}'s workspace, which would stop what ${name} is doing now: ${list}. Files already saved in ${name}'s files are kept.`,
+        bodyUnknown: (change, name) =>
+          `${change} restarts ${name}'s workspace, which would stop what ${name} is doing now. Files already saved in ${name}'s files are kept.`,
+        grant: "Changing who has access",
+        supervise: "Changing the supervisor",
+        adopt: "Applying the updated brief",
+        reply: (person) => `a reply to ${person}`,
+        work: (objective) => `the assignment “${objective}”`,
+        wait: (name) => `Apply when ${name} is idle`,
+        now: "Stop the work and apply now",
+        pending: (name) =>
+          `This change will apply when ${name} is idle. Keep this page open.`,
+      },
+      lifecycleAction: {
+        suspend: "Pause",
+        restore: "Resume",
+        archive: "Retire",
+        delete: "Delete",
+        adopt: "Brief applied",
+        supervise: "Supervisor changed",
+        grant: "Access changed",
+      },
+      conversations: {
+        with: (person) => `with ${person}`,
+        empty: "No conversations yet.",
+        untitled: "Untitled conversation",
+        yours: "Your conversation",
+        running: "Working",
+        ownOnly:
+          "You see your own conversations. People who can see all work see every conversation.",
+        loadFailed: "Conversations could not be loaded. Refresh to try again.",
+        noUse: (supervisor) =>
+          `You can read conversations but not start one. Ask ${supervisor} for “Can chat”.`,
+      },
+      marker: {
+        ai: "AI",
+        aiAssistant: "AI assistant",
+        aiEmployee: "AI employee",
+      },
+      header: {
+        line: (kind, own, owner, supervisor) =>
+          kind === "company"
+            ? `AI employee · supervised by ${supervisor}`
+            : own
+              ? "Your AI assistant"
+              : `${owner}'s AI assistant · supervised by ${supervisor}`,
+        yourAccess: "Your access:",
+      },
+      state: {
+        working: "Working now",
+        idle: "Idle",
+        lastActive: (time) => `last active ${time}`,
+        neverUsed: "not used yet",
+        paused: "Paused",
+        retired: "Retired",
+        deleted: "Deleted",
+        unfinished: "Not finished",
+        unavailable: "Cannot work right now",
+        changing: "Change in progress",
+      },
+      notFound: "This AI assistant or AI employee is not available to you.",
+      backToList: (kind) =>
+        kind === "personal" ? "Back to My assistants" : "Back to AI employees",
+      pausedNotice: (name) =>
+        `${name} is paused. A manager can resume ${name} on ${name}'s Settings tab.`,
+      retiredNotice: (name) =>
+        `${name} is retired. Files and past conversations stay readable.`,
+      deletedNotice: (name) => `${name} was deleted.`,
+      accessWithdrawn: (name) => `You no longer have access to ${name}.`,
+      tabs: {
+        conversations: "Conversations",
+        files: "Files",
+        work: "Work",
+        memory: "Memory",
+        access: "Access",
+        settings: "Settings",
+      },
+      settings: {
+        renamed: "Renamed.",
+        assignments: (name) => `${name} accepts assignments on the Work tab`,
+        briefNote: (name) =>
+          `Applying the brief closes ${name}'s workspace. The next conversation starts a new one. Open assignments then have to be confirmed by a manager on the Work tab before ${name} can work on them.`,
+        briefApplied: "The brief was applied.",
+        useCustomAgent: "Apply one of your custom agents instead",
+        pauseConfirm: (name) =>
+          `This stops ${name} from working. Conversations, files and memory stay. You can resume ${name} at any time.`,
+        runningNow: (name) => `${name} is working right now. That work stops.`,
+        retireConfirm: (name, kind) =>
+          kind === "personal"
+            ? `This ends the role. Past conversations and files stay readable for the people who can read them now. ${name} still counts as one of your AI assistants until ${name} is deleted.`
+            : `This ends the role. Past conversations and files stay readable for the people who can read them now. ${name} still counts as one of the AI employees allowed until ${name} is deleted.`,
+        deleteConfirm: (name, kind) =>
+          kind === "personal"
+            ? `This removes ${name}, ${name}'s memory and all of ${name}'s files, and cannot be undone. The place is free for a new AI assistant right away.`
+            : `This removes ${name}, ${name}'s memory and all of ${name}'s files, and cannot be undone. The place is free for a new AI employee right away.`,
+        deleteUnverified: (name, provider) =>
+          `${name}'s files could not be checked, so they cannot be removed now; ${provider} can remove them later. ${name} will be deleted and will no longer count toward the number allowed.`,
+        typeName: (name) => `Type ${name} to confirm`,
+        deleting: (name) => `Deleting ${name}…`,
+        deleted: (name) => `${name} was deleted.`,
+        deletedClearing: (name, kind) =>
+          kind === "personal"
+            ? `${name} was deleted. The files are still being cleared; the place will be free for a new AI assistant in a few minutes.`
+            : `${name} was deleted. The files are still being cleared; the place will be free for a new AI employee in a few minutes.`,
+        abandonConfirm: (name) =>
+          `Give up this change? ${name} stays as before the change.`,
+        abandonRefused:
+          "The change could not be given up yet. Press Try again.",
+        employeeName: "Name of the new AI employee",
+        employeeAdded: (name) => `${name} was added.`,
+        automatic: (name) =>
+          `Nothing starts ${name} on a schedule. ${name} works when someone sends a message or starts an assignment.`,
+      },
       administratorSupport: "an administrator",
       providerFallback: "your service provider",
       unavailable: {
+        serverNotReady:
+          "The server is not yet set up to run AI assistants and AI employees safely.",
+        serverCheckFailed:
+          "AI assistants and AI employees cannot start right now: a safety check on the server failed. Their files are kept.",
+        agentsPaused: (provider) =>
+          `AI assistants and AI employees are paused by ${provider}.`,
+        serverMoved: (name, provider) =>
+          `${name} cannot work yet: the service moved to a new server, and ${provider} has to confirm the move. ${name}'s files are kept.`,
+        filesUnchecked: (name) =>
+          `${name}'s files did not pass the safety check, so ${name} cannot work. The files are kept. Nothing else is affected.`,
+        agentsWait: "AI assistants and AI employees cannot work until then.",
         diskTooSmall: (provider) =>
           `Files are not available right now: the storage of this deployment is smaller than what is set for it. Chats work without files until ${provider} has fixed this.`,
         storageMissing: (provider) =>
@@ -213,12 +785,10 @@ export function createEnUS(product: string): Translations {
         askAdmin: "Ask an administrator.",
       },
       unconfirmed:
-        "The request outcome is not confirmed. Refresh or retry the same request to check its state.",
-      abandon: "Abandon contained operation",
-      abandoned:
-        "An obsolete operation was abandoned without changing grants or reactivating the agent.",
+        "It is not confirmed that the change was saved. Press Try again; nothing is done twice.",
+      abandon: "Give up this change",
+      abandoned: "An earlier change was given up. Nothing was changed.",
 
-      title: "Agent instances",
       description:
         "Persistent personal and company agents with their own Home and memory.",
       legacyUnavailable:
@@ -227,39 +797,38 @@ export function createEnUS(product: string): Translations {
       custody: "Custody",
       personal: "Personal",
       company: "Company",
-      supervisor: "Supervisor user ID",
+      supervisor: "Supervisor",
       definition: "Definition",
-      create: "Create instance",
-      start: "Start conversation",
-      home: "Open Home",
+      start: "New conversation",
+      home: "Open files",
       spaces: "Browse Spaces and Projects",
       manage: "Manage instance",
       rename: "Rename",
-      suspend: "Suspend",
-      archive: "Archive",
-      delete: "Remove agent",
-      restore: "Restore",
-      adopt: "Adopt definition",
+      suspend: "Pause",
+      archive: "Retire",
+      delete: "Delete",
+      restore: "Resume",
+      adopt: "Apply updated brief",
       supervise: "Change supervisor",
       grant: "Update access",
       member: "Member user ID",
-      use: "Use",
-      inspect: "Inspect",
-      manageAccess: "Manage",
+      use: "Can chat",
+      inspect: "Can see all work",
+      manageAccess: "Can manage",
       grantsNotice:
         "Agent permissions and Home access are separate. Edit resource grants in Spaces.",
       retention:
         "These actions stop the agent’s environment and retain Home data and human grants. Shared Projects are retained.",
-      pending:
-        "Containment pending. The agent cannot run; stopping its environment is not yet confirmed.",
-      retry: "Retry captured operation",
+      pending: (name) =>
+        `This change is not finished: it is not yet confirmed that ${name}'s workspace is closed. ${name} cannot work until the change is finished.`,
+      retry: "Try again",
       refresh: "Refresh",
       loading: "Loading…",
       none: "No instances yet.",
       more: "Load more",
       memory: "Instance memory",
-      memoryNotice:
-        "This is shared instance memory for its current Inspect audience. It never includes private user memory.",
+      memoryNotice: (name) =>
+        `What ${name} remembers from one conversation to the next. Everyone who can see all work can read it. It never includes anyone's private memory.`,
       fact: "New fact",
       addFact: "Add fact",
       removeFact: "Remove fact",
@@ -268,8 +837,8 @@ export function createEnUS(product: string): Translations {
       importMemory: "Import memory",
       replaceMemory: "Replace memory",
       confirm: "Confirm action",
-      confirmMemory:
-        "Clear or replacement import retires queued writes and changes the whole instance memory.",
+      confirmMemory: (name) =>
+        `This changes everything ${name} remembers and cannot be undone.`,
       companyCopy: "Create company copy",
       companyCopyNotice:
         "Create a separate company instance, then explicitly copy selected Home files in Spaces and export/import memory. Credentials are not copied.",
@@ -279,16 +848,27 @@ export function createEnUS(product: string): Translations {
       archived: "Archived",
       deleted: "Removed",
       provisioning: "Provisioning",
-      instructions: "Adopted instructions",
+      instructions: "Brief",
       businessDefinition: "Definition name",
       useOnly:
         "Use permits your own unprotected conversation; instance memory requires Inspect.",
-      operationError: "Agent operation failed. Refresh before retrying.",
+      operationError: "That did not work. Refresh the page, then try again.",
       source: "Original definition",
-      memoryUnavailable:
-        "Memory is unavailable under the current grants or backend.",
+      memoryUnavailable: (name) =>
+        `${name}'s memory cannot be shown right now.`,
     },
     storageSpaces: {
+      agentFilesOf: (name) =>
+        `These are ${name}'s files. Change who can use them on ${name}'s Access tab. Pause, retire or delete ${name} on ${name}'s Settings tab.`,
+      agentFilesRecoveryNote: (name) =>
+        `A backup, a restore or a repair of the files closes ${name}'s workspace. A reply or an assignment in progress stops, and ${name} cannot work until the backup, restore or repair has finished.`,
+      agentFilesUnknown:
+        "These files belong to an AI assistant or AI employee. Change who can use them on that AI assistant or AI employee's Access tab, and pause, retire or delete that AI assistant or AI employee on the Settings tab.",
+      agentFilesRecoveryUnknown:
+        "A backup, a restore or a repair closes the AI assistant or AI employee's workspace. Any reply or assignment in progress stops. Work cannot continue until the backup, restore or repair has finished.",
+      membersHint:
+        "The files of an AI assistant or an AI employee are on the Files tab of that AI assistant or AI employee.",
+      createOff: "New Spaces cannot be created here.",
       confirmAction: "Confirm action",
       recovery: "Backups and recovery",
       recoveryNotice:
@@ -426,6 +1006,12 @@ export function createEnUS(product: string): Translations {
     },
 
     runProgress: {
+      residentPreparing: (name) => `Getting ${name} ready…`,
+      residentStarting: (name) => `Starting ${name}'s workspace…`,
+      residentStartingLong: (name) =>
+        `Still starting ${name}'s workspace. After a quiet period this can take up to two minutes.`,
+      residentStartFailed: (name, support) =>
+        `${name}'s workspace did not start. Send your message again; if this keeps happening, ask ${support}.`,
       preparing: "Preparing your workspace…",
       workspaceStarting: "Starting a fresh workspace…",
       thinking: "Thinking…",
@@ -574,9 +1160,22 @@ export function createEnUS(product: string): Translations {
 
     // Input Box
     inputBox: {
+      agentFile: {
+        attach: (name) => `Attach a file for ${name}`,
+        hint: (name) =>
+          `Files you attach are saved in ${name}'s files. Everyone who can see all of ${name}'s work can open them.`,
+        sendWaits: "Wait until the files are saved.",
+        uploading: (percent) => `Uploading… ${percent}%`,
+        saved: (name) => `Saved in ${name}'s files`,
+        savedAs: (file) => `Saved as ${file}`,
+        refused: (file) => `${file} could not be saved. Try again.`,
+        noAccess: (name) => `You can no longer give files to ${name}.`,
+        tooLarge: (file, max) =>
+          `${file} is larger than ${max}, the most one file can be.`,
+      },
       placeholder: "How can I assist you today?",
       disclaimer: `${product} is AI and can make mistakes`,
-      assistantDisclaimer: "This assistant is AI and can make mistakes",
+      assistantDisclaimer: "This is AI and can make mistakes.",
       createSkillPrompt:
         "We're going to build a new skill step by step with `skill-creator`. To start, what do you want this skill to do?",
       addAttachments: "Add attachments",
@@ -733,6 +1332,12 @@ export function createEnUS(product: string): Translations {
 
     // Sidebar
     sidebar: {
+      myAssistants: "My assistants",
+      aiEmployees: "AI employees",
+      assistantsOff: "AI assistants are not offered here.",
+      aiEmployeesOff: "AI employees are not offered here.",
+      agentsUnavailable:
+        "AI assistants and AI employees are not available right now.",
       newChat: "New chat",
       chats: "Chats",
       channels: "Channels",
@@ -760,7 +1365,7 @@ export function createEnUS(product: string): Translations {
       noMatches: "No loaded files match",
       noMatchesHint: "Try another name or folder, or clear the filter.",
       description:
-        "What you kept, from every conversation. Your assistant can open these in any chat.",
+        "What you kept, from every conversation. You can use these in any chat.",
       empty: "Nothing kept yet",
       emptyHint:
         "Save a report or an upload from a conversation and it will be here next time.",

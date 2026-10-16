@@ -26,6 +26,7 @@ import {
 } from "@/components/ai-elements/chain-of-thought";
 import { CodeBlock } from "@/components/ai-elements/code-block";
 import { Button } from "@/components/ui/button";
+import { useConversationFiles } from "@/components/workspace/chats/conversation-files";
 import {
   buildWriteFileArtifactURL,
   resolveArtifactURL,
@@ -48,6 +49,7 @@ import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
+import { NetworkDenials } from "./network-denials";
 
 interface MessageGroupProps {
   className?: string;
@@ -75,7 +77,12 @@ function MessageGroupComponent({
   const [showLastThinking, setShowLastThinking] = useState(
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
-  const steps = useMemo(() => convertToSteps(messages), [messages]);
+  const toolData = useMemo(() => indexToolCallData(messages), [messages]);
+  const steps = useMemo(
+    () => convertToSteps(messages, toolData),
+    [messages, toolData],
+  );
+  const conversation = useConversationFiles();
   const stepIndexByStep = useMemo(
     () => new Map(steps.map((step, index) => [step, index] as const)),
     [steps],
@@ -443,6 +450,9 @@ function MessageGroupComponent({
           )}
         </>
       )}
+      {conversation.agent && toolData.networkDenied.size > 0 && (
+        <NetworkDenials hosts={[...toolData.networkDenied.keys()]} />
+      )}
     </ChainOfThought>
   );
 }
@@ -599,6 +609,8 @@ function ToolCall({
   const { t } = useI18n();
   const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
     useArtifacts();
+  const conversation = useConversationFiles();
+  const artifactViewsEnabled = !conversation.agent && !conversation.locked;
   const browserViewPanel = useMaybeBrowserView();
   const tokenLabel = tokenDebugStep
     ? formatDebugToken(tokenDebugStep, t)
@@ -622,6 +634,7 @@ function ToolCall({
       })
     : null;
   const autoOpenArtifactUrl =
+    artifactViewsEnabled &&
     isLoading &&
     isLast &&
     autoOpen &&
@@ -648,47 +661,65 @@ function ToolCall({
     const shot = browserView?.screenshot;
     const previewUrl =
       shot && threadId ? resolveArtifactURL(shot, threadId) : undefined;
+    const previewContent = (
+      <>
+        <img
+          className="w-full object-contain"
+          src={previewUrl}
+          alt={browserView?.title ?? "browser view"}
+          loading="lazy"
+          decoding="async"
+        />
+        {browserView?.url && (
+          <div className="text-muted-foreground bg-muted/40 truncate px-2 py-1 text-left text-[11px]">
+            {browserView.url}
+          </div>
+        )}
+      </>
+    );
     return (
       <ChainOfThoughtStep
         key={id}
         label={resolveLabel(browserToolLabel(name, args, t))}
         icon={MonitorIcon}
       >
-        {previewUrl && !deferBrowserPreview && (
-          <button
-            type="button"
-            className="border-border mt-1 block w-full max-w-md cursor-pointer overflow-hidden rounded-lg border"
-            onClick={() => {
-              if (!shot) {
-                return;
-              }
-              if (browserViewPanel) {
-                browserViewPanel.pushFrame({
-                  screenshot: shot,
-                  url: browserView?.url,
-                  title: browserView?.title,
-                });
-                browserViewPanel.openPanel();
-              } else {
-                select(shot);
-                setOpen(true);
-              }
-            }}
-          >
-            <img
-              className="w-full object-contain"
-              src={previewUrl}
-              alt={browserView?.title ?? "browser view"}
-              loading="lazy"
-              decoding="async"
-            />
-            {browserView?.url && (
-              <div className="text-muted-foreground bg-muted/40 truncate px-2 py-1 text-left text-[11px]">
-                {browserView.url}
-              </div>
-            )}
-          </button>
-        )}
+        {previewUrl &&
+          !deferBrowserPreview &&
+          (conversation.locked ? (
+            <span
+              title={conversation.sentence ?? undefined}
+              aria-description={conversation.sentence ?? undefined}
+            >
+              {browserView?.title ?? t.toolCalls.browserScreenshot}
+            </span>
+          ) : conversation.agent ? (
+            <a href={previewUrl} target="_blank" rel="noopener noreferrer">
+              {previewContent}
+            </a>
+          ) : (
+            <button
+              type="button"
+              className="border-border mt-1 block w-full max-w-md cursor-pointer overflow-hidden rounded-lg border"
+              onClick={() => {
+                if (!shot) {
+                  return;
+                }
+                if (browserViewPanel) {
+                  browserViewPanel.pushFrame({
+                    screenshot: shot,
+                    url: browserView?.url,
+                    title: browserView?.title,
+                  });
+                  browserViewPanel.openPanel();
+                } else {
+                  select(shot);
+                  setOpen(true);
+                }
+              }}
+            >
+              {previewContent}
+            </button>
+          ))}
       </ChainOfThoughtStep>
     );
   } else if (name === "web_search") {
@@ -842,11 +873,15 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        className={writeFileArtifactUrl ? "cursor-pointer" : undefined}
+        className={
+          writeFileArtifactUrl && artifactViewsEnabled
+            ? "cursor-pointer"
+            : undefined
+        }
         label={resolveLabel(description)}
         icon={NotebookPenIcon}
         onClick={() => {
-          if (!writeFileArtifactUrl) {
+          if (!writeFileArtifactUrl || !artifactViewsEnabled) {
             return;
           }
           select(writeFileArtifactUrl);
@@ -854,7 +889,9 @@ function ToolCall({
         }}
       >
         {writeFilePath && (
-          <ChainOfThoughtSearchResult className="cursor-pointer">
+          <ChainOfThoughtSearchResult
+            className={artifactViewsEnabled ? "cursor-pointer" : undefined}
+          >
             {writeFilePath}
           </ChainOfThoughtSearchResult>
         )}
@@ -950,11 +987,31 @@ interface BrowserViewMeta {
 function indexToolCallData(messages: Message[]) {
   const toolCallResults = new Map<string, string>();
   const browserViews = new Map<string, BrowserViewMeta>();
+  const networkDenied = new Map<string, { host: string; port: number }>();
 
   for (const message of messages) {
-    if (message.type !== "tool" || !message.tool_call_id) {
+    if (message.type !== "tool") {
       continue;
     }
+    const artifact: unknown = Reflect.get(message, "artifact");
+    const denied: unknown =
+      artifact && typeof artifact === "object"
+        ? Reflect.get(artifact, "sandbox_network_denied")
+        : null;
+    if (
+      denied &&
+      typeof denied === "object" &&
+      typeof Reflect.get(denied, "host") === "string" &&
+      Number.isInteger(Reflect.get(denied, "port"))
+    ) {
+      const host = Reflect.get(denied, "host") as string;
+      if (!networkDenied.has(host))
+        networkDenied.set(host, {
+          host,
+          port: Reflect.get(denied, "port") as number,
+        });
+    }
+    if (!message.tool_call_id) continue;
 
     const toolCallId = message.tool_call_id;
     if (!toolCallResults.has(toolCallId)) {
@@ -976,12 +1033,15 @@ function indexToolCallData(messages: Message[]) {
     }
   }
 
-  return { browserViews, toolCallResults };
+  return { browserViews, toolCallResults, networkDenied };
 }
 
-function convertToSteps(messages: Message[]): CoTStep[] {
+function convertToSteps(
+  messages: Message[],
+  toolData = indexToolCallData(messages),
+): CoTStep[] {
   const steps: CoTStep[] = [];
-  const { browserViews, toolCallResults } = indexToolCallData(messages);
+  const { browserViews, toolCallResults } = toolData;
   for (const [messageIndex, message] of messages.entries()) {
     if (message.type === "ai") {
       // Reasoning precedes the answer text it produced, so it is pushed first:

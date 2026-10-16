@@ -31,8 +31,11 @@ export function WorkspaceContainer({
 export function WorkspaceHeader({
   className,
   children,
+  breadcrumbSection,
   ...props
-}: React.ComponentProps<"header">) {
+}: React.ComponentProps<"header"> & {
+  breadcrumbSection?: { label: string; href: string };
+}) {
   const { t } = useI18n();
   const pathname = usePathname();
   const segments = useMemo(() => {
@@ -68,13 +71,20 @@ export function WorkspaceHeader({
                 <BreadcrumbItem>
                   {segments.length >= 2 ? (
                     <BreadcrumbLink asChild>
-                      <Link href={`/${segments[0]}/${segments[1]}`}>
-                        {nameOfSegment(segments[1], t)}
+                      <Link
+                        href={
+                          breadcrumbSection?.href ??
+                          `/${segments[0]}/${segments[1]}`
+                        }
+                      >
+                        {breadcrumbSection?.label ??
+                          nameOfSegment(segments[1], t)}
                       </Link>
                     </BreadcrumbLink>
                   ) : (
                     <BreadcrumbPage>
-                      {nameOfSegment(segments[1], t)}
+                      {breadcrumbSection?.label ??
+                        nameOfSegment(segments[1], t)}
                     </BreadcrumbPage>
                   )}
                 </BreadcrumbItem>
@@ -119,6 +129,8 @@ function nameOfSegment(
   if (segment === "workspace") return t.breadcrumb.workspace;
   if (segment === "chats") return t.breadcrumb.chats;
   if (segment === "attention") return t.attention.title;
-  if (segment === "instances") return t.agentInstances.title;
+  if (segment === "instances") return t.sidebar.agents;
+  if (segment === "assistants") return t.agentInstances.assistants.title;
+  if (segment === "employees") return t.agentInstances.employees.title;
   return segment[0]?.toUpperCase() + segment.slice(1);
 }

@@ -31,6 +31,8 @@ import { useMaybeBrowserView } from "../browser-view/context";
 import { useThread } from "../messages/context";
 import { useMaybeSidecar } from "../sidecar/context";
 
+import { useConversationFiles } from "./conversation-files";
+
 function RightPanelLoading() {
   return (
     <div className="grid size-full place-items-center">
@@ -79,6 +81,8 @@ const ChatBox: React.FC<{
   browserEnabled?: boolean;
 }> = ({ children, threadId, browserEnabled = true }) => {
   const { thread } = useThread();
+  const conversation = useConversationFiles();
+  const artifactsEnabled = !conversation.agent && !conversation.locked;
   const isMobile = useIsMobile();
   const pathname = usePathname();
   const threadIdRef = useRef(threadId);
@@ -143,6 +147,7 @@ const ChatBox: React.FC<{
   ]);
 
   const artifactPanelOpen = useMemo(() => {
+    if (!artifactsEnabled) return false;
     if (sidecarOpen) {
       return false;
     }
@@ -150,7 +155,7 @@ const ChatBox: React.FC<{
       return artifactsOpen && artifacts?.length > 0;
     }
     return artifactsOpen;
-  }, [artifactsOpen, artifacts, sidecarOpen]);
+  }, [artifactsEnabled, artifactsOpen, artifacts, sidecarOpen]);
 
   const activeRightPanel: RightPanelKind | null = sidecarOpen
     ? "sidecar"
@@ -285,7 +290,23 @@ const ChatBox: React.FC<{
     }
   }, [browserEnabled, browserView]);
 
+  useEffect(() => {
+    // Unknown binding hides content without erasing this thread's saved panel.
+    // Only a positive agent binding retires the ordinary artifact selection.
+    if (conversation.agent && (artifactsOpen || selectedArtifact)) {
+      setArtifactsOpen(false);
+      deselect();
+    }
+  }, [
+    conversation.agent,
+    artifactsOpen,
+    selectedArtifact,
+    setArtifactsOpen,
+    deselect,
+  ]);
+
   const rightPanelContent = useMemo(() => {
+    if (renderedRightPanel === "artifacts" && !artifactsEnabled) return null;
     if (renderedRightPanel === "browser") {
       return <BrowserViewPanel threadId={threadId} className="size-full" />;
     }
@@ -340,6 +361,7 @@ const ChatBox: React.FC<{
     }
     return null;
   }, [
+    artifactsEnabled,
     renderedRightPanel,
     sidecar,
     selectedArtifact,

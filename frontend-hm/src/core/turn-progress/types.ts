@@ -25,6 +25,8 @@ export interface TurnProgress {
   stage: TurnProgressStage;
   /** Milliseconds since the run was admitted, from the turn's own clock. */
   atMs: number;
+  /** Client receipt time; never derived from the server's elapsed clock. */
+  receivedAt?: number;
 }
 
 function isStage(value: unknown): value is TurnProgressStage {

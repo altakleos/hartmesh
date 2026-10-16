@@ -47,7 +47,15 @@ export function TurnProgressProvider({
   const [byThread, setByThread] = useState<Record<string, TurnProgress>>({});
 
   const record = useCallback((threadId: string, progress: TurnProgress) => {
-    setByThread((previous) => ({ ...previous, [threadId]: progress }));
+    const arrived = Date.now();
+    setByThread((previous) => {
+      const prior = previous[threadId];
+      const receivedAt =
+        prior?.runId === progress.runId && prior.stage === progress.stage
+          ? (prior.receivedAt ?? arrived)
+          : arrived;
+      return { ...previous, [threadId]: { ...progress, receivedAt } };
+    });
   }, []);
 
   const clear = useCallback((threadId: string) => {

@@ -11,6 +11,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { useConversationFiles } from "@/components/workspace/chats/conversation-files";
 import {
   ArtifactRequestError,
   downloadArtifactArchive,
@@ -50,6 +51,9 @@ export function ArtifactFileList({
   threadId: string;
 }) {
   const { t } = useI18n();
+  const conversation = useConversationFiles();
+  const archiveAllowed =
+    archiveDownloadsEnabled && !conversation.agent && !conversation.locked;
   const { localSkillManagement: canInstallSkill } = useCustomerAdministration();
   const { select: selectArtifact, setOpen } = useArtifacts();
   const [downloadingArchive, setDownloadingArchive] = useState(false);
@@ -58,8 +62,7 @@ export function ArtifactFileList({
   const { data: archiveManifest } = useQuery({
     queryKey: ["artifact-archive-manifest", threadId, runId],
     queryFn: () => getArtifactArchiveManifest({ threadId, runId: runId! }),
-    enabled:
-      archiveDownloadsEnabled && runId !== undefined && !staticWebsiteOnly,
+    enabled: archiveAllowed && runId !== undefined && !staticWebsiteOnly,
     retry: false,
     staleTime: Infinity,
   });
@@ -67,10 +70,11 @@ export function ArtifactFileList({
 
   const handleClick = useCallback(
     (filepath: string) => {
+      if (conversation.locked) return;
       selectArtifact(filepath);
       setOpen(true);
     },
-    [selectArtifact, setOpen],
+    [conversation.locked, selectArtifact, setOpen],
   );
 
   const handleInstallSkill = useCallback(
@@ -136,7 +140,7 @@ export function ArtifactFileList({
   }, [downloadingArchive, runId, t, threadId]);
 
   const canDownloadArchive =
-    archiveDownloadsEnabled &&
+    archiveAllowed &&
     archiveCount !== undefined &&
     archiveCount > 1 &&
     archiveCount <= MAX_ARTIFACT_ARCHIVE_FILES &&
@@ -167,12 +171,32 @@ export function ArtifactFileList({
         {files.map((file) => (
           <Card
             key={file}
-            className="relative cursor-pointer p-3"
-            onClick={() => handleClick(file)}
+            className={cn(
+              "relative p-3",
+              !conversation.locked && "cursor-pointer",
+            )}
+            aria-disabled={conversation.locked || undefined}
+            onClick={
+              conversation.locked || conversation.agent
+                ? undefined
+                : () => handleClick(file)
+            }
           >
             <CardHeader className="grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 pr-2 pl-1">
               <CardTitle className="relative min-w-0 pl-8 leading-tight [overflow-wrap:anywhere] break-words">
-                <div className="min-w-0">{getFileName(file)}</div>
+                <div className="min-w-0">
+                  {conversation.agent && !conversation.locked ? (
+                    <a
+                      href={urlOfArtifact({ filepath: file, threadId })}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {getFileName(file)}
+                    </a>
+                  ) : (
+                    getFileName(file)
+                  )}
+                </div>
                 <div className="absolute top-2 -left-0.5">
                   {getFileIcon(file, "size-6")}
                 </div>
@@ -181,7 +205,8 @@ export function ArtifactFileList({
                 {getFileExtensionDisplayName(file)} file
               </CardDescription>
               <CardAction className="row-span-1 self-center">
-                {skillInstallEnabled &&
+                {!conversation.locked &&
+                  skillInstallEnabled &&
                   file.endsWith(".skill") &&
                   canInstallSkill && (
                     <Button
@@ -197,26 +222,31 @@ export function ArtifactFileList({
                       {t.common.install}
                     </Button>
                   )}
-                <Button variant="ghost" asChild>
-                  <a
-                    href={urlOfArtifact({
-                      filepath: file,
-                      threadId: threadId,
-                      download: true,
-                    })}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <DownloadIcon className="size-4" />
-                    {t.common.download}
-                  </a>
-                </Button>
+                {!conversation.locked && (
+                  <Button variant="ghost" asChild>
+                    <a
+                      href={urlOfArtifact({
+                        filepath: file,
+                        threadId: threadId,
+                        download: true,
+                      })}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <DownloadIcon className="size-4" />
+                      {t.common.download}
+                    </a>
+                  </Button>
+                )}
               </CardAction>
             </CardHeader>
           </Card>
         ))}
       </ul>
+      {conversation.locked && conversation.sentence && (
+        <p>{conversation.sentence}</p>
+      )}
     </div>
   );
 }

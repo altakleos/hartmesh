@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useId, useState } from "react";
 
@@ -19,8 +20,15 @@ import {
   WorkspaceContainer,
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
+import { useAgentHomes } from "@/core/agent-instances/hooks";
 import { useAuth } from "@/core/auth/AuthProvider";
-import { useDocumentTitle, useStorageSpacesEnabled } from "@/core/features";
+import {
+  useDocumentTitle,
+  useStorageSpacesEnabled,
+  useSpacesPageVisible,
+  useStorage,
+  useAgentInstances,
+} from "@/core/features";
 import { useFileActionLifetime } from "@/core/file-areas/file-action-lifetime";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -43,15 +51,27 @@ export default function SpacesPage() {
   const { t } = useI18n();
   const { user } = useAuth();
   const capability = useStorageSpacesEnabled();
+  const visible = useSpacesPageVisible();
+  const storage = useStorage();
+  const agents = useAgentInstances();
   const search = useSearchParams();
   const router = useRouter();
   const raw = search.get("space");
   const id = raw && /^[0-9a-f]{32}$/.test(raw) ? raw : null;
   const path = search.get("path") ?? "";
-  const spaces = useSpaces(capability.enabled);
-  const space = useSpace(id, capability.enabled);
+  const discoverAgents =
+    visible &&
+    capability.enabled &&
+    agents.known &&
+    agents.enabled &&
+    id !== null;
+  const homes = useAgentHomes(discoverAgents);
+  const spaces = useSpaces(visible && capability.enabled);
+  const space = useSpace(id, visible && capability.enabled);
   const lifetime = useFileActionLifetime();
-  const captureSignal = useSpaceActionSignal();
+  const captureSignal = useSpaceActionSignal(
+    `${visible}:${capability.enabled}:${storage.userSpaces}`,
+  );
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [custody, setCustody] = useState<"personal" | "company">("personal");
@@ -79,9 +99,14 @@ export default function SpacesPage() {
     } catch (failure) {
       if (!signal.aborted && lifetime.active)
         setError(
-          failure instanceof Error
-            ? failure.message
-            : t.storageSpaces.operationError,
+          typeof failure === "object" &&
+            failure !== null &&
+            "status" in failure &&
+            failure.status === 403
+            ? t.storageSpaces.createOff
+            : failure instanceof Error
+              ? failure.message
+              : t.storageSpaces.operationError,
         );
     } finally {
       if (!signal.aborted && lifetime.active) setBusy(false);
@@ -97,6 +122,16 @@ export default function SpacesPage() {
           <p className="text-muted-foreground">{t.storageSpaces.description}</p>
           {capability.isLoading ? (
             <p role="status">{t.common.loading}</p>
+          ) : !visible ? (
+            <div role="status" className="space-y-2">
+              <p>{t.storageSpaces.membersHint}</p>
+              <p className="flex gap-4">
+                <Link href="/workspace/assistants">
+                  {t.sidebar.myAssistants}
+                </Link>
+                <Link href="/workspace/employees">{t.sidebar.aiEmployees}</Link>
+              </p>
+            </div>
           ) : !capability.enabled ? (
             <div role="status">
               <h2>{t.storageSpaces.unavailable}</h2>
@@ -127,14 +162,16 @@ export default function SpacesPage() {
                     </option>
                   ))}
                 </select>
-                <Button
-                  onClick={() => {
-                    setCreating(true);
-                    setError(null);
-                  }}
-                >
-                  {t.storageSpaces.newSpace}
-                </Button>
+                {storage.userSpaces && (
+                  <Button
+                    onClick={() => {
+                      setCreating(true);
+                      setError(null);
+                    }}
+                  >
+                    {t.storageSpaces.newSpace}
+                  </Button>
+                )}
                 <Button
                   variant="outline"
                   onClick={() => {
@@ -157,8 +194,19 @@ export default function SpacesPage() {
                     {(space.data.permissions & 8) !== 0 &&
                       space.data.mode === "native" && (
                         <SpaceRecoveryPanel
-                          key={`${user?.id}:${space.data.id}`}
+                          key={`${user?.id}:${user?.system_role}:${user?.permissions?.join(",")}:${space.data.id}`}
                           space={space.data}
+                          agent={homes.data?.find(
+                            (agent) => agent.home_id === space.data.id,
+                          )}
+                          discoveryPending={discoverAgents && homes.isPending}
+                          findAgent={async () => {
+                            const result = await homes.refetch();
+                            if (result.error) throw result.error;
+                            return result.data?.find(
+                              (agent) => agent.home_id === space.data.id,
+                            );
+                          }}
                           refresh={() => {
                             void space.refetch();
                             void spaces.refetch();
@@ -186,7 +234,7 @@ export default function SpacesPage() {
           )}
         </div>
         <Dialog
-          open={creating && capability.enabled}
+          open={creating && visible && capability.enabled && storage.userSpaces}
           onOpenChange={(open) => {
             if (!busy) setCreating(open);
           }}

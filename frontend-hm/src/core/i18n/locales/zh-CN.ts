@@ -15,7 +15,19 @@ import type { Translations } from "./types";
 
 export function createZhCN(product: string): Translations {
   return {
+    people: {
+      you: "你",
+      youInline: "你",
+      aManager: "一位管理员",
+      formerNamed: (person) => `${person}（已停用）`,
+      former: "一位前同事",
+      unknown: "一位同事",
+    },
     attention: {
+      navCount: (pending, routing) =>
+        routing === 0
+          ? `${pending} 项等待你的回复`
+          : `${pending} 项等待你的回复，${routing} 项等待指定接收人`,
       title: "关注事项",
       pending: "需要你的输入",
       routing: "需要指定接收人",
@@ -23,19 +35,20 @@ export function createZhCN(product: string): Translations {
       all: "共享请求",
       empty: "此视图暂无请求。",
       unavailable: "当前部署或权限不支持关注事项。",
-      notice: "回复会被保存，但不会启动运行。打开 Work，显式恢复 AI 员工执行。",
+      notice: (name) =>
+        `回复会保存，但不会启动工作。要让${name ?? "AI 助理或 AI 员工"}继续，请打开任务并点击恢复。`,
       question: "问题",
       reason: "原因",
       expected: "预期回复",
       information: "信息",
       decision: "决定",
       review: "结果审核",
-      recipient: "人类接收人 ID",
+      recipient: "谁来回答",
       defaultRecipient: "留空以使用符合权限的人类主管。",
       create: "请求人类输入",
       purpose: "用途",
       choices: "选项（可选，每行一个）",
-      shared: "问题和回复对当前有 Work 查看权限的人共享。",
+      shared: (name) => `所有能查看${name}全部工作的人都能阅读问题和回复。`,
       send: "提交回复",
       supplied: "已提供信息",
       cannot_provide: "无法提供",
@@ -58,7 +71,7 @@ export function createZhCN(product: string): Translations {
       reset: "放弃过期表单并重新加载",
       stale: "请求已更改。回复前请检查当前问题和接收人。",
       retry: "重试原提交",
-      unconfirmed: "尚未确认保存。请重试原提交以获取回执。",
+      unconfirmed: "尚未确认是否已保存。请重试相同的提交；不会重复保存。",
       receipt: "已保存回复回执",
       saved: "已保存",
       closed: "已关闭",
@@ -68,71 +81,108 @@ export function createZhCN(product: string): Translations {
       file: "现有文件引用",
       space: "存储空间",
       path: "相对文件路径",
-      fileNotice:
-        "引用不会为 AI 员工上传或挂载文件。传输请使用已授权的 Home 存储控件，且需要独占写入窗口。上传与回复是独立操作。",
+      fileNotice: (name) =>
+        `引用指向${name}已经拥有的文件；不会将文件交给${name}。请先通过${name}的文件标签页或与${name}的对话附件交付文件，再在这里引用。`,
       requestLink: "在关注事项中查看请求",
       unchecked: "尚未核查文件当前内容。",
-      noAssessment:
-        "信息等待评估。获得授权的人类可打开 Work，显式恢复 AI 员工执行。",
+      noAssessment: (name) =>
+        `回复已保存。要让${name}使用此回复，请打开任务并点击恢复。`,
       outcome: "已提交的结果陈述",
       state: "请求状态",
       activity: "最近活动",
-      recipientMissing: "需要符合权限的人类接收人。",
+      recipientMissing: "暂时无人。管理者需要选择一位同事。",
       readState: "已读至版本",
       sources: "来源引用",
       createUnavailable: "新请求需要启用策略且已协调的活动 Work。",
+      noPermission: "您没有查看请求的权限。",
+      unavailableStill: (name) =>
+        `您仍可阅读请求并回复。回复会保留，直到${name ?? "AI 助理和 AI 员工"}能够再次工作。`,
+      loadError: "无法加载请求。请检查连接并刷新。",
+      emptyPending:
+        "目前没有需要您提供的信息。AI 助理或 AI 员工需要您提供文件、事实或决定时，请求会显示在这里。",
+      recipientDefault: (supervisor) => `${supervisor}（监督者）`,
+      recipientNone: "暂时无人",
+      savedAt: (time) => `已于${time}保存。`,
+      readCurrent: "您已阅读最新版本。",
+      readStale: "阅读后已有更改。",
+      sourceUnavailable: "您已无法访问此文件。",
+      closedReason: {
+        resolved: "已回答并检查",
+        superseded: "已由新问题替代",
+        withdrawn: "已撤回",
+      },
+      event: {
+        create: "已提问",
+        respond: "已回复",
+        route: "接收人已更改",
+        withdraw: "问题已撤回",
+        assess: "回复已检查",
+        decide: "已记录决定",
+        accept: "已接受结果",
+        edit: "已关闭：任务已编辑",
+        cancel: "已关闭：任务已撤回",
+        reopen: "已关闭：任务已重新开放",
+        changes_requested: "已关闭：已要求更改",
+        reconcile_mandate: "已按更新后的工作说明检查",
+        other: "已更新",
+      },
     },
     agentWork: {
-      newConversation: "使用新的执行会话",
-      reconcileAttempt: "核对已隔离的尝试",
-      containmentReceipt: "已完成的隔离操作",
-      containmentNotice:
-        "服务器会验证此先前环境已被隔离。恢复会保留报告和效果，但不会宣告成功或恢复执行。",
-
+      stopPending: (name) => `正在停止${name}的工作，可能需要一分钟。`,
+      stopNothing: (name) => `没有需要停止的工作：${name}已经停止处理此任务。`,
+      stopFailed: "无法停止工作，请重试。",
+      newConversation: "使用新对话",
+      reconcileAttempt: "手动关闭此工作",
+      containmentReceipt: (name) => `关闭${name}工作环境的更改`,
+      containmentNotice: (name) =>
+        `仅在工作持续未确认时使用。此操作记录${name}的工作环境已关闭，不会将工作标为完成，也不会重新启动${name}。`,
       responsibilities: "职责",
       currentWork: "本页当前工作",
       needsInput: "本页待关注工作",
       recentOutcomes: "本页近期结果",
       activate: "执行此工作",
       resume: "恢复执行",
-      recoverActivation: "恢复启动回执",
-      execution: "执行尝试",
-      openConversation: "打开执行会话",
+      recoverActivation: "再次尝试启动",
+      execution: (name) => `${name}的工作`,
+      openConversation: "打开任务的对话",
       candidate: "完成报告正在等待确认；尚未提交审核。",
-      uncertain:
-        "执行或清理结果尚不确定。拥有 Home ADMIN 权限的管理员必须先隔离先前环境并核对本次尝试，才能再次启动。",
+      uncertain: (name) =>
+        `${name}的最后一步没有返回结果。正在安全关闭${name}的工作环境，通常不到一分钟。`,
       suggestion: "建议的后续工作",
       delegateSuggestion: "准备委派",
       attemptStatus: {
         starting: "正在启动",
-        running: "正在运行",
-        stopping: "等待停止",
-        uncertain: "结果不确定",
-        succeeded: "运行结束",
+        running: "正在工作",
+        stopping: "正在停止…",
+        uncertain: "正在确认发生了什么",
+        succeeded: "已结束",
         failed: "失败",
-        cancelled: "已取消",
+        cancelled: "已停止",
+        contained: "已中断",
+        notStarted: "未启动",
+        noResult: "结束但没有结果",
       },
       resetResponse: "为当前记录重置回复",
       replaceUnavailable: "替换引用列表，包括删除不可访问的引用。",
       title: "工作",
-      recordsOnly:
-        "委派会保存任务。“执行此工作”或“恢复执行”会显式启动 AI 员工；回复和截止目标不会启动运行。",
-      visibility:
-        "跟踪委派需要 Use 和 Inspect 权限，包括查看此 AI 员工的共享工作。",
-      policyDisabled:
-        "要委派，请在定义设置中启用工作，再为此 AI 员工采用该定义。现有记录仍可访问。",
+      recordsOnly: (name) =>
+        `保存任务不会启动工作。点击“执行此工作”或“恢复”后，${name}才开始工作。`,
+      visibility: (supervisor) =>
+        `要查看和分配任务，您需要“可聊天”和“可查看所有工作”权限。请联系${supervisor}。`,
+      policyDisabled: (name) =>
+        `${name}的任务功能已关闭。管理者可以在${name}的设置标签页开启。以前保存的任务仍可阅读。`,
       policyEnabled: "启用工作跟踪",
       policyNotice:
-        "此设置更改定义。管理员采用新定义之前，现有 AI 员工保留已采用的策略。执行需要单独显式启动。",
+        "这会更改定义。使用该定义的 AI 助理和 AI 员工会保留当前设置，直到管理者应用更新后的工作说明。不会自动启动任何工作。",
       reviewRequired: "要求人工审核",
       responsibility: "职责",
       objective: "目标",
       criteria: "成功标准",
       priority: "优先级",
-      due: "预期时间（本地时间；不会安排执行）",
+      due: "截止时间（本地时间；不会自动启动）",
       delegate: "委派工作",
-      sharedNotice:
-        "任务及备注与此 AI 员工的 Inspect 用户共享。仅填写您希望共享的信息。",
+      sharedNotice: (name) =>
+        `所有能查看${name}全部工作的人都能阅读任务和备注。请只填写您愿意分享的内容。`,
       empty: "暂无工作记录。",
       open: "待处理",
       blocked: "受阻",
@@ -146,17 +196,18 @@ export function createZhCN(product: string): Translations {
       edit: "编辑任务",
       save: "保存任务",
       cancelEdit: "放弃草稿",
-      cancel: "取消工作",
+      cancel: "撤回任务",
       reopen: "重新打开工作",
       changes_requested: "要求修改",
-      reconcile_mandate: "按已采用职责重新确认",
+      reconcile_mandate: "按更新后的工作说明确认",
       accept: "接受结果陈述",
-      reconcileNeeded:
-        "已采用的职责已更改。将来执行前，管理员必须重新确认此任务。",
+      reconcileNeeded: (name) =>
+        `保存此任务后，${name}的工作说明已更改。管理者需要确认任务仍然适用，${name}才能处理。`,
       note: "备注或回复",
       input: "提供事实信息",
       decide: "记录管理员决定",
-      inputNotice: "事实信息不会解除阻碍或批准决定。回复不会启动执行。",
+      inputNotice: (name) =>
+        `此处提供的信息不会解决问题或批准决定，也不会启动工作。要让${name}继续，请点击恢复。`,
       unchecked: "尚未检查当前内容。引用不证明文件存在，也不证明内容已经审核。",
       acceptUnchecked:
         "我接受已记录的结果陈述，并确认文件内容未经检查或不可访问。",
@@ -177,15 +228,504 @@ export function createZhCN(product: string): Translations {
       nextAction: "下一步",
       lastActivity: "最近活动",
       acceptedBy: "人工审核接受人",
-      reportedComplete: "AI 员工报告已完成",
+      reportedComplete: (name) => `${name}已报告完成`,
       creator: "委派人",
       human: "人员",
       nonhuman: "AI 员工",
+      stop: "停止",
+      stopConfirm: (name) =>
+        `停止${name}处理此任务吗？${name}已经完成的内容会保留在${name}的文件中，任务保持开放，您之后可以点击恢复。`,
+      stopNow: "立即停止",
+      keepWorking: "继续工作",
+      stopped: (person, time) =>
+        `${person}于${time}停止了工作。点击恢复以继续。`,
+      stoppedByEdit: (person) =>
+        `${person}编辑了任务，因此工作已停止。点击恢复以按新版本继续。`,
+      stoppedByWithdraw: (person) => `${person}撤回了任务，因此工作已停止。`,
+      stoppedByService: (name) =>
+        `服务重启或维护导致工作停止。${name}已经完成的内容保留在${name}的文件中。点击恢复以继续。`,
+      stoppedPlain: "已停止。点击恢复以继续。",
+      uncertainWaiting: (name) =>
+        `${name}的最后一步没有返回结果。待${name}的其他对话结束后，将关闭${name}的工作环境；之后可恢复此任务。`,
+      attemptFailed: (name, support) =>
+        `${name}因错误停止了此任务。请点击恢复以重试；如果持续发生，请联系${support}。`,
+      endedWithoutReport: (name) =>
+        `${name}停止了工作，但没有报告结果或在此任务上提问。${name}最后写下的内容在对话中。如果${name}在那里提问，请先在对话中回答或编辑任务，然后点击恢复。`,
+      recoverActivationNote: "这不会重复启动工作。",
+      giveNeedsChat: (name, supervisor) =>
+        `要向${name}分配任务，您还需要“可聊天”权限。请联系${supervisor}。`,
+      advanced: "高级",
+      latest: "（最新）",
+      manualFirst: (name) =>
+        `请在${name}的设置标签页暂停并恢复${name}，然后返回此处。`,
+      unresolvedAsk: (supervisor) => `请联系${supervisor}检查此情况。`,
+      host: "服务",
+      attempt: {
+        busy: (name, action) =>
+          `同时运行的工作过多，因此${name}未能启动。请稍后再次点击${action}。`,
+        runLimit: (name, action) =>
+          `${name}已在两个对话中工作。请在其中一个结束后点击${action}。`,
+        restarting: (name, action) =>
+          `${name}的工作环境正在重启。请几分钟后再次点击${action}。`,
+        startingElsewhere: (name, action) =>
+          `另一个对话正在启动${name}。请稍后再次点击${action}。`,
+        startFailed: (name, action, support) =>
+          `${name}的工作环境无法启动，未执行任何工作。请点击${action}重试；如果持续发生，请联系${support}。`,
+        full: (name, support) =>
+          `${name}的文件空间已满，因此${name}无法启动。请在${name}的文件标签页删除文件，或联系${support}增加空间。`,
+        fullAsk: (name, supervisor, support) =>
+          `${name}的文件空间已满，因此${name}无法启动。请联系${supervisor}删除文件，或联系${support}增加空间。`,
+      },
+      workLimit: {
+        one: "另一个任务正在运行，此处一次只能运行一个。该任务结束后即可启动此任务。",
+        many: (count) =>
+          `已有${count}个任务正在运行，已达到同时运行的上限。请等其中一个结束后再启动此任务。`,
+        which: (agent, objective, time, person) =>
+          `${agent}正在处理“${objective}”，由${person}于${time}启动。`,
+        starting: (agent) => `${agent}正在启动一个任务。`,
+        free: (name) => `现在有空位了。${name}可以开始工作。`,
+      },
+      event: {
+        delegate: "任务已保存",
+        activate: "工作已启动",
+        progress: "已报告进展",
+        outcome: "已报告完成",
+        request_input: "已请求输入",
+        revise_input: "问题已更改",
+        assess_input: "已检查回复",
+        suggest: "已建议后续工作",
+        derive: "已创建后续任务",
+        derived: "由另一任务创建",
+        human_response: "已回复",
+        request_route: "问题已转给其他人",
+        request_withdraw: "问题已撤回",
+        input: "已提供信息",
+        decide: "已记录决定",
+        accept: "已接受结果",
+        edit: "任务已编辑",
+        cancel: "任务已撤回",
+        reopen: "任务已重新开放",
+        changes_requested: "已要求更改",
+        reconcile_mandate: "已按更新后的工作说明检查",
+        reconcile_attempt: "已手动关闭",
+        stop: "已请求停止",
+        attempt_settled: "工作已结束",
+        attempt_uncertain: "工作结束但未确认",
+        attempt_contained: "已中断",
+        other: "已更新",
+      },
+      contained: {
+        containerAbsent: (name) =>
+          `${name}处理此任务时，${name}的工作环境意外停止。`,
+        runOrphaned: (name) => `${name}处理此任务时，服务已重启。`,
+        runNeverStarted: (name) =>
+          `启动${name}的请求未完成，没有更改任何内容。`,
+        startFailed: (name, support) =>
+          `${name}的工作环境无法启动，未执行任何工作。请点击恢复以重试；如果持续发生，请联系${support}。`,
+        outcomeUncertain: (name) =>
+          `${name}的最后一步没有返回结果，因此已关闭${name}的工作环境以保护文件。继续前请检查文件。`,
+        idle: (name) =>
+          `${name}没有完成此任务，且${name}的工作环境在一段时间未使用后关闭。`,
+        lifecycle: (name) =>
+          `管理者在${name}处理此任务时暂停或停用了${name}，或更改了${name}的权限、监督者或工作说明，关闭了${name}的工作环境。`,
+        storageRecovery: (provider, name) =>
+          `${provider}在${name}处理此任务时恢复或修复了${name}的文件，关闭了${name}的工作环境。继续前请检查文件。`,
+        operator: (name, provider) =>
+          `${name}处理此任务时，${provider}关闭了${name}的工作环境以进行维护。`,
+        hostReplaced: (name) =>
+          `${name}处理此任务时，服务已迁移到新服务器。${name}的文件为上次备份时的版本；继续前请检查文件。`,
+        unknown: (name) => `${name}处理此任务的工作已中断。`,
+        kept: (name) =>
+          `${name}已完成的内容保留在${name}的文件中；没有提交审核。`,
+        candidate: (name) =>
+          `中断前${name}已写下完成报告，但未提交。请点击恢复，让${name}检查工作并再次报告。`,
+      },
+    },
+    sandboxNetwork: {
+      title: "网站被阻止",
+      blocked: (name, host, minutes, provider) =>
+        `${name} 尝试访问 ${host}，但该网站不在允许列表中。您可以让 ${name} 的全部对话和任务在 ${minutes} 分钟内访问 ${host}，或继续阻止 ${host}。永久列表由 ${provider} 设置。`,
+      neverAllowed: "公司内部网络中的地址始终不能被允许。",
+      allow: (minutes) => `允许 ${minutes} 分钟`,
+      keepBlocked: "继续阻止",
+      allowed: (host, minutes, name) =>
+        `已允许访问 ${host}，有效期 ${minutes} 分钟。请让 ${name} 重试，或在需要 ${host} 的任务上点击恢复。`,
+      kept: (host) => `${host} 仍被阻止。`,
+      managersOnly: (name) => `只有能管理 ${name} 的人才能允许网站。`,
+      deniedAsk: (name, host, supervisor, support) =>
+        `${name} 无法访问 ${host}，该网站不在允许列表中。请联系 ${supervisor} 暂时允许 ${host}，或联系 ${support} 将 ${host} 添加到列表。`,
+      denied: (name, host, provider) =>
+        `${name} 无法访问 ${host}，该网站不在允许列表中。如需暂时允许，请在您自己的对话中让 ${name} 访问 ${host}，并在询问时允许该网站。然后请 ${name} 重试，或在已结束的任务上点击恢复。永久列表由 ${provider} 设置。`,
     },
     agentInstances: {
+      welcome: {
+        title: (name) => `${name} 已准备好`,
+        body: (name) => `${name} 会在对话之间保留文件和记忆。`,
+        ownFiles: (name) =>
+          `${name} 在自己的文件中工作，不会操作您的文件或浏览器。要给 ${name} 文件，请在这里附加。`,
+        assistantNoMyFiles: (name) => `${name} 无法查看我的文件。`,
+        sharedReadable: (name) => `${name} 可以阅读共享文件。`,
+        prefilled: "消息框中已准备好第一条消息。只有点击发送后才会发送。",
+        firstMessage: (name) =>
+          `你好，${name}。请简要介绍你的角色、可以交给你的工作，以及如何交接文件。`,
+        tipFiles: (name) => `附加文件以交给 ${name}。`,
+        tipWork: (name) => `在工作标签页给 ${name} 分配任务。`,
+        tipAccess: "在访问权限标签页添加同事。",
+        companyNotice: (name) =>
+          `任何可以查看 ${name} 所有工作的人，都可以阅读与这位 AI 员工的对话。`,
+      },
+      chat: {
+        subline: (kind, own, owner, supervisor) =>
+          kind === "company"
+            ? `AI 员工 · 监督者：${supervisor}`
+            : own
+              ? "您的 AI 助理"
+              : `${owner} 的 AI 助理`,
+        alsoWorking: "还在另一个对话中工作",
+        colleagues: (person, name) =>
+          `这是 ${person} 与 ${name} 的对话。${person} 可以阅读您在此发送的内容。`,
+      },
+      fileNeedsInspect: (name, supervisor) =>
+        `要打开 ${name} 的文件，您需要“可查看所有工作”权限。请联系 ${supervisor}。`,
+      busy: (name) =>
+        `同时运行的工作过多，因此 ${name} 未能启动。请稍后再次发送消息。`,
+      conversationLimit: (name) =>
+        `${name} 已在两个对话中工作。请在其中一个结束后再次发送消息。`,
+      restarting: (name) =>
+        `${name} 的工作环境正在重启，等待另一个对话结束。请几分钟后再次发送消息。`,
+      startingElsewhere: (name) =>
+        `另一个对话正在启动 ${name}。请稍后再次发送消息。`,
+      fullStart: (name, support) =>
+        `${name} 的文件空间已满，因此 ${name} 无法启动。请在 ${name} 的文件标签页删除文件，或联系 ${support} 增加空间。`,
+      fullStartAsk: (name, supervisor, support) =>
+        `${name} 的文件空间已满，因此 ${name} 无法启动。请联系 ${supervisor} 删除文件，或联系 ${support} 增加空间。`,
+      interruptedByManager: (name) =>
+        `管理者更改了 ${name} 的设置，重启了 ${name} 的工作环境并停止了此回复。${name} 文件中已保存的内容没有丢失。请再次发送消息以继续。`,
+      interruptedByRecovery: (provider, name) =>
+        `${provider} 恢复或修复了 ${name} 的文件，关闭了 ${name} 的工作环境并停止了此回复。请几分钟后再次发送消息。如果文件已恢复，请先检查文件。`,
+      interrupted: (name) =>
+        `${name} 的工作环境已重启，停止了此回复。请再次发送消息。`,
+      interruptedByService: "服务已重启，停止了此回复。请再次发送消息。",
+      bringBack: "重新启用",
+      makeEmployee: "用这份职责说明创建 AI 员工",
+      makeEmployeeNotice:
+        "这会添加一位使用相同职责说明的独立 AI 员工。不会复制文件和记忆；请在新 AI 员工的文件标签页添加所需文件。",
+      files: {
+        root: (name) => `${name} 的文件`,
+        name: "名称",
+        size: "大小",
+        modified: "更改时间",
+        uploadsHint: (name) => `他人提供给 ${name} 的文件`,
+        outputsHint: (name) => `${name} 生成的文件`,
+        producedBy: (name, date) => `由 ${name} 于 ${date} 生成`,
+        add: "添加文件",
+        drop: (name) => `将文件拖到此处以提供给 ${name}`,
+        choose: "选择文件",
+        newFolder: "新建文件夹",
+        folderName: "文件夹名称",
+        newName: "新名称",
+        deleteConfirm: (file) => `删除 ${file}？此操作无法撤销。`,
+        needsInspect: (name, supervisor) =>
+          `要查看 ${name} 的文件，您需要“可查看所有工作”权限。请联系 ${supervisor}。`,
+        readOnlyHint: (name) =>
+          `要提供文件给 ${name}，请在与 ${name} 的对话中附加文件。`,
+        emptyRoot: (name) => `此处尚无内容。拖放文件以提供给 ${name}。`,
+        emptyRootReader: "此处尚无内容。",
+        uploading: (percent) => `正在上传… ${percent}%`,
+        saved: (name) => `已保存在 ${name} 的文件中`,
+        savedAs: (file) => `已另存为 ${file}`,
+        refused: (file) => `无法保存 ${file}。请重试。`,
+        noAccess: (name) => `您已无法提供文件给 ${name}。`,
+        full: (name, support) =>
+          `${name} 的文件已满。请在 ${name} 的“文件”标签页删除文件，或联系 ${support} 增加容量。`,
+        fullAsk: (name, supervisor, support) =>
+          `${name} 的文件已满。请联系 ${supervisor} 删除文件，或联系 ${support} 增加容量。`,
+        tooLarge: (file, max) => `${file} 大于单个文件的上限 ${max}。`,
+        listFailed: (name) => `无法加载 ${name} 的文件。请刷新。`,
+        accessNotSaved: (name) =>
+          `尚未保存您对 ${name} 文件的访问权限。请管理者在 ${name} 的“访问权限”标签页重新保存您的权限。`,
+        listLive: (name) => `${name} 正在工作，文件可能在您查看时更改。`,
+        invalidName: "不能使用该名称。",
+        reserved: (name) => `该文件夹供 ${name} 自身的工具使用。`,
+        nameTaken: "此处已有同名内容。",
+        fileChanged: "文件在您打开后已更改。请重新加载，您的文本会保留。",
+        folderNotEmpty: "删除文件夹前，请先清空其中的内容。",
+        notActive: (name) => `${name} 已暂停或停用，无法更改 ${name} 的文件。`,
+        notFound: "该文件或文件夹已不存在。请刷新列表。",
+        actionFailed: "操作未成功。请重试。",
+      },
+      memoryTooLarge:
+        "内容过大，无法导入记忆。请粘贴使用“导出记忆”生成的文件内容。",
+      memoryInvalid: "这不是记忆导出文件。请粘贴使用“导出记忆”生成的文件内容。",
+      create: {
+        title: (kind) =>
+          kind === "personal" ? "添加 AI 助理" : "添加 AI 员工",
+        step: (n) => `第 ${n} 步，共 2 步`,
+        namePlaceholder: "例如：报告分析师",
+        nameHelp: (kind) =>
+          kind === "personal"
+            ? "在所有显示这位 AI 助理的地方使用的名称。"
+            : "在所有显示这位 AI 员工的地方使用的名称。",
+        nameInvalid: "名称须为 1 至 128 个字符。",
+        roleHeading: (name) => `${name} 将做什么？`,
+        roleHeadingUnnamed: (kind) =>
+          kind === "personal"
+            ? "这位 AI 助理将做什么？"
+            : "这位 AI 员工将做什么？",
+        roleBlank: "空白职责说明",
+        roleBlankDescription: "自行描述职责。",
+        rolesNone: "尚未设置现成的角色。请在下方描述职责。",
+        rolesFailed: "无法加载现成的角色。请在下方描述职责，或重试。",
+        replaceBrief: "将您编辑的说明替换为这个角色的说明？",
+        keepBrief: "保留您的说明",
+        useRoleBrief: "使用角色的说明",
+        brief: (name) => `${name} 负责什么`,
+        briefUnnamed: (kind) =>
+          kind === "personal" ? "这位 AI 助理负责什么" : "这位 AI 员工负责什么",
+        briefHelp: (name) =>
+          `这些内容将成为 ${name} 的常驻指令。您可在 ${name} 的“设置”标签页更改。`,
+        briefHelpUnnamed: (kind) =>
+          kind === "personal"
+            ? "这些内容将成为这位 AI 助理的常驻指令。您可在“设置”标签页更改。"
+            : "这些内容将成为这位 AI 员工的常驻指令。您可在“设置”标签页更改。",
+        briefPlaceholder:
+          "用几句话描述职责：做什么、保留什么，以及何时向人提问。",
+        briefRequired: "请简要描述职责。",
+        briefTooLong: "职责说明过长。请少于 16,000 个字符。",
+        useCustomAgent: "使用您的自定义智能体",
+        useRole: "改为描述职责",
+        customAgent: "自定义智能体",
+        customAgentNone: "您尚无自定义智能体。",
+        next: "下一步",
+        back: "返回",
+        supervisorHeading: (name) => `谁负责 ${name}`,
+        supervisorHelp: (name) =>
+          `对 ${name} 负责的人。${name} 的问题会优先发送给此人。`,
+        settingUp: (name) => `正在设置 ${name}…`,
+        slow: "用时比平常更长。请保持此窗口打开。",
+        unconfirmed: (name) =>
+          `尚未确认是否已添加 ${name}。请点击重试，不会重复添加。`,
+        failed: (name) => `无法添加 ${name}。请重试。`,
+        briefFailed: "无法保存职责说明。请重试。",
+        companyRefused: "只有管理员可以添加 AI 员工。",
+        addedNoConversation: (name) =>
+          `已添加 ${name}，但无法打开首个对话。请点击“新建对话”重试。`,
+      },
+      filesBusy: (name) =>
+        `${name} 的文件正在更改，暂时无法使用。请过几分钟再试。`,
+      assistants: {
+        title: "我的助理",
+        description:
+          "AI 助理属于您：在不同对话间保留职责说明、文件和记忆；只有您能使用，除非您添加同事。AI 助理看不到“我的文件”，需要您提供文件。",
+        add: "添加 AI 助理",
+        none: "尚无 AI 助理。",
+        othersHeading: "同事授权您访问的 AI 助理",
+        ownerLine: (owner) => `${owner} 的 AI 助理`,
+        allowance: (count, max, name) =>
+          max === 1
+            ? count === 0
+              ? "您可以添加 1 位 AI 助理。"
+              : `${name} 是您的 AI 助理。每人可拥有 1 位。`
+            : `您已有 ${count} 位 AI 助理，每人最多可有 ${max} 位。`,
+        limitReached: (count, max, name) =>
+          max === 1
+            ? `您已有 AI 助理 ${name}，每人只能有一位。请在 ${name} 的“设置”标签页删除 ${name} 后再添加，或请管理员添加 AI 员工。`
+            : `您已有 ${count} 位 AI 助理，已达个人上限。请在某位 AI 助理的“设置”标签页删除后再添加，或请管理员添加 AI 员工。`,
+        limitUnfinished: (name) =>
+          `${name} 的设置未完成，仍计入您的 AI 助理数量。请先在“未完成”下完成或移除 ${name}。`,
+        noneFree: (administrator, provider) =>
+          `目前无法添加 AI 助理：此处允许的 AI 助理名额已用完。${administrator ? `请联系 ${provider} 增加名额` : "请联系管理员"}。`,
+        noPermission: "您无权添加 AI 助理。请联系管理员。",
+        notOffered: "此处不提供 AI 助理。",
+        listFailed: "无法加载您的 AI 助理。请检查连接并刷新。",
+      },
+      employees: {
+        title: "AI 员工",
+        description:
+          "AI 员工属于公司：人员离职后仍可继续工作，有一位监督者，并始终标为 AI。",
+        add: "添加 AI 员工",
+        none: "尚无 AI 员工。",
+        adminsAdd: "由管理员添加 AI 员工。",
+        supervisorLine: (supervisor) => `由 ${supervisor} 监督`,
+        allowance: (count, max) => `${count} / ${max} 位 AI 员工`,
+        limitReached: (max, provider) =>
+          `此处允许的 ${max} 位 AI 员工名额已用完。请删除不再需要的 AI 员工，或联系 ${provider} 增加名额。`,
+        notOffered: "此处不提供 AI 员工。",
+        listFailed: "无法加载 AI 员工。请检查连接并刷新。",
+      },
+      group: {
+        active: "在用",
+        paused: "已暂停",
+        retired: "已停用",
+        unfinished: "未完成",
+      },
+      unfinished: (name) => `${name} 的设置未完成。`,
+      finishSetup: "完成设置",
+      remove: "移除",
+      unfinishedElsewhere: (name) =>
+        `请在添加 ${name} 的浏览器中完成设置，或移除 ${name} 后重新添加。未完成的 AI 助理或 AI 员工会在 24 小时后移除。`,
+      unfinishedCompleted: (name) => `${name} 已在此期间完成设置，因此未移除。`,
+      access: {
+        heading: (name) => `谁可以与 ${name} 一起工作`,
+        use: "可对话",
+        inspect: "可查看所有工作",
+        manage: "可管理",
+        useHelp: (name) =>
+          `与 ${name} 开始对话并附加文件。打开 ${name} 的文件需要“可查看所有工作”权限。`,
+        inspectHelp: (name) =>
+          `打开 ${name} 的文件，阅读所有对话、工作标签页和 ${name} 的记忆。`,
+        chatOnlyNote: (person, name) =>
+          `只有“可对话”权限时，${person} 可与 ${name} 对话并附加文件，但无法打开 ${name} 生成的文件、分配任务或查看他人的对话。`,
+        manageHelp: (name) =>
+          `更改职责说明、访问权限和文件；暂停、停用或删除 ${name}。`,
+        supervisorNote: (name) =>
+          `对 ${name} 负责。${name} 的问题会优先发送给此人。`,
+        supervisorHint: (name) =>
+          `只有能管理 ${name} 的人才能成为监督者。请先授予“可管理”权限。`,
+        filesFollow: (name) =>
+          `能查看 ${name} 所有工作的人可以打开 ${name} 的文件。还能管理的人可以更改这些文件。`,
+        onlyYou: "只有您有访问权限。",
+        manageIncludes: "“可管理”包含“可查看所有工作”。",
+        manageNeedsInspect: (name) =>
+          `要管理 ${name}，您还需要“可查看所有工作”权限。请其他管理者为您授权。`,
+        lastManager: (name) =>
+          `${name} 至少需要一位管理者。请先授予他人“可管理”权限。`,
+        ownManage: "您不能移除自己的“可管理”权限。请其他管理者操作。",
+        add: "添加同事",
+        searchHint: "输入同事邮箱地址的开头。",
+        noResults: "没有匹配的同事。",
+        searchHintFull: "输入同事的完整邮箱地址，然后点击“查找”。",
+        find: "查找",
+        notFoundFull:
+          "公司中没有使用该邮箱地址的账户。请检查拼写，或请管理员添加此人。",
+        searchFailed: "查找失败。请重试。",
+        alreadyHasAccess: (person) => `${person} 已有访问权限。`,
+        saved: "已保存。",
+        remove: "移除访问权限",
+        removeConfirm: (person, name) =>
+          `移除 ${person} 对 ${name} 的访问权限？${person} 将无法再看到 ${name} 的对话或文件。`,
+      },
+      interrupt: {
+        title: (name) => `${name} 正在工作`,
+        body: (change, name, list) =>
+          `${change} 会重启 ${name} 的工作环境，并停止 ${name} 当前的工作：${list}。已保存在 ${name} 文件中的内容会保留。`,
+        bodyUnknown: (change, name) =>
+          `${change} 会重启 ${name} 的工作环境，并停止 ${name} 当前的工作。已保存在 ${name} 文件中的内容会保留。`,
+        grant: "更改访问权限",
+        supervise: "更改监督者",
+        adopt: "应用更新后的职责说明",
+        reply: (person) => `给 ${person} 的回复`,
+        work: (objective) => `任务“${objective}”`,
+        wait: (name) => `在 ${name} 空闲时应用`,
+        now: "停止工作并立即应用",
+        pending: (name) =>
+          `这项更改会在 ${name} 空闲时应用。请保持此页面打开。`,
+      },
+      lifecycleAction: {
+        suspend: "暂停",
+        restore: "恢复",
+        archive: "停用",
+        delete: "删除",
+        adopt: "已应用职责说明",
+        supervise: "已更改监督者",
+        grant: "已更改访问权限",
+      },
+      conversations: {
+        with: (person) => `与 ${person} 的对话`,
+        empty: "尚无对话。",
+        untitled: "未命名对话",
+        yours: "您的对话",
+        running: "工作中",
+        ownOnly: "您只能看到自己的对话。能查看所有工作的人可以看到每个对话。",
+        loadFailed: "无法加载对话。请刷新重试。",
+        noUse: (supervisor) =>
+          `您可以阅读对话，但无法开始新对话。请联系 ${supervisor} 获取“可对话”权限。`,
+      },
+      marker: { ai: "AI", aiAssistant: "AI 助理", aiEmployee: "AI 员工" },
+      header: {
+        line: (kind, own, owner, supervisor) =>
+          kind === "company"
+            ? `AI 员工 · 由 ${supervisor} 监督`
+            : own
+              ? "您的 AI 助理"
+              : `${owner} 的 AI 助理 · 由 ${supervisor} 监督`,
+        yourAccess: "您的权限：",
+      },
+      state: {
+        working: "正在工作",
+        idle: "空闲",
+        lastActive: (time) => `上次工作于 ${time}`,
+        neverUsed: "尚未使用",
+        paused: "已暂停",
+        retired: "已停用",
+        deleted: "已删除",
+        unfinished: "未完成",
+        unavailable: "目前无法工作",
+        changing: "正在更改",
+      },
+      notFound: "这位 AI 助理或 AI 员工不可用，或您无权访问。",
+      backToList: (kind) =>
+        kind === "personal" ? "返回我的助理" : "返回 AI 员工",
+      pausedNotice: (name) =>
+        `${name} 已暂停。管理者可在 ${name} 的“设置”标签页恢复 ${name}。`,
+      retiredNotice: (name) => `${name} 已停用。文件和过往对话仍可阅读。`,
+      deletedNotice: (name) => `${name} 已删除。`,
+      accessWithdrawn: (name) => `您不再有权访问 ${name}。`,
+      tabs: {
+        conversations: "对话",
+        files: "文件",
+        work: "工作",
+        memory: "记忆",
+        access: "访问权限",
+        settings: "设置",
+      },
+      settings: {
+        renamed: "已重命名。",
+        assignments: (name) => `${name} 可在工作标签页接受任务`,
+        briefNote: (name) =>
+          `应用职责说明会关闭 ${name} 的工作环境。下一次对话会启动新环境。未完成的任务需要管理者在工作标签页确认后，${name} 才能继续执行。`,
+        briefApplied: "已应用职责说明。",
+        useCustomAgent: "改为应用您的某个自定义智能体",
+        pauseConfirm: (name) =>
+          `这会暂停 ${name} 的工作。对话、文件和记忆会保留。您随时可恢复 ${name}。`,
+        runningNow: (name) => `${name} 正在工作。这项工作会停止。`,
+        retireConfirm: (name, kind) =>
+          kind === "personal"
+            ? `这会结束此角色。当前有权限的人仍可阅读过往对话和文件。删除 ${name} 前，${name} 仍计入您的 AI 助理数量。`
+            : `这会结束此角色。当前有权限的人仍可阅读过往对话和文件。删除 ${name} 前，${name} 仍计入允许的 AI 员工数量。`,
+        deleteConfirm: (name, kind) =>
+          kind === "personal"
+            ? `这会删除 ${name}、${name} 的记忆及全部文件，无法撤销。空出的位置可立即用于新的 AI 助理。`
+            : `这会删除 ${name}、${name} 的记忆及全部文件，无法撤销。空出的位置可立即用于新的 AI 员工。`,
+        deleteUnverified: (name, provider) =>
+          `${name} 的文件未能通过检查，因此现在无法删除；${provider} 可稍后删除这些文件。${name} 将被删除，不再计入允许的数量。`,
+        typeName: (name) => `输入 ${name} 以确认`,
+        deleting: (name) => `正在删除 ${name}…`,
+        deleted: (name) => `${name} 已删除。`,
+        deletedClearing: (name, kind) =>
+          kind === "personal"
+            ? `${name} 已删除。文件仍在清理；几分钟后即可空出位置用于新的 AI 助理。`
+            : `${name} 已删除。文件仍在清理；几分钟后即可空出位置用于新的 AI 员工。`,
+        abandonConfirm: (name) => `放弃这项更改？${name} 会保持更改前的状态。`,
+        abandonRefused: "暂时无法放弃这项更改。请重试。",
+        employeeName: "新 AI 员工的名字",
+        employeeAdded: (name) => `已添加 ${name}。`,
+        automatic: (name) =>
+          `不会按时间表启动 ${name}。只有在有人发送消息或启动任务时，${name} 才会工作。`,
+      },
       administratorSupport: "管理员",
       providerFallback: "服务提供方",
       unavailable: {
+        serverNotReady:
+          "服务器尚未设置好，暂时无法安全运行 AI 助理和 AI 员工。",
+        serverCheckFailed:
+          "服务器的安全检查失败，AI 助理和 AI 员工暂时无法启动。他们的文件会保留。",
+        agentsPaused: (provider) => `${provider} 已暂停 AI 助理和 AI 员工。`,
+        serverMoved: (name, provider) =>
+          `${name} 暂时无法工作：服务已迁移到新服务器，${provider} 需要确认迁移。${name} 的文件会保留。`,
+        filesUnchecked: (name) =>
+          `${name} 的文件未通过安全检查，因此无法工作。文件会保留，其他内容不受影响。`,
+        agentsWait: "在此之前，AI 助理和 AI 员工无法工作。",
         diskTooSmall: (provider) =>
           `文件暂时不可用：部署的存储小于配置要求。在 ${provider} 修复前，对话可以继续，但无法使用文件。`,
         storageMissing: (provider) =>
@@ -200,30 +740,28 @@ export function createZhCN(product: string): Translations {
         reference: (code) => `支持参考：${code}`,
         askAdmin: "请联系管理员。",
       },
-      unconfirmed: "尚未确认请求结果。请刷新或重试同一请求以检查状态。",
-      abandon: "放弃已隔离的操作",
-      abandoned: "已放弃过时的操作，未更改权限或重新激活智能体。",
+      unconfirmed: "尚未确认更改已保存。请重试；不会重复执行。",
+      abandon: "放弃这项更改",
+      abandoned: "先前的更改已放弃。未发生任何更改。",
 
-      title: "智能体实例",
       description: "拥有独立主目录和记忆的持久化个人与公司智能体。",
       legacyUnavailable: "持久化实例需要启用智能体管理并配置合格的存储空间。",
-      name: "名称",
+      name: "名字",
       custody: "归属",
       personal: "个人",
       company: "公司",
-      supervisor: "监督者用户 ID",
+      supervisor: "监督者",
       definition: "定义",
-      create: "创建实例",
-      start: "开始对话",
-      home: "打开主目录",
+      start: "新建对话",
+      home: "打开文件",
       spaces: "浏览空间和项目",
       manage: "管理实例",
       rename: "重命名",
       suspend: "暂停",
-      archive: "归档",
-      delete: "移除智能体",
+      archive: "停用",
+      delete: "删除",
       restore: "恢复",
-      adopt: "采用定义",
+      adopt: "应用更新后的职责说明",
       supervise: "更改监督者",
       grant: "更新访问权限",
       member: "成员用户 ID",
@@ -234,15 +772,16 @@ export function createZhCN(product: string): Translations {
         "智能体权限与主目录访问权限相互独立。请在空间中编辑资源权限。",
       retention:
         "这些操作停止智能体环境，但保留主目录数据和人员权限。共享项目也会保留。",
-      pending: "环境隔离仍在处理中。智能体无法运行，但尚未确认环境已停止。",
-      retry: "重试已记录的操作",
+      pending: (name) =>
+        `这项更改尚未完成：尚未确认 ${name} 的工作环境已关闭。更改完成前，${name} 无法工作。`,
+      retry: "重试",
       refresh: "刷新",
       loading: "加载中…",
       none: "暂无实例。",
       more: "加载更多",
       memory: "实例记忆",
-      memoryNotice:
-        "这是由当前查看权限控制的共享实例记忆，不包含用户的私人记忆。",
+      memoryNotice: (name) =>
+        `${name} 在不同对话间保留的记忆。能查看所有工作的人都可阅读。不包含任何人的私人记忆。`,
       fact: "新增事实",
       addFact: "添加事实",
       removeFact: "移除事实",
@@ -251,8 +790,7 @@ export function createZhCN(product: string): Translations {
       importMemory: "导入记忆",
       replaceMemory: "替换记忆",
       confirm: "确认操作",
-      confirmMemory:
-        "清空或替换导入会淘汰排队中的旧写入，并更改整个实例的记忆。",
+      confirmMemory: (name) => `这将更改 ${name} 的全部记忆，且无法撤销。`,
       companyCopy: "创建公司副本",
       companyCopyNotice:
         "创建独立的公司实例后，请在空间中明确复制所选主目录文件，并导出和导入记忆。凭据不会被复制。",
@@ -262,14 +800,25 @@ export function createZhCN(product: string): Translations {
       archived: "已归档",
       deleted: "已移除",
       provisioning: "配置中",
-      instructions: "已采用的指令",
+      instructions: "职责说明",
       businessDefinition: "定义名称",
       useOnly: "使用权限允许访问您自己的非受保护对话；实例记忆需要查看权限。",
       operationError: "智能体操作失败。请刷新后再重试。",
       source: "原始定义",
-      memoryUnavailable: "当前权限或后端不支持记忆访问。",
+      memoryUnavailable: (name) => `目前无法显示 ${name} 的记忆。`,
     },
     storageSpaces: {
+      agentFilesOf: (name) =>
+        `这些是 ${name} 的文件。在 ${name} 的“访问权限”标签页更改谁可以使用文件；在 ${name} 的“设置”标签页暂停、停用或删除 ${name}。`,
+      agentFilesRecoveryNote: (name) =>
+        `备份、恢复或修复文件会关闭 ${name} 的工作环境。进行中的回复或任务会停止；在备份、恢复或修复完成之前，${name} 无法工作。`,
+      agentFilesUnknown:
+        "这些文件属于一位 AI 助理或 AI 员工。请在该 AI 助理或 AI 员工的“访问权限”标签页更改谁可以使用文件，并在“设置”标签页暂停、停用或删除该 AI 助理或 AI 员工。",
+      agentFilesRecoveryUnknown:
+        "备份、恢复或修复会关闭该 AI 助理或 AI 员工的工作环境。进行中的回复或任务会停止；文件操作完成前，工作无法继续。",
+      membersHint:
+        "AI 助理或 AI 员工的文件位于该 AI 助理或 AI 员工的“文件”标签页。",
+      createOff: "此处不能创建新的 Space。",
       confirmAction: "确认操作",
       recovery: "备份与恢复",
       recoveryNotice:
@@ -396,6 +945,12 @@ export function createZhCN(product: string): Translations {
     },
 
     runProgress: {
+      residentPreparing: (name) => `正在准备 ${name}…`,
+      residentStarting: (name) => `正在启动 ${name} 的工作环境…`,
+      residentStartingLong: (name) =>
+        `仍在启动 ${name} 的工作环境。一段时间未使用后，启动最多可能需要两分钟。`,
+      residentStartFailed: (name, support) =>
+        `${name} 的工作环境未能启动。请再次发送消息；如果持续发生，请联系 ${support}。`,
       preparing: "正在准备工作区…",
       workspaceStarting: "正在启动新的工作区…",
       thinking: "思考中…",
@@ -528,9 +1083,21 @@ export function createZhCN(product: string): Translations {
 
     // Input Box
     inputBox: {
+      agentFile: {
+        attach: (name) => `给 ${name} 附加文件`,
+        hint: (name) =>
+          `附加的文件会保存在 ${name} 的文件中。可以查看 ${name} 所有工作的人都可以打开这些文件。`,
+        sendWaits: "请等待文件保存完成。",
+        uploading: (percent) => `正在上传… ${percent}%`,
+        saved: (name) => `已保存在 ${name} 的文件中`,
+        savedAs: (file) => `已保存为 ${file}`,
+        refused: (file) => `${file} 未能保存。请重试。`,
+        noAccess: (name) => `您已无法向 ${name} 提供文件。`,
+        tooLarge: (file, max) => `${file} 超过单个文件的大小上限 ${max}。`,
+      },
       placeholder: "今天我能为你做些什么？",
       disclaimer: "内容由AI生成，重要信息请务必核查",
-      assistantDisclaimer: "内容由AI生成，重要信息请务必核查",
+      assistantDisclaimer: "这是 AI，可能会出错。",
       createSkillPrompt:
         "我们一起用 skill-creator 技能来创建一个技能吧。先问问我希望这个技能能做什么。",
       addAttachments: "添加附件",
@@ -672,6 +1239,11 @@ export function createZhCN(product: string): Translations {
 
     // Sidebar
     sidebar: {
+      myAssistants: "我的 AI 助理",
+      aiEmployees: "AI 员工",
+      assistantsOff: "此处不提供 AI 助理。",
+      aiEmployeesOff: "此处不提供 AI 员工。",
+      agentsUnavailable: "AI 助理和 AI 员工暂时不可用。",
       newChat: "新对话",
       chats: "对话",
       channels: "渠道",
@@ -698,8 +1270,7 @@ export function createZhCN(product: string): Translations {
         `在已加载的 ${loaded.toLocaleString()} 个文件中显示 ${found.toLocaleString()} 个`,
       noMatches: "已加载的文件中没有匹配项",
       noMatchesHint: "尝试其他名称或文件夹，或清除筛选。",
-      description:
-        "你在各个对话中保存下来的文件。在任何对话里，助手都能打开它们。",
+      description: "你在各个对话中保存下来的文件。你可以在任何对话中使用它们。",
       empty: "还没有保存任何文件",
       emptyHint: "在对话中保存一份报告或上传的文件，下次就能在这里找到。",
       loadFailed: "无法加载你的文件",
