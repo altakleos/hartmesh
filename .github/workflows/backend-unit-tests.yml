@@ -48,7 +48,9 @@ jobs:
   backend-unit-tests:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Collection and post-test drainage share the deadline with every case.
+    # Keep room for the full suite on slower hosted runners.
+    timeout-minutes: 20
     strategy:
       # Duration-aware split: `make test-shard` balances the shards by real
       # wall-clock cost from backend/.test_durations (read-only for shards, so
