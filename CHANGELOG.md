@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### AI assistant and AI employee product experience
+
+My assistants and AI employees have separate lists and creation flows, named
+people pickers and role/blank briefs. Their pages bring conversations, Files,
+Work, Memory, Access and Settings together under current permissions. Files can
+be given while a workspace runs or is closed; Use permits attaching an input,
+while Inspect is required to open files. Work supports explicit Stop/Resume and
+supervisor questions through Attention. Network cards render from request-bearing
+tool messages, with structured denied-site lines for autonomous work.
+
+The required Compose job now verifies 27 named cases without skips, including
+40 MiB file integrity, limits and same-kind reuse after deletion, supervisor
+questions and interrupted-workspace settlement. The runbook documents all nine
+operator verbs, tenant roles and evidence boundaries. Default activation remains
+opt-in pending its separate change. No additional database schema, native
+evidence format or configuration-version change is introduced by these screens,
+acceptance additions or documents; the schema changes for this unreleased version
+remain listed below.
+
 ### AI agent operator commands
 
 The backend adds nine JSON operator commands for managed-storage inspection,
@@ -60,26 +79,35 @@ reports its existing starting phase; resuming a workspace does not.
 Sandbox cleanup tolerates automatic removal completing between ID and name
 inspection, with one bounded recheck of both original references. Unconfirmed or
 changed resources continue to retain their cleanup records and capacity.
+After a standalone operator closes a workspace, the next message now confirms
+its exact historical closure, finishes its original native journal and refreshes
+the Gateway's resident association before preparing a replacement. Closure racing
+with resume is covered; changed or unconfirmed facts retain the capacity charge,
+and the original operator attribution is preserved.
+Maintenance also waits for a captured in-progress preparation under its workspace
+lock and deadline, then rechecks its exact completion and running graph. A normal
+successful startup no longer leaves subsequent file operations or work unavailable
+until the next maintenance pass; uncertain starts and changed identities stay closed.
 
 There is no database schema, native evidence format or configuration-version change.
 
 ### Direct agent file writes
 
 AI assistant and AI employee conversations accept uploads directly into their
-persistent Home, before or during a run. Home file APIs support upload, revision-
+persistent Space, before or during a run. Agent file APIs support upload, revision-
 checked edit, new folder, rename and removal without starting a workspace. New
 uploads preserve existing files, reuse identical content or select a numbered
 name. Each file is limited to 64 MiB and records its human requester separately
 from the agent actor. Current permissions are checked again before publication
 and retry receipts; cancellation drains disk work before closing its files.
-Agent upload context uses current Home file metadata without reading content or
+Agent upload context uses current Space file metadata without reading content or
 the requester's directories.
 
 There is no database schema, native evidence format or configuration-version change.
 
 ### Agent lifecycle and file access
 
-Agent deletion atomically deletes its Home and makes one guarded reclamation
+Agent deletion atomically deletes its Space and makes one guarded reclamation
 attempt, reporting whether its typed slot was freed. Maintenance retries uncertain
 cleanup. Deleted AI assistants and AI employees cannot be restored. Explicit Space
 release requires a current stored ADMIN grant, deleted native storage and fenced
@@ -102,8 +130,8 @@ attempts. Required CI adds seven real bundle cases for AI assistant file
 persistence, runtime placement, Work outcomes/capacity and graceful/forced restart
 recovery. Native qualification now uses real resident admission and verifies host
 containment before replacement. Named-case gates reject skips or missing cases;
-operator docs describe holds, recovery and workspace cleanup. Default activation
-and remaining product controls stay deferred.
+operator docs describe holds, recovery and workspace cleanup. Default activation stays deferred; product controls are now available when
+explicit agent counts are configured.
 
 Startup agent readiness reflects execution admission. Resident initialization
 failures produce bounded source diagnostics without exception values or tenant
@@ -516,7 +544,7 @@ authority before their callback. Lifecycle effects still require all attachments
 fenced, including after adapter loss. Pre-publication capacity failures report
 `SpaceFull`; failures after publication retain an uncertain operation. This change
 adds no database schema changes.
-AI-instance lifecycle retries also recheck every current Home attachment without
+AI-instance lifecycle retries also recheck every current Space attachment without
 closing views created after the captured scope. Space metadata continues to show
 recovery pending while file outcomes or containment remain unconfirmed.
 

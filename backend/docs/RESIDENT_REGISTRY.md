@@ -53,6 +53,16 @@ Authority is checked again after capacity waiting. Resume recovery uses a scoped
 `unfenced` read requiring the exact actor, host and complete mount view; an
 unrelated or ambiguous row cannot authorize adoption or containment.
 
+An operator can close a workspace from a separate process while the Gateway
+retains its old association. Before admission, preparation observes that exact
+fenced attachment and lets canonical host containment finish the original native
+journal and notify the registry with the stored closure reason. Its admission
+callback borrows the parent transaction and rechecks the actor, incarnation,
+host, container, fenced phase and complete mount scope. A missing resume alone
+proves no closure. Unknown outcomes keep the old charge and refuse replacement;
+closed runtime admission remains closed. The check also covers closure racing
+with resume, and cancellation drains confirmation before returning.
+
 A newly invoked start is recovered only by its exact preparation incarnation.
 Unreadable or mismatched SQL retains the opaque claim and slot. Missing intent
 releases the claim only after the operation drains and the qualified host is
@@ -161,6 +171,11 @@ Workspace readiness is current host state, separate from the cached initial
 capacity result. Maintenance retries qualification on the same registry. Failed
 inventory closes admission before requalification; an unfinished initializer must
 be consumed before invalidation. Cached attachments/adapters never change on retry.
+Reconciliation waits for a CID-less preparation under its Home lock and inherited
+deadline, then re-reads exact durable correlation. Only pending-to-active completion
+with its preparation cleared can supply the original CID; normal owner, run and
+fresh graph checks still precede publication. An unknown start, changed scope or
+expired deadline retains accounting and refuses readiness.
 The startup recovered-run snapshot applies only to its original attachment IDs,
 so later maintenance cannot close a newer workspace from historical recovery.
 

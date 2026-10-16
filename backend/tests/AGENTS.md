@@ -178,7 +178,7 @@ identity or bypasses native containment.
 
 `test_compose_instance_acceptance.py` is opt-in live, gated by
 `HARTMESH_REQUIRE_BUNDLE_INSTANCES=1`; missing prerequisites fail when requested.
-The `bundle-instances` CI job requires all seventeen storage/agent cases in order
+The `bundle-instances` CI job requires all 27 storage/agent cases in order
 with zero skips and disk-backed `TMPDIR`/pytest basetemp. Never run or collect this
 suite locally. Ordinary coverage reads its AST/workflow through
 `test_compose_instance_acceptance_contract.py`; receipt tests use synthetic files
@@ -218,3 +218,9 @@ clients, confirm attachments contained, close the registry/provider, then dispos
 SQL. Both named resident cases are mandatory with zero skips; never import or
 collect the native suite locally. Generic native backing proof is distinct from
 managed Gateway ownership, proved by the bundle cases.
+
+Cases 18–27 prove direct live/closed uploads, streamed 40 MiB digest equality,
+Stop without assignment cancellation, count refusals and same-kind slot reuse,
+denied-site artifacts, supervisor requests and operator/container-loss settlement.
+The scripted Work branch rejects `ask_clarification` or a missing system question
+rule with HTTP 422. Full suites and large fixtures must use task-owned disk temps.

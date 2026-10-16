@@ -50,4 +50,17 @@ same resulting prompt. Empty overlays preserve bytes.
   graph integrations must do the same. If it is absent, enforcement deliberately
   counts the thread's full delegation ledger (fail-restrictive) and emits a warning.
 
-**Direct subagent runtime**: `create_deerflow_agent(..., subagent_runtime=runtime)` is the explicit dependency-injection path for direct graph callers. Reuse one `deerflow.subagents.SubagentRuntime` across every graph that belongs to the same application capacity boundary. With the default subagent feature it binds middleware concurrency/total limits, the ordinary `task` tool, one real execution controller, and any active durable-batch submitter to the same snapshot. A caller-owned batch repository requires `await runtime.start()` (or `async with runtime`) before graph construction and `stop()` at shutdown; the factory fails closed while that worker is stopped, and already-built bound batch tools must fail unavailable after it stops rather than falling through to another process-global submitter. The factory never creates SQL infrastructure, renders the caller-owned `system_prompt`, or mounts Gateway API/UI routes. Full middleware takeover cannot be combined with this runtime; direct callers and custom subagent middleware remain responsible for model-visible call-policy wording.
+**Direct subagent runtime**: `create_deerflow_agent(..., subagent_runtime=runtime)`
+accepts one caller-owned `deerflow.subagents.SubagentRuntime` per application capacity
+boundary. Tools, limits, controller, durable submitter and feature policy share its
+snapshot. For a task repository, `await runtime.start()` (or `async with`) before
+building graphs and `stop()` at shutdown. The factory rejects a stopped worker;
+already-bound task tools also fail unavailable, never falling back to a global
+submitter. The factory creates no SQL infrastructure, renders no caller-owned
+`system_prompt` and mounts no Gateway API/UI. Full middleware takeover cannot
+combine with this runtime; direct callers/custom subagent middleware own prompt
+call-policy wording.
+
+Work attempts use `autonomous` interaction mode, so `ask_clarification` is never
+offered. `runtime_scope.py::ASSIGNMENT_QUESTION_RULE` directs `report_work` with
+`action: request_input` before stopping with a question; prose alone is no blocker.

@@ -24,10 +24,12 @@ Trusted authentication/embedding code binds the verified reference with
 aliases do not authenticate it. No human user or AgentInstance row is required.
 
 The Gateway configures human resolution and the persistent agent-instance
-directory when Storage Spaces is enabled. Instance creation and management are
-described in [Agent Execution](AGENT_EXECUTION.md); conversation execution uses its host-owned instance binding. The Compose profile
-keeps AI assistant/AI employee execution disabled while its topology is qualified. Other embedding consumers supply their own nonhuman
-directory and trusted authentication adapter. Advertised
+directory when Storage Spaces is enabled. An agent is a person’s own AI assistant
+or a company’s AI employee. [Agent Execution](AGENT_EXECUTION.md) describes their
+creation and host-bound conversations. Qualified Compose workspaces use the AIO
+restricted network and configured read-only mounts; default activation remains
+opt-in until the final activation change. Other embedding consumers supply their
+own nonhuman directory and trusted authentication adapter. Advertised
 `actor_kinds` includes `nonhuman` only when that resolver exists. First-party
 My Files/Shared/Projects convenience features remain human workflows. PATs have
 no storage scopes, and ownerless internal requests are rejected.
@@ -51,8 +53,8 @@ operation_id = uuid4().hex
 reference = await create_file(
     provider,
     resource=resource,
-    path="home.md",
-    content=b"# Home\n",
+    path="notes.md",
+    content=b"# Notes\n",
     operation_id=operation_id,
 )
 ```
@@ -126,8 +128,8 @@ container reads a fresh nonce from the pool at admission and from each bound
 view before workspace creation. This proves byte/path coherence even when the
 Gateway itself runs in a container through a socket bind; matching path strings
 are insufficient. Remote/proxied Docker and Docker Desktop remain unsupported.
-Restricted-network/configured-mount builders remain unsupported until their
-workspace topology is implemented. The trusted
+The AIO resident builder supports restricted networking and configured read-only
+mounts, including Shared. Other transports need their own qualification. The trusted
 builder creates a stopped container; exact identity commits before activation.
 At most 32 roots belong to one attachment and 32 live/pending attachments to a
 resource. Multiple writable environment incarnations may use a resource across
@@ -155,9 +157,12 @@ The supported backing is a provider-prepared fully allocated **fixed ext4
 filesystem**, with verified image/loop/mount identity on the private ext4 data
 disk. Configure its trusted inventory before Gateway startup. No ordinary-folder
 or legacy-adoption fallback qualifies a resource. Provisioning consumes a new
-empty prepared slot. Ordinary deleted resources retain bindings and tombstones;
-qualified released-account host reclamation can empty and free its exact User
-binding, preserving the tombstone. Unknown containment never frees capacity.
+empty prepared slot. Human-deleted resources retain their bindings, backups and
+tombstones until explicit ADMIN `release`. Host-eligible deletion with an agent,
+an abandoned creation or a released seat removes files and backups and frees
+only the original kind’s slot, preserving the tombstone. An unverifiable release
+leaves bytes untouched and the slot unclaimed for operator `storage-init forget`.
+Unknown containment never frees capacity.
 
 The filesystem bounds bytes and inodes for data, private staging, snapshots,
 retained backups and displaced restore trees together. The provider retains a
@@ -204,11 +209,11 @@ binding.
 | SQLite locking/rollback, committed-data integrity at real ENOSPC | `test_storage_spaces_volume_native.py::test_sqlite_transactions_and_committed_rows_survive_real_disk_exhaustion` |
 | Actual source-chat deletion and zero-feature retained reads/edits | `test_storage_feature_routes.py::test_saved_bytes_survive_actual_thread_deletion_and_optional_feature_removal` on SQLite/PostgreSQL |
 | Kernel byte/inode bounds, reserve, private growth, exact fencing and quiesced WAL restore | Existing cases in mandatory `test_storage_spaces_volume_native.py` |
-| Shipped Compose bundle: ten account/seat, ordinary chat, file/publication and full-storage journeys | Required `bundle-instances` CI job; scripted inference and runc alias, used-account reclamation after two allowlist chats |
+| Shipped Compose bundle: 27 account, chat, storage and agent journeys, including live/closed transfers, 40 MiB integrity, Stop, limits/reuse, Work questions/denials and containment | Required `bundle-instances` CI job; scripted inference and runc alias, used-account reclamation after two allowlist chats |
 | Test-fixture creation acknowledgement loss preserves its backing until exact absence | Native real-create-then-error case and `test_storage_spaces_native_fixture_ownership.py` |
 | Missing controller, private state and current grants | Existing facade, workflow, feature-control/publication and attachment tests |
 
-The mandatory Linux Docker merge job executes all 25 native cases, including
+The mandatory Linux Docker merge job executes all 26 native cases, including
 instance AIO persistence, managed chat scope and private-control reclamation,
 and rejects every skip. Ordinary directory/SQL fixtures prove functional contracts, not native
 mounts or quotas. Unsupported contributor hosts skip only the separately

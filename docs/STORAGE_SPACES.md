@@ -1,5 +1,8 @@
 # Storage Spaces
 
+An agent is a person’s own AI assistant or a company’s AI employee. Identifiers
+`home`, `home_id`, `/home/` and `/mnt/spaces/home` name that agent’s Space.
+
 ## AI agent operator commands
 
 Run these commands inside the backend image with the same configuration,
@@ -36,7 +39,7 @@ Gateway ends runs and settles Work. Lease expiry alone does not confirm an ended
 run. The command waits only for captured run and attempt IDs and reports anything
 still unconfirmed. A normally completed attempt can have a null containment reason.
 
-`export` verifies the Home and disk headroom before closing its workspace, then
+`export` verifies the Space and disk headroom before closing its workspace, then
 creates a private, exclusive tar archive under
 `/srv/hartmesh/home/agent-exports/`. It preserves symbolic links without following
 them and rejects special nodes or source replacements. Completed archives remain
@@ -46,7 +49,7 @@ these archives automatically; the operator owns their retention.
 `supervise` recovers a company AI employee only when its supervisor and every
 other human manager cannot sign in. Select a unique account with `--email`, or
 use `--issuer` plus `--subject`. The command closes the workspace, gives the live
-human account Use/Inspect/Manage, then Home read/write/administer/export, and runs
+human account Use/Inspect/Manage, then Space read/write/administer/export, and runs
 the product lifecycle as that person. Its exact immutable recovery intent allows
 interrupted grants to resume without granting a different target or host authority.
 If a product lifecycle is pending, `manager_added` means the human manager has
@@ -258,7 +261,7 @@ loads that inventory. A late durability failure after publishing the inventory
 preserves prepared backings. Existing pools and data are not reformatted.
 
 The Gateway pins the inventory at startup. Missing or malformed inventories and
-individual slot failures retain durable resource and AI employee records; they
+individual slot failures retain durable resource and agent records; they
 do not stop the Gateway. A durable database is required. Startup records separate
 storage and execution status, including individual unverified slot identities.
 Docker admission checks the local root-owned Unix socket and daemon identity,
@@ -280,10 +283,10 @@ service construction, bound-resource metadata checks, then Docker admission
 within one budget. `execution_state` and `allowance(kind)` use current inventory
 and durable rows rather than a cached free count. Feature dispatch remains
 lookup-only and returns bounded structured 503 reasons.
-Successful pool qualification does not enable unsupported workspace topology.
-Restricted networking and configured-mount workspace support remain a later
-runtime change; preparation and resume currently retain that guard, while
-discovery and fencing remain available.
+Pool qualification and workspace readiness remain separate checks. The qualified
+AIO resident builder supports the bundle’s restricted network, read-only configured
+mounts and Shared bind. Unsupported transports remain unavailable; a pool probe
+alone cannot qualify an execution topology.
 
 When `HARTMESH_STORAGE_INIT_IMAGE` is configured, Gateway startup asks that
 pinned backend image to run `mount-all` before inventory verification. The helper
@@ -607,6 +610,11 @@ then rechecks authority and backing after the wait. `SpaceFull` identifies only
 definite pre-publication byte/inode capacity failures; post-publication errors
 stay uncertain for recovery.
 
+`put_unique` reuses identical bytes or publishes under the next free numbered
+name; it never replaces an occupied name. A host write requires its size plus
+1 MiB free and at least two free inodes. Agent Files and composer transfers write
+directly at any time, including beside a running workspace; current membership
+and confined publication still apply.
 
 All browser requests use the authenticated human. Attributed internal requests
 use their validated actual owner; missing attribution never becomes `default`.
@@ -627,7 +635,7 @@ HTTP registration API. PAT credentials do not yet carry storage scopes.
 | `POST /api/spaces/{id}/import` | Explicit audience-checked cross-space file copy |
 | `GET /api/spaces/{id}/recovery` | ADMIN-only backup, operation and attachment facts |
 | `POST /api/spaces/{id}/recovery` | Explicitly accept uncertain current file state |
-| `POST /api/spaces/{id}/lifecycle` | ADMIN backup, restore, archive or delete |
+| `POST /api/spaces/{id}/lifecycle` | ADMIN backup, restore, archive, delete or explicit release |
 | `POST /api/spaces/{id}/attachments/retire` | Retire the captured attachment IDs |
 
 Mutations carry the current resource generation. File mutations also carry a
@@ -739,9 +747,13 @@ stage; failed cleanup stays visible and consumes capacity.
 Archive preserves readable data while removing effective WRITE/OPERATE. Current
 administrators can still revoke archived memberships. Delete is separate: it
 fences access, removes visible bytes and retains a permanent tombstone, used
-backing identity and private retention data/backups. Deleted capacity is never
-silently reused. Physical retention/purge remains an explicit operator policy;
-delete does not promise secure erasure or automatic pool reclamation.
+backing identity and private retention data/backups until an explicit `release`.
+Outside the bundle, that release requires a current stored ADMIN grant and the
+deleted Space’s captured generation. A Space deleted with its agent, an abandoned
+creation or a released seat instead records host reclamation eligibility: the
+host empties data and backups, removes its binding and returns the slot only to
+its original kind. Unknown containment never frees capacity. Deletion does not
+promise secure erasure.
 
 Pending file operations have an ADMIN recovery view even while file access is
 paused. After inspecting bytes and provider evidence, the owner can explicitly
@@ -855,7 +867,7 @@ the kernel's writer reservation. Final strict native proof occurs outside SQL
 before publishing binding and role deletion together. Unknown or unverified facts
 remain pending; only newly confirmed reclamation counts as freed capacity.
 Account provenance and the Space tombstone remain. Human retained-backup release
-and AI-assistant Home release have separate lifecycle stages.
+and agent Space release use their respective lifecycle eligibility checks.
 Privileged personal MCP discovery and cached calls also recheck current account
 eligibility, so a retained administrator role cannot restore disabled access.
 

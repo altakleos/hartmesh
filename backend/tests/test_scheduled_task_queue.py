@@ -876,7 +876,7 @@ async def test_scheduled_queue_timeout_advances_cron_without_immediate_requeue(t
             timezone="UTC",
             next_run_at=admitted_at - timedelta(minutes=1),
         )
-        await run_repo.create(
+        queued = await run_repo.create(
             run_record_id="task-run-timeout",
             task_id="task-timeout",
             thread_id="thread-1",
@@ -894,7 +894,8 @@ async def test_scheduled_queue_timeout_advances_cron_without_immediate_requeue(t
             launch_run,
             queue_timeout_seconds=60,
         )
-        poll_at = admitted_at + timedelta(seconds=61)
+        # Queue age starts at insertion, after the task's setup has finished.
+        poll_at = datetime.fromisoformat(queued["created_at"]) + timedelta(seconds=61)
 
         await service.run_once(now=poll_at)
 
@@ -932,7 +933,7 @@ async def test_manual_queue_timeout_preserves_serialized_next_run_at(tmp_path):
             timezone="UTC",
             next_run_at=next_run_at,
         )
-        await run_repo.create(
+        queued = await run_repo.create(
             run_record_id="task-run-manual-timeout",
             task_id="task-manual-timeout",
             thread_id="thread-1",
@@ -951,7 +952,7 @@ async def test_manual_queue_timeout_preserves_serialized_next_run_at(tmp_path):
             queue_timeout_seconds=60,
         )
 
-        await service.run_once(now=admitted_at + timedelta(seconds=61))
+        await service.run_once(now=datetime.fromisoformat(queued["created_at"]) + timedelta(seconds=61))
 
         row = (await run_repo.list_by_task("task-manual-timeout"))[0]
         assert row["status"] == "failed"

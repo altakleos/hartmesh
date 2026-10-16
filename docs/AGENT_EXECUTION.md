@@ -1,9 +1,13 @@
-# Persistent agent instances
+# AI assistants and AI employees
+
+An agent is a person’s own AI assistant or a company’s AI employee. API identifiers
+such as `home`, `home_id`, `/home/` and `/mnt/spaces/home` retain their names; in this
+document they refer to the agent’s Space and files.
 
 A definition is reusable configuration. A persistent instance has a separate
 non-login identity, personal/company custody, human supervisor, adopted
-definition revision and a Storage Spaces home. Two instances using one
-definition retain different principals and homes.
+definition revision and a Storage Space. Two instances using one
+definition retain different principals and Spaces.
 
 Management requires `agents_api.enabled: true`, a durable database, and enabled
 Storage Spaces with qualified provider inventory. Existing default/custom chats
@@ -50,7 +54,7 @@ and run-inventory logs count mismatches using fixed field labels. Attachment
 diagnostics use booleans for captured state and preparation; none records
 tenant identifiers, metadata keys or values, or file contents.
 Reconciliation rechecks a captured attachment's actor, host, mount scope, identity
-and phase under the Home lock before acting on it. An exactly fenced snapshot
+and phase under the Space lock before acting on it. An exactly fenced snapshot
 permits one whole-pass rescan only after its retained charge, association,
 preparation and uncertain-containment state are cleared. The new pass must
 qualify the replacement through the normal resume path under the original
@@ -84,16 +88,16 @@ host provisioning authority, and supervisors must be active humans.
 
 The host loads the definition in the authenticated caller's namespace and
 records its exact configuration and SOUL text under a SHA-256 revision. Requests
-cannot provide an owner, principal, revision, home path or configuration snapshot.
+cannot provide an owner, principal, revision, filesystem path or configuration snapshot.
 The revision does not freeze remote models or future host behavior. Execution
 must still honor current model/tool/resource/provider policy.
 
 The server generates the instance ID and `agent:<id>` principal. Its stable
-home is provisioned through Storage Spaces. Personal home custody stays with
+Space is provisioned through Storage Spaces. Personal custody stays with
 the person; company custody has no personal owner. The resident receives
 explicit READ/WRITE/EXPORT, without ADMIN. Creator and supervisor initially
 receive Use, Inspect and Manage instance access; a different supervisor also
-receives explicit home management access. Company custody confers no ambient
+receives explicit Space management access. Company custody confers no ambient
 audience or creator-private credentials.
 
 `GET /api/agent-instances` filters current grants in SQL before pagination.
@@ -101,26 +105,26 @@ audience or creator-private credentials.
 `/definition` requires Inspect and exposes its
 adopted configuration under that same check. `PATCH /api/agent-instances/{id}`
 renames with the current `generation`, Manage, and provider `agents:write`.
-Rename retains principal, custody, revision and home identity. Provider route
+Rename retains principal, custody, revision and Space identity. Provider route
 ceilings supplement mandatory grants. PAT instance/storage scopes are unsupported.
 
 ## Interrupted creation
 
 Creation records a durable `provisioning` intent, atomically binds one qualified
-home, and installs grants through the existing storage membership API. It
+Space, and installs grants through the existing storage membership API. It
 publishes `active` only after confirming those facts. Pending principals are
 unavailable to ordinary storage callers; only the exact trusted provisioning
 scope can validate a pending grant target.
 
 Retry the exact request with the same `creation_id` after interruption. The
-original identity, home and revision survive even if the source definition was
+original identity, Space and revision survive even if the source definition was
 changed or removed. A different request returns 409. Lack of capacity leaves an
 inspectable pending intent; it never substitutes an ordinary folder. Ready
-retries do not recreate homes, restore revoked grants or reactivate suspended
+retries do not recreate Spaces, restore revoked grants or reactivate suspended
 identities. Cancellation drains owned persistent work before returning.
 
 Company actors survive creator departure; personal actors require an active
-custodian. Ordinary home browsing uses the existing Spaces resource page.
+custodian. The agent’s Files tab reads its Space through existing storage routes.
 
 ## Conversations and execution
 
@@ -145,15 +149,15 @@ the Gateway and Docker to share a mount namespace: a Gateway container may
 qualify through its mounted local socket. Workspaces use the provider's restricted
 network controller and exact read-only configured mounts; other transports refuse execution. The existing lead graph,
 run worker, journals and checkpoint accessors remain in use. The environment
-mounts instance Home at `/mnt/spaces/home` and the freshly qualified Company
+mounts instance Space at `/mnt/spaces/home` and the freshly qualified Company
 `shared/` directory read-only at `/mnt/user-data/shared`; its fixed workspace,
-uploads and outputs aliases refer to that Home. SDK requests address the exact
+uploads and outputs aliases refer to that Space. SDK requests address the exact
 registered container through Docker control, without a reusable container-IP
 endpoint. Neither the resident nor its relay publishes a host port. Shared binding
 and directory revisions must still match before reuse. Company reclamation remains
 unsupported; a configured Shared bind is not an ordinary attachment mount edge.
 A new chat or completed run reuses the admitted attachment. Lease
-expiry, SDK closure and chat deletion do not retire a physical writer or Home.
+expiry, SDK closure and chat deletion do not retire a physical writer or Space.
 
 A workspace takes one of `sandbox.replicas` slots. At most two runs share it;
 Work attempts are globally limited to `max(1, replicas - 1)`, including launch
@@ -168,30 +172,31 @@ starting or closing workspaces retain their charge until confirmed containment.
 Graceful Gateway shutdown records `gateway_stopped` on interrupted runs. This
 managed resident lifecycle assumes one Gateway worker.
 
-Ordinary wiki, repository and database edits persist in Home without an artifact
+Ordinary wiki, repository and database edits persist in Space without an artifact
 manifest or automatic delivery requirement. Explicit output presentation uses
-Home's `outputs/` and the existing Space download path. Checkpoint branches keep
-the same instance and Home, instead of copying requester directories. Children
+Space's `outputs/` and the existing Space download path. Checkpoint branches keep
+the same instance and Space, instead of copying requester directories. Children
 inherit that native filesystem authority; a smaller tool list does not narrow
 it, and the child prompt states this scope.
 
 The requester supplies attribution and current provider ceilings, rather than
 My Files, private memory, private skills or personal credentials. Instance
 definitions may reference currently enabled public skills. Private/legacy
-packages, uploads tooling and MCP credentials have no instance adapter yet.
+skill packages and MCP credentials have no instance adapter yet. Composer
+uploads use the direct agent file routes below.
 Public package bytes are captured with bounded readers, copied and verified in
-a content-addressed Home cache; they count against Home quotas. Run evidence
+a content-addressed Space cache; they count against Space quotas. Run evidence
 records the admitted package revision separately from the current host skill
 catalog. The native cache remains writable data; its hash/path does not attest
 that later execution bytes are immutable or grant additional authority.
 
 Requester-directory editors, ZIP artifact archives, browser sessions, legacy
 Shared publishing and scheduling return unsupported for bound chats. Use the
-existing Home Space browser for file edits and downloads. Legacy chat features
+agent’s Files tab for file edits and downloads. Legacy chat features
 keep their existing behavior. Turning managed storage off makes persisted
 bindings unavailable instead of restoring creator-owner access.
 
-## Direct Home file writes
+## Direct agent file writes
 
 The following APIs write through the host's existing Space filesystem. They
 require qualified execution, but do not start, stop or wait for a workspace;
@@ -200,8 +205,8 @@ ordinary filesystem concurrency applies while the agent is running.
 | Endpoint | Current authority | Body and result |
 | --- | --- | --- |
 | `POST /api/agent-instances/{id}/conversations/{thread}/files?operation_id=…` | Use on this conversation, plus `threads:write` and `agents:read` ceilings | Multipart field `file`; returns 201 with `path`, `size`, `sha256`, `deduplicated` and `sandbox_path`. |
-| `PUT /api/agent-instances/{id}/home/content?path=…&operation_id=…` | Home WRITE, plus `agents:read/write` ceilings | Raw bytes; returns `path`, `size`, `sha256` and `deduplicated`. Add `expected_sha256` to edit the exact loaded revision. |
-| `POST /api/agent-instances/{id}/home/files` | Home WRITE, plus `agents:read/write` ceilings | JSON `operation_id`, `action` (`mkdir`, `rename`, `remove`), `path`, and `destination` only for rename; returns `complete` and `path`. |
+| `PUT /api/agent-instances/{id}/home/content?path=…&operation_id=…` | Space WRITE, plus `agents:read/write` ceilings | Raw bytes; returns `path`, `size`, `sha256` and `deduplicated`. Add `expected_sha256` to edit the exact loaded revision. |
+| `POST /api/agent-instances/{id}/home/files` | Space WRITE, plus `agents:read/write` ceilings | JSON `operation_id`, `action` (`mkdir`, `rename`, `remove`), `path`, and `destination` only for rename; returns `complete` and `path`. |
 
 Use a fresh 32-character lowercase UUID-hex operation ID per request. Exact
 retries return the recorded result only after checking current access; changing
@@ -210,7 +215,7 @@ stream through bounded temporary spools. File contents never enter an SQL row.
 The agent is the file-operation actor; `on_behalf_of` records the human requester.
 Current human and conversation authority is rechecked under the mutation lock.
 
-Conversation uploads land in Home's `uploads/`, creating it before the first run
+Conversation uploads land in Space's `uploads/`, creating it before the first run
 when necessary. The returned sandbox path begins `/mnt/user-data/uploads/`.
 An existing file with identical size and SHA-256 is reused; different content
 uses the next free name, from `name (2).ext` through `name (99).ext`. Occupied
@@ -230,7 +235,10 @@ Upload context reads only confined, current regular-file metadata; it never
 opens file content, follows upload links or reads requester directories.
 
 These APIs add no database migration, native evidence format or configuration
-version. The product UI is delivered in the subsequent design stage.
+version. The Files tab and conversation composer use these routes; the next
+message carries saved references in `additional_kwargs.files`, using the returned
+`sandbox_path`, filename and size. Use alone can attach input but does not permit
+browsing or opening files; **Can see all work** (Inspect) is required for that.
 
 ## Delivery stages and schema
 
@@ -280,11 +288,11 @@ Default DeerMem instances keep facts and every summary field in the application
 database under stable instance identity. They start empty, including company
 instances; no creator-private summary or user/global bucket is read. Legacy
 chats keep their existing file-backed memory. General wiki/knowledge files still
-belong to Home and keep their ordinary Storage Spaces behavior. SQL platform
-memory checks Home audience/lifecycle through READ admission; it does not claim
+belong to Space and keep their ordinary Storage Spaces behavior. SQL platform
+memory checks Space audience/lifecycle through READ admission; it does not claim
 an exclusive filesystem-edit window over a live native attachment.
 
-Current Inspect and Home READ admit whole-instance memory. Native execution also
+Current Inspect and Space READ admit whole-instance memory. Native execution also
 requires Use; Use-only execution disables injection, tools, capture and compaction
 flush. Losing Inspect stops further model/tool dispatch for a run that already
 injected instance memory. Definition `memory_enabled: false` and global memory
@@ -292,13 +300,13 @@ disabling prevent execution reads and capture. Manual management remains availab
 under Inspect, or Manage plus Inspect for edits, and provider memory/agent ceilings.
 Conversation-derived memories are shared instance data for this explicit audience.
 
-Memory execution also requires compatible conversation and writable Home readers,
-including an original requester with Use who has no Home grant. Memory-bearing
+Memory execution also requires compatible conversation and writable Space readers,
+including an original requester with Use who has no Space grant. Memory-bearing
 history requires current Inspect for reads and execution. References and branches
 check destination readers against source readers; copies across original requesters
 retain this Inspect requirement across restarts and subsequent copies. Losing
 Inspect cannot reopen protected history through the original-requester Use exception.
-Inspect admits conversation/evidence reads without an additional Home READ grant.
+Inspect admits conversation/evidence reads without an additional Space READ grant.
 
 Facts and summaries use DeerMem's existing extraction, safety filters, capacity
 policy and lexical/relevance ranking. Derived access/eviction metadata stays in
@@ -317,7 +325,7 @@ document. `/memory/facts` supports POST and PATCH/DELETE by fact ID. DELETE
 Imports normalize/cap facts and replace only this instance's summaries.
 
 Clear/import advance a SQL epoch in the same commit. Queued jobs retain their
-original epoch across reload/CAS retries; generation, current grants, Home and
+original epoch across reload/CAS retries; generation, current grants, Space and
 conversation incarnation are rechecked before commit. Extraction holds no SQL
 locks during model calls. Shutdown drains the bounded queues while the original
 host loop is live and retires scopes that exceed its shared flush budget.
@@ -330,26 +338,40 @@ refuses used memory or provenance; configuration format is unchanged.
 
 ## Lifecycle and product controls
 
-`/workspace/instances` creates personal/company residents from caller-visible
-definitions, shows custody/supervision/current access, and starts server-minted
-conversations. The existing chat page resolves identity through
-`GET /api/agent-instances/conversations/{thread}/instance`; client metadata cannot
-bind an agent. Instance chats link to Home and withhold unsupported legacy upload,
-browser, sidecar and scheduling controls. Existing-chat legacy capabilities wait
-for successful feature discovery and a positive unbound result; lookup errors
-keep those actions unavailable. Use Home for ordinary file uploads.
-Home/Projects browsing and selected cross-space copies use `/workspace/spaces`;
-the native execution view remains the qualified Home, without ambient requester
-or Project mounts. Existing storage audience/copy checks remain authoritative.
+**My assistants** (`/workspace/assistants`) lists personal AI assistants;
+**AI employees** (`/workspace/employees`) lists company agents. Their page offers
+Conversations, Files, Work, Memory, Access and Settings according to current
+permissions. **Can work with**, **Can see all work** and **Can manage** correspond
+to Use, Inspect and Manage. Manage includes Inspect in the product controls.
+
+The existing chat page uses the canonical thread row’s `agent_instance` binding,
+including `custody`. A failed or unknown binding keeps legacy actions and file
+requests unavailable. Bound conversations do not prewarm a sandbox or expose
+legacy browser, archive, sidecar or scheduling actions. Attachments use the agent
+file routes. Files open only after current Inspect is verified. Generic Spaces
+browsing and authorized copies retain current source/destination access checks;
+execution mounts no ambient requester or Project directory.
+
+`GET /api/v1/auth/users` supplies named human pickers. Instance detail includes
+`activity`, `home` and `execution`; the list adds `unfinished` with
+`include_provisioning=true`. `DELETE /api/agent-instances/{id}` abandons an
+unfinished creation and requires its captured `creation_id`. The conversations
+list is `GET /api/agent-instances/{id}/conversations`. `GET /api/agent-instances/roles`
+reads role starting points from `ui.roles` or the live tenant `roles.json`; changing
+one never changes an already adopted brief.
 
 `POST /api/agent-instances/{id}/lifecycle` accepts captured `generation`, UUID-hex
 `operation_id`, and `action`: `suspend`, `archive`, `delete`, `restore`, `adopt`,
 `supervise`, or `grant`. Adoption takes caller-visible `definition_name`, supervision
 takes `supervisor_id`, and grants take `member_id` plus explicit permission bits
-(Use1/Inspect2/Manage4; zero revokes). Inspect grants Home READ/EXPORT; Inspect
+(Use1/Inspect2/Manage4; zero revokes). Inspect grants Space READ/EXPORT; Inspect
 plus Manage grants READ/WRITE/EXPORT/ADMIN. Membership without Inspect removes
-the file grant. Generic Space grant routes refuse a live agent's Home.
-Domain Manage and current Home
+the file grant. In the Compose bundle every generic Space grant route refuses `owned-space`.
+Access to an agent’s files follows its instance membership: Inspect gives 17
+(READ/EXPORT), Inspect plus Manage gives 27 (READ/WRITE/ADMIN/EXPORT), and a member
+without Inspect has no human file grant. Abandoning a grant restores the currently
+committed membership’s file grant.
+Domain Manage and current Space
 ADMIN are mandatory, alongside provider `agents:read`/`agents:write` ceilings.
 
 Optional `only_if_idle: true` checks the owning registry's actual run IDs inside
@@ -357,7 +379,7 @@ withdrawal before changing state. Busy requests return HTTP409 `work-in-flight`
 with `run_ids`. The flag is not stored, so the same operation may be retried
 without it. File activity and capacity reservations are not this run snapshot.
 
-Suspension/archive preserve principal, Home bytes, human storage grants
+Suspension/archive preserve principal, Space bytes, human storage grants
 and independently owned Projects. Qualified Storage Spaces retirement records the
 exact attachment scope and inactive agent generation atomically before physical
 effects. HTTP202 means containment remains pending, never that the writer stopped.
@@ -365,27 +387,27 @@ GET `/lifecycle` supplies current operation status and captured retry requests.
 Retries reuse the same identity/scope; completed retries cannot stop replacement
 writers. Renaming cannot strand a pending intent. Owned mutations drain cancellation.
 
-Delete commits the agent and Home tombstones together, advancing the Home
+Delete commits the agent and Space tombstones together, advancing the Space
 generation and recording `retained_backups: false` with cause `agent-deleted`.
 The route then makes one guarded host release attempt. HTTP200 includes
 `space_released`, false for incomplete or unverified cleanup; HTTP202 and abandoned
 operations omit it. Maintenance retries bindings that remain. Uncertain release
 proof is retained until physical reclamation can be confirmed.
 
-Deleted agents cannot be restored. Restore requires a retained active, qualified Home, current resident read/write
+Deleted agents cannot be restored. Restore requires a retained active, qualified Space, current resident read/write
 grants, a live supervisor/custodian and a valid adopted definition. Conflicting or
 unresolved native views prevent restoration. It restores no old membership and
 does not reconstruct deleted Space backing. Use qualified Space recovery separately
 when storage itself needs recovery. Generations reject older runs and memory jobs.
-Company managers with current Home ADMIN may resolve the exact committed pending
+Company managers with current Space ADMIN may resolve the exact committed pending
 request after creator departure; original actor remains recorded and `resolved_by`
 identifies the current resolver. Personal intents remain actor-bound. Captured
 adoption retries do not require the mutable source definition to survive.
 `POST /api/agent-instances/{id}/lifecycle/abandon` takes the pending operation ID
-and current instance generation. Current Manage/Home ADMIN may abandon obsolete
+and current instance generation. Current Manage/Space ADMIN may abandon obsolete
 intents only after their exact captured attachment scope is fenced. It records
 `phase=abandoned` and the resolver, retains the request/actor and suspended status,
-and performs no provider effects. An unfinished grant first resets Home access
+and performs no provider effects. An unfinished grant first resets Space access
 from current committed membership; a retired human receives no file grant.
 Reset failure or a changed grant leaves the intent pending. The final transaction
 rechecks both membership and file access. Use normal supervision/restore afterward.
@@ -395,12 +417,44 @@ Abandoned retries are terminal and cannot replay old grants or stop replacements
 captured personal generation, name and optional supervisor. The current personal
 custodian needs Inspect/Manage and current company-provisioning authority. The
 separate company target adopts an explicit copy of the captured business definition;
-its Home and memory start empty. Select file transfers in Spaces under current
+its Space and memory start empty. Select file transfers in Spaces under current
 READ/EXPORT/WRITE and disclosure admission, and transfer memory only through explicit
 export/import. Credentials, old principal, private user memory and legacy folders
 are never transferred implicitly. The personal instance remains independent.
 
 Migration `0037_agent_lifecycle` adds `agent_lifecycle_operations` after0036, with
-exact request/Home/attachment identity, original actor, prior status, generation,
+exact request/Space/attachment identity, original actor, prior status, generation,
 phase and resolver. Existing tables/configuration format are unchanged. Downgrade
 refuses used intents. Historical migrations/ancestry fixtures remain immutable.
+
+## Network decisions
+
+`direct_fetch` records the requester’s admitted web-fetch capability. Sandbox
+egress uses the standing provider allowlist. A network card is available only
+in an interactive conversation belonging to a current manager, never during a
+Work attempt or for a Use-only requester. It offers Keep blocked or a temporary
+allowance, which applies to that agent’s workspace across conversations and
+assignments. Current authority is checked again on the response.
+
+Every network request artifact carries `human_input.details` with `host`, `port`
+and `ttl_seconds`, including ordinary chats. Agent tool messages record denied
+connections in `sandbox_network_denied: {host, port}`. UI cards render from the
+request on any tool message. Work runs in autonomous mode and asks its supervisor
+through `report_work`/`request_input` instead of a conversational card.
+
+## Operator tool
+
+Run `python -m app.gateway.agent_instances` through the privilege-dropping `ai`
+function in the [Compose runbook](../deploy/compose/README.md#commands). Its nine
+verbs are `list`, `status`, `close-workspace`, `verify`, `export`, `supervise`,
+`delete`, `adopt-host` and `settle`. Each invocation emits one JSON document;
+exit 0 means complete, 1 refusal/failure, and 2 incomplete or unconfirmed effects.
+
+`delete` removes only an agent no eligible customer human can manage: a personal
+AI assistant whose owner is no longer live, or a company AI employee with no live
+supervisor or eligible Manage holder. The command rechecks this before committing
+both tombstones. It does not free the slot: the running Gateway’s host release
+removes files/backups and returns it to the matching kind. `settle` reconciles
+one interrupted file operation/publication; `--discard` records a host decision
+without replaying filesystem effects. See the runbook for exact flags, eligibility,
+uncertain outcomes and host replacement requirements.

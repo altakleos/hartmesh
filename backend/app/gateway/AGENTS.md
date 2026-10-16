@@ -1,13 +1,14 @@
 ### Gateway API (`app/gateway/`)
 
-Storage, reclamation and operator CLI: [guide](../../../docs/STORAGE_SPACES.md).
+Storage and operator CLI: [guide](../../../docs/STORAGE_SPACES.md).
+CLI `settle` edits file-op rows; other verbs use domain APIs. No slot release.
 
 One owner for retries; retain uncertainty.
 
-Managed ordinary chats check first-conversation capacity before checkpoint seeding
-and durable run admission, preserving HTTP 507. Reuse recorded idempotency keys
-first, and recheck after a capacity refusal for peer admissions; keep payload and
-owner checks. Instance runs use their own storage policy. Retain worker revalidation.
+Managed chats check first-conversation capacity before checkpoint seeding/run
+admission (HTTP 507). Reuse idempotency keys first; after capacity refusal recheck
+peer admissions, payload and owner. Instance storage policy and worker
+revalidation remain mandatory.
 
 Reject external run/state writes with `sandbox`, `thread_data`, or `viewed_images`.
 

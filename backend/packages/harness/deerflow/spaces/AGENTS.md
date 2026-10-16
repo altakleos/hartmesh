@@ -58,7 +58,7 @@ install this scope globally. A private exact completion permit seals only after
 terminal journal fsync and absence; consume it for memory accounting even if the
 deadline expires or the owner starts closing. Drain workers before expiring the
 batch, and clear the exact registry claim after confirmed index completion.
-Compose agent counts remain disabled. Generic release uses the existing
+Generic release uses the existing
 host-release proof and a native slot reservation before SQL locks; foreign native
 holders keep their backing and evidence. Released User policy stays in Gateway.
 PoolRuntimeOwner retains the exact published namespace even through failed first
@@ -148,7 +148,7 @@ native provider semantics stay in the caller.
 
 Immutable intent and versioned progress use the existing operation table with
 private nonhuman writer label `host:space-release`; never resolve it as a principal
-or grant it authority. This corrects CONTRACT 8.6's no-operation-row retry plan.
+or grant it authority. Keep the durable retry record.
 Only dedicated release interprets these records; ordinary settlement excludes
 them. `release_filesystem.py` pins qualified descriptors, refuses an unwritable
 parent before intent, and keeps its named private journal tied to the owned inode.

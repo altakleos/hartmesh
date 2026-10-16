@@ -59,7 +59,9 @@ The direct Home file APIs accept uploads up to 64 MiB before or during a run,
 reuse identical files and preserve different files under numbered names. Authorized
 humans can edit a loaded revision, create folders, rename and remove files without
 starting a workspace. Writes retain human attribution and recheck current access.
-See [the file API](docs/AGENT_EXECUTION.md#direct-home-file-writes). My assistants
+After an operator closes a workspace, the next message confirms its original
+containment before preparing a replacement; uncertain cleanup keeps it unavailable.
+See [the file API](docs/AGENT_EXECUTION.md#direct-agent-file-writes). My assistants
 and AI employees provide role-based setup and separate Conversations, Files, Work,
 Memory, Access and Settings tabs. Conversations show the AI identity and supervisor;
 attachments save immediately in the agent's files. Colleagues with Can chat alone
@@ -70,7 +72,7 @@ Resume. Attention routes questions to eligible people by name; a reply starts no
 Qualified workspaces support the provider's restricted network and read-only
 Shared binding alongside Home, without publishing a sandbox or relay port.
 Storage and agent counts remain opt-in while the Compose rollout continues.
-Required CI now checks seventeen shipped-bundle storage and agent journeys,
+Required CI now checks 27 shipped-bundle storage and agent journeys,
 including Work outcomes, concurrent ordinary chat, idle workspace reuse and
 interrupted-attempt containment. Native CI uses real resident admission and
 proves original-container removal before replacement. See the
@@ -751,6 +753,9 @@ uncertainty or shutdown invalidates it and fences stale refresh results.
 Readiness refusals log fixed causes and counts without tenant identifiers or payloads.
 Reconciliation checks captured attachments under the workspace lock. A confirmed
 completed replacement permits one fresh scan; uncertain claims keep their charge.
+An in-progress preparation is re-read under that lock and its deadline, so a
+successful startup does not leave files or subsequent work temporarily refused.
+Only an exact completed attachment with fresh workspace proof qualifies.
 Expired-run recovery wakes the existing maintenance loop. Consuming a failed
 initializer schedules its next owned pass immediately; live peer leases stay
 protected. Delayed startup readiness reports confirmed containment counts once.
