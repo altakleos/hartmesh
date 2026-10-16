@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.46] - 2026-10-16
+
 ### Storage and agents in the Compose bundle
 
 Every person, AI assistant, AI employee and the company has separate fixed-capacity
@@ -84,7 +86,7 @@ The required Compose job now verifies 27 named cases without skips, including
 questions and interrupted-workspace settlement. The runbook documents all nine
 operator verbs, tenant roles and evidence boundaries. No additional database schema, native
 evidence format or configuration-version change is introduced by these screens,
-acceptance additions or documents; the schema changes for this unreleased version
+acceptance additions or documents; the schema changes for this release
 remain listed below.
 
 ### AI agent operator commands
