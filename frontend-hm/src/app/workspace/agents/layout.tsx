@@ -3,12 +3,12 @@
 import type { ReactNode } from "react";
 
 import { AgentsFeatureDisabled } from "@/components/workspace/agents/agents-feature-disabled";
-import { useAgentsApiEnabled } from "@/core/agents";
+import { useAgentInstances } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 
 export default function AgentsLayout({ children }: { children: ReactNode }) {
   const { t } = useI18n();
-  const { enabled, isLoading } = useAgentsApiEnabled();
+  const { known, enabled, isLoading } = useAgentInstances();
 
   if (isLoading) {
     return (
@@ -18,7 +18,7 @@ export default function AgentsLayout({ children }: { children: ReactNode }) {
     );
   }
 
-  if (!enabled) {
+  if (!known || !enabled) {
     return <AgentsFeatureDisabled />;
   }
 

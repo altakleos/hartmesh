@@ -38,6 +38,7 @@ export interface InputRequest {
 export interface InputResponse {
   id: string;
   actor_id: string;
+  actor_kind?: "human" | "nonhuman" | "host";
   request_revision: number;
   text?: string;
   choice?: string;
@@ -111,6 +112,7 @@ export function getHistory(id: string, offset = 0, signal?: AbortSignal) {
     events: {
       id: string;
       actor_id: string;
+      actor_kind?: "human" | "nonhuman" | "host";
       action: string;
       revision: number;
       created_at: string;

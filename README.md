@@ -59,8 +59,14 @@ The direct Home file APIs accept uploads up to 64 MiB before or during a run,
 reuse identical files and preserve different files under numbered names. Authorized
 humans can edit a loaded revision, create folders, rename and remove files without
 starting a workspace. Writes retain human attribution and recheck current access.
-See [the file API](docs/AGENT_EXECUTION.md#direct-home-file-writes); product UI
-support follows in the next design stage.
+See [the file API](docs/AGENT_EXECUTION.md#direct-home-file-writes). My assistants
+and AI employees provide role-based setup and separate Conversations, Files, Work,
+Memory, Access and Settings tabs. Conversations show the AI identity and supervisor;
+attachments save immediately in the agent's files. Colleagues with Can chat alone
+see produced filenames; opening files requires Can see all work. Managers can
+update the brief and access, pause, retire or delete the AI assistant or AI employee.
+Work shows starting, running, stopped and interrupted attempts, with explicit
+Resume. Attention routes questions to eligible people by name; a reply starts no run.
 Qualified workspaces support the provider's restricted network and read-only
 Shared binding alongside Home, without publishing a sandbox or relay port.
 Storage and agent counts remain opt-in while the Compose rollout continues.
@@ -750,8 +756,7 @@ initializer schedules its next owned pass immediately; live peer leases stay
 protected. Delayed startup readiness reports confirmed containment counts once.
 Creation respects the configured allowance, counts unfinished and paused agents,
 and assigns files from the matching kind of prepared slot. Exact creation retries
-retain their identity and files. Default activation and the remaining product
-screens are staged separately.
+retain their identity and files. Default activation remains staged separately.
 
 The management API supports separate AI assistant and AI employee lists, role
 templates, activity and execution status, and paginated conversations. Inspect

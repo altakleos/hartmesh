@@ -20,6 +20,7 @@ rs.mock("@/core/auth/AuthProvider", () => ({
 }));
 rs.mock("@/core/attention/api", { spy: true });
 rs.mock("@/core/agent-instances/api", { spy: true });
+rs.mock("@/core/people/api", { spy: true });
 rs.mock("@/core/spaces/api", () => ({
   listSpaces: rs.fn().mockResolvedValue({ spaces: [] }),
 }));
@@ -28,11 +29,12 @@ import * as workAPI from "@/core/agent-instances/api";
 import * as api from "@/core/attention/api";
 import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
 import { I18nProvider } from "@/core/i18n/context";
+import { getPeople } from "@/core/people/api";
 
 const id = "a".repeat(32);
 let current: api.InputRequest;
 let responses: api.InputResponse[];
-function show() {
+function show(executionUnavailable = false) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -40,7 +42,7 @@ function show() {
     <QueryClientProvider client={client}>
       <I18nProvider initialLocale="en-US">
         <FileActionLifetimeProvider>
-          <RequestDetail id={id} />
+          <RequestDetail id={id} executionUnavailable={executionUnavailable} />
         </FileActionLifetimeProvider>
       </I18nProvider>
     </QueryClientProvider>,
@@ -48,6 +50,25 @@ function show() {
   return { client, ...mounted };
 }
 beforeEach(() => {
+  rs.mocked(workAPI.getInstanceGrants)
+    .mockReset()
+    .mockResolvedValue({
+      grants: [
+        { user_id: "alice", permissions: 7 },
+        { user_id: "bob", permissions: 3 },
+        { user_id: "manager", permissions: 6 },
+      ],
+    });
+  rs.mocked(getPeople)
+    .mockReset()
+    .mockImplementation(async (ids) => ({
+      users: ids.map((id) => ({
+        id,
+        name: id === "bob" ? "Jordan" : "Casey",
+        email: `${id}@example.test`,
+        active: true,
+      })),
+    }));
   current = {
     id,
     instance_id: "b".repeat(32),
@@ -100,6 +121,9 @@ beforeEach(() => {
     }));
   rs.mocked(api.command).mockReset().mockResolvedValue(current);
   rs.mocked(api.markRead).mockReset().mockResolvedValue({});
+  rs.mocked(api.getHistory)
+    .mockReset()
+    .mockResolvedValue({ events: [], has_more: false });
   rs.mocked(workAPI.getWork)
     .mockReset()
     .mockImplementation(
@@ -166,7 +190,8 @@ it("keeps same-question concurrent replies eligible but retires rerouted drafts"
 });
 it("never silently rebases a routing draft onto a concurrent reroute", async () => {
   const { client } = show();
-  fireEvent.change(await screen.findByLabelText("Human recipient ID"), {
+  await screen.findByRole("option", { name: "Jordan" });
+  fireEvent.change(screen.getByLabelText("Who should answer"), {
     target: { value: "bob" },
   });
   current = {
@@ -179,7 +204,7 @@ it("never silently rebases a routing draft onto a concurrent reroute", async () 
   const button = screen.getByRole("button", {
     name: "Route request",
   });
-  expect(button.hasAttribute("disabled")).toBe(true);
+  await waitFor(() => expect(button.hasAttribute("disabled")).toBe(true));
   fireEvent.click(button);
   expect(api.command).not.toHaveBeenCalled();
 });
@@ -212,9 +237,9 @@ it("new responses invalidate review acknowledgement and exact response IDs bind 
     screen.getByRole("button", { name: "Accept outcome statement" }),
   );
   await waitFor(() => expect(workAPI.commandWork).toHaveBeenCalledTimes(1));
-  expect(
-    rs.mocked(workAPI.commandWork).mock.calls[0]?.[2].request_basis,
-  ).toEqual({
+  const command = rs.mocked(workAPI.commandWork).mock.calls[0]?.[2];
+  if (!command) throw new Error("Missing exact outcome acceptance command");
+  expect(Reflect.get(command, "request_basis")).toEqual({
     id,
     revision: 2,
     request_revision: 1,
@@ -237,6 +262,103 @@ it("read state is a separate mutation and cannot approve or respond", async () =
   await waitFor(() => expect(api.markRead).toHaveBeenCalledTimes(1));
   expect(api.respond).not.toHaveBeenCalled();
   expect(workAPI.commandWork).not.toHaveBeenCalled();
+});
+it("continues saving replies during an execution hold and shows a saved time without operation IDs", async () => {
+  show(true);
+  await screen.findByText(
+    "You can still read requests and reply. Replies are kept until Documentation AI employee can work again.",
+  );
+  fireEvent.change(screen.getByLabelText("Response", { exact: true }), {
+    target: { value: "Use this guide" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Supply response" }));
+  await screen.findByText(/^Saved at .+\.$/);
+  expect(api.respond).toHaveBeenCalledTimes(1);
+  expect(workAPI.commandWork).not.toHaveBeenCalled();
+  expect(screen.queryByText(/eeeeeeeeeeeeeeee/)).toBeNull();
+});
+it("read status appears only after reading and distinguishes a newer request revision", async () => {
+  const view = show();
+  await screen.findByRole("heading", { name: "Which guide?" });
+  expect(screen.queryByText("You have read the latest version.")).toBeNull();
+  current = { ...current, read_revision: current.revision };
+  await act(() =>
+    view.client.invalidateQueries({ queryKey: ["attention-detail"] }),
+  );
+  await screen.findByText("You have read the latest version.");
+  current = { ...current, revision: current.revision + 1 };
+  await act(() =>
+    view.client.invalidateQueries({ queryKey: ["attention-detail"] }),
+  );
+  await screen.findByText("Changed since you read it.");
+});
+it("routes to nobody through the same named list and sends null without a separate clear action", async () => {
+  show();
+  await screen.findByLabelText("Who should answer");
+  fireEvent.change(screen.getByLabelText("Who should answer"), {
+    target: { value: "__none" },
+  });
+  const route = screen.getByRole("button", { name: "Route request" });
+  await waitFor(() => expect(route.hasAttribute("disabled")).toBe(false));
+  fireEvent.click(route);
+  await waitFor(() => expect(api.command).toHaveBeenCalledTimes(1));
+  expect(rs.mocked(api.command).mock.calls[0]![1]).toMatchObject({
+    action: "route",
+    recipient_id: null,
+  });
+  expect(screen.queryByRole("button", { name: "Clear recipient" })).toBeNull();
+});
+it("history uses the service name and event labels, while unavailable sources use their own sentence", async () => {
+  current = {
+    ...current,
+    can_manage: false,
+    sources: [{ kind: "unavailable" }],
+  };
+  rs.mocked(api.getHistory).mockResolvedValue({
+    events: [
+      {
+        id: "event",
+        actor_id: "PRIVATE-HOST-ID",
+        actor_kind: "host",
+        action: "respond",
+        revision: 4,
+        created_at: "2026-10-16T07:00:00Z",
+      },
+    ],
+    has_more: false,
+  });
+  show();
+  await screen.findByText("This file is no longer available to you.");
+  fireEvent.click(screen.getByRole("button", { name: "Request history" }));
+  await screen.findByText(/The service · Reply given/);
+  expect(screen.queryByText(/PRIVATE-HOST-ID/)).toBeNull();
+});
+it("a deactivated response author is named without exposing the stored account ID", async () => {
+  current = { ...current, can_manage: false };
+  responses = [
+    {
+      id: "response",
+      actor_id: "former",
+      request_revision: 1,
+      disposition: "supplied",
+      text: "A fact",
+      sources: [],
+      created_at: "2026-10-16T07:00:00Z",
+    },
+  ];
+  rs.mocked(getPeople).mockResolvedValue({
+    users: [
+      {
+        id: "former",
+        name: "Jordan",
+        email: "jordan@example.test",
+        active: false,
+      },
+    ],
+  });
+  show();
+  await screen.findByText("Jordan (no longer active)");
+  expect(screen.queryByText("former")).toBeNull();
 });
 it("unmount aborts a pending response and ignores its late receipt", async () => {
   let resolve!: (value: api.InputRequest) => void;
@@ -276,7 +398,7 @@ it("recovers the exact acceptance receipt after a lost acknowledgement and close
     can_manage: false,
   };
   await act(() => client.invalidateQueries({ queryKey: ["attention-detail"] }));
-  await screen.findByText("Request state: Closed (resolved)");
+  await screen.findByText("Request state: Closed (answered and checked)");
   expect(
     screen.queryByRole("button", { name: "Accept outcome statement" }),
   ).toBeNull();

@@ -9,6 +9,7 @@ export default tseslint.config(
   {
     ignores: [
       ".next",
+      ".next-hartmesh-*/**",
       "playwright-report",
       "test-results",
       "src/components/ui/**",

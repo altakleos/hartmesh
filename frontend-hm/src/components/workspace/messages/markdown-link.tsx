@@ -1,5 +1,9 @@
 import type { AnchorHTMLAttributes } from "react";
 
+import {
+  isConversationFileURL,
+  useConversationFiles,
+} from "@/components/workspace/chats/conversation-files";
 import { resolveMarkdownArtifactURL } from "@/core/artifacts/utils";
 import { cn } from "@/lib/utils";
 
@@ -66,6 +70,7 @@ export function createMarkdownLinkComponent(threadId?: string) {
     href,
     ...props
   }: AnchorHTMLAttributes<HTMLAnchorElement>) {
+    const files = useConversationFiles();
     // Reject unsafe schemes up front so a prompt-injected / pasted href can
     // never reach the rendered anchor — including through the citation
     // branch (which renders <a href={href}> directly). Check before the
@@ -87,6 +92,18 @@ export function createMarkdownLinkComponent(threadId?: string) {
           title={`Unsafe link scheme in ${href}`}
         >
           {children}
+        </span>
+      );
+    }
+    if (files.locked && href && isConversationFileURL(href, threadId)) {
+      return (
+        <span
+          className={props.className}
+          aria-disabled="true"
+          title={files.sentence ?? undefined}
+          aria-description={files.sentence ?? undefined}
+        >
+          {props.children}
         </span>
       );
     }

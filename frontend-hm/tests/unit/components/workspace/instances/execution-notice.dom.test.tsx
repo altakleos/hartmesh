@@ -102,3 +102,144 @@ describe("file execution notices", () => {
     );
   });
 });
+
+describe("agent execution notices", () => {
+  it("gives a deployment hold precedence over busy files", () => {
+    notice({
+      area: "agent",
+      reason: "operator-hold",
+      busy: true,
+      name: "Researcher",
+      administrator: false,
+      provider: "Acme",
+    });
+    expect(screen.getByRole("alert").textContent).toBe(
+      "AI assistants and AI employees are paused by Acme.",
+    );
+  });
+  it("explains an operator hold without asking the reader to fix it", () => {
+    notice({
+      area: "agent",
+      reason: "operator-hold",
+      administrator: true,
+      provider: "Acme",
+      supportURL: "https://support.example.com",
+    });
+    expect(screen.getByRole("alert").textContent).toBe(
+      "AI assistants and AI employees are paused by Acme.",
+    );
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+  it("uses the provider fallback for a hold", () => {
+    notice({ area: "agent", reason: "operator-hold", administrator: false });
+    expect(screen.getByRole("alert").textContent).toBe(
+      "AI assistants and AI employees are paused by your service provider.",
+    );
+  });
+  it.each(["personal", "company"] as const)(
+    "shows only the not-offered sentence for %s custody",
+    (kind) => {
+      notice({
+        area: "agent",
+        kind,
+        reason: "agents-none",
+        administrator: true,
+      });
+      expect(screen.getByRole("alert").textContent).toBe(
+        kind === "personal"
+          ? "AI assistants are not offered here."
+          : "AI employees are not offered here.",
+      );
+    },
+  );
+  it("keeps an unknown agent reason generic without inventing a reference", () => {
+    notice({ area: "agent", reason: null, administrator: true });
+    expect(screen.getByRole("alert").textContent).toBe(
+      enUS.sidebar.agentsUnavailable,
+    );
+  });
+  it.each([
+    ["host-replaced", "server-moved"],
+    ["space-unverified", "files-unchecked"],
+  ] as const)(
+    "gives an administrator the named agent and safe reference for %s",
+    (reason, reference) => {
+      notice({
+        area: "agent",
+        name: "Researcher",
+        reason,
+        administrator: true,
+        provider: "Acme",
+        supportURL: "https://support.example.com",
+      });
+      expect(screen.getByRole("alert").textContent).toContain("Researcher");
+      if (reason === "host-replaced") {
+        expect(screen.getByRole("alert").textContent).toContain(
+          "Acme has to confirm the move",
+        );
+        expect(screen.getByRole("alert").textContent).not.toContain(
+          "{provider}",
+        );
+      }
+      expect(
+        screen.getByText(enUS.agentInstances.unavailable.reference(reference)),
+      ).toBeDefined();
+      expect(screen.getByRole("link")).toBeDefined();
+    },
+  );
+  it.each([
+    "disk-too-small",
+    "storage-pool-missing",
+    "inventory-unreadable",
+  ] as const)(
+    "adds the agent-work explanation for underlying storage %s",
+    (storageReason) => {
+      notice({
+        area: "agent",
+        reason: "storage-unavailable",
+        storageReason,
+        administrator: false,
+        provider: "Acme",
+      });
+      expect(screen.getByRole("alert").textContent).toBe(
+        enUS.chat.filesUnavailable +
+          "AI assistants and AI employees cannot work until then." +
+          enUS.agentInstances.unavailable.askAdmin,
+      );
+      expect(screen.queryByRole("link")).toBeNull();
+    },
+  );
+  it.each([
+    [
+      "host-unqualified",
+      "The server is not yet set up to run AI assistants and AI employees safely.",
+    ],
+    [
+      "admission-failed",
+      "AI assistants and AI employees cannot start right now: a safety check on the server failed. Their files are kept.",
+    ],
+  ] as const)("uses agent-oriented copy for %s", (storageReason, text) => {
+    notice({
+      area: "agent",
+      reason: "storage-unavailable",
+      storageReason,
+      administrator: false,
+    });
+    expect(screen.getByText(text)).toBeDefined();
+    expect(
+      screen.getByText(enUS.agentInstances.unavailable.askAdmin),
+    ).toBeDefined();
+  });
+  it("uses the busy-files sentence with no support instructions", () => {
+    notice({
+      area: "agent",
+      reason: null,
+      name: "Researcher",
+      busy: true,
+      administrator: true,
+    });
+    expect(screen.getByRole("alert").textContent).toBe(
+      "Researcher's files are being changed right now and cannot be used. Try again in a few minutes.",
+    );
+  });
+});

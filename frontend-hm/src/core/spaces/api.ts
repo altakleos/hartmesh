@@ -113,6 +113,8 @@ export class StorageRequestError extends Error {
   constructor(
     public status: number,
     message: string,
+    public reason?: string,
+    public extra: Record<string, unknown> = {},
   ) {
     super(message);
   }
@@ -128,6 +130,11 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { cache: "no-store", ...init });
   const payload: unknown = await response.json();
   if (!response.ok) {
+    const body =
+      typeof payload === "object" && payload !== null && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>)
+        : {};
+    const { reason, ...extra } = body;
     const detail =
       typeof payload === "object" && payload !== null && "detail" in payload
         ? payload.detail
@@ -137,6 +144,16 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
       typeof detail === "string"
         ? detail
         : `Storage request failed (${response.status})`,
+      typeof reason === "string"
+        ? reason
+        : response.status === 409 &&
+            typeof detail === "object" &&
+            detail !== null &&
+            "code" in detail &&
+            detail.code === "storage-busy"
+          ? "storage-busy"
+          : undefined,
+      extra,
     );
   }
   return payload as T;

@@ -5,26 +5,33 @@ import { useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { usePersonName } from "@/components/workspace/person-name";
 import {
   InstanceApiError,
   operationID,
   type WorkRecord,
+  type AgentInstance,
 } from "@/core/agent-instances/api";
 import { createInput, type CreateInput } from "@/core/attention/api";
 import { useI18n } from "@/core/i18n/hooks";
 import { useSpaceActionSignal } from "@/core/spaces/lifetime";
 
+import { InputRecipientSelect } from "./recipient-select";
+
 export function RequestInput({
   record,
   manager,
   disabled,
+  instance,
 }: {
   record: WorkRecord;
   manager: boolean;
   disabled: boolean;
+  instance: Pick<AgentInstance, "name" | "supervisor">;
 }) {
   const { t } = useI18n();
   const c = t.attention;
+  const supervisor = usePersonName(instance.supervisor.subject_id) ?? "…";
   const client = useQueryClient();
   const capture = useSpaceActionSignal();
   const [question, setQuestion] = useState(""),
@@ -40,6 +47,8 @@ export function RequestInput({
   const [error, setError] = useState("");
   const busy = useRef(false);
   const [working, setWorking] = useState(false);
+  const [recipientValid, setRecipientValid] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   async function send(body: CreateInput) {
     if (busy.current) return;
     busy.current = true;
@@ -63,7 +72,7 @@ export function RequestInput({
       const definite =
         e instanceof InstanceApiError && e.status >= 400 && e.status < 500;
       if (definite) setPending(null);
-      setError(definite ? e.message : c.unconfirmed);
+      setError(definite ? t.agentInstances.operationError : c.unconfirmed);
     } finally {
       busy.current = false;
       if (!signal.aborted) setWorking(false);
@@ -86,12 +95,20 @@ export function RequestInput({
         ["open", "submitted"].includes(record.status) &&
         record.work_enabled &&
         !record.needs_mandate_reconciliation && (
-          <details>
+          <details onToggle={(event) => setExpanded(event.currentTarget.open)}>
             <summary>{c.create}</summary>
             <form
               className="flex flex-col gap-2"
               onSubmit={(e) => {
                 e.preventDefault();
+                if (
+                  !recipientValid ||
+                  disabled ||
+                  working ||
+                  pending ||
+                  basis !== record.revision
+                )
+                  return;
                 void send({
                   operation_id: operationID(),
                   expected_work_revision: basis,
@@ -114,7 +131,7 @@ export function RequestInput({
                 }
                 className="space-y-2"
               >
-                <p>{c.shared}</p>
+                <p>{c.shared(instance.name)}</p>
                 {record.status === "open" && (
                   <label>
                     {c.purpose}
@@ -156,15 +173,15 @@ export function RequestInput({
                     onChange={(e) => setExpected(e.target.value)}
                   />
                 </label>
-                <label>
-                  {c.recipient}
-                  <Input
-                    maxLength={128}
-                    value={recipient}
-                    onChange={(e) => setRecipient(e.target.value)}
-                  />
-                </label>
-                <p>{c.defaultRecipient}</p>
+                <InputRecipientSelect
+                  instance={record.instance_id}
+                  purpose={record.status === "submitted" ? "review" : purpose}
+                  enabled={manager && expanded}
+                  value={recipient}
+                  choose={setRecipient}
+                  validity={setRecipientValid}
+                  defaultLabel={c.recipientDefault(supervisor)}
+                />
                 <label>
                   {c.choices}
                   <textarea
@@ -173,7 +190,9 @@ export function RequestInput({
                     onChange={(e) => setChoices(e.target.value)}
                   />
                 </label>
-                <Button type="submit">{c.create}</Button>
+                <Button type="submit" disabled={!recipientValid}>
+                  {c.create}
+                </Button>
               </fieldset>
             </form>
             {basis !== record.revision && !pending && (

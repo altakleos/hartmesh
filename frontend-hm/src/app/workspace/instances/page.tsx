@@ -3,823 +3,378 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useId, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { AccessTab } from "@/components/workspace/instances/access-tab";
+import {
+  AgentHeader,
+  AgentAvailabilityNotice,
+} from "@/components/workspace/instances/agent-header";
+import { ConversationsTab } from "@/components/workspace/instances/conversations-tab";
+import { DeletedAgentNavigation } from "@/components/workspace/instances/delete-agent-dialog";
+import { FilesTab } from "@/components/workspace/instances/files-tab";
+import {
+  LifecycleActionsProvider,
+  LifecycleState,
+  useLifecycleActions,
+} from "@/components/workspace/instances/lifecycle-actions";
+import { MemoryTab } from "@/components/workspace/instances/memory-tab";
+import { SettingsTab } from "@/components/workspace/instances/settings-tab";
+import { UnfinishedCard } from "@/components/workspace/instances/unfinished-card";
 import { WorkPanel } from "@/components/workspace/instances/work-panel";
+import { useSupervisorName } from "@/components/workspace/person-name";
 import {
   WorkspaceBody,
   WorkspaceContainer,
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
 import * as api from "@/core/agent-instances/api";
-import { useAgentsApiEnabled } from "@/core/agents";
-import { listAgents } from "@/core/agents/api";
+import {
+  agentBlock,
+  hasCeiling,
+  INSPECT,
+  MANAGE,
+} from "@/core/agent-instances/presentation";
 import { useAuth } from "@/core/auth/AuthProvider";
-import { useDocumentTitle, useStorageSpacesEnabled } from "@/core/features";
-import { useFileActionLifetime } from "@/core/file-areas/file-action-lifetime";
+import { useAgentInstances, useDocumentTitle } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
-import { useSpaceActionSignal } from "@/core/spaces/lifetime";
-
-const USE = 1,
-  INSPECT = 2,
-  MANAGE = 4;
 
 export default function InstancesPage() {
   const { user } = useAuth();
-  const { enabled: agentsEnabled, isLoading: agentsLoading } =
-    useAgentsApiEnabled();
-  const spaces = useStorageSpacesEnabled();
   const { t } = useI18n();
+  const feature = useAgentInstances();
   const search = useSearchParams();
-  useDocumentTitle(t.agentInstances.title, t.pages.appName);
+  const router = useRouter();
+  const requested = search.get("instance");
+  const selected =
+    requested && /^[0-9a-f]{32}$/.test(requested) ? requested : null;
+  const fallback = user?.system_role === "admin" ? "company" : "personal";
+  const canRead = !!user && hasCeiling(user.permissions, "agents:read");
+  const scope = JSON.stringify([
+    user?.id,
+    user?.system_role,
+    user?.permissions,
+    selected,
+  ]);
+  const [knownKind, setKnownKind] = useState<{
+    scope: string;
+    kind: api.Custody;
+  }>();
+  const reportKind = useCallback(
+    (kind: api.Custody) => {
+      setKnownKind((current) =>
+        current?.scope === scope && current.kind === kind
+          ? current
+          : { scope, kind },
+      );
+    },
+    [scope],
+  );
+  const kind = knownKind?.scope === scope ? knownKind.kind : null;
+  useEffect(() => {
+    if (!requested)
+      router.replace(
+        fallback === "company"
+          ? "/workspace/employees"
+          : "/workspace/assistants",
+      );
+  }, [requested, fallback, router]);
   return (
     <WorkspaceContainer>
-      <WorkspaceHeader />
+      <WorkspaceHeader
+        breadcrumbSection={{
+          label:
+            kind === "personal"
+              ? t.agentInstances.assistants.title
+              : kind === "company"
+                ? t.agentInstances.employees.title
+                : t.sidebar.agents,
+          href:
+            kind === "personal"
+              ? "/workspace/assistants"
+              : kind === "company"
+                ? "/workspace/employees"
+                : "/workspace/agents",
+        }}
+      />
       <WorkspaceBody>
-        <div className="mx-auto flex h-full w-full max-w-5xl flex-col gap-4 overflow-y-auto p-6">
-          <h1 className="text-2xl font-semibold">{t.agentInstances.title}</h1>
-          <p className="text-muted-foreground">
-            {t.agentInstances.description}
-          </p>
-          {agentsLoading || spaces.isLoading ? (
-            <p role="status">{t.common.loading}</p>
-          ) : !agentsEnabled || !spaces.enabled ? (
-            <p role="status">{t.agentInstances.legacyUnavailable}</p>
-          ) : (
-            <InstanceControls
-              key={`${user?.id}:${user?.system_role}:${user?.permissions?.join(",")}:${search.get("instance")}`}
+        <div className="mx-auto h-full w-full max-w-5xl space-y-5 overflow-y-auto p-6">
+          {feature.isLoading || !requested ? (
+            <p role="status">{t.agentInstances.loading}</p>
+          ) : !feature.known || !feature.enabled || !canRead ? (
+            <p>{t.sidebar.agentsUnavailable}</p>
+          ) : selected ? (
+            <InstanceDetail
+              key={`${user?.id}:${user?.system_role}:${user?.permissions?.join(",")}:${selected}`}
+              id={selected}
+              onKindChange={reportKind}
             />
+          ) : (
+            <NotFound kind={fallback} />
           )}
         </div>
       </WorkspaceBody>
     </WorkspaceContainer>
   );
 }
-
-function InstanceControls() {
+function NotFound({ kind }: { kind: api.Custody }) {
+  const { t } = useI18n();
+  return (
+    <>
+      <p role="alert">{t.agentInstances.notFound}</p>
+      <Link
+        className="underline"
+        href={
+          kind === "personal" ? "/workspace/assistants" : "/workspace/employees"
+        }
+      >
+        {t.agentInstances.backToList(kind)}
+      </Link>
+    </>
+  );
+}
+function InstanceDetail({
+  id,
+  onKindChange,
+}: {
+  id: string;
+  onKindChange: (kind: api.Custody) => void;
+}) {
   const { user } = useAuth();
   const { t } = useI18n();
   const copy = t.agentInstances;
-  const queryClient = useQueryClient();
-  const router = useRouter();
   const search = useSearchParams();
-  const id = search.get("instance");
-  const selected = id && /^[0-9a-f]{32}$/.test(id) ? id : null;
-  const account = useFileActionLifetime();
-  const captureSignal = useSpaceActionSignal();
-  const [offset, setOffset] = useState(0);
-  const [busy, setBusy] = useState(false);
-  const busyRef = useRef(false);
-  const [error, setError] = useState<string | null>(null);
-  const [name, setName] = useState("");
-  const [definition, setDefinition] = useState("");
-  const [custody, setCustody] = useState<"personal" | "company">("personal");
-  const [supervisor, setSupervisor] = useState("");
-  const [member, setMember] = useState("");
-  const [permissions, setPermissions] = useState(USE);
-  const [fact, setFact] = useState("");
-  const [importText, setImportText] = useState("");
-  const [accept, setAccept] = useState(false);
-  const [creation, setCreation] = useState<api.CreateInstance | null>(null);
-  const [companyCopy, setCompanyCopy] = useState<{
-    creation_id: string;
-    generation: number;
-    name: string;
-    supervisor_id?: string;
-  } | null>(null);
-  const [pending, setPending] = useState<api.LifecycleChange | null>(null);
-  const formId = useId();
-  const ceiling = (permission: string) =>
-    !!user &&
-    (user.permissions == null ||
-      user.permissions.includes(permission) ||
-      user.permissions.includes("*") ||
-      user.permissions.includes(permission.split(":")[0] + ":*"));
-  const key = ["agent-instances", user?.id, user?.system_role];
-  const instances = useQuery({
-    queryKey: [...key, "list", offset],
-    queryFn: ({ signal }) => api.listInstances(offset, signal),
-    enabled: ceiling("agents:read"),
+  const client = useQueryClient();
+  const key = [
+    "agent-instances",
+    user?.id,
+    user?.system_role,
+    user?.permissions,
+    id,
+  ];
+  const detail = useQuery({
+    queryKey: [...key, "detail"],
+    queryFn: ({ signal }) => api.getInstance(id, signal),
+    refetchInterval: 10_000,
+    refetchIntervalInBackground: false,
+    retry: false,
     staleTime: 0,
   });
-  const instance = useQuery({
-    queryKey: [...key, selected],
-    queryFn: ({ signal }) => api.getInstance(selected!, signal),
-    enabled: selected !== null && ceiling("agents:read"),
-    staleTime: 0,
-  });
-  const current = instance.data;
-  const canInspect = !!current && (current.permissions & INSPECT) === INSPECT;
-  const canManage =
+  const current = !detail.isError ? detail.data : undefined;
+  const knownKind = useRef<api.Custody | undefined>(undefined);
+  useEffect(() => {
+    if (current) {
+      knownKind.current = current.custody;
+      onKindChange(current.custody);
+    }
+  }, [current, onKindChange]);
+  useDocumentTitle(current?.name ?? t.sidebar.agents, t.pages.appName);
+  const inspect = !!current && (current.permissions & INSPECT) !== 0;
+  const manage = !!current && (current.permissions & MANAGE) !== 0;
+  const readable =
     !!current &&
-    (current.permissions & MANAGE) === MANAGE &&
-    ceiling("agents:write");
-  const definitions = useQuery({
-    queryKey: [...key, "definitions"],
-    queryFn: listAgents,
-    enabled: ceiling("agents:write") && (!selected || canManage),
-  });
-  const adopted = useQuery({
-    queryKey: [...key, selected, "definition"],
-    queryFn: ({ signal }) => api.getInstanceDefinition(selected!, signal),
-    enabled: canInspect,
-    staleTime: 0,
-  });
-  const grants = useQuery({
-    queryKey: [...key, selected, "grants"],
-    queryFn: ({ signal }) => api.getInstanceGrants(selected!, signal),
-    enabled: canManage,
-    staleTime: 0,
-  });
+    current.status !== "deleted" &&
+    current.status !== "provisioning";
+  const [observeDeletion, setObserveDeletion] = useState(false);
+  useEffect(() => {
+    if (!observeDeletion) return;
+    const timer = setTimeout(() => setObserveDeletion(false), 180_000);
+    return () => clearTimeout(timer);
+  }, [observeDeletion]);
   const lifecycle = useQuery({
-    queryKey: [...key, selected, "lifecycle"],
-    queryFn: ({ signal }) => api.getInstanceLifecycle(selected!, signal),
-    enabled: canInspect || canManage,
-    staleTime: 0,
-  });
-  const memory = useQuery({
-    queryKey: [...key, selected, "memory"],
-    queryFn: ({ signal }) => api.getInstanceMemory(selected!, signal),
-    enabled:
-      canInspect && current?.status !== "deleted" && ceiling("memory:read"),
-    staleTime: 0,
+    queryKey: [...key, "lifecycle", current?.permissions],
+    queryFn: ({ signal }) => api.getInstanceLifecycle(id, signal),
+    enabled: (readable || observeDeletion) && (inspect || manage),
+    refetchInterval: 10_000,
+    refetchIntervalInBackground: false,
     retry: false,
   });
-  const unresolved = lifecycle.data?.operations.find(
-    (operation) => !operation.complete,
-  );
-  const memoryWrite =
-    canManage &&
-    canInspect &&
-    current?.status === "active" &&
-    ceiling("memory:read") &&
-    ceiling("memory:write");
-
-  async function run(work: (signal: AbortSignal) => Promise<void>) {
-    if (busyRef.current) return;
-    busyRef.current = true;
-    const signal = captureSignal();
-    setBusy(true);
-    setError(null);
-    try {
-      await work(signal);
-    } catch (failure) {
-      if (!signal.aborted && account.active)
-        setError(
-          failure instanceof Error ? failure.message : copy.operationError,
-        );
-    } finally {
-      busyRef.current = false;
-      if (!signal.aborted && account.active) setBusy(false);
-    }
+  const adopted = useQuery({
+    queryKey: [
+      ...key,
+      "definition",
+      current?.definition_revision,
+      current?.permissions,
+    ],
+    queryFn: ({ signal }) => api.getInstanceDefinition(id, signal),
+    enabled: readable && inspect,
+    retry: false,
+  });
+  const requested = search.get("work")
+    ? "work"
+    : (search.get("tab") ?? "conversations");
+  const tabs = [
+    "conversations",
+    "files",
+    "work",
+    ...(inspect && hasCeiling(user?.permissions, "memory:read")
+      ? ["memory"]
+      : []),
+    ...(manage ? ["access", "settings"] : []),
+  ] as (keyof typeof copy.tabs)[];
+  const tab = tabs.find((tab) => tab === requested) ?? "conversations";
+  function refresh() {
+    void client.invalidateQueries({ queryKey: ["agent-instances"] });
+    void client.invalidateQueries({ queryKey: ["features"] });
   }
-  async function refresh(signal?: AbortSignal) {
-    if (signal?.aborted || !account.active) return;
-    await queryClient.invalidateQueries({ queryKey: key });
-  }
-  function change(action: api.LifecycleChange["action"]) {
-    if (!current || !canManage || (unresolved ?? pending)) return;
-    const body: api.LifecycleChange = {
-      generation: current.generation,
-      operation_id: api.operationID(),
-      action,
-      ...(action === "adopt" ? { definition_name: definition } : {}),
-      ...(action === "supervise" ? { supervisor_id: supervisor } : {}),
-      ...(action === "grant" ? { member_id: member, permissions } : {}),
-    };
-    setPending(body);
-    void execute(body);
-  }
-  async function execute(body: api.LifecycleChange) {
-    if (!current || !canManage) return;
-    await run(async (signal) => {
-      const result = await api.changeInstanceLifecycle(
-        current.id,
-        body,
-        signal,
-      );
-      if (signal.aborted || !account.active) return;
-      setPending(result.complete ? null : body);
-      setAccept(false);
-      await refresh(signal);
-    });
-  }
-  function field(
-    label: string,
-    value: string,
-    update: (value: string) => void,
-    name: string,
-  ) {
+  if (detail.isPending) return <p role="status">{copy.loading}</p>;
+  if (!current)
     return (
-      <label className="flex flex-col gap-1" htmlFor={`${formId}-${name}`}>
-        <span>{label}</span>
-        <Input
-          id={`${formId}-${name}`}
-          value={value}
-          onChange={(event) => update(event.target.value)}
-          disabled={busy}
-        />
-      </label>
+      <NotFound
+        kind={
+          knownKind.current ??
+          (user?.system_role === "admin" ? "company" : "personal")
+        }
+      />
     );
-  }
-  const definitionPicker = (
-    <label className="flex flex-col gap-1" htmlFor={`${formId}-definition`}>
-      <span>{copy.definition}</span>
-      <select
-        id={`${formId}-definition`}
-        className="bg-background rounded border p-2"
-        value={definition}
-        onChange={(event) => setDefinition(event.target.value)}
-        disabled={busy}
-      >
-        <option value="">—</option>
-        {definitions.data?.map((value) => (
-          <option key={value.name} value={value.name}>
-            {value.name}
-          </option>
-        ))}
-      </select>
-    </label>
+  return (
+    <LifecycleActionsProvider
+      instance={current}
+      observationEpoch={detail.dataUpdatedAt}
+      onDeletePendingChange={setObserveDeletion}
+      operations={lifecycle.data?.operations ?? []}
+      refresh={refresh}
+    >
+      <InstanceContent
+        current={current}
+        tab={tab}
+        tabs={tabs}
+        definition={!adopted.isError ? adopted.data : undefined}
+        operations={lifecycle.data?.operations}
+        refresh={refresh}
+      />
+    </LifecycleActionsProvider>
   );
-
+}
+type Tab =
+  | "conversations"
+  | "files"
+  | "work"
+  | "memory"
+  | "access"
+  | "settings";
+function InstanceContent({
+  current,
+  tab,
+  tabs,
+  definition,
+  operations,
+  refresh,
+}: {
+  current: api.AgentInstanceDetail;
+  tab: Tab;
+  tabs: Tab[];
+  definition?: Awaited<ReturnType<typeof api.getInstanceDefinition>>;
+  operations?: api.LifecycleOperation[];
+  refresh: () => void;
+}) {
+  const { user } = useAuth();
+  const { t } = useI18n();
+  const copy = t.agentInstances;
+  const search = useSearchParams();
+  const feature = useAgentInstances();
+  const { pending: changing } = useLifecycleActions();
+  const inspect = (current.permissions & INSPECT) !== 0;
+  const block = agentBlock(current, feature);
+  const supervisor = useSupervisorName(current.supervisor.subject_id);
   return (
     <>
-      {error && <p role="alert">{error}</p>}
-      {instances.error && <p role="alert">{instances.error.message}</p>}
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          variant="outline"
-          disabled={busy}
-          onClick={() => void run((signal) => refresh(signal))}
-        >
-          {copy.refresh}
-        </Button>
-        <Link href="/workspace/spaces">{copy.spaces}</Link>
-      </div>
-      <ul className="grid gap-2 sm:grid-cols-2">
-        {instances.data?.instances.map((value) => (
-          <li key={value.id} className="rounded border p-3">
-            <Link href={`/workspace/instances?instance=${value.id}`}>
-              {value.name}
-            </Link>
-            <p className="text-muted-foreground text-sm">
-              {copy[value.custody]} · {copy[value.status]}
-            </p>
-          </li>
-        ))}
-      </ul>
-      {instances.data?.instances.length === 0 && <p>{copy.none}</p>}
-      {offset > 0 && (
-        <Button
-          variant="outline"
-          onClick={() => setOffset(Math.max(0, offset - 100))}
-        >
-          ←
-        </Button>
-      )}
-      {instances.data?.instances.length === 100 && (
-        <Button variant="outline" onClick={() => setOffset(offset + 100)}>
-          {copy.more}
-        </Button>
-      )}
-      {!selected && ceiling("agents:write") && (
-        <section className="grid gap-3 rounded border p-4 sm:grid-cols-2">
-          {field(copy.name, name, setName, "create-name")}
-          {definitionPicker}
-          <label className="flex flex-col gap-1" htmlFor={`${formId}-custody`}>
-            <span>{copy.custody}</span>
-            <select
-              id={`${formId}-custody`}
-              className="bg-background rounded border p-2"
-              value={custody}
-              onChange={(event) =>
-                setCustody(event.target.value as "personal" | "company")
-              }
-            >
-              <option value="personal">{copy.personal}</option>
-              <option value="company">{copy.company}</option>
-            </select>
-          </label>
-          {field(
-            copy.supervisor,
-            supervisor,
-            setSupervisor,
-            "create-supervisor",
-          )}
-          <Button
-            disabled={busy || !name.trim() || !definition}
-            onClick={() =>
-              void run(async (signal) => {
-                const body = creation ?? {
-                  creation_id: api.operationID(),
-                  name,
-                  definition_name: definition,
-                  custody,
-                  ...(supervisor ? { supervisor_id: supervisor } : {}),
-                };
-                setCreation(body);
-                const created = await api.createInstance(body, signal);
-                if (signal.aborted || !account.active) return;
-                setCreation(null);
-                await refresh(signal);
-                if (!signal.aborted && account.active)
-                  router.replace(`/workspace/instances?instance=${created.id}`);
-              })
+      <DeletedAgentNavigation />
+      <AgentHeader
+        changed={refresh}
+        instance={current}
+        lifecyclePending={changing}
+        brief={definition?.soul}
+      />
+      <LifecycleState />
+      {current.status === "deleted" ? (
+        <>
+          <p>{copy.deletedNotice(current.name)}</p>
+          <Link
+            className="underline"
+            href={
+              current.custody === "personal"
+                ? "/workspace/assistants"
+                : "/workspace/employees"
             }
           >
-            {copy.create}
-          </Button>
-        </section>
-      )}
-      {selected &&
-        (instance.isPending ? (
-          <p role="status">{copy.loading}</p>
-        ) : instance.error ? (
-          <p role="alert">{instance.error.message}</p>
-        ) : (
-          current && (
-            <section
-              key={current.id}
-              className="flex flex-col gap-4 rounded border p-4"
-            >
-              <h2 className="text-xl font-semibold">{current.name}</h2>
-              <dl className="grid gap-2 sm:grid-cols-2">
-                <div>
-                  <dt>{copy.custody}</dt>
-                  <dd>{copy[current.custody]}</dd>
-                </div>
-                <div>
-                  <dt>{copy.status}</dt>
-                  <dd>{copy[current.status]}</dd>
-                </div>
-                <div>
-                  <dt>{copy.supervisor}</dt>
-                  <dd>{current.supervisor.subject_id}</dd>
-                </div>
-                <div>
-                  <dt>{copy.definition}</dt>
-                  <dd>
-                    {adopted.data?.config.name ??
-                      current.definition_revision.slice(0, 12)}
-                  </dd>
-                </div>
-              </dl>
-              <p>
-                {[USE, INSPECT, MANAGE]
-                  .filter((bit) => (current.permissions & bit) !== 0)
-                  .map((bit) =>
-                    bit === USE
-                      ? copy.use
-                      : bit === INSPECT
-                        ? copy.inspect
-                        : copy.manageAccess,
-                  )
-                  .join(" · ")}
-              </p>
-              {current.home_id && (
-                <Link href={`/workspace/spaces?space=${current.home_id}`}>
-                  {copy.home}
-                </Link>
-              )}
-              {!canInspect && <p>{copy.useOnly}</p>}
-              <WorkPanel
+            {copy.backToList(current.custody)}
+          </Link>
+        </>
+      ) : current.status === "provisioning" ? (
+        <UnfinishedCard
+          entry={current}
+          executable={feature.execution === "ready"}
+          notice={
+            block ? (
+              <AgentAvailabilityNotice instance={current} block={block} />
+            ) : undefined
+          }
+          refresh={refresh}
+        />
+      ) : (
+        <>
+          {search.get("employeeAdded") === "1" && (
+            <p role="status">{copy.settings.employeeAdded(current.name)}</p>
+          )}
+          {search.get("added") === "1" && (
+            <p role="status">{copy.create.addedNoConversation(current.name)}</p>
+          )}
+          <nav
+            role="tablist"
+            aria-label={current.name}
+            className="flex flex-wrap gap-2 border-b pb-2"
+          >
+            {tabs.map((item) => (
+              <Link
+                role="tab"
+                aria-selected={tab === item}
+                key={item}
+                className="aria-selected:bg-muted rounded px-3 py-2 text-sm"
+                href={`/workspace/instances?instance=${current.id}&tab=${item}`}
+              >
+                {copy.tabs[item]}
+              </Link>
+            ))}
+          </nav>
+          <div role="tabpanel" aria-label={copy.tabs[tab]}>
+            {tab === "conversations" && <ConversationsTab instance={current} />}
+            {tab === "files" && (
+              <FilesTab
                 instance={current}
-                policy={adopted.error ? null : adopted.data?.config.work_policy}
-                canRead={ceiling("agents:read")}
-                canWrite={ceiling("agents:write")}
-                canActivate={ceiling("runs:create")}
-                canCreateConversation={ceiling("threads:write")}
-                canStop={ceiling("runs:cancel")}
-                initialWork={search.get("work")}
-                lifecycleOperations={lifecycle.data?.operations}
-                lifecyclePending={!!(unresolved ?? pending)}
+                changed={refresh}
+                initialFolder={search.get("folder") ?? undefined}
               />
-              {(current.permissions & USE) !== 0 &&
-                current.status === "active" &&
-                ceiling("threads:write") && (
-                  <Button
-                    disabled={busy || !!(unresolved ?? pending)}
-                    onClick={() =>
-                      void run(async (signal) => {
-                        const chat = await api.createInstanceConversation(
-                          current.id,
-                          api.operationID(),
-                          signal,
-                        );
-                        if (!signal.aborted && account.active)
-                          router.push(`/workspace/chats/${chat.thread_id}`);
-                      })
-                    }
-                  >
-                    {copy.start}
-                  </Button>
-                )}
-              {adopted.data && (
-                <details>
-                  <summary>{copy.instructions}</summary>
-                  <p className="whitespace-pre-wrap">{adopted.data.soul}</p>
-                </details>
-              )}
-              {(unresolved ?? pending) && (
-                <div role="status">
-                  <p>{unresolved ? copy.pending : copy.unconfirmed}</p>
-                  {canManage && (pending ?? unresolved?.retry) && (
-                    <Button
-                      disabled={busy}
-                      onClick={() =>
-                        void execute(pending ?? unresolved!.retry!)
-                      }
-                    >
-                      {copy.retry}
-                    </Button>
+            )}
+            {tab === "work" &&
+              (inspect ? (
+                <WorkPanel
+                  instance={current}
+                  unavailable={block}
+                  policy={definition?.config.work_policy}
+                  canRead={hasCeiling(user?.permissions, "agents:read")}
+                  canWrite={hasCeiling(user?.permissions, "agents:write")}
+                  canActivate={hasCeiling(user?.permissions, "runs:create")}
+                  canCreateConversation={hasCeiling(
+                    user?.permissions,
+                    "threads:write",
                   )}
-                  {canManage && unresolved && (
-                    <Button
-                      variant="outline"
-                      disabled={busy || !accept}
-                      onClick={() =>
-                        void run(async (signal) => {
-                          await api.abandonInstanceLifecycle(
-                            current.id,
-                            {
-                              generation: current.generation,
-                              operation_id: unresolved.operation_id,
-                            },
-                            signal,
-                          );
-                          if (signal.aborted || !account.active) return;
-                          setPending(null);
-                          setAccept(false);
-                          await refresh(signal);
-                        })
-                      }
-                    >
-                      {copy.abandon}
-                    </Button>
-                  )}
-                </div>
-              )}
-              {lifecycle.data?.operations.some(
-                (operation) => operation.abandoned,
-              ) && <p role="status">{copy.abandoned}</p>}
-              {canManage && (
-                <section className="flex flex-col gap-3 border-t pt-4">
-                  <h3 className="font-semibold">{copy.manage}</h3>
-                  <p>{copy.retention}</p>
-                  {canInspect &&
-                    current.custody === "personal" &&
-                    current.owner_id === user?.id &&
-                    current.status !== "deleted" && (
-                      <>
-                        <p>{copy.companyCopyNotice}</p>
-                        <Button
-                          variant="outline"
-                          disabled={
-                            busy || !accept || !!(unresolved ?? pending)
-                          }
-                          onClick={() =>
-                            void run(async (signal) => {
-                              const body = companyCopy ?? {
-                                creation_id: api.operationID(),
-                                generation: current.generation,
-                                name:
-                                  name.trim() ||
-                                  `${current.name.slice(0, 110)} (company)`,
-                                ...(supervisor
-                                  ? { supervisor_id: supervisor }
-                                  : {}),
-                              };
-                              setCompanyCopy(body);
-                              const target = await api.createCompanyCopy(
-                                current.id,
-                                body,
-                                signal,
-                              );
-                              if (signal.aborted || !account.active) return;
-                              setCompanyCopy(null);
-                              await refresh(signal);
-                              if (!signal.aborted && account.active)
-                                router.replace(
-                                  `/workspace/instances?instance=${target.id}`,
-                                );
-                            })
-                          }
-                        >
-                          {copy.companyCopy}
-                        </Button>
-                      </>
-                    )}
-                  {field(copy.name, name, setName, "rename")}
-                  <Button
-                    variant="outline"
-                    disabled={
-                      busy ||
-                      !name.trim() ||
-                      !!(unresolved ?? pending) ||
-                      current.status === "deleted"
-                    }
-                    onClick={() =>
-                      void run(async (signal) => {
-                        await api.renameInstance(
-                          current.id,
-                          current.generation,
-                          name,
-                          signal,
-                        );
-                        await refresh(signal);
-                      })
-                    }
-                  >
-                    {copy.rename}
-                  </Button>
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={accept}
-                      onChange={(event) => setAccept(event.target.checked)}
-                    />{" "}
-                    {copy.confirm}
-                  </label>
-                  <div className="flex flex-wrap gap-2">
-                    {(["suspend", "archive", "delete", "restore"] as const).map(
-                      (action) => (
-                        <Button
-                          key={action}
-                          variant="outline"
-                          disabled={
-                            busy ||
-                            !accept ||
-                            !!(unresolved ?? pending) ||
-                            (action === "restore"
-                              ? current.status === "active"
-                              : current.status === "deleted")
-                          }
-                          onClick={() => change(action)}
-                        >
-                          {copy[action]}
-                        </Button>
-                      ),
-                    )}
-                  </div>
-                  {current.status !== "deleted" && (
-                    <>
-                      {definitionPicker}
-                      <Button
-                        variant="outline"
-                        disabled={
-                          busy || !definition || !!(unresolved ?? pending)
-                        }
-                        onClick={() => change("adopt")}
-                      >
-                        {copy.adopt}
-                      </Button>
-                      {field(
-                        copy.supervisor,
-                        supervisor,
-                        setSupervisor,
-                        "supervise",
-                      )}
-                      <Button
-                        variant="outline"
-                        disabled={
-                          busy || !supervisor || !!(unresolved ?? pending)
-                        }
-                        onClick={() => change("supervise")}
-                      >
-                        {copy.supervise}
-                      </Button>
-                      <p>{copy.grantsNotice}</p>
-                      <ul>
-                        {grants.data?.grants.map((value) => (
-                          <li key={value.user_id}>
-                            {value.user_id} ·{" "}
-                            {[USE, INSPECT, MANAGE]
-                              .filter((bit) => (value.permissions & bit) !== 0)
-                              .map((bit) =>
-                                bit === USE
-                                  ? copy.use
-                                  : bit === INSPECT
-                                    ? copy.inspect
-                                    : copy.manageAccess,
-                              )
-                              .join(" · ")}
-                          </li>
-                        ))}
-                      </ul>
-                      {field(copy.member, member, setMember, "grant-member")}
-                      <div className="flex flex-wrap gap-3">
-                        {([USE, INSPECT, MANAGE] as const).map((bit) => (
-                          <label key={bit}>
-                            <input
-                              type="checkbox"
-                              checked={(permissions & bit) !== 0}
-                              onChange={(event) =>
-                                setPermissions(
-                                  event.target.checked
-                                    ? permissions | bit
-                                    : permissions & ~bit,
-                                )
-                              }
-                            />
-                            {bit === USE
-                              ? copy.use
-                              : bit === INSPECT
-                                ? copy.inspect
-                                : copy.manageAccess}
-                          </label>
-                        ))}
-                      </div>
-                      <Button
-                        variant="outline"
-                        disabled={busy || !member || !!(unresolved ?? pending)}
-                        onClick={() => change("grant")}
-                      >
-                        {copy.grant}
-                      </Button>
-                    </>
-                  )}
-                </section>
-              )}
-              {canInspect &&
-                ceiling("memory:read") &&
-                current.status !== "deleted" && (
-                  <section className="flex flex-col gap-3 border-t pt-4">
-                    <h3 className="font-semibold">{copy.memory}</h3>
-                    <p>{copy.memoryNotice}</p>
-                    {memory.error && (
-                      <p role="status">
-                        {copy.memoryUnavailable} {memory.error.message}
-                      </p>
-                    )}
-                    {memory.data && (
-                      <>
-                        <dl className="grid gap-3 sm:grid-cols-2">
-                          {[
-                            [
-                              t.settings.memory.markdown.work,
-                              memory.data.user.workContext.summary,
-                            ],
-                            [
-                              t.settings.memory.markdown.personal,
-                              memory.data.user.personalContext.summary,
-                            ],
-                            [
-                              t.settings.memory.markdown.topOfMind,
-                              memory.data.user.topOfMind.summary,
-                            ],
-                            [
-                              t.settings.memory.markdown.recentMonths,
-                              memory.data.history.recentMonths.summary,
-                            ],
-                            [
-                              t.settings.memory.markdown.earlierContext,
-                              memory.data.history.earlierContext.summary,
-                            ],
-                            [
-                              t.settings.memory.markdown.longTermBackground,
-                              memory.data.history.longTermBackground.summary,
-                            ],
-                          ]
-                            .filter(([, summary]) => summary)
-                            .map(([label, summary]) => (
-                              <div key={label}>
-                                <dt className="font-semibold">{label}</dt>
-                                <dd className="whitespace-pre-wrap">
-                                  {summary}
-                                </dd>
-                              </div>
-                            ))}
-                        </dl>
-                        <ul>
-                          {memory.data.facts.map((value) => (
-                            <li
-                              key={value.id}
-                              className="flex items-start justify-between gap-3 rounded border p-2"
-                            >
-                              <p className="whitespace-pre-wrap">
-                                {value.content}
-                              </p>
-                              {memoryWrite && (
-                                <Button
-                                  variant="outline"
-                                  disabled={busy}
-                                  onClick={() =>
-                                    void run(async (signal) => {
-                                      await api.deleteInstanceFact(
-                                        current.id,
-                                        value.id,
-                                        signal,
-                                      );
-                                      await refresh(signal);
-                                    })
-                                  }
-                                >
-                                  {copy.removeFact}
-                                </Button>
-                              )}
-                            </li>
-                          ))}
-                        </ul>
-                        <Button
-                          variant="outline"
-                          onClick={() => {
-                            const blob = new Blob(
-                              [JSON.stringify(memory.data, null, 2)],
-                              { type: "application/json" },
-                            );
-                            const url = URL.createObjectURL(blob);
-                            const anchor = document.createElement("a");
-                            anchor.href = url;
-                            anchor.download = "instance-memory.json";
-                            anchor.click();
-                            URL.revokeObjectURL(url);
-                          }}
-                        >
-                          {copy.exportMemory}
-                        </Button>
-                        {memoryWrite && (
-                          <>
-                            {field(copy.fact, fact, setFact, "memory-fact")}
-                            <Button
-                              disabled={busy || !fact.trim()}
-                              onClick={() =>
-                                void run(async (signal) => {
-                                  await api.createInstanceFact(
-                                    current.id,
-                                    fact,
-                                    signal,
-                                  );
-                                  if (!signal.aborted) setFact("");
-                                  await refresh(signal);
-                                })
-                              }
-                            >
-                              {copy.addFact}
-                            </Button>
-                            <p>{copy.confirmMemory}</p>
-                            <Button
-                              variant="outline"
-                              disabled={busy || !accept}
-                              onClick={() =>
-                                void run(async (signal) => {
-                                  await api.clearInstanceMemory(
-                                    current.id,
-                                    signal,
-                                  );
-                                  await refresh(signal);
-                                })
-                              }
-                            >
-                              {copy.clearMemory}
-                            </Button>
-                            <label htmlFor={`${formId}-memory-import`}>
-                              {copy.importMemory}
-                            </label>
-                            <textarea
-                              id={`${formId}-memory-import`}
-                              className="min-h-24 rounded border p-2"
-                              value={importText}
-                              onChange={(event) =>
-                                setImportText(event.target.value)
-                              }
-                            />
-                            <Button
-                              variant="outline"
-                              disabled={busy || !accept || !importText.trim()}
-                              onClick={() =>
-                                void run(async (signal) => {
-                                  if (
-                                    new TextEncoder().encode(importText)
-                                      .length >
-                                    4 * 1024 * 1024
-                                  )
-                                    throw new Error(
-                                      "Memory import exceeds4MiB",
-                                    );
-                                  const document: unknown =
-                                    JSON.parse(importText);
-                                  await api.importInstanceMemory(
-                                    current.id,
-                                    document,
-                                    signal,
-                                  );
-                                  await refresh(signal);
-                                })
-                              }
-                            >
-                              {copy.replaceMemory}
-                            </Button>
-                          </>
-                        )}
-                      </>
-                    )}
-                  </section>
-                )}
-            </section>
-          )
-        ))}
+                  canStop={hasCeiling(user?.permissions, "runs:cancel")}
+                  initialWork={search.get("work")}
+                  lifecyclePending={changing}
+                  lifecycleOperations={operations}
+                />
+              ) : (
+                <p>{t.agentWork.visibility(supervisor)}</p>
+              ))}
+            {tab === "memory" && (
+              <MemoryTab instance={current} lifecyclePending={changing} />
+            )}
+            {tab === "access" && <AccessTab />}
+            {tab === "settings" && <SettingsTab />}
+          </div>
+        </>
+      )}
     </>
   );
 }

@@ -23,6 +23,19 @@ export interface FeaturesResponse {
     user_spaces?: unknown;
   };
   accounts?: { seats?: { allowed?: unknown; in_use?: unknown } };
+  agent_instances?: {
+    enabled?: unknown;
+    execution?: unknown;
+    reason?: unknown;
+    ai_assistants?: {
+      per_user?: unknown;
+      allowed?: unknown;
+      in_use?: unknown;
+      mine?: unknown;
+    };
+    ai_employees?: { allowed?: unknown; in_use?: unknown };
+  };
+  people_search?: unknown;
   customer_administration?: {
     plugin_management?: boolean;
     local_skill_management?: boolean;
@@ -125,6 +138,74 @@ export interface SeatsFeature {
   inUse: number;
 }
 
+export const EXECUTION_REASONS = [
+  "storage-unavailable",
+  "agents-none",
+  "operator-hold",
+  "host-replaced",
+  "space-unverified",
+  "space-not-assigned",
+] as const;
+export type ExecutionReason = (typeof EXECUTION_REASONS)[number];
+export interface AgentInstancesFeature {
+  known: boolean;
+  enabled: boolean;
+  execution: "ready" | "unavailable";
+  reason: ExecutionReason | null;
+  assistants: { perUser: number; allowed: number; inUse: number; mine: number };
+  employees: { allowed: number; inUse: number };
+}
+
+function wholeCount(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : 0;
+}
+
+export function selectAgentInstances(
+  features: FeaturesResponse | undefined,
+): AgentInstancesFeature {
+  const agents = features?.agent_instances;
+  if (
+    !agents ||
+    typeof agents.enabled !== "boolean" ||
+    (agents.execution !== "ready" && agents.execution !== "unavailable")
+  ) {
+    return {
+      known: false,
+      enabled: false,
+      execution: "unavailable",
+      reason: null,
+      assistants: { perUser: 0, allowed: 0, inUse: 0, mine: 0 },
+      employees: { allowed: 0, inUse: 0 },
+    };
+  }
+  return {
+    known: true,
+    enabled: agents.enabled,
+    execution: agents.execution,
+    reason: EXECUTION_REASONS.includes(agents.reason as ExecutionReason)
+      ? (agents.reason as ExecutionReason)
+      : null,
+    assistants: {
+      perUser: wholeCount(agents.ai_assistants?.per_user),
+      allowed: wholeCount(agents.ai_assistants?.allowed),
+      inUse: wholeCount(agents.ai_assistants?.in_use),
+      mine: wholeCount(agents.ai_assistants?.mine),
+    },
+    employees: {
+      allowed: wholeCount(agents.ai_employees?.allowed),
+      inUse: wholeCount(agents.ai_employees?.in_use),
+    },
+  };
+}
+
+export function selectPeopleSearch(
+  features: FeaturesResponse | undefined,
+): "prefix" | "exact" {
+  return features?.people_search === "prefix" ? "prefix" : "exact";
+}
+
 /** Failed, absent or malformed discovery never grants file availability. */
 export function selectStorageState(
   features: FeaturesResponse | undefined,
@@ -167,6 +248,8 @@ export function selectStorageState(
     userSpaces: storage.user_spaces === true,
   };
 }
+
+export { selectStorageState as selectStorage };
 
 export function selectSeats(
   features: FeaturesResponse | undefined,

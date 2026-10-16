@@ -7,10 +7,12 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 
 const state = rs.hoisted(() => ({
   enabled: true,
+  tab: "conversations",
   userId: "alice",
   permissions: 7,
   push: rs.fn(),
@@ -31,7 +33,15 @@ rs.mock("@/core/auth/AuthProvider", () => ({
   }),
 }));
 rs.mock("@/core/features", () => ({
-  useStorageSpacesEnabled: () => ({ enabled: state.enabled, isLoading: false }),
+  useAgentInstances: () => ({
+    known: true,
+    enabled: state.enabled,
+    isLoading: false,
+    execution: "ready",
+    reason: null,
+  }),
+  useStorage: () => null,
+  useBranding: () => ({}),
   useDocumentTitle: () => undefined,
 }));
 rs.mock("@/core/agents", () => ({
@@ -41,7 +51,8 @@ rs.mock("@/core/agents/api", () => ({
   listAgents: rs.fn().mockResolvedValue([]),
 }));
 rs.mock("next/navigation", () => ({
-  useSearchParams: () => new URLSearchParams("instance=" + "a".repeat(32)),
+  useSearchParams: () =>
+    new URLSearchParams("instance=" + "a".repeat(32) + "&tab=" + state.tab),
   useRouter: () => ({ push: state.push, replace: rs.fn() }),
 }));
 rs.mock("@/core/agent-instances/api", { spy: true });
@@ -60,7 +71,7 @@ import * as api from "@/core/agent-instances/api";
 import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
 import { I18nProvider } from "@/core/i18n/context";
 
-function instance(): api.AgentInstance {
+function instance(): api.AgentInstanceDetail {
   return {
     id: "a".repeat(32),
     name: "Resident analyst",
@@ -74,6 +85,14 @@ function instance(): api.AgentInstance {
     status: "active",
     generation: 7,
     permissions: state.permissions,
+    activity: {
+      running_runs: 0,
+      running: [],
+      last_active_at: null,
+      open_conversations: 0,
+    },
+    home: { state: "available", workspace: "absent" },
+    execution: { execution: "ready", reason: null },
   };
 }
 function show() {
@@ -89,15 +108,20 @@ function show() {
       </I18nProvider>
     </QueryClientProvider>
   );
-  return { ...render(ui()), ui };
+  return { ...render(ui()), ui, client };
 }
 beforeEach(() => {
   rs.mocked(api.listWork).mockResolvedValue({ work: [] });
   state.enabled = true;
+  state.tab = "conversations";
   state.userId = "alice";
   state.permissions = 7;
   state.push.mockReset();
-  rs.mocked(api.listInstances).mockResolvedValue({ instances: [instance()] });
+  rs.mocked(api.listInstances).mockResolvedValue({
+    instances: [instance()],
+    ai_assistants: { per_user: 1, allowed: 10, in_use: 1, mine: 0 },
+    unfinished: [],
+  });
   rs.mocked(api.getInstance).mockImplementation(async () => instance());
   rs.mocked(api.getInstanceDefinition).mockResolvedValue({
     revision: "d".repeat(64),
@@ -109,6 +133,7 @@ beforeEach(() => {
   rs.mocked(api.getInstanceMemory).mockRejectedValue(
     new api.InstanceApiError(501, "Scoped memory unavailable"),
   );
+  rs.mocked(api.changeInstanceLifecycle).mockReset();
   rs.mocked(api.createInstanceConversation).mockReset();
 });
 afterEach(cleanup);
@@ -118,7 +143,7 @@ it("does not load instances when the deployment capability is disabled", async (
   show();
   expect(
     await screen.findByText(
-      "Persistent instances require enabled agent management and qualified Storage Spaces.",
+      "AI assistants and AI employees are not available right now.",
     ),
   ).toBeTruthy();
   expect(api.listInstances).not.toHaveBeenCalled();
@@ -128,13 +153,13 @@ it("shows identity and Home while withholding Manage and memory controls from Us
   rs.mocked(api.getInstanceDefinition).mockClear();
   show();
   expect(
-    await screen.findByRole("button", { name: "Start conversation" }),
+    await screen.findByRole("button", { name: "New conversation" }),
   ).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Suspend" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Clear memory" })).toBeNull();
   expect(
-    screen.getByRole("link", { name: "Open Home" }).getAttribute("href"),
-  ).toContain("space=" + "b".repeat(32));
+    screen.getByRole("tab", { name: "Files" }).getAttribute("href"),
+  ).toContain("tab=files");
   expect(api.getInstanceDefinition).not.toHaveBeenCalled();
 });
 it("fences late conversation navigation when the account changes", async () => {
@@ -147,7 +172,7 @@ it("fences late conversation navigation when the account changes", async () => {
   );
   const view = show();
   fireEvent.click(
-    await screen.findByRole("button", { name: "Start conversation" }),
+    await screen.findByRole("button", { name: "New conversation" }),
   );
   await waitFor(() =>
     expect(api.createInstanceConversation).toHaveBeenCalledTimes(1),
@@ -159,6 +184,7 @@ it("fences late conversation navigation when the account changes", async () => {
 });
 
 it("abandons a captured obsolete operation and leaves restoration explicit", async () => {
+  state.tab = "settings";
   const request: api.LifecycleChange = {
     operation_id: "c".repeat(32),
     generation: 6,
@@ -191,22 +217,28 @@ it("abandons a captured obsolete operation and leaves restoration explicit", asy
   );
   show();
   const button = await screen.findByRole("button", {
-    name: "Abandon contained operation",
+    name: "Give up this change",
   });
-  fireEvent.click(screen.getByLabelText("Confirm action", { exact: true }));
   fireEvent.click(button);
+  expect(api.abandonInstanceLifecycle).not.toHaveBeenCalled();
+  fireEvent.click(
+    within(screen.getByRole("dialog")).getByRole("button", {
+      name: "Give up this change",
+    }),
+  );
   await waitFor(() =>
     expect(api.abandonInstanceLifecycle).toHaveBeenCalledTimes(1),
   );
   expect(
     await screen.findByText(
-      "An obsolete operation was abandoned without changing grants or reactivating the agent.",
+      "An earlier change was given up. Nothing was changed.",
     ),
   ).toBeTruthy();
   expect(
-    screen.queryByRole("button", { name: "Start conversation" }),
-  ).toBeNull();
-  expect(screen.getByRole("button", { name: "Restore" })).toBeTruthy();
+    screen.getByRole<HTMLButtonElement>("button", { name: "New conversation" })
+      .disabled,
+  ).toBe(true);
+  expect(screen.getByRole("button", { name: "Resume" })).toBeTruthy();
 });
 
 it("shows historical abandonment accurately after a later restoration", async () => {
@@ -223,11 +255,11 @@ it("shows historical abandonment accurately after a later restoration", async ()
   });
   show();
   expect(
-    await screen.findByRole("button", { name: "Start conversation" }),
+    await screen.findByRole("button", { name: "New conversation" }),
   ).toBeTruthy();
   expect(
     await screen.findByText(
-      "An obsolete operation was abandoned without changing grants or reactivating the agent.",
+      "An earlier change was given up. Nothing was changed.",
     ),
   ).toBeTruthy();
   expect(
@@ -235,4 +267,56 @@ it("shows historical abandonment accurately after a later restoration", async ()
       "An obsolete operation was abandoned. The agent remains suspended until explicitly restored.",
     ),
   ).toBeNull();
+});
+
+it("continues observing a locally pending deletion after detail becomes deleted and replays only to read its release receipt", async () => {
+  state.tab = "settings";
+  let deleted = false;
+  let terminal = false;
+  const body: api.LifecycleChange = {
+    action: "delete",
+    generation: 7,
+    operation_id: "c".repeat(32),
+  };
+  rs.mocked(api.getInstance).mockImplementation(async () => ({
+    ...instance(),
+    status: deleted ? "deleted" : "active",
+  }));
+  rs.mocked(api.getInstanceLifecycle).mockImplementation(async () => ({
+    operations: deleted ? [{ ...body, complete: terminal }] : [],
+  }));
+  rs.mocked(api.changeInstanceLifecycle).mockImplementation(
+    async (_id, captured) => {
+      body.operation_id = captured.operation_id;
+      deleted = true;
+      return {
+        instance: { ...instance(), status: "deleted" },
+        complete: terminal,
+        operation_id: captured.operation_id,
+        ...(terminal ? { space_released: false } : {}),
+      };
+    },
+  );
+  const view = show();
+  fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+  fireEvent.change(screen.getByLabelText("Type Resident analyst to confirm"), {
+    target: { value: "Resident analyst" },
+  });
+  fireEvent.click(
+    within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" }),
+  );
+  await screen.findByText("Resident analyst was deleted.");
+  terminal = true;
+  await view.client.invalidateQueries({ queryKey: ["agent-instances"] });
+  await waitFor(() =>
+    expect(api.changeInstanceLifecycle).toHaveBeenCalledTimes(2),
+  );
+  expect(rs.mocked(api.changeInstanceLifecycle).mock.calls[1]![1]).toEqual(
+    rs.mocked(api.changeInstanceLifecycle).mock.calls[0]![1],
+  );
+  await waitFor(() =>
+    expect(state.push).toHaveBeenCalledWith(
+      "/workspace/employees?deleted=Resident+analyst&clearing=1",
+    ),
+  );
 });

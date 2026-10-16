@@ -23,10 +23,15 @@ is provider-only. The bilingual notice uses only configured provider support lin
 
 ## Project Overview
 
-`/workspace/instances` uses current grants/provider ceilings, account/role caches
-and retired-action fences. Retry exact intents;202 stays pending. Chat identity
-comes from server binding. Home/Projects reuse Spaces; legacy uploads/browser/
-sidecar/scheduling stay withheld. Memory uses instance APIs/all summaries only.
+`/workspace/assistants` and `/workspace/employees` list AI assistants and AI employees;
+`/workspace/instances` owns their detail tabs. Use current grants/provider ceilings,
+account/role caches and retired-action fences. Retry exact intents;202 stays pending.
+Chat identity comes from the thread row. Agent files use Spaces reads and audited
+agent writes; conversation attachments upload immediately and send saved references.
+Binding discovery hides ordinary artifacts without clearing restored selections;
+a positive agent binding retires that panel. Detail breadcrumbs use verified custody.
+Only Inspect opens produced files. Browser/sidecar/scheduling remain ordinary-chat
+controls. Memory uses instance APIs/all summaries only.
 Company targets start empty; transfer data explicitly through admitted APIs.
 Work controls separate delegation, explicit activation and review. Use+Inspect delegates with adopted
 policy defaults; Manage+Inspect changes assignments and reviews exact statements.
@@ -39,7 +44,11 @@ Use+Inspect plus run/agent ceilings. Preserve conversation creation and activati
 identities across unknown replies; receipt recovery never changes the bound thread.
 Unresolved attempts prohibit replacement. Polling preserves captured draft/review
 bases. Candidate reports are separate from submitted outcomes; a response starts no
-run. Recovery uses exact completed containment receipts and current Home ADMIN.
+run. Work Stop captures its attempt/revisions; guarded retries never stop a replacement.
+Recovery is collapsed under Advanced for stopping/uncertain work and needs exact
+completed containment receipts and current Home ADMIN. Attention recipients come
+from eligible grants; directory names never decide authority. Requests and replies
+remain available during execution holds and start no work by themselves.
 
 `/workspace/spaces` uses account-scoped queries and host grants. Send captured
 generation/SHA for edits and attachment IDs for retirement; preserve conflict
@@ -147,6 +156,18 @@ Rstest has node and happy-dom projects in `rstest.config.ts`. Pure logic uses
 cleanup and store-order tests under real React rather than mocking React.
 Only DOM tests pay the document environment's higher runtime cost.
 
+Use task-specific disk-backed `TMPDIR`, `TMP` and `TEMP` for suites. Set
+`HARTMESH_TEST_OUTPUT` to a directory there when using Rstest's
+`--dev.writeToDisk`; its compiled bundles then stay outside this checkout.
+Bound focused runs with `--pool.maxWorkers 2 --pool.minWorkers 1
+--maxConcurrency 2`; keep total test workers at four or fewer.
+
+For browser checks beside a running development server, set `NEXT_DIST_DIR` to
+an ignored `.next-hartmesh-*` directory and `NEXT_TSCONFIG_PATH` to a task-owned
+config under `.hartmesh-test/` extending `../tsconfig.build.json`. Next can update
+that config without rewriting the tracked build config. Use the same variables
+for build and start, distinct ports, and disk-backed suite temporary directories.
+
 E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`.
 
 `playwright.real-backend.config.ts` tests the real replay Gateway without
@@ -188,43 +209,21 @@ any tool name, so a new producer needs no client change; the present-files
 group renders its first message's prose above the files, which is what keeps a
 tagged answer readable rather than replaced by its own chips.
 
-One `$` is money, two are mathematics. `core/streamdown/plugins.ts` sets
-`singleDollarTextMath: false`, because with it on, remark-math read the span
-between any two currency amounts in a sentence as an equation: a released build
-printed "August 2026: $201,487.04 in revenue across 502 jobs, an average of
-$401.37 per job." as an italic serif formula with both dollar signs and every
-space between them gone. One amount in a sentence was safe and two were not, an
-odd count left a stray dollar sign behind, and neither a comma, a decimal point
-nor a following space prevented it — which is why it survived a release. Every
-figure in a business report is currency, so that is the ordinary sentence, not
-an edge case.
+`core/streamdown/plugins.ts` keeps `singleDollarTextMath: false`: one `$` is
+literal currency, while `$$` requests mathematics. Never restore single-dollar
+math to repair literal LaTeX; it consumes currency amounts and their spaces.
+Do not promote spans containing backslashes either: Windows paths and escaped
+asterisks between amounts must remain ordinary text.
 
-Two dollar signs are now the only way to ask for mathematics, and they still
-render both inline and display, because what separates the two is where the
-delimiters sit rather than how many there are: a marker that begins a line
-opens a display fence, one mid-line is inline. `normalizeLatexMathDelimiters`
-in `preprocess.ts` therefore rewrites `\(...\)` as well as `\[...\]`, and
-dropping that second half would silently turn every `\(...\)` a model emits
-into plain text. Because an inline span is only inline when its markers stay
-mid-line, a `\(...\)` that crosses a line break is joined onto one line; left
-alone it opened a fence, ate its own formula as fence meta, and then paired
-with the next genuine display block and destroyed that one too.
-
-The accepted cost is that a model emitting a single-dollar formula prints it
-literally. That is the price of keeping currency intact, and a bug report about
-literal LaTeX must not be closed by turning the flag back on — doing so
-restores the defect for every business report. Promoting a single-dollar span
-to a double when it contains a backslash is not a safe recovery either: an
-ordinary sentence whose text between two amounts holds a Windows path or an
-escaped asterisk would be promoted straight back into an equation.
-
-The regression for this has to assert the render, never `textContent`. The
-released capture's extracted DOM text was correct — dollar signs and spaces
-intact — while the pixels showed an equation, so a `textContent` assertion over
-a KaTeX render is a control that cannot fail.
-`tests/unit/core/streamdown-currency.test.ts` and the assistant-bubble case in
-`tests/e2e/user-message-plain-text.spec.ts` assert the absence of a `katex`
-class instead.
+Double-dollar markers mid-line render inline; markers beginning a line open a
+display fence. `normalizeLatexMathDelimiters` in `preprocess.ts` rewrites both
+`\(...\)` and `\[...\]`. Join multiline inline spans onto one line so their
+markers cannot become display fences and consume the next display block.
+Single-dollar formulas intentionally remain literal. Currency regressions must
+assert rendered behavior, never `textContent`: extracted DOM text can retain
+currency while KaTeX displays a formula. Keep the absence-of-`katex` assertions in
+`tests/unit/core/streamdown-currency.test.ts` and the assistant-bubble case of
+`tests/e2e/user-message-plain-text.spec.ts`.
 
 The chat mode is one dial, read in one place: `core/threads/run-context.ts`
 answers which modes a model can offer (`offersReasoningMode`), which mode a

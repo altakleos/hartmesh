@@ -5,9 +5,12 @@ import {
   CalendarClock,
   FolderIcon,
   MessagesSquare,
+  TriangleAlertIcon,
+  type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useId } from "react";
 
 import {
   SidebarGroup,
@@ -21,123 +24,156 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { AttentionNav } from "@/components/workspace/attention/nav";
-import { useAgentsApiEnabled } from "@/core/agents";
-import { useStorageSpacesEnabled } from "@/core/features";
+import { useAgentInstances, useSpacesPageVisible } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
+
+function Entry({
+  href,
+  label,
+  icon: Icon,
+  inert = false,
+  explanation,
+  warning = false,
+}: {
+  href: string;
+  label: string;
+  icon: LucideIcon;
+  inert?: boolean;
+  explanation?: string;
+  warning?: boolean;
+}) {
+  const pathname = usePathname();
+  const id = useId();
+  const content = (
+    <>
+      <Icon />
+      <span>{label}</span>
+      {warning && (
+        <TriangleAlertIcon
+          className="ml-auto size-4 text-amber-600"
+          aria-hidden
+        />
+      )}
+    </>
+  );
+  const button = inert ? (
+    <SidebarMenuButton
+      className="text-muted-foreground/50"
+      aria-disabled
+      aria-describedby={explanation ? id : undefined}
+    >
+      {content}
+    </SidebarMenuButton>
+  ) : (
+    <SidebarMenuButton isActive={pathname.startsWith(href)} asChild>
+      <Link
+        className="text-muted-foreground"
+        href={href}
+        aria-describedby={explanation ? id : undefined}
+      >
+        {content}
+      </Link>
+    </SidebarMenuButton>
+  );
+  return (
+    <SidebarMenuItem>
+      {explanation ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span
+              className={
+                inert ? "block w-full cursor-not-allowed" : "block w-full"
+              }
+            >
+              {button}
+              <span id={id} className="sr-only">
+                {explanation}
+              </span>
+            </span>
+          </TooltipTrigger>
+          <TooltipContent side="right">{explanation}</TooltipContent>
+        </Tooltip>
+      ) : (
+        button
+      )}
+    </SidebarMenuItem>
+  );
+}
 
 export function WorkspaceNavChatList() {
   const { t } = useI18n();
-  const pathname = usePathname();
-  const { enabled: agentsEnabled } = useAgentsApiEnabled();
-  const { enabled: spacesEnabled } = useStorageSpacesEnabled();
+  const agents = useAgentInstances();
+  const spacesVisible = useSpacesPageVisible();
+  const available = agents.known && agents.enabled && !agents.isLoading;
+  const waiting = available && agents.execution === "unavailable";
+  function kindState(off: boolean, offText: string) {
+    const notOffered =
+      available &&
+      ((agents.execution === "ready" && off) ||
+        agents.reason === "agents-none");
+    return {
+      inert: !available || notOffered,
+      warning: waiting && !notOffered,
+      explanation: agents.isLoading
+        ? undefined
+        : notOffered
+          ? offText
+          : !available || waiting
+            ? t.sidebar.agentsUnavailable
+            : undefined,
+    };
+  }
   return (
     <SidebarGroup className="pt-1">
       <SidebarMenu>
-        {spacesEnabled && agentsEnabled && <AttentionNav />}
-        <SidebarMenuItem>
-          <SidebarMenuButton isActive={pathname === "/workspace/chats"} asChild>
-            <Link className="text-muted-foreground" href="/workspace/chats">
-              <MessagesSquare />
-              <span>{t.sidebar.chats}</span>
-            </Link>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-        {spacesEnabled && (
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              isActive={pathname.startsWith("/workspace/spaces")}
-              asChild
-            >
-              <Link className="text-muted-foreground" href="/workspace/spaces">
-                <FolderIcon />
-                <span>{t.storageSpaces.title}</span>
-              </Link>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        )}
-        {spacesEnabled && agentsEnabled && (
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              isActive={pathname.startsWith("/workspace/instances")}
-              asChild
-            >
-              <Link
-                className="text-muted-foreground"
-                href="/workspace/instances"
-              >
-                <BotIcon />
-                <span>{t.agentInstances.title}</span>
-              </Link>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        )}
-        <SidebarMenuItem>
-          <SidebarMenuButton
-            isActive={pathname.startsWith("/workspace/files")}
-            asChild
-          >
-            <Link className="text-muted-foreground" href="/workspace/files">
-              <FolderIcon />
-              <span>{t.sidebar.files}</span>
-            </Link>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-        <SidebarMenuItem>
-          {agentsEnabled ? (
-            <SidebarMenuButton
-              isActive={pathname.startsWith("/workspace/agents")}
-              asChild
-            >
-              <Link className="text-muted-foreground" href="/workspace/agents">
-                <BotIcon />
-                <span>{t.sidebar.agents}</span>
-              </Link>
-            </SidebarMenuButton>
-          ) : (
-            // Disabled: aria-disabled drives the sidebar CVA to suppress
-            // pointer events on the button, so wrap it in a hoverable span
-            // that still surfaces the "feature not enabled" tooltip for mouse
-            // users. The button stays in the tab order (no tabIndex={-1}) and
-            // is wired via aria-describedby to a visually-hidden reason, so
-            // keyboard and screen-reader users also learn why it is disabled.
-            <Tooltip>
-              <TooltipTrigger asChild>
-                {/* cursor-not-allowed lives on the span (the element that
-                    still receives pointer events), not the inert button. */}
-                <span className="block w-full cursor-not-allowed">
-                  <SidebarMenuButton
-                    className="text-muted-foreground/50"
-                    aria-disabled
-                    aria-describedby="agents-disabled-reason"
-                  >
-                    <BotIcon />
-                    <span>{t.sidebar.agents}</span>
-                  </SidebarMenuButton>
-                  <span id="agents-disabled-reason" className="sr-only">
-                    {t.sidebar.agentsDisabledTooltip}
-                  </span>
-                </span>
-              </TooltipTrigger>
-              <TooltipContent side="right">
-                {t.sidebar.agentsDisabledTooltip}
-              </TooltipContent>
-            </Tooltip>
+        {available && <AttentionNav />}
+        <Entry
+          href="/workspace/chats"
+          label={t.sidebar.chats}
+          icon={MessagesSquare}
+        />
+        <Entry
+          href="/workspace/assistants"
+          label={t.sidebar.myAssistants}
+          icon={BotIcon}
+          {...kindState(
+            agents.assistants.perUser === 0,
+            t.sidebar.assistantsOff,
           )}
-        </SidebarMenuItem>
-        <SidebarMenuItem>
-          <SidebarMenuButton
-            isActive={pathname.startsWith("/workspace/scheduled-tasks")}
-            asChild
-          >
-            <Link
-              className="text-muted-foreground"
-              href="/workspace/scheduled-tasks"
-            >
-              <CalendarClock />
-              <span>{t.sidebar.scheduledTasks}</span>
-            </Link>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
+        />
+        <Entry
+          href="/workspace/employees"
+          label={t.sidebar.aiEmployees}
+          icon={BotIcon}
+          {...kindState(
+            agents.employees.allowed === 0,
+            t.sidebar.aiEmployeesOff,
+          )}
+        />
+        {spacesVisible && (
+          <Entry
+            href="/workspace/spaces"
+            label={t.storageSpaces.title}
+            icon={FolderIcon}
+          />
+        )}
+        <Entry
+          href="/workspace/files"
+          label={t.sidebar.files}
+          icon={FolderIcon}
+        />
+        <Entry
+          href="/workspace/agents"
+          label={t.sidebar.agents}
+          icon={BotIcon}
+          inert={!available}
+          explanation={available ? undefined : t.sidebar.agentsDisabledTooltip}
+        />
+        <Entry
+          href="/workspace/scheduled-tasks"
+          label={t.sidebar.scheduledTasks}
+          icon={CalendarClock}
+        />
       </SidebarMenu>
     </SidebarGroup>
   );

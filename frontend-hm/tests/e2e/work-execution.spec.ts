@@ -25,6 +25,14 @@ test("a human reply starts no run; Open Work selects the exact assignment for ex
     status: "active",
     generation: 1,
     permissions: 7,
+    activity: {
+      running_runs: 0,
+      running: [],
+      last_active_at: null,
+      open_conversations: 1,
+    },
+    home: { state: "available", workspace: "absent" },
+    execution: { execution: "ready", reason: null },
   };
   let record = {
     id: work,
@@ -105,6 +113,13 @@ test("a human reply starts no run; Open Work selects the exact assignment for ex
     route.fulfill({
       json: {
         agents_api: { enabled: true },
+        agent_instances: {
+          enabled: true,
+          execution: "ready",
+          reason: null,
+          ai_assistants: { per_user: 3, allowed: 8, in_use: 1, mine: 1 },
+          ai_employees: { allowed: 4, in_use: 1 },
+        },
         storage_spaces: { enabled: true },
       },
     }),
@@ -237,7 +252,9 @@ test("a human reply starts no run; Open Work selects the exact assignment for ex
   ).toBeVisible();
   expect(activations).toBe(0);
   await page.getByRole("link", { name: "Open Work", exact: true }).click();
-  await expect(page).toHaveURL(new RegExp(`instance=${instance}&work=${work}`));
+  await expect(page).toHaveURL(
+    new RegExp(`instance=${instance}&tab=work&work=${work}`),
+  );
   await expect(
     page.getByRole("button", { name: "Resume", exact: true }),
   ).toBeVisible();
@@ -251,6 +268,6 @@ test("a human reply starts no run; Open Work selects the exact assignment for ex
     page.getByRole("button", { name: "Resume", exact: true }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("link", { name: "Open execution conversation" }),
+    page.getByRole("link", { name: "Open the assignment's conversation" }),
   ).toHaveAttribute("href", "/workspace/chats/work-chat");
 });

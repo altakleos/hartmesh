@@ -44,6 +44,9 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
+import { AgentAvatar } from "@/components/workspace/instances/agent-avatar";
+import { usePersonName } from "@/components/workspace/person-name";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -73,8 +76,19 @@ import { ThreadChannelIcon } from "./thread-channel-source";
 import { useThreadDeleteDialog } from "./thread-delete-dialog";
 import { VirtualThreadList } from "./thread-list-virtualizer";
 
+function ConversationWith({ id }: { id: string }) {
+  const { t } = useI18n();
+  const person = usePersonName(id, true);
+  return (
+    <span className="text-muted-foreground min-w-0 truncate text-xs">
+      {t.agentInstances.conversations.with(person ?? "…")}
+    </span>
+  );
+}
+
 export function RecentChatList() {
   const { t } = useI18n();
+  const { user } = useAuth();
   const pathname = usePathname();
   const { thread_id: threadIdFromPath } = useParams<{
     thread_id: string;
@@ -276,7 +290,9 @@ export function RecentChatList() {
                     >
                       <SidebarMenuButton isActive={isActive} asChild>
                         <Link
-                          aria-label={branchLabel}
+                          aria-label={
+                            thread.agent_instance ? undefined : branchLabel
+                          }
                           className="text-muted-foreground min-w-0 whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
                           data-branch-depth={
                             branchEntry && branchEntry.depth > 0
@@ -302,6 +318,18 @@ export function RecentChatList() {
                             </span>
                           )}
                           <ThreadChannelIcon source={channelSource} />
+                          {thread.agent_instance && (
+                            <>
+                              <AgentAvatar
+                                instance={thread.agent_instance}
+                                className="size-6 text-[9px]"
+                              />
+                              <span className="min-w-0 truncate font-medium">
+                                {thread.agent_instance.name}
+                              </span>
+                              <span aria-hidden>·</span>
+                            </>
+                          )}
                           {pinned && (
                             <Pin
                               aria-hidden="true"
@@ -309,6 +337,12 @@ export function RecentChatList() {
                             />
                           )}
                           <span className="min-w-0 truncate">{title}</span>
+                          {thread.agent_instance &&
+                            thread.agent_instance.requester_id !== user?.id && (
+                              <ConversationWith
+                                id={thread.agent_instance.requester_id}
+                              />
+                            )}
                           {channelSource && (
                             <span
                               className="bg-muted text-muted-foreground ml-auto inline-flex h-5 max-w-14 shrink-0 items-center rounded-md px-1.5 text-[10px] font-medium"

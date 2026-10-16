@@ -141,6 +141,188 @@ beforeEach(() => {
   rs.mocked(api.activateWork).mockReset().mockResolvedValue(record());
 });
 afterEach(cleanup);
+it("keeps a refused activation's conversation and shows fixed copy before a fresh manual start", async () => {
+  const current = record();
+  rs.mocked(api.listWork).mockResolvedValue({ work: [current] });
+  rs.mocked(api.activateWork).mockRejectedValueOnce(
+    new api.InstanceApiError(409, "PRIVATE ACTIVATION DIAGNOSTIC", "run-limit"),
+  );
+  show(7, true, true, true);
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Review the guide · Open · Normal",
+    }),
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Work on this" }));
+  await screen.findByText(
+    "Documentation AI employee is already working in two conversations. Press Work on this when one of them finishes.",
+  );
+  expect(screen.queryByText(/PRIVATE ACTIVATION/)).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Work on this" }));
+  await waitFor(() => expect(api.activateWork).toHaveBeenCalledTimes(2));
+  expect(api.createInstanceConversation).toHaveBeenCalledTimes(1);
+  expect(rs.mocked(api.activateWork).mock.calls[1]![2].thread_id).toBe(
+    "work-chat",
+  );
+});
+it("refreshes a 409 before displaying a refusal and shows a colleague's newly started attempt instead", async () => {
+  let current = record();
+  rs.mocked(api.listWork).mockImplementation(async () => ({ work: [current] }));
+  rs.mocked(api.getWork).mockImplementation(async () => current);
+  rs.mocked(api.activateWork).mockImplementationOnce(async () => {
+    current = {
+      ...current,
+      attempt: {
+        id: "e".repeat(32),
+        status: "running",
+        thread_id: "colleague-chat",
+        run_id: "run",
+        requester_id: "colleague",
+      },
+    };
+    throw new api.InstanceApiError(409, "PRIVATE COLLEAGUE DIAGNOSTIC", "busy");
+  });
+  show(7, true, true, true);
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Review the guide · Open · Normal",
+    }),
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Work on this" }));
+  await screen.findByText("Documentation AI employee's work: Working", {
+    selector: "h5",
+  });
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.queryByText(/PRIVATE COLLEAGUE/)).toBeNull();
+});
+it("retires an activation refusal when a later normal refresh sees a colleague working", async () => {
+  let current = record();
+  rs.mocked(api.listWork).mockImplementation(async () => ({ work: [current] }));
+  rs.mocked(api.getWork).mockImplementation(async () => current);
+  rs.mocked(api.activateWork).mockRejectedValueOnce(
+    new api.InstanceApiError(409, "PRIVATE", "busy"),
+  );
+  const view = show(7, true, true, true);
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Review the guide · Open · Normal",
+    }),
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Work on this" }));
+  await screen.findByText(/Too much is running at once, so Documentation/);
+  current = {
+    ...current,
+    attempt: {
+      id: "e".repeat(32),
+      status: "running",
+      thread_id: "colleague-chat",
+      run_id: "run",
+      requester_id: "colleague",
+    },
+  };
+  await act(() => view.client.invalidateQueries({ queryKey: ["agent-work"] }));
+  await screen.findByText("Documentation AI employee's work: Working", {
+    selector: "h5",
+  });
+  expect(screen.queryByRole("alert")).toBeNull();
+  current = { ...current, attempt: null };
+  await act(() => view.client.invalidateQueries({ queryKey: ["agent-work"] }));
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+it("switching to a cached unresolved assignment retires another assignment's recovery draft", async () => {
+  const a: api.WorkRecord = {
+    ...record(),
+    attempt: {
+      id: "e".repeat(32),
+      status: "uncertain",
+      instance_generation: 1,
+    },
+  };
+  const b: api.WorkRecord = {
+    ...a,
+    id: "9".repeat(32),
+    objective: "Check examples",
+    attempt: {
+      id: "8".repeat(32),
+      status: "uncertain",
+      instance_generation: 1,
+    },
+  };
+  rs.mocked(getSpace).mockResolvedValue({
+    id: instance.home_id!,
+    backing_handle: "test",
+    name: "Home",
+    custody: { kind: "company", principal: null },
+    mode: "native",
+    generation: 1,
+    status: "active",
+    permissions: 15,
+  });
+  rs.mocked(api.listWork).mockResolvedValue({ work: [a, b] });
+  rs.mocked(api.getWork).mockImplementation(async (_instance, id) =>
+    id === b.id ? b : a,
+  );
+  const receipt = "f".repeat(32);
+  const view = show(7, true, true, true, [
+    { operation_id: receipt, action: "suspend", generation: 1, complete: true },
+  ]);
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Review the guide · Open · Normal",
+    }),
+  );
+  fireEvent.click(await screen.findByText("Advanced"));
+  fireEvent.change(
+    await screen.findByLabelText(
+      "The change that closed Documentation AI employee's workspace",
+    ),
+    { target: { value: receipt } },
+  );
+  const notes = screen.getAllByLabelText("Note or response");
+  fireEvent.change(notes[notes.length - 1]!, {
+    target: { value: "A recovery draft" },
+  });
+  view.client.setQueryData(
+    [
+      "agent-work",
+      "alice",
+      "user",
+      ["agents:read", "agents:write"],
+      instance.id,
+      7,
+      "record",
+      b.id,
+    ],
+    b,
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Check examples · Open · Normal" }),
+  );
+  await screen.findByText("Check examples", { selector: "h4" });
+  expect(screen.queryByDisplayValue("A recovery draft")).toBeNull();
+  expect(screen.getByText("Advanced").closest("details")!.open).toBe(false);
+  fireEvent.click(screen.getByText("Advanced"));
+  fireEvent.change(
+    screen.getByLabelText(
+      "The change that closed Documentation AI employee's workspace",
+    ),
+    { target: { value: receipt } },
+  );
+  const freshNotes = screen.getAllByLabelText("Note or response");
+  fireEvent.change(freshNotes[freshNotes.length - 1]!, {
+    target: { value: "B recovery" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Close this by hand" }));
+  await waitFor(() => expect(api.commandWork).toHaveBeenCalledTimes(1));
+  expect(rs.mocked(api.commandWork).mock.calls[0]!.slice(0, 2)).toEqual([
+    instance.id,
+    b.id,
+  ]);
+  expect(rs.mocked(api.commandWork).mock.calls[0]![2]).toMatchObject({
+    attempt_id: b.attempt!.id,
+    note: "B recovery",
+  });
+});
 it("allows exact containment recovery while its activation acknowledgement remains pending", async () => {
   rs.mocked(getSpace).mockResolvedValue({
     id: instance.home_id!,
@@ -180,6 +362,11 @@ it("allows exact containment recovery while its activation acknowledgement remai
   );
   fireEvent.click(await screen.findByRole("button", { name: "Work on this" }));
   await screen.findByRole("button", { name: "Retry same request" });
+  expect(screen.queryByText("Advanced")).toBeNull();
+  current = {
+    ...current,
+    attempt: { ...current.attempt!, status: "uncertain" },
+  };
   operations.push({
     operation_id: "f".repeat(32),
     generation: 1,
@@ -188,17 +375,18 @@ it("allows exact containment recovery while its activation acknowledgement remai
   });
   view.rerender(view.ui());
   fireEvent.click(screen.getByRole("button", { name: "Refresh Work" }));
+  fireEvent.click(await screen.findByText("Advanced"));
   fireEvent.change(
-    await screen.findByLabelText("Completed containment operation"),
+    await screen.findByLabelText(
+      "The change that closed Documentation AI employee's workspace",
+    ),
     { target: { value: operations[0]!.operation_id } },
   );
   const notes = screen.getAllByLabelText("Note or response");
   fireEvent.change(notes[notes.length - 1]!, {
     target: { value: "Environment contained" },
   });
-  fireEvent.click(
-    screen.getByRole("button", { name: "Reconcile contained attempt" }),
-  );
+  fireEvent.click(screen.getByRole("button", { name: "Close this by hand" }));
   await waitFor(() => expect(api.commandWork).toHaveBeenCalledTimes(1));
   expect(rs.mocked(api.commandWork).mock.calls[0]?.[2]).toMatchObject({
     action: "reconcile_attempt",
@@ -237,17 +425,18 @@ it("reconciles the exact contained attempt using captured revisions and a human 
       name: "Review the guide · Open · Normal",
     }),
   );
+  fireEvent.click(await screen.findByText("Advanced"));
   fireEvent.change(
-    await screen.findByLabelText("Completed containment operation"),
+    await screen.findByLabelText(
+      "The change that closed Documentation AI employee's workspace",
+    ),
     { target: { value: intent } },
   );
   const notes = screen.getAllByLabelText("Note or response");
   fireEvent.change(notes[notes.length - 1]!, {
     target: { value: "Native environment contained; inspect effects" },
   });
-  fireEvent.click(
-    screen.getByRole("button", { name: "Reconcile contained attempt" }),
-  );
+  fireEvent.click(screen.getByRole("button", { name: "Close this by hand" }));
   await waitFor(() => expect(api.commandWork).toHaveBeenCalledTimes(1));
   expect(rs.mocked(api.commandWork).mock.calls[0]?.[2]).toMatchObject({
     action: "reconcile_attempt",
@@ -275,9 +464,7 @@ it("resumes settled Work in an explicitly chosen new conversation", async () => 
       name: "Review the guide · Open · Normal",
     }),
   );
-  fireEvent.click(
-    await screen.findByLabelText("Use a new execution conversation"),
-  );
+  fireEvent.click(await screen.findByLabelText("Use a new conversation"));
   fireEvent.click(screen.getByRole("button", { name: "Resume" }));
   await waitFor(() => expect(api.activateWork).toHaveBeenCalledTimes(1));
   expect(api.createInstanceConversation).toHaveBeenCalledTimes(1);
@@ -299,7 +486,7 @@ it("recovers a stale activation rejection when current Work confirms no reservat
   fireEvent.click(await screen.findByRole("button", { name: "Work on this" }));
   expect(await screen.findByRole("alert")).toHaveProperty(
     "textContent",
-    "Work changed",
+    "That did not work. Refresh the page, then try again.",
   );
   await waitFor(() =>
     expect(
@@ -390,22 +577,34 @@ it("keeps uncertain completion reports separate from review and forbids replacem
   ).toBeNull();
   expect(
     screen
-      .getByRole("link", { name: "Open execution conversation" })
+      .getByRole("link", { name: "Open the assignment's conversation" })
       .getAttribute("href"),
   ).toBe("/workspace/chats/work-chat");
 });
 it("explains shared visibility before Use-only humans can compose or read Work", () => {
   show(1);
-  expect(
-    screen.getByText(/Tracked delegation requires Use and Inspect/),
-  ).toBeTruthy();
+  expect(screen.getByText(/To see and give assignments you need/)).toBeTruthy();
   expect(screen.queryByLabelText("Objective")).toBeNull();
   expect(api.listWork).not.toHaveBeenCalled();
+});
+it("an inspector without chat can read assignments and sees the specific delegation requirement", async () => {
+  rs.mocked(api.listWork).mockResolvedValue({ work: [record()] });
+  show(2);
+  await screen.findByRole("button", {
+    name: "Review the guide · Open · Normal",
+  });
+  expect(
+    screen.getByText(
+      /To give Documentation AI employee an assignment you also need/,
+    ),
+  ).toBeTruthy();
+  expect(screen.queryByText(/To see and give assignments you need/)).toBeNull();
+  expect(screen.queryByLabelText("Objective")).toBeNull();
 });
 it("delegates records without claiming execution and retries an uncertain response exactly", async () => {
   rs.mocked(api.delegateWork).mockRejectedValueOnce(new Error("response lost"));
   show(3);
-  expect(screen.getByText(/Delegation saves an assignment/)).toBeTruthy();
+  expect(screen.getByText(/Saving an assignment starts nothing/)).toBeTruthy();
   expect(screen.queryByRole("button", { name: /^(Run|Resume)$/ })).toBeNull();
   expect(screen.queryByLabelText("Priority")).toBeNull();
   fireEvent.change(screen.getByLabelText("Objective"), {
@@ -449,7 +648,9 @@ it("sends the displayed row and assignment revisions for manager commands", asyn
       name: "Review the guide · Open · Normal",
     }),
   );
-  fireEvent.click(await screen.findByRole("button", { name: "Cancel Work" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Withdraw assignment" }),
+  );
   await waitFor(() => expect(api.commandWork).toHaveBeenCalledTimes(1));
   expect(rs.mocked(api.commandWork).mock.calls[0]?.[2]).toMatchObject({
     action: "cancel",
@@ -563,7 +764,9 @@ it("requires consent to replace unavailable sources and strips projection fields
   fireEvent.click(buttons[0]!);
   fireEvent.click(screen.getByRole("button", { name: "Save assignment" }));
   await waitFor(() => expect(api.commandWork).toHaveBeenCalledTimes(1));
-  expect(rs.mocked(api.commandWork).mock.calls[0]?.[2].sources).toEqual([
+  const command = rs.mocked(api.commandWork).mock.calls[0]?.[2];
+  if (!command) throw new Error("Missing saved assignment command");
+  expect(Reflect.get(command, "sources")).toEqual([
     { kind: "space_file", space_id: "b".repeat(32), path: "second.txt" },
   ]);
 });

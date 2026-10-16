@@ -15,6 +15,12 @@ import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 
+import {
+  readRefusal,
+  refusalSentence,
+  takeRefusal,
+  type Refusal,
+} from "../agent-instances/errors";
 import { cancelActiveThreadRun, getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
 import {
@@ -86,10 +92,13 @@ import { THREAD_PINNED_METADATA_KEY } from "./utils";
 export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
   displayThreadId?: string | null | undefined;
+  agentInstanceId?: string | null;
   context: LocalSettings["context"];
   isMock?: boolean;
   onSend?: (threadId: string) => void;
   onStart?: (threadId: string, runId: string) => void;
+  /** Every admitted run; onStart retains its once-per-conversation behavior. */
+  onAdmitted?: (threadId: string, runId: string) => void;
   onFinish?: (state: AgentThreadState) => void;
 };
 
@@ -118,6 +127,53 @@ export interface ThreadRunRefusal {
   newThread: boolean;
   storageObservedAt?: number;
   refusal: StorageRefusal;
+}
+
+export interface AgentThreadRunRefusal {
+  sequence: number;
+  threadId: string;
+  refusal: Refusal;
+  requestId?: string;
+  restore?: { text: string; files: FileInMessage[] };
+}
+const EMPTY_REFUSED_NETWORK_REQUESTS: ReadonlySet<string> = new Set();
+function networkRequestId(kwargs: Record<string, unknown> | undefined) {
+  const response = kwargs?.human_input_response;
+  if (!response || typeof response !== "object" || Array.isArray(response))
+    return undefined;
+  const value = response as Record<string, unknown>;
+  return value.source === "sandbox_network" &&
+    typeof value.request_id === "string"
+    ? value.request_id
+    : undefined;
+}
+interface AgentSubmissionSource {
+  text: string;
+  files: FileInMessage[];
+  baseline: Set<string | Message>;
+}
+function savedAgentAttachments(value: unknown): FileInMessage[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item: unknown) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const file = item as Record<string, unknown>;
+    return typeof file.filename === "string" &&
+      typeof file.path === "string" &&
+      file.path.startsWith("/mnt/user-data/uploads/") &&
+      typeof file.size === "number" &&
+      Number.isSafeInteger(file.size) &&
+      file.size >= 0 &&
+      file.status === "uploaded"
+      ? [
+          {
+            filename: file.filename,
+            path: file.path,
+            size: file.size,
+            status: "uploaded" as const,
+          },
+        ]
+      : [];
+  });
 }
 
 export class ThreadSendNotAdmittedError extends Error {
@@ -1687,17 +1743,46 @@ function isThreadMissingError(error: unknown): boolean {
 
 export function useThreadStream({
   threadId,
+  agentInstanceId,
   displayThreadId,
   context,
   isMock,
   onSend,
   onStart,
+  onAdmitted,
   onFinish,
 }: ThreadStreamOptions) {
   const { t } = useI18n();
+  const agentBound = useRef(agentInstanceId);
+  agentBound.current = agentInstanceId;
+  const [agentRunRefusal, setAgentRunRefusal] =
+    useState<AgentThreadRunRefusal | null>(null);
+  const [refusedNetworkByConversation, setRefusedNetworkByConversation] =
+    useState<ReadonlyMap<string, ReadonlySet<string>>>(() => new Map());
   const currentViewThreadId = displayThreadId ?? threadId ?? null;
   const currentViewThreadIdRef = useRef(currentViewThreadId);
   currentViewThreadIdRef.current = currentViewThreadId;
+  const viewOwner = useRef({
+    threadId: currentViewThreadId,
+    agent: agentInstanceId,
+    active: true,
+  });
+  if (
+    viewOwner.current.threadId !== currentViewThreadId ||
+    viewOwner.current.agent !== agentInstanceId
+  )
+    viewOwner.current = {
+      threadId: currentViewThreadId,
+      agent: agentInstanceId,
+      active: true,
+    };
+  useEffect(() => {
+    const owned = viewOwner.current;
+    owned.active = true;
+    return () => {
+      owned.active = false;
+    };
+  }, [currentViewThreadId, agentInstanceId]);
   // Optimistic messages shown before the server stream responds.
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
   const [optimisticThreadId, setOptimisticThreadId] = useState<string | null>(
@@ -1718,6 +1803,8 @@ export function useThreadStream({
     | (Omit<ThreadRunRefusal, "refusal"> & {
         accepted: boolean;
         reported: boolean;
+        agentSource?: AgentSubmissionSource;
+        networkRequestId?: string;
         failure?: unknown;
         admission: Promise<void>;
         settleAdmission: () => void;
@@ -1754,8 +1841,13 @@ export function useThreadStream({
   const listeners = useRef({
     onSend,
     onStart,
+    onAdmitted,
     onFinish,
   });
+  const announcedRuns = useRef(new Set<string>());
+  useEffect(() => {
+    announcedRuns.current.clear();
+  }, [currentViewThreadId]);
 
   const {
     messages: history,
@@ -1769,8 +1861,8 @@ export function useThreadStream({
 
   // Keep listeners ref updated with latest callbacks
   useEffect(() => {
-    listeners.current = { onSend, onStart, onFinish };
-  }, [onSend, onStart, onFinish]);
+    listeners.current = { onSend, onStart, onAdmitted, onFinish };
+  }, [onSend, onStart, onAdmitted, onFinish]);
 
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
@@ -1808,6 +1900,11 @@ export function useThreadStream({
       }
       return currentLiveMessagesThreadId;
     });
+    const admissionKey = JSON.stringify([_threadId, _runId]);
+    if (!announcedRuns.current.has(admissionKey)) {
+      announcedRuns.current.add(admissionKey);
+      listeners.current.onAdmitted?.(_threadId, _runId);
+    }
     if (!startedRef.current) {
       listeners.current.onStart?.(_threadId, _runId);
       startedRef.current = true;
@@ -1864,6 +1961,78 @@ export function useThreadStream({
             },
       );
       void queryClient.invalidateQueries({ queryKey: ["features"] });
+      return true;
+    },
+    [queryClient],
+  );
+  const recordAgentRefusal = useCallback(
+    (
+      error: unknown,
+      phase: "send" | "stop" = "send",
+      meta?: { thread_id: string; run_id: string },
+      captured?: SubmissionOrigin,
+    ) => {
+      if (!agentBound.current) return false;
+      const origin =
+        captured ??
+        submissionErrorOrigin(error) ??
+        (meta ? admittedSubmissions.current.get(meta.run_id) : undefined);
+      if (origin && (origin.retired || origin !== pendingSend.current))
+        return true;
+      const pending = origin ? pendingSend.current : null;
+      const failedThreadId =
+        pending?.threadId ??
+        meta?.thread_id ??
+        threadIdRef.current ??
+        currentViewThreadIdRef.current;
+      if (!failedThreadId || failedThreadId !== currentViewThreadIdRef.current)
+        return true;
+      const cached = takeRefusal(failedThreadId);
+      const refusal =
+        phase === "stop"
+          ? { reason: "operation-failed", extra: {} }
+          : (cached ?? readRefusal(error));
+      if (!refusal || !refusalSentence(refusal, "conversation")) return false;
+      if (pending?.reported) return true;
+      if (pending) {
+        pending.reported = true;
+        pending.failure = error;
+      }
+      const source = pending?.agentSource;
+      const output =
+        source &&
+        pending.accepted &&
+        messagesRef.current.some(
+          (message) =>
+            message.type === "ai" &&
+            !source.baseline.has(messageIdentity(message) ?? message) &&
+            !isUploadPlaceholderMessage(message) &&
+            (hasContent(message) || hasToolCalls(message)),
+        );
+      const restore =
+        source && !output && phase !== "stop"
+          ? { text: source.text, files: source.files }
+          : undefined;
+      if (pending) pending.agentSource = undefined;
+      if (refusal.reason === "managers-only" && pending?.networkRequestId) {
+        const key = JSON.stringify([agentBound.current, failedThreadId]);
+        const request = pending.networkRequestId;
+        setRefusedNetworkByConversation((previous) => {
+          const next = new Map(previous);
+          next.set(key, new Set([...(previous.get(key) ?? []), request]));
+          return next;
+        });
+      }
+      setAgentRunRefusal({
+        sequence: pending?.sequence ?? ++refusalSequence.current,
+        threadId: failedThreadId,
+        refusal,
+        ...(refusal.reason === "managers-only" && pending?.networkRequestId
+          ? { requestId: pending.networkRequestId }
+          : {}),
+        ...(restore ? { restore } : {}),
+      });
+      void queryClient.invalidateQueries({ queryKey: ["conversation-agent"] });
       return true;
     },
     [queryClient],
@@ -2116,7 +2285,10 @@ export function useThreadStream({
       pendingPreparedReplayRef.current = null;
       setPendingSupersededRunIds(new Set());
       setPendingSupersededMessageIds(new Set());
-      if (!recordStorageRefusal(error, undefined, meta))
+      if (
+        !recordAgentRefusal(error, "send", meta) &&
+        !recordStorageRefusal(error, undefined, meta)
+      )
         toast.error(getStreamErrorMessage(error));
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
@@ -2164,6 +2336,7 @@ export function useThreadStream({
     if (stoppedThreadId) clearTurnProgress(stoppedThreadId);
     const pendingReplay = pendingPreparedReplayRef.current;
     const stoppedSubmission = pendingSend.current;
+    const stoppedOwner = viewOwner.current;
     try {
       await stopThreadAndInvalidateCaches(
         queryClient,
@@ -2185,7 +2358,9 @@ export function useThreadStream({
         clearPreparedReplayMasks(pendingReplay);
       }
     } catch (error) {
-      toast.error(getStreamErrorMessage(error));
+      if (!stoppedOwner.active || viewOwner.current !== stoppedOwner) return;
+      if (!recordAgentRefusal(error, "stop"))
+        toast.error(getStreamErrorMessage(error));
     } finally {
       stoppingThreadIdRef.current = null;
       setStoppingThreadId(null);
@@ -2193,6 +2368,7 @@ export function useThreadStream({
   }, [
     clearPreparedReplayMasks,
     clearTurnProgress,
+    recordAgentRefusal,
     displayThreadId,
     isMock,
     queryClient,
@@ -2384,14 +2560,30 @@ export function useThreadStream({
         newThread: !startedRef.current && !onStreamThreadId,
         accepted: false,
         reported: false,
+        networkRequestId: networkRequestId(options?.additionalKwargs),
+        agentSource:
+          agentBound.current && options?.additionalKwargs?.hide_from_ui !== true
+            ? {
+                text: message.text,
+                files: savedAgentAttachments(options?.additionalKwargs?.files),
+                baseline: new Set(
+                  messagesRef.current.map(
+                    (message) => messageIdentity(message) ?? message,
+                  ),
+                ),
+              }
+            : undefined,
         failure: undefined as unknown,
         admission,
         settleAdmission,
         runId: undefined as string | undefined,
         retired: false,
       };
+      if (pendingSend.current) pendingSend.current.agentSource = undefined;
       pendingSend.current = pending;
       setRunRefusal(null);
+      setAgentRunRefusal(null);
+      takeRefusal(threadId);
 
       // The send has genuinely proceeded past the in-flight guard, so callers
       // can now run one-time cleanup that must not fire on the dropped path.
@@ -2602,7 +2794,8 @@ export function useThreadStream({
           queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
         });
       } catch (error) {
-        recordStorageRefusal(error, pending.phase, undefined, pending);
+        if (!recordAgentRefusal(error, "send", undefined, pending))
+          recordStorageRefusal(error, pending.phase, undefined, pending);
         if (pending.retired || pendingSend.current !== pending) throw error;
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
@@ -2628,6 +2821,7 @@ export function useThreadStream({
       humanMessageCount,
       persistedMessages,
       recordStorageRefusal,
+      recordAgentRefusal,
       onStreamThreadId,
     ],
   );
@@ -2969,6 +3163,14 @@ export function useThreadStream({
     loadMoreHistory,
     runRefusal:
       runRefusal?.threadId === currentViewThreadId ? runRefusal : null,
+    agentRunRefusal:
+      agentRunRefusal?.threadId === currentViewThreadId
+        ? agentRunRefusal
+        : null,
+    refusedNetworkRequests:
+      refusedNetworkByConversation.get(
+        JSON.stringify([agentInstanceId, currentViewThreadId]),
+      ) ?? EMPTY_REFUSED_NETWORK_REQUESTS,
   } as const;
 }
 

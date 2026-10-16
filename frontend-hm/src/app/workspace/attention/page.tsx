@@ -1,15 +1,16 @@
 "use client";
 import { useSearchParams } from "next/navigation";
 
+import { Button } from "@/components/ui/button";
+import { AttentionExecutionBanner } from "@/components/workspace/attention/execution-banner";
 import { AttentionInbox } from "@/components/workspace/attention/inbox";
 import {
   WorkspaceBody,
   WorkspaceContainer,
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
-import { useAgentsApiEnabled } from "@/core/agents";
 import { useAuth } from "@/core/auth/AuthProvider";
-import { useDocumentTitle, useStorageSpacesEnabled } from "@/core/features";
+import { useAgentInstances, useDocumentTitle } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 
 export default function AttentionPage() {
@@ -22,8 +23,7 @@ export default function AttentionPage() {
       user.permissions.some((p) =>
         ["*", "agents:*", "agents:read"].includes(p),
       ));
-  const spaces = useStorageSpacesEnabled();
-  const agents = useAgentsApiEnabled();
+  const agents = useAgentInstances();
   useDocumentTitle(t.attention.title, t.pages.appName);
   const work = search.get("work") ?? undefined;
   const id = search.get("request") ?? undefined;
@@ -33,14 +33,29 @@ export default function AttentionPage() {
       <WorkspaceBody>
         <div className="mx-auto h-full w-full max-w-5xl space-y-4 overflow-y-auto p-6">
           <h1 className="text-2xl font-semibold">{t.attention.title}</h1>
-          {spaces.enabled && agents.enabled && canRead ? (
-            <AttentionInbox
-              key={`${user?.id}:${user?.permissions?.join(",")}:${work}:${id}`}
-              work={work}
-              initialRequest={id}
-            />
+          {agents.isLoading ? (
+            <p role="status">{t.agentInstances.loading}</p>
+          ) : !canRead ? (
+            <p>{t.attention.noPermission}</p>
+          ) : !agents.known || !agents.enabled ? (
+            <div>
+              <p>{t.sidebar.agentsUnavailable}</p>
+              <Button onClick={() => void agents.refetch()}>
+                {t.attention.refresh}
+              </Button>
+            </div>
           ) : (
-            <p>{t.attention.unavailable}</p>
+            <>
+              {agents.execution === "unavailable" && (
+                <AttentionExecutionBanner feature={agents} />
+              )}
+              <AttentionInbox
+                executionUnavailable={agents.execution === "unavailable"}
+                key={`${user?.id}:${user?.system_role}:${user?.permissions?.join(",")}:${work}:${id}`}
+                work={work}
+                initialRequest={id}
+              />
+            </>
           )}
         </div>
       </WorkspaceBody>

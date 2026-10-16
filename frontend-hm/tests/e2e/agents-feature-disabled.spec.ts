@@ -26,7 +26,14 @@ test.describe("Agents feature disabled", () => {
       route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ agents_api: { enabled: false } }),
+        body: JSON.stringify({
+          agents_api: { enabled: false },
+          agent_instances: {
+            enabled: false,
+            execution: "unavailable",
+            reason: null,
+          },
+        }),
       }),
     );
 
@@ -37,7 +44,9 @@ test.describe("Agents feature disabled", () => {
     await expect(
       page.getByText(/contact your administrator|联系管理员/i),
     ).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByText(/config\.yaml|agents_api/i)).toHaveCount(0);
+    await expect(
+      page.getByText(/config\.yaml|agents_api|agent_instances/i),
+    ).toHaveCount(0);
 
     // Gate prevented every agents API call, including direct navigation.
     expect(agentRequests).toEqual([]);
@@ -64,7 +73,14 @@ test.describe("Agents feature disabled", () => {
         ? route.fulfill({
             status: 200,
             contentType: "application/json",
-            body: JSON.stringify({ agents_api: { enabled: false } }),
+            body: JSON.stringify({
+              agents_api: { enabled: false },
+              agent_instances: {
+                enabled: false,
+                execution: "unavailable",
+                reason: null,
+              },
+            }),
           })
         : route.fulfill({
             status: 500,

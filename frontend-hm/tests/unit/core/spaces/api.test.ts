@@ -7,6 +7,7 @@ import { fetch } from "@/core/api/fetcher";
 import { selectStorageSpacesEnabled } from "@/core/features/api";
 import {
   changeSpaceLifecycle,
+  listSpaceFiles,
   retireSpaceAttachments,
   createSpace,
   spaceFileURL,
@@ -25,6 +26,22 @@ it("uses stable resource-relative file references without a chat", () => {
     `/backend/api/spaces/${SPACE}/content?path=notes%2FQ3+%232.md&download=true`,
   );
   expect(() => spaceFileURL("../owner", "x")).toThrow();
+});
+
+it("retains an owned-space reason without relying on the server's English detail", async () => {
+  mocked.mockResolvedValueOnce(
+    Response.json(
+      { reason: "owned-space", detail: "private diagnostic" },
+      { status: 409 },
+    ),
+  );
+  await expect(changeSpaceLifecycle(SPACE, 7, "archive")).rejects.toMatchObject(
+    {
+      status: 409,
+      reason: "owned-space",
+      extra: { detail: "private diagnostic" },
+    },
+  );
 });
 
 it("provisions personal custody without sending a claimed actor", async () => {
@@ -94,5 +111,24 @@ it("retirement sends the captured attachment IDs instead of ambient current envi
   expect(JSON.parse(mocked.mock.calls[0]![1]!.body as string)).toEqual({
     generation: 7,
     attachment_ids: ["b".repeat(32)],
+  });
+});
+
+it("normalizes only an actual busy read envelope while retaining opaque details", async () => {
+  const detail = {
+    code: "storage-busy",
+    cause: "pending-recovery",
+    message: "private",
+  };
+  mocked.mockResolvedValueOnce(
+    new Response(JSON.stringify({ detail }), {
+      status: 409,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  await expect(listSpaceFiles("a".repeat(32), "")).rejects.toMatchObject({
+    status: 409,
+    reason: "storage-busy",
+    extra: { detail },
   });
 });

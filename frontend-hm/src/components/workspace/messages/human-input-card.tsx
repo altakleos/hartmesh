@@ -19,6 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { useConversationFiles } from "@/components/workspace/chats/conversation-files";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildHumanInputFormSubmissionValue,
@@ -230,6 +231,36 @@ export function HumanInputCard({
   ) => HumanInputSubmitResult | Promise<HumanInputSubmitResult>;
 }) {
   const { t } = useI18n();
+  const conversation = useConversationFiles();
+  const network =
+    request.source === "sandbox_network" &&
+    request.details &&
+    conversation.agent
+      ? {
+          ...request.details,
+          name: conversation.agent.name,
+          minutes: request.details.ttl_seconds / 60,
+        }
+      : null;
+  const networkRefused =
+    !!network &&
+    conversation.refusedNetworkRequests?.has(request.request_id) === true;
+  const networkAnswer =
+    network &&
+    answeredResponse?.response_kind === "option" &&
+    answeredResponse.value === "allow_temporary"
+      ? t.sandboxNetwork.allowed(network.host, network.minutes, network.name)
+      : network &&
+          answeredResponse?.response_kind === "option" &&
+          answeredResponse.value === "deny"
+        ? t.sandboxNetwork.kept(network.host)
+        : null;
+  const answerText = networkRefused
+    ? null
+    : (networkAnswer ??
+      (answeredResponse
+        ? t.humanInput.answeredValue(answeredResponse.value)
+        : null));
   const [text, setText] = useState("");
   const [error, setError] = useState("");
   const [isComposing, setIsComposing] = useState(false);
@@ -341,7 +372,7 @@ export function HumanInputCard({
         </p>
       ) : answeredResponse ? (
         <p className="text-muted-foreground text-sm" aria-live="polite">
-          {t.humanInput.answeredValue(answeredResponse.value)}
+          {answerText}
         </p>
       ) : (
         <span />
@@ -372,12 +403,16 @@ export function HumanInputCard({
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div className="min-w-0 space-y-1">
               <h2 id={titleId} className="text-sm leading-5 font-medium">
-                {request.title ?? t.toolCalls.needYourHelp}
+                {network
+                  ? t.sandboxNetwork.title
+                  : (request.title ?? t.toolCalls.needYourHelp)}
               </h2>
-              {request.context ? (
+              {network || request.context ? (
                 <div className="text-muted-foreground text-sm leading-6">
                   <MarkdownContent
-                    content={request.context}
+                    content={
+                      network ? t.sandboxNetwork.neverAllowed : request.context!
+                    }
                     isLoading={false}
                   />
                 </div>
@@ -405,9 +440,24 @@ export function HumanInputCard({
           </div>
 
           <div className="text-foreground text-sm leading-6">
-            <MarkdownContent content={request.question} isLoading={false} />
+            {network ? (
+              <p>
+                {t.sandboxNetwork.blocked(
+                  network.name,
+                  network.host,
+                  network.minutes,
+                  conversation.providerName ??
+                    t.agentInstances.providerFallback,
+                )}
+              </p>
+            ) : (
+              <MarkdownContent content={request.question} isLoading={false} />
+            )}
           </div>
 
+          {networkRefused && network && (
+            <p role="alert">{t.sandboxNetwork.managersOnly(network.name)}</p>
+          )}
           {isForm ? (
             <form className="space-y-4" onSubmit={handleFormSubmit}>
               {fields.map((field, index) => {
@@ -513,7 +563,11 @@ export function HumanInputCard({
                   onClick={() => handleOptionClick(option)}
                 >
                   <span className="min-w-0 wrap-break-word whitespace-pre-wrap">
-                    {option.label}
+                    {network && option.value === "deny"
+                      ? t.sandboxNetwork.keepBlocked
+                      : network && option.value === "allow_temporary"
+                        ? t.sandboxNetwork.allow(network.minutes)
+                        : option.label}
                   </span>
                 </Button>
               ))}
@@ -556,7 +610,7 @@ export function HumanInputCard({
                     className="text-muted-foreground text-sm"
                     aria-live="polite"
                   >
-                    {t.humanInput.answeredValue(answeredResponse.value)}
+                    {answerText}
                   </p>
                 ) : (
                   <span />
@@ -578,7 +632,7 @@ export function HumanInputCard({
 
           {!allowText && !isForm && answeredResponse ? (
             <p className="text-muted-foreground text-sm" aria-live="polite">
-              {t.humanInput.answeredValue(answeredResponse.value)}
+              {answerText}
             </p>
           ) : null}
         </div>

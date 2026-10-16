@@ -20,6 +20,9 @@ const shared = {
 };
 
 export default defineConfig({
+  output: process.env.HARTMESH_TEST_OUTPUT
+    ? { distPath: process.env.HARTMESH_TEST_OUTPUT }
+    : undefined,
   projects: [
     {
       ...shared,

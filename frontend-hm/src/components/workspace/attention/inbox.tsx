@@ -5,6 +5,8 @@ import { useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ActorName } from "@/components/workspace/actor-name";
+import { AIBadge } from "@/components/workspace/instances/ai-badge";
 import * as workAPI from "@/core/agent-instances/api";
 import * as api from "@/core/attention/api";
 import { useAttention } from "@/core/attention/hooks";
@@ -13,12 +15,16 @@ import { useI18n } from "@/core/i18n/hooks";
 import { listSpaces } from "@/core/spaces/api";
 import { useSpaceActionSignal } from "@/core/spaces/lifetime";
 
+import { InputRecipientSelect, NO_RECIPIENT } from "./recipient-select";
+
 export function AttentionInbox({
   work,
   initialRequest,
+  executionUnavailable = false,
 }: {
   work?: string;
   initialRequest?: string;
+  executionUnavailable?: boolean;
 }) {
   const { t } = useI18n();
   const c = t.attention;
@@ -28,7 +34,12 @@ export function AttentionInbox({
   const query = useAttention(view, offset, work);
   return (
     <div className="space-y-4">
-      <p>{c.notice}</p>
+      {!selected && (
+        <>
+          <p>{c.notice()}</p>
+          {executionUnavailable && <p>{c.unavailableStill()}</p>}
+        </>
+      )}
       <nav className="flex flex-wrap gap-2" aria-label={c.title}>
         {(["pending", "routing", "answered", "all"] as const).map((v) => (
           <Button
@@ -52,7 +63,7 @@ export function AttentionInbox({
         {c.refresh}
       </Button>
       {query.isError ? (
-        <p role="alert">{c.unavailable}</p>
+        <p role="alert">{c.loadError}</p>
       ) : query.isPending ? (
         <p>{t.common.loading}</p>
       ) : (
@@ -65,12 +76,15 @@ export function AttentionInbox({
                   className="h-auto w-full justify-start text-left whitespace-normal"
                   onClick={() => setSelected(r.id)}
                 >
-                  {r.instance_name} · {r.work_objective} — {r.question}
+                  <AIBadge /> {r.instance_name} · {r.work_objective} —{" "}
+                  {r.question}
                 </Button>
               </li>
             ))}
           </ul>
-          {!query.data.requests.length && <p>{c.empty}</p>}
+          {!query.data.requests.length && (
+            <p>{view === "pending" ? c.emptyPending : c.empty}</p>
+          )}
           <div className="flex gap-2">
             <Button
               disabled={!offset}
@@ -87,7 +101,13 @@ export function AttentionInbox({
           </div>
         </>
       )}
-      {selected && <RequestDetail key={selected} id={selected} />}
+      {selected && (
+        <RequestDetail
+          key={selected}
+          id={selected}
+          executionUnavailable={executionUnavailable}
+        />
+      )}
     </div>
   );
 }
@@ -96,13 +116,25 @@ type Intent =
   | { kind: "respond"; body: api.Reply }
   | { kind: "command"; body: api.RequestCommand }
   | { kind: "work"; body: workAPI.WorkCommand };
-export function RequestDetail({ id }: { id: string }) {
+export function RequestDetail({
+  id,
+  executionUnavailable = false,
+}: {
+  id: string;
+  executionUnavailable?: boolean;
+}) {
   const { user } = useAuth();
   const { t } = useI18n();
   const c = t.attention;
   const client = useQueryClient();
   const capture = useSpaceActionSignal();
-  const key = ["attention-detail", user?.id, user?.permissions, id];
+  const key = [
+    "attention-detail",
+    user?.id,
+    user?.system_role,
+    user?.permissions,
+    id,
+  ];
   const query = useQuery({
     queryKey: key,
     queryFn: async ({ signal }) => {
@@ -132,6 +164,7 @@ export function RequestDetail({ id }: { id: string }) {
     [note, setNote] = useState(""),
     [space, setSpace] = useState(""),
     [path, setPath] = useState("");
+  const [recipientValid, setRecipientValid] = useState(false);
   const [draftBasis, setDraftBasis] = useState<{
     request: number;
     assignment: number;
@@ -179,17 +212,16 @@ export function RequestDetail({ id }: { id: string }) {
     setReceipt("");
     const signal = capture();
     try {
-      const result =
-        intent.kind === "respond"
-          ? await api.respond(id, intent.body, signal)
-          : intent.kind === "command"
-            ? await api.command(id, intent.body, signal)
-            : await workAPI.commandWork(
-                current.request.instance_id,
-                current.request.work_id,
-                intent.body,
-                signal,
-              );
+      if (intent.kind === "respond") await api.respond(id, intent.body, signal);
+      else if (intent.kind === "command")
+        await api.command(id, intent.body, signal);
+      else
+        await workAPI.commandWork(
+          current.request.instance_id,
+          current.request.work_id,
+          intent.body,
+          signal,
+        );
       if (signal.aborted) return;
       setPending(null);
       setRecipient("");
@@ -202,11 +234,7 @@ export function RequestDetail({ id }: { id: string }) {
       setDraftBasis(null);
       setDecisionBasis(null);
       setAck(null);
-      setReceipt(
-        "receipt" in result && result.receipt
-          ? `${c.receipt}: ${result.receipt.operation_id}`
-          : c.saved,
-      );
+      setReceipt(c.savedAt(new Date().toLocaleTimeString()));
       await Promise.all([
         client.invalidateQueries({ queryKey: ["attention"] }),
         client.invalidateQueries({ queryKey: ["attention-detail"] }),
@@ -219,7 +247,7 @@ export function RequestDetail({ id }: { id: string }) {
         e.status >= 400 &&
         e.status < 500;
       if (definite) setPending(null);
-      setError(definite ? e.message : c.unconfirmed);
+      setError(definite ? t.agentInstances.operationError : c.unconfirmed);
       if (definite) await query.refetch();
     } finally {
       busyRef.current = false;
@@ -229,7 +257,7 @@ export function RequestDetail({ id }: { id: string }) {
   if (query.isError)
     return (
       <section>
-        <p role="alert">{c.unavailable}</p>
+        <p role="alert">{c.loadError}</p>
         <Button onClick={() => void query.refetch()}>{c.refresh}</Button>
       </section>
     );
@@ -270,8 +298,10 @@ export function RequestDetail({ id }: { id: string }) {
   return (
     <section aria-label={r.question} className="space-y-3 rounded border p-4">
       <h2 className="text-xl font-semibold">{r.question}</h2>
+      <p>{c.notice(r.instance_name)}</p>
+      {executionUnavailable && <p>{c.unavailableStill(r.instance_name)}</p>}
       <p>
-        {r.instance_name} · {r.work_objective}
+        <AIBadge /> {r.instance_name} · {r.work_objective}
       </p>
       <p>
         {c.reason}: {r.reason}
@@ -281,20 +311,27 @@ export function RequestDetail({ id }: { id: string }) {
       </p>
       <p>
         {c.state}: {c[r.state === "pending" ? "pending" : r.state]}
-        {r.closed_reason ? ` (${r.closed_reason})` : ""}
+        {r.closed_reason && Object.hasOwn(c.closedReason, r.closed_reason)
+          ? ` (${c.closedReason[r.closed_reason as keyof typeof c.closedReason]})`
+          : ""}
       </p>
       <p>
         {c.activity}: {new Date(r.updated_at).toLocaleString()}
       </p>
       <p>
-        {c.recipient}: {r.needs_routing ? c.recipientMissing : r.recipient_id}
+        {c.recipient}:{" "}
+        {r.needs_routing || !r.recipient_id ? (
+          c.recipientMissing
+        ) : (
+          <ActorName id={r.recipient_id} />
+        )}
       </p>
-      <p>
-        {c.readState}: {r.read_revision}
-      </p>
+      {r.read_revision > 0 && (
+        <p>{r.read_revision === r.revision ? c.readCurrent : c.readStale}</p>
+      )}
       <Link
         className="underline"
-        href={`/workspace/instances?instance=${r.instance_id}&work=${r.work_id}`}
+        href={`/workspace/instances?instance=${r.instance_id}&tab=work&work=${r.work_id}`}
       >
         {c.openWork}
       </Link>
@@ -316,14 +353,14 @@ export function RequestDetail({ id }: { id: string }) {
         {c.read}
       </Button>
       <p>{c.readNotice}</p>
-      {r.state === "answered" && <p>{c.noAssessment}</p>}
+      {r.state === "answered" && <p>{c.noAssessment(r.instance_name)}</p>}
       <SourceList sources={r.sources} />
       <h3>{c.responses}</h3>
       <ul className="space-y-2">
         {responses.map((response) => (
           <li key={response.id} className="border-l pl-3">
             <p>
-              {response.actor_id} ·{" "}
+              <ActorName id={response.actor_id} kind={response.actor_kind} /> ·{" "}
               {new Date(response.created_at).toLocaleString()} ·{" "}
               {c[response.disposition]}
             </p>
@@ -360,7 +397,7 @@ export function RequestDetail({ id }: { id: string }) {
             disabled={disabled || stale}
             className="flex flex-col gap-3"
           >
-            <p>{c.shared}</p>
+            <p>{c.shared(r.instance_name)}</p>
             <label>
               {c.text}
               <textarea
@@ -410,7 +447,7 @@ export function RequestDetail({ id }: { id: string }) {
             </label>
             <details>
               <summary>{c.file}</summary>
-              <p>{c.fileNotice}</p>
+              <p>{c.fileNotice(r.instance_name)}</p>
               <label>
                 {c.space}
                 <select
@@ -476,26 +513,26 @@ export function RequestDetail({ id }: { id: string }) {
         )}
       {r.can_manage && (
         <fieldset disabled={disabled} className="space-y-3 border-t pt-3">
-          <label>
-            {c.recipient}
-            <Input
-              maxLength={128}
-              value={recipient}
-              onChange={(e) => {
-                setRoutingBasis(
-                  (b) =>
-                    b ?? {
-                      revision: r.revision,
-                      request_revision: r.request_revision,
-                    },
-                );
-                setRecipient(e.target.value);
-              }}
-            />
-          </label>
+          <InputRecipientSelect
+            instance={r.instance_id}
+            purpose={r.purpose}
+            enabled={r.can_manage}
+            value={recipient}
+            validity={setRecipientValid}
+            choose={(value) => {
+              setRoutingBasis(
+                (b) =>
+                  b ?? {
+                    revision: r.revision,
+                    request_revision: r.request_revision,
+                  },
+              );
+              setRecipient(value);
+            }}
+          />
           <Button
             disabled={
-              !recipient ||
+              !recipientValid ||
               routingBasis?.revision !== r.revision ||
               routingBasis?.request_revision !== r.request_revision
             }
@@ -505,23 +542,12 @@ export function RequestDetail({ id }: { id: string }) {
                 body: {
                   ...commandBase,
                   action: "route",
-                  recipient_id: recipient,
+                  recipient_id: recipient === NO_RECIPIENT ? null : recipient,
                 },
               })
             }
           >
             {c.route}
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() =>
-              void execute({
-                kind: "command",
-                body: { ...commandBase, action: "route", recipient_id: null },
-              })
-            }
-          >
-            {c.unassign}
           </Button>
           <label>
             {c.note}
@@ -604,14 +630,17 @@ export function RequestDetail({ id }: { id: string }) {
       </Button>
       {historyOffset !== null &&
         (history.isError ? (
-          <p role="alert">{c.unavailable}</p>
+          <p role="alert">{c.loadError}</p>
         ) : (
           <>
             <ul>
               {history.data?.events.map((e) => (
                 <li key={e.id}>
-                  {e.actor_id} · {e.action} · {e.revision} ·{" "}
-                  {new Date(e.created_at).toLocaleString()}
+                  <ActorName id={e.actor_id} kind={e.actor_kind} /> ·{" "}
+                  {Object.hasOwn(c.event, e.action)
+                    ? c.event[e.action as keyof typeof c.event]
+                    : c.event.other}{" "}
+                  · {new Date(e.created_at).toLocaleString()}
                 </li>
               ))}
             </ul>
@@ -648,7 +677,7 @@ function SourceList({ sources }: { sources: api.InputRequest["sources"] }) {
               {s.path} · {t.attention.unchecked}
             </Link>
           ) : (
-            t.attention.unavailable
+            t.attention.sourceUnavailable
           )}
         </li>
       ))}

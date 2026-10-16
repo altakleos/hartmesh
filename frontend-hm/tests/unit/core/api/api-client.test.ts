@@ -1,5 +1,6 @@
 import { afterEach, expect, test, rs } from "@rstest/core";
 
+import { takeRefusal } from "@/core/agent-instances/errors";
 import {
   cancelActiveThreadRun,
   clearReconnectRun,
@@ -81,6 +82,96 @@ function makeSSEResponse(body: string, headers?: HeadersInit) {
 afterEach(() => {
   rs.unstubAllGlobals();
 });
+
+test.each(["start", "join"])(
+  "captures a raw refusal frame before yielding it unchanged on %s",
+  async (mode) => {
+    const thread = `agent-frame-${mode}`;
+    const payload = {
+      name: "ResidentInterrupted",
+      message: "diagnostic only",
+      reason: "storage-recovery",
+    };
+    rs.stubGlobal("window", { location: { origin: "http://localhost:2026" } });
+    rs.stubGlobal(
+      "fetch",
+      rs.fn(async (input: RequestInfo | URL) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : input.url;
+        if (url.endsWith("/runs/run-refusal"))
+          return Response.json({ status: "running" });
+        return makeSSEResponse(
+          `event: error\ndata: ${JSON.stringify(payload)}\n\n`,
+        );
+      }),
+    );
+    const stream =
+      mode === "start"
+        ? getAPIClient(true).runs.stream(thread, "lead_agent")
+        : getAPIClient(true).runs.joinStream(thread, "run-refusal");
+    const entry = await stream.next();
+    expect(entry.value).toMatchObject({ event: "error", data: payload });
+    expect(takeRefusal(thread)).toEqual({
+      name: payload.name,
+      reason: payload.reason,
+      detail: payload.message,
+      extra: {},
+    });
+    expect(takeRefusal(thread)).toBeNull();
+    await stream.return(undefined);
+  },
+);
+
+test.each(["start", "join"])(
+  "captures an HTTP refusal and rethrows the original SDK error on %s",
+  async (mode) => {
+    const thread = `agent-http-${mode}`;
+    rs.stubGlobal("window", { location: { origin: "http://localhost:2026" } });
+    rs.stubGlobal(
+      "fetch",
+      rs.fn(async (input: RequestInfo | URL) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : input.url;
+        if (url.endsWith("/runs/run-refusal"))
+          return Response.json({ status: "running" });
+        return Response.json(
+          {
+            reason: "execution-unavailable",
+            execution_reason: "operator-hold",
+            detail: "private diagnostic",
+          },
+          { status: 409 },
+        );
+      }),
+    );
+    const stream =
+      mode === "start"
+        ? getAPIClient(true).runs.stream(thread, "lead_agent")
+        : getAPIClient(true).runs.joinStream(thread, "run-refusal");
+    const error: unknown = await stream
+      .next()
+      .catch((failure: unknown) => failure);
+    expect(error).toMatchObject({
+      status: 409,
+      message: expect.stringContaining("HTTP 409:"),
+    });
+    expect(takeRefusal(thread)).toEqual({
+      status: 409,
+      reason: "execution-unavailable",
+      executionReason: "operator-hold",
+      detail: "private diagnostic",
+      extra: { detail: "private diagnostic" },
+    });
+  },
+);
 
 test.each([507, 503])(
   "does not retry a structured storage admission refusal with HTTP %s",

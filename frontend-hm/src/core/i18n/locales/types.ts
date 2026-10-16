@@ -1,6 +1,12 @@
 import type { LucideIcon } from "lucide-react";
 
 export interface StorageUnavailableTranslations {
+  serverNotReady: string;
+  serverCheckFailed: string;
+  agentsPaused: (provider: string) => string;
+  serverMoved: (name: string, provider: string) => string;
+  filesUnchecked: (name: string) => string;
+  agentsWait: string;
   diskTooSmall: (provider: string) => string;
   storageMissing: (provider: string) => string;
   storageUnreadable: (provider: string) => string;
@@ -12,6 +18,14 @@ export interface StorageUnavailableTranslations {
 }
 
 export interface Translations {
+  people: {
+    you: string;
+    youInline: string;
+    aManager: string;
+    formerNamed: (person: string) => string;
+    former: string;
+    unknown: string;
+  };
   chat: {
     filesFull: (support: string) => string;
     filesPreparing: (support: string) => string;
@@ -20,177 +34,321 @@ export interface Translations {
     myFilesUnchecked: string;
   };
   auth: { noSeats: string };
-  attention: Record<
-    | "title"
-    | "pending"
-    | "routing"
-    | "answered"
-    | "all"
-    | "empty"
-    | "unavailable"
-    | "notice"
-    | "question"
-    | "reason"
-    | "expected"
-    | "information"
-    | "decision"
-    | "review"
-    | "recipient"
-    | "defaultRecipient"
-    | "create"
-    | "purpose"
-    | "choices"
-    | "shared"
-    | "send"
-    | "supplied"
-    | "cannot_provide"
-    | "wrong_recipient"
-    | "text"
-    | "choice"
-    | "disposition"
-    | "read"
-    | "readNotice"
-    | "history"
-    | "responses"
-    | "route"
-    | "unassign"
-    | "withdraw"
-    | "note"
-    | "decide"
+  attention: {
+    navCount: (pending: number, routing: number) => string;
+    notice: (name?: string) => string;
+    noAssessment: (name: string) => string;
+    unconfirmed: string;
+    noPermission: string;
+    unavailableStill: (name?: string) => string;
+    loadError: string;
+    emptyPending: string;
+    recipient: string;
+    recipientDefault: (supervisor: string) => string;
+    recipientNone: string;
+    recipientMissing: string;
+    shared: (name: string) => string;
+    fileNotice: (name: string) => string;
+    savedAt: (time: string) => string;
+    readCurrent: string;
+    readStale: string;
+    sourceUnavailable: string;
+    closedReason: {
+      resolved: string;
+      superseded: string;
+      withdrawn: string;
+    };
+    event: {
+      create: string;
+      respond: string;
+      route: string;
+      withdraw: string;
+      assess: string;
+      decide: string;
+      accept: string;
+      edit: string;
+      cancel: string;
+      reopen: string;
+      changes_requested: string;
+      reconcile_mandate: string;
+      other: string;
+    };
+  } & Record<
     | "accept"
     | "ack"
-    | "refresh"
-    | "reset"
-    | "stale"
-    | "retry"
-    | "unconfirmed"
-    | "receipt"
-    | "saved"
-    | "closed"
-    | "back"
-    | "next"
-    | "openWork"
-    | "file"
-    | "space"
-    | "path"
-    | "fileNotice"
-    | "requestLink"
-    | "unchecked"
-    | "noAssessment"
-    | "outcome"
-    | "state"
     | "activity"
-    | "recipientMissing"
+    | "all"
+    | "answered"
+    | "back"
+    | "cannot_provide"
+    | "choice"
+    | "choices"
+    | "closed"
+    | "create"
+    | "createUnavailable"
+    | "decide"
+    | "decision"
+    | "defaultRecipient"
+    | "disposition"
+    | "empty"
+    | "expected"
+    | "file"
+    | "history"
+    | "information"
+    | "next"
+    | "note"
+    | "openWork"
+    | "outcome"
+    | "path"
+    | "pending"
+    | "purpose"
+    | "question"
+    | "read"
+    | "readNotice"
     | "readState"
+    | "reason"
+    | "receipt"
+    | "refresh"
+    | "requestLink"
+    | "reset"
+    | "responses"
+    | "retry"
+    | "review"
+    | "route"
+    | "routing"
+    | "saved"
+    | "send"
     | "sources"
-    | "createUnavailable",
+    | "space"
+    | "stale"
+    | "state"
+    | "supplied"
+    | "text"
+    | "title"
+    | "unassign"
+    | "unavailable"
+    | "unchecked"
+    | "withdraw"
+    | "wrong_recipient",
     string
   >;
   agentWork: {
-    attemptStatus: Record<
-      | "starting"
-      | "running"
-      | "stopping"
-      | "uncertain"
-      | "succeeded"
-      | "failed"
-      | "cancelled",
-      string
-    >;
+    execution: (name: string) => string;
+    openConversation: string;
+    newConversation: string;
+    recordsOnly: (name: string) => string;
+    reportedComplete: (name: string) => string;
+    policyNotice: string;
+    due: string;
+    inputNotice: (name: string) => string;
+    stop: string;
+    stopConfirm: (name: string) => string;
+    stopNow: string;
+    keepWorking: string;
+    stopPending: (name: string) => string;
+    stopped: (person: string, time: string) => string;
+    stoppedByEdit: (person: string) => string;
+    stoppedByWithdraw: (person: string) => string;
+    stoppedByService: (name: string) => string;
+    stoppedPlain: string;
+    stopNothing: (name: string) => string;
+    stopFailed: string;
+    uncertain: (name: string) => string;
+    uncertainWaiting: (name: string) => string;
+    attemptFailed: (name: string, support: string) => string;
+    endedWithoutReport: (name: string) => string;
+    recoverActivation: string;
+    recoverActivationNote: string;
+    cancel: string;
+    visibility: (supervisor: string) => string;
+    giveNeedsChat: (name: string, supervisor: string) => string;
+    reconcileNeeded: (name: string) => string;
+    reconcile_mandate: string;
+    sharedNotice: (name: string) => string;
+    policyDisabled: (name: string) => string;
+    advanced: string;
+    reconcileAttempt: string;
+    containmentReceipt: (name: string) => string;
+    containmentNotice: (name: string) => string;
+    latest: string;
+    manualFirst: (name: string) => string;
+    unresolvedAsk: (supervisor: string) => string;
+    host: string;
+    attemptStatus: {
+      starting: string;
+      running: string;
+      stopping: string;
+      uncertain: string;
+      succeeded: string;
+      failed: string;
+      cancelled: string;
+      contained: string;
+      notStarted: string;
+      noResult: string;
+    };
+    attempt: {
+      busy: (name: string, action: string) => string;
+      runLimit: (name: string, action: string) => string;
+      restarting: (name: string, action: string) => string;
+      startingElsewhere: (name: string, action: string) => string;
+      startFailed: (name: string, action: string, support: string) => string;
+      full: (name: string, support: string) => string;
+      fullAsk: (name: string, supervisor: string, support: string) => string;
+    };
+    workLimit: {
+      one: string;
+      many: (count: number) => string;
+      which: (
+        agent: string,
+        objective: string,
+        time: string,
+        person: string,
+      ) => string;
+      starting: (agent: string) => string;
+      free: (name: string) => string;
+    };
+    event: {
+      delegate: string;
+      activate: string;
+      progress: string;
+      outcome: string;
+      request_input: string;
+      revise_input: string;
+      assess_input: string;
+      suggest: string;
+      derive: string;
+      derived: string;
+      human_response: string;
+      request_route: string;
+      request_withdraw: string;
+      input: string;
+      decide: string;
+      accept: string;
+      edit: string;
+      cancel: string;
+      reopen: string;
+      changes_requested: string;
+      reconcile_mandate: string;
+      reconcile_attempt: string;
+      stop: string;
+      attempt_settled: string;
+      attempt_uncertain: string;
+      attempt_contained: string;
+      other: string;
+    };
+    contained: {
+      containerAbsent: (name: string) => string;
+      runOrphaned: (name: string) => string;
+      runNeverStarted: (name: string) => string;
+      startFailed: (name: string, support: string) => string;
+      outcomeUncertain: (name: string) => string;
+      idle: (name: string) => string;
+      lifecycle: (name: string) => string;
+      storageRecovery: (provider: string, name: string) => string;
+      operator: (name: string, provider: string) => string;
+      hostReplaced: (name: string) => string;
+      unknown: (name: string) => string;
+      kept: (name: string) => string;
+      candidate: (name: string) => string;
+    };
   } & Record<
-    | "newConversation"
-    | "reconcileAttempt"
-    | "containmentReceipt"
-    | "containmentNotice"
-    | "responsibilities"
-    | "currentWork"
-    | "needsInput"
-    | "recentOutcomes"
-    | "activate"
-    | "resume"
-    | "recoverActivation"
-    | "execution"
-    | "openConversation"
-    | "candidate"
-    | "uncertain"
-    | "suggestion"
-    | "delegateSuggestion"
-    | "resetResponse"
-    | "replaceUnavailable"
-    | "title"
-    | "recordsOnly"
-    | "visibility"
-    | "policyDisabled"
-    | "policyEnabled"
-    | "policyNotice"
-    | "reviewRequired"
-    | "responsibility"
-    | "objective"
-    | "criteria"
-    | "priority"
-    | "due"
-    | "delegate"
-    | "sharedNotice"
-    | "empty"
-    | "open"
-    | "blocked"
-    | "submitted"
-    | "completed"
-    | "cancelled"
-    | "low"
-    | "normal"
-    | "high"
-    | "urgent"
-    | "edit"
-    | "save"
-    | "cancelEdit"
-    | "cancel"
-    | "reopen"
-    | "changes_requested"
-    | "reconcile_mandate"
     | "accept"
-    | "reconcileNeeded"
-    | "note"
-    | "input"
-    | "decide"
-    | "inputNotice"
-    | "unchecked"
     | "acceptUnchecked"
-    | "unavailableSource"
+    | "acceptedBy"
+    | "activate"
+    | "addSource"
+    | "blocked"
+    | "cancelEdit"
+    | "cancelled"
+    | "candidate"
+    | "changes_requested"
+    | "completed"
+    | "creator"
+    | "criteria"
+    | "currentWork"
+    | "decide"
+    | "delegate"
+    | "delegateSuggestion"
+    | "edit"
+    | "empty"
+    | "error"
+    | "high"
+    | "history"
+    | "human"
+    | "input"
+    | "lastActivity"
+    | "low"
+    | "needsInput"
+    | "next"
+    | "nextAction"
+    | "nonhuman"
+    | "normal"
+    | "note"
+    | "objective"
+    | "open"
+    | "path"
+    | "policyEnabled"
+    | "previous"
+    | "priority"
+    | "progress"
+    | "recentOutcomes"
+    | "refresh"
+    | "removeSource"
+    | "reopen"
+    | "replaceUnavailable"
+    | "resetResponse"
+    | "responsibilities"
+    | "responsibility"
+    | "resume"
+    | "retry"
+    | "reviewRequired"
+    | "save"
     | "sources"
     | "space"
-    | "path"
-    | "addSource"
-    | "removeSource"
-    | "history"
-    | "previous"
-    | "next"
-    | "refresh"
-    | "retry"
+    | "submitted"
+    | "suggestion"
+    | "title"
+    | "unavailableSource"
+    | "unchecked"
     | "unconfirmed"
-    | "error"
-    | "progress"
-    | "nextAction"
-    | "lastActivity"
-    | "acceptedBy"
-    | "reportedComplete"
-    | "creator"
-    | "human"
-    | "nonhuman",
+    | "urgent",
     string
   >;
+  sandboxNetwork: {
+    title: string;
+    blocked: (
+      name: string,
+      host: string,
+      minutes: number,
+      provider: string,
+    ) => string;
+    neverAllowed: string;
+    allow: (minutes: number) => string;
+    keepBlocked: string;
+    allowed: (host: string, minutes: number, name: string) => string;
+    kept: (host: string) => string;
+    managersOnly: (name: string) => string;
+    deniedAsk: (
+      name: string,
+      host: string,
+      supervisor: string,
+      support: string,
+    ) => string;
+    denied: (name: string, host: string, provider: string) => string;
+  };
   agentInstances: Record<
-    | "title"
     | "description"
     | "legacyUnavailable"
     | "administratorSupport"
+    | "bringBack"
+    | "makeEmployee"
+    | "makeEmployeeNotice"
     | "name"
     | "custody"
     | "personal"
     | "company"
     | "supervisor"
     | "definition"
-    | "create"
     | "start"
     | "home"
     | "spaces"
@@ -209,7 +367,6 @@ export interface Translations {
     | "manageAccess"
     | "grantsNotice"
     | "retention"
-    | "pending"
     | "retry"
     | "abandon"
     | "abandoned"
@@ -219,7 +376,6 @@ export interface Translations {
     | "none"
     | "more"
     | "memory"
-    | "memoryNotice"
     | "fact"
     | "addFact"
     | "removeFact"
@@ -228,7 +384,6 @@ export interface Translations {
     | "importMemory"
     | "replaceMemory"
     | "confirm"
-    | "confirmMemory"
     | "companyCopy"
     | "companyCopyNotice"
     | "status"
@@ -241,11 +396,293 @@ export interface Translations {
     | "businessDefinition"
     | "useOnly"
     | "operationError"
-    | "source"
-    | "memoryUnavailable",
+    | "source",
     string
-  > & { providerFallback: string; unavailable: StorageUnavailableTranslations };
+  > & {
+    welcome: {
+      title: (name: string) => string;
+      body: (name: string) => string;
+      ownFiles: (name: string) => string;
+      assistantNoMyFiles: (name: string) => string;
+      sharedReadable: (name: string) => string;
+      prefilled: string;
+      firstMessage: (name: string) => string;
+      tipFiles: (name: string) => string;
+      tipWork: (name: string) => string;
+      tipAccess: string;
+      companyNotice: (name: string) => string;
+    };
+    chat: {
+      subline: (
+        kind: "personal" | "company",
+        own: boolean,
+        owner: string,
+        supervisor: string,
+      ) => string;
+      alsoWorking: string;
+      colleagues: (person: string, name: string) => string;
+    };
+    fileNeedsInspect: (name: string, supervisor: string) => string;
+    busy: (name: string) => string;
+    conversationLimit: (name: string) => string;
+    restarting: (name: string) => string;
+    startingElsewhere: (name: string) => string;
+    fullStart: (name: string, support: string) => string;
+    fullStartAsk: (name: string, supervisor: string, support: string) => string;
+    interruptedByManager: (name: string) => string;
+    interruptedByRecovery: (provider: string, name: string) => string;
+    interrupted: (name: string) => string;
+    interruptedByService: string;
+    create: {
+      title: (kind: "personal" | "company") => string;
+      step: (n: number) => string;
+      namePlaceholder: string;
+      nameHelp: (kind: "personal" | "company") => string;
+      nameInvalid: string;
+      roleHeading: (name: string) => string;
+      roleHeadingUnnamed: (kind: "personal" | "company") => string;
+      roleBlank: string;
+      roleBlankDescription: string;
+      rolesNone: string;
+      rolesFailed: string;
+      replaceBrief: string;
+      keepBrief: string;
+      useRoleBrief: string;
+      brief: (name: string) => string;
+      briefUnnamed: (kind: "personal" | "company") => string;
+      briefHelp: (name: string) => string;
+      briefHelpUnnamed: (kind: "personal" | "company") => string;
+      briefPlaceholder: string;
+      briefRequired: string;
+      briefTooLong: string;
+      useCustomAgent: string;
+      useRole: string;
+      customAgent: string;
+      customAgentNone: string;
+      next: string;
+      back: string;
+      supervisorHeading: (name: string) => string;
+      supervisorHelp: (name: string) => string;
+      settingUp: (name: string) => string;
+      slow: string;
+      unconfirmed: (name: string) => string;
+      failed: (name: string) => string;
+      briefFailed: string;
+      companyRefused: string;
+      addedNoConversation: (name: string) => string;
+    };
+    files: {
+      root: (name: string) => string;
+      name: string;
+      size: string;
+      modified: string;
+      uploadsHint: (name: string) => string;
+      outputsHint: (name: string) => string;
+      producedBy: (name: string, date: string) => string;
+      add: string;
+      drop: (name: string) => string;
+      choose: string;
+      newFolder: string;
+      folderName: string;
+      newName: string;
+      deleteConfirm: (file: string) => string;
+      needsInspect: (name: string, supervisor: string) => string;
+      readOnlyHint: (name: string) => string;
+      emptyRoot: (name: string) => string;
+      emptyRootReader: string;
+      uploading: (percent: number) => string;
+      saved: (name: string) => string;
+      savedAs: (file: string) => string;
+      refused: (file: string) => string;
+      noAccess: (name: string) => string;
+      full: (name: string, support: string) => string;
+      fullAsk: (name: string, supervisor: string, support: string) => string;
+      tooLarge: (file: string, max: string) => string;
+      listFailed: (name: string) => string;
+      accessNotSaved: (name: string) => string;
+      listLive: (name: string) => string;
+      invalidName: string;
+      reserved: (name: string) => string;
+      nameTaken: string;
+      fileChanged: string;
+      folderNotEmpty: string;
+      notActive: (name: string) => string;
+      notFound: string;
+      actionFailed: string;
+    };
+    memoryNotice: (name: string) => string;
+    confirmMemory: (name: string) => string;
+    memoryUnavailable: (name: string) => string;
+    memoryTooLarge: string;
+    memoryInvalid: string;
+    providerFallback: string;
+    filesBusy: (name: string) => string;
+    assistants: {
+      title: string;
+      description: string;
+      add: string;
+      none: string;
+      othersHeading: string;
+      ownerLine: (owner: string) => string;
+      allowance: (count: number, max: number, name: string) => string;
+      limitReached: (count: number, max: number, name: string) => string;
+      limitUnfinished: (name: string) => string;
+      noneFree: (administrator: boolean, provider: string) => string;
+      noPermission: string;
+      notOffered: string;
+      listFailed: string;
+    };
+    employees: {
+      title: string;
+      description: string;
+      add: string;
+      none: string;
+      adminsAdd: string;
+      supervisorLine: (supervisor: string) => string;
+      allowance: (count: number, max: number) => string;
+      limitReached: (max: number, provider: string) => string;
+      notOffered: string;
+      listFailed: string;
+    };
+    group: {
+      active: string;
+      paused: string;
+      retired: string;
+      unfinished: string;
+    };
+    unfinished: (name: string) => string;
+    finishSetup: string;
+    remove: string;
+    unfinishedElsewhere: (name: string) => string;
+    unfinishedCompleted: (name: string) => string;
+    marker: { ai: string; aiAssistant: string; aiEmployee: string };
+    conversations: {
+      with: (person: string) => string;
+      empty: string;
+      untitled: string;
+      yours: string;
+      running: string;
+      ownOnly: string;
+      loadFailed: string;
+      noUse: (supervisor: string) => string;
+    };
+    access: {
+      heading: (name: string) => string;
+      use: string;
+      inspect: string;
+      manage: string;
+      useHelp: (name: string) => string;
+      inspectHelp: (name: string) => string;
+      chatOnlyNote: (person: string, name: string) => string;
+      manageHelp: (name: string) => string;
+      supervisorNote: (name: string) => string;
+      supervisorHint: (name: string) => string;
+      filesFollow: (name: string) => string;
+      onlyYou: string;
+      manageIncludes: string;
+      manageNeedsInspect: (name: string) => string;
+      lastManager: (name: string) => string;
+      ownManage: string;
+      add: string;
+      searchHint: string;
+      noResults: string;
+      searchHintFull: string;
+      find: string;
+      notFoundFull: string;
+      searchFailed: string;
+      alreadyHasAccess: (person: string) => string;
+      saved: string;
+      remove: string;
+      removeConfirm: (person: string, name: string) => string;
+    };
+    interrupt: {
+      title: (name: string) => string;
+      body: (change: string, name: string, list: string) => string;
+      bodyUnknown: (change: string, name: string) => string;
+      grant: string;
+      supervise: string;
+      adopt: string;
+      reply: (person: string) => string;
+      work: (objective: string) => string;
+      wait: (name: string) => string;
+      now: string;
+      pending: (name: string) => string;
+    };
+    lifecycleAction: {
+      suspend: string;
+      restore: string;
+      archive: string;
+      delete: string;
+      adopt: string;
+      supervise: string;
+      grant: string;
+    };
+    unavailable: StorageUnavailableTranslations;
+    header: {
+      line: (
+        kind: "personal" | "company",
+        own: boolean,
+        owner: string,
+        supervisor: string,
+      ) => string;
+      yourAccess: string;
+    };
+    state: {
+      working: string;
+      idle: string;
+      lastActive: (time: string) => string;
+      neverUsed: string;
+      paused: string;
+      retired: string;
+      deleted: string;
+      unfinished: string;
+      unavailable: string;
+      changing: string;
+    };
+    notFound: string;
+    backToList: (kind: "personal" | "company") => string;
+    pausedNotice: (name: string) => string;
+    retiredNotice: (name: string) => string;
+    deletedNotice: (name: string) => string;
+    accessWithdrawn: (name: string) => string;
+    tabs: {
+      conversations: string;
+      files: string;
+      work: string;
+      memory: string;
+      access: string;
+      settings: string;
+    };
+    pending: (name: string) => string;
+    settings: {
+      renamed: string;
+      assignments: (name: string) => string;
+      briefNote: (name: string) => string;
+      briefApplied: string;
+      useCustomAgent: string;
+      pauseConfirm: (name: string) => string;
+      runningNow: (name: string) => string;
+      retireConfirm: (name: string, kind: "personal" | "company") => string;
+      deleteConfirm: (name: string, kind: "personal" | "company") => string;
+      deleteUnverified: (name: string, provider: string) => string;
+      typeName: (name: string) => string;
+      deleting: (name: string) => string;
+      deleted: (name: string) => string;
+      deletedClearing: (name: string, kind: "personal" | "company") => string;
+      abandonConfirm: (name: string) => string;
+      abandonRefused: string;
+      employeeName: string;
+      employeeAdded: (name: string) => string;
+      automatic: (name: string) => string;
+    };
+  };
   storageSpaces: {
+    agentFilesOf: (name: string) => string;
+    agentFilesRecoveryNote: (name: string) => string;
+    agentFilesUnknown: string;
+    agentFilesRecoveryUnknown: string;
+    membersHint: string;
+    createOff: string;
     confirmAction: string;
     recovery: string;
     recoveryNotice: string;
@@ -365,6 +802,10 @@ export interface Translations {
   };
 
   runProgress: {
+    residentPreparing: (name: string) => string;
+    residentStarting: (name: string) => string;
+    residentStartingLong: (name: string) => string;
+    residentStartFailed: (name: string, support: string) => string;
     preparing: string;
     workspaceStarting: string;
     thinking: string;
@@ -488,6 +929,17 @@ export interface Translations {
 
   // Input Box
   inputBox: {
+    agentFile: {
+      attach: (name: string) => string;
+      hint: (name: string) => string;
+      sendWaits: string;
+      uploading: (percent: number) => string;
+      saved: (name: string) => string;
+      savedAs: (file: string) => string;
+      refused: (file: string) => string;
+      noAccess: (name: string) => string;
+      tooLarge: (file: string, max: string) => string;
+    };
     placeholder: string;
     disclaimer: string;
     /** The same line in a company's workspace, which is not the product's to sign. */
@@ -578,6 +1030,11 @@ export interface Translations {
 
   // Sidebar
   sidebar: {
+    myAssistants: string;
+    aiEmployees: string;
+    assistantsOff: string;
+    aiEmployeesOff: string;
+    agentsUnavailable: string;
     recentChats: string;
     newChat: string;
     chats: string;

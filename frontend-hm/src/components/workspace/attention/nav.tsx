@@ -23,10 +23,10 @@ export function AttentionNav() {
           <span>{t.attention.title}</span>
           {counts && (
             <span
-              aria-label={`${t.attention.pending}: ${counts.pending}; ${t.attention.routing}: ${counts.routing}`}
+              aria-label={t.attention.navCount(counts.pending, counts.routing)}
+              title={t.attention.navCount(counts.pending, counts.routing)}
             >
-              {counts.pending}
-              {counts.routing ? ` + ${counts.routing}` : ""}
+              {counts.pending + counts.routing}
             </span>
           )}
         </Link>

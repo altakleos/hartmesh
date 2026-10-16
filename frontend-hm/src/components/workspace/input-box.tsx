@@ -74,7 +74,10 @@ import { getBackendBaseURL } from "@/core/config";
 import { useBranding, useWorkspacePresentation } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import { polishInputDraft } from "@/core/input-polish/api";
-import { isHiddenFromUIMessage } from "@/core/messages/utils";
+import {
+  isHiddenFromUIMessage,
+  type FileInMessage,
+} from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { selectAvailableModel } from "@/core/models/selection";
 import {
@@ -86,6 +89,7 @@ import { DEFAULT_MAX_SUGGESTIONS } from "@/core/suggestions/api";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
 import type { AgentThreadContext, GoalState } from "@/core/threads";
 import { compactThreadContext } from "@/core/threads/api";
+import { useComposerAgentRefusal } from "@/core/threads/composer-agent";
 import {
   buildComposerDraftKey,
   clearComposerDraft,
@@ -97,6 +101,7 @@ import {
 } from "@/core/threads/composer-draft";
 import { useComposerStorageRefusal } from "@/core/threads/composer-storage";
 import type {
+  AgentThreadRunRefusal,
   SendMessageOptions,
   ThreadRunRefusal,
 } from "@/core/threads/hooks";
@@ -283,6 +288,10 @@ export function InputBox({
   allowAttachments = true,
   attachmentsUnavailable = false,
   storageRefusal,
+  agentRefusal,
+  agentFiles,
+  allowStop = true,
+  stopDisabled = false,
   disabled,
   autoFocus,
   status = "ready",
@@ -306,6 +315,16 @@ export function InputBox({
   allowAttachments?: boolean;
   attachmentsUnavailable?: boolean;
   storageRefusal?: ThreadRunRefusal | null;
+  agentRefusal?: AgentThreadRunRefusal | null;
+  agentFiles?: {
+    name: string;
+    content: React.ReactNode;
+    uploading: boolean;
+    restoredCount: number;
+    restoreFiles: (files: FileInMessage[]) => void;
+  };
+  allowStop?: boolean;
+  stopDisabled?: boolean;
   status?: ChatStatus;
   disabled?: boolean;
   context: Omit<
@@ -380,11 +399,36 @@ export function InputBox({
     getEditRevision: readEditRevision,
     setText: setTextInput,
   });
+  const agentRefused = useComposerAgentRefusal({
+    refusal: agentRefusal,
+    threadId,
+    getText: readInputText,
+    getEditRevision: readEditRevision,
+    setText: setTextInput,
+    restoreFiles: agentFiles?.restoreFiles,
+  });
   const sidecar = useMaybeSidecar();
   const attachmentParts = attachments.files;
   const removeAttachment = attachments.remove;
   const { skills, isLoading: skillsLoading } = useSkills();
-  const { data: uploadLimits } = useUploadLimits(threadId);
+  const { data: configuredUploadLimits } = useUploadLimits(threadId);
+  const agentAttachments = !!agentFiles;
+  const restoredFileCount = agentFiles?.restoredCount ?? 0;
+  const uploadLimits = useMemo(
+    () =>
+      configuredUploadLimits && agentAttachments
+        ? {
+            ...configuredUploadLimits,
+            max_files: Math.max(
+              0,
+              configuredUploadLimits.max_files - restoredFileCount,
+            ),
+            max_file_size: Number.MAX_SAFE_INTEGER,
+            max_total_size: Number.MAX_SAFE_INTEGER,
+          }
+        : configuredUploadLimits,
+    [configuredUploadLimits, agentAttachments, restoredFileCount],
+  );
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const inlineSkillTextRef = useRef<HTMLSpanElement | null>(null);
@@ -1208,6 +1252,7 @@ export function InputBox({
         attachmentParts,
         editRevision.current,
       );
+      agentRefused.capture(message.text, textInput.value, editRevision.current);
       return onSubmit?.(message, submitOptions);
     },
     [
@@ -1216,6 +1261,7 @@ export function InputBox({
       invalidateDraftSaveTimer,
       onSubmit,
       refused,
+      agentRefused,
       textInput.value,
       attachmentParts,
       reportUploadLimitViolations,
@@ -1228,6 +1274,7 @@ export function InputBox({
   );
 
   const handleStopStreaming = useCallback(() => {
+    if (!allowStop || stopDisabled) return;
     // Mark the in-progress turn as user-interrupted so the next
     // streaming->ready transition does not suggest follow-ups for it.
     stoppedByUserRef.current = true;
@@ -1235,10 +1282,12 @@ export function InputBox({
     setFollowupsHidden(true);
     setFollowupsLoading(false);
     onStop?.();
-  }, [onStop]);
+  }, [allowStop, onStop, stopDisabled]);
 
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
+      if (agentFiles?.uploading)
+        return Promise.reject(new Error("Files are still being saved."));
       if (status === "streaming") {
         toast.info(t.inputBox.pleaseWaitStreaming);
         return Promise.reject(new Error("streaming"));
@@ -1252,7 +1301,7 @@ export function InputBox({
         : message;
       const submitAction = getInputSubmitAction({
         text: messageWithSlashSkill.text,
-        fileCount: messageWithSlashSkill.files.length,
+        fileCount: messageWithSlashSkill.files.length + restoredFileCount,
         status,
       });
       if (submitAction.kind === "goal") {
@@ -1312,6 +1361,8 @@ export function InputBox({
     },
     [
       abortVoiceInput,
+      agentFiles?.uploading,
+      restoredFileCount,
       handleCompactCommand,
       handleGoalCommand,
       handleStopStreaming,
@@ -1417,7 +1468,7 @@ export function InputBox({
     text: selectedSlashSkill
       ? `/${selectedSlashSkill.name} ${textInput.value}`
       : textInput.value,
-    fileCount: attachmentParts.length,
+    fileCount: attachmentParts.length + restoredFileCount,
     status,
   });
   const draftNeedsModel =
@@ -2363,22 +2414,26 @@ export function InputBox({
               )}
             </div>
           )}
-          <PromptInputAttachments className="contents p-0">
-            {(attachment) => (
-              <div className="max-w-60">
-                <PromptInputAttachment data={attachment} />
-                {refused.failures[attachment.id] && (
-                  <div className="text-destructive mt-1 text-xs">
-                    <FilesStateNotice
-                      refusal={refused.failures[attachment.id]!}
-                      area="upload"
-                      filename={attachment.filename}
-                    />
-                  </div>
-                )}
-              </div>
-            )}
-          </PromptInputAttachments>
+          {agentFiles ? (
+            agentFiles.content
+          ) : (
+            <PromptInputAttachments className="contents p-0">
+              {(attachment) => (
+                <div className="max-w-60">
+                  <PromptInputAttachment data={attachment} />
+                  {refused.failures[attachment.id] && (
+                    <div className="text-destructive mt-1 text-xs">
+                      <FilesStateNotice
+                        refusal={refused.failures[attachment.id]!}
+                        area="upload"
+                        filename={attachment.filename}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+            </PromptInputAttachments>
+          )}
           {polishingInput && (
             <div
               aria-live="polite"
@@ -2475,6 +2530,7 @@ export function InputBox({
                 disabled={composerLocked || attachmentsUnavailable}
                 unavailable={attachmentsUnavailable}
                 uploadLimits={uploadLimits}
+                agentName={agentFiles?.name}
               />
             )}
             <VoiceInputButton
@@ -2871,23 +2927,36 @@ export function InputBox({
                 </ModelSelectorList>
               </ModelSelectorContent>
             </ModelSelector>
-            <PromptInputSubmit
-              className="rounded-full"
-              disabled={
-                composerLocked ||
-                (status !== "streaming" &&
-                  draftNeedsModel &&
-                  Boolean(modelSubmitError))
-              }
-              variant="outline"
-              status={status}
-              onClick={(e) => {
-                if (status === "streaming") {
-                  e.preventDefault();
-                  handleStopStreaming();
+            {(status !== "streaming" || allowStop) && (
+              <Tooltip
+                content={
+                  status !== "streaming" && agentFiles?.uploading
+                    ? t.inputBox.agentFile.sendWaits
+                    : undefined
                 }
-              }}
-            />
+              >
+                <span>
+                  <PromptInputSubmit
+                    className="rounded-full"
+                    disabled={
+                      status === "streaming"
+                        ? stopDisabled || polishingInput
+                        : composerLocked ||
+                          agentFiles?.uploading === true ||
+                          (draftNeedsModel && Boolean(modelSubmitError))
+                    }
+                    variant="outline"
+                    status={status}
+                    onClick={(e) => {
+                      if (status === "streaming") {
+                        e.preventDefault();
+                        handleStopStreaming();
+                      }
+                    }}
+                  />
+                </span>
+              </Tooltip>
+            )}
           </PromptInputTools>
         </PromptInputFooter>
       </PromptInput>
@@ -3059,28 +3128,36 @@ function AddAttachmentsButton({
   disabled,
   uploadLimits,
   unavailable,
+  agentName,
 }: {
   className?: string;
   disabled?: boolean;
   uploadLimits?: UploadLimits;
   unavailable?: boolean;
+  agentName?: string;
 }) {
   const { t } = useI18n();
   const attachments = usePromptInputAttachments();
   const tooltipContent = unavailable
     ? t.chat.filesUnavailable
-    : uploadLimits
-      ? t.uploads.limitsHint(
-          uploadLimits.max_files,
-          formatUploadSize(uploadLimits.max_file_size),
-          formatUploadSize(uploadLimits.max_total_size),
-        )
-      : t.inputBox.addAttachments;
+    : agentName
+      ? t.inputBox.agentFile.hint(agentName)
+      : uploadLimits
+        ? t.uploads.limitsHint(
+            uploadLimits.max_files,
+            formatUploadSize(uploadLimits.max_file_size),
+            formatUploadSize(uploadLimits.max_total_size),
+          )
+        : t.inputBox.addAttachments;
   return (
     <Tooltip content={<span className="block max-w-80">{tooltipContent}</span>}>
       <span>
         <PromptInputButton
-          aria-label={t.inputBox.addAttachments}
+          aria-label={
+            agentName
+              ? t.inputBox.agentFile.attach(agentName)
+              : t.inputBox.addAttachments
+          }
           className={cn("px-2!", className)}
           data-testid="add-attachments-button"
           disabled={disabled}

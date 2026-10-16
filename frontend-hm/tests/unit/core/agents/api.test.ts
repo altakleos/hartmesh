@@ -29,6 +29,10 @@ rs.mock("@/core/config", () => ({
 import {
   AgentsApiDisabledError,
   checkAgentName,
+  createAgent,
+  deleteAgent,
+  getAgent,
+  listAgents,
   updateAgent,
 } from "@/core/agents/api";
 import { fetch as fetcher } from "@/core/api/fetcher";
@@ -44,6 +48,60 @@ function jsonResponse(status: number, body: unknown): Response {
 
 beforeEach(() => {
   mockedFetch.mockReset();
+});
+
+test.each([
+  ["list", (signal: AbortSignal) => listAgents(signal)],
+  ["read", (signal: AbortSignal) => getAgent("analyst", signal)],
+  [
+    "create",
+    (signal: AbortSignal) =>
+      createAgent({ name: "analyst", soul: "Research" }, signal),
+  ],
+  [
+    "update",
+    (signal: AbortSignal) =>
+      updateAgent("analyst", { soul: "Research" }, signal),
+  ],
+  ["delete", (signal: AbortSignal) => deleteAgent("analyst", signal)],
+] as const)(
+  "passes caller cancellation through a definition %s",
+  async (_name, call) => {
+    mockedFetch.mockResolvedValueOnce(jsonResponse(200, { agents: [] }));
+    const controller = new AbortController();
+    await call(controller.signal);
+    expect(mockedFetch.mock.calls[0]![1]?.signal).toBe(controller.signal);
+  },
+);
+
+test("retires a definition creation while its response body is held", async () => {
+  let finish!: (value: unknown) => void;
+  let started!: () => void;
+  const bodyStarted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  mockedFetch.mockResolvedValueOnce({
+    ok: true,
+    json: () => {
+      started();
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    },
+  } as Response);
+  const controller = new AbortController();
+  const pending = createAgent(
+    { name: "analyst", soul: "Research" },
+    controller.signal,
+  );
+  await bodyStarted;
+  const rejected = expect(pending).rejects.toMatchObject({
+    name: "AbortError",
+  });
+  controller.abort();
+  await rejected;
+  finish({ name: "Old account's definition" });
+  expect(mockedFetch).toHaveBeenCalledTimes(1);
 });
 
 describe("checkAgentName", () => {
@@ -205,3 +263,16 @@ describe("updateAgent", () => {
     });
   });
 });
+
+test.each([404, 403, 503])(
+  "definition reads retain HTTP %s so adoption cannot mistake an outage for a missing source",
+  async (status) => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(status, { detail: "private diagnostic" }),
+    );
+    await expect(
+      getAgent("researcher", new AbortController().signal),
+    ).rejects.toMatchObject({ name: "AgentDefinitionError", status });
+    expect(mockedFetch).toHaveBeenCalledTimes(1);
+  },
+);
