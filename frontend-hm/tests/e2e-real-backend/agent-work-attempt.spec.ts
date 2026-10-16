@@ -17,50 +17,59 @@ const attempt = {
   workspace: "ready" as const,
 };
 
-test("shows starting workspace, Working, Stop and Stopped", async ({
-  page,
-}) => {
-  const state = await setupAgents(page);
-  state.work = [
-    assignment({
-      attempt: { ...attempt, status: "starting", workspace: "starting" },
-    }),
-  ];
-  await detail(page, "work");
-  await page.getByRole("button", { name: /Review the guide ·/ }).click();
-  await expect(
-    page
-      .getByText(
-        /Starting Researcher's workspace|Researcher's workspace is taking/,
-      )
-      .first(),
-  ).toBeVisible();
-  state.work[0]!.attempt = attempt;
-  await page.getByRole("button", { name: "Refresh Work", exact: true }).click();
-  await expect(
-    page.getByRole("heading", {
-      name: "Researcher\'s work: Working",
-      exact: true,
-    }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Stop", exact: true }).click();
-  await expect(
-    page.getByRole("dialog").getByText(/Stop Researcher working on this/),
-  ).toBeVisible();
-  await page
-    .getByRole("dialog")
-    .getByRole("button", { name: "Stop now", exact: true })
-    .click();
-  await expect(
-    page.getByRole("heading", {
-      name: "Researcher\'s work: Stopped",
-      exact: true,
-    }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Resume", exact: true }),
-  ).toBeEnabled();
-});
+for (const [elapsed, sentence] of [
+  [0, "Starting Researcher's workspace…"],
+  [
+    31_000,
+    "Still starting Researcher's workspace. After a quiet period this can take up to two minutes.",
+  ],
+] as const) {
+  test(`shows starting workspace, Working, Stop and Stopped after ${elapsed} ms`, async ({
+    page,
+  }) => {
+    await page.clock.setFixedTime(new Date(Date.parse(NOW) + elapsed));
+    const state = await setupAgents(page);
+    state.work = [
+      assignment({
+        attempt: { ...attempt, status: "starting", workspace: "starting" },
+      }),
+    ];
+    await detail(page, "work");
+    await page.getByRole("button", { name: /Review the guide ·/ }).click();
+    await expect(
+      page
+        .getByRole("region", { name: "Researcher's work", exact: true })
+        .getByText(sentence, { exact: true }),
+    ).toBeVisible();
+    state.work[0]!.attempt = attempt;
+    await page
+      .getByRole("button", { name: "Refresh Work", exact: true })
+      .click();
+    await expect(
+      page.getByRole("heading", {
+        name: "Researcher\'s work: Working",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Stop", exact: true }).click();
+    await expect(
+      page.getByRole("dialog").getByText(/Stop Researcher working on this/),
+    ).toBeVisible();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Stop now", exact: true })
+      .click();
+    await expect(
+      page.getByRole("heading", {
+        name: "Researcher\'s work: Stopped",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Resume", exact: true }),
+    ).toBeEnabled();
+  });
+}
 
 test("shows Interrupted with its reason and Resume", async ({ page }) => {
   const state = await setupAgents(page);
