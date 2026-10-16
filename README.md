@@ -753,6 +753,9 @@ uncertainty or shutdown invalidates it and fences stale refresh results.
 Readiness refusals log fixed causes and counts without tenant identifiers or payloads.
 Reconciliation checks captured attachments under the workspace lock. A confirmed
 completed replacement permits one fresh scan; uncertain claims keep their charge.
+An in-progress preparation is re-read under that lock and its deadline, so a
+successful startup does not leave files or subsequent work temporarily refused.
+Only an exact completed attachment with fresh workspace proof qualifies.
 Expired-run recovery wakes the existing maintenance loop. Consuming a failed
 initializer schedules its next owned pass immediately; live peer leases stay
 protected. Delayed startup readiness reports confirmed containment counts once.

@@ -117,7 +117,9 @@ their promises. Confirmed rollback may cancel; uncertain commit retains charge.
 Serialize runless replay recovery under the Home lock, releasing before launch.
 Drain sealed admissions before RunManager shutdown snapshots workers. Periodic
 orphan callbacks request an exact deferred recycle; maintenance owns closure.
-An unacknowledged preparation cannot become absence from an empty census.
+Re-read CID-less snapshots under the Home lock and deadline; only exact active
+completion plus fresh graph proof qualifies. A preparation marker or empty census
+never proves completion or absence.
 Startup recovery freezes the original record set and rotates at most four records
 per pass before the final census. Require exactly one supported writable Home
 mount, current Home ownership, unchanged missing/fenced SQL facts, and no local

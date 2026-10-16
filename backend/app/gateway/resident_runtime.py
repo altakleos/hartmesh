@@ -619,13 +619,6 @@ class ResidentRuntime:
                 self._invalidate_workspace("reconcile-deadline")
                 pending.append(claim.id)
                 continue
-            if claim.container_id is None:
-                self.registry.retain(claim)
-                # An empty daemon listing cannot drain an earlier unreturned
-                # request. Retain the preparation until exact recovery exists.
-                self._invalidate_workspace("reconcile-preparing")
-                pending.append(claim.id)
-                continue
             if len(owners) > 1:
                 self._invalidate_workspace("reconcile-owners")
                 pending.append(claim.id)
@@ -646,15 +639,24 @@ class ResidentRuntime:
 
             async def reconcile():
                 nonlocal claim, identity, generation, enabled
+                if entry is None and claim.container_id is None:
+                    return unconfirmed("preparing")
                 if entry is not None:
                     state = await self.attachments.inspect_preparation(actor=claim.actor, incarnation=claim.incarnation, resources=claim.resources, host_id=claim.host_id)
-                    if state is None or (state.id, state.container_id) != (claim.id, claim.container_id):
+                    if state is None or state.id != claim.id or (claim.container_id is not None and state.container_id != claim.container_id):
                         raise StorageRuntimeUnavailable("Captured attachment correlation changed")
+                    # A preparation may have completed while this exact Home
+                    # lock was held. Only its acknowledged active transition
+                    # can fill a previously absent CID; a marker alone proves
+                    # no worker completion and never permits admission.
+                    if claim.container_id is None and (claim.phase != "pending" or state.phase != "active" or state.container_id is None or entry.preparation is not None):
+                        self.registry.retain(claim)
+                        return unconfirmed("preparing")
                     if state.phase == "fenced":
                         if claim.id not in self.registry.retained and claim.id not in self.registry._associated.values() and entry.attachment_id != claim.id and entry.preparation is None and claim.id not in self.attachments.uncontained:
                             raise _ResidentSnapshotChanged(claim.id)
                         return unconfirmed("containment-unconfirmed")
-                    fresh = replace(claim, phase=state.phase)
+                    fresh = replace(claim, phase=state.phase, container_id=state.container_id)
                     if self.registry._merge_retained(claim, fresh) != fresh:
                         raise StorageRuntimeUnavailable("Captured attachment phase regressed")
                     claim = fresh
@@ -727,7 +729,7 @@ class ResidentRuntime:
                 if entry is None:
                     confirmed = await reconcile()
                 else:
-                    async with entry.lock:
+                    async with asyncio.timeout_at(deadline), entry.lock:
                         entry.reconciling = True
                         try:
                             confirmed = await reconcile()

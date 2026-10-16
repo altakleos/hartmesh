@@ -171,6 +171,11 @@ Workspace readiness is current host state, separate from the cached initial
 capacity result. Maintenance retries qualification on the same registry. Failed
 inventory closes admission before requalification; an unfinished initializer must
 be consumed before invalidation. Cached attachments/adapters never change on retry.
+Reconciliation waits for a CID-less preparation under its Home lock and inherited
+deadline, then re-reads exact durable correlation. Only pending-to-active completion
+with its preparation cleared can supply the original CID; normal owner, run and
+fresh graph checks still precede publication. An unknown start, changed scope or
+expired deadline retains accounting and refuses readiness.
 The startup recovered-run snapshot applies only to its original attachment IDs,
 so later maintenance cannot close a newer workspace from historical recovery.
 

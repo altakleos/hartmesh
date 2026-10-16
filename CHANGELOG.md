@@ -84,6 +84,10 @@ its exact historical closure, finishes its original native journal and refreshes
 the Gateway's resident association before preparing a replacement. Closure racing
 with resume is covered; changed or unconfirmed facts retain the capacity charge,
 and the original operator attribution is preserved.
+Maintenance also waits for a captured in-progress preparation under its workspace
+lock and deadline, then rechecks its exact completion and running graph. A normal
+successful startup no longer leaves subsequent file operations or work unavailable
+until the next maintenance pass; uncertain starts and changed identities stay closed.
 
 There is no database schema, native evidence format or configuration-version change.
 
