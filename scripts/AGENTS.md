@@ -429,7 +429,7 @@ files, but cannot retire the published baseline.
 
 ## Tenant qualification receipts
 
-`tenant_class_receipt.py` adds the required `tenant_class` entry to the existing
+`tenant_class_receipt.py` adds an optional `tenant_class` entry to the existing
 image-acceptance record. It admits bounded UTF-8 JSON/JUnit, exactly 27 named
 bundle cases, successful actual case results and consistent declared totals.
 Runtime and mount propagation are derived solely from the two required passed
@@ -437,7 +437,10 @@ cases. Every nested key/type, UTC timestamp, image digest and finite timing is
 validated; failed qualification preserves existing record bytes. Commit the
 record after a human-performed pinned-tenant run. CI runs all 27 bundle cases
 with scripted inference and a runc alias; it cannot attest the tenant VM class
-or gVisor. Missing `tenant_class` blocks release admission. Verification compares
+or gVisor. Tenant qualification belongs to infra/consumers and is never performed
+in a release session. Its absence does not block release admission; verification
+strictly validates any supplied receipt and compares
 receipt backend/sandbox digests with pinned candidates and still authenticates
 both image-acceptance stores. New image admission writes its five fields freshly
-and removes an older tenant receipt; record the new human qualification before tagging.
+and removes an older tenant receipt; only a separate consumer qualification can
+supply a replacement.

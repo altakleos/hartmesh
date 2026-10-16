@@ -868,11 +868,12 @@ already admitted request returns that run, even if storage subsequently fills.
 
 Required CI starts the shipped Compose bundle and verifies all 27 storage and
 agent journeys through its public entry point. Full-suite fixtures use disk-backed
-temporary storage. Before a release can be published, its acceptance record must
-also contain a validated receipt of a human-performed pinned tenant-class run,
-including complete native and 27-case bundle reports. CI's scripted model and
-runc alias establish functional behavior; they do not attest gVisor behavior or
-the tenant VM class. See [release qualification](RELEASING.md).
+temporary storage. Releases require signed candidate images and authenticated
+exact-image acceptance for SQLite and PostgreSQL/Redis. Tenant-VM qualification
+is separate infra/consumer work and is never performed while cutting a release;
+an optional supplied receipt is strictly validated. CI's scripted model and runc
+alias establish functional behavior; they do not attest gVisor behavior or the
+tenant VM class. See [release validation](RELEASING.md).
 
 The [Compose runbook](deploy/compose/README.md#storage-and-agents) describes
 account assignment, seat release, pending cleanup and whole-disk snapshot restore.

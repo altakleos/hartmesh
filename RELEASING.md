@@ -121,11 +121,14 @@ from the same tagged source.
    workflow, runner, browser test directory, fixtures or test dependency controls
    require fresh acceptance; changes to image build inputs also require fresh
    candidates and pins.
-   Every new release requires a human-performed tenant-class run on the pinned
-   bundle after committing the image acceptance record. Preserve the
+   Tenant-VM qualification belongs to the separate infra/consumer workflow;
+   it is not a prerequisite for cutting a HartMesh release and is never performed
+   by the release session. Automated image acceptance above remains mandatory.
+   If a consumer separately supplies tenant-class results for the pinned bundle,
+   preserve the
    native and complete 27-case bundle JUnit reports, the measured guest facts,
    the eight manually verified steps and six timings, and the bundle's image
-   list. Add the required `tenant_class` receipt with:
+   list. An optional `tenant_class` receipt can be recorded with:
    ```bash
    python3 scripts/tenant_class_receipt.py \
      --record deploy/compose/acceptance.json --version 2.1.0+hartmesh.1 \
@@ -139,10 +142,12 @@ from the same tagged source.
    preserves the five authenticated image-acceptance fields. Its ten checks
    comprise eight manually verified steps and those two derived results. Required
    CI also runs all 27 bundle cases, but its scripted model and runc alias cannot
-   attest the tenant VM class or gVisor. A missing receipt blocks release admission;
-   never generate a human qualification claim from CI results.
+   attest the tenant VM class or gVisor. Release admission permits the receipt to
+   be absent and strictly validates it when supplied; never generate a human
+   qualification claim from CI results.
    Refreshing image admission replaces its five fields and removes an older
-   tenant receipt, which must then be recorded again before tagging.
+   tenant receipt. A consumer must qualify the new pinned bundle separately
+   before a replacement tenant receipt can be attached.
 
 6. **Tag and push** the commit containing the verified record:
    ```bash

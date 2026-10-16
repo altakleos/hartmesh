@@ -368,8 +368,8 @@ and current native evidence. There is no database schema change.
 A dedicated Linux/Docker CI job starts the shipped Compose bundle and verifies
 27 storage and agent journeys, including typed mounts, missing assignments,
 account seats, reclamation, Shared publication and full-files refusal/recovery.
-Qualification fixtures use disk-backed temporary directories. Release admission
-requires a strictly validated human tenant-class receipt; its operator tool requires all
+Qualification fixtures use disk-backed temporary directories. A separately supplied
+human tenant-class receipt is strictly validated; its operator tool requires all
 27 named acceptance cases, derives runtime/mount evidence from passed tests and
 preserves authenticated image-acceptance fields. The backend runtime image now
 explicitly installs the namespace and privilege-drop tools required by the bundle.
@@ -700,12 +700,14 @@ No additional schema or configuration version changes.
 Required CI separately verifies the 26 native filesystem cases, the complete
 27-case shipped Compose suite and both SQLite/PostgreSQL production Docker
 profiles. The scripted provider and runc alias establish functional behavior;
-they do not qualify the tenant VM class, actual-model behavior or gVisor. Every
-new release must also carry a validated, human-produced `tenant_class` receipt
-in `deploy/compose/acceptance.json`, bound to the pinned backend and sandbox
-images, native/bundle JUnit hashes, guest facts, ten checks and six timings.
+they do not qualify the tenant VM class, actual-model behavior or gVisor.
+Tenant qualification is separate infra/consumer work and is not performed while
+cutting a release. An optional human-produced `tenant_class` receipt in
+`deploy/compose/acceptance.json` is strictly validated against the pinned backend
+and sandbox images, native/bundle JUnit hashes, guest facts, ten checks and six timings.
 Authenticated acceptance of both image-store profiles remains mandatory; recording
-fresh image acceptance removes any earlier tenant receipt. Tenant-class qualification is recorded after the human run.
+fresh image acceptance removes any earlier tenant receipt. Tenant-class qualification
+remains pending unless a separate consumer run supplies its evidence.
 
 ## [2.2.0+hartmesh.45] - 2026-10-09
 

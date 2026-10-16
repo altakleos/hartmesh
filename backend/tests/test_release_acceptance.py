@@ -179,7 +179,7 @@ def tenant_receipt():
     }
 
 
-def test_acceptance_record_admits_a_valid_required_tenant_class_entry(evidence):
+def test_acceptance_record_admits_a_valid_optional_tenant_class_entry(evidence):
     guard, actions, _root = evidence
     value = {**record(evidence), "tenant_class": tenant_receipt()}
     write_record(evidence, value)
@@ -190,12 +190,13 @@ def test_acceptance_record_admits_a_valid_required_tenant_class_entry(evidence):
     assert "tenant_class" not in record(evidence)
 
 
-def test_acceptance_record_requires_the_tenant_class_entry(evidence):
+def test_image_acceptance_admits_release_without_tenant_qualification(evidence):
     guard, actions, _root = evidence
-    write_record(evidence, record(evidence))
-    with pytest.raises(guard.AcceptanceError, match="tenant.class.*required"):
-        guard.verify_acceptance(REPOSITORY, VERSION, "HEAD", CANDIDATES, client=actions)
-    assert actions.downloads == [1, 2]
+    value = record(evidence)
+    write_record(evidence, value)
+    assert guard.verify_acceptance(REPOSITORY, VERSION, "HEAD", CANDIDATES, client=actions) == value
+    assert "tenant_class" not in value
+    assert actions.downloads == [1, 2, 1, 2]
 
 
 @pytest.mark.parametrize("mutation", ["version", "unknown", "missing-step", "failed-step", "bad-utc", "bool-guest", "wrong-image"])
@@ -306,9 +307,12 @@ def test_new_rerun_during_verification_invalidates_the_evidence(evidence):
         record(evidence)
 
 
-def test_committed_pointer_hash_and_version_are_checked(evidence):
+@pytest.mark.parametrize("with_tenant_qualification", [False, True])
+def test_committed_pointer_hash_and_version_are_checked(evidence, with_tenant_qualification):
     guard, actions, _root = evidence
-    value = {**record(evidence), "tenant_class": tenant_receipt()}
+    value = record(evidence)
+    if with_tenant_qualification:
+        value["tenant_class"] = tenant_receipt()
     value["artifacts"]["sqlite"] = "sha256:" + "d" * 64
     write_record(evidence, value)
     with pytest.raises(guard.AcceptanceError, match="digest"):
