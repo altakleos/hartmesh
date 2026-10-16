@@ -79,6 +79,11 @@ reports its existing starting phase; resuming a workspace does not.
 Sandbox cleanup tolerates automatic removal completing between ID and name
 inspection, with one bounded recheck of both original references. Unconfirmed or
 changed resources continue to retain their cleanup records and capacity.
+After a standalone operator closes a workspace, the next message now confirms
+its exact historical closure, finishes its original native journal and refreshes
+the Gateway's resident association before preparing a replacement. Closure racing
+with resume is covered; changed or unconfirmed facts retain the capacity charge,
+and the original operator attribution is preserved.
 
 There is no database schema, native evidence format or configuration-version change.
 

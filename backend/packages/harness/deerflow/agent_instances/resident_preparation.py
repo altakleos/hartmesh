@@ -5,6 +5,7 @@ import logging
 from uuid import uuid4
 
 from deerflow.agent_instances.contract import AgentDenied, Refusal, ResidentFilesBusy, ResidentFilesFull, ResidentStartFailed, ResidentStartingElsewhere
+from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow
 from deerflow.runtime.turn_phases import TurnPhase, phase_span
 from deerflow.spaces.attachments import AttachmentPending, ResourceMount, RetainedAttachment
 from deerflow.spaces.backings import BackingUnavailable
@@ -133,6 +134,46 @@ async def _recover_claim(execution, environment, residents, mounts, resources, c
         logger.warning("Preparation outcome remains retained for Home %s", instance.home_id, exc_info=True)
 
 
+async def _refresh_closed(execution, residents, mounts):
+    """Observe an external closure without deriving absence from a missing row."""
+    entry = residents.entry(execution.instance)
+    if not residents._restoration_started or not residents.restoration_complete or residents._closing or entry.reconciling or entry.attachment_id is None or entry.preparation is not None:
+        return
+    claim = residents.retained.get(entry.attachment_id)
+    if (
+        claim is None
+        or claim.actor != execution.instance.principal
+        or claim.host_id != mounts.provider.host_id
+        or claim.resources != (ResourceMount(execution.instance.home_id, execution.home_generation, "home", True),)
+        or claim.container_id is None
+    ):
+        raise AttachmentPending("The previous resident lost its exact retained correlation")
+    if await mounts.retained_attachment(claim.id) is not None:
+        return
+    # A standalone operator cannot notify this process. Historical SQL alone
+    # cannot release the charge: canonical host containment must finish the
+    # retained original graph and notify with its stored closure reason.
+    state = await mounts.inspect_preparation(actor=claim.actor, incarnation=claim.incarnation, resources=claim.resources, host_id=claim.host_id)
+    if state is None or (state.id, state.phase, state.host_id, state.container_id) != (claim.id, "fenced", claim.host_id, claim.container_id):
+        raise AttachmentPending("The previous resident's exact closure is unconfirmed")
+
+    async def observed_fenced(session, identities):
+        row = await session.get(SpaceAttachmentRow, claim.id)
+        if (
+            identities != ((claim.id, claim.container_id),)
+            or row is None
+            or (row.id, row.incarnation, row.actor_kind, row.actor_id, row.host_id, row.container_id, row.phase) != (claim.id, claim.incarnation, claim.actor.kind, claim.actor.subject_id, claim.host_id, claim.container_id, "fenced")
+            or mounts._closure_reason(row, None) is None
+        ):
+            raise AttachmentPending("The previous resident changed before observing its closure")
+        scope = await mounts._mount_scope(session, (claim.id,))
+        if scope[claim.id] != {(resource.space_id, resource.generation, resource.alias, resource.writable) for resource in claim.resources}:
+            raise AttachmentPending("The previous resident's closed mount scope changed")
+
+    if not await mounts.contain_host(claim.id, "container-absent", admission=observed_fenced) or entry.attachment_id is not None:
+        raise AttachmentPending("The previous resident's closure was not observed")
+
+
 async def _attachment(execution, environment, residents, mounts, run_id):
     instance = execution.instance
     entry = residents.entry(instance)
@@ -143,11 +184,16 @@ async def _attachment(execution, environment, residents, mounts, run_id):
         except AttachmentPending:
             # resume inspects that same durable intent and decides its outcome.
             pass
-        await residents.admit(instance, work=False, run_id=run_id)
-        if entry.preparation is not None:
-            raise ResidentStartingElsewhere(instance.name)
         try:
+            await _refresh_closed(execution, residents, mounts)
+            await residents.admit(instance, work=False, run_id=run_id)
+            if entry.preparation is not None:
+                raise ResidentStartingElsewhere(instance.name)
             attached = await _resume(execution, residents, mounts, resources)
+            if attached is None and entry.attachment_id is not None:
+                await _refresh_closed(execution, residents, mounts)
+                if entry.attachment_id is not None:
+                    raise AttachmentPending("The previous resident is not confirmed closed")
         except (AgentDenied, Refusal):
             raise
         except SpaceOperationPending as exc:

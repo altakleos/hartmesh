@@ -123,6 +123,98 @@ async def test_live_gateway_finishes_operator_prepared_journal_without_restart(s
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("changed", [None, "actor", "phase"])
+async def test_gateway_preparation_observes_operator_closure_before_replacing_workspace(storage, fixture, tmp_path, monkeypatch, changed):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    from _sandbox_provider_fakes import _make_provider
+    from _storage_spaces_test_support import ALICE, operation
+
+    from deerflow.agent_instances.contract import ResidentStartFailed
+    from deerflow.agent_instances.resident_preparation import _attachment
+    from deerflow.agent_instances.residents import ResidentRegistry
+
+    factory, saved, _captured, objects, calls, gateway = await operator_scope(storage, fixture)
+    files, sf, _catalog, mounts, adapter = storage
+    # These injected roots do not qualify native quotas; admit headroom explicitly.
+    monkeypatch.setattr(files, "quota", AsyncMock(return_value={"available_bytes": 32 << 20, "available_inodes": 1024}))
+    root = saved.roots[0]
+    instance = SimpleNamespace(id=operation(), home_id=root.space_id, principal=ALICE, name="Qualification AI employee")
+    provider, _backend = _make_provider(tmp_path, monkeypatch)
+    settled = AsyncMock(return_value=[])
+    residents = ResidentRegistry(attachments=mounts, provider=provider, run_manager=SimpleNamespace(task_runs=Mock(return_value={})), settle=settled, owner_of=AsyncMock(return_value=instance), replicas=2, idle_timeout=600)
+    provider.external_slots = residents.external_slots
+    token = residents.begin_restore()
+    old = await mounts.retained_attachment(saved.attachment_id)
+    residents.finish_restore(token, (old,))
+    async with residents.entry(instance).lock:
+        residents.associate(instance, old, generation=root.generation)
+    execution = SimpleNamespace(instance=instance, home_generation=root.generation, work=None, authority=SimpleNamespace(validate=AsyncMock(), instances=SimpleNamespace(files=files)))
+    environment = SimpleNamespace(attachment_id=None)
+    try:
+        # The operator owns no Gateway callback and leaves its original journal.
+        assert await mounts.contain_host(saved.attachment_id, "operator")
+        assert not objects and fixture[2].residents.records() == (saved,)
+        assert residents.entry(instance).attachment_id == saved.attachment_id and residents.external_slots() == 1
+        async with sf() as session:
+            row = await session.get(SpaceAttachmentRow, saved.attachment_id)
+            closure = (row.fenced_by_kind, row.fenced_by_id, row.fence_reason, row.fenced_at)
+            assert closure[2] == "operator"
+
+        adapter._operator_only = False
+        adapter._containment_scope = gateway
+        mounts.on_contained = residents.contained
+        prepare = adapter.prepare
+        prepared = []
+
+        def after_confirmation(plan):
+            assert saved.attachment_id not in residents.retained
+            assert fixture[0].snapshot().residents == fixture[2].residents.records() == ()
+            prepared.append(plan)
+            return prepare(plan)
+
+        monkeypatch.setattr(adapter, "prepare", after_confirmation)
+        if changed is not None:
+            inspect = mounts.inspect_preparation
+
+            async def after_inspection(**kwargs):
+                state = await inspect(**kwargs)
+                async with sf() as session, session.begin():
+                    row = await session.get(SpaceAttachmentRow, saved.attachment_id)
+                    if changed == "actor":
+                        row.actor_id = "another-human"
+                    else:
+                        row.phase = "active"
+                        row.fenced_by_kind = row.fenced_by_id = row.fence_reason = row.fenced_at = None
+                return state
+
+            monkeypatch.setattr(mounts, "inspect_preparation", after_inspection)
+        calls.clear()
+        if changed is not None:
+            with pytest.raises(ResidentStartFailed):
+                await _attachment(execution, environment, residents, mounts, "next-run")
+            assert not prepared and not objects and residents.retained == {old.id: old}
+            assert residents.entry(instance).attachment_id == old.id and residents.external_slots() == 1
+            assert fixture[0].snapshot().residents == fixture[2].residents.records() == (saved,)
+            assert not any(command[1] in {"run", "create", "start", "stop", "rm"} for command in calls)
+            settled.assert_not_awaited()
+            return
+        replacement = await _attachment(execution, environment, residents, mounts, "next-run")
+        assert len(prepared) == 1
+        assert replacement.id != saved.attachment_id and replacement.container_id != saved.container_id
+        assert environment.attachment_id == replacement.id and residents.entry(instance).attachment_id == replacement.id
+        assert set(residents.retained) == {replacement.id} and residents.external_slots() == 1
+        assert not any(command[1] in {"run", "create", "start", "stop", "rm"} for command in calls)
+        async with sf() as session:
+            row = await session.get(SpaceAttachmentRow, saved.attachment_id)
+            assert row.phase == "fenced" and (row.fenced_by_kind, row.fenced_by_id, row.fence_reason, row.fenced_at) == closure
+        settled.assert_awaited_once_with(instance_id=instance.id, reason="operator", attachment_id=saved.attachment_id, live_run_ids=frozenset())
+    finally:
+        factory.evidence.close()
+
+
+@pytest.mark.asyncio
 async def test_finished_operator_scope_rechecks_late_matching_journal_uncertainty(storage, fixture, monkeypatch):
     factory, saved, _captured, _objects, _calls, gateway = await operator_scope(storage, fixture)
     try:

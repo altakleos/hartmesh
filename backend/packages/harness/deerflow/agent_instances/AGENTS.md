@@ -135,6 +135,9 @@ existing AIO SDK. Address immutable Docker IDs, not container IPs. Drain prepara
 and closure across cancellation; unknown outcomes retain native intents. SDK closure,
 leases and ordinary completion never fence or replace physical writers. Children
 inherit the full Home mount; tool filtering is not a narrower filesystem boundary.
+An external operator closure needs exact historical fenced SQL plus canonical host
+containment before replacement. Recheck its actor, incarnation, host, CID and full
+mount scope in the borrowed parent transaction; uncertainty retains its charge.
 Qualification requires the inventory and probe image. Cache the adapter only after
 successful qualification; reuse still proves current host/owner/evidence. Residents
 use restricted topology without host ports, with exact RO configured mounts and

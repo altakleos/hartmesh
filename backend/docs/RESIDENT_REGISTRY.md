@@ -53,6 +53,16 @@ Authority is checked again after capacity waiting. Resume recovery uses a scoped
 `unfenced` read requiring the exact actor, host and complete mount view; an
 unrelated or ambiguous row cannot authorize adoption or containment.
 
+An operator can close a workspace from a separate process while the Gateway
+retains its old association. Before admission, preparation observes that exact
+fenced attachment and lets canonical host containment finish the original native
+journal and notify the registry with the stored closure reason. Its admission
+callback borrows the parent transaction and rechecks the actor, incarnation,
+host, container, fenced phase and complete mount scope. A missing resume alone
+proves no closure. Unknown outcomes keep the old charge and refuse replacement;
+closed runtime admission remains closed. The check also covers closure racing
+with resume, and cancellation drains confirmation before returning.
+
 A newly invoked start is recovered only by its exact preparation incarnation.
 Unreadable or mismatched SQL retains the opaque claim and slot. Missing intent
 releases the claim only after the operation drains and the qualified host is

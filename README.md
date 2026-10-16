@@ -59,6 +59,8 @@ The direct Home file APIs accept uploads up to 64 MiB before or during a run,
 reuse identical files and preserve different files under numbered names. Authorized
 humans can edit a loaded revision, create folders, rename and remove files without
 starting a workspace. Writes retain human attribution and recheck current access.
+After an operator closes a workspace, the next message confirms its original
+containment before preparing a replacement; uncertain cleanup keeps it unavailable.
 See [the file API](docs/AGENT_EXECUTION.md#direct-agent-file-writes). My assistants
 and AI employees provide role-based setup and separate Conversations, Files, Work,
 Memory, Access and Settings tabs. Conversations show the AI identity and supervisor;
