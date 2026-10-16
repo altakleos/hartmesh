@@ -12,3 +12,5 @@ When `database.postgres_schema` is configured, both async ORM connections and th
 Alembic stamp/upgrade workers started inside `bootstrap_schema()` remain owned by the bootstrap critical section until the worker finishes. Drain those `asyncio.to_thread()` calls across host cancellation before releasing the in-process SQLite bootstrap lock or PostgreSQL advisory lock; otherwise another bootstrap can overlap a still-running migration worker.
 
 Scheduler timeouts and completion callbacks use `complete_run(..., only_if_active=True)` under the parent-first lock: the first terminal outcome and parent accounting persist across late callbacks. Do not rely on process-local timeout memory for this fence.
+
+`list_inflight_by_metadata` is an operator-tool observation only; it owns no run.

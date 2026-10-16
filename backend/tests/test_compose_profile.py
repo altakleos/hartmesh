@@ -1636,7 +1636,21 @@ def test_readme_says_spaces_and_agents_are_not_offered_while_the_default_is_off(
     assert "HARTMESH_USERS" in section and "storage: off (HARTMESH_USERS absent)" in section
     assert '"storage": "off"' in section and '"agents": "off"' in section
     assert "Explicit AI assistant and AI employee counts now take effect" in section
-    assert "ai()" not in section and "release-seat" in section
+    assert "ai()" in section and "release-seat" in section
+
+
+def test_readme_documents_agent_commands_with_the_entrypoints_privilege_drop():
+    section = (PROFILE / "README.md").read_text(encoding="utf-8").split("## Storage and agents\n", 1)[1].split("\n## ", 1)[0]
+    function = next(line for line in section.splitlines() if line.startswith("ai()"))
+    assert '--reuid=1000 --regid=1000 --groups="$(stat -c %g /var/run/docker.sock)"' in function
+    assert "--inh-caps=-all --no-new-privs" in function
+    assert "HOME=/tmp/gateway-home DOCKER_CONFIG=/tmp/gateway-home/.docker PYTHONPATH=. uv run --no-sync python -m app.gateway.agent_instances" in function
+    for command in ("list", "status", "close-workspace", "verify", "export", "supervise", "delete", "adopt-host", "settle"):
+        assert f"##### `{command}`" in section
+    assert "### Roles and the provider's name" in section
+    assert "### What has been verified" in section
+    assert "27 named acceptance cases" in section and "runc alias" in section
+    assert "`tenant_class`" in section and "does not claim it is complete" in section
 
 
 def test_readme_carries_the_legacy_directories_note_and_the_three_preflight_lines():

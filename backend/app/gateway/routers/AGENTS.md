@@ -20,8 +20,10 @@ replacement. Uploads qualify by phase, check every chunk's limits/quota, and com
 only after final admission. Failure/cancellation drains all stages, including
 project attachments. `ChatFilesFull` uses the central refusal handler. Ordinary
 upload/list/delete/edit refuses instance conversations. `agent_home.py` owns
-direct Home writes: recheck human rights under mutation SQL; drain spool workers
-before close. Permission errors retain their access-denied response.
+the conversation upload, `/home/content` and `/home/files` routes: direct writes
+recheck human rights under mutation SQL and drain spool workers before close.
+Permission errors retain access-denied responses. Declare `GET /roles` before
+`GET /{instance_id}`.
 
 `chat_cleanup.py` admits only purpose-bound deletion, including unsupported resource
 credentials, without a general User scope. Durable deletion and the stable
@@ -51,12 +53,10 @@ Workspace prewarm checks `sandbox:execute` before provider lookup/scheduling,
 using the shared request authorization helper off-loop. Denial returns 202
 with `scheduled: false, reason: forbidden`; thread ownership still applies.
 
-`POST /api/threads/{id}/history` hydrates reopened chats with the rendered
-`artifacts`, `todos`, and non-null `goal` channels in the newest returned
-checkpoint alongside title and messages.
-Keep that projection explicit and serialized through the API channel serializer;
-do not expose internal sandbox state. Empty lists are meaningful, while absent
-or null goals are omitted to preserve the frontend's local override semantics.
+`POST /api/threads/{id}/history` returns the newest checkpoint’s title/messages
+and rendered `artifacts`, `todos` and non-null `goal`. Keep the API channel
+serializer and explicit projection; expose no internal sandbox state. Empty lists
+are meaningful; omit absent/null goals to preserve frontend local overrides.
 
 Artifacts, Files and Shared must stream from one safely opened descriptor, including MIME
 sniffing, response metadata and range reads. Preflight paths only determine HTTP

@@ -1,8 +1,11 @@
 """Protocol fixture exercises actual production tools and scanner decisions."""
 
 import hashlib
+import http.client
 import json
 import runpy
+import threading
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -91,7 +94,14 @@ def test_skill_presentation_uses_actual_bounded_producer_manifest(reply):
 
 
 def work_body(results=(), *, message="Work on the explicitly activated assignment.", tools=("read_work_context", "bash", "report_work")):
-    return {"messages": [{"role": "user", "content": message}, *[{"role": "tool", "content": result} for result in results]], "tools": [{"function": {"name": name}} for name in tools]}
+    return {
+        "messages": [
+            {"role": "system", "content": "- This run works on an assignment, and no person is waiting in this conversation."},
+            {"role": "user", "content": message},
+            *[{"role": "tool", "content": result} for result in results],
+        ],
+        "tools": [{"function": {"name": name}} for name in tools],
+    }
 
 
 def work_context(objective="acceptance:work:outcome"):
@@ -146,3 +156,68 @@ def test_work_branch_requires_the_actual_offered_tool(reply):
         reply(work_body(tools=("report_work",)))
     with pytest.raises(ValueError, match="required real tool not offered: bash"):
         reply(work_body([work_context()], tools=("read_work_context", "report_work")))
+
+
+def test_work_denied_reads_context_runs_the_blocked_command_and_reports_the_outcome(reply):
+    context = work_context("acceptance:work:denied")
+    assert tool_call(reply(work_body())) == ("read_work_context", {})
+    assert tool_call(reply(work_body([context]))) == ("bash", {"command": "python3 -c \"import urllib.request; urllib.request.urlopen('https://example.org/', timeout=20)\"; echo exit $?"})
+    report = tool_call(reply(work_body([context, "blocked"])))
+    assert report == (
+        "report_work",
+        {"report": {"operation_id": hashlib.sha256(("a" * 32 + ":" + "b" * 32).encode()).hexdigest()[:32], "expected_revision": 7, "action": "outcome", "statement": "Acceptance outcome: blocked connection recorded."}},
+    )
+    assert reply(work_body([context, "blocked", "outcome recorded"])) == {"content": "Work acceptance complete."}
+
+
+def test_work_ask_reads_context_then_requests_input_then_stops(reply):
+    context = work_context("acceptance:work:ask")
+    assert tool_call(reply(work_body())) == ("read_work_context", {})
+    report = tool_call(reply(work_body([context])))
+    assert report == (
+        "report_work",
+        {
+            "report": {
+                "operation_id": hashlib.sha256(("a" * 32 + ":" + "b" * 32).encode()).hexdigest()[:32],
+                "expected_revision": 7,
+                "action": "request_input",
+                "statement": "Which input should I use for this assignment?",
+                "purpose": "information",
+                "reason": "The required input is unspecified.",
+                "expected_response": "Identify the input to use.",
+            }
+        },
+    )
+    assert reply(work_body([context, "request recorded"])) == {"content": "Work question recorded."}
+    newer = json.loads(context)
+    newer["work"]["revision"] = 11
+    assert tool_call(reply(work_body([json.dumps(newer)])))[1]["report"]["expected_revision"] == 11
+
+
+@pytest.mark.parametrize("invalid", ["clarification", "missing", "user-only", "incomplete"])
+def test_work_branch_refuses_a_request_that_offers_ask_clarification_or_lacks_the_question_rule(invalid):
+    body = work_body()
+    if invalid == "clarification":
+        body["tools"].append({"function": {"name": "ask_clarification"}})
+    elif invalid == "missing":
+        body["messages"].pop(0)
+    elif invalid == "user-only":
+        body["messages"][0]["role"] = "user"
+    else:
+        body["messages"][0]["content"] = "- This run works on an assignment."
+    handler = runpy.run_path(str(PROVIDER))["Handler"]
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    connection = http.client.HTTPConnection(*server.server_address, timeout=5)
+    try:
+        connection.request("POST", "/v1/chat/completions", json.dumps(body), {"Content-Type": "application/json"})
+        response = connection.getresponse()
+        response.read()
+        assert response.status == 422
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=5)
+        assert not worker.is_alive()

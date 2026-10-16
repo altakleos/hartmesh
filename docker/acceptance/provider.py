@@ -85,6 +85,10 @@ def reply(body: dict[str, Any]) -> dict[str, Any]:
 
 def work_reply(body, turn):
     """Stateless script of real Work tools; no application inference bypass."""
+    offered = {tool.get("function", {}).get("name") for tool in body["tools"]}
+    system = " ".join(str(message.get("content", "")) for message in body.get("messages", []) if message.get("role") == "system")
+    if "ask_clarification" in offered or "- This run works on an assignment, and no person is waiting in this conversation." not in system:
+        raise ValueError("Work requires its question rule and must not offer ask_clarification")
     results = [message for message in turn if message.get("role") == "tool"]
     if not results:
         name, arguments = "read_work_context", {}
@@ -127,6 +131,41 @@ def work_reply(body, turn):
                 name, arguments = "bash", {"command": "sleep 300"}
             else:
                 return {"content": "Work hold finished."}
+        elif "acceptance:work:denied" in objective:
+            if len(results) == 1:
+                name, arguments = "bash", {"command": "python3 -c \"import urllib.request; urllib.request.urlopen('https://example.org/', timeout=20)\"; echo exit $?"}
+            elif len(results) == 2:
+                name, arguments = (
+                    "report_work",
+                    {
+                        "report": {
+                            "operation_id": hashlib.sha256((work_id + ":" + attempt_id).encode("utf-8")).hexdigest()[:32],
+                            "expected_revision": revision,
+                            "action": "outcome",
+                            "statement": "Acceptance outcome: blocked connection recorded.",
+                        }
+                    },
+                )
+            else:
+                return {"content": "Work acceptance complete."}
+        elif "acceptance:work:ask" in objective:
+            if len(results) == 1:
+                name, arguments = (
+                    "report_work",
+                    {
+                        "report": {
+                            "operation_id": hashlib.sha256((work_id + ":" + attempt_id).encode("utf-8")).hexdigest()[:32],
+                            "expected_revision": revision,
+                            "action": "request_input",
+                            "statement": "Which input should I use for this assignment?",
+                            "purpose": "information",
+                            "reason": "The required input is unspecified.",
+                            "expected_response": "Identify the input to use.",
+                        }
+                    },
+                )
+            else:
+                return {"content": "Work question recorded."}
         else:
             raise ValueError("unrecognized acceptance work objective")
     offered = {tool.get("function", {}).get("name") for tool in body["tools"]}

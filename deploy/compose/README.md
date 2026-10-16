@@ -972,7 +972,7 @@ copy: every sandbox mounts it read-only at `/mnt/tenant` (a `sandbox.mounts`
 entry in `config.yaml`), which is where the `business-report` skill picks up
 the company name, logo and colours by itself, and the Gateway reads the same
 path (`tenant_bundle.path`) for the workspace header, the About page and
-Home's starter grid. A person sees the company after signing in; the login
+Home's starter grid, agent roles and provider support text. A person sees the company after signing in; the login
 page stays the product's own.
 
 The layout is the skill's contract, and every file is optional:
@@ -988,6 +988,7 @@ The layout is the skill's contract, and every file is optional:
 ├── provider.json       {"display_name": "Example Hosting",
 │                        "support_url": "https://support.example.com/help"}
 ├── starters.json       [{"id": "business-review", "title": "...", "prompt": "..."}]
+├── roles.json          optional role briefs (§ "Roles and the provider’s name")
 │                       -- the same shape and rules as `ui.starters`: at most
 │                       six, distinct ids, plain text; present, it *is* the grid
 └── report-profiles/    <name>.json, loaded by the skill by name ahead of its
@@ -1768,6 +1769,11 @@ shutdown budget, which is why a baseline taken *before* `docker compose down`
 and compared *after* it can differ on `memory.json` with nobody having touched
 it by hand.
 
+Memory writer idleness alone does not quiesce an agent’s filesystem or a Work
+attempt. Use `ai list`/`ai status` to identify current work before the maintenance
+window. For a quiesced snapshot, follow § "Backup and restore": stop the stack,
+confirm/remove actual container holders and run `si quiesce` before snapshotting.
+
 **Upgrading a guest that already runs sandboxes.** `docker compose up -d`
 stops the Gateway with SIGTERM and its shutdown destroys every sandbox it
 owns, so the new limits and switches apply from the next acquisition. A
@@ -2183,7 +2189,8 @@ kind `user`, `assistant`, `employee` or `company`. The **pool** holds the slots
 at `/srv/hartmesh/spaces`. An AI assistant is a person's own agent; an AI
 employee is the company's agent. Counts and capacities below plan their storage;
 explicit agent counts also enable counted creation and qualified execution while
-default activation and the remaining product screens are deferred.
+default activation remains deferred. The product screens distinguish both kinds
+and support Files, Work, Memory, Access and Settings.
 
 **Qualification and operator hold.** With managed storage enabled, the Gateway
 keeps execution closed until it has reconciled durable run ownership, retained
@@ -2204,8 +2211,16 @@ Examples use these shell functions, defined in the operator's shell:
 ```bash
 hm() { docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env "$@"; }
 si() { hm run --rm -T storage-init "$@"; }
+ai() { hm exec -T gateway sh -c 'cd /app/backend && exec setpriv --reuid=1000 --regid=1000 --groups="$(stat -c %g /var/run/docker.sock)" --inh-caps=-all --no-new-privs env HOME=/tmp/gateway-home DOCKER_CONFIG=/tmp/gateway-home/.docker PYTHONPATH=. uv run --no-sync python -m app.gateway.agent_instances "$@"' agent_instances "$@"; }
 accounts() { hm exec -T --user 1000:1000 --workdir /app/backend -e PYTHONPATH=. gateway /app/backend/.venv/bin/python -m app.gateway.auth.accounts "$@"; }
 ```
+
+`ai` enters through the container’s root only to perform the entrypoint’s
+privilege drop: uid 1000, gid 1000, the Docker socket’s actual group, no inherited
+capabilities and `no_new_privs`. The account helper does not need Docker access;
+its explicit uid/gid and image environment remain as shown. `-T` keeps JSON output
+usable through pipes. `uv run --no-sync` uses the image environment without an
+installation.
 
 Supply `HARTMESH_PROVIDER_KEYS_SECRET` in the command environment for `hm up`
 when provider keys have been stored through the product (§ "Provider keys in
@@ -2269,6 +2284,8 @@ with no personal or Shared bind and no legacy-folder fallback. An unavailable
 company Space omits Shared while personal files remain usable. First-party file
 routes return a structured refusal when their own role is unavailable.
 
+**When an agent cannot reach a site.** A workspace reaches the sites of the standing list, `sandbox.network.allow_domains` of this profile's `config.yaml`, and no other (§ "`SANDBOX_EGRESS=allowlist` (the default)"). That list is the provider's, and nobody at the customer changes it. A person is asked about a blocked site in one case only: in a conversation of that person's own with the agent, when that person can manage it. The card "A site is blocked" then offers "Allow for 5 minutes" and "Keep blocked", and an allowance holds for every conversation and assignment of that agent for those minutes. Nobody is asked while an agent works on an assignment, nor in a conversation of a person who cannot manage it: the connection stays blocked, the work goes on, and the conversation shows one line that names the site. A reader who can manage the agent reads "{name} tried to reach {host}, which is not on the list of sites allowed here. Allow {host} for {minutes} minutes for all of {name}'s conversations and assignments, or keep {host} blocked. The permanent list is set by {provider}." Every other reader reads a line that says "which is not on the list of sites allowed here" and whom to ask. A request to add a site therefore reaches the provider, and widening the standing list remains the operator's decision, as for every sandbox. Web search and web fetch are not governed by the list: they run from the Gateway, as they do for an ordinary chat.
+
 ### The keys
 
 All seven keys are validated even when storage is off. Values are decimal whole
@@ -2323,10 +2340,10 @@ creation respects each kind's allowance and each person's assistant limit,
 including administrators. Unfinished, paused and archived agents count; exact
 creation retries preserve their identity and files. Assistant and employee files
 use slots of their matching kind. Both counts still default to zero in this
-staged build. Three product capabilities remain unfinished: giving an agent files
-while its workspace runs, freeing its slot on deletion, and screens that distinguish
-AI assistants from AI employees. This staged build is for qualification, not customer
-deployment. Qualified nonzero counts permit execution; holds and unavailable
+build. With explicit counts, Files and conversation uploads write directly while
+the workspace runs or is closed, deletion reclaims the matching kind’s slot, and
+separate lists and creation flows distinguish the two kinds. Default activation
+remains a separate change. Qualified nonzero counts permit execution; holds and unavailable
 storage refuse new replies, activations and lifecycle changes. Work projections
 report readiness, containment and capacity, with details limited by Inspect.
 A successful qualification writes `storage: ready (…)` and `agents: ready (…)`
@@ -2587,8 +2604,549 @@ backend working directory; it does not synchronize or install packages.
 Each invocation emits the account tool's own JSON document. `release-seat`
 refuses an enabled account with `error: not_disabled` and exit 1. Exit 2 with
 `cleanup_pending: true` means release committed while cleanup is unconfirmed;
-retry the same account ID. Its current `assistants` is 0 because this profile
-does not activate AI assistants.
+retry the same account ID. Its `assistants` counts the personal AI assistants
+matched by this release operation, including interrupted creations.
+
+| Agent command | Effect |
+| --- | --- |
+| `ai list [--all]` | Current identities, custody, files, workspaces and unresolved work; `--all` includes deleted/released agents. |
+| `ai status` | Pool plan, execution, hold and actual Gateway-lifetime counts. |
+| `ai close-workspace <id> [--end-running-work] [--wait-seconds 120]` | Close exact workspaces and wait for captured run/attempt outcomes. |
+| `ai verify` | Verify catalogue slots and report their kind, use and unclaimed/surplus state. |
+| `ai export <id> [--end-running-work] [--wait-seconds 120]` | Quiesced tar export under `home/agent-exports`; operator retains/deletes it. |
+| `ai supervise <id> --email ADDRESS` | Recover supervision of a company AI employee with no eligible human manager. |
+| `ai delete <id> [--end-running-work] [--wait-seconds 120]` | Tombstone an eligible orphan; the running Gateway reclaims its storage. |
+| `ai adopt-host --from OLD_ID --acknowledge-old-host-gone` | Acknowledge replacement only after the old host is gone. |
+| `ai settle --space ID --operation ID [--discard]` | Inspect/reconcile one interrupted file operation or deliberately record failure. |
+
+#### Output and exit codes
+
+The three tools print exactly one JSON document on stdout for every invocation, on one line, produced by `json.dumps(document, sort_keys=True)`, which is what the account commands do. There is no `--json` flag and no other output format. Anything a tool writes besides the document goes to stderr; `storage-init`'s progress lines are there.
+
+Every document has these fields.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `command` | string or null | The verb. Null only in the refusal of a command line that named no verb. |
+| `returncode` | integer | 0, 1 or 2: what the verb returned. It equals the process's exit status, except for `prepare --at-start`, whose exit status is always 0. |
+| `note` | string | One sentence that says what happened, for a person. |
+| `error` | string | Present only when `returncode` is 1: the refusal, a refusal or operational failure reported by the verb. |
+
+A document whose `returncode` is 0 or 2 carries every field of its verb's table; a field that does not apply is null, 0 or empty, as its type allows. An exit-1 document carries `command`, `returncode` 1, `error` and `note`, preserving applicable reason/diagnostic fields. A pre-effect refusal uses `refused; nothing was changed`. Known late refusals (`CommandFailed`) and unexpected failures use `failed; run the verb again`: effects may already be committed or unconfirmed. Inspect current state and retained evidence before retrying. For example, this pre-effect refusal changed nothing:
+
+```json
+{"command": "close-workspace", "error": "no AI assistant or AI employee has id 4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f", "note": "refused; nothing was changed", "returncode": 1}
+```
+
+Exit status 0 means the command completed or was already done. Exit status 1
+means refusal or operational failure; it does not by itself establish that
+nothing changed. Exit status 2 means incomplete or unconfirmed work, with the
+remaining facts named in the document. Parser failures (unknown verb, missing or
+invalid arguments) return one refusal JSON document, including when no command
+could be identified. Known late refusals preserve their error and diagnostic
+fields with `failed; run the verb again`; unexpected exceptions additionally
+write their exception type/text to stderr. Neither path erases retained evidence.
+For example, export may have closed a workspace before a later archive failure,
+and deletion may be committed before a subsequent observation fails. Retry the
+same intent and re-read its recorded/current state rather than assuming rollback.
+A remote runner’s exit code may differ from the command’s; inspect `returncode`.
+
+
+Ids of agents, Spaces, slots, attachments, assignments, attempts and file operations are 32 hexadecimal characters. Ids of people and of runs are UUIDs. A Docker host is named by the engine's ID, the value `docker info --format '{{.ID}}'` prints. A kind is one of `user`, `assistant`, `employee`, `company`.
+
+`close-workspace`, `export`, `supervise` and `delete` act on a workspace that may be in use. Each refuses while a reply or an assignment of that agent is in flight. A run counts as in flight while the run store holds it unfinished under a lease that has not expired. `--end-running-work` lifts the refusal, and it cancels nothing. The verb closes the workspace first, with the reason `operator`, and the Gateway ends each run of that workspace at the run's next model call: a reply ends with the error `ResidentInterrupted` and the reason `operator`, and an assignment's attempt is settled as failed with the same reason. `--wait-seconds <n>` bounds how long the verb waits for those runs to end and for those attempts to be settled; the default is 120. A run that is waiting for a long answer of the model, or for a tool that does not use the workspace, ends only after that, and is listed as unconfirmed until then. A run whose model was already writing its last answer makes no further model call: it ends with that answer, and its conversation shows no notice. The two flags have the names the account commands use (§ "Sign-in"); only the bound on the wait means the same.
+
+What people read after `--end-running-work`: in a conversation whose reply was cut, "{name}'s workspace was restarted, which stopped this reply. Send your message again."; on an assignment that was running, "Interrupted", "{name}'s workspace was closed for maintenance by {provider} while {name} was working on this.", "What {name} had done is kept in {name}'s files; nothing was submitted for review." and the button Resume. Without the flag nothing is in flight and nobody notices: the next message starts a workspace.
+
+#### `python -m app.gateway.agent_instances`
+
+Run through `ai` (§ "Storage and agents"). The tool runs in the Gateway container as uid 1000, gid 1000, with the Docker socket's group and no capability. It loads `home/config.yaml`, reaches the database, the pool and the Docker daemon, and observes the running Gateway’s process-checked private lifetime receipt for `status`. It does not start or take over a Gateway runtime. The Gateway reads committed changes on subsequent use and maintenance passes; an interval is not a completion guarantee.
+
+Every verb can return these refusals, exit 1:
+
+- `the configuration /srv/hartmesh/home/config.yaml cannot be loaded: <text>`
+- `the database cannot be reached: <text>`
+- `Storage Spaces are off in the rendered configuration (HARTMESH_USERS absent); there is nothing to act on`, from every verb, and while this release keeps absent-key activation off
+
+##### `list`
+
+```bash
+ai list
+ai list --all
+```
+
+It reads every AI assistant and AI employee from the database, each one's Space, the record of its workspace, the state of that container at the Docker daemon, and its runs in flight. It changes nothing. Without `--all` it leaves out the deleted agents whose Space holds no slot any more, and counts them in `deleted_released`.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `count` | integer | Number of entries in `instances`. |
+| `deleted_released` | integer | Deleted agents whose Space holds no slot any more. They are listed only with `--all`. |
+| `instances` | array of objects | One per agent, in the order of `created_at`: every one that is not deleted, every deleted one whose Space still holds a slot and, with `--all`, every other deleted one. |
+| `instances[].id` | string | The agent's id. |
+| `instances[].name` | string | Its name. |
+| `instances[].custody` | string | `personal` for an AI assistant, `company` for an AI employee. |
+| `instances[].kind` | string | `assistant` or `employee`: the kind of its Space, which follows `custody`. |
+| `instances[].status` | string | `provisioning` (its setting up did not finish; its creator sees it under "Not finished"), `active`, `suspended` (shown to people as Paused), `archived` (Retired) or `deleted`. |
+| `instances[].created_at` | string | ISO 8601. The Gateway removes a `provisioning` row 24 hours after this time. |
+| `instances[].owner_id` | string or null | The owner's account id for an AI assistant; null for an AI employee. |
+| `instances[].owner_live` | boolean or null | For an AI assistant, whether its owner's account can sign in: false when that account is turned off, released or gone, which is when the AI assistant no longer works and `delete` is admitted. Null for an AI employee. |
+| `instances[].supervisor` | object | `id` (string), `email` (string or null), `live` (boolean: false when that account is turned off, released or gone). |
+| `instances[].space` | object | The nine fields that follow. Every agent has a Space from its creation; a `provisioning` row whose creation stopped before the assignment has `space` null. |
+| `instances[].space.space_id` | string | The agent's Space. |
+| `instances[].space.space_status` | string | `active`, `archived` or `deleted`. The Space of a deleted agent is `deleted` too. |
+| `instances[].space.space_generation` | integer | The Space's generation. |
+| `instances[].space.slot_id` | string or null | The slot bound to the Space; null once the slot has been freed. |
+| `instances[].space.max_bytes` | integer or null | The capacity the Space is bound to; null without a slot. |
+| `instances[].space.used_bytes` | integer or null | Bytes in use; null without a slot or when the Space does not verify. |
+| `instances[].space.verified` | boolean or null | Whether the Space verifies; null without a slot. |
+| `instances[].space.reason` | string or null | The verification text when `verified` is false. |
+| `instances[].space.release` | string or null | Null for an agent that is not deleted. For a deleted one: `pending`, the Space is deleted and still holds its slot, and the Gateway frees it by itself; `done`, the Space holds no slot. |
+| `instances[].workspace` | object or null | Null when no workspace record is open. Otherwise `attachment_id` (string), `phase` (`pending`, `active` or `fence_pending`), `container_id` (string or null), `container` (`running`, `exited`, `absent` or `unknown`), `host_id` (string: the Docker host that started it). `unknown` preserves a foreign host's unobservable container state or a preparation that returned no container ID; neither proves absence. Such records remain visible. |
+| `instances[].execution` | string or null | `ready` or `unavailable`, for this agent; null for a `provisioning` or `deleted` one. |
+| `instances[].execution_reason` | string or null | `host-replaced`, `space-unverified`, `operator-hold` or `storage-unavailable` when `execution` is `unavailable`. |
+| `instances[].runs_in_flight` | integer | Replies and assignments in flight. |
+| `instances[].attempts_unresolved` | integer | Assignment attempts that are neither finished nor settled. |
+| `instances[].last_run_at` | string or null | When its last run started, ISO 8601. |
+
+Example:
+
+```json
+{"command": "list", "count": 2, "deleted_released": 0, "instances": [{"attempts_unresolved": 0, "created_at": "2026-10-20T08:31:07+00:00", "custody": "company", "execution": "ready", "execution_reason": null, "id": "4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f", "kind": "employee", "last_run_at": "2026-11-03T09:14:02+00:00", "name": "Finance analyst", "owner_id": null, "owner_live": null, "runs_in_flight": 1, "space": {"max_bytes": 1073741824, "reason": null, "release": null, "slot_id": "5b6c7d8e9f0a4b1c8d2e3f4a5b6c7d8e", "space_generation": 4, "space_id": "8e21f4a6c0d94b7e8a5f3c1d2e6b9a70", "space_status": "active", "used_bytes": 429496729, "verified": true}, "status": "active", "supervisor": {"email": "pat@example.com", "id": "1f9b6a2c-4d3e-4f5a-8b7c-9d0e1f2a3b4c", "live": true}, "workspace": {"attachment_id": "a1b2c3d4e5f60718293a4b5c6d7e8f90", "container": "running", "container_id": "9b0e6c1d2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c", "host_id": "7b9c1e6f-4d2a-4c5e-9f0a-1b2c3d4e5f60", "phase": "active"}}, {"attempts_unresolved": 0, "created_at": "2026-10-22T10:05:44+00:00", "custody": "personal", "execution": null, "execution_reason": null, "id": "9a8b7c6d5e4f4a3b8c2d1e0f9a8b7c6d", "kind": "assistant", "last_run_at": "2026-11-01T15:40:12+00:00", "name": "Researcher", "owner_id": "6a7c8d9e-0f1a-4b2c-8d3e-4f5a6b7c8d9e", "owner_live": true, "runs_in_flight": 0, "space": {"max_bytes": 1073741824, "reason": null, "release": "pending", "slot_id": "7d8e9f0a1b2c4d3e8f4a5b6c7d8e9f0a", "space_generation": 3, "space_id": "2c9d4e5f6a7b4c8d9e0f1a2b3c4d5e6f", "space_status": "deleted", "used_bytes": 1048576, "verified": true}, "status": "deleted", "supervisor": {"email": "lee@example.com", "id": "6a7c8d9e-0f1a-4b2c-8d3e-4f5a6b7c8d9e", "live": true}, "workspace": null}], "note": "2 agents listed: 1 AI employee active, 1 AI assistant deleted whose slot is being freed; 1 workspace running; 1 run in flight; 0 deleted left out", "returncode": 0}
+```
+
+Refusal, exit 1, beside the common ones: `the Docker daemon did not answer: <text>`.
+
+##### `status`
+
+```bash
+ai status
+```
+
+It independently observes the rendered plan, inventory and verified slots,
+the Docker daemon, pool byte-coherence probe and hold file. Its process-checked
+private Gateway receipt supplies the actual running lifetime used for counters;
+missing or stale lifetime evidence refuses the command. It does not initialize
+or inspect the live resident registry’s complete admission/accounting gate. Its
+`execution` is derived from storage, configured counts and hold, and therefore
+cannot certify that a new run will be admitted or reproduce live `/health` or
+`/api/features` readiness. A run request still undergoes current admission.
+Status exits 0 when it can provide this snapshot, including unavailable storage;
+the document reports the state.
+
+For each kind it reports the one allowance the Gateway, `/api/features` and the creation refusals all read: `prepared` is the number of slots of the kind in the inventory; `allowed_key` is what the keys call for, `HARTMESH_USERS` for `user`, `HARTMESH_USERS × HARTMESH_AI_ASSISTANTS_PER_USER` for `assistant`, `HARTMESH_AI_EMPLOYEES` for `employee`, 1 for `company`; `in_use` is, for `user`, the seated accounts, and for an agent kind the agents of that kind that are not deleted; `allowed` is the smaller of `prepared` and the larger of `allowed_key` and `in_use`; `free` is `allowed` less `in_use`. So a key lowered below use leaves `allowed` at `in_use`, a key lowered above use leaves surplus slots prepared, and a plan not finished leaves `allowed` at `prepared`. Screens show `allowed`; nothing shows `prepared`.
+
+A Docker daemon that does not answer from inside the container is not a refusal of this verb: it is the state `unavailable` with the code `admission-failed`, and the fields that need the daemon are null.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `storage` | string | `ready`, `incomplete` or `unavailable`, independently derived from the current storage snapshot. |
+| `storage_reason` | string or null | With `unavailable`: `disk-too-small`, `storage-pool-missing`, `inventory-unreadable`, `host-unqualified` or `admission-failed`. |
+| `execution` | string | `ready`, `none`, `held` or `unavailable`, derived from storage/plan/hold; not proof of the live Gateway admission gate. |
+| `reason` | string or null | With `unavailable`: `storage-unavailable`, and the storage reason is in `storage_reason`; with `none`: `agents-none`; with `held`: `operator-hold`. |
+| `reason_text` | string or null | The text that follows the code in the start-up line. |
+| `spaces` | object | One object per kind, `user`, `assistant`, `employee`, `company`, each with the seven fields that follow. |
+| `spaces.<kind>.allowed` | integer | The allowance of the kind, as above. For `assistant` it is the deployment's total; the per-person count is `per_user`. |
+| `spaces.<kind>.allowed_key` | integer | What the keys call for. |
+| `spaces.<kind>.prepared` | integer | Slots of the kind in the inventory. |
+| `spaces.<kind>.in_use` | integer | Seated accounts, or agents of the kind that are not deleted, or 1 for the company once its Space exists. |
+| `spaces.<kind>.free` | integer | `allowed` less `in_use`. |
+| `spaces.<kind>.unverified` | integer | Slots of the kind that fail verification. |
+| `spaces.<kind>.capacity_bytes` | integer | The capacity the key sets for new Spaces of the kind. |
+| `per_user` | integer | `HARTMESH_AI_ASSISTANTS_PER_USER`. |
+| `unclaimed` | object | Kind to count: slots bound to no Space that hold files or fail verification. Each is a slot to repair or to reclaim (§ "Full Spaces, the data disk, and unverified Spaces"). None of them is counted in `free`. |
+| `surplus` | object | Kind to count: slots beyond `allowed_key` that are bound to nothing. |
+| `reserved_bytes` | integer | The sum of the sizes of every slot in the inventory. |
+| `required_bytes` | integer | What the keys call for, at their capacities. |
+| `headroom_bytes` | integer | The larger of 4 GiB and 10 % of the data disk. |
+| `data_disk` | object | `size_bytes`, `free_bytes` and `free_inodes` (integers). |
+| `shortfall` | object or null | When the plan is not complete: `missing` (kind to count), `missing_bytes`, `fits` (boolean). Null when every Space the keys call for exists. |
+| `hold` | object or null | When the hold file exists: `since` (string, ISO 8601, the file's modification time) and `reason` (string or null, its first line). Null otherwise. |
+| `instances` | object | The number of agents in each status, by kind: `assistant` and `employee`, each with `provisioning`, `active`, `suspended`, `archived`, `deleted` (integers). |
+| `releases` | object | `pending` (integer: deleted Spaces of every kind whose slot the Gateway is still to free). |
+| `sandbox_slots` | object | `limit` (integer: `sandbox.replicas`), `workspaces_running` and `chat_sandboxes_running` (integers, or null when the daemon did not answer: running containers named `hartmesh-space-…` and `deer-flow-sandbox-…`). |
+| `runs_in_flight` | integer | Replies and assignments of agents in flight. |
+| `attachments_active` | integer | Workspace records that are not closed. |
+| `attempts_unresolved` | integer | Assignment attempts neither finished nor settled. |
+| `file_operations_pending` | integer | File operations and publications on Spaces of every kind with no recorded outcome. |
+| `since_gateway_start` | object | `at` (string, ISO 8601: when the running Gateway started), `attachments_fenced` (object: fence reason to count, for records that the Gateway or an operator command closed since then), `work_attempts_settled` (integer), `file_operations_settled` (integer). |
+| `host_id` | string or null | This VM's Docker engine ID; null when the daemon did not answer. |
+| `foreign_hosts` | array of objects | Other Docker hosts named by workspace records that are not closed: `host_id` (string), `attachments` (integer), `adopted` (boolean: whether `adopt-host` has recorded that host as replaced by this one). Empty when `host_id` is null. |
+| `runtime` | string | The sandbox runtime, from `SANDBOX_RUNTIME`, or `default` when the key is unset. |
+
+Example:
+
+```json
+{"attachments_active": 1, "attempts_unresolved": 0, "command": "status", "data_disk": {"free_bytes": 13314398617, "free_inodes": 3041203, "size_bytes": 52721533747}, "execution": "ready", "file_operations_pending": 0, "foreign_hosts": [], "headroom_bytes": 5272153374, "hold": null, "host_id": "7b9c1e6f-4d2a-4c5e-9f0a-1b2c3d4e5f60", "instances": {"assistant": {"active": 4, "archived": 0, "deleted": 1, "provisioning": 0, "suspended": 0}, "employee": {"active": 3, "archived": 0, "deleted": 2, "provisioning": 0, "suspended": 0}}, "note": "storage ready: users 7 of 10 seats, AI assistants 4 of 10, AI employees 3 of 10, company 1 of 1; 31 spaces prepared, 31 verified; agents ready; 1 workspace running of 2 sandbox slots; 1 run in flight", "per_user": 1, "reason": null, "reason_text": null, "releases": {"pending": 1}, "required_bytes": 33285996544, "reserved_bytes": 33285996544, "returncode": 0, "runs_in_flight": 1, "runtime": "runsc", "sandbox_slots": {"chat_sandboxes_running": 0, "limit": 2, "workspaces_running": 1}, "shortfall": null, "since_gateway_start": {"at": "2026-11-03T08:00:11+00:00", "attachments_fenced": {"container-absent": 1, "idle": 1, "run-orphaned": 1}, "file_operations_settled": 0, "work_attempts_settled": 1}, "spaces": {"assistant": {"allowed": 10, "allowed_key": 10, "capacity_bytes": 1073741824, "free": 6, "in_use": 4, "prepared": 10, "unverified": 0}, "company": {"allowed": 1, "allowed_key": 1, "capacity_bytes": 1073741824, "free": 0, "in_use": 1, "prepared": 1, "unverified": 0}, "employee": {"allowed": 10, "allowed_key": 10, "capacity_bytes": 1073741824, "free": 7, "in_use": 3, "prepared": 10, "unverified": 0}, "user": {"allowed": 10, "allowed_key": 10, "capacity_bytes": 1073741824, "free": 3, "in_use": 7, "prepared": 10, "unverified": 0}}, "storage": "ready", "storage_reason": null, "surplus": {"assistant": 0, "company": 0, "employee": 0, "user": 0}, "unclaimed": {"assistant": 0, "company": 0, "employee": 0, "user": 0}}
+```
+
+Refusals, exit 1: the common ones only.
+
+##### `close-workspace`
+
+```bash
+ai close-workspace 4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f
+ai close-workspace 4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f --end-running-work --wait-seconds 60
+```
+
+It removes one agent's workspace container. It starts nothing: the next message or assignment starts a new workspace, in about half a minute. Use it before `resize` of that agent's slot, when a workspace misbehaves, or when the agent's Space must be still. In order:
+
+1. It finds the agent, whatever its status.
+2. It reads the workspace records of its Space that are not closed. With none, it stops: verdict `already_closed`, exit 0.
+3. It reads the runs of that agent that are in flight. With one or more and no `--end-running-work`, it refuses.
+4. For each record, it removes the workspace container, its relay and its two networks, requires the Docker daemon to confirm that the container is gone, and marks the record closed with the reason `operator`, this Docker host as the one that closed it, and the time. It cancels no run and starts no container.
+5. It waits, for at most `--wait-seconds`, until every run found in step 3 has ended and every assignment attempt of that agent that was unfinished is settled. It settles nothing itself. The Gateway does both: it ends each run of the closed workspace at the run's next model call and then settles its attempt as failed with the reason `operator`; an unfinished attempt that has no run in flight is settled at the Gateway's next pass, within 60 seconds. A run that is waiting for a long answer of the model, or for a tool that does not use the workspace, ends only after that; when the wait runs out first, it is listed in `runs_unconfirmed`.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `instance_id` | string | The agent. |
+| `verdict` | string | `closed`; `already_closed`; or `unconfirmed`, when the daemon did not confirm a removal. |
+| `attachments` | array of objects | Each record this command closed: `attachment_id` (string), `container_id` (string or null), `fence_reason` (string: `operator`, or `host-replaced` for a record of a Docker host that `adopt-host` has recorded as replaced), `fenced_at` (string, ISO 8601). |
+| `attachments_unconfirmed` | array of strings | Ids of the records whose container the daemon did not confirm gone. They stay open. |
+| `runs_found` | integer | Runs in flight when the command started. |
+| `runs_ended` | integer | Of those, the runs that had ended when the command returned. |
+| `runs_unconfirmed` | array of strings | Ids of the runs that had not ended when the wait ran out. |
+| `attempts_settled` | array of objects | The assignment attempts the Gateway settled during the wait: `attempt_id`, `work_id` (strings), `run_id` (string or null), `reason` (string or null: the stored containment reason; null when the attempt completed normally during the wait). |
+| `attempts_unconfirmed` | array of strings | Ids of the attempts still unfinished when the wait ran out. |
+| `waited_seconds` | number | How long step 5 waited. |
+
+Example, with `--end-running-work` while an assignment was running:
+
+```json
+{"attachments": [{"attachment_id": "a1b2c3d4e5f60718293a4b5c6d7e8f90", "container_id": "9b0e6c1d2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c", "fence_reason": "operator", "fenced_at": "2026-11-03T09:20:41+00:00"}], "attachments_unconfirmed": [], "attempts_settled": [{"attempt_id": "77aa0b1c2d3e4f5a8b6c7d8e9f0a1b2c", "reason": "operator", "run_id": "0c3e9a1b-2d4f-4a6c-8e0b-1d3f5a7c9e2b", "work_id": "5d10a2b3c4d54e6f8a7b9c0d1e2f3a4b"}], "attempts_unconfirmed": [], "command": "close-workspace", "instance_id": "4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f", "note": "workspace of 4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f closed: 1 container removed; 1 run ended; 1 attempt settled as failed (operator); the next message starts a new workspace", "returncode": 0, "runs_ended": 1, "runs_found": 1, "runs_unconfirmed": [], "verdict": "closed", "waited_seconds": 3.4}
+```
+
+Refusals, exit 1, beside the common ones:
+
+- `no AI assistant or AI employee has id 4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f`
+- `4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f has 1 run in flight; wait for it to end or pass --end-running-work`
+- `attachment a1b2c3d4e5f60718293a4b5c6d7e8f90 was started by Docker host 0d6c2b1e-8f3a-4c7d-9e5b-2a1f0c3d4e6f, not this one; see adopt-host`
+- `the Docker daemon did not answer: <text>`
+
+Exit 2, with what was done in the document:
+
+- a run in `runs_unconfirmed` or an attempt in `attempts_unconfirmed`: the workspace is closed, and the note ends `1 run had not ended after 120 s; the Gateway settles its attempt when it ends; run the command again to see`. Such a run is waiting for the model or for a tool that does not use the workspace, and the Gateway ends it at its next model call.
+- verdict `unconfirmed`, with the note `the Docker daemon did not confirm that container 9b0e6c1d2f3a is gone; its record is not marked closed; run the command again`: the removal was asked for and its outcome is unknown.
+
+##### `verify`
+
+```bash
+ai verify
+```
+
+It does what the Gateway does at its start, in a process of its own, as the Gateway's user: it loads the inventory, verifies every slot, and runs the proof that the Docker daemon reads the pool, which starts and removes one short-lived container named `hartmesh-probe-<nonce>`. It also says what each slot is used for, from the database, and compares the inventory with the plan of the keys. It changes nothing else, and it never runs `storage-init`. Use it after a repair, before restarting the Gateway, to find a surplus or unclaimed slot, and to read a Space's `used_bytes`.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `pool` | object | `path` (string), `probe` (`ok` or `failed`), `probe_error` (string or null). |
+| `plan` | object | Kind to `{allowed_key, prepared, in_use}`, as `status` computes them. |
+| `spaces` | array of objects | One per slot of the inventory, and one per slot that a Space is bound to and the inventory no longer lists. The twelve fields that follow. |
+| `spaces[].slot_id` | string | The slot. |
+| `spaces[].kind` | string | Its kind from the inventory; null for a slot the inventory no longer lists. |
+| `spaces[].listed` | boolean | Whether the inventory lists it. |
+| `spaces[].state` | string | `verified` or `unverified`. |
+| `spaces[].reason` | string or null | The verification text when `state` is `unverified` (§ "Full Spaces, the data disk, and unverified Spaces"). |
+| `spaces[].use` | string | `user`, `assistant`, `employee` or `company`: bound to a Space of that kind that is not deleted; `releasing`: bound to a deleted Space, which the Gateway frees by itself; `surplus`: bound to nothing, verified and empty, beyond what the key of its kind calls for; `unclaimed`: bound to nothing and holding files or unverified; a free slot within the key is `free`. |
+| `spaces[].holder_id` | string or null | The account id, the agent's id or `company`, for a bound slot. |
+| `spaces[].space_id` | string or null | The Space the slot is bound to. |
+| `spaces[].space_status` | string or null | That Space's status: `active`, `archived` or `deleted`. |
+| `spaces[].used_bytes` | integer or null | Bytes in use; null when the slot does not verify. |
+| `spaces[].max_bytes` | integer | The slot's capacity. |
+| `spaces[].empty` | boolean or null | Whether `data/` and `control/` are both empty; null when the slot does not verify. |
+| `verified` | integer | Listed slots that verified. |
+| `total` | integer | Slots in the inventory. |
+| `unclaimed`, `surplus` | integers | Slots whose `use` is `unclaimed`, and `surplus`. |
+
+Example:
+
+```json
+{"command": "verify", "plan": {"assistant": {"allowed_key": 10, "in_use": 4, "prepared": 10}, "company": {"allowed_key": 1, "in_use": 1, "prepared": 1}, "employee": {"allowed_key": 10, "in_use": 3, "prepared": 10}, "user": {"allowed_key": 10, "in_use": 7, "prepared": 10}}, "note": "30 of 31 spaces verified; 1 unclaimed; 0 surplus; the Docker daemon reads the pool", "pool": {"path": "/srv/hartmesh/spaces", "probe": "ok", "probe_error": null}, "returncode": 2, "spaces": [{"empty": false, "holder_id": "1f9b6a2c-4d3e-4f5a-8b7c-9d0e1f2a3b4c", "kind": "user", "listed": true, "max_bytes": 1073741824, "reason": null, "slot_id": "3f2a9c0d5b7e4f1a8c6d2e0b9a7f5c31", "space_id": "0b1c2d3e4f5a4b6c8d7e9f0a1b2c3d4e", "space_status": "active", "state": "verified", "use": "user", "used_bytes": 214748364}, {"empty": null, "holder_id": null, "kind": "employee", "listed": true, "max_bytes": 1073741824, "reason": "Backing must be an independent provider-mounted ext4 filesystem with nodev/nosuid", "slot_id": "6e7f8a9b0c1d4e2f8a3b4c5d6e7f8a9b", "space_id": null, "space_status": null, "state": "unverified", "use": "unclaimed", "used_bytes": null}], "surplus": 0, "total": 31, "unclaimed": 1, "verified": 30}
+```
+
+The example lists two of the 31 entries. Exit 0 when every slot verified and the proof passed. Exit 2 when a slot is `unverified` or `probe` is `failed`.
+
+Refusals, exit 1, beside the common ones:
+
+- `no inventory at /srv/hartmesh/spaces/inventory.v2.json; run: storage-init prepare`
+- `the inventory cannot be loaded: <the Gateway's text>`
+
+##### `export`
+
+```bash
+ai export 4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f
+ai export 4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f --end-running-work
+```
+
+It writes one agent's Space to a tar file on the data disk. It acts on agents alone; a person's files are the person's "Download all my data", and Shared is in the snapshot. In order:
+
+1. It finds the agent and its Space, requires a status other than `deleted`, and verifies the Space.
+2. It refuses unless the data disk keeps 1 GiB free after an archive as large as the Space's used bytes, which is the rule of the account export (§ "Download all my data").
+3. It closes the workspace exactly as `close-workspace` does in its steps 2 to 5, with the same refusal while a run is in flight and the same two flags.
+4. Holding the Space's row lock, so that no workspace starts meanwhile, it archives everything under `data/` into `/srv/hartmesh/home/agent-exports/<id>-<UTC time>.tar`, mode `0600`, owner 1000, without following a link out of the Space, and computes the SHA-256. New workspace admission and Gateway file publication serialize behind this Space lock. An upload may be received/spooled meanwhile, but its publication waits until the export’s lock is released; it is not promised inclusion in that archive.
+
+The directory is deliberately not `home/exports/`, which the Gateway empties at every start. Nothing deletes an export; remove it once it is copied.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `instance_id` | string | The agent. |
+| `verdict` | string | `exported`. |
+| `space` | object | `space_id`, `slot_id` and `kind` (strings). |
+| `path` | string | The archive. |
+| `bytes` | integer | Its size. |
+| `files` | integer | Entries archived. |
+| `sha256` | string | Its SHA-256, 64 hexadecimal characters. |
+| `workspace_closed` | boolean | Whether a workspace record was open and this command closed it. |
+| `attachments` | array of objects | The records this command closed, as for `close-workspace`. |
+| `attachments_unconfirmed` | array of strings | Always empty in a document of this verb: a removal the daemon did not confirm is a refusal here. |
+| `runs_found` | integer | Runs in flight when the command started. |
+| `runs_ended` | integer | Of those, the runs that had ended when the command returned. |
+| `runs_unconfirmed` | array of strings | Ids of the runs that had not ended when the wait ran out. |
+| `attempts_settled` | array of objects | As for `close-workspace`. |
+| `attempts_unconfirmed` | array of strings | As for `close-workspace`. |
+| `waited_seconds` | number | How long the wait of step 3 lasted. |
+
+Example:
+
+```json
+{"attachments": [{"attachment_id": "a1b2c3d4e5f60718293a4b5c6d7e8f90", "container_id": "9b0e6c1d2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c", "fence_reason": "operator", "fenced_at": "2026-11-03T09:25:01+00:00"}], "attachments_unconfirmed": [], "attempts_settled": [], "attempts_unconfirmed": [], "bytes": 432643891, "command": "export", "files": 1820, "instance_id": "4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f", "note": "files of 4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f exported: 1820 entries, 412.6 MiB; nothing deletes this file", "path": "/srv/hartmesh/home/agent-exports/4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f-20261103T092502Z.tar", "returncode": 0, "runs_ended": 0, "runs_found": 0, "runs_unconfirmed": [], "sha256": "9d1f0a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7", "space": {"kind": "employee", "slot_id": "5b6c7d8e9f0a4b1c8d2e3f4a5b6c7d8e", "space_id": "8e21f4a6c0d94b7e8a5f3c1d2e6b9a70"}, "verdict": "exported", "waited_seconds": 0.0, "workspace_closed": true}
+```
+
+Refusals, exit 1, beside the common ones; a refusal after step 3 leaves the workspace closed and no file:
+
+- `no AI assistant or AI employee has id 4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f`
+- `4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f has no files yet (status provisioning)`
+- `4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f is deleted; its files were deleted with it`
+- `space 8e21f4a6c0d94b7e8a5f3c1d2e6b9a70 (slot 5b6c7d8e9f0a4b1c8d2e3f4a5b6c7d8e) is unverified: <text>; see storage-init verify`
+- `the archive needs 0.4 GiB and would leave the data disk under 1 GiB free`
+- `4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f has 1 run in flight; wait for it to end or pass --end-running-work`
+- `attachment a1b2c3d4e5f60718293a4b5c6d7e8f90 was started by Docker host 0d6c2b1e-8f3a-4c7d-9e5b-2a1f0c3d4e6f, not this one; see adopt-host`
+- `the Docker daemon did not confirm that container 9b0e6c1d2f3a is gone; nothing was exported; run the command again`
+- `the Docker daemon did not answer: <text>`
+- `Backup does not support special filesystem nodes`: the Space holds a device file or a named pipe.
+- `Backup exceeds the supported entry count`: the Space holds more than 100,000 entries.
+
+Exit 2: a run in `runs_unconfirmed` or an attempt in `attempts_unconfirmed`. The archive is written and complete, because the workspace was closed before it was made; only the Gateway's settlement had not finished when the wait ran out.
+
+An exit-1 failure after workspace closure does not reopen it or roll back earlier
+effects. The operational-failure note preserves the original error and fields.
+A successfully published archive is retained even if later Gateway settlement
+remains unconfirmed; use its recorded path/hash and current command state.
+
+##### `supervise`
+
+```bash
+ai supervise 4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f --issuer https://login.example.com --subject sub-lee
+ai supervise 4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f --email lee@example.com
+```
+
+It is for one situation: an AI employee that nobody at the customer can manage any more, because its supervisor and every other manager have left and their accounts are turned off or released. While one manager can still sign in, the supervisor is changed in the product, not here. An AI assistant has no supervisor to replace: it stops with its owner's account, and `release-seat` or `delete` removes it. The person is named as the account commands name one: by the identity provider's issuer and subject, or by `--email`, which must resolve to exactly one account. It also takes `--end-running-work` and `--wait-seconds`. In order:
+
+1. It finds the agent and requires company custody and the status `active`, `suspended` or `archived`.
+2. It resolves the person and requires an account that can sign in.
+3. If that person is already the supervisor and holds Manage, it stops: verdict `unchanged`, exit 0.
+4. If a workspace record of the Space is open, it closes the workspace exactly as `close-workspace` does in its steps 3 to 5, with the reason `operator`, the same refusal while a run is in flight and the same two flags. The grant of the next step can be written only while no workspace is open.
+5. By the host's authority it gives that person what the supervisor named at creation receives, in two writes that a repeat of the command completes if it is interrupted between them. First it gives Use, Inspect and Manage on the AI employee. Then, under the Space's row lock, it gives read, write, export and administer on the Space: the Space's generation advances by one, and its event row is a `grant` whose actor is that person and whose details carry `operator_host_id`, this VM's Docker engine ID. The order is fixed: a person may read an agent's files only with "Can see all work" on that agent, and the grant on the Space is refused without it. This is the only authority an operator command creates, and the only grant on any Space that is not written by the Gateway itself.
+6. As that person, it performs the product's own change of supervisor, the lifecycle action `supervise`, which records the change with that person as its actor and leaves the AI employee in the status it had. A workspace that someone started between steps 4 and 6 is closed by that action, with the reason `lifecycle`.
+
+If step 6 cannot complete because an earlier lifecycle operation of that AI employee is still pending, the command stops with verdict `manager_added` and exit 2: the person now holds Manage, signs in, resolves the pending operation on the AI employee's Settings tab and changes the supervisor there.
+
+Implementation clarification: recovery records an immutable Space event binding the exact operator host, target, original instance/Space/backing/grants and selected lifecycle operation. It reserves generation room before granting authority, including a possible terminal handoff event. Every phase repeats current account eligibility under the owning transaction. An exact completed authority pair can permit a later independent recovery only after full current orphan eligibility, with no exemption for the earlier target; existing pending lifecycle operations remain intact. A terminal handoff event supports retries of `manager_added` without granting authority again. A known refusal after committed closure or grants uses the operational-failure envelope (`failed; run the verb again`), preserving evidence and avoiding a claim that nothing changed.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `instance_id` | string | The AI employee. |
+| `verdict` | string | `changed`, `unchanged` or `manager_added`. |
+| `previous` | object | The supervisor before: `id` (string), `email` (string or null), `live` (boolean). |
+| `supervisor` | object | The person named: `id`, `email` (strings), `issuer` and `subject` (strings or null for a local account). |
+| `grants` | object | `instance` (integer: normally 7, Use 1, Inspect 2, Manage 4) and `space` (integer: normally 27, read 1, write 2, administer 8, export 16). With `unchanged`, report the actual current bits without adding permissions. |
+| `generation` | integer | The AI employee's generation afterwards. |
+| `lifecycle_operation_id` | string or null | The id of the recorded change; null with `unchanged` and `manager_added`. |
+| `workspace_closed` | boolean | Whether a workspace record was open and this command closed it. |
+| `attachments` | array of objects | The records this command closed, as for `close-workspace`. |
+| `attachments_unconfirmed` | array of strings | Always empty in a document of this verb: a removal the daemon did not confirm is a refusal here. |
+| `runs_found` | integer | Runs in flight when the command started. |
+| `runs_ended` | integer | Of those, the runs that had ended when the command returned. |
+| `runs_unconfirmed` | array of strings | Ids of the runs that had not ended when the wait ran out. |
+| `attempts_settled` | array of objects | As for `close-workspace`. |
+| `attempts_unconfirmed` | array of strings | As for `close-workspace`. |
+| `waited_seconds` | number | How long the wait of step 4 lasted. |
+
+Example:
+
+```json
+{"attachments": [], "attachments_unconfirmed": [], "attempts_settled": [], "attempts_unconfirmed": [], "command": "supervise", "generation": 6, "grants": {"instance": 7, "space": 27}, "instance_id": "4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f", "lifecycle_operation_id": "c7d8e9f0a1b24c3d8e5f6a7b8c9d0e1f", "note": "supervisor of 4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f changed; the new supervisor holds Use, Inspect and Manage and can administer the files", "previous": {"email": "pat@example.com", "id": "1f9b6a2c-4d3e-4f5a-8b7c-9d0e1f2a3b4c", "live": false}, "returncode": 0, "runs_ended": 0, "runs_found": 0, "runs_unconfirmed": [], "supervisor": {"email": "lee@example.com", "id": "6a7c8d9e-0f1a-4b2c-8d3e-4f5a6b7c8d9e", "issuer": "https://login.example.com", "subject": "sub-lee"}, "verdict": "changed", "waited_seconds": 0.0, "workspace_closed": false}
+```
+
+Refusals, exit 1, beside the common ones:
+
+- `no AI assistant or AI employee has id 4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f`
+- `4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f is an AI assistant: it stops with its owner's account and cannot be handed to another person; its owner can make an AI employee with the same brief, and release-seat or delete removes it once the owner's account is turned off`
+- `4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f is deleted; supervise acts on an AI employee that is active, paused or retired`
+- `4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f is not set up yet (status provisioning)`
+- `no account exists for subject 'sub-lee' at issuer 'https://login.example.com'`
+- `2 accounts have subject 'sub-lee' at this issuer; address one of them by --email`
+- `no account, or more than one, holds the address 'lee@example.com'`
+- `the account of subject 'sub-lee' is turned off; a supervisor must be able to sign in`
+- `4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f has 1 run in flight; wait for it to end or pass --end-running-work`
+- `attachment a1b2c3d4e5f60718293a4b5c6d7e8f90 was started by Docker host 0d6c2b1e-8f3a-4c7d-9e5b-2a1f0c3d4e6f, not this one; see adopt-host`
+- `the Docker daemon did not confirm that container 9b0e6c1d2f3a is gone; nothing was granted; run the command again`
+- `the Docker daemon did not answer: <text>`
+- `give --issuer and --subject, or --email`
+
+Exit 2: verdict `manager_added`, with the note `the person holds Manage on 4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f; a lifecycle operation is pending, so the supervisor is unchanged; the person resolves it in the product`; or a run in `runs_unconfirmed` or an attempt in `attempts_unconfirmed`, with the supervisor changed.
+
+##### `delete`
+
+```bash
+ai delete 9a8b7c6d5e4f4a3b8c2d1e0f9a8b7c6d
+ai delete 9a8b7c6d5e4f4a3b8c2d1e0f9a8b7c6d --end-running-work --wait-seconds 60
+```
+
+It is for an agent that nobody at the customer can delete. For an AI assistant that is one whose owner's account is turned off or released: the AI assistant stops working with the account, cannot be handed to another person, and holds its slot until it is deleted; `release-seat` deletes it with the seat, and this verb deletes it alone when the seat is to be kept. For an AI employee it is one whose supervisor and every manager have left; `supervise` is the usual answer, which gives it a manager who decides, and `delete` is for an AI employee the customer's administrator asks to have removed outright while nobody can sign in to do it. The verb does what Delete does in the product, by the host's authority, and for no agent that someone at the customer can still delete. Nothing brings a deleted agent back, so run `export` first when the customer wants the files. It also takes `--end-running-work` and `--wait-seconds`. In order:
+
+1. It finds the agent.
+2. For an AI assistant it requires that the owner's account cannot sign in, because it is turned off, released or gone; otherwise it refuses with the reason `owner-active`. For an AI employee it requires that the supervisor and every holder of Manage cannot sign in; otherwise it refuses with the reason `managers-active`.
+3. It refuses an agent whose setting up did not finish. For one that is already deleted it goes on with step 6.
+4. It closes the workspace exactly as `close-workspace` does in its steps 2 to 5, with the reason `operator`, the same refusal while a run is in flight and the same two flags. When the wait runs out while a run has not ended or an attempt is not settled, it stops there: verdict `workspace_closed`, exit 2, and nothing is deleted. Running it again continues from there.
+5. By the host's authority, in one transaction, it marks the agent and its Space deleted. The deletion is recorded as an act of the host on the owner's or the supervisor's behalf, not as an act of a person. From this moment the agent is in nobody's list and counts toward no number.
+6. It does not free the slot itself. The running Gateway does, at the next pass of its 60-second task, exactly as it completes a deletion that a person started: it empties the slot and removes its tie to the Space, and the slot is then free for the next agent of its kind. The verb waits for that, for at most `--wait-seconds` again, and reports what it finds. When the Gateway has freed the slot it writes `agents: assistant 9a8b… deleted by the operator; space 7d8e… released`, or `employee` for one.
+
+The Gateway frees the slot, and not the verb, because the Gateway keeps its own list of the slots in use: a slot freed behind it would stay taken until its next restart. For the same reason the release waits while storage is `unavailable` for the deployment (§ "Reading the start-up lines").
+
+A run in flight is treated as by every verb that closes a workspace. Without `--end-running-work` the verb refuses while a reply or an assignment of that agent is in flight, and nothing is changed. With it, the verb closes the workspace with the reason `operator`, the Gateway ends each run at the run's next model call and settles its attempt as failed with that reason, and the deletion goes ahead only once every such run has ended and every such attempt is settled. An AI assistant starts no run while its owner's account is turned off, so only work that was in flight at that moment is concerned.
+
+Afterwards `list` shows the agent only with `--all`. While its slot is not free yet, `list` still shows it without the flag, with `"release": "pending"`.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `instance_id` | string | The agent. |
+| `kind` | string | `assistant` or `employee`. |
+| `verdict` | string | `deleted`; `already_deleted`, when it was deleted before this run; or `workspace_closed`, when the work had not ended within the wait and nothing was deleted. |
+| `owner` | object or null | For an AI assistant, the owner, whose account cannot sign in: `id` (string), `email` (string or null). Null for an AI employee. |
+| `space` | object | The four fields that follow. |
+| `space.space_id` | string | The agent's Space. |
+| `space.slot_id` | string or null | The slot the Space held when the command started; null when it held none any more. |
+| `space.release` | string or null | As in `list`: `done`, the Space holds no slot any more; `pending`, the Gateway had not freed the slot when the wait ran out. Null with `workspace_closed`. |
+| `space.use` | string or null | What `verify` says of that slot when the command returns: `free`, emptied and free for its kind; `assistant` or `employee`, nothing was deleted, or another agent has taken the slot already; `releasing`, not freed yet; `unclaimed`, released without being emptied. Null without a slot. |
+| `workspace_closed` | boolean | Whether a workspace record was open and this command closed it. |
+| `attachments` | array of objects | The records this command closed, as for `close-workspace`. |
+| `attachments_unconfirmed` | array of strings | Always empty in a document of this verb: a removal the daemon did not confirm is a refusal here. |
+| `runs_found` | integer | Runs in flight when the command started. |
+| `runs_ended` | integer | Of those, the runs that had ended when the command returned. |
+| `runs_unconfirmed` | array of strings | Ids of the runs that had not ended when the wait ran out. |
+| `attempts_settled` | array of objects | As for `close-workspace`. |
+| `attempts_unconfirmed` | array of strings | As for `close-workspace`. |
+| `waited_seconds` | number | How long the waits of steps 4 and 6 lasted together. |
+
+Example:
+
+```json
+{"attachments": [], "attachments_unconfirmed": [], "attempts_settled": [], "attempts_unconfirmed": [], "command": "delete", "instance_id": "9a8b7c6d5e4f4a3b8c2d1e0f9a8b7c6d", "kind": "assistant", "note": "AI assistant 9a8b7c6d5e4f4a3b8c2d1e0f9a8b7c6d deleted; slot 7d8e9f0a1b2c4d3e8f4a5b6c7d8e9f0a emptied and free for the next AI assistant", "owner": {"email": "sam@example.com", "id": "3d4e5f6a-7b8c-4d9e-8f0a-1b2c3d4e5f6a"}, "returncode": 0, "runs_ended": 0, "runs_found": 0, "runs_unconfirmed": [], "space": {"release": "done", "slot_id": "7d8e9f0a1b2c4d3e8f4a5b6c7d8e9f0a", "space_id": "2c9d4e5f6a7b4c8d9e0f1a2b3c4d5e6f", "use": "free"}, "verdict": "deleted", "waited_seconds": 41.0, "workspace_closed": false}
+```
+
+Exit 0: verdict `deleted` or `already_deleted`, with `space.release` `done` and a `space.use` other than `unclaimed`.
+
+Refusals, exit 1, beside the common ones. A late failure can leave a workspace closed or deletion committed; `failed; run the verb again` preserves that uncertainty. Inspect the current agent and release state before retrying:
+
+- `no AI assistant or AI employee has id 9a8b7c6d5e4f4a3b8c2d1e0f9a8b7c6d`
+- `9a8b7c6d5e4f4a3b8c2d1e0f9a8b7c6d is an AI assistant and its owner's account is active: the owner deletes it in the product`; the document also carries `reason` with the value `owner-active`
+- `4f1c2d7e9a0b4c6d8e1f3a5b7c9d0e2f is an AI employee with a manager who can sign in: a manager deletes it in the product`; the document also carries `reason` with the value `managers-active`
+- `9a8b7c6d5e4f4a3b8c2d1e0f9a8b7c6d is not set up yet (status provisioning); the Gateway removes it 24 hours after it was created`
+- `9a8b7c6d5e4f4a3b8c2d1e0f9a8b7c6d has 1 run in flight; wait for it to end or pass --end-running-work`
+- `attachment a1b2c3d4e5f60718293a4b5c6d7e8f90 was started by Docker host 0d6c2b1e-8f3a-4c7d-9e5b-2a1f0c3d4e6f, not this one; see adopt-host`
+- `the Docker daemon did not confirm that container 9b0e6c1d2f3a is gone; nothing was deleted; run the command again`
+- `the Docker daemon did not answer: <text>`
+- `9a8b7c6d5e4f4a3b8c2d1e0f9a8b7c6d was not deleted: <text>`: the deletion itself was refused, and `<text>` says why, for example an attachment that is not fenced, or a generation that is exhausted.
+
+A refusal of the second or the third kind carries `reason` beside the four fields of every refusal:
+
+```json
+{"command": "delete", "error": "9a8b7c6d5e4f4a3b8c2d1e0f9a8b7c6d is an AI assistant and its owner's account is active: the owner deletes it in the product", "note": "refused; nothing was changed", "reason": "owner-active", "returncode": 1}
+```
+
+Exit 2, with what was done in the document:
+
+- verdict `workspace_closed`, with the note `workspace of 9a8b7c6d5e4f4a3b8c2d1e0f9a8b7c6d closed; 1 run had not ended after 120 s; nothing was deleted; run the command again`.
+- `space.release` `pending`, with a note that ends `the Gateway had not freed slot 7d8e9f0a1b2c4d3e8f4a5b6c7d8e9f0a after 120 s; agent_instances list shows when it has`. The agent is deleted. The Gateway frees the slot at a later pass or at its next start; while it cannot, its journal says why (§ "Full Spaces, the data disk, and unverified Spaces", "Deleted agents and their slots").
+- `space.use` `unclaimed`, with a note that ends `slot 7d8e9f0a1b2c4d3e8f4a5b6c7d8e9f0a could not be verified and was released without being emptied; reclaim it with: storage-init forget 7d8e9f0a1b2c4d3e8f4a5b6c7d8e9f0a --discard`. The agent is deleted, and the Gateway has written its line for such a slot. Reclaim the slot as § "Full Spaces, the data disk, and unverified Spaces" says. A repeat of the command finds no slot tied to the Space and answers `already_deleted` with exit 0; `ai verify` goes on showing the slot until it is reclaimed.
+
+##### `adopt-host`
+
+```bash
+ai adopt-host --from 0d6c2b1e-8f3a-4c7d-9e5b-2a1f0c3d4e6f --acknowledge-old-host-gone
+```
+
+It records the operator's statement that the Docker host named by `--from` no longer exists and that this VM has taken its place. It is used once after a restore onto a VM whose Docker engine has another identity, when the Gateway's line asks for it (§ "Backup and restore"). The value of `--from` is the id that line prints, which `ai status` repeats under `foreign_hosts`. It concerns agents alone: a chat sandbox is recorded by no attachment. In order:
+
+1. It reads this VM's Docker engine ID.
+2. It counts the workspace records that are not closed and name the old host.
+3. Without `--acknowledge-old-host-gone` it refuses and reports the count.
+4. With the flag it writes one row to `storage_host_replacements`: the old id, this id, the count and the time. A row that already exists gives verdict `already_adopted`, exit 0.
+
+It closes nothing itself. At its next start the Gateway closes each of those records, with the reason `host-replaced`, once its own daemon confirms that no such container exists here, and settles the assignment attempts that were running in them. Run `hm restart gateway` after it.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `from` | string | The old Docker host. |
+| `host_id` | string | This VM's Docker engine ID. |
+| `acknowledged` | boolean | Whether the flag was given. |
+| `attachments_named` | integer | Workspace records, not closed, that name the old host. |
+| `verdict` | string | `adopted` or `already_adopted`. |
+
+Example:
+
+```json
+{"acknowledged": true, "attachments_named": 3, "command": "adopt-host", "from": "0d6c2b1e-8f3a-4c7d-9e5b-2a1f0c3d4e6f", "host_id": "7b9c1e6f-4d2a-4c5e-9f0a-1b2c3d4e5f60", "note": "Docker host 0d6c2b1e-8f3a-4c7d-9e5b-2a1f0c3d4e6f recorded as replaced by 7b9c1e6f-4d2a-4c5e-9f0a-1b2c3d4e5f60; 3 attachments are closed at the next Gateway start", "returncode": 0, "verdict": "adopted"}
+```
+
+Refusals, exit 1, beside the common ones:
+
+- `3 attachments are held by Docker host 0d6c2b1e-8f3a-4c7d-9e5b-2a1f0c3d4e6f; confirm that VM is powered off or destroyed, then pass --acknowledge-old-host-gone`; the document also carries `attachments_named`
+- `0d6c2b1e-8f3a-4c7d-9e5b-2a1f0c3d4e6f is this Docker host; there is nothing to adopt`
+- `no attachment names Docker host 0d6c2b1e-8f3a-4c7d-9e5b-2a1f0c3d4e6f; hosts on record: 7b9c1e6f-4d2a-4c5e-9f0a-1b2c3d4e5f60`
+- `give --from <Docker engine ID>`
+- `the Docker daemon did not answer: <text>`
+
+##### `settle`
+
+```bash
+ai settle --space 0b1c2d3e4f5a4b6c8d7e9f0a1b2c3d4e --operation 6e2d7f8a9b0c4d1e8f2a3b4c5d6e7f80
+ai settle --space 9c4d1e6f8a0b4c2d9e7f5a3b1c8d6e40 --operation 6e2d7f8a9b0c4d1e8f2a3b4c5d6e7f80 --discard
+```
+
+Every write the Gateway makes to a Space, a file given to an agent, a Keep into My Files, a project document, a publication to Shared or its removal, leaves a `pending` row in `storage_space_file_operations` until its outcome is recorded. The Gateway settles a row the restart or the crash left `pending` by itself, at its start and in every pass of its 60-second task: a file write by replaying its record against the files, a Keep or a project document as complete because each publishes by a hard link under a unique name and records nothing the filesystem does not show, a publication to Shared by reading its receipt `control/host-workflow-<operation id>.json` and reconciling the record with the files. A row that it cannot settle, because the receipt is missing or the reconciliation raises, is left `pending`, and the journal says so: `storage: publication 6e2d… not settled: <text>`. While such a row stands, a request that includes a write on that Space is refused as `storage-busy`; the person reads "Shared is being changed right now. Try again in a moment." or "Your files are being changed right now. Try again in a moment.", and reads it again at every try. This verb is the operator's way to end that. In order:
+
+1. It finds the row by Space and operation id and requires the phase `pending`.
+2. It prints the row's facts under `request`, the receipt under `receipt` when one exists, and what the folder holds under `files`, so that the operator can read them before acting; with neither flag it stops here when the settlement would raise, verdict `unsettled`, exit 2.
+3. Without `--discard` it runs the Gateway's own settlement for the row's kind, by host authority under the host workflow lock, and records the outcome: `complete` with the resolution `host-settled` or `host-reconciled`, or `failed` when the replay says the write never landed.
+4. With `--discard`, after the operator has inspected the receipt and the files, it marks the row `failed` with the resolution `host-discarded` and changes no file. What the operation had already written stays where it is; a publication that half-landed is then a file in `shared/` with no record, which the Shared tab lists as a file nobody published and an administrator can remove.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `space_id`, `operation_id` | strings | The row. |
+| `kind` | string | The Space's kind. |
+| `namespace` | string or null | `hm.shared`, `hm.my-files`, `hm.projects` for a feature workflow; null for a file write. |
+| `action` | string | The row's `request.action`: `write`, `put`, `mkdir`, `rename`, `remove` or `feature-workflow`. |
+| `on_behalf_of` | string or null | The person on whose behalf the host wrote, for a host-written row. |
+| `request` | object | The row's request as stored. |
+| `receipt` | object or null | The receipt's content, or null when none exists. |
+| `files` | array of strings | The names under the folder the operation targets that the receipt or the request names. |
+| `verdict` | string | `settled-complete`, `settled-failed`, `discarded` or `unsettled`. |
+| `resolution` | string or null | `host-settled`, `host-reconciled`, `host-discarded`, or null with `unsettled`. |
+
+Example:
+
+```json
+{"action": "feature-workflow", "command": "settle", "files": ["q3-review.pdf"], "kind": "company", "namespace": "hm.shared", "note": "publication 6e2d7f8a9b0c4d1e8f2a3b4c5d6e7f80 on the company space settled complete (host-reconciled): the file is in shared/ and its record now names it", "on_behalf_of": "1f9b6a2c-4d3e-4f5a-8b7c-9d0e1f2a3b4c", "operation_id": "6e2d7f8a9b0c4d1e8f2a3b4c5d6e7f80", "receipt": {"digest": "sha256:4a5b…", "name": "q3-review.pdf", "operation_id": "6e2d7f8a9b0c4d1e8f2a3b4c5d6e7f80", "source_space_id": "0b1c2d3e4f5a4b6c8d7e9f0a1b2c3d4e"}, "request": {"action": "feature-workflow", "by": "host", "intent": "publish", "namespace": "hm.shared"}, "resolution": "host-reconciled", "returncode": 0, "space_id": "9c4d1e6f8a0b4c2d9e7f5a3b1c8d6e40", "verdict": "settled-complete"}
+```
+
+Refusals, exit 1, beside the common ones:
+
+- `no file operation 6e2d7f8a9b0c4d1e8f2a3b4c5d6e7f80 on space 9c4d1e6f8a0b4c2d9e7f5a3b1c8d6e40`
+- `file operation 6e2d7f8a9b0c4d1e8f2a3b4c5d6e7f80 is already complete`, or `already failed`
+- `space 9c4d1e6f8a0b4c2d9e7f5a3b1c8d6e40 is unverified: <text>; see storage-init verify`
+- `another workflow holds the lock of space 9c4d1e6f8a0b4c2d9e7f5a3b1c8d6e40; run the command again in a moment`
+
+Exit 2: verdict `unsettled`, with the note `publication 6e2d7f8a9b0c4d1e8f2a3b4c5d6e7f80 cannot be settled: <text>; inspect receipt and files, then run with --discard to record it as failed`. Nothing was changed.
 
 ### Changing the counts and capacities
 
@@ -2597,6 +3155,13 @@ fits. Lowering a count removes nothing. A larger capacity applies to new slots;
 existing slots require offline `resize` and a Gateway restart. A smaller capacity
 affects future preparation only. An interrupted growth is continued with the
 same command; a smaller target cannot truncate an already extended image.
+
+Deleting an AI assistant or AI employee marks its Space deleted with it, and the
+Gateway removes files and backups before returning the slot to the same kind.
+A deleted agent cannot be restored. If `space_released` is false, cleanup remains
+unconfirmed; the product checks the release for up to three minutes without
+claiming that elapsed time proves completion. Lowering an agent count removes
+no existing agent. An unverified slot remains unavailable until operator repair.
 
 ### Seats, and the account of a person who has left
 
@@ -2632,6 +3197,14 @@ after two allowlist chats, rechecks both complete resource sets before disableme
 and verifies every original container/network ID and name is absent before reuse.
 Partial paired cleanup survives restart through the private journal. A free seat does not guarantee an
 immediately reusable User slot.
+
+An AI assistant whose owner cannot sign in keeps its slot until the seat is
+released or `ai delete <id>` removes that assistant alone. Export its files with
+`ai export` before permanent removal when they are needed. AI assistants cannot
+be handed to a new owner. An AI employee with no live supervisor or manager can
+be recovered with `ai supervise`, or deliberately removed with `ai delete`.
+Both commands recheck current human eligibility and require explicit authorization
+to close running work.
 
 ### Stopping agents in an emergency
 
@@ -2715,14 +3288,91 @@ One agent's Space also supports qualified per-Space backup, restore and recovery
 through the authenticated Spaces API. Current Space ADMIN and generation are
 required; those operations contain recorded attachments with `storage-recovery`
 before physical effects. They preserve existing files when containment is uncertain.
-An operator export command and product Files controls arrive in the next stage.
+`ai export <id>` produces a quiesced external archive; product Files controls
+support direct transfers. Export verifies the Space and disk headroom before
+closing its workspace. `--end-running-work` explicitly permits interruption.
 User and company roles use the whole data-disk snapshot instead.
 
 The Gateway attempts interrupted ordinary file and feature-workflow settlement
 at startup and in minute-based maintenance. It confirms private receipts and
 current binding identities; it never replays an unknown write or claims success
 from elapsed time. Uncertain copy/lifecycle/controller outcomes remain pending
-for inspection. There is no agent operator `settle` command in this profile.
+for inspection. `ai settle --space <id> --operation <id>` inspects and reconciles
+one exact row. Use `--discard` only after inspecting the request, receipts and
+files: it records host/operator failure and replays no write. A missing receipt
+or uncertain publication can remain unsettled with exit 2.
+
+### Roles and the provider's name
+
+Two things in the tenant bundle (§ "Tenant bundle") shape what a person sees when adding an AI assistant or an AI employee. Both are optional, and both are read live: an edit reaches the next page load, with no restart.
+
+**Roles.** When a person adds an AI assistant or an administrator adds an AI employee, the product offers a short list of roles and, always, a blank brief. A role is a starting point: a name, a description, the standing instructions the agent begins with, the skills it may use and whether it accepts assignments. The release ships three roles that name no industry, in `ui.roles` of the template: a reporting analyst, a researcher and a newsletter writer. The operator replaces the list for one tenant with `/srv/hartmesh/operator/tenant/roles.json`:
+
+```json
+[
+  {
+    "id": "reporting-analyst",
+    "name": "Reporting analyst",
+    "description": "Turns exports into periodic business reviews.",
+    "soul": "You are a reporting analyst at this company: you turn the exports people give you into business reviews with every number checked, and you say plainly when data is missing or does not add up. You keep each period's report and source files among your own files for comparison with the next.",
+    "skills": ["business-report", "data-analysis"],
+    "work_policy": {
+      "enabled": true,
+      "default_priority": "normal",
+      "review_required": true,
+      "allow_derived": false,
+      "max_derived_per_activation": 3,
+      "responsibilities": [
+        {"key": "periodic-review", "label": "Business reviews"},
+        {"key": "data-questions", "label": "Questions about uploaded data"}
+      ]
+    }
+  }
+]
+```
+
+The example is the first of the release's three roles, written as this file: installed as it stands, it offers that one role and the blank brief. Start from it and change the texts.
+
+The file is a JSON list of at most 8 roles. `id` is 1 to 40 characters of `a` to `z`, `0` to `9` and `-`, and distinct. `name` is one plain line of at most 60 characters. `description` is one plain line of at most 200. `soul` is plain text of at most 16,000 characters. `skills` is optional: at most 16 names from the public skill library (§ "Public skills"); a name the library does not carry is dropped and named in the journal. `work_policy` is optional and has the fields shown; `default_priority` is `low`, `normal`, `high` or `urgent`, and `max_derived_per_activation` is 1 to 20. An unknown key refuses the file.
+
+The file follows the rule of `starters.json`. A missing file leaves the release's three roles. A malformed one leaves them too and is named in the journal as `tenant bundle: roles.json: <rule>`, never with the value. `[]` is a deliberate choice: only the blank brief is offered. Install it as the other bundle files are installed, readable by uid 1000:
+
+```bash
+install -o 1000 -g 1000 -m 0640 roles.json /srv/hartmesh/operator/tenant/roles.json
+```
+
+A role is used once, when the agent is added: the instructions become that agent's own and are edited in its Settings afterwards. Changing or removing a role changes no existing agent.
+
+**The provider's name.** Several sentences tell a person to ask the provider: when storage is unavailable, when files are full, when no seat is free, when the number of AI employees allowed is reached, when a workspace does not start. They take the name and the link from `provider.json` in the tenant bundle, the same file that already names the provider in the workspace menu (§ "Tenant bundle"):
+
+```json
+{"display_name": "Example Hosting", "support_url": "https://support.example.com/help"}
+```
+
+With a name, the sentences read "ask Example Hosting"; without one, "ask your service provider". With a link, the sentence is followed by the menu's own "Contact Example Hosting support"; without one, the sentence stands alone. There is no `.env` key for either.
+
+### What has been verified
+
+The evidence tiers establish different facts. Each is recorded separately:
+
+- `managed-storage` runs all 26 required native cases on real loop-mounted ext4
+  filesystems and actual containers, using the resident builder and byte-coherence
+  probes. It rejects every skip; directories and engine doubles cannot replace it.
+- `bundle-instances` runs the shipped profile through nginx with all seven keys,
+  a scripted model and 27 named acceptance cases. It checks accounts/seats,
+  ordinary chats, files/publication, full-storage refusals, resident persistence,
+  Work/restart containment, live/closed file transfers and 40 MiB integrity,
+  Stop, count refusals, same-kind reuse, denied egress, supervisor questions and
+  operator/killed-workspace settlement. Its `hartmesh-ci` runtime is a runc alias:
+  this proves runtime selection, not gVisor behavior or model judgment.
+- A per-release `tenant_class` receipt is a person’s qualification on the actual
+  VM class under `runsc`, covering default preparation/timing, real transfers,
+  cold start, full storage, egress, two conversations, hold, reboot and snapshot
+  restore. GitHub CI cannot supply it; this runbook does not claim it is complete.
+
+Offline SQL/contract tests, strict blocking-I/O checks and browser suites qualify
+additional functional boundaries. More than one Gateway worker and data disks
+outside the supported ext4 host model are not qualified by these results.
 
 ## Durability
 

@@ -1,13 +1,15 @@
 # Human-input requests and Attention
 
+An agent is a person’s own AI assistant or a company’s AI employee.
+
 **Attention** gives human collaborators a durable inbox for questions attached
-to an AI employee's Work. A manager opens Work and selects **Request human input**.
+to an agent's Work. A manager opens Work and selects **Request human input**.
 The question, reason and expected response are shared with current Work inspectors.
 HartMesh handles attribution, current access, routing and history. Domain rules
 and specialist validation remain in skills and optional trusted plugins.
 
 Authenticated humans can create and manage requests. During explicit Work
-execution, the AI employee can ask for input and assess the exact set of factual
+execution, the agent can ask for input and assess the exact set of factual
 replies, or revise an inadequate factual question. Human decisions and outcome
 acceptance remain authenticated human actions.
 Saving a response never starts or resumes a run. An inbox entry proves availability
@@ -24,7 +26,9 @@ hides protected cached details and counts.
 
 Each request records one primary human recipient. Creation defaults to the
 eligible human supervisor; no eligible default leaves Needs routing. Managers
-may explicitly select or clear a recipient. Addressing grants no access and does
+may explicitly select a recipient by name from the agent’s eligible members, or
+clear it. Attention remains available whenever agents are enabled, including
+while their execution is unavailable. Addressing grants no access and does
 not exclude another authorized human from helping. Supervisor changes do not
 retarget existing requests. If a recipient loses eligibility, its personal action
 count disappears and managers see Needs routing. Legitimately restoring the same
@@ -33,7 +37,7 @@ identity's grants restores its existing addressed action; no grant is created.
 Inspect permits shared reads; Use plus Inspect permits factual responses.
 Manage plus Inspect permits routing, withdrawal and canonical Work decisions or
 reviews. Provider `agents:read` and `agents:write` are additional ceilings.
-Archived/deleted AI employees cannot receive factual responses. Authorized
+Archived/deleted agents cannot receive factual responses. Authorized
 history and deliberate management remain available. PATs and caller-selected
 human/nonhuman identities are not accepted.
 
@@ -54,13 +58,12 @@ review requires the existing Work Changes requested/Cancel/Accept controls.
 History retains prior responses and routing actions.
 
 References use existing Space locators with current shared-audience admission.
-References do not upload, copy, verify contents or mount a resource for the AI
-employee. Its workspace mounts its own files at `/mnt/spaces/home` read-write and
+References do not upload, copy, verify contents or mount a resource for the agent. Its workspace mounts its own files at `/mnt/spaces/home` read-write and
 the company's Shared folder at `/mnt/user-data/shared` read-only, and none of the
-requester's My Files or Projects. Use existing Home
-storage controls for a transfer; managers must establish the qualified exclusive
-write window after native attachments are fenced. A finished or blocked run is
-not that proof. Upload and response are separate: preserve an uploaded file if
+requester's My Files or Projects. Give a file through the agent’s Files tab or
+the message box of its conversation at any time, whether its workspace is running
+or closed. The Gateway writes it directly through the file routes; there is no
+exclusive write window. Upload and response are separate: preserve an uploaded file if
 response persistence is uncertain, and retry the exact response operation.
 Binding decisions recheck READ on their original and response-attached sources.
 Outcome acceptance remains explicitly statement-only, with current file contents

@@ -1,25 +1,26 @@
 # Work records
 
-Work is a durable commitment owned by an AI employee instance. An authorized
+An agent is a person’s own AI assistant or a company’s AI employee.
+Work is a durable commitment owned by an agent instance. An authorized
 human delegates an objective and assessable success criteria; the record and
 its history persist independently of conversations. Domain procedures belong in
 adopted instructions, skills and trusted extensions, not Work schemas.
 
 Saving an assignment, providing input, recording a decision or changing a due
-target does not execute the AI employee. **Work on this** and **Resume** explicitly
+target does not execute the agent. **Work on this** and **Resume** explicitly
 start an attempt through the existing conversation runtime. The
-[Attention inbox](HUMAN_INPUT_REQUESTS.md) supports human and AI employee requests,
+[Attention inbox](HUMAN_INPUT_REQUESTS.md) supports human and agent requests,
 attributed human responses and separate factual assessment during execution.
 Ordinary conversations remain available independently of Work.
 
 ## Enable and use
 
 Enable **Work → Enable tracked Work** in a custom definition’s settings. Review
-its human-review requirement, then use the instance’s existing **Adopt
-definition** action. Existing adoption and containment checks still apply. A
+its human-review requirement, then use the agent’s **Settings → Apply updated
+brief** action. Existing adoption and containment checks still apply. A
 changed definition does not silently update an existing instance.
 
-Open **Agent instances**, select the AI employee and use **Work**. Delegation
+Open **My assistants** or **AI employees**, select the agent and use **Work**. Delegation
 uses the adopted priority and review defaults. Managers may change priority,
 review and due targets; an adopted required-review policy cannot be waived.
 Dates express expectations and do not schedule execution. Missing/disabled
@@ -30,12 +31,12 @@ is required to delegate or supply factual input. Manage plus Inspect controls
 assignment changes, cancellation/reopening, binding decisions and review.
 Provider `agents:read` is also required, and mutations require `agents:write`.
 PATs and client-selected actor identities are unsupported. Work visibility does
-not require Home READ; referenced files have their own current access checks.
+not require Space READ; referenced files have their own current access checks.
 
 Optional `work_policy` fields are `enabled` (default false), `default_priority`
 (`normal`), `review_required` (true), `responsibilities` (up to 32 unique key/label
 pairs), `allow_derived` (false) and `max_derived_per_activation` (1–20, default3).
-During an admitted attempt, the AI employee may suggest follow-up Work or register
+During an admitted attempt, the agent may suggest follow-up Work or register
 bounded derived Work when allowed. Derived Work uses the adopted defaults and
 requires its own explicit human activation. Human definition APIs accept these fields; model self-update
 cannot alter them. Old adopted snapshots retain their exact bytes and hashes.
@@ -44,12 +45,12 @@ cannot alter them. Old adopted snapshots retain their exact bytes and hashes.
 
 Open means a commitment remains. Blocked means input or a decision is needed.
 Submitted means **Ready for review**. Completed means either a human accepted
-the exact outcome or, where review was not required, **AI employee reported
+the exact outcome or, where review was not required, **{name} reported
 complete**. Cancelled means a manager withdrew the commitment. A run ending does
 not prove an outcome is complete.
 
 New records start Open. A manager can create a linked human-input request, atomically blocking open
-Work. An admitted AI employee can also request information or a decision. Human
+Work. An admitted agent can also request information or a decision. Human
 commands cannot invent a completion report; only the exact current attempt may
 report a completion candidate. Submitted assignments
 require **Request changes** before editing; Completed/Cancelled assignments
@@ -93,7 +94,7 @@ Endpoints below are under `/api/agent-instances/{instance_id}/work`:
 | `POST /{work_id}/activate` | Explicit activation with exact operation, row/assignment revisions and bound conversation ID |
 
 Command actions: `edit`, `cancel`, `reopen`, `changes_requested`,
-`reconcile_mandate`, `reconcile_attempt`, `input`, `decide`, `accept`. Every command rejects fields
+`stop`, `reconcile_mandate`, `reconcile_attempt`, `input`, `decide`, `accept`. Every command rejects fields
 belonging to other actions. Reopen/changes/reconciliation require a note.
 Input/decision require exact blocker identity and revision; acceptance requires
 exact outcome/evidence revision, `basis: "outcome_statement"` and
@@ -136,7 +137,7 @@ database schema or configuration-version change.
 Activation adds the current `runs:create` ceiling to Use plus Inspect and
 `agents:read`/`agents:write`. Creating a new execution conversation also requires
 `threads:write`. The server checks the adopted mandate, exact assignment, current
-source access and conversation/Home audience before dispatch. Shared Work context
+source access and audience of the conversation and the agent’s files before dispatch. Shared Work context
 marks the conversation Inspect-protected even when memory is off.
 
 An attempt records its actual conversation/run identity. Starting, Running,
@@ -159,21 +160,38 @@ reservations, against `max(1, sandbox.replicas - 1)`. Its `running` details are
 Inspect-filtered. Each workspace admits at most two runs; an ordinary chat still
 has a sandbox slot while a Work attempt holds the other slot in the bundle.
 
+**Stop** ends the current attempt and leaves the assignment open. It requires
+Manage plus Inspect, or Use plus Inspect for the exact attempt requester, with
+`agents:read`/`agents:write` and `runs:cancel`. The command names the exact
+`attempt_id` with current row and assignment revisions. The attempt first becomes
+`stopping`, then `cancelled` on a confirmed nonsuccessful run end; a run already
+finishing successfully can still succeed. Its workspace stays available;
+Resume is a new explicit activation. `no-running-attempt` refuses a stale Stop.
+
+Access, supervisor and brief changes close the workspace and end work in flight.
+`only_if_idle` instead refuses a busy change with `work-in-flight` and its run IDs.
+
+An attempt runs in `autonomous` interaction mode: it never offers
+`ask_clarification` or a network-approval card. To ask a person, the agent calls
+`report_work` with `action: request_input`; this blocks Work and sends the question
+to the eligible supervisor’s Attention inbox. A prose question alone leaves Work
+open. A blocked site remains blocked and is recorded in the conversation.
+
 Progress changes the row revision without changing the assignment. A completion
 report remains a **candidate** until the matching run succeeds, owned operations
 settle and current assignment/access checks pass. Only then does it become Ready
-for review, or AI employee reported complete where review is not required.
+for review, or {name} reported complete where review is not required.
 Required review creates the canonical human-input request. A finished run without
 a candidate leaves Work open. Earlier reports remain in attributed history.
 
 Replies may arrive while a run is active. Information assessment names the exact
 question revision and every current response; new replies reject stale assessment.
-The AI employee can replace an inadequate factual question while retaining a
+The agent can replace an inadequate factual question while retaining a
 blocker. It cannot impersonate a human decision or accept its own outcome.
 
 Editing or cancelling active Work also requires `runs:cancel`, records the exact
 stop intent and fences stale reports. Cancellation metadata is not physical
-containment. For an unresolved attempt, a manager with current Home ADMIN first
+containment. For an unresolved attempt, a manager with current Space ADMIN first
 completes the existing lifecycle containment operation. **Reconcile contained
 attempt** submits that exact operation and attempt, expected revisions and a note;
 the server verifies the captured native environments are fenced. Recovery preserves
@@ -189,6 +207,6 @@ No calendar, event or reply automatically activates Work.
 
 Additive migration `0040_work_execution` adds nullable candidate/settlement columns
 to attempts and human/nonhuman attribution to request creation and events. Existing
-request/event rows default to human attribution. Used execution or AI employee
+request/event rows default to human attribution. Used execution or agent
 attribution blocks downgrade. Existing definition hashes and consumer file formats
 remain unchanged.

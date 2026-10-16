@@ -27,6 +27,16 @@ STORAGE_TESTS = (
     "test_graceful_gateway_restart_leaves_no_unresolved_attempt",
     "test_killed_gateway_settles_the_attempt_failed_with_an_attempt_contained_event",
     "test_new_activation_is_admitted_after_a_contained_attempt",
+    "test_file_given_while_the_workspace_runs_is_read_by_the_running_agent",
+    "test_file_given_while_no_workspace_runs_is_present_at_the_next_run",
+    "test_forty_mebibyte_file_arrives_with_the_same_sha256",
+    "test_stop_ends_a_held_attempt_and_leaves_the_assignment_open",
+    "test_creation_past_the_count_is_refused_for_each_kind",
+    "test_deleted_agents_slot_is_reused_by_the_same_kind_at_once",
+    "test_assignment_that_meets_a_blocked_host_finishes_and_records_the_denial",
+    "test_a_question_in_an_assignment_blocks_it_and_reaches_the_supervisor",
+    "test_closing_the_workspace_under_a_held_attempt_ends_its_run_with_the_reason_operator",
+    "test_a_killed_workspace_ends_its_run_with_the_reason_container_absent",
 )
 
 
@@ -193,6 +203,7 @@ def test_bundle_gate_requires_disk_backed_fixtures_and_exact_named_cases():
     assert 'findmnt -no FSTYPE --target "$TMPDIR"' in preflight
     assert "tmpfs|ramfs)" in preflight and "exit 1" in preflight
     acceptance = steps["13 Run the acceptance tests"]
+    assert "len(cases) == 27" in acceptance
     assert "HARTMESH_REQUIRE_BUNDLE_INSTANCES=1" in acceptance
     assert '--basetemp="$TMPDIR/fixtures"' in acceptance
     assert "-p no:randomly" in acceptance
@@ -204,6 +215,20 @@ def test_bundle_gate_requires_disk_backed_fixtures_and_exact_named_cases():
     shutdown = steps["14 Check that the stack stops cleanly"]
     assert shutdown.index("compose-before-down.log") < shutdown.index("$C down")
     assert "storage-init quiesce" in shutdown
+
+
+def test_operator_helper_uses_the_image_environment_and_actual_socket_group():
+    tree = ast.parse((ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8"))
+    bundle = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Bundle")
+    helper = next(node for node in bundle.body if isinstance(node, ast.FunctionDef) and node.name == "ai")
+    constants = {node.value for node in ast.walk(helper) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+    bootstrap = next(value for value in constants if "setpriv" in value)
+    assert "cd /app/backend" in bootstrap
+    assert '--reuid=1000 --regid=1000 --groups="$(stat -c %g /var/run/docker.sock)"' in bootstrap
+    assert "--inh-caps=-all --no-new-privs" in bootstrap
+    assert "HOME=/tmp/gateway-home DOCKER_CONFIG=/tmp/gateway-home/.docker PYTHONPATH=." in bootstrap
+    assert '/app/backend/.venv/bin/python -m app.gateway.agent_instances "$@"' in bootstrap
+    assert subprocess.run(["sh", "-n"], input=bootstrap, text=True, capture_output=True).returncode == 0
 
 
 def test_work_qualification_uses_one_shared_assistant_and_exact_recovery_evidence():

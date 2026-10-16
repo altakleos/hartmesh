@@ -199,10 +199,38 @@ jobs:
           import xml.etree.ElementTree as ET
           tree = ET.parse(sys.argv[1])
           cases = tree.findall(".//testcase")
-          assert len(cases) == 17, f"expected 17 acceptance cases, collected {len(cases)}"
-          expected = {'test_graceful_gateway_restart_leaves_no_unresolved_attempt', 'test_chat_without_files_mounts_nothing_of_the_user', 'test_my_files_shared_and_projects_work_with_storage_spaces_on', 'test_chat_without_shared_mounts_the_users_space_alone', 'test_publication_records_the_member_and_by_host', 'test_bundle_runs_an_agent_and_its_space_survives_gateway_restart_and_workspace_loss', 'test_full_user_space_refuses_upload_and_new_conversation_with_files_full', 'test_runtime_alias_is_on_the_workspace_and_the_chat_sandbox_and_not_on_the_relay_and_the_probe', 'test_work_activation_on_a_real_workspace_settles_succeeded_and_submits_the_outcome', 'test_new_activation_is_admitted_after_a_contained_attempt', 'test_company_grant_is_written_for_an_account_that_had_none', 'test_attempt_in_flight_leaves_a_slot_for_an_ordinary_chat', 'test_ordinary_chat_works_with_storage_spaces_on', 'test_release_seat_frees_the_seat_and_empties_the_users_space', 'test_seat_is_taken_at_the_three_creation_paths_and_refused_past_the_count', 'test_killed_gateway_settles_the_attempt_failed_with_an_attempt_contained_event', 'test_pool_verifies_inside_the_gateway_container_without_host_image_path'}
+          assert len(cases) == 27, f"expected 27 acceptance cases, collected {len(cases)}"
+          expected = (
+              'test_pool_verifies_inside_the_gateway_container_without_host_image_path',
+              'test_ordinary_chat_works_with_storage_spaces_on',
+              'test_my_files_shared_and_projects_work_with_storage_spaces_on',
+              'test_chat_without_files_mounts_nothing_of_the_user',
+              'test_chat_without_shared_mounts_the_users_space_alone',
+              'test_seat_is_taken_at_the_three_creation_paths_and_refused_past_the_count',
+              'test_release_seat_frees_the_seat_and_empties_the_users_space',
+              'test_company_grant_is_written_for_an_account_that_had_none',
+              'test_publication_records_the_member_and_by_host',
+              'test_full_user_space_refuses_upload_and_new_conversation_with_files_full',
+              'test_bundle_runs_an_agent_and_its_space_survives_gateway_restart_and_workspace_loss',
+              'test_runtime_alias_is_on_the_workspace_and_the_chat_sandbox_and_not_on_the_relay_and_the_probe',
+              'test_work_activation_on_a_real_workspace_settles_succeeded_and_submits_the_outcome',
+              'test_attempt_in_flight_leaves_a_slot_for_an_ordinary_chat',
+              'test_graceful_gateway_restart_leaves_no_unresolved_attempt',
+              'test_killed_gateway_settles_the_attempt_failed_with_an_attempt_contained_event',
+              'test_new_activation_is_admitted_after_a_contained_attempt',
+              'test_file_given_while_the_workspace_runs_is_read_by_the_running_agent',
+              'test_file_given_while_no_workspace_runs_is_present_at_the_next_run',
+              'test_forty_mebibyte_file_arrives_with_the_same_sha256',
+              'test_stop_ends_a_held_attempt_and_leaves_the_assignment_open',
+              'test_creation_past_the_count_is_refused_for_each_kind',
+              'test_deleted_agents_slot_is_reused_by_the_same_kind_at_once',
+              'test_assignment_that_meets_a_blocked_host_finishes_and_records_the_denial',
+              'test_a_question_in_an_assignment_blocks_it_and_reaches_the_supervisor',
+              'test_closing_the_workspace_under_a_held_attempt_ends_its_run_with_the_reason_operator',
+              'test_a_killed_workspace_ends_its_run_with_the_reason_container_absent',
+          )
           names = [case.get("name") for case in cases]
-          assert len(names) == len(set(names)) and set(names) == expected, "acceptance names differ from the seventeen storage and agent cases"
+          assert len(names) == len(set(names)) and tuple(names) == expected, "acceptance names differ from the twenty-seven storage and agent cases"
           assert not tree.findall(".//skipped"), "an acceptance case was skipped"
           assert not tree.findall(".//failure") and not tree.findall(".//error")
           PY

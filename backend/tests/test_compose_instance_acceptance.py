@@ -5,8 +5,10 @@ released-account maintenance cannot reclaim an active account's orphaned old
 Space. Case 9 proves Undo sharing and explicit republication, not removal Undo.
 """
 
+import hashlib
 import json
 import os
+import random
 import re
 import selectors
 import subprocess
@@ -87,6 +89,17 @@ class Bundle:
         selector = ["--id", account_id] if account_id is not None else ["--email", email]
         result = self.run("exec", "-T", "--user", "1000:1000", "--workdir", "/app/backend", "--env", "PYTHONPATH=.", "gateway", "/app/backend/.venv/bin/python", "-m", "app.gateway.auth.accounts", verb, *selector, check=False)
         return result.returncode, json.loads(result.stdout.splitlines()[-1])
+
+    def ai(self, *args, timeout=180):
+        bootstrap = (
+            'cd /app/backend && exec setpriv --reuid=1000 --regid=1000 --groups="$(stat -c %g /var/run/docker.sock)" '
+            "--inh-caps=-all --no-new-privs env HOME=/tmp/gateway-home DOCKER_CONFIG=/tmp/gateway-home/.docker PYTHONPATH=. "
+            '/app/backend/.venv/bin/python -m app.gateway.agent_instances "$@"'
+        )
+        result = self.run("exec", "-T", "gateway", "sh", "-c", bootstrap, "agent_instances", *args, check=False, timeout=timeout)
+        document = json.loads(result.stdout.splitlines()[-1])
+        assert document["command"] == args[0] and document["returncode"] == result.returncode == 0, document
+        return document
 
     def cleanup_orphan(self, facts):
         token = uuid.uuid4().hex
@@ -281,13 +294,13 @@ class Person:
     def upload(self, thread_id, content=MARKER, *, name="input.txt", expected=200):
         return self.request("POST", f"/api/threads/{thread_id}/uploads", files={"files": (name, content, "text/plain")}, expected=expected)
 
-    def run(self, thread_id, *, success=True):
+    def run(self, thread_id, *, success=True, files=None):
         response = self.request(
             "POST",
             f"/api/langgraph/threads/{thread_id}/runs/stream",
             json={
                 "assistant_id": "lead_agent",
-                "input": {"messages": [{"type": "human", "content": "acceptance:file"}]},
+                "input": {"messages": [{"type": "human", "content": "acceptance:file", **({"additional_kwargs": {"files": files}} if files is not None else {})}]},
                 "context": {"mode": "flash", "model_name": "acceptance-model", "thinking_enabled": False, "subagent_enabled": False},
                 "stream_mode": ["values", "messages-tuple", "updates"],
             },
@@ -342,7 +355,7 @@ def member(compose):
 
 @pytest.fixture(scope="module")
 def employee(compose, session):
-    """Stage-three cases share one AI assistant; deletion arrives in stage four."""
+    """Share one personal AI assistant and its adopted Work-enabled definition."""
     definition = session.request(
         "POST",
         "/api/agents",
@@ -358,7 +371,7 @@ def employee(compose, session):
     # stage-four qualification and must not be claimed by this setup.
     space = session.request("GET", f"/api/spaces/{instance['home_id']}").json()
     session.request("PUT", f"/api/spaces/{instance['home_id']}/content", params={"path": "uploads/input.txt", "generation": space["generation"], "operation_id": uuid.uuid4().hex, "create": True}, content=MARKER)
-    return {"instance": instance, "thread_id": thread["thread_id"], "slot": slot, "root": root}
+    return {"instance": instance, "thread_id": thread["thread_id"], "slot": slot, "root": root, "definition": definition["name"]}
 
 
 def workspace(compose, employee):
@@ -399,12 +412,12 @@ def activate(session, employee, work, *, expected=200):
     ).json()
 
 
-def await_attempt(session, employee, work_id, statuses):
+def await_attempt(session, employee, work_id, statuses, *, timeout=120):
     def check():
         work = session.request("GET", work_path(employee, work_id)).json()
         return work if work["attempt"] and work["attempt"]["status"] in statuses else None
 
-    return eventually(check, timeout=120, interval=2)
+    return eventually(check, timeout=timeout, interval=2)
 
 
 def held_attempt(compose, session, employee):
@@ -1145,3 +1158,229 @@ def test_new_activation_is_admitted_after_a_contained_attempt(compose, session, 
     assert settled["status"] == "submitted" and settled["outcome"]["attempt_id"] == activated["activation_receipt"]["attempt_id"]
     _identity, entry = workspace(compose, employee)
     assert compose.invoke(["docker", "exec", entry["Id"], "cat", "/mnt/user-data/outputs/proof.txt"]).stdout == "WORK-ACCEPTANCE-PROOF\n"
+
+
+def give_file(session, employee, content):
+    instance_id = employee["instance"]["id"]
+    session.request("POST", f"/api/agent-instances/{instance_id}/home/files", json={"operation_id": uuid.uuid4().hex, "action": "remove", "path": "uploads/input.txt"})
+    saved = session.request(
+        "POST",
+        f"/api/agent-instances/{instance_id}/conversations/{employee['thread_id']}/files",
+        params={"operation_id": uuid.uuid4().hex},
+        files={"file": ("input.txt", content, "text/plain")},
+        expected=201,
+    ).json()
+    assert saved["path"] == "uploads/input.txt" and saved["sha256"] == hashlib.sha256(content).hexdigest()
+    assert saved["size"] == len(content) and saved["sandbox_path"] == "/mnt/user-data/uploads/input.txt"
+    return [{"filename": "input.txt", "path": saved["sandbox_path"], "size": saved["size"], "status": "uploaded"}]
+
+
+def test_file_given_while_the_workspace_runs_is_read_by_the_running_agent(compose, session, employee):
+    identity, _entry = workspace(compose, employee)
+    content = MARKER + b"-while-running"
+    files = give_file(session, employee, content)
+    answered = time.monotonic()
+    assert compose.invoke(["docker", "exec", identity["container_id"], "cat", "/mnt/user-data/uploads/input.txt"], timeout=2).stdout.encode() == content
+    assert time.monotonic() - answered < 2
+    assert workspace(compose, employee)[0] == identity
+    session.run(employee["thread_id"], files=files)
+    assert workspace(compose, employee)[0] == identity
+
+
+def test_file_given_while_no_workspace_runs_is_present_at_the_next_run(compose, session, employee):
+    previous, _entry = workspace(compose, employee)
+    assert compose.ai("close-workspace", employee["instance"]["id"])["verdict"] == "closed"
+    files = give_file(session, employee, MARKER + b"-while-closed")
+    assert not any(entry["Name"].startswith("/hartmesh-space-") for entry in compose.containers())
+    session.run(employee["thread_id"], files=files)
+    assert workspace(compose, employee)[0]["container_id"] != previous["container_id"]
+
+
+def test_forty_mebibyte_file_arrives_with_the_same_sha256(compose, session, employee, tmp_path):
+    filesystem = compose.invoke(["stat", "-f", "-c", "%T", str(tmp_path)]).stdout.strip()
+    assert filesystem not in ("tmpfs", "ramfs"), "large fixtures must be disk-backed"
+    payload = tmp_path / "forty-mebibytes.bin"
+    random_bytes, digest = random.Random(726), hashlib.sha256()
+    with payload.open("wb") as stream:
+        for _ in range(640):
+            chunk = random_bytes.randbytes(65536)
+            stream.write(chunk)
+            digest.update(chunk)
+    assert payload.stat().st_size == 40 * 1024 * 1024
+    identity, _entry = workspace(compose, employee)
+    with payload.open("rb") as stream:
+        saved = session.request(
+            "PUT",
+            f"/api/agent-instances/{employee['instance']['id']}/home/content",
+            params={"path": "uploads/forty-mebibytes.bin", "operation_id": uuid.uuid4().hex},
+            headers={"Content-Length": str(payload.stat().st_size), "Content-Type": "application/octet-stream"},
+            content=iter(lambda: stream.read(65536), b""),
+        ).json()
+    assert saved["sha256"] == digest.hexdigest() and saved["size"] == payload.stat().st_size
+    assert compose.invoke(["docker", "exec", identity["container_id"], "sha256sum", "/mnt/user-data/uploads/forty-mebibytes.bin"]).stdout.split()[0] == digest.hexdigest()
+    assert workspace(compose, employee)[0] == identity
+
+
+def test_stop_ends_a_held_attempt_and_leaves_the_assignment_open(compose, session, employee):
+    held, identity = held_attempt(compose, session, employee)
+    stopped = session.request(
+        "POST",
+        work_path(employee, held["id"]) + "/commands",
+        json={"operation_id": uuid.uuid4().hex, "expected_revision": held["revision"], "expected_assignment_revision": held["assignment_revision"], "action": "stop", "attempt_id": held["attempt"]["id"]},
+    ).json()
+    assert stopped["attempt"]["status"] == "stopping" and stopped["status"] == held["status"] == "open"
+    settled = await_attempt(session, employee, held["id"], {"cancelled"}, timeout=60)
+    assert settled["status"] == "open" and settled["attempt"]["id"] == held["attempt"]["id"]
+    assert workspace(compose, employee)[0] == identity
+    edited = session.request(
+        "POST",
+        work_path(employee, held["id"]) + "/commands",
+        json={"operation_id": uuid.uuid4().hex, "expected_revision": settled["revision"], "expected_assignment_revision": settled["assignment_revision"], "action": "edit", "objective": "acceptance:work:outcome"},
+    ).json()
+    activated = activate(session, employee, edited)
+    assert activated["activation_receipt"]["attempt_id"] != held["attempt"]["id"]
+    assert await_attempt(session, employee, held["id"], {"succeeded"})["status"] == "submitted"
+
+
+def assistant_slots(compose):
+    return sum(slot["use"] == "assistant" for slot in compose.ai("verify")["spaces"])
+
+
+def create_agent(session, employee, custody, name, *, expected=201):
+    return session.request("POST", "/api/agent-instances", json={"creation_id": uuid.uuid4().hex, "name": name, "definition_name": employee["definition"], "custody": custody}, expected=expected).json()
+
+
+def listed_agent(compose, instance_id, *, all=False):
+    document = compose.ai("list", *(["--all"] if all else []))
+    return next(instance for instance in document["instances"] if instance["id"] == instance_id)
+
+
+def test_creation_past_the_count_is_refused_for_each_kind(compose, session, employee):
+    counts = session.request("GET", "/api/features").json()["agent_instances"]
+    personal = counts["ai_assistants"]
+    assert set(personal) == {"per_user", "mine", "allowed", "in_use"}
+    remaining = personal["per_user"] - personal["mine"]
+    assert 0 <= remaining <= 10
+    for _ in range(remaining):
+        previous_mine = personal["mine"]
+        create_agent(session, employee, "personal", "Counted AI assistant " + uuid.uuid4().hex)
+        personal = session.request("GET", "/api/features").json()["agent_instances"]["ai_assistants"]
+        assert personal["mine"] == previous_mine + 1
+    before = compose.psql("SELECT count(*) FROM agent_instances")
+    refused = create_agent(session, employee, "personal", "Refused AI assistant", expected=409)
+    assert refused["reason"] == "ai-assistant-limit"
+    assert {key: refused[key] for key in personal} == personal and personal["mine"] == personal["per_user"]
+    assert compose.psql("SELECT count(*) FROM agent_instances") == before
+    occupied = assistant_slots(compose)
+    company_count = session.request("GET", "/api/features").json()["agent_instances"]["ai_employees"]
+    assert set(company_count) == {"allowed", "in_use"} and company_count["allowed"] > company_count["in_use"]
+    last = None
+    remaining = company_count["allowed"] - company_count["in_use"]
+    assert 1 <= remaining <= 100
+    for _ in range(remaining):
+        previous_in_use = company_count["in_use"]
+        last = create_agent(session, employee, "company", "Counted AI employee " + uuid.uuid4().hex)
+        listed = listed_agent(compose, last["id"])
+        assert listed["kind"] == "employee" and compose.state["inventory"][listed["space"]["slot_id"]]["kind"] == "employee"
+        company_count = session.request("GET", "/api/features").json()["agent_instances"]["ai_employees"]
+        assert company_count["in_use"] == previous_in_use + 1
+    assert last is not None
+    before = compose.psql("SELECT count(*) FROM agent_instances")
+    refused = create_agent(session, employee, "company", "Refused AI employee", expected=409)
+    assert refused["reason"] == "ai-employee-limit" and refused["allowed"] == refused["in_use"] == company_count["allowed"]
+    assert compose.psql("SELECT count(*) FROM agent_instances") == before
+    assert session.request("GET", "/api/agent-instances", params={"include_provisioning": "true"}).json()["unfinished"] == []
+    assert assistant_slots(compose) == occupied
+    compose.state["last_company_employee"] = last
+    compose.state["assistant_slots_in_use"] = occupied
+
+
+def test_deleted_agents_slot_is_reused_by_the_same_kind_at_once(compose, session, employee):
+    previous = compose.state["last_company_employee"]
+    slot = listed_agent(compose, previous["id"])["space"]["slot_id"]
+    removed = session.request(
+        "POST",
+        f"/api/agent-instances/{previous['id']}/lifecycle",
+        json={"operation_id": uuid.uuid4().hex, "generation": previous["generation"], "action": "delete"},
+    ).json()
+    assert removed["complete"] is True and type(removed["space_released"]) is bool
+    if not removed["space_released"]:
+        assert eventually(lambda: listed_agent(compose, previous["id"], all=True)["space"]["release"] == "done", timeout=180, interval=15)
+    replacement = create_agent(session, employee, "company", "Replacement AI employee")
+    listed = listed_agent(compose, replacement["id"])
+    assert listed["space"]["slot_id"] == slot and listed["kind"] == "employee"
+    assert compose.state["inventory"][slot]["kind"] == "employee"
+    assert assistant_slots(compose) == compose.state["assistant_slots_in_use"]
+    session.request("POST", f"/api/agent-instances/{previous['id']}/lifecycle", json={"operation_id": uuid.uuid4().hex, "generation": removed["instance"]["generation"], "action": "restore"}, expected=404)
+
+
+def new_conversation(session, employee):
+    thread = session.request("POST", f"/api/agent-instances/{employee['instance']['id']}/conversations", json={"creation_id": uuid.uuid4().hex}, expected=201).json()
+    return {**employee, "thread_id": thread["thread_id"]}
+
+
+def messages(session, employee):
+    result = session.request("GET", f"/api/langgraph/threads/{employee['thread_id']}/state").json()["values"]["messages"]
+    assert result
+    return result
+
+
+def test_assignment_that_meets_a_blocked_host_finishes_and_records_the_denial(compose, session, employee):
+    context = new_conversation(session, employee)
+    work = delegate(session, context, "acceptance:work:denied")
+    activate(session, context, work)
+    settled = await_attempt(session, context, work["id"], {"succeeded"})
+    assert settled["status"] == "submitted"
+    stored = messages(session, context)
+    assert any(message.get("type") == "tool" and message.get("name") == "bash" and (message.get("artifact") or {}).get("sandbox_network_denied") == {"host": "example.org", "port": 443} for message in stored)
+    assert not any((message.get("artifact") or {}).get("human_input", {}).get("source") == "sandbox_network" for message in stored)
+
+
+def test_a_question_in_an_assignment_blocks_it_and_reaches_the_supervisor(compose, session, employee):
+    context = new_conversation(session, employee)
+    work = delegate(session, context, "acceptance:work:ask")
+    activate(session, context, work)
+    settled = await_attempt(session, context, work["id"], {"succeeded"})
+    assert settled["status"] == "blocked" and settled["human_input_request_id"]
+    request = session.request("GET", "/api/human-input/" + settled["human_input_request_id"]).json()
+    assert request["question"] == "Which input should I use for this assignment?"
+    assert employee["instance"]["supervisor"]["kind"] == "human"
+    assert request["recipient_id"] == employee["instance"]["supervisor"]["subject_id"] == session.user["id"] and not request["needs_routing"]
+    stored = messages(session, context)
+    assert not any(
+        message.get("name") == "ask_clarification"
+        or (message.get("artifact") or {}).get("human_input")
+        or any(call.get("name") == "ask_clarification" or call.get("function", {}).get("name") == "ask_clarification" for call in message.get("tool_calls", []))
+        for message in stored
+    )
+
+
+def contained_run(session, employee, held, reason, *, timeout):
+    def terminal():
+        work = session.request("GET", work_path(employee, held["id"])).json()
+        run = session.request("GET", f"/api/langgraph/threads/{employee['thread_id']}/runs/{held['attempt']['run_id']}").json()
+        if work["attempt"]["status"] != "failed" or run["status"] != "error":
+            return None
+        assert work["attempt"]["id"] == held["attempt"]["id"] and work["attempt"]["contained"]["reason"] == reason
+        return work
+
+    return eventually(terminal, timeout=max(0.01, timeout), interval=2)
+
+
+def test_closing_the_workspace_under_a_held_attempt_ends_its_run_with_the_reason_operator(compose, session, employee):
+    held, _identity = held_attempt(compose, session, employee)
+    started = time.monotonic()
+    closed = compose.ai("close-workspace", employee["instance"]["id"], "--end-running-work", "--wait-seconds", "60", timeout=75)
+    assert closed["verdict"] == "closed" and closed["runs_found"] == closed["runs_ended"] == 1
+    contained_run(session, employee, held, "operator", timeout=60 - (time.monotonic() - started))
+    assert time.monotonic() - started <= 60
+
+
+def test_a_killed_workspace_ends_its_run_with_the_reason_container_absent(compose, session, employee):
+    held, identity = held_attempt(compose, session, employee)
+    started = time.monotonic()
+    compose.invoke(["docker", "kill", identity["container_id"]])
+    contained_run(session, employee, held, "container-absent", timeout=60 - (time.monotonic() - started))
+    assert container_absent(compose, identity["container_id"])
+    assert container_absent(compose, "hartmesh-space-" + identity["attachment_id"])
+    assert time.monotonic() - started <= 60

@@ -1,4 +1,4 @@
-# AI employee consumer qualification
+# AI assistant and AI employee consumer qualification
 
 HartMesh supplies Work, explicit execution, human-input requests, current access
 and attributed history. Skills own business reasoning and working-file formats;
@@ -16,10 +16,13 @@ view schemas are unchanged; retained bundles include a hashed
 
 The standalone [procedure and supplier examples](../examples/skills/README.md)
 have independent working-data formats and executable operations. Their files
-follow current workspace scope: persistent Home for qualified AI employees,
-conversation scope otherwise. Working files are mutable data, not host policy,
+follow current workspace scope: a persistent Space of its own for a qualified
+AI assistant (a person’s own) or AI employee (the company’s), conversation scope
+otherwise. Working files are mutable data, not host policy,
 authenticated provenance or approval. Existing quota, ACL, native attachment and
-host write-window rules remain owned by Storage Spaces.
+file rules remain owned by Storage Spaces. Files reach an agent through its file
+routes at any time, including while its workspace runs, by one direct Gateway
+write; there is no exclusive write window.
 
 The optional [quote response plugin](../examples/deerflow-extension-work-input/README.md)
 checks its own domain fields and submits human-attributed facts through the public
@@ -32,8 +35,9 @@ resolve a decision or activate Work by interpreting supplied text.
 | --- | --- | --- |
 | Consumer files | Reporting and both independent examples: validation, lasting vs temporary choices, output inspection, exact retries, conflicts, reset, concurrent processes and failed publication | Ordinary disk fixtures do not establish native quota or containment |
 | Deterministic lifecycle | `test_work_consumer_journeys.py`: four consumers use production tools, run worker, Work/input/review services, new conversations, a reopened SQL/service stack and two successive HTTP Gateway-router processes; human answers affect final output, intermediate artifacts remain, current source revocation is applied | Graph/model, process identity and filesystem backing are injected; production startup/authentication have separate Docker acceptance coverage |
-| Native storage | Required no-skip `test_storage_spaces_volume_native.py` uses the pinned shipped AIO image, a qualified Home, two human requesters, all three consumer writers, real resident admission, host containment and replacement; Docker admission is a nonce probe of pool/bound-view bytes | Proves filesystem/runtime behavior, not model judgment; instance Work activation is a separate lifecycle |
-| Compose bundle | Required `bundle-instances` starts the shipped profile with the built backend and scripted model; seventeen journeys prove prepared mounts, accounts/seats, ordinary chat, My Files/Shared/Projects, host-attributed publication, full-files refusal/recovery, AI assistant persistence, Work outcomes/capacity and restart containment | runc under an alias; no model judgment or tenant-class proof; seat reclamation uses two allowlist chats and verifies full paired-set absence |
+| Native storage | Required no-skip `test_storage_spaces_volume_native.py` uses the pinned shipped AIO image, a qualified Space, two human requesters, all three consumer writers, real resident admission, host containment and replacement; Docker admission is a nonce probe of pool/bound-view bytes | Proves filesystem/runtime behavior, not model judgment; instance Work activation is a separate lifecycle |
+| Compose bundle | Required `bundle-instances` starts the shipped profile with the built backend and scripted model; 27 journeys prove prepared mounts, accounts/seats, ordinary chat, My Files/Shared/Projects, host-attributed publication, full-files refusal/recovery, AI assistant persistence, Work outcomes/capacity and restart containment; live/closed file transfers, 40 MiB hashes, Stop, count refusals and same-kind slot reuse, denied sites, supervisor questions, operator closure and workspace loss | runc under an alias; no model judgment or tenant-class proof; seat reclamation uses two allowlist chats and verifies full paired-set absence |
+| Tenant class | A separately recorded per-release `tenant_class` receipt covers the actual VM class under `runsc`: preflight, default first start, runtime placement, real browser transfers, cold start, full storage, egress, two conversations, hold, reboot and snapshot restore | Requires a person’s qualified run; GitHub runc/scripted results cannot stand in for it, and this document does not claim it has passed |
 | Browser | `work-input-plugin.spec.ts` loads the actual optional module and checks current request binding, invalid input, exact uncertain retries, no implicit run and generic fallback; existing Work/Attention journeys cover resumption | Deterministic HTTP responses; real SQL is qualified separately |
 | Actual model | Bounded reporting and independent-workload runs require approved test inference | Pending when no approved inference capability is available; deterministic results are not actual-model evidence |
 

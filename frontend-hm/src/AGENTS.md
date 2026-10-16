@@ -120,7 +120,19 @@ Auth UI note: the login page's "keep me signed in" option submits only `remember
 
 `/goal` and `/compact` are built-in composer commands, not skill activations. `src/components/workspace/input-box.tsx` intercepts `/goal`, `/goal clear`, and `/goal <condition>` before normal chat submission, calling Gateway `GET/PUT/DELETE /api/threads/{thread_id}/goal`. Setting `/goal <condition>` also submits the condition text as the next user task so the agent starts running immediately; status and clear do not start a run. Goal and compact requests are tied to the current `threadId` with an `AbortController`, so switching threads or unmounting the composer aborts in-flight requests and stale responses cannot update the new thread's composer state. The chat pages render `GoalStatus` above the composer from `AgentThreadState.goal`, with local optimistic state until an incremental goal update or final state reload arrives. `/compact` calls `POST /api/threads/{thread_id}/compact` to summarize older active context while leaving the full visible chat history intact; it is skipped on new/empty threads and blocked server-side while a run is in flight. Thread rename uses the same serialized state-write route; the rename dialog stays open and surfaces the server error when an active run returns 409.
 
-A new chat's sandbox is built while the person types. `useThreadChat` mints the thread id the moment `/chats/new` (or an agent's `/chats/new`) opens, and both chat pages call `usePrewarmWorkspace({ threadId, enabled: isNewThread && !isMock })` (`src/components/workspace/chats/use-prewarm-workspace.ts`), which `POST`s `/api/threads/{thread_id}/workspace/prewarm` exactly once per new thread id. The request is fire-and-forget by contract — `prewarmThreadWorkspace` in `core/threads/api.ts` never rejects — because a prewarm is an optimisation the person never sees: if it did not happen, the first turn builds the sandbox itself. Nothing is sent for an existing thread or a mock page.
+Only ordinary new chats prewarm while the person types. `useThreadChat` mints
+the thread ID on new-page entry; `usePrewarmWorkspace` posts once to
+`POST /api/threads/{id}/workspace/prewarm`. `prewarmThreadWorkspace` never rejects:
+the first turn builds the sandbox if prewarm failed. Existing/mock chats and
+AI assistant/AI employee conversations never prewarm.
+
+`selectAgentInstances` fails closed. `readRefusal` alone decodes run/HTTP refusals;
+remember a stream’s thread refusal before the SDK sees it. Unknown canonical
+`agent_instance` bindings keep file/legacy controls inert. Agent file requests
+require current Inspect (“Can see all work”); Use may attach input. Render a card
+for every tool message carrying a validated human-input request. Disabled
+controls retain their localized explanation.
+
 
 The `/` skill list stays reachable after a skill is selected: typing `/` in the editable text beside the chip reopens it, and picking an entry swaps the chip rather than adding a second one, because the wire format carries exactly one leading `/skill`. That list offers skills only while a chip is selected — a builtin command owns the whole composer line, so `/goal` behind a selected skill would submit as chat text instead of running the command. The trigger itself is unchanged: a slash only opens the list at the start of the input (`getLeadingSlashSkillQuery`), pinned by `tests/e2e/chat.spec.ts`.
 
