@@ -4,10 +4,11 @@
 capacity and lifecycle bookkeeping. Managed Gateway startup installs it after
 capturing the closed host capability and binding the exact provider/attachments.
 With `AgentInstances.residents=None`, instance preparation and completion keep
-their existing path. Storage and agent defaults remain unchanged.
+their existing path.
 The installation includes durable restoration, exact preparation correlation,
-Work admission/replay, completion, maintenance and shutdown. Compose counts remain
-disabled until the remaining product stages complete.
+Work admission/replay, completion, maintenance and shutdown. Compose defaults
+permit one AI assistant per person and ten company AI employees, with managed
+storage enabled even when its seven planning keys are absent.
 There is no database schema change in this integration.
 
 Startup recovery freezes the retained original workspace graphs and rotates at

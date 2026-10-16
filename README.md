@@ -71,7 +71,10 @@ Work shows starting, running, stopped and interrupted attempts, with explicit
 Resume. Attention routes questions to eligible people by name; a reply starts no run.
 Qualified workspaces support the provider's restricted network and read-only
 Shared binding alongside Home, without publishing a sandbox or relay port.
-Storage and agent counts remain opt-in while the Compose rollout continues.
+The Compose bundle enables managed storage and agent creation by default: ten
+account seats, one AI assistant per person and ten company AI employee places.
+It prepares 31 GiB plus disk headroom; these are allowances, not created agents.
+Read the [upgrade preflight](deploy/compose/README.md#upgrading-from-release-45) before upgrading.
 Required CI now checks 27 shipped-bundle storage and agent journeys,
 including Work outcomes, concurrent ordinary chat, idle workspace reuse and
 interrupted-attempt containment. Native CI uses real resident admission and
@@ -85,8 +88,8 @@ Its restart foundation counts each uncertain durable attachment separately and
 requires a complete validated snapshot before opening admission.
 The staged runtime also provides a private host-controlled admission guard.
 It blocks new acquisition and client publication while allowing existing lease
-cleanup and qualified storage inspection. Gateway activation remains a separate
-rollout step.
+cleanup and qualified storage inspection. Managed Gateway startup installs the
+coordinated runtime and opens execution only after successful qualification.
 Private restart-accounting seams retain qualified sandbox primaries in the
 existing capacity pool without creating clients. A bounded read-only inventory
 includes stopped containers and historical prefixes; missing or ambiguous facts
@@ -661,13 +664,13 @@ Backend processes automatically pick up `config.yaml` changes on the next config
 
 Configuration version 54 accepts optional `storage_spaces.plan` counts and GiB
 capacities, AI assistant/AI employee counts under `agents_api`, and deployment-owned
-role briefs under `ui.roles`. These planning fields prepare Compose storage and
-agent provisioning; this change keeps both features disabled by default. Role
+role briefs under `ui.roles`. The Compose bundle enables managed storage and
+agent provisioning at the defaults; other deployments configure their backing explicitly. Role
 briefs describe an AI employee's work through configuration and skills. They
 do not grant permissions. See `config.example.yaml` for the fields and
 [the changelog](CHANGELOG.md#unreleased) for the accompanying database schema changes.
 
-The backend image includes an opt-in operator CLI for preparing and maintaining
+The backend image includes an operator CLI for preparing and maintaining
 typed storage pools. It checks disk headroom before preparation and supports
 offline growth that preserves files; see [Storage Spaces](docs/STORAGE_SPACES.md)
 for its privilege requirements and current scope.
@@ -687,7 +690,7 @@ before submission and verify its actual Docker identity before acknowledging it.
 Unresolved requests survive restart, reserve capacity and block another native
 create for the same account or container name. Cancellation retains verified
 containers for fenced cleanup. Operators must preserve the directory alongside
-the pool; unsafe or unknown evidence refuses admission. Defaults remain disabled.
+the pool; unsafe or unknown evidence refuses admission.
 The journal also retains private teardown records for restricted sandboxes.
 Unresolved records reserve capacity and fence matching owners, names and target
 slots while positively unrelated work remains admissible.
@@ -863,13 +866,13 @@ When a managed conversation has no file directory yet, full storage refuses its
 first run with HTTP 507 before creating a run or opening its stream. Retrying an
 already admitted request returns that run, even if storage subsequently fills.
 
-Provider qualification includes a CI job that installs the pinned Compose
-bundle, verifies its prepared storage and runs ten real storage journeys through
-its public entry point. Full-suite fixtures use disk-backed temporary storage.
-Release tooling can carry an optional receipt of a human-performed tenant-class
-run alongside authenticated image acceptance; that receipt requires the full
-27-case qualification. Storage defaults remain disabled until the remaining
-design stages and qualification are complete.
+Required CI starts the shipped Compose bundle and verifies all 27 storage and
+agent journeys through its public entry point. Full-suite fixtures use disk-backed
+temporary storage. Before a release can be published, its acceptance record must
+also contain a validated receipt of a human-performed pinned tenant-class run,
+including complete native and 27-case bundle reports. CI's scripted model and
+runc alias establish functional behavior; they do not attest gVisor behavior or
+the tenant VM class. See [release qualification](RELEASING.md).
 
 The [Compose runbook](deploy/compose/README.md#storage-and-agents) describes
 account assignment, seat release, pending cleanup and whole-disk snapshot restore.
@@ -882,9 +885,10 @@ status without exposing counts or paths. Deployments can disable generic Space
 creation while keeping host assignment available.
 
 The Compose profile reads seven optional storage settings and runs a bounded
-preparation one-shot from the same pinned backend image. Storage stays off when
-`HARTMESH_USERS` is absent; AI assistant/AI employee counts render as zero
-while their execution support is being completed. The data disk must be a shared
+preparation one-shot from the same pinned backend image. An absent key means
+its default: ten seats, one AI assistant per person, ten company AI employees and
+1 GiB per slot. There is no storage-off key; setting both agent counts to zero
+keeps personal/company files enabled. The data disk must be a shared
 mount even with those settings absent; see the
 [Compose pre-flight check](deploy/compose/README.md#storage-and-agents). Gateway
 startup uses the same image for a bounded mount-only call. Timed-out calls remain

@@ -27,8 +27,9 @@ The Gateway configures human resolution and the persistent agent-instance
 directory when Storage Spaces is enabled. An agent is a person’s own AI assistant
 or a company’s AI employee. [Agent Execution](AGENT_EXECUTION.md) describes their
 creation and host-bound conversations. Qualified Compose workspaces use the AIO
-restricted network and configured read-only mounts; default activation remains
-opt-in until the final activation change. Other embedding consumers supply their
+restricted network and configured read-only mounts. Compose enables managed
+storage and agent creation at its documented defaults; custom embeddings
+configure their backing and policy explicitly. Other embedding consumers supply their
 own nonhuman directory and trusted authentication adapter. Advertised
 `actor_kinds` includes `nonhuman` only when that resolver exists. First-party
 My Files/Shared/Projects convenience features remain human workflows. PATs have

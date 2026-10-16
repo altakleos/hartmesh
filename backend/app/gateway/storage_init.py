@@ -37,7 +37,7 @@ from deerflow.spaces.backings import (
 )
 from deerflow.spaces.provision import INODE_BYTES, KINDS, MAX_SPACES, plan_capacities, plan_counts, storage_fit
 
-ABSENT_MEANS_DEFAULT = False
+ABSENT_MEANS_DEFAULT = True
 AT_START_LIMIT_SECONDS = 600
 LOCK_WAIT_SECONDS = 30
 USERS_RANGE = (1, 100)

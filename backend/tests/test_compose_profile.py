@@ -1469,21 +1469,26 @@ def test_render_config_mirrors_the_storage_constants(render_config: ModuleType) 
         return next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets))
 
     assert render_config.MAX_SPACES == assignment(REPO_ROOT / "backend/packages/harness/deerflow/spaces/provision.py", "MAX_SPACES") == 256
-    assert render_config.ABSENT_MEANS_DEFAULT == assignment(REPO_ROOT / "backend/app/gateway/storage_init.py", "ABSENT_MEANS_DEFAULT") is False
+    assert render_config.ABSENT_MEANS_DEFAULT == assignment(REPO_ROOT / "backend/app/gateway/storage_init.py", "ABSENT_MEANS_DEFAULT") is True
     assert render_config.AGENT_COUNTS_ACTIVE is True
 
 
 @pytest.mark.parametrize("raw", [None, "", "  "])
-def test_render_keeps_storage_off_while_users_is_absent(render_config: ModuleType, raw: str | None) -> None:
-    env = {**_base_environ(), "HARTMESH_AI_EMPLOYEES": "8"}
+def test_render_writes_the_default_plan_when_every_key_is_absent(render_config: ModuleType, raw: str | None) -> None:
+    env = _base_environ()
     if raw is not None:
-        env["HARTMESH_USERS"] = raw
+        env.update(dict.fromkeys(STORAGE_ENV_KEYS, raw))
     document, _ = render_config.render(yaml.safe_load(TEMPLATE.read_text(encoding="utf-8")), (), env)
-    assert document["storage_spaces"] == {"enabled": False, "inventory_path": "/srv/hartmesh/spaces/inventory.v2.json", "user_spaces": False, "plan": None}
-    assert document["agents_api"] == {"enabled": False, "ai_assistants_per_user": 0, "ai_employees": 0}
+    assert document["storage_spaces"] == {
+        "enabled": True,
+        "inventory_path": "/srv/hartmesh/spaces/inventory.v2.json",
+        "user_spaces": False,
+        "plan": {"users": 10, "user_gib": 1, "ai_assistants_per_user": 1, "ai_assistant_gib": 1, "ai_employees": 10, "ai_employee_gib": 1, "company_gib": 1},
+    }
+    assert document["agents_api"] == {"enabled": True, "ai_assistants_per_user": 1, "ai_employees": 10}
 
 
-@pytest.mark.parametrize("extras,counts", [({}, (0, 0)), ({"HARTMESH_AI_ASSISTANTS_PER_USER": "2", "HARTMESH_AI_EMPLOYEES": "3"}, (2, 3)), ({"HARTMESH_AI_ASSISTANTS_PER_USER": "0", "HARTMESH_AI_EMPLOYEES": "0"}, (0, 0))])
+@pytest.mark.parametrize("extras,counts", [({}, (1, 10)), ({"HARTMESH_AI_ASSISTANTS_PER_USER": "2", "HARTMESH_AI_EMPLOYEES": "3"}, (2, 3)), ({"HARTMESH_AI_ASSISTANTS_PER_USER": "0", "HARTMESH_AI_EMPLOYEES": "0"}, (0, 0))])
 def test_render_writes_the_plan_from_the_seven_keys_with_their_defaults(render_config: ModuleType, extras: dict, counts: tuple) -> None:
     env = {**_base_environ(), "HARTMESH_USERS": " 10 ", **extras}
     document, _ = render_config.render(yaml.safe_load(TEMPLATE.read_text(encoding="utf-8")), (), env)
@@ -1569,12 +1574,13 @@ def test_summary_line_reports_the_spaces_and_the_agents(render_config: ModuleTyp
         monkeypatch.setenv(key, value)
     args = ["--template", str(TEMPLATE), "--catalog", str(CATALOG), *(["--check"] if check else ["--output", str(tmp_path / "config.yaml")])]
     assert render_config.main(args) == 0
-    assert "egress=allowlist; spaces=off; " in capsys.readouterr().out
+    expected = "egress=allowlist; spaces: users 10 x 1 GiB, assistants 1 per user x 1 GiB, employees 10 x 1 GiB, company 1 GiB; agents=on; "
+    assert expected in capsys.readouterr().out
     monkeypatch.setenv("HARTMESH_USERS", "10")
     monkeypatch.setenv("HARTMESH_AI_ASSISTANTS_PER_USER", "1")
     monkeypatch.setenv("HARTMESH_AI_EMPLOYEES", "10")
     assert render_config.main(args) == 0
-    assert "egress=allowlist; spaces: users 10 x 1 GiB, assistants 1 per user x 1 GiB, employees 10 x 1 GiB, company 1 GiB; agents=on; " in capsys.readouterr().out
+    assert expected in capsys.readouterr().out
 
 
 def test_storage_init_is_pinned_outside_the_memory_equality(compose: dict) -> None:
@@ -1629,13 +1635,14 @@ def test_readme_gives_the_pre_flight_check_for_the_shared_data_disk() -> None:
     assert "keys are absent" in section
 
 
-def test_readme_says_spaces_and_agents_are_not_offered_while_the_default_is_off():
+def test_readme_states_that_an_absent_key_means_its_default():
     text = (PROFILE / "README.md").read_text(encoding="utf-8")
     section = text.split("## Storage and agents\n", 1)[1].split("\n## ", 1)[0].lstrip()
-    assert section.startswith("**The storage model and the agents are not offered in this release.**")
-    assert "HARTMESH_USERS" in section and "storage: off (HARTMESH_USERS absent)" in section
-    assert '"storage": "off"' in section and '"agents": "off"' in section
-    assert "Explicit AI assistant and AI employee counts now take effect" in section
+    assert section.startswith("An absent key means its default.")
+    assert "31 GiB" in section and "31 slots" in section
+    assert "HARTMESH_AI_ASSISTANTS_PER_USER=0" in section and "HARTMESH_AI_EMPLOYEES=0" in section
+    assert "no key that turns storage off" in section
+    assert '"storage": "ready"' in section and '"agents": "ready"' in section
     assert "ai()" in section and "release-seat" in section
 
 
@@ -1676,7 +1683,7 @@ def test_readme_carries_the_legacy_directories_note_and_the_three_preflight_line
     for command in ("df -B1 --output=size,avail /srv/hartmesh | tail -n 1", "du -sh /srv/hartmesh/home/users /srv/hartmesh/home/shared /srv/hartmesh/postgres", "accounts list"):
         assert command in preflight
         assert preflight.index(command) < preflight.index("hm down")
-    assert "Qualification with HARTMESH_USERS set" in preflight
+    assert "new storage layout applies to every upgrade" in preflight
     assert "snapshot" in section and "restore" in section.split("### Rolling back", 1)[1].lower()
     assert "--user 1000:1000 --workdir /app/backend -e PYTHONPATH=." in section
     assert "/app/backend/.venv/bin/python -m app.gateway.auth.accounts" in section

@@ -25,7 +25,8 @@ reason; `/health` maps this to state words `ready`, `none`, `held` or `unavailab
 HTTP 409 with a public `detail`, `reason: execution-unavailable` and a separate
 `execution_reason`. Feature file routes instead use a structured `detail` with
 `code`, `reason` and a public message. The Compose renderer still writes both
-explicit agent creation counts; both default to zero until default activation.
+explicit agent creation counts: one AI assistant per person and ten company AI
+employees by default. Both can be zero while personal/company storage stays enabled.
 
 Startup logs report storage and agent execution readiness separately. A prepared
 storage pool can coexist with `agents: unavailable (storage-unavailable)` while

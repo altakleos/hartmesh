@@ -90,7 +90,7 @@ def exact_keys(value, keys, label):
 
 
 def validate_tenant_class(entry, version: str, candidates: dict | None = None) -> None:
-    """Validate the optional, human-produced receipt without bypassing image admission."""
+    """Validate the required, human-produced receipt without bypassing image admission."""
     exact_keys(
         entry,
         (
@@ -638,12 +638,11 @@ def verify_acceptance(
     client=None,
 ) -> dict:
     record = read_json(git_file(revision, RECORD, 8192))
+    if "tenant_class" not in record:
+        raise AcceptanceError("tenant-class receipt is required for release acceptance")
     if (
         set(record)
-        not in (
-            {"schema", "version", "run_id", "run_attempt", "artifacts"},
-            {"schema", "version", "run_id", "run_attempt", "artifacts", "tenant_class"},
-        )
+        != {"schema", "version", "run_id", "run_attempt", "artifacts", "tenant_class"}
         or type(record["schema"]) is not int
         or record["schema"] != 1
         or not positive(record["run_id"])
@@ -662,8 +661,7 @@ def verify_acceptance(
         )
     ):
         raise AcceptanceError("acceptance record artifact digests are invalid")
-    if "tenant_class" in record:
-        validate_tenant_class(record["tenant_class"], version, candidates)
+    validate_tenant_class(record["tenant_class"], version, candidates)
     verified = check(
         repository,
         version,
@@ -674,6 +672,5 @@ def verify_acceptance(
         hashes,
         client,
     )
-    if "tenant_class" in record:
-        verified["tenant_class"] = record["tenant_class"]
+    verified["tenant_class"] = record["tenant_class"]
     return verified

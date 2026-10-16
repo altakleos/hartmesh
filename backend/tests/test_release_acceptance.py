@@ -20,6 +20,7 @@ VERSION = "2.2.0+hartmesh.41"
 RUN_ID = 1234
 DIGEST = "sha256:" + "a" * 64
 IMAGES = {name: f"ghcr.io/{REPOSITORY}-{name}@{DIGEST}" for name in ("backend", "frontend")}
+CANDIDATES = {**IMAGES, "sandbox": f"ghcr.io/{REPOSITORY}-sandbox@{DIGEST}"}
 
 
 def load():
@@ -146,11 +147,12 @@ def test_both_stores_accept_exact_images_and_allow_later_notes_and_pins(evidence
     guard, actions, root = evidence
     value = record(evidence)
     assert value == {"schema": 1, "version": VERSION, "run_id": RUN_ID, "run_attempt": 2, "artifacts": {stores: artifact["digest"] for stores, artifact in zip(guard.STORES, actions.artifacts, strict=True)}}
+    value["tenant_class"] = tenant_receipt()
     write_record(evidence, value)
     (root / "CHANGELOG.md").write_text("release notes\n", encoding="utf-8")
     git(root, "add", "CHANGELOG.md")
     git(root, "commit", "-qm", "notes only")
-    assert guard.verify_acceptance(REPOSITORY, VERSION, "HEAD", IMAGES, client=actions) == value
+    assert guard.verify_acceptance(REPOSITORY, VERSION, "HEAD", CANDIDATES, client=actions) == value
     assert actions.downloads == [1, 2, 1, 2]
 
 
@@ -158,9 +160,9 @@ def test_local_uncommitted_success_claim_cannot_qualify_a_release(evidence):
     guard, actions, root = evidence
     path = root / "deploy/compose/acceptance.json"
     path.parent.mkdir(parents=True)
-    path.write_text(json.dumps(record(evidence)), encoding="utf-8")
+    path.write_text(json.dumps({**record(evidence), "tenant_class": tenant_receipt()}), encoding="utf-8")
     with pytest.raises(guard.AcceptanceError, match="acceptance"):
-        guard.verify_acceptance(REPOSITORY, VERSION, "HEAD", IMAGES, client=actions)
+        guard.verify_acceptance(REPOSITORY, VERSION, "HEAD", CANDIDATES, client=actions)
 
 
 def tenant_receipt():
@@ -170,23 +172,30 @@ def tenant_receipt():
         "recorded_at": "2026-10-13T07:00:00Z",
         "guest": {"vcpus": 4, "memory_mib": 8192, "data_disk_gib": 100, "kernel": "6.8", "docker_engine": "28.3", "compose": "2.38", "runsc": "20260901"},
         "images": {"backend": DIGEST, "sandbox": DIGEST},
-        "native": {"cases": 25, "junit_sha256": DIGEST},
+        "native": {"cases": 26, "junit_sha256": DIGEST},
         "acceptance": {"cases": 27, "junit_sha256": DIGEST},
         "steps": dict.fromkeys(("fresh_install", "runtime", "rprivate", "cold_start", "enospc", "egress_denial", "transfer_64_mib", "two_runs_one_workspace", "reboot", "restore"), "passed"),
         "seconds": dict.fromkeys(("prepare", "cold_start", "pending", "fence_pending", "idle_eviction", "transfer_64_mib"), 1.25),
     }
 
 
-def test_acceptance_record_admits_an_optional_tenant_class_entry(evidence):
+def test_acceptance_record_admits_a_valid_required_tenant_class_entry(evidence):
     guard, actions, _root = evidence
     value = {**record(evidence), "tenant_class": tenant_receipt()}
     write_record(evidence, value)
-    candidates = {**IMAGES, "sandbox": f"ghcr.io/{REPOSITORY}-sandbox@{DIGEST}"}
-    assert guard.verify_acceptance(REPOSITORY, VERSION, "HEAD", candidates, client=actions) == value
+    assert guard.verify_acceptance(REPOSITORY, VERSION, "HEAD", CANDIDATES, client=actions) == value
     assert actions.downloads == [1, 2, 1, 2]
     # New authenticated admission evidence always replaces the original five
     # fields; it cannot silently carry an older tenant qualification forward.
     assert "tenant_class" not in record(evidence)
+
+
+def test_acceptance_record_requires_the_tenant_class_entry(evidence):
+    guard, actions, _root = evidence
+    write_record(evidence, record(evidence))
+    with pytest.raises(guard.AcceptanceError, match="tenant.class.*required"):
+        guard.verify_acceptance(REPOSITORY, VERSION, "HEAD", CANDIDATES, client=actions)
+    assert actions.downloads == [1, 2]
 
 
 @pytest.mark.parametrize("mutation", ["version", "unknown", "missing-step", "failed-step", "bad-utc", "bool-guest", "wrong-image"])
@@ -299,13 +308,13 @@ def test_new_rerun_during_verification_invalidates_the_evidence(evidence):
 
 def test_committed_pointer_hash_and_version_are_checked(evidence):
     guard, actions, _root = evidence
-    value = record(evidence)
+    value = {**record(evidence), "tenant_class": tenant_receipt()}
     value["artifacts"]["sqlite"] = "sha256:" + "d" * 64
     write_record(evidence, value)
     with pytest.raises(guard.AcceptanceError, match="digest"):
-        guard.verify_acceptance(REPOSITORY, VERSION, "HEAD", IMAGES, client=actions)
+        guard.verify_acceptance(REPOSITORY, VERSION, "HEAD", CANDIDATES, client=actions)
     with pytest.raises(guard.AcceptanceError, match="version"):
-        guard.verify_acceptance(REPOSITORY, "2.2.0+hartmesh.42", "HEAD", IMAGES, client=actions)
+        guard.verify_acceptance(REPOSITORY, "2.2.0+hartmesh.42", "HEAD", CANDIDATES, client=actions)
 
 
 def test_new_harness_file_cannot_escape_fingerprint_coverage(evidence):

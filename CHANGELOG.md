@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Storage and agents in the Compose bundle
+
+Every person, AI assistant, AI employee and the company has separate fixed-capacity
+storage. My Files, Projects and conversation files use the person's Space;
+Shared uses the company's. The default plan permits ten accounts, one AI assistant
+per person and ten company AI employees. It prepares their slots without creating
+agents. People add their own AI assistants; administrators add company AI employees
+with a human supervisor. Briefs, files and memory persist across conversations.
+
+Accounts take seats; a disabled account retains its seat until explicit release.
+Agent access separates chatting and attaching files from inspecting all work.
+Assignments ask their supervisor through Attention and resume explicitly. Qualified
+workspaces survive ordinary Gateway restarts; lost or contained attempts become
+visible interruptions. The platform keeps business procedures in skills and extensions.
+
+### Member upgrade notes
+
+Tell the administrator these changes before upgrading from release 45:
+
+1. **My Files, Shared and Projects start empty.** Earlier files are not copied.
+   People should download anything they need before the window; the provider keeps
+   the old directories for an agreed time, protected by the pre-upgrade snapshot.
+2. **Conversations retain text, with new empty file directories.** Earlier uploads
+   and produced files stay unread in the old data-disk directories.
+3. **Accounts take seats.** Settings shows used and allowed seats and refuses an
+   extra account with the provider's remedy. Turning an account off keeps its seat;
+   explicit release removes that person's files and AI assistants before reuse.
+4. **My assistants and AI employees are separate lists.** People add their own
+   AI assistants; administrators add company AI employees with human supervisors.
+   AI assistants do not see their owner's My Files and stop with a disabled owner;
+   company AI employees can continue under current supervision.
+5. **Attention lists human-input requests.** Eligible members see requests waiting
+   for their reply or a recipient; the count refreshes every 30 seconds.
+6. **Files show ordinary capacity remedies.** People delete files or conversations
+   when full, or ask their administrator/provider for room. Agent managers can
+   remove files on the Files tab. No member storage-management screen is required.
+7. **Agents is available to every signed-in member.** Custom-agent/profile routes
+   that release 45 disabled in this profile are enabled.
+8. **Ordinary chats keep their attachment flow.** Blocked-site requests now render
+   their approval card with the ordinary chat's three choices.
+9. **AI agent workspaces use the provider's standing site list.** A human manager
+   in their own conversation can allow a blocked site for five minutes. Autonomous
+   assignments and other readers get a denied-site line; Gateway web search/fetch
+   remain outside this workspace list.
+10. **Workspaces share two sandbox slots.** On the smallest profile only one Work
+    assignment runs at a time. Scheduled work can occupy the other slot; a message
+    needing unavailable capacity receives a retry remedy.
+11. **Access and brief changes close the workspace.** The next message starts a
+    qualified replacement. Applying a brief or Work-policy change also requires
+    confirmation of open assignments before they resume; access/supervisor changes
+    do not require that assignment confirmation.
+12. **Creation respects each kind's allowance.** Deletion is irreversible and
+    removes the agent's memory and files. A slot returns to the same kind after
+    verified containment and cleanup; unconfirmed cleanup remains visibly pending.
+13. **Assignments ask through Attention.** A question blocks the assignment for
+    its supervisor, whose reply does not start work; Resume does. A denied site is
+    recorded without a conversational approval card. Work ending without a result
+    or question says so and leaves the conversation available for review.
+14. **Opening an AI agent's files requires Can see all work.** Colleague setup
+    selects it alongside Can chat. Can chat alone allows conversation and attaching
+    input, and does not permit reading produced files or giving assignments.
+
 ### AI assistant and AI employee product experience
 
 My assistants and AI employees have separate lists and creation flows, named
@@ -20,8 +82,7 @@ tool messages, with structured denied-site lines for autonomous work.
 The required Compose job now verifies 27 named cases without skips, including
 40 MiB file integrity, limits and same-kind reuse after deletion, supervisor
 questions and interrupted-workspace settlement. The runbook documents all nine
-operator verbs, tenant roles and evidence boundaries. Default activation remains
-opt-in pending its separate change. No additional database schema, native
+operator verbs, tenant roles and evidence boundaries. No additional database schema, native
 evidence format or configuration-version change is introduced by these screens,
 acceptance additions or documents; the schema changes for this unreleased version
 remain listed below.
@@ -130,8 +191,8 @@ attempts. Required CI adds seven real bundle cases for AI assistant file
 persistence, runtime placement, Work outcomes/capacity and graceful/forced restart
 recovery. Native qualification now uses real resident admission and verifies host
 containment before replacement. Named-case gates reject skips or missing cases;
-operator docs describe holds, recovery and workspace cleanup. Default activation stays deferred; product controls are now available when
-explicit agent counts are configured.
+operator docs describe holds, recovery and workspace cleanup. Product controls
+respect the configured AI assistant and AI employee allowances.
 
 Startup agent readiness reflects execution admission. Resident initialization
 failures produce bounded source diagnostics without exception values or tenant
@@ -170,7 +231,6 @@ and describe their own files and read-only Shared files.
 Account release transactionally deletes personal AI assistants and their bound
 Spaces, removes unfinished creations without a Space, and preserves company AI
 employees. Unconfirmed containment or final cleanup retains capacity charges.
-Storage defaults and the remaining product stages stay deferred.
 
 There is no database schema, native evidence format or configuration-version change.
 
@@ -180,8 +240,7 @@ Managed startup can finish interrupted cleanup of an AI agent's original workspa
 when its attachment row is missing or already fenced. It uses retained container,
 network and backing identities, preserves live runs and unfinished create requests,
 and keeps uncertain cleanup charged. Bounded retries run before a fresh complete
-capacity census. Historical closure attribution and files remain intact. Compose
-agent counts remain disabled pending the remaining product stages.
+capacity census. Historical closure attribution and files remain intact.
 
 There is no database schema, native evidence format or configuration-version change.
 
@@ -195,8 +254,6 @@ SQL closure and durable journal completion. Lost replies, cancellation and parti
 batch cleanup preserve retry evidence; finished retries observe absence without
 replaying destructive commands. Unfinished cleanup blocks backing administration
 and release. Capacity reporting verifies original graphs before counting them.
-Compose agent counts remain disabled pending strict orphan recovery and the
-remaining product stages.
 
 There is no database schema or configuration-version change. The private native
 evidence journal adds explicit v5 actorless resident records; v1–v4 validation
@@ -214,8 +271,6 @@ admissions before stopping workers. Existing maintenance adds operator holds,
 eligible workspace reaping, Work settlement and release cleanup for every kind.
 Reclamation retries brief reservation conflicts for up to five seconds in the
 same maintenance pass. Unknown outcomes retain their existing retry safeguards.
-Compose agent counts remain disabled; strict durable resident orphan cleanup and
-the remaining product stages follow separately.
 
 There is no database schema or configuration-version change. Private native
 evidence adds explicit v3 zero-slot create and v4 zero-slot teardown records;
@@ -231,7 +286,7 @@ confirmed host failures while preserving candidates and assignment state. Termin
 worker results win over late settlement; failed transactions publish no receipt
 or journal line. Worker completion now returns its resulting status with unchanged
 decisions. The coordinated Gateway runtime above now consumes these APIs.
-Storage/agent defaults remain disabled. There is no database schema change.
+There is no database schema change.
 
 ### Shared workspace capacity foundation
 
@@ -243,7 +298,7 @@ exact preparation claims, idle containment and completion bookkeeping. Expired o
 cancelled reservations cannot release an uncertain preparation or publish late
 capacity. Timed-out eviction remains owned until drainage. The coordinated Gateway
 runtime above now installs restoration and Work integration.
-Storage/agent defaults remain disabled. There is no database schema change.
+There is no database schema change.
 
 ### Workspace runtime observations and shutdown attribution
 
@@ -254,7 +309,7 @@ terminal outcome, without adding a run store or ledger. Gateway shutdown records
 `gateway_stopped` before cancellation and preserves an existing reason. Cancelled
 cleanup cannot overwrite a staged success or error with durable interruption;
 unconfirmed finalization remains the worker's or recovery's responsibility.
-Storage/agent defaults remain disabled. There is no database schema change.
+There is no database schema change.
 
 ### Durable restricted sandbox containment
 
@@ -269,7 +324,7 @@ Bounded ordinary reconciliation recovers active accounts' unfinished cleanup;
 targeted retirements retain their required owner/slot reservation.
 Each original ID and name must be absent before durable completion and capacity
 release. Held executions, foreign identities and unknown outcomes retain backing
-reservations. Storage/agent defaults remain disabled. There is no database schema
+reservations. There is no database schema
 change; the private journal adds a new record format.
 
 ### Restricted resident workspace preparation
@@ -282,7 +337,7 @@ slot coordination survives worker drainage and container-ID commit. Reuse checks
 current root binding revisions, mounts and network. Adapter reuse retains fresh
 host and native-evidence qualification. Paired cleanup is best effort and removes
 only inspected immutable resource IDs. Docker control timeouts allow up to 630
-seconds. Storage/agent defaults remain disabled. There is no database schema change.
+seconds. There is no database schema change.
 
 ### Workspace closure attribution and host containment
 
@@ -293,7 +348,7 @@ Callbacks run after commit, support exact recorded retries and cannot undo a
 confirmed closure. Read-only liveness checks preserve unknown Docker outcomes and
 require current-daemon proof before and after inspection. Lost creation replies
 remain pending even after an empty container census; cleanup failures retain
-retryable closure state. Storage/agent defaults remain disabled. There is no
+retryable closure state. There is no
 database schema change.
 
 ### Compose storage operations
@@ -301,19 +356,18 @@ database schema change.
 The operator runbook now describes User/company assignment, ordinary chat mounts,
 mountless degradation, seats and release retries, full-files notices and complete
 data-disk backup/restore. The bundle gate exercises seat reclamation after two
-allowlist chats and checks absence of both complete resource sets. Legacy-folder notes apply
-only to storage-enabled qualification, and timing/capacity examples identify
-unmeasured assumptions. Consumer documentation records the ten-case bundle gate
-and current native evidence. Storage/agent defaults remain disabled. There is no
-database schema change.
+allowlist chats and checks absence of both complete resource sets. Legacy-folder
+notes apply to every upgrade, and timing/capacity examples identify unmeasured
+assumptions. Consumer documentation records the complete 27-case bundle gate
+and current native evidence. There is no database schema change.
 
 ### Compose storage qualification and tenant receipts
 
 A dedicated Linux/Docker CI job starts the shipped Compose bundle and verifies
-ten storage journeys, including typed mounts, missing assignments, account seats,
-reclamation, Shared publication and full-files refusal/recovery. Qualification
-fixtures use disk-backed temporary directories. Release admission accepts an
-optional, strictly validated tenant-class receipt; its operator tool requires all
+27 storage and agent journeys, including typed mounts, missing assignments,
+account seats, reclamation, Shared publication and full-files refusal/recovery.
+Qualification fixtures use disk-backed temporary directories. Release admission
+requires a strictly validated human tenant-class receipt; its operator tool requires all
 27 named acceptance cases, derives runtime/mount evidence from passed tests and
 preserves authenticated image-acceptance fields. The backend runtime image now
 explicitly installs the namespace and privilege-drop tools required by the bundle.
@@ -323,7 +377,6 @@ Chats without assigned personal files clear upload context before the model runs
 CI failure evidence includes bounded physical image and binding facts.
 Full personal storage refuses a first-conversation run with HTTP 507 before
 admission or streaming, while recorded idempotent retries still return their run.
-Storage defaults remain disabled.
 There is no database schema change.
 
 ### Managed storage and account seat notices
@@ -336,7 +389,7 @@ leave Shared usable, preparation polls while mounted and list recovery retries
 are bounded. Native downloads retain browser streaming and account-owned
 cleanup. Settings displays managed seats, handles concurrent seat refusals and
 keeps storage-off account controls; registration uses the same localized seat
-remedy. Storage defaults remain disabled. There is no database schema change.
+remedy. There is no database schema change.
 
 ### Released-account storage reclamation
 
@@ -347,8 +400,7 @@ them in borrowed transactions and holds containment through worker drainage and
 commit. Unverified slots, busy or unknown cleanup and changed eligibility preserve
 bindings and role links for retry. Final native proof runs outside SQL; confirmed
 publication removes only the exact User role with its binding. Failures remain
-isolated by resource and maintenance phase. Storage defaults remain disabled.
-There is no database schema change; private journal JSON remains version 1.
+isolated by resource and maintenance phase. There is no database schema change; private journal JSON remains version 1.
 
 ### Native owner and slot containment
 
@@ -360,7 +412,7 @@ held executions, foreign or unresolved requests and uncertain cleanup preserve
 the backing. Canonical fenced cleanup removes qualified open-mode primaries by
 immutable ID and can retry a lost absence reply. Unsupported restricted resource
 sets refuse automatic reclamation. The Gateway supplies account-release policy.
-Storage defaults remain disabled. There is no database schema change; private
+There is no database schema change; private
 journal JSON remains version 1.
 
 ### Managed native creation evidence
@@ -373,8 +425,7 @@ creation now records before Docker submission and acknowledges only after exact
 actual identity inspection. Verified results survive sync/async/prewarm cancellation;
 unknown results remain quarantined or conservatively counted. Qualification restores
 pending capacity before native publication and refuses repeat requests for the same
-account or name. Account-release containment uses the retained provider scope. Storage defaults
-remain disabled. There is no database schema change; private
+account or name. Account-release containment uses the retained provider scope. There is no database schema change; private
 journal JSON uses schema version 1.
 
 ### Managed pool runtime ownership
@@ -385,7 +436,7 @@ operator-created ownership file is retained through sandbox and storage drainage
 and SQL disposal; Docker child commands inherit ownership. Unavailable ownership
 keeps history and mountless text chats usable, without adopting or replacing
 native containers. Qualification retries retain the same provider and lock.
-Unmanaged storage remains supported. Defaults remain disabled. There is no
+Unmanaged storage remains supported. There is no
 database schema change.
 
 ### Managed storage administration
@@ -397,7 +448,7 @@ refusals preserve current caller grants and lifecycle generation checks.
 Exact ADMIN metadata admission can proceed when backing verification fails,
 without bypassing attachment containment or granting file access. Failed marker
 verification no longer publishes speculative capacity growth with metadata edits.
-Storage defaults remain disabled. There is no database schema change.
+There is no database schema change.
 
 ### Host storage reclamation foundation
 
@@ -406,9 +457,9 @@ deletion explicitly permits discarding backups and every attachment is fenced.
 Cleanup renews both roots, rejects stale views and retains durable progress across
 interrupted initialization, full private control storage and failed commits.
 Unknown evidence stays pending. Physical verification failure before cleanup
-leaves the slot untouched and reserved as uncertain. The following Compose stage
-connects this mechanism to account release and confirmed sandbox containment.
-Storage defaults remain disabled. There is no database schema change; private
+leaves the slot untouched and reserved as uncertain. Compose uses this mechanism
+for account release after confirmed sandbox containment.
+There is no database schema change; private
 operation/checkpoint JSON is versioned.
 
 ### Storage capacity snapshots
@@ -416,8 +467,7 @@ operation/checkpoint JSON is versioned.
 Delayed metadata and filesystem checks can no longer overwrite a newer slot
 binding or clear an allocation awaiting commit. Failed allocation retains
 uncertain capacity; failed metadata commits publish no verified cache facts.
-Current resource and filesystem admission remains mandatory. Storage defaults
-remain disabled. There is no database schema change.
+Current resource and filesystem admission remains mandatory. There is no database schema change.
 
 ### Compose mounted parent permissions
 
@@ -428,8 +478,7 @@ changes. Startup `mount-all` repairs only the parent after exact image allocatio
 inventory/image/mounted UUID agreement and writable loop-mount proof; it creates
 no missing data/control roots and changes no fstab or fsck behavior. Containers
 still receive data roots or admitted descendants. This corrects the design's
-mounted root:root 0755 layout, which prevented safe root renewal. Defaults remain
-disabled. There is no database schema change.
+mounted root:root 0755 layout, which prevented safe root renewal. There is no database schema change.
 
 ### Storage binding identity
 
@@ -444,7 +493,7 @@ marker. Failed allocation retains private evidence and excludes uncertain slots.
 Allocation serializes independent callers through transaction completion. Feature
 first-use links recheck before marker publication, so losing concurrent requests
 leave unused slots empty and retain current identity and grant checks.
-Defaults remain disabled. There is no database schema change.
+There is no database schema change.
 
 ### Compose storage maintenance
 
@@ -456,7 +505,7 @@ in the owning transaction. Live writes retain private locks through commit,
 uncertain outcomes remain pending, and cleanup preserves unrelated evidence.
 Recovery and assignment tasks drain before shutdown. Busy responses include a
 workflow/lifecycle cause; trusted writes can record human provenance without
-changing authorization. Defaults remain disabled. There is no database schema
+changing authorization. There is no database schema
 change.
 
 ### Compose account export
@@ -469,8 +518,7 @@ excluded. Source authority and backing identity are refreshed before preparation
 copying and download; discarded or replaced exports refuse before headers.
 Individual changed or unreadable files remain visible as manifest skips, while
 storage-authority failures stop the export. Shutdown drains discarded builders;
-download acquisition, reads and closure drain through cancellation. Defaults
-remain disabled. There is no database schema change.
+download acquisition, reads and closure drain through cancellation. There is no database schema change.
 
 ### Compose file workflows
 
@@ -486,11 +534,11 @@ receipt, exclusion and size rules. Browser tools publish on the owning Gateway
 loop and ignore caller-supplied native paths. Source-only operations require
 READ and EXPORT without also requiring WRITE. Borrowed project transactions
 recheck current identity and resource authority on the same database connection.
-Storage defaults remain disabled. There is no database schema change.
+There is no database schema change.
 
 ### Compose conversation storage
 
-Opt-in managed ordinary chats use their assigned User Space for conversation
+Managed Compose ordinary chats use their assigned User Space for conversation
 workspace, uploads, outputs and My Files, with company Shared mounted read-only.
 Missing or unverified personal storage and unsupported storage credentials allow
 text chats without file access. Retained/warm sandbox clients recheck current
@@ -502,7 +550,7 @@ absence, fresh admission and confined file removal. Latest-turn branching copies
 only conversation files with target reservation and rollback on failure; other
 branches copy history without files. Gateway shutdown drains storage admission
 before closing SQL.
-Defaults remain disabled. This change adds no database schema changes.
+This change adds no database schema changes.
 
 ### Conversation path foundation
 
@@ -510,8 +558,7 @@ Trusted host integrations can route conversation folders into an explicitly
 selected data root while keeping the existing thread leaf layout and Docker
 source paths aligned. Projected thread directories use `0770` and descriptor
 traversal refuses symlinked or foreign-filesystem descendants. The callback
-selects paths only; coordinated Compose chat admission and mounts follow in the
-next integration change. This change adds no database schema changes.
+selects paths only; coordinated Compose admission verifies the chat mounts. This change adds no database schema changes.
 
 ### Assigned feature storage
 
@@ -530,8 +577,8 @@ successful creation. Typed Compose plans enforce user seats across local, SSO an
 offline creation. Operators can disable local accounts and release disabled seats
 with stable-ID cleanup retries, preserving rows and provenance. Released accounts
 cannot be enabled or reclaim addresses through stale credential writes. Background
-repair and volume cleanup remain for later integration changes; defaults stay disabled. No database schema change
-is added, but existing feature-link rows now identify resource roles rather than
+repair retries missing assignments and cleanup in the existing maintenance pass.
+No database schema change is added, but existing feature-link rows now identify resource roles rather than
 one resource per plugin.
 
 ### Storage concurrency
@@ -560,56 +607,77 @@ same schema directly.
 - Add nullable `users.released_at`; attachment `fenced_by_kind`, `fenced_by_id`,
   `fence_reason` and `fenced_at`; and Work-attempt `contained_reason`,
   `workspace_ready_at` and `attachment_id`.
-- Permit `host` as an actor in `agent_work_events`. This foundation change
-  now supports released-seat facts; containment and host settlement remain staged.
+- Permit `host` as an actor in `agent_work_events` for containment and Work
+  settlement, alongside released-seat facts and durable closure attribution.
 - Downgrade refuses recorded host replacements, released seats, containment
   attribution, host-settled attempt facts and host events. SQLite also refuses
   rebuilding attachments referenced by mounts; removing the unused user column
   requires SQLite 3.35 or later to preserve user preferences.
 
 A release-45 Gateway cannot start on this newer database revision. Returning to
-release 45 requires restoring a database snapshot taken before the upgrade.
+release 45 requires restoring the whole data-disk snapshot taken before the upgrade.
 
 ### Configuration and deployment
 
-Configuration version 54 adds validated storage planning counts and capacities,
-AI assistant/AI employee counts, and optional deployment-owned role briefs.
-The storage model and agents are not offered in this release. With
-`HARTMESH_USERS` absent, storage-init prepares no filesystem and user behavior
-remains as in release 45. Setting the keys is limited to operator qualification:
-the pool verifies but account assignment/chat mounts are not active, and both
-rendered agent counts remain zero. The Compose storage runbook documents current
-planning defaults, commands and the shared-mount preflight required even when off.
+Configuration format advances from 53 to 54; the Compose template renders it
+without tenant configuration-file edits. Seven optional `.env` keys select
+counts and whole-GiB capacities: `HARTMESH_USERS`, `HARTMESH_USER_STORAGE_GIB`,
+`HARTMESH_AI_ASSISTANTS_PER_USER`, `HARTMESH_AI_ASSISTANT_STORAGE_GIB`,
+`HARTMESH_AI_EMPLOYEES`, `HARTMESH_AI_EMPLOYEE_STORAGE_GIB` and
+`HARTMESH_COMPANY_STORAGE_GIB`. Absent keys now use the defaults: ten seats,
+one AI assistant per person, ten company AI employee places and 1 GiB per slot.
+There is no storage-off key. Set both agent counts to zero to stop agent
+execution and retain personal/company files and the existing agent data.
 
-The backend image includes an environment-only `storage_init` operator CLI for
-typed fixed ext4 pools: preparation, mounting, fstab synchronization, verification,
-offline growth, explicit removal, quiescence and status. Preparation is resumable,
-checks the whole plan against disk/inode headroom, and remains off when
-`HARTMESH_USERS` is absent. The existing standalone helper remains compatible.
-There are no additional database schema changes beyond revision 0041 above.
+**Before upgrading from release 45**, follow the
+[Compose preflight](deploy/compose/README.md#upgrading-from-release-45):
 
-Managed storage startup retains durable records when the inventory, a slot or
-Docker admission is unavailable. Verification and admission respect the startup
-budget, keep unfinished work owned and recheck failed admission every minute.
-Typed assignment adds folder layouts and atomic user/company role links. Verified
-offline growth preserves filesystem identity and updates durable bounds after
-restart. Work reads report current execution availability through the shared
-status probe. This change adds no database schema or configuration version change.
+- The data disk must be ext4 and a shared mount; check `findmnt -no
+  TARGET,PROPAGATION --target /srv/hartmesh`. Make the actual data mount shared
+  and retain `shared` in its fstab options before starting the bundle.
+- Linux 6.0 or later, loop devices and the documented eight filesystem tools are
+  required. Missing prerequisites report unavailable storage; they do not adopt
+  the earlier directories.
+- The defaults allocate **31 GiB**, plus the larger of 4 GiB and 10% of disk
+  size. At least 36 GiB free is needed on a 50 GiB data disk; a 100 GiB disk
+  needs 41 GiB free. Read `df` and the new bundle's `si status` before `up`.
+- Count all accounts, including disabled accounts, and set `HARTMESH_USERS` at
+  or above that number before the swap. Disabled accounts retain seats.
+- Agree the maintenance window and tell the administrator the member changes
+  below. Keep a whole data-disk snapshot from before the upgrade, stop the old
+  stack and remove its exact orphaned workspace/sandbox resources before starting
+  the new pinned bundle.
 
-Feature bootstrap reports storage/execution state, account seats, AI assistant/
-AI employee allowances and caller-specific file readiness. Public health adds
-state words without counts or paths. Unsupported identities receive no personal
-projection; projection failures return unavailable defaults. The deployment's
-`user_spaces` flag now refuses generic Space creation while retaining host
-assignment. No additional schema or configuration version changes.
+The new privileged, 128 MiB `storage-init` one-shot prepares the complete missing
+plan under `/srv/hartmesh/spaces`, writes its fstab block and exits before the
+Gateway starts. Both services bind the pool at its host path with slave
+propagation. The first start allocates, formats and mounts 31 default slots;
+**94 seconds is illustrative, not a measured tenant-class outage**. Preparation
+is resumable and bounded at 600 seconds. A partial plan remains visible and can
+continue at the next `up` or `si prepare`; inspect actual readiness and timings.
+The backend digest is shared by Gateway, storage-init and the mount-only helper.
 
-The Compose profile renders the seven optional storage settings and prepares
-typed pools through a bounded, privileged `storage-init` one-shot. Gateway and
-one-shot pool binds require shared propagation on the data disk, even when the
-settings are absent; check the Compose README before starting. The release pin
-rewrites both services and the Gateway helper image together. Storage stays off
-with `HARTMESH_USERS` absent and agent creation counts remain zero. No additional
-schema or configuration version changes.
+Every upgraded tenant uses the new layout. Earlier My Files, Shared, Projects
+and conversation working directories stay on disk, unread and uncopied; the new
+folders start empty. Account, conversation, schedule and custom-agent metadata
+remain. Follow the runbook's retention/removal note and snapshot restore procedure.
+A bundle swap alone cannot roll back the newer schema or file layout.
+
+Agent files accept up to 64 MiB; an additional front door must admit 65 MiB bodies
+on `/api/agent-instances/`. Running workspaces share the two sandbox slots with
+ordinary chats. On the smallest profile one Work assignment runs at a time; a
+scheduled task can also occupy a slot. Roles are deployment configuration and
+skills, with no business policy embedded in the platform.
+
+Operator tools cover fixed ext4 preparation, mount/verify, offline growth,
+quiescence and removal; nine JSON AI agent inspection/recovery verbs; and
+`accounts release-seat`. Read the [operator runbook](deploy/compose/README.md#storage-and-agents)
+for current identities, privileges and pending cleanup behavior. Verification
+preserves uncertain bindings and retries qualification every minute. Feature
+bootstrap reports storage/execution readiness, seats and allowances without byte
+capacities. Public health reports state words only. No additional database
+migration or configuration-version change is introduced by default activation;
+revision 0041 above is the complete schema change since release 45.
 
 The Gateway's optional helper-image setting enables a bounded `mount-all` call
 before storage verification. Only that verb is admitted. Timeout ownership and
@@ -624,6 +692,18 @@ host identity checks remain mandatory; probe cleanup does not touch free-slot
 control folders. Workspace topology guards cover preparation and resume, with
 discovery/fencing retained. Native fixtures accept an explicit writer runtime.
 No additional schema or configuration version changes.
+
+### Qualification
+
+Required CI separately verifies the 26 native filesystem cases, the complete
+27-case shipped Compose suite and both SQLite/PostgreSQL production Docker
+profiles. The scripted provider and runc alias establish functional behavior;
+they do not qualify the tenant VM class, actual-model behavior or gVisor. Every
+new release must also carry a validated, human-produced `tenant_class` receipt
+in `deploy/compose/acceptance.json`, bound to the pinned backend and sandbox
+images, native/bundle JUnit hashes, guest facts, ten checks and six timings.
+Authenticated acceptance of both image-store profiles remains mandatory; recording
+fresh image acceptance removes any earlier tenant receipt. Tenant-class qualification is recorded after the human run.
 
 ## [2.2.0+hartmesh.45] - 2026-10-09
 
