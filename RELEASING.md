@@ -121,11 +121,11 @@ from the same tagged source.
    workflow, runner, browser test directory, fixtures or test dependency controls
    require fresh acceptance; changes to image build inputs also require fresh
    candidates and pins.
-   For a release that needs tenant-class qualification, perform that run on the
-   pinned bundle after committing the image acceptance record. Preserve the
+   Every new release requires a human-performed tenant-class run on the pinned
+   bundle after committing the image acceptance record. Preserve the
    native and complete 27-case bundle JUnit reports, the measured guest facts,
    the eight manually verified steps and six timings, and the bundle's image
-   list. Add the optional receipt with:
+   list. Add the required `tenant_class` receipt with:
    ```bash
    python3 scripts/tenant_class_receipt.py \
      --record deploy/compose/acceptance.json --version 2.1.0+hartmesh.1 \
@@ -136,9 +136,11 @@ from the same tagged source.
    ```
    The receipt tool derives runtime and mount-propagation evidence from the
    two required acceptance cases, refuses skipped or incomplete reports and
-   preserves the five authenticated image-acceptance fields. The initial
-   ten-case storage CI job provides stage-two evidence; a tenant receipt needs
-   all 27 cases. The receipt remains optional while activation is deferred.
+   preserves the five authenticated image-acceptance fields. Its ten checks
+   comprise eight manually verified steps and those two derived results. Required
+   CI also runs all 27 bundle cases, but its scripted model and runc alias cannot
+   attest the tenant VM class or gVisor. A missing receipt blocks release admission;
+   never generate a human qualification claim from CI results.
    Refreshing image admission replaces its five fields and removes an older
    tenant receipt, which must then be recorded again before tagging.
 

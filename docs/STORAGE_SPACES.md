@@ -77,7 +77,7 @@ inspection. An occupied workflow lock refuses both paths.
 No database schema change is needed for these commands. Host settlement records
 its actual UTC completion time in existing result JSON; historical rows receive
 no invented completion time. Recovery and handoff events use the existing Space
-event stream. Storage and agent defaults remain opt-in.
+event stream. The Compose bundle enables managed storage and agent counts by default.
 
 The `agent_operator_*` service graph shares pure storage constructors with the
 Gateway. It never enters Gateway startup, acquires provider/runtime ownership or
@@ -117,7 +117,7 @@ checks exclude unresolved sibling journals without requiring renewal permissions
 Durable host-release crash recovery uses the existing operation table's private,
 versioned `host-release` JSON and the writer label `nonhuman/host:space-release`.
 That label is provenance, never a directory identity. There is no database schema
-change and storage defaults remain disabled. Native byte/inode/held-descriptor
+change. Native byte/inode/held-descriptor
 qualification runs only in the mandatory Linux Docker CI tier.
 
 Explicit `POST /api/spaces/{id}/lifecycle` with `action: release` instead requires
@@ -221,8 +221,11 @@ Gateway startup applies the migration through the existing bootstrap.
 
 See the [Compose storage runbook](../deploy/compose/README.md#storage-and-agents)
 for the shared-mount preflight, seven planning keys, pool layout, operator verbs
-and snapshot rollback. The model and agents remain inactive by default in this
-release. The renderer and operator CLI both keep `ABSENT_MEANS_DEFAULT = False`.
+and snapshot rollback. The renderer and operator CLI both use
+`ABSENT_MEANS_DEFAULT = True`: absent keys prepare ten User, ten AI assistant,
+ten AI employee and one company slot, 1 GiB each. Allocation needs 31 GiB plus
+`max(4 GiB, 10% of disk size)` headroom. Counts permit creation; preparation does
+not create agents. Both agent counts set to zero keep personal/company storage enabled.
 
 
 The opt-in host filesystem adapter exposes a product file API and browser. It supports
@@ -438,7 +441,7 @@ Malformed records, interrupted stages and limits refuse admission without evicti
 Preserve this directory with the pool; no browser/model force-clear API is provided.
 Mountless chats and existing durable attachment preparation retain their own
 lifecycles. The Gateway retains this qualified provider for account-release
-containment. Defaults remain off.
+containment.
 There is no database schema change; private journal JSON remains version 1.
 
 The private AIO native-retirement scope reserves an opaque owner and the exact
@@ -509,7 +512,9 @@ the process exits zero so startup can continue, while its JSON document retains
 the actual return code and any partial outcome. No request provisions a slot.
 After a forced interruption, the document lists persisted slots and their current
 mount state; facts the supervisor cannot establish are explicitly `null`.
-Storage remains off when `HARTMESH_USERS` is absent in this foundation change.
+An absent `HARTMESH_USERS` uses ten seats in the Compose plan. There is no
+storage-off environment key; tenant-specific overrides must remain available to
+operator commands as well as startup.
 
 The mandatory Linux Docker job requires actual mounted backings and rejects
 every skipped native case. This development host cannot mount the fixture; it

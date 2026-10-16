@@ -29,11 +29,14 @@ def test_malformed_command_line_prints_the_document_and_exits_one(argv, capsys):
     assert lines[0] == json.dumps(doc, sort_keys=True)
 
 
-def test_absent_capacity_means_one_gib_and_absent_agent_count_means_zero():
-    assert si.parse_plan({}) is None
+def test_absent_keys_use_ten_seats_one_assistant_per_user_and_ten_employees():
+    default = si.parse_plan({})
+    assert default is not None and default.users == 10
+    assert default.ai_assistants_per_user == 1 and default.ai_employees == 10
+    assert all(value == 1 << 30 for value in si.plan_capacities(default).values())
     p = si.parse_plan({"HARTMESH_USERS": " 2 "})
     assert p.users == 2 and p.user_gib == p.company_gib == 1
-    assert p.ai_assistants_per_user == p.ai_employees == 0
+    assert p.ai_assistants_per_user == 1 and p.ai_employees == 10
 
 
 @pytest.mark.parametrize("key", list(si.KEYS))
@@ -218,13 +221,26 @@ def test_fit_is_computed_once_for_whole_missing_set_and_refuses_before_images(op
     assert "Grow the data disk" in doc["note"]
 
 
-def test_prepare_creates_only_the_directory_when_users_is_absent(tmp_path, monkeypatch):
-    monkeypatch.setattr(si.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(si.os, "fchown", lambda *args: None)
-    tool = si.StorageInitializer(tmp_path, None)
-    with tool.locked():
-        assert tool.prepare()["verdict"] == "nothing-to-do"
-    assert sorted(p.name for p in tool.pool.iterdir()) == [".storage-init.lock"]
+def test_prepare_with_every_key_absent_prepares_the_default_plan(operator):
+    # The fixture intercepts every host command and uses sparse files: this is
+    # a planning test, not native filesystem or tenant-class qualification.
+    tool, mounted, commands = operator
+    tool.plan = si.parse_plan({})
+    assert tool.plan is not None
+    tool.capacities = si.plan_capacities(tool.plan)
+    doc = tool.prepare()
+    counts = dict(company=1, user=10, assistant=10, employee=10)
+    assert doc["returncode"] == 0 and doc["verdict"] == "complete"
+    assert doc["prepared_now"] == doc["prepared"] == counts
+    assert doc["missing"] == dict.fromkeys(si.KINDS, 0)
+    assert doc["fits"] is True
+    assert doc["required_bytes"] == doc["reserved_bytes"] == 31 << 30
+    assert doc["headroom_bytes"] == 5 << 30
+    assert doc["fstab"]["entries"] == len(mounted) == 31
+    assert len([command for command in commands if command[0] == "mkfs.ext4"]) == 31
+    entries = json.loads(tool.manifest.read_text(encoding="utf-8"))["volumes"]
+    assert [entry["kind"] for entry in entries] == ["company"] + ["user"] * 10 + ["assistant"] * 10 + ["employee"] * 10
+    assert all(entry["max_bytes"] == 1 << 30 and entry["max_inodes"] == 131_072 for entry in entries)
 
 
 @pytest.mark.parametrize("change", ["disk", "image", "mount", "schema", "kind"])

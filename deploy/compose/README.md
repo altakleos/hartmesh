@@ -87,11 +87,11 @@ get explicit `environment:` entries and never see a provider key.
 
 | Key | Consumed by |
 | --- | --- |
-| `HARTMESH_USERS` | User slot count, 1–100; absent keeps storage off. (§ "Storage and agents"). |
+| `HARTMESH_USERS` | User slot count, 1–100; absent 10. (§ "Storage and agents"). |
 | `HARTMESH_USER_STORAGE_GIB` | User capacity, 1–1024 GiB; absent 1. (§ "Storage and agents"). |
-| `HARTMESH_AI_ASSISTANTS_PER_USER` | Assistant slots per user, 0–10; absent 0 in this release. (§ "Storage and agents"). |
+| `HARTMESH_AI_ASSISTANTS_PER_USER` | AI assistant slots per user, 0–10; absent 1. (§ "Storage and agents"). |
 | `HARTMESH_AI_ASSISTANT_STORAGE_GIB` | Assistant capacity, 1–1024 GiB; absent 1. (§ "Storage and agents"). |
-| `HARTMESH_AI_EMPLOYEES` | AI employee slots, 0–100; absent 0 in this release. (§ "Storage and agents"). |
+| `HARTMESH_AI_EMPLOYEES` | AI employee slots, 0–100; absent 10. (§ "Storage and agents"). |
 | `HARTMESH_AI_EMPLOYEE_STORAGE_GIB` | AI employee capacity, 1–1024 GiB; absent 1. (§ "Storage and agents"). |
 | `HARTMESH_COMPANY_STORAGE_GIB` | Company capacity, 1–1024 GiB; absent 1. (§ "Storage and agents"). |
 | `HARTMESH_APP_SUBNET` | The `app` bridge's IPAM subnet **and** the Gateway's `AUTH_TRUSTED_PROXIES`, which are the same reference. Absent -- which is what every existing tenant `.env` is -- both take the shipped default, `10.201.26.0/24`. Set it only when that range collides with something the guest must still reach (§ "Network model"). |
@@ -2175,21 +2175,22 @@ attempt can occupy both sandbox slots; scheduler concurrency does not count Work
 
 ## Storage and agents
 
-**The storage model and the agents are not offered in this release.** This
-release carries the storage service and seven optional planning keys, inactive
-by default. With `HARTMESH_USERS` absent, Storage Spaces and the agents API
-remain off as in release 45. `storage-init` creates `/srv/hartmesh/spaces` and
-its lock, prepares no filesystems, and exits. The Gateway writes
-`storage: off (HARTMESH_USERS absent)`; `/health` reports `"storage": "off"`
-and `"agents": "off"`. Setting the keys is for operator qualification only.
+An absent key means its default. With all seven keys absent, Compose prepares
+31 slots of 1 GiB: ten user slots, ten AI assistant slots and ten AI employee
+slots, plus one company slot. This reserves 31 GiB plus the disk headroom below.
+Each person may add one AI assistant; administrators may add up to ten company
+AI employees. Preparing slots does not create those agents. There is no key that turns storage off.
+To offer no agents, set `HARTMESH_AI_ASSISTANTS_PER_USER=0` and
+`HARTMESH_AI_EMPLOYEES=0`; personal and company files remain enabled.
+Complete the shared-mount and disk preflight before the first start or upgrade.
 
 A **Space** is a fixed-capacity ext4 filesystem inside a fully allocated image
 on the data disk. A **slot** is a prepared filesystem, assigned or free, with
 kind `user`, `assistant`, `employee` or `company`. The **pool** holds the slots
 at `/srv/hartmesh/spaces`. An AI assistant is a person's own agent; an AI
 employee is the company's agent. Counts and capacities below plan their storage;
-explicit agent counts also enable counted creation and qualified execution while
-default activation remains deferred. The product screens distinguish both kinds
+the counts permit creation and qualified execution at the defaults or the
+operator's configured limits. The product screens distinguish both kinds
 and support Files, Work, Memory, Access and Settings.
 
 **Qualification and operator hold.** With managed storage enabled, the Gateway
@@ -2245,7 +2246,7 @@ names a different mount target, use that target for the remedy. An unshared
 mount causes Docker to refuse the bind before the Gateway starts; skipping the
 one-shot does not bypass the Gateway's identical requirement.
 
-Qualification with the keys set also needs these host checks:
+Storage preparation also needs these host checks:
 
 ```bash
 findmnt -no FSTYPE --target /srv/hartmesh  # ext4
@@ -2259,7 +2260,7 @@ The slot verifier requires filesystem identity support from Linux 6.0 or later.
 Missing storage prerequisites leave storage unavailable; they do not replace
 the configured backing with an ordinary directory.
 
-With keys set, the one-shot checks the complete missing plan, prepares slots
+The one-shot checks the complete missing plan, prepares slots
 one at a time in company/user/assistant/employee order, mounts existing slots,
 and updates its fstab block. The Gateway verifies the inventory and backing,
 then probes whether Docker sees the same bytes. It creates the company Space
@@ -2288,18 +2289,18 @@ routes return a structured refusal when their own role is unavailable.
 
 ### The keys
 
-All seven keys are validated even when storage is off. Values are decimal whole
+All seven keys are validated, including when both agent counts are zero. Values are decimal whole
 numbers with surrounding blanks trimmed; empty means absent. A change takes
 `hm up -d --wait`. The template contains neither `storage_spaces` nor
 `agents_api`; the renderer writes both sections.
 
-| Key | Range | When absent in this release | What it plans |
+| Key | Range | When absent | What it plans |
 | --- | --- | --- | --- |
-| `HARTMESH_USERS` | 1–100 | Storage off | User slots. Once used, keep this key: removing it makes files in Spaces unreachable until it returns. |
+| `HARTMESH_USERS` | 1–100 | 10 | User slots; choose at least the number of accounts, including disabled accounts. |
 | `HARTMESH_USER_STORAGE_GIB` | 1–1024 | 1 | Whole GiB per user slot. |
-| `HARTMESH_AI_ASSISTANTS_PER_USER` | 0–10 | 0 | Assistant slots per planned user. |
+| `HARTMESH_AI_ASSISTANTS_PER_USER` | 0–10 | 1 | AI assistant slots per planned user. |
 | `HARTMESH_AI_ASSISTANT_STORAGE_GIB` | 1–1024 | 1 | Whole GiB per assistant slot. |
-| `HARTMESH_AI_EMPLOYEES` | 0–100 | 0 | Company AI employee slots; `on` and `off` are invalid. |
+| `HARTMESH_AI_EMPLOYEES` | 0–100 | 10 | Company AI employee slots; `on` and `off` are invalid. |
 | `HARTMESH_AI_EMPLOYEE_STORAGE_GIB` | 1–1024 | 1 | Whole GiB per AI employee slot. |
 | `HARTMESH_COMPANY_STORAGE_GIB` | 1–1024 | 1 | Whole GiB for the company slot. |
 
@@ -2314,8 +2315,8 @@ max_inodes     = max_bytes // 8192  per Space
 ```
 
 `U`, `A`, `E` and `C` are the capacities converted from GiB to bytes.
-Missing bytes/counts include only slots still to prepare. Explicitly setting
-all seven values below reserves 31 GiB:
+Missing bytes/counts include only slots still to prepare. The defaults below
+reserve 31 GiB; writing them explicitly has the same effect as leaving them absent:
 
 ```dotenv
 HARTMESH_USERS=10
@@ -2331,21 +2332,20 @@ This prepares
 ten user, ten assistant, ten employee and one company slot. On a 50 GiB data
 disk it also requires 5 GiB left free. About 48 GiB initially free would leave
 about 12 GiB beyond that reserve. This is arithmetic, not a measured workload.
-Setting only `HARTMESH_USERS=10` prepares eleven 1 GiB slots in this release.
+Setting only `HARTMESH_USERS=10` has the same 31-slot plan. Both agent counts
+set to zero plan eleven 1 GiB slots, with personal and company files still enabled.
 
-With the keys set for operator qualification, people's files, Shared and Projects
-live in Spaces and ordinary chats mount them. Missing or unverified assignments
-remain visible without preventing text chat. Explicit AI assistant and AI employee counts now take effect:
-creation respects each kind's allowance and each person's assistant limit,
+People's files, Shared and Projects live in Spaces and ordinary chats mount
+them. Missing or unverified assignments remain visible without preventing text
+chat. Creation respects each kind's allowance and each person's assistant limit,
 including administrators. Unfinished, paused and archived agents count; exact
-creation retries preserve their identity and files. Assistant and employee files
-use slots of their matching kind. Both counts still default to zero in this
-build. With explicit counts, Files and conversation uploads write directly while
-the workspace runs or is closed, deletion reclaims the matching kind’s slot, and
-separate lists and creation flows distinguish the two kinds. Default activation
-remains a separate change. Qualified nonzero counts permit execution; holds and unavailable
-storage refuse new replies, activations and lifecycle changes. Work projections
-report readiness, containment and capacity, with details limited by Inspect.
+creation retries preserve their identity and files. AI assistant and AI employee
+files use slots of their matching kind. Files and conversation uploads write
+directly while the workspace runs or is closed, deletion reclaims the matching
+kind's slot after verified cleanup, and separate lists and creation flows
+distinguish the two kinds. Qualified nonzero counts permit execution; holds and
+unavailable storage refuse new replies, activations and lifecycle changes.
+Work projections report readiness, containment and capacity, with details limited by Inspect.
 A successful qualification writes `storage: ready (…)` and `agents: ready (…)`
 when a count is nonzero, or `agents: none (…)` when both are zero.
 The bytes and inodes per conversation are unmeasured;
@@ -2442,7 +2442,6 @@ missing slots and does not cure a Gateway helper failure.
 
 | Output | Meaning |
 | --- | --- |
-| `storage: off (HARTMESH_USERS absent)` | Storage disabled; no slot verification or admission. |
 | `storage: storage-init mount-all exit …` | Helper outcome for existing mounts. |
 | `storage: ready (…)` | Pool admitted, with prepared/verified counts and bounds. |
 | `storage: ready, … spaces short (…)` | Incomplete plan; inspect whether the missing allocation fits. |
@@ -2460,19 +2459,25 @@ missing slots and does not cure a Gateway helper failure.
 | `agents: work attempt <id> of <id> settled failed (…)` | Interrupted attempt failed without promoting its candidate. |
 | `agents: held (…)` / `agents: hold lifted` | Operator hold found / removed. |
 
-The renderer reports `spaces=off` with the key absent, otherwise the planned
-counts/capacities followed by `agents=on` when either agent count is nonzero,
+The renderer reports the planned counts/capacities, including defaults for absent
+keys, followed by `agents=on` when either agent count is nonzero,
 or `agents=none` otherwise. It reads no disk. `/health` reports
 state words only; `/api/features` adds authenticated readiness and counts,
 without paths or byte capacities. See [Storage Spaces](../../docs/STORAGE_SPACES.md).
 
 ### Fresh install
 
-Complete the shared-mount preflight, leave `HARTMESH_USERS` absent, then start
-with `hm up -d --wait`. Read `hm logs --no-log-prefix storage-init gateway`.
-Expect the one-shot's `nothing-to-do` document with an off note, the Gateway's
-`storage: off (HARTMESH_USERS absent)`, `/health` storage/agents `off`, and the
-renderer summary `spaces=off`. No storage image is prepared in this mode.
+Complete the shared-mount, Linux/tool and disk preflight. With all keys absent,
+`si status` computes the 31 GiB plan and required headroom before preparation.
+Start with `hm up -d --wait` and read
+`hm logs --no-log-prefix storage-init gateway`. Expect 31 prepared/mounted slots,
+31 fstab entries, `storage: ready (…)` and `agents: ready (…)`, with
+`"storage": "ready"` and `"agents": "ready"` in `/health` after qualification.
+The renderer reports ten users, one AI assistant per user and ten AI employees.
+The first administrator takes the first account seat and assigned User Space.
+The first allocation can take minutes; read the actual preparation outcome and
+readiness. Insufficient disk, missing prerequisites or incomplete preparation
+remain visible and do not fall back to the earlier directories.
 
 ### Upgrading from release 45
 
@@ -2489,7 +2494,7 @@ accounts list
 
 Read these while the old Gateway still runs. Count accounts, including disabled
 ones, before choosing `HARTMESH_USERS`; disabling an account keeps its seat.
-For an enabled plan, free bytes less the missing allocation must leave the larger
+Free bytes less the missing allocation must leave the larger
 of 4 GiB and 10% of the disk size. The explicit 31 GiB example needs at least
 36 GiB free on a 50 GiB disk. If existing accounts exceed the configured seats,
 the Gateway still starts; excess accounts work without personal files until the
@@ -2500,27 +2505,27 @@ key is raised and assignment succeeds.
 2. Stop the stack with `hm down`. Inspect and remove the old Gateway's exact
    orphaned sandbox/relay/bridge containers using the existing upgrade procedure
    (§ "Upgrading a guest that already runs sandboxes").
-3. Replace `/opt/hartmesh` with the new pinned bundle and complete its shared-mount
-   preflight. Its new `si status` command can now report the off state. Leave
-   `HARTMESH_USERS` absent for normal use.
+3. Replace `/opt/hartmesh` with the new pinned bundle. Complete its shared-mount,
+   Linux/tool and disk preflight; set `HARTMESH_USERS` at or above the account
+   count. With the stack down, `si status` must report that the plan fits.
 4. Run `hm up -d --wait`, supplying the provider-key wrapping secret if needed.
-5. Inspect storage-init/Gateway logs and `/health`; expect the same off results
-   as a fresh installation. Normal bootstrap applies revision
-   `0041_storage_host_replacements` on SQLite or PostgreSQL.
+   Absent keys now prepare the default 31 GiB plan, plus required headroom.
+5. Inspect storage-init/Gateway logs and `/health`; expect prepared/verified
+   storage and qualified agent readiness as on a fresh installation. Normal
+   bootstrap applies revision `0041_storage_host_replacements` on SQLite or PostgreSQL.
 
 The snapshot is taken before the database upgrade. No user-file transfer is
-performed by this foundation. For the additive table/columns and guarded
+performed by this upgrade. For the additive table/columns and guarded
 technical downgrade, see the [schema notes](../../CHANGELOG.md#schema-changes).
 
-**Qualification with HARTMESH_USERS set.** Keep all seven planning keys explicit
-on the provider's qualification guest. This mode assigns the new layout; the
-following legacy-directory note applies only with storage enabled. With the key
-absent, the existing paths remain in use.
+The new storage layout applies to every upgrade, including when all seven keys
+are absent. Give the administrator the [member upgrade notes](../../CHANGELOG.md#member-upgrade-notes)
+before the maintenance window. The following directories are not migrated into Spaces.
 
 **The directories of release 45 stay on the disk, and nothing reads them.** After this upgrade My Files, Shared and Projects are folders inside each person's Space and the company's, and they start empty. What people kept before the upgrade is still on the data disk, untouched, at `/srv/hartmesh/home/users/<id>/files/` (each person's earlier My Files), `/srv/hartmesh/home/shared/` (the earlier Shared) and `/srv/hartmesh/home/users/<id>/projects/` (each person's earlier project documents). The product does not read them and does not copy them: a person who had files in My Files opens an empty My Files. Tell the customer's administrator before the upgrade. Once the snapshot taken before the upgrade is kept, you may remove the three directories; `du -sh` on each says what returns to the data disk. The conversations' own directories of release 45, `/srv/hartmesh/home/users/<id>/threads/<thread>/` with everything under them, are likewise left unread: a conversation that existed before the upgrade opens with an empty working directory, and its earlier uploads, produced files, skills projection and ACP workspace stay on the data disk until you remove `threads/` as a whole. Removing the directories is the only action this release offers for them; there is no copy into a Space.
 
-Once storage is enabled, first-party file and chat paths resolve through verified
-roles rather than those legacy directories. Account, conversation and schedule
+First-party file and chat paths resolve through verified roles rather than those
+legacy directories. Account, conversation and schedule
 metadata remain. Snapshot restore is the way back.
 
 **How long it takes.** The first start allocates, formats and mounts the plan one
@@ -2562,11 +2567,10 @@ this profile. Restart when people and AI agents are not working.
 
 ### Commands
 
-With `HARTMESH_USERS` absent, commands return an off/nothing-to-do result rather
-than operating on slots; `quiesce` remains available. `status` still checks host
-prerequisites and validates inventory, so it may refuse before returning off. Keep
-the key for an existing enabled pool, including while performing verification,
-growth or removal. An off result is not proof that a slot was verified or removed.
+Every command resolves absent keys to their defaults. Keep any tenant-specific
+counts and capacities in `.env` during verification, growth and removal;
+removing an override restores its default and does not remove existing slots.
+`status` checks host prerequisites and validates inventory before reporting the plan.
 
 Each verb emits one sorted JSON document. Exit 0 means success/nothing to do,
 1 refusal, and 2 partial or uncertain completion. `prepare --at-start` always
@@ -2666,7 +2670,7 @@ Every verb can return these refusals, exit 1:
 
 - `the configuration /srv/hartmesh/home/config.yaml cannot be loaded: <text>`
 - `the database cannot be reached: <text>`
-- `Storage Spaces are off in the rendered configuration (HARTMESH_USERS absent); there is nothing to act on`, from every verb, and while this release keeps absent-key activation off
+- `Storage Spaces are off in the rendered configuration (HARTMESH_USERS absent); there is nothing to act on`, if a configuration outside this Compose profile explicitly disables Storage Spaces; absent keys in this profile use defaults
 
 ##### `list`
 
