@@ -629,9 +629,12 @@ async def _company_role(session):
 
 async def resident_readonly_roots(app):
     """Project the current Company binding without borrowing actor authority."""
-    from deerflow.spaces.incarnations import verify_bound
+    return await storage_readonly_roots(app.state.storage_spaces)
 
-    files = app.state.storage_spaces
+
+async def storage_readonly_roots(files):
+    """Shared observation for resident admission and isolated operator commands."""
+    from deerflow.spaces.incarnations import verify_bound
 
     async def snapshot(session):
         row = await _company_role(session)
@@ -1210,6 +1213,25 @@ def human_lookup(repository):
     return lookup
 
 
+def read_storage_pool(config):
+    """Read and verify the configured pool without starting Gateway services."""
+    return _read_pool(config)
+
+
+async def storage_allowance(config, catalog, session_factory, kind: str, *, session=None) -> Allowance:
+    """Read a typed allowance with an optional borrowed transaction."""
+    return await _allowance(config, catalog, session_factory, kind, session=session)
+
+
+def build_storage_services(config, catalog, session_factory, repository):
+    """Construct policy objects only; callers separately own all startup effects."""
+    human = human_lookup(repository)
+    directory = InstanceDirectory(session_factory, human=human)
+    registry = SpaceRegistry(session_factory, HostPrincipalResolver(human=human, nonhuman=directory.lookup, nonhuman_in_session=directory.lookup_in_session))
+    files = SpaceFiles(registry, catalog, inventory_path=Path(config.inventory_path), user_spaces=config.user_spaces)
+    return files, AgentInstances(files, directory)
+
+
 async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session_factory, creation_repository=None) -> None:
     entered = time.monotonic()
     app.state.storage_startup_entered = entered
@@ -1257,10 +1279,7 @@ async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session
             creation_repository = bind_user_repo(session_factory)
         else:
             creation_repository = SQLiteUserRepository(session_factory)
-    human = human_lookup(creation_repository)
-    directory = InstanceDirectory(session_factory, human=human)
-    registry = SpaceRegistry(session_factory, HostPrincipalResolver(human=human, nonhuman=directory.lookup, nonhuman_in_session=directory.lookup_in_session))
-    app.state.storage_spaces = SpaceFiles(registry, catalog, inventory_path=Path(config.inventory_path), user_spaces=config.user_spaces)
+    app.state.storage_spaces, app.state.agent_instances = build_storage_services(config, catalog, session_factory, creation_repository)
     app.state.storage_spaces._managed_runtime_required = config.plan is not None
     app.state.storage_spaces._pool_runtime_owner = getattr(app.state, "pool_runtime_owner", None)
     app.state.storage_spaces.maintenance_logger = logger
@@ -1273,7 +1292,6 @@ async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session
             if service.healthy:
                 app.state.storage_spaces.workflow_settlers[namespace] = service.settle_workflow
     _install_seats(app, session_factory, creation_repository)
-    app.state.agent_instances = AgentInstances(app.state.storage_spaces, directory)
     app.state.agent_conversations = AgentConversations(app.state.agent_instances)
     if thread_store is not None and hasattr(thread_store, "instance_authority"):
         thread_store.instance_authority = app.state.agent_conversations

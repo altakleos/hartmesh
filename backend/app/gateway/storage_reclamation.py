@@ -282,10 +282,20 @@ async def finish_releases(app):
                 candidate = await _release_candidate(files, session, space_id)
             except (BackingUnavailable, SpaceConflict):
                 continue
-            candidates.append((space_id, candidate))
-    for space_id, candidate in candidates:
+            operator_deleted = None
+            if candidate[1] in {"assistant", "employee"} and getattr(app.state, "agent_instances", None) is not None:
+                from deerflow.persistence.agent_instances.model import AgentInstanceRow
+
+                owner = await session.scalar(select(AgentInstanceRow).where(AgentInstanceRow.home_id == space_id, AgentInstanceRow.status == "deleted"))
+                deletion = await session.scalar(select(SpaceEventRow).where(SpaceEventRow.space_id == space_id, SpaceEventRow.action == "delete").order_by(SpaceEventRow.generation.desc()).limit(1))
+                if owner is not None and deletion is not None and isinstance(deletion.details, dict) and deletion.details.get("by") == "host" and deletion.details.get("cause") == "operator-deleted":
+                    operator_deleted = owner.id
+            candidates.append((space_id, candidate, operator_deleted))
+    for space_id, candidate, operator_deleted in candidates:
         result = await release_deleted_space(app, space_id, retain_unverified=True, _expected=candidate)
         if all(result.get(key) is True for key in ("complete", "slot_released", "newly_reclaimed")):
             reclaimed += 1
             logger.info("storage: %s space reclaimed (%s)", candidate[1], candidate[0])
+            if operator_deleted is not None:
+                logging.getLogger("app.gateway.storage_spaces").info("agents: %s %s deleted by the operator; space %s released", candidate[1], operator_deleted, candidate[0])
     return reclaimed

@@ -12,13 +12,13 @@ import stat
 import tarfile
 from pathlib import Path
 
-from deerflow.spaces.filesystem import FileConflict
+from deerflow.spaces.filesystem import ConfinedFilesystem, FileConflict, UnsafeSpacePath
 
 MAX_ARCHIVE_ENTRIES = 100_000
 
 
-def _digest(path):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+def _digest(path, *, directory_fd=None):
+    fd = os.open(path if directory_fd is None else path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory_fd)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise FileConflict("Backup is not a regular private file")
@@ -38,32 +38,114 @@ def _sync_directory(path):
         os.close(fd)
 
 
-def backup(volume, backup_id, *, target: Path | None = None):
-    target = Path(target) if target is not None else volume.control_path / ("backup-" + backup_id + ".tar")
-    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+def _source_open(filesystem, path, flags, *, allow_root=False):
     try:
-        with os.fdopen(fd, "wb", closefd=False) as output, tarfile.open(fileobj=output, mode="w", dereference=False) as archive:
-            pending = [volume.data_path]
-            count = 0
-            while pending:
-                directory = pending.pop()
-                for child in sorted(directory.iterdir()):
-                    metadata = child.lstat()
-                    if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
-                        raise FileConflict("Backup does not support special filesystem nodes")
+        return filesystem._open(path, flags, allow_root=allow_root, follow_symlinks=False)
+    except (OSError, UnsafeSpacePath) as exc:
+        raise FileConflict("Backup source changed during archiving") from exc
+
+
+def _source_revision(metadata):
+    return metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns
+
+
+def _same_source(filesystem, path, metadata):
+    descriptor = _source_open(filesystem, path, os.O_PATH | os.O_NOFOLLOW)
+    try:
+        if _source_revision(os.fstat(descriptor)) != _source_revision(metadata):
+            raise FileConflict("Backup source changed during archiving")
+    finally:
+        os.close(descriptor)
+
+
+def _archive_tree(archive, filesystem):
+    root = os.fstat(filesystem._data_fd)
+    pending, count, links = [("", (root.st_dev, root.st_ino))], 0, {}
+    while pending:
+        folder, expected = pending.pop()
+        directory = _source_open(filesystem, folder, os.O_RDONLY | os.O_DIRECTORY, allow_root=not folder)
+        try:
+            metadata = os.fstat(directory)
+            if (metadata.st_dev, metadata.st_ino) != expected:
+                raise FileConflict("Backup source changed during archiving")
+            names = []
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if count + len(names) >= MAX_ARCHIVE_ENTRIES:
+                        raise FileConflict("Backup exceeds the supported entry count")
+                    names.append(entry.name)
+            for name in sorted(names):
+                path = folder + "/" + name if folder else name
+                held = _source_open(filesystem, path, os.O_PATH | os.O_NOFOLLOW)
+                try:
+                    metadata = os.fstat(held)
                     count += 1
                     if count > MAX_ARCHIVE_ENTRIES:
                         raise FileConflict("Backup exceeds the supported entry count")
-                    archive.add(child, arcname=child.relative_to(volume.data_path).as_posix(), recursive=False)
+                    info = tarfile.TarInfo(path)
+                    info.mode, info.uid, info.gid, info.mtime = stat.S_IMODE(metadata.st_mode), metadata.st_uid, metadata.st_gid, metadata.st_mtime
                     if stat.S_ISDIR(metadata.st_mode):
-                        pending.append(child)
+                        info.type = tarfile.DIRTYPE
+                        archive.addfile(info)
+                        pending.append((path, (metadata.st_dev, metadata.st_ino)))
+                    elif stat.S_ISLNK(metadata.st_mode):
+                        info.type, info.linkname = tarfile.SYMTYPE, os.readlink("", dir_fd=held)
+                        archive.addfile(info)
+                        _same_source(filesystem, path, metadata)
+                    elif stat.S_ISREG(metadata.st_mode):
+                        identity = metadata.st_dev, metadata.st_ino
+                        previous = links.get(identity) if metadata.st_nlink > 1 else None
+                        if previous is not None:
+                            if previous[1] != _source_revision(metadata):
+                                raise FileConflict("Backup source changed during archiving")
+                            info.type, info.linkname = tarfile.LNKTYPE, previous[0]
+                            archive.addfile(info)
+                        else:
+                            info.type, info.size = tarfile.REGTYPE, metadata.st_size
+                            # Reopen only the owned, type-checked inode. Neither
+                            # mutable leaf names nor parent links select bytes.
+                            readable = os.open(f"/proc/self/fd/{held}", os.O_RDONLY | os.O_CLOEXEC)
+                            with os.fdopen(readable, "rb") as content:
+                                if _source_revision(os.fstat(content.fileno())) != _source_revision(metadata):
+                                    raise FileConflict("Backup source changed during archiving")
+                                archive.addfile(info, content)
+                                if _source_revision(os.fstat(content.fileno())) != _source_revision(metadata):
+                                    raise FileConflict("Backup source changed during archiving")
+                            if metadata.st_nlink > 1:
+                                links[identity] = path, _source_revision(metadata)
+                        _same_source(filesystem, path, metadata)
+                    else:
+                        raise FileConflict("Backup does not support special filesystem nodes")
+                finally:
+                    os.close(held)
+        finally:
+            os.close(directory)
+
+
+def backup(volume, backup_id, *, target: Path | None = None, target_directory_fd: int | None = None):
+    if target_directory_fd is not None and (target is None or type(target_directory_fd) is not int or target_directory_fd < 0):
+        raise ValueError("A pinned archive directory requires an explicit target and open descriptor")
+    target = Path(target) if target is not None else volume.control_path / ("backup-" + backup_id + ".tar")
+    name = target if target_directory_fd is None else target.name
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=target_directory_fd)
+    try:
+        with os.fdopen(fd, "wb", closefd=False) as output, tarfile.open(fileobj=output, mode="w", dereference=False) as archive:
+            factory = getattr(volume, "filesystem", None)
+            with factory() if callable(factory) else ConfinedFilesystem(volume.data_path, volume.control_path) as filesystem:
+                _archive_tree(archive, filesystem)
             output.flush()
         os.fsync(fd)
-        _sync_directory(target.parent)
-        return _digest(target)
+        if target_directory_fd is None:
+            _sync_directory(target.parent)
+        else:
+            os.fsync(target_directory_fd)
+        return _digest(target, directory_fd=target_directory_fd)
     except BaseException:
         # No public bytes have changed. This exact file belongs to this call.
-        target.unlink(missing_ok=True)
+        try:
+            os.unlink(name, dir_fd=target_directory_fd)
+        except FileNotFoundError:
+            pass
         raise
     finally:
         os.close(fd)

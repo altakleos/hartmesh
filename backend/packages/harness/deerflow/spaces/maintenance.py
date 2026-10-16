@@ -14,6 +14,7 @@ from deerflow.persistence.spaces.model import SpaceRow
 from deerflow.spaces.attachments import SpaceAttachments
 from deerflow.spaces.filesystem import FileConflict, _path
 from deerflow.spaces.incarnations import BoundVolume, validate_marker
+from deerflow.spaces.settlement import host_settlement_result
 from deerflow.spaces.workflows import WorkflowLockMissing, WorkflowReceipt, _owner, _read_only, _receipt, acquire, close
 from deerflow.utils.file_io import run_file_io
 
@@ -120,7 +121,9 @@ def _cleanup(filesystem):
     os.fsync(root)
 
 
-async def _settle(files, candidate):
+async def _settle(files, candidate, *, discard=False, raise_errors=False, operator_host_id=None, discard_admission=None):
+    if discard and (not isinstance(operator_host_id, str) or not 1 <= len(operator_host_id) <= 128):
+        raise ValueError("Operator discard requires its Docker host identity")
     log = getattr(files, "maintenance_logger", logger)
     filesystem, descriptors, receipt = None, [], None
     tokens = []
@@ -128,7 +131,7 @@ async def _settle(files, candidate):
     async with files.registry._sf() as session:
         row = await session.get(SpaceRow, candidate.space_id)
         binding = await session.get(SpaceBackingRow, row.backing_handle) if row is not None else None
-        if binding is None or binding.space_id != candidate.space_id or row.status != "active" or row.mode != "native":
+        if binding is None or binding.space_id != candidate.space_id or (not discard and row.status != "active") or row.mode != "native":
             return False
         binding_facts = _facts(binding, _BINDING)
         row_facts = _facts(row, ("backing_handle", "generation", "status", "mode"))
@@ -146,7 +149,7 @@ async def _settle(files, candidate):
             current_binding = await session.get(SpaceBackingRow, row.backing_handle) if row is not None else None
             if row is None or current_binding is None or _facts(current_binding, _BINDING) != binding_facts or _facts(row, ("backing_handle", "generation", "status", "mode")) != row_facts:
                 return False
-            if current is None or current.phase != "pending" or _facts(current, _INTENT) != _facts(candidate, _INTENT) or row.status != "active" or row.mode != "native":
+            if current is None or current.phase != "pending" or _facts(current, _INTENT) != _facts(candidate, _INTENT) or (not discard and row.status != "active") or row.mode != "native":
                 return False
             if await SpaceAttachments._current(session, [row.id], lock=True):
                 return False
@@ -156,7 +159,11 @@ async def _settle(files, candidate):
             tokens.append((_owner, _owner.set((files, frozenset((candidate.space_id,))))))
             tokens.append((_read_only, _read_only.set(False)))
             request = current.request
-            if request["action"] == "feature-workflow":
+            if discard:
+                if discard_admission is not None:
+                    await discard_admission()
+                current.phase, current.result = "failed", {"resolution": "host-discarded", "by": "operator", "host_id": operator_host_id}
+            elif request["action"] == "feature-workflow":
                 handler = files.workflow_settlers.get(request.get("namespace"))
                 if handler is None:
                     return False
@@ -169,6 +176,7 @@ async def _settle(files, candidate):
                 current.phase, current.result = "complete", {"resolution": resolution, "value": None, "facts": receipt.value["facts"]}
             else:
                 current.phase, current.result = await run_file_io(_direct, filesystem, request)
+            current.result = host_settlement_result(current.result)
             await run_file_io(_current_roots, filesystem, volume)
             phase = current.phase
             kind = getattr(volume.spec, "kind", None) or row.custody_kind
@@ -180,13 +188,15 @@ async def _settle(files, candidate):
         # Exiting host_locked confirms commit. Never remove evidence before it.
         settled = True
         log.info("storage: file operation %s of %s %s settled %s", candidate.operation_id, kind, owner, phase)
-        if receipt is not None:
+        if receipt is not None and not discard:
             await run_file_io(receipt.remove)
-        if cleanup:
+        if cleanup and not discard:
             await run_file_io(_cleanup, filesystem)
     except Exception as exc:
         label = "publication" if candidate.request.get("action") == "feature-workflow" else "file operation"
         log.warning("storage: %s %s not settled: %s", label, candidate.operation_id, exc)
+        if raise_errors:
+            raise
     finally:
         for variable, token in reversed(tokens):
             variable.reset(token)
@@ -196,6 +206,24 @@ async def _settle(files, candidate):
         finally:
             await run_file_io(close, descriptors)
     return settled
+
+
+async def settle_file_operation(files, candidate, *, discard=False, raise_errors=False, operator_host_id=None, discard_admission=None):
+    """Settle one captured operation through its workflow's normal lock and checks."""
+    return await _settle(files, candidate, discard=discard, raise_errors=raise_errors, operator_host_id=operator_host_id, discard_admission=discard_admission)
+
+
+async def discard_interrupted(files, *, space_id, operation_id, host_id):
+    """Discard only one exact abandoned intent; do no replay or file cleanup."""
+    files._operation_id(space_id)
+    files._operation_id(operation_id)
+    async with files.registry._sf() as session:
+        candidate = await session.get(SpaceFileOperationRow, (space_id, operation_id))
+    if candidate is None or candidate.phase != "pending":
+        return False
+    from deerflow.utils.file_io import await_drained
+
+    return await await_drained(_settle(files, candidate, discard=True, raise_errors=True, operator_host_id=host_id))
 
 
 async def settle_interrupted(files, *, space_id=None, operation_id=None):

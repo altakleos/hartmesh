@@ -1,6 +1,6 @@
 ### Gateway API (`app/gateway/`)
 
-Storage and `storage_reclamation.py`: [guide](../../../docs/STORAGE_SPACES.md).
+Storage, reclamation and operator CLI: [guide](../../../docs/STORAGE_SPACES.md).
 
 One owner for retries; retain uncertainty.
 

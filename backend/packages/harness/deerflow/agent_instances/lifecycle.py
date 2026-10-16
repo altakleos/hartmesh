@@ -218,9 +218,11 @@ class InstanceLifecycle:
         current = await session.scalar(select(SpaceAttachmentRow.id).join(SpaceMountRow, SpaceMountRow.attachment_id == SpaceAttachmentRow.id).where(SpaceMountRow.space_id == intent.home_id, SpaceAttachmentRow.phase != "fenced").limit(1))
         return current is None
 
-    async def change(self, *, actor, instance_id, expected_generation, operation_id, action, definition=None, supervisor=None, member=None, permissions=None, only_if_idle=False, runs_in_flight=None):
+    async def change(self, *, actor, instance_id, expected_generation, operation_id, action, definition=None, supervisor=None, member=None, permissions=None, only_if_idle=False, runs_in_flight=None, host_admission=None):
         validate_generation(expected_generation)
         self.agents.files._operation_id(operation_id)
+        if host_admission is not None and not callable(host_admission):
+            raise ValueError("Host lifecycle admission must be callable")
         if action not in {"suspend", "archive", "delete", "restore", "adopt", "supervise", "grant"}:
             raise ValueError("Unknown agent lifecycle action")
         if (action == "adopt") != (definition is not None) or (action == "supervise") != (supervisor is not None) or (action == "grant") != (member is not None and permissions is not None):
@@ -273,6 +275,8 @@ class InstanceLifecycle:
                     if run_ids:
                         raise Refusal(WORK_IN_FLIGHT_DETAIL.format(name=view.name), reason="work-in-flight", run_ids=run_ids)
                 row, grant, current = await self._parent(session, actor, instance_id)
+                if host_admission is not None:
+                    await host_admission(session)
                 if current.home_id != view.home_id:
                     raise AgentConflict("Lifecycle Home identity changed")
                 intent = await session.get(AgentLifecycleRow, (instance_id, operation_id))
@@ -345,6 +349,8 @@ class InstanceLifecycle:
             async def finalize():
                 async with self.agents.files.registry.admitted(actor=actor, requests={view.home_id: (Permission.ADMIN, None)}) as (session, homes):
                     row, grant, current = await self._parent(session, actor, instance_id)
+                    if host_admission is not None:
+                        await host_admission(session)
                     intent = await session.get(AgentLifecycleRow, (instance_id, operation_id))
                     if intent is None:
                         raise AgentConflict("Lifecycle intent is unavailable")

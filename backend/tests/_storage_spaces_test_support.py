@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import event
@@ -22,6 +23,14 @@ from deerflow.spaces.service import SpaceFiles
 
 ALICE = PrincipalRef("human", "alice")
 BOB = PrincipalRef("human", "bob")
+
+
+def assert_host_settlement(result, expected):
+    """Host recovery records UTC completion time alongside unchanged outcomes."""
+    assert isinstance(result, dict) and isinstance(result.get("host_settled_at"), str)
+    moment = datetime.fromisoformat(result["host_settled_at"])
+    assert moment.tzinfo is not None and moment.utcoffset() == UTC.utcoffset(moment)
+    assert {key: value for key, value in result.items() if key != "host_settled_at"} == expected
 
 
 @dataclass

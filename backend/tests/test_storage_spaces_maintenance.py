@@ -7,7 +7,7 @@ import threading
 from contextlib import asynccontextmanager
 
 import pytest
-from _storage_spaces_test_support import ALICE, home, operation
+from _storage_spaces_test_support import ALICE, assert_host_settlement, home, operation
 from test_storage_spaces_service import space_file_storage as space_file_storage
 
 from deerflow.persistence.spaces.files import SpaceFileOperationRow
@@ -52,7 +52,7 @@ async def test_settlement_proves_direct_effects(space_file_storage, action, pres
     assert await files.settle_interrupted() == 1
     phase, result = await outcome(sf, space, identifier)
     assert phase == ("complete" if complete else "failed")
-    assert result == ({"resolution": "host-settled", "value": digest if action == "write" else None} if complete else {"resolution": "host-settled"})
+    assert_host_settlement(result, {"resolution": "host-settled", "value": digest if action == "write" else None} if complete else {"resolution": "host-settled"})
     assert await files.settle_interrupted() == 0
 
 
@@ -90,7 +90,9 @@ async def test_receipt_settlement_retains_facts_and_only_removes_owned_stages(sp
     link = volume.control_path / ("stage-" + operation())
     link.symlink_to(unrelated)
     assert await files.settle_interrupted() == 1
-    assert await outcome(sf, space, identifier) == ("complete", {"resolution": "host-settled", "value": None, "facts": receipt.value["facts"]})
+    phase, result = await outcome(sf, space, identifier)
+    assert phase == "complete"
+    assert_host_settlement(result, {"resolution": "host-settled", "value": None, "facts": receipt.value["facts"]})
     assert not receipt.path.exists()
     assert not stage.exists()
     assert unrelated.read_bytes() == b"keep" and directory.is_dir() and link.is_symlink()
@@ -399,7 +401,9 @@ async def test_pending_put_retains_the_proven_file_result(space_file_storage):
     digest = hashlib.sha256(b"published").hexdigest()
     identifier = await intent(sf, space, {"action": "put", "path": "item", "sha256": digest, "size": 9, "on_behalf_of": "alice"})
     assert await files.settle_interrupted() == 1
-    assert await outcome(sf, space, identifier) == ("complete", {"resolution": "host-settled", "value": {"path": "item", "size": 9, "sha256": digest, "deduplicated": False}})
+    phase, result = await outcome(sf, space, identifier)
+    assert phase == "complete"
+    assert_host_settlement(result, {"resolution": "host-settled", "value": {"path": "item", "size": 9, "sha256": digest, "deduplicated": False}})
 
 
 @pytest.mark.asyncio

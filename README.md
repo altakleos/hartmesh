@@ -664,6 +664,15 @@ typed storage pools. It checks disk headroom before preparation and supports
 offline growth that preserves files; see [Storage Spaces](docs/STORAGE_SPACES.md)
 for its privilege requirements and current scope.
 
+With managed storage enabled, the backend also provides
+`python -m app.gateway.agent_instances` for operator inspection and recovery.
+Its nine commands list AI assistants and AI employees, report storage/execution
+status, verify slots, close a workspace, export files, recover an orphaned AI
+employee's supervisor, delete an orphaned AI agent, acknowledge a replaced Docker
+host, and settle one interrupted file operation. Every response is one JSON line;
+exit 2 means recovery or Gateway settlement remains unfinished. See
+[the command guide](docs/STORAGE_SPACES.md#ai-agent-operator-commands) before recovery.
+
 Preparation also publishes a private `.native-creates` directory outside storage
 views and temporary probes. Managed native chats now record each container request
 before submission and verify its actual Docker identity before acknowledging it.

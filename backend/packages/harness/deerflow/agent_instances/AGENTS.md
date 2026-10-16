@@ -171,6 +171,13 @@ writes. Use-only/disabled/unsupported scopes have no memory fallback. Queues sta
 owned through completion and shared-budget shutdown; do not prune live run queues.
 Scheduling and a separate storage ACL engine stay outside this module.
 
+`change(host_admission=...)` adds a trusted borrowed-session condition under the
+Home→instance locks during withdrawal and finalization; it never replaces current
+human, Manage or ADMIN checks. The operator CLI uses it for orphan recovery and
+retains immutable intent/handoff events in the Home's existing event stream.
+Reserve generation room before publishing recovery grants. Exact partial retries
+must preserve target, host, original facts, grants and lifecycle attribution.
+
 Lifecycle uses the host-only callback inside qualified attachment retirement:
 resource→attachment→instance, capture exact intent/IDs and withdraw generation
 before effects. Pending never proves containment. Empty/completed retries never

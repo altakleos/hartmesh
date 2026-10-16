@@ -163,7 +163,7 @@ class WorkflowReceipt:
             if len(raw) > 65536:
                 raise ValueError("Host workflow receipt exceeds64KiB")
             value = json.loads(raw)
-            if value.get("schema_version") != 1 or value.get("operation_id") != self.operation_id or value.get("request") != self.value["request"] or not isinstance(value.get("facts"), dict):
+            if not isinstance(value, dict) or value.get("schema_version") != 1 or value.get("operation_id") != self.operation_id or value.get("request") != self.value["request"] or not isinstance(value.get("facts"), dict):
                 raise ValueError("Host workflow receipt does not match its durable intent")
             self.value = value
             self._identity = (metadata.st_dev, metadata.st_ino)

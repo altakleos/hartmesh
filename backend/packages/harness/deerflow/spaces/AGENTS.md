@@ -389,6 +389,13 @@ Finished no-record retries recheck journal uncertainty after the final census.
 Targeted `settle_interrupted` requires both IDs and leaves other intents pending;
 no arguments retain maintenance's full pass. `snapshots.backup(target=...)` keeps
 exclusive private creation and archive guards, fsyncing the actual destination.
+An optional destination directory FD pins archive creation, digest and cleanup.
+Source traversal opens each root-relative inode without symlink following, pins
+regular content, preserves symlink text/hardlinks and rejects queued replacements.
+`contain_host` also accepts a trusted borrowed admission condition before pending
+or effects; rollback preserves effect-free refusals. Host settlement stamps actual
+UTC completion in existing result JSON; targeted operator discard records its
+actual Docker host and never replays or removes receipts/stages.
 
 `retire` accepts a host-only admission callback after locking scoped attachments
 inside its first ADMIN transaction, before pending/effects. Domain conditions add

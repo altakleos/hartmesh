@@ -3,6 +3,7 @@ import logging
 import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime
 
 from deerflow_extension_api import (
     EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY,
@@ -476,6 +477,7 @@ async def _runtime_with_mcp_pool_shutdown(app: FastAPI, startup_config: AppConfi
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Bind host policy to lifecycle work without carrying tokens across yield."""
+    app.state.gateway_started_at = datetime.now(UTC)
     from app.gateway.customer_administration import customer_administration_host_scope
     from deerflow.runtime.customer_administration import capture_customer_administration_policy
 
@@ -500,6 +502,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 @asynccontextmanager
 async def _lifespan_resources(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
+    entered_at = getattr(app.state, "gateway_started_at", None)
+    if not isinstance(entered_at, datetime):
+        entered_at = datetime.now(UTC)
 
     # Load config and check necessary environment variables at startup.
     # `startup_config` is a local snapshot used only for one-shot bootstrap
@@ -609,11 +614,13 @@ async def _lifespan_resources(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
     from app.gateway.chat_storage import chat_storage_lifecycle
+    from app.gateway.gateway_observation import gateway_observation_lifetime
     from app.gateway.personal_mcp_access import personal_mcp_authority
     from app.gateway.pool_runtime import managed_pool_runtime
     from app.gateway.storage_spaces import storage_spaces_lifecycle
 
     async with (
+        gateway_observation_lifetime(enabled=startup_config.storage_spaces.enabled, started_at=entered_at),
         managed_pool_runtime(app, startup_config.storage_spaces),
         personal_mcp_authority(),
         storage_spaces_lifecycle(app),
