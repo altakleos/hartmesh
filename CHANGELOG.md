@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.47] - 2026-10-23
+
+### Terminal-write recovery
+
+SQL-backed runs now recover from transient terminal-write failures with bounded
+retries and durable readback. A lost commit acknowledgement confirms the saved
+outcome before another conditional write; recovery preserves the actual execution
+result and never recreates a missing run. Ownership, change sequence,
+cancellation and lease checks protect newer work throughout recovery.
+
+Terminal, progress and completion persistence diagnostics identify the run and a
+fixed failure classification without logging exception text, tracebacks, SQL or
+parameters. This replaces swallowed failures and raw persistence exceptions.
+
+### Cancellation and streams
+
+A live worker now owns terminal settlement after cancellation. The cancellation
+caller records the request and signals execution while the durable run stays
+active through checkpoint rollback and receipt drainage. An interrupted
+acknowledgement can no longer overwrite the rollback outcome.
+
+Staged finalization continues renewing its lease and participates in Gateway
+shutdown drainage. Database rollback and session closure drain through repeated
+cancellation, retaining ownership of unfinished cleanup.
+
+Exhausted persistence recovery ends the stream with `run_state_unconfirmed`
+while the last confirmed lease permits reporting it, or with heartbeats off.
+A rejected ownership fence adds no failure narrative to a peer-owned stream;
+lease validity is checked again immediately before reporting the failure.
+
+### Operator recovery
+
+Recovery makes up to three attempts, each with a five-second read/write timeout
+and 100 ms between attempts. Database cleanup can extend that nominal window.
+If persistence remains unavailable, restore access and restart the affected
+Gateway using its ordinary deployment procedure. Confirm the old Gateway has
+stopped before replacing a heartbeat-off worker. A new chat turn remains blocked
+until durable settlement; account-disable commands retain exit 2 and the exact
+unconfirmed run IDs until then.
+
+See the [terminal recovery guide](https://github.com/altakleos/hartmesh/blob/v2.2.0%2Bhartmesh.47/backend/docs/TERMINAL_WRITE_RECOVERY.md)
+for diagnostics, lease-aware restart behavior and recovery checks.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.46. The migration head remains
+`0041_storage_host_replacements`; this release requires no additional database
+migration.
+
+### Configuration
+
+Configuration version remains 54. This release adds no configuration keys or
+dependencies and retains the Compose profile's enabled ownership heartbeats.
+
 ## [2.2.0+hartmesh.46] - 2026-10-16
 
 ### Storage and agents in the Compose bundle
