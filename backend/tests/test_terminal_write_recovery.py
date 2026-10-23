@@ -193,6 +193,7 @@ async def test_outage_ends_stream_unconfirmed_and_restart_recovers_without_heart
     assert not record.terminal_confirmed
     assert fault.attempts == 3
     assert any(event == "error" and data.get("reason") == "run_state_unconfirmed" for event, data in frames)
+    assert record.terminal_write_unconfirmed
     assert frames[-1] == ("end", None)
     assert SECRET not in caplog.text
     with pytest.raises(ConflictError):
@@ -224,6 +225,60 @@ async def test_persistence_restored_inside_recovery_window_settles_without_resta
     assert record.terminal_confirmed and not record.ownership_lost
     assert frames[-1] == ("end", None)
     await manager.create_or_reject(record.thread_id)
+
+
+@pytest.mark.anyio
+async def test_final_conditional_rejection_cannot_narrate_onto_new_owners_stream(repository, monkeypatch):
+    from deerflow.runtime.runs.terminal import TerminalRecoveryPolicy
+
+    manager = RunManager(repository, terminal_recovery_policy=TerminalRecoveryPolicy(max_attempts=1))
+    record = await manager.create_or_reject("final-cas-rejection")
+    original = repository.finalize_owned
+
+    async def takeover_then_finalize(run_id, **kwargs):
+        async with repository._sf() as session:
+            await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(owner_worker_id="new-owner", change_seq=RunRow.change_seq + 1))
+            await session.commit()
+        return await original(run_id, **kwargs)
+
+    monkeypatch.setattr(repository, "finalize_owned", takeover_then_finalize)
+    frames = await run_turn(manager, record)
+    row = await repository.get(record.run_id)
+    assert row["owner_worker_id"] == "new-owner" and row["status"] == "running"
+    assert record.ownership_lost and not record.terminal_write_unconfirmed
+    assert not any(event == "error" for event, data in frames)
+    assert frames[-1] == ("end", None)
+
+
+@pytest.mark.anyio
+async def test_expired_lease_during_final_cleanup_suppresses_unconfirmed_narrative(repository, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+
+    manager = RunManager(repository, run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True))
+    record = await manager.create_or_reject("cleanup-lease-expiry")
+    fault = PersistenceFault(repository, persistent=True)
+    original = manager.set_finalizing
+    expired = False
+
+    async def expire_during_cleanup(run_id, finalizing):
+        nonlocal expired
+        await original(run_id, finalizing)
+        if not finalizing and record.terminal_write_unconfirmed:
+            # Recovery was allowed to narrate when it fenced local execution,
+            # but the finalizing barrier drains before stream publication.
+            assert manager._parse_lease_deadline(record.lease_expires_at) > datetime.now(UTC)
+            record.lease_expires_at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+            expired = True
+
+    monkeypatch.setattr(manager, "set_finalizing", expire_during_cleanup)
+    frames = await run_turn(manager, record, event_store=MemoryRunEventStore())
+    assert expired and fault.attempts == 3
+    assert record.ownership_lost and not record.terminal_write_unconfirmed
+    assert not any(event == "error" for event, data in frames)
+    assert frames[-1] == ("end", None)
+    assert (await repository.get(record.run_id))["status"] == "running"
 
 
 @pytest.mark.anyio
@@ -265,7 +320,8 @@ async def test_fenced_worker_cannot_change_a_new_owner_or_version(repository, ch
     assert await repository.get(record.run_id) == expected
     assert record.ownership_lost and not record.terminal_confirmed
     assert f"outcome=stale_{change}" in caplog.text if change != "lease" else "outcome=lease_expired" in caplog.text
-    assert any(event == "error" and data.get("reason") == "run_state_unconfirmed" for event, data in frames)
+    assert not any(event == "error" and data.get("reason") == "run_state_unconfirmed" for event, data in frames)
+    assert not record.terminal_write_unconfirmed
     assert frames[-1] == ("end", None)
     with pytest.raises(ConflictError):
         await manager.create_or_reject(record.thread_id)
@@ -437,7 +493,7 @@ async def test_lost_ownership_during_terminal_finally_still_ends_the_stream(repo
         async with asyncio.timeout(1):
             frames = [frame async for frame in bridge.subscribe(record.run_id)]
         assert frames[-1].event == "__end__"
-        assert any(frame.event == "error" and frame.data.get("reason") == "run_state_unconfirmed" for frame in frames)
+        assert not any(frame.event == "error" and frame.data.get("reason") == "run_state_unconfirmed" for frame in frames)
         assert not record.finalizing
         assert (await repository.get(record.run_id))["status"] == "running"
     finally:
@@ -661,3 +717,57 @@ async def test_progress_and_completion_write_diagnostics_never_disclose_sql_or_m
     assert "reason=run_metadata_write_failed" in caplog.text
     assert SECRET not in caplog.text and "private_sql" not in caplog.text
     assert not any(item.exc_info for item in caplog.records if "persistence failed" in item.message)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("heartbeat", [False, True])
+async def test_live_worker_rollback_outcome_is_not_overwritten_by_cancel_acknowledgement(repository, heartbeat, monkeypatch):
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+    from deerflow.runtime.runs import worker
+
+    manager = RunManager(repository, run_ownership_config=RunOwnershipConfig(heartbeat_enabled=heartbeat))
+    record = await manager.create_or_reject("local-rollback-race")
+    streaming, rolling_back, finish_rollback = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    class Agent:
+        async def astream(self, *args, **kwargs):
+            streaming.set()
+            await asyncio.Event().wait()
+            yield {"messages": []}
+
+    async def rollback(**kwargs):
+        rolling_back.set()
+        await finish_rollback.wait()
+        return True
+
+    original_persist = manager._persist_status
+
+    async def delayed_ack(record, status, **kwargs):
+        if status == RunStatus.interrupted:
+            # Force the cancel caller's acknowledgement behind the worker's
+            # staged rollback result, while checkpoint restoration is draining.
+            await rolling_back.wait()
+        return await original_persist(record, status, **kwargs)
+
+    monkeypatch.setattr(worker, "_rollback_to_pre_run_checkpoint", rollback)
+    monkeypatch.setattr(manager, "_persist_status", delayed_ack)
+    turn = asyncio.create_task(run_turn(manager, record, agent=Agent(), event_store=MemoryRunEventStore()))
+    record.task = turn
+    try:
+        await asyncio.wait_for(streaming.wait(), timeout=5)
+        await asyncio.wait_for(manager.cancel(record.run_id, action="rollback"), timeout=5)
+        await asyncio.wait_for(rolling_back.wait(), timeout=5)
+        assert (await repository.get(record.run_id))["status"] == "running", "checkpoint cleanup must retain the active durable fence"
+        finish_rollback.set()
+        frames = await asyncio.wait_for(turn, timeout=5)
+    finally:
+        finish_rollback.set()
+        if not turn.done():
+            turn.cancel()
+        await asyncio.gather(turn, return_exceptions=True)
+    row = await repository.get(record.run_id)
+    assert row["status"] == "error" and row["error"] == "Rolled back by user"
+    assert row["cancel_action"] == "rollback"
+    assert record.status == RunStatus.error and record.terminal_confirmed and not record.ownership_lost
+    assert frames[-1] == ("end", None)
+    await manager.create_or_reject(record.thread_id)

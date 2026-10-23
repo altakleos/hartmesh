@@ -40,6 +40,10 @@ A durable cancellation discovered during completion/recovery returns to the
 worker's ordinary interrupt or checkpoint-rollback handling before terminal
 settlement. It cannot be overwritten by recovery success. Recovery itself never
 mutates checkpoints. Delivery receipt and checkpoint ordering remain in the worker.
+For a live SQL-backed worker, the cancellation caller records the durable request
+and signals execution; the worker alone persists its terminal outcome after
+rollback/checkpoint/receipt drainage. The caller does not terminalize the active
+row or overwrite a staged rollback result with an interrupted acknowledgement.
 Completion metadata for this path
 requires an already confirmed terminal row with the matching owner and status;
 it cannot recreate the run or change its terminal state.
@@ -56,9 +60,12 @@ window permits settlement in the same Gateway process.
 ## Streams and operator action
 
 A recovered result reports the confirmed execution outcome. If persistence
-cannot be confirmed, or ownership is rejected, the worker fences
-further durable finalization and emits an SSE `error` with reason
-`run_state_unconfirmed`, then the stream END marker. Local error status does not
+cannot be confirmed, the worker fences further durable finalization. Exhausted
+persistence recovery emits an SSE `error` with reason `run_state_unconfirmed`
+before the stream END marker while its last confirmed lease remains valid
+(or heartbeats are off). A stale owner/version/lease, missing row, or generic
+ownership-loss fence emits no new failure narrative onto a peer-owned stream.
+Local error status does not
 prove a durable terminal row. The active database row continues blocking a new
 turn in that chat until recovery confirms settlement.
 

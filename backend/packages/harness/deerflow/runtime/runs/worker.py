@@ -29,7 +29,7 @@ from collections.abc import Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from contextvars import Context
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any, Final, Literal, cast
 
@@ -1180,7 +1180,11 @@ async def _run_agent(
         from .terminal import UNCONFIRMED_ERROR, UNCONFIRMED_STATE
 
         if not terminal_failure_published:
-            if record.ownership_lost and not record.terminal_confirmed:
+            if record.terminal_write_unconfirmed and run_manager.heartbeat_enabled:
+                deadline = run_manager._parse_lease_deadline(record.lease_expires_at)
+                if deadline is None or deadline <= datetime.now(UTC):
+                    record.terminal_write_unconfirmed = False
+            if record.terminal_write_unconfirmed and record.ownership_lost and not record.terminal_confirmed:
                 await bridge.publish(run_id, "error", {"message": UNCONFIRMED_ERROR, "reason": UNCONFIRMED_STATE})
                 terminal_failure_published = True
         await bridge.publish_end(run_id)

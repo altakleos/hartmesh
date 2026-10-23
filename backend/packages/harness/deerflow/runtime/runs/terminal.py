@@ -77,6 +77,7 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
             return StatusFinalization(finalized=False)
         expected_sequence = None
         recovering = False
+        ownership_rejected = False
         for attempt in range(1, policy.max_attempts + 1):
             try:
                 async with asyncio.timeout(policy.attempt_timeout):
@@ -87,6 +88,7 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                     elif row.get("owner_worker_id") != record.owner_worker_id or record.owner_worker_id != manager.worker_id:
                         rejection = "stale_owner"
                     if rejection:
+                        ownership_rejected = True
                         diagnostic(record, status, outcome=rejection, attempt=attempt)
                         break
 
@@ -106,6 +108,7 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                     if manager.heartbeat_enabled:
                         deadline = manager._parse_lease_deadline(row.get("lease_expires_at"))
                         if deadline is None or deadline <= datetime.now(UTC):
+                            ownership_rejected = True
                             diagnostic(record, status, outcome="lease_expired", attempt=attempt)
                             break
                     if action is not None and respect_cancellation:
@@ -115,8 +118,10 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                     if expected_sequence is None:
                         expected_sequence = row["change_seq"]
                     elif row["change_seq"] != expected_sequence:
+                        ownership_rejected = True
                         diagnostic(record, status, outcome="stale_version", attempt=attempt)
                         break
+                    ownership_rejected = False
 
                     # Preserve the real worker outcome. Only invalid metadata
                     # shapes may be repaired; never mutate checkpoint state as
@@ -146,6 +151,7 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                             record.updated_at = datetime.now(UTC).isoformat()
                             record.terminal_confirmed = True
                         return StatusFinalization(finalized=True)
+                    ownership_rejected = True
                     diagnostic(record, status, outcome="conditional_rejection", attempt=attempt)
             except Exception as exc:
                 diagnostic(
@@ -162,5 +168,9 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
         # This is a process-local fence only. Restoring persistence and restarting
         # the stopped Gateway invokes existing startup orphan recovery; no peer
         # heartbeat is needed in the single-worker profile.
-        await manager._mark_ownership_lost(record, reason=UNCONFIRMED_ERROR, require_active=False)
+        unconfirmed = not ownership_rejected
+        if manager.heartbeat_enabled:
+            deadline = manager._parse_lease_deadline(record.lease_expires_at)
+            unconfirmed = unconfirmed and deadline is not None and deadline > datetime.now(UTC)
+        await manager._mark_ownership_lost(record, reason=UNCONFIRMED_ERROR, require_active=False, terminal_write_unconfirmed=unconfirmed)
         return StatusFinalization(finalized=False)

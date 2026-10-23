@@ -228,6 +228,7 @@ class RunRecord:
     ownership_lost: bool = False
     terminal_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     terminal_confirmed: bool = False
+    terminal_write_unconfirmed: bool = False
     stop_reason: str | None = None
     idempotency_key: str | None = None
     # True only on the caller that recovered an existing idempotent admission;
@@ -1403,6 +1404,7 @@ class RunManager:
             elif outcome != CancelOutcome.lease_valid_elsewhere:
                 return outcome
 
+        worker_finalizes = False
         async with self._lock:
             record = self._runs.get(run_id)
             if record is not None:
@@ -1414,6 +1416,7 @@ class RunManager:
                 record.abort_event.set()
                 task_active = record.task is not None and not record.task.done()
                 record.finalizing = task_active
+                worker_finalizes = task_active and self._store is not None and getattr(self._store, "supports_terminal_recovery", False) is True
                 if task_active and record.status == RunStatus.running:
                     record.task.cancel()
                 record.status = RunStatus.interrupted
@@ -1421,6 +1424,13 @@ class RunManager:
 
         # Persist outside the lock so store calls don't block other mutations.
         if record is not None:
+            if worker_finalizes:
+                # The durable cancellation is already recorded. Keep its row
+                # active while the worker drains rollback/checkpoint/receipt
+                # writes; an eager interrupted acknowledgement would race and
+                # overwrite the worker's staged rollback outcome.
+                logger.info("Run %s cancellation signalled; live worker owns terminal settlement (action=%s)", run_id, action)
+                return CancelOutcome.cancelled
             persisted = await self._persist_status(record, RunStatus.interrupted)
             if not persisted and self._store is not None:
                 # ``_persist_status`` already fetched ``existing`` internally;
@@ -2080,6 +2090,7 @@ class RunManager:
         *,
         reason: str,
         require_active: bool = True,
+        terminal_write_unconfirmed: bool = False,
     ) -> bool:
         """Fence one local run and cancel its execution task.
 
@@ -2098,9 +2109,12 @@ class RunManager:
                 if record.task is not None and record.task.done():
                     return False
             if record.ownership_lost:
+                if not terminal_write_unconfirmed:
+                    record.terminal_write_unconfirmed = False
                 return True
             record.ownership_lost = True
             record.terminal_confirmed = False
+            record.terminal_write_unconfirmed = terminal_write_unconfirmed
             record.abort_event.set()
             record.status = RunStatus.error
             record.error = reason
