@@ -616,3 +616,81 @@ def test_main_refuses_subjects_where_they_do_not_belong(argv: list[str], names: 
     document = json.loads(capsys.readouterr().out)
     assert names in document["error"] and document["command"] == argv[0]
     assert seen == {}, "refused before anything ran"
+
+
+@pytest.mark.anyio
+async def test_twenty_person_batch_settles_with_terminal_refusals_and_an_overlapping_scheduled_turn(stores, monkeypatch):
+    """Offline production workers; leased tenant qualification remains infra's job."""
+    from deerflow.config.run_ownership_config import RunOwnershipConfig
+    from deerflow.runtime.runs.manager import RunManager
+    from deerflow.runtime.runs.worker import RunContext, run_agent
+    from deerflow.runtime.stream_bridge.memory import MemoryStreamBridge
+
+    manager = RunManager(stores.runs, run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True))
+    subjects = [f"batch-{index}" for index in range(20)]
+    records = []
+    for subject in subjects:
+        account = await stores.users.create_user(_account(subject))
+        records.append(await manager.create_or_reject(str(uuid4()), user_id=str(account.id)))
+    records.append(await manager.create_or_reject(str(uuid4()), user_id=records[0].user_id, metadata={"scheduled_task_id": "overlap"}))
+    started = set()
+    all_started = asyncio.Event()
+    hold = asyncio.Event()
+    bridge = MemoryStreamBridge()
+
+    class WaitingAgent:
+        def __init__(self, run_id):
+            self.run_id = run_id
+
+        async def astream(self, *args, **kwargs):
+            started.add(self.run_id)
+            if len(started) == len(records):
+                all_started.set()
+            await hold.wait()
+            yield {"messages": []}
+
+    original = stores.runs._terminal_values
+    refusals = set()
+
+    def validation(status, error, stop_reason):
+        # Refuse one terminal write in two different real workers. The recovery
+        # payload then succeeds; no provider or extra sandbox is involved.
+        task = asyncio.current_task()
+        if task not in refusals and len(refusals) < 2:
+            refusals.add(task)
+            raise ValueError("private-test-canary")
+        return original(status, error, stop_reason)
+
+    monkeypatch.setattr(stores.runs, "_terminal_values", validation)
+    tasks = []
+    command_task = None
+    try:
+        for record in records:
+            agent = WaitingAgent(record.run_id)
+            task = asyncio.create_task(run_agent(bridge, manager, record, ctx=RunContext(checkpointer=None), agent_factory=lambda *, config, agent=agent: agent, graph_input={}, config={}))
+            record.task = task
+            tasks.append(task)
+        await asyncio.wait_for(all_started.wait(), timeout=10)
+        command_task = asyncio.create_task(_command(stores, wait_seconds=10).run("disable", issuer=ISSUER, subjects=subjects))
+        async with asyncio.timeout(15):
+            while not command_task.done():
+                await manager._renew_leases()
+                await asyncio.sleep(0.01)
+            document = await command_task
+            await asyncio.gather(*tasks)
+        assert document["returncode"] == 0 and document["totals"]["runs_unconfirmed"] == []
+        assert document["totals"]["runs_found"] == 21
+        assert len(refusals) == 2
+        for record in records:
+            row = await stores.runs.get(record.run_id, user_id=None)
+            assert row["status"] in {"interrupted", "error"}
+            assert record.terminal_confirmed and not record.ownership_lost
+            async with asyncio.timeout(1):
+                frames = [frame async for frame in bridge.subscribe(record.run_id)]
+            assert frames[-1].event == "__end__"
+    finally:
+        hold.set()
+        for task in [*tasks, *([command_task] if command_task is not None else [])]:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, *([command_task] if command_task is not None else []), return_exceptions=True)

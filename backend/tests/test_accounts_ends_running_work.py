@@ -115,6 +115,37 @@ async def test_disable_reports_a_run_it_could_not_confirm_stopped_as_a_failure(s
 
 
 @pytest.mark.anyio
+async def test_terminal_write_failure_stays_unconfirmed_until_durable_restart_recovery(stores, monkeypatch) -> None:
+    from deerflow.runtime.runs.manager import RunManager
+    from deerflow.runtime.runs.schemas import RunStatus
+    from deerflow.runtime.runs.terminal import TerminalRecoveryPolicy
+
+    users, runs = stores
+    account = await users.create_user(_account())
+    manager = RunManager(runs, terminal_recovery_policy=TerminalRecoveryPolicy(retry_delay=0))
+    record = await manager.create_or_reject("terminal-failure", user_id=str(account.id))
+    await manager.try_start(record.run_id)
+    original = runs._terminal_values
+
+    def refuse(*_args):
+        raise ValueError("private-test-canary")
+
+    monkeypatch.setattr(runs, "_terminal_values", refuse)
+    await manager.set_status_if_not_cancelled(record.run_id, RunStatus.success)
+    assert record.status == RunStatus.error
+    assert (await runs.get(record.run_id, user_id=None))["status"] == "running"
+    document = await _command(users, runs, wait_seconds=0).run("disable", issuer=ISSUER, subject="sub-pat")
+    assert document["returncode"] == EXIT_UNCONFIRMED_RUNS == 2
+    assert document["runs_unconfirmed"] == [record.run_id]
+
+    monkeypatch.setattr(runs, "_terminal_values", original)
+    replacement = RunManager(runs)
+    await replacement.reconcile_orphaned_inflight_runs(error="Restarted after persistence repair", stop_reason="orphan_recovered")
+    document = await _command(users, runs, wait_seconds=0).run("disable", issuer=ISSUER, subject="sub-pat")
+    assert document["returncode"] == 0 and document["runs_unconfirmed"] == []
+
+
+@pytest.mark.anyio
 async def test_disable_confirms_a_run_the_worker_stopped(stores) -> None:
     users, runs = stores
     account = await users.create_user(_account())

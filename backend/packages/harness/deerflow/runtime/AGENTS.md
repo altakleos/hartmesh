@@ -1,5 +1,14 @@
 ### Stream Bridge Heartbeats
 
+SQL terminal writes use `runs/terminal.py` and `RunRepository.finalize_owned`.
+Read committed state before recovery; CAS the original change sequence, owner,
+source status, cancellation action and current lease. Never recreate missing rows
+or log raw persistence exceptions. A local error/fence is not durable confirmation.
+Recovery preserves the executed outcome; it never mutates checkpoints. Keep staged
+finalization leased and included in shutdown drainage until confirmation.
+Unconfirmed streams publish `run_state_unconfirmed` and END. Recovery bounds,
+operator restart and store capability rules: [terminal recovery](../../../../docs/TERMINAL_WRITE_RECOVERY.md).
+
 MemoryRunStore's private recovery snapshot mirrors the complete borrowed SQL
 inflight snapshot. Unsupported stores refuse recovery; the ordinary public
 inflight API and lease-takeover semantics remain unchanged.

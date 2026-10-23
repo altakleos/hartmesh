@@ -8,6 +8,8 @@ minutes -- we don't hold connections across long execution.
 from __future__ import annotations
 
 import json
+import sys
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -24,6 +26,7 @@ from deerflow.runtime.runs.store.base import (
     normalize_run_created_at_iso,
 )
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.time import coerce_iso
 
 
@@ -33,8 +36,24 @@ def _lease_expired_or_null(lease_col, cutoff: datetime):
 
 
 class RunRepository(RunStore):
+    supports_terminal_recovery = True
+
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
+
+    @asynccontextmanager
+    async def _terminal_session(self):
+        # AsyncSession.__aexit__ shields close() but does not drain its task if
+        # the caller is cancelled. Own the complete exit across repeated cancel.
+        context = self._sf()
+        session = await context.__aenter__()
+        try:
+            yield session
+        except BaseException:
+            await await_drained(context.__aexit__(*sys.exc_info()))
+            raise
+        else:
+            await await_drained(context.__aexit__(None, None, None))
 
     @staticmethod
     async def _next_change_seq(session: AsyncSession) -> int:
@@ -171,7 +190,7 @@ class RunRepository(RunStore):
         user_id: str | None | _AutoSentinel = AUTO,
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.get")
-        async with self._sf() as session:
+        async with self._terminal_session() as session:
             row = await session.get(RunRow, run_id)
             if row is None:
                 return None
@@ -300,6 +319,68 @@ class RunRepository(RunStore):
         async with self._sf() as session:
             result = await session.execute(stmt)
             return {row.run_id: self._row_to_dict(row) for row in result.scalars()}
+
+    @staticmethod
+    def _terminal_values(status, error, stop_reason):
+        # No lifecycle-reason allowlist: capacity and extension reasons remain
+        # valid. Validate column shape before opening a SQL transaction.
+        if status not in {"success", "error", "timeout", "interrupted"}:
+            raise ValueError("Invalid terminal status")
+        if error is not None and not isinstance(error, str):
+            raise ValueError("Invalid terminal error")
+        if stop_reason is not None and (not isinstance(stop_reason, str) or len(stop_reason) > 50):
+            raise ValueError("Invalid terminal reason")
+        return {"status": status, "error": error, "stop_reason": stop_reason, "updated_at": datetime.now(UTC)}
+
+    async def finalize_owned(self, run_id, *, owner_worker_id, expected_change_seq, expected_status, expected_cancel_action, require_lease, status, error=None, stop_reason=None) -> bool:
+        """CAS finalization, with explicit pre-commit versus ambiguous failure phases."""
+        from deerflow.runtime.runs.terminal import TerminalWriteFailure, exception_classification
+
+        try:
+            values = self._terminal_values(status, error, stop_reason)
+            if expected_status not in {"pending", "running", "interrupted"} or not owner_worker_id or type(expected_change_seq) is not int:
+                raise ValueError("Invalid terminal fence")
+        except Exception as exc:
+            raise TerminalWriteFailure("validation_refused", exception_classification(exc)) from None
+
+        try:
+            async with self._terminal_session() as session:
+                committing = False
+                try:
+                    values["change_seq"] = await self._next_change_seq(session)
+                    conditions = [
+                        RunRow.run_id == run_id,
+                        RunRow.owner_worker_id == owner_worker_id,
+                        RunRow.change_seq == expected_change_seq,
+                        RunRow.status == expected_status,
+                        RunRow.cancel_action == expected_cancel_action,
+                    ]
+                    if require_lease:
+                        # PostgreSQL now() is frozen at transaction start. A
+                        # writer waiting for a lock must use the current clock.
+                        clock = func.clock_timestamp() if session.bind.dialect.name == "postgresql" else func.strftime("%Y-%m-%d %H:%M:%f", "now")
+                        conditions.append(RunRow.lease_expires_at > clock)
+                    else:
+                        conditions.append(RunRow.lease_expires_at.is_(None))
+                    result = await session.execute(update(RunRow).where(*conditions).values(**values).returning(RunRow.run_id))
+                    matched = result.first() is not None
+                    committing = True
+                    await session.commit()
+                    return matched
+                except Exception as exc:
+                    outcome = "unknown"
+                    if not committing:
+                        try:
+                            await await_drained(session.rollback())
+                        except Exception:
+                            pass
+                        else:
+                            outcome = "rolled_back"
+                    raise TerminalWriteFailure(outcome, exception_classification(exc)) from None
+        except TerminalWriteFailure:
+            raise
+        except Exception as exc:
+            raise TerminalWriteFailure("unknown", exception_classification(exc)) from None
 
     async def update_status(self, run_id, status, *, error=None, stop_reason=None) -> bool:
         values: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
@@ -483,6 +564,7 @@ class RunRepository(RunStore):
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
         error: str | None = None,
+        expected_owner_worker_id: str | None = None,
     ) -> bool:
         """Update status + token usage + convenience fields on run completion.
 
@@ -515,14 +597,13 @@ class RunRepository(RunStore):
             allowed_sources.append("interrupted")
         async with self._sf() as session:
             values["change_seq"] = await self._next_change_seq(session)
-            result = await session.execute(
-                update(RunRow)
-                .where(
-                    RunRow.run_id == run_id,
-                    RunRow.status.in_(tuple(allowed_sources)),
-                )
-                .values(**values)
-            )
+            conditions = [RunRow.run_id == run_id, RunRow.status.in_(tuple(allowed_sources))]
+            if expected_owner_worker_id is not None:
+                # The worker already confirmed terminal persistence. Completion
+                # is metadata-only and cannot recreate or re-terminalize a row.
+                values.pop("status")
+                conditions = [RunRow.run_id == run_id, RunRow.status == status, RunRow.owner_worker_id == expected_owner_worker_id]
+            result = await session.execute(update(RunRow).where(*conditions).values(**values))
             await session.commit()
             return result.rowcount != 0
 
