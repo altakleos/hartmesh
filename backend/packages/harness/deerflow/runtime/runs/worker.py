@@ -29,7 +29,7 @@ from collections.abc import Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from contextvars import Context
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any, Final, Literal, cast
 
@@ -1094,6 +1094,8 @@ async def _run_agent(
     snapshot_capture_failed = False
     llm_error_fallback_message: str | None = None
     checkpoint_rollback_completed = False
+    terminal_stream_closed = False
+    terminal_failure_published = False
     # Message ids checkpointed *before* this run started. The stream loop uses
     # this set to mask out ``deerflow_error_fallback`` markers that belong to
     # earlier runs on the same thread — without it, one stale fallback in
@@ -1172,6 +1174,26 @@ async def _run_agent(
                 **terminal_status_kwargs,
             )
             logger.info("Run %s was cancelled", run_id)
+
+    async def _publish_terminal_stream() -> None:
+        nonlocal terminal_stream_closed, terminal_failure_published
+        from .terminal import UNCONFIRMED_ERROR, UNCONFIRMED_STATE
+
+        if not terminal_failure_published:
+            if record.terminal_write_unconfirmed and run_manager.heartbeat_enabled:
+                deadline = run_manager._parse_lease_deadline(record.lease_expires_at)
+                if deadline is None or deadline <= datetime.now(UTC):
+                    record.terminal_write_unconfirmed = False
+            if record.terminal_write_unconfirmed and record.ownership_lost and not record.terminal_confirmed:
+                await bridge.publish(run_id, "error", {"message": UNCONFIRMED_ERROR, "reason": UNCONFIRMED_STATE})
+                terminal_failure_published = True
+        await bridge.publish_end(run_id)
+        terminal_stream_closed = True
+
+    async def _close_fenced_stream() -> None:
+        if record.finalizing:
+            await run_manager.set_finalizing(run_id, False)
+        await _publish_terminal_stream()
 
     try:
         normalized_stream_modes = normalize_stream_modes(stream_modes)
@@ -2086,12 +2108,20 @@ async def _run_agent(
             if record.finalizing:
                 await run_manager.set_finalizing(run_id, False)
 
-            await bridge.publish_end(run_id)
+            await _publish_terminal_stream()
 
             if deferred_finalization_interrupt is not None:
                 raise deferred_finalization_interrupt
         finally:
             try:
+                if record.ownership_lost and not terminal_stream_closed:
+                    from deerflow.utils.file_io import await_drained
+
+                    try:
+                        await await_drained(_close_fenced_stream())
+                    except BaseException:
+                        logger.warning("Could not close fenced run stream for %s", run_id)
+                        # Preserve the worker's original cancellation/failure.
                 if journal is not None:
                     try:
                         await journal.close(flush=not record.ownership_lost)

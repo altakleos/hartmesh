@@ -110,6 +110,20 @@ def run_is_before_cursor(
 
 
 class RunStore(abc.ABC):
+    # Opt in only with an atomic owner/version/cancellation/lease predicate.
+    # Legacy stores retain their existing public status-update contract.
+    supports_terminal_recovery: bool = False
+
+    async def finalize_owned(
+        self, run_id: str, *, owner_worker_id: str, expected_change_seq: int, expected_status: str, expected_cancel_action: str | None, require_lease: bool, status: str, error: str | None = None, stop_reason: str | None = None
+    ) -> bool:
+        """Conditionally settle exactly the observed owned row, or return False.
+
+        No fallback to an unfenced write is safe. Exceptions have unknown commit
+        outcome unless the implementation explicitly attests otherwise.
+        """
+        raise NotImplementedError("RunStore does not support fenced terminal recovery")
+
     async def list_changed(
         self,
         *,
