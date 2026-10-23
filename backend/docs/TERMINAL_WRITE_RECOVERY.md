@@ -11,7 +11,9 @@ No database schema change is required.
 Terminal persistence logs the run ID, attempted status, stable
 `terminal_write_failed` reason, attempt number and a fixed exception
 classification. It never logs exception text, tracebacks, SQL, parameters,
-messages or credentials. Outcomes distinguish:
+messages or credentials. Progress and completion metadata failures use the same
+fixed classifications with an operation name and `run_metadata_write_failed`.
+Terminal outcomes distinguish:
 
 - `validation_refused`: the payload was refused before opening a transaction.
 - `rolled_back`: a pre-commit failure was followed by a confirmed rollback.

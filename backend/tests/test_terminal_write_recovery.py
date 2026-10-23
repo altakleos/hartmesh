@@ -59,10 +59,11 @@ async def repository(tmp_path, request):
 class PersistenceFault:
     """Fail only actual terminal transactions; all reads use the real database."""
 
-    def __init__(self, repository, *, after_commit=False, persistent=False):
+    def __init__(self, repository, *, after_commit=False, persistent=False, metadata=False):
         self.factory = repository._sf
         self.after_commit = after_commit
         self.persistent = persistent
+        self.metadata = metadata
         self.attempts = 0
         self.failed = False
         self.failure_seen = asyncio.Event()
@@ -82,6 +83,8 @@ class PersistenceFault:
                     and statement.table.name == "runs"
                     and any(getattr(key, "name", key) == "status" and getattr(value, "value", None) in {"success", "error", "timeout", "interrupted"} for key, value in values.items())
                 )
+                if self.metadata:
+                    terminal = terminal or (getattr(statement, "is_update", False) and statement.table.name == "runs" and any(getattr(key, "name", key) == "first_human_message" for key in values))
                 if terminal and not self.after_commit and (self.persistent or not self.failed):
                     self.attempts += 1
                     self.failed = True
@@ -633,3 +636,28 @@ async def test_missing_terminal_row_is_fenced_without_recreation(repository):
     await manager.set_status_if_not_cancelled(record.run_id, RunStatus.success)
     assert await repository.get(record.run_id) is None
     assert record.ownership_lost and not record.terminal_confirmed
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("phase", ["progress", "finalizing_progress", "completion"])
+async def test_progress_and_completion_write_diagnostics_never_disclose_sql_or_messages(repository, phase, caplog):
+    manager = RunManager(repository)
+    record = await manager.create_or_reject("metadata-logging")
+    await manager.try_start(record.run_id)
+    if phase == "finalizing_progress":
+        await manager.set_status(record.run_id, RunStatus.success, persist=False)
+    elif phase == "completion":
+        await manager.set_status_if_not_cancelled(record.run_id, RunStatus.success)
+    fault = PersistenceFault(repository, metadata=True)
+    if phase == "progress":
+        await manager.update_run_progress(record.run_id, first_human_message=SECRET)
+    elif phase == "finalizing_progress":
+        await manager.update_finalizing_progress(record.run_id, first_human_message=SECRET)
+    else:
+        await manager.update_run_completion(record.run_id, status="success", first_human_message=SECRET)
+    assert fault.failed
+    assert f"operation={phase}" in caplog.text
+    assert "exception_class=database_error" in caplog.text
+    assert "reason=run_metadata_write_failed" in caplog.text
+    assert SECRET not in caplog.text and "private_sql" not in caplog.text
+    assert not any(item.exc_info for item in caplog.records if "persistence failed" in item.message)

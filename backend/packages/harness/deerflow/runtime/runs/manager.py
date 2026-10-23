@@ -589,8 +589,8 @@ class RunManager:
                 )
                 if recovered is False:
                     logger.warning("Run completion update for %s affected no rows after row recreation", run_id)
-        except Exception:
-            logger.warning("Failed to persist run completion for %s", run_id, exc_info=True)
+        except Exception as exc:
+            logger.warning("Run persistence failed run_id=%s operation=completion reason=run_metadata_write_failed exception_class=%s", run_id, exception_classification(exc))
 
     async def update_run_progress(self, run_id: str, **kwargs) -> None:
         """Persist a running token/message snapshot without changing status."""
@@ -607,8 +607,8 @@ class RunManager:
         if should_persist and self._store is not None:
             try:
                 await self._store.update_run_progress(run_id, **kwargs)
-            except Exception:
-                logger.warning("Failed to persist run progress for %s", run_id, exc_info=True)
+            except Exception as exc:
+                logger.warning("Run persistence failed run_id=%s operation=progress reason=run_metadata_write_failed exception_class=%s", run_id, exception_classification(exc))
 
     async def update_finalizing_progress(self, run_id: str, **kwargs) -> None:
         """Persist final fields while the durable row is deliberately active."""
@@ -627,8 +627,8 @@ class RunManager:
                 # The local status is already staged as terminal, but the store
                 # row intentionally remains running until checkpoint finalization.
                 await self._store.update_run_progress(run_id, **kwargs)
-            except Exception:
-                logger.warning("Failed to persist finalizing progress for %s", run_id, exc_info=True)
+            except Exception as exc:
+                logger.warning("Run persistence failed run_id=%s operation=finalizing_progress reason=run_metadata_write_failed exception_class=%s", run_id, exception_classification(exc))
 
     async def create(
         self,
