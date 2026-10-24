@@ -1336,6 +1336,10 @@ without deleting earlier receipts. The connection flow remains reserved.
 Its presentation layer includes English and Chinese product text, bounded Telegram
 HTML, complete multipart previews, permission-aware web links and voice-provider
 selection from the deployment's current model configuration.
+Durable input and delivery records now retain routing, publication and output
+identities through retries. Fenced workers resume unacknowledged reply parts,
+and an input completes only after all required deliveries settle. These workers
+remain separate from the later transport and Gateway startup integration.
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 

@@ -41,6 +41,23 @@ Borrowed helpers accept only their owning writer session and never commit or
 open another checkout. Connection-only writers never acquire capacity afterward.
 The existing channel repository's committing/ownership-transfer helpers are
 not suitable inside these units; use the local owner-filtered row helpers.
+`BotLink.from_row` captures detached public facts without its credential; use
+this factory instead of importing the link module's private snapshot helper.
+
+`inbox.py` owns immutable admission/routes, compatible grouping and publication
+history. Match the captured chat and generation, and bind runs only to the current
+publication. Shared `register_delivery`/`settle_deliveries` keep completion in one
+place: a sealed route and every required delivery must be sent/skipped. An
+auxiliary receipt never completes unfinished processing. Borrowed helpers share
+the caller's writer/session and never own its commit or rollback.
+
+`producer.py` owns reply plans and bounded claim workers. Raw delivery receives
+link/outbox/part IDs plus both process/admission fences. Current owner/policy/
+target eligibility is mandatory at claim and each part, outside SQL transactions.
+Never reclaim a live worker by elapsed time. Already-dispatched transport may
+finish during conflict; new parts wait. Saved acknowledgements and presentation
+identities survive retries. This layer starts no supervisor, poller or Gateway
+service; transport integration follows separately.
 
 Binding saves account ownership, channel identity, generation, event, sanitized
 Start identity and ordered welcome/privacy delivery in one unit. Start accepts
