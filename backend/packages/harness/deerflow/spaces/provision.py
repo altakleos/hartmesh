@@ -16,6 +16,7 @@ from deerflow.spaces.backings import RESERVE_INODES, FixedVolumeSpec, PreparedVo
 
 MAX_SPACES = 256
 INODE_BYTES = 8192
+FIXED_VOLUME_MOUNT_OPTIONS = "loop,nodev,nosuid,nodiscard"
 HEADROOM_MIN_BYTES = 4 << 30
 HEADROOM_FRACTION = 0.10
 SPACE_MIN_FREE_BYTES = 16 << 20
@@ -172,7 +173,7 @@ def prepare_volumes(
             finally:
                 os.close(fd)
             subprocess.run(
-                [tools["mount"], "-o", "loop,nodev,nosuid", str(image), str(mount)],
+                [tools["mount"], "-o", FIXED_VOLUME_MOUNT_OPTIONS, str(image), str(mount)],
                 check=True,
                 timeout=30,
             )

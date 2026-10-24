@@ -246,6 +246,14 @@ outside the visible root. Displayed available capacity excludes filesystem
 overhead. Image allocation leaves the configured platform byte/inode reserve;
 ordinary resource writes cannot grow these fixed image files.
 
+Preparation explicitly mounts fixed images with `nodiscard`. Host trim policy
+must exclude their mounted filesystems: FITRIM through a loop device punches holes
+in its backing image and invalidates the physical reservation. Compose-generated
+fstab entries carry `X-fstrim.notrim` for the standard scheduled trim service;
+the standalone helper does not manage host fstab, so its operator must supply an
+equivalent exclusion. Direct trim and `fstrim -a` bypass that fstab marker.
+See the [operator trim policy](../deploy/compose/README.md#fixed-image-trim-policy).
+
 The explicit operator helper uses preinstalled tools and prepares only new
 regular image files. It never installs dependencies, builds VM images or reads
 application configuration. For a new pool on a supported Linux host:

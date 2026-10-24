@@ -35,7 +35,7 @@ from deerflow.spaces.backings import (
     validate_loop_range,
     verify_image_extents,
 )
-from deerflow.spaces.provision import INODE_BYTES, KINDS, MAX_SPACES, plan_capacities, plan_counts, storage_fit
+from deerflow.spaces.provision import FIXED_VOLUME_MOUNT_OPTIONS, INODE_BYTES, KINDS, MAX_SPACES, plan_capacities, plan_counts, storage_fit
 
 ABSENT_MEANS_DEFAULT = True
 AT_START_LIMIT_SECONDS = 600
@@ -322,7 +322,7 @@ class StorageInitializer:
     def mount(self, spec):
         no_symlinks(spec.image_path)
         no_symlinks(spec.mount_path)
-        self.host.run("mount", "-o", "loop,nodev,nosuid", str(spec.image_path), str(spec.mount_path))
+        self.host.run("mount", "-o", FIXED_VOLUME_MOUNT_OPTIONS, str(spec.image_path), str(spec.mount_path))
         if not os.path.ismount(spec.mount_path):
             raise Refused(f"slot {spec.slot_id} was mounted on the host and is not visible here; the mount of {self.data_dir} is not shared (findmnt -no PROPAGATION --target {self.data_dir})")
 
@@ -461,7 +461,9 @@ class StorageInitializer:
         def escape(path):
             return str(path).replace("\\", "\\134").replace(" ", "\\040").replace("\t", "\\011").replace("\n", "\\012")
 
-        return f"{escape(spec.image_path)} {escape(spec.mount_path)} ext4 loop,nodev,nosuid,nofail,x-systemd.requires-mounts-for={escape(spec.image_path.parent.parent)},x-systemd.before=docker.service 0 0"
+        # Scheduled FITRIM would punch holes in the fully reserved loop image.
+        # nodiscard alone controls online discard, not an explicit FITRIM ioctl.
+        return f"{escape(spec.image_path)} {escape(spec.mount_path)} ext4 {FIXED_VOLUME_MOUNT_OPTIONS},nofail,X-fstrim.notrim,x-systemd.requires-mounts-for={escape(spec.image_path.parent.parent)},x-systemd.before=docker.service 0 0"
 
     def fstab_sync(self):
         inventory = self.load()

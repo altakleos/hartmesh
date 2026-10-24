@@ -185,6 +185,17 @@ identity or bypasses native containment.
 
 ## Shipped Compose qualification
 
+The mandatory native tier also runs the scheduled-trim regression on isolated,
+disposable loop images. Only a task-owned nonempty fstab table is passed to
+`fstrim --listed-in`: its unprotected positive control must actually lose physical
+allocation and fail qualification; the protected image must retain allocation,
+files and qualification. Never run this native test locally or trim the host's
+global table. Compose failure evidence includes bounded fstrim service/timer facts.
+After deliberate workspace destruction/replacement, the bundle journey waits for
+public `agent_instances.execution` readiness before the next independent journey.
+The shared wait retains a hard 90-second deadline and bounded GETs; it never
+retries an activation or substitutes Gateway liveness for resident qualification.
+
 `test_compose_instance_acceptance.py` is opt-in live, gated by
 `HARTMESH_REQUIRE_BUNDLE_INSTANCES=1`; missing prerequisites fail when requested.
 The `bundle-instances` CI job requires all 27 storage/agent cases in order
