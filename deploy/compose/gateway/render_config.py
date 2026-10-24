@@ -87,7 +87,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -131,6 +131,11 @@ CAPACITY_RANGE = (1, 1024)
 MAX_SPACES = 256  # mirrors deerflow.spaces.provision
 ABSENT_MEANS_DEFAULT = True  # mirrors app.gateway.storage_init
 AGENT_COUNTS_ACTIVE = True
+TELEGRAM_ABSENT_MEANS_ON = False
+TELEGRAM_ENV = "HARTMESH_TELEGRAM"
+TELEGRAM_VOICE_ENV = "HARTMESH_TELEGRAM_VOICE"
+TELEGRAM_MAX_BOTS_ENV = "HARTMESH_TELEGRAM_MAX_BOTS"
+TELEGRAM_MAX_BOTS_PER_PERSON_ENV = "HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON"
 MODELS_ENV = "HARTMESH_MODELS_FILE"
 # ── Sign-in mode ────────────────────────────────────────────────────────────
 SIGN_ON_ISSUER_ENV = "HARTMESH_SIGN_ON_ISSUER"
@@ -571,6 +576,75 @@ def select_egress(environ: Mapping[str, str]) -> str:
     return mode
 
 
+def select_telegram(environ: Mapping[str, str]) -> Literal["on", "off", "absent"]:
+    raw = environ.get(TELEGRAM_ENV, "").strip()
+    if not raw:
+        return "on" if TELEGRAM_ABSENT_MEANS_ON else "absent"
+    if raw not in {"on", "off"}:
+        raise RenderError(f"{TELEGRAM_ENV} must be `on` or `off`")
+    return raw
+
+
+def select_telegram_voice(environ: Mapping[str, str]) -> str:
+    raw = environ.get(TELEGRAM_VOICE_ENV, "").strip() or "auto"
+    if raw not in {"auto", "openai", "gemini", "off"}:
+        raise RenderError(f"{TELEGRAM_VOICE_ENV} must be one of auto, openai, gemini, off")
+    return raw
+
+
+def _select_telegram_count(environ: Mapping[str, str], key: str, maximum: int, default: int) -> int:
+    raw = environ.get(key, "").strip()
+    if not raw:
+        return default
+    digits = raw.lstrip("0") or "0"
+    # Bound conversion too: an arbitrarily long environment value must still
+    # give the fixed refusal rather than Python's integer conversion error.
+    if not _WHOLE_SECONDS.fullmatch(raw) or len(digits) > len(str(maximum)) or not 1 <= int(digits) <= maximum:
+        raise RenderError(f"{key} must be a whole number from 1 to {maximum}")
+    return int(digits)
+
+
+def select_telegram_max_bots(environ: Mapping[str, str]) -> int:
+    return _select_telegram_count(environ, TELEGRAM_MAX_BOTS_ENV, 500, 100)
+
+
+def select_telegram_max_bots_per_person(environ: Mapping[str, str]) -> int:
+    return _select_telegram_count(environ, TELEGRAM_MAX_BOTS_PER_PERSON_ENV, 40, 10)
+
+
+def _telegram_sections(document: dict[str, Any], environ: Mapping[str, str]) -> None:
+    section = dict(_mapping(document.get("telegram_bots", {}), "template `telegram_bots`"))
+    channels = _mapping(document.get("channels", {}), "template `channels`")
+    if {"enabled", "public_base_url"} & section.keys() or "channel_connections" in document or "telegram" in channels:
+        raise RenderError("template `telegram_bots.enabled`, `telegram_bots.public_base_url`, `channel_connections` and `channels.telegram` must be absent; HARTMESH_TELEGRAM and HARTMESH_PUBLIC_HOST select them")
+    mode = select_telegram(environ)
+    voice = {**_mapping(section.get("voice", {}), "template `telegram_bots.voice`"), "provider": select_telegram_voice(environ)}
+    maximum, per_person = select_telegram_max_bots(environ), select_telegram_max_bots_per_person(environ)
+    if mode == "absent":
+        document.pop("telegram_bots", None)
+        document.pop("channels", None)
+        document["tools"] = [entry for entry in document["tools"] if entry["name"] != "show_web_page"]
+        return
+    host = environ.get(PUBLIC_HOST_ENV, "").strip()
+    section.update(enabled=mode == "on", public_base_url=f"https://{host}" if _HOSTNAME.fullmatch(host) else None, max_bots=maximum, max_bots_per_person=per_person, voice=voice)
+    document["telegram_bots"] = section
+    document["channel_connections"] = {"enabled": True, "require_bound_identity": True, "telegram": {"enabled": False}}
+    document["channels"] = {"max_concurrency": 8}
+
+
+def telegram_summary(document: Mapping[str, Any], environ: Mapping[str, str]) -> str:
+    if not document.get("telegram_bots", {}).get("enabled", False):
+        return "telegram=off; "
+    secret = environ.get("HARTMESH_PROVIDER_KEYS_SECRET", "").strip()
+    if not secret:
+        return "telegram=on, bots cannot be added (HARTMESH_PROVIDER_KEYS_SECRET not set); "
+    if len(secret) < 32:
+        return "telegram=on, bots cannot be read (HARTMESH_PROVIDER_KEYS_SECRET is shorter than 32 characters); "
+    if document["telegram_bots"]["public_base_url"] is None:
+        return "telegram=on, no link buttons (HARTMESH_PUBLIC_HOST is not a hostname); "
+    return "telegram=on; "
+
+
 def select_ready_timeout(environ: Mapping[str, str]) -> int | None:
     """Return the operator's cold-start readiness budget override, or None when unset."""
 
@@ -967,6 +1041,7 @@ def render(
         ui["product_name"] = name
     document["ui"] = ui
     _storage_sections(document, environ)
+    _telegram_sections(document, environ)
 
     problems: list[str] = []
     _credential_problems(document, (), problems)
@@ -1044,7 +1119,7 @@ def main(argv: list[str] | None = None) -> int:
         sign_in_line += f" (provider {SIGN_ON_PROVIDER_ID}, callback https://{os.environ[PUBLIC_HOST_ENV].strip()}/api/v1/auth/callback/{SIGN_ON_PROVIDER_ID}{membership})"
     else:
         sign_in_line += f" (registration {select_local_registration(os.environ)})"
-    summary = f"models from {source}; egress={select_egress(os.environ)}; {storage_summary(document)}{sign_in_line}; provider keys found: {providers}; sandbox ready_timeout={budget}s, capacity_wait_timeout={slot_wait}s; {bundle_line}"
+    summary = f"models from {source}; egress={select_egress(os.environ)}; {storage_summary(document)}{telegram_summary(document, os.environ)}{sign_in_line}; provider keys found: {providers}; sandbox ready_timeout={budget}s, capacity_wait_timeout={slot_wait}s; {bundle_line}"
     if args.check:
         print(f"render_config: {args.template} renders ({summary})")
         return 0

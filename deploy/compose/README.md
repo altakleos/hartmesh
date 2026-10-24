@@ -94,6 +94,10 @@ get explicit `environment:` entries and never see a provider key.
 | `HARTMESH_AI_EMPLOYEES` | AI employee slots, 0–100; absent 10. (§ "Storage and agents"). |
 | `HARTMESH_AI_EMPLOYEE_STORAGE_GIB` | AI employee capacity, 1–1024 GiB; absent 1. (§ "Storage and agents"). |
 | `HARTMESH_COMPANY_STORAGE_GIB` | Company capacity, 1–1024 GiB; absent 1. (§ "Storage and agents"). |
+| `HARTMESH_TELEGRAM` | Reserved: `on` or `off`; absent means off until the unfinished feature is offered. (§ "Telegram bots"). |
+| `HARTMESH_TELEGRAM_VOICE` | Reserved voice provider: `auto`, `openai`, `gemini` or `off`; absent `auto`. (§ "Telegram bots"). |
+| `HARTMESH_TELEGRAM_MAX_BOTS` | Reserved deployment bot-link limit, 1–500; absent 100. (§ "Telegram bots"). |
+| `HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON` | Reserved per-person bot-link limit, 1–40; absent 10. (§ "Telegram bots"). |
 | `HARTMESH_APP_SUBNET` | The `app` bridge's IPAM subnet **and** the Gateway's `AUTH_TRUSTED_PROXIES`, which are the same reference. Absent -- which is what every existing tenant `.env` is -- both take the shipped default, `10.201.26.0/24`. Set it only when that range collides with something the guest must still reach (§ "Network model"). |
 | `HARTMESH_PRODUCT_NAME` | What the product is called: the heading on the sign-in and setup pages, the browser tab, the workspace when the tenant bundle names no company, the assistant's own name, and DingTalk's message title. Rendered into `ui.product_name` (the template must not carry it); one line of at most 40 characters, surrounding spaces trimmed. Absent -- which is what every existing tenant `.env` is -- `HartMesh`. A name the Gateway would refuse (a control or reordering character, over 40 characters), or one beginning with `$` (the Gateway would read it as an environment variable), refuses to render. It is read at Gateway start: a new name takes a restart. Quote a name containing `#` (`HARTMESH_PRODUCT_NAME="Acme #1"`), or `.env` reads the rest as a comment. A company name from the tenant bundle still wins inside the workspace after sign-in (§ "Tenant bundle"). |
 | `HARTMESH_MODELS_FILE` | The path of the operator's own model file, read by `gateway/render_config.py` at every Gateway start. Absent -- which is what every existing tenant `.env` is -- the rendered `models:` section comes from the bundled provider catalog exactly as before. Set, that one file is the whole model list (§ "Operator-managed models"). |
@@ -2057,6 +2061,39 @@ An export needs as much free space as the person's data until it is
 downloaded or expires, so an account larger than the free space minus 1 GiB
 cannot be exported until the data disk grows. The logs say when one starts and
 finishes, with its counts and size, and never a title or a file name.
+
+## Telegram bots
+
+Telegram bots are not offered in this release. The key `HARTMESH_TELEGRAM` is
+reserved for them. While it is absent, the renderer writes no `telegram_bots`,
+`channel_connections` or `channels` section and removes `show_web_page` from
+the tool list. `on` is for qualification of the unfinished feature and is not
+supported in this release. No managed bot supervisor runs yet.
+
+Configuration version 55 reserves all managed-bot settings. Explicit `on` or
+`off` renders the section with its corresponding `enabled` value, the public
+URL from `HARTMESH_PUBLIC_HOST` when it passes the renderer's hostname check,
+and the voice provider and bot limits above. Empty environment values use the
+absent defaults. Invalid values refuse rendering with the key's name. The
+template must omit `telegram_bots.enabled`, `telegram_bots.public_base_url`,
+`channel_connections` and `channels.telegram`; the renderer owns them.
+The rendered bound-identity configuration disables deployment-wide Telegram
+setup through both existing token routes. It does not migrate an existing bot.
+
+The render/check summary follows the storage/agents fragment with `telegram=off`
+when absent or explicitly off. For explicit `on`, its first applicable message is:
+
+| Fragment | Meaning |
+| --- | --- |
+| `telegram=on, bots cannot be added (HARTMESH_PROVIDER_KEYS_SECRET not set)` | No wrapping secret was supplied. |
+| `telegram=on, bots cannot be read (HARTMESH_PROVIDER_KEYS_SECRET is shorter than 32 characters)` | The supplied wrapping secret is too short. |
+| `telegram=on, no link buttons (HARTMESH_PUBLIC_HOST is not a hostname)` | No valid public hostname; the rendered public URL is null. |
+| `telegram=on` | These prerequisites are present. This does not enable the unfinished connection flow. |
+
+Neither a missing secret nor a non-hostname public host refuses a render.
+The secret value is never written into the rendered section or printed in the
+summary. The database schema foundation is revision `0042_telegram_bots`; these
+configuration and tool additions require no further migration.
 
 ## Scheduled tasks
 

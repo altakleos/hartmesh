@@ -89,6 +89,11 @@ adopted revision, Home and thread incarnation. Reject client copies and never pe
 the object. Inspection projections cannot execute. Validate on the original host
 loop before model/tool calls, including isolated child loops and worker threads.
 
+`chat_tools.show_web_page` emits one of twelve page keys in a `web_page` artifact,
+never an address or reader authority. Agent-only pages require host `AgentExecution`;
+custom-agent chats cannot offer memory. Clients resolve links and recheck access.
+The tool returns a plain `ToolMessage` so the conversation continues.
+
 Workspace refusal types in `contract.py` use the existing `Refusal` HTTP envelope.
 All eight `ResidentUnavailable` subclasses default to 409, including workspace
 `files-full`, distinct from the personal-chat 507. Preserve cause metadata and

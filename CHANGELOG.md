@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Configuration and deployment
+
+Configuration version 55 adds strict managed Telegram bot settings, four optional
+Compose environment keys and a page-offer tool that carries page keys rather
+than addresses. Telegram bots are not offered in this release;
+`HARTMESH_TELEGRAM` is reserved and an absent key means that the deployment has
+no Telegram bots. Explicit `on`/`off` renders bound-identity settings and closes
+the deployment-wide Telegram token routes. The renderer reports fixed status
+messages without printing the wrapping secret. These configuration/tool changes
+add no database schema changes beyond the migration described below.
+
 ### Schema changes
 
 Add revision `0042_telegram_bots`, after `0041_storage_host_replacements`, with
