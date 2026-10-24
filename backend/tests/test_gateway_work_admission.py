@@ -69,10 +69,17 @@ async def test_capacity_refusal_cannot_write_a_new_attempt(execution, monkeypatc
     from app.gateway.work_execution import activate_work_run
 
     service, admitted, row, _sf = execution
-    service.agents.residents = SimpleNamespace(admit=AsyncMock(side_effect=ResidentBusy(admitted.instance.name)))
+    home = SimpleNamespace(lock=asyncio.Lock())
+
+    def entry(instance):
+        assert (instance.id, instance.home_id) == (admitted.instance.id, admitted.instance.home_id)
+        return home
+
+    service.agents.residents = SimpleNamespace(entry=entry, admit=AsyncMock(side_effect=ResidentBusy(admitted.instance.name)))
     monkeypatch.setattr("app.gateway.services.start_run", AsyncMock(side_effect=AssertionError("Refused admission must not launch")))
     with pytest.raises(ResidentBusy):
         await activate_work_run(request_for(service), service, admitted, row["id"], activation(admitted, row))
+    assert not home.lock.locked()
     service.agents.residents = None
     current = await service.work.get(actor=admitted.requester, instance_id=admitted.instance.id, work_id=row["id"])
     assert current["attempt"] is None and current["revision"] == row["revision"]

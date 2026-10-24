@@ -10,6 +10,9 @@ admission (HTTP 507). Reuse idempotency keys first; after capacity refusal reche
 peer admissions, payload and owner. Instance storage policy and worker
 revalidation remain mandatory.
 
+Initial Work `admit` holds the exact Home lock; release before SQL/launch.
+Recheck restoration, closure and recycle after waiting.
+
 Reject external run/state writes with `sandbox`, `thread_data`, or `viewed_images`.
 
 Studio retains sanitized creation metadata.
@@ -21,13 +24,12 @@ reject arbitrary Python commands and manifest policy bypasses. Keep credentials
 out of tool schemas; preserve admin checks, masked edits, atomic writes, and
 MCP cache reloads.
 
-Memory shutdown resolves hot-reloaded config and the backend, flushes, then
-closes as one `await_drained` operation. Keep config resolution inside the
-best-effort error handler and off the event loop so malformed config edits do
-not abort runtime teardown. Cancellation waits for the owned workers before
-propagating; backend `close()` overrides must be quick or internally bounded
-because close has no host timeout. Budget resolution and close in the pod grace
-period in addition to the configured flush timeout and other shutdown hooks.
+Memory shutdown resolves hot-reloaded config/backend, flushes and closes in
+one `await_drained` operation. Resolve config off-loop inside the best-effort
+handler so invalid edits cannot abort teardown. Drain workers before propagating
+cancellation. Backend `close()` must be quick or internally bounded; no host
+timeout applies. Pod grace covers resolution/close, the configured flush timeout
+and other shutdown hooks.
 Extension-service teardown follows the same ownership rule: `stop_services()`
 is drained across host cancellation before later runtime resources unwind; each
 service `stop()` remains bounded by its 30-second `asyncio.timeout`, so include

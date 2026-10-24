@@ -26,6 +26,15 @@ No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
 remains version 55. Ordinary message handling and managed-bot activation remain
 deferred.
 
+### Work activation during workspace maintenance
+
+Serialize initial Work capacity admission with the AI employee's Home checks,
+so healthy maintenance does not reject activation as a restarting workspace.
+Recheck current restoration, shutdown and recycle state after waiting.
+
+No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
+remains version 55.
+
 ### Telegram private input and fixed replies
 
 Add ordered private-chat update handling, bounded stranger replies, token-paste
