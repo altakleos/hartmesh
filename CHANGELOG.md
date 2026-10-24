@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Compose workspace recovery qualification
+
+After deliberately removing an idle workspace, wait for its exact attachment
+retirement, primary and relay removal, and current execution readiness before
+starting the next acceptance run. Keep production admission checks and the
+in-flight workspace-loss test unchanged.
+
+No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
+remains version 55.
+
 ### Work activation during workspace maintenance
 
 Serialize initial Work capacity admission with the AI employee's Home checks,
