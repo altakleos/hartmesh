@@ -296,6 +296,13 @@ After deliberate workspace destruction/replacement, the bundle journey waits for
 public `agent_instances.execution` readiness before the next independent journey.
 The shared wait retains a hard 90-second deadline and bounded GETs; it never
 retries an activation or substitutes Gateway liveness for resident qualification.
+Cases 11 and 12 also capture the exact current attachment, personal AI assistant
+and Home scope, primary and paired relay before each deliberate removal. The
+read-only retirement barrier requires that exact host's `container-absent` fenced
+record, both containers' ID AND name absence, then fresh public readiness within
+one 90-second budget. SQL closure alone does not prove native finalization.
+Keep the standard-library helper's manual-clock tests offline and inspect native
+wiring through AST only; case 27 must still kill its in-flight attempt.
 
 `test_compose_instance_acceptance.py` is opt-in live, gated by
 `HARTMESH_REQUIRE_BUNDLE_INSTANCES=1`; missing prerequisites fail when requested.
