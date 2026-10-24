@@ -48,6 +48,21 @@ rollback/autoflush, chat-scoped replay, publication/run fences, joined-input
 completion and existing welcome plans. Worker barriers cover delayed same-process
 completions, fresh claim IDs, exact-part acknowledgements, capacity release,
 per-link pacing and repair. Advance injected clocks rather than real retry waits.
+Inject receipt and subsequent release commit failures together; a healthy tick
+must recover that finished claim without taking a live same-process claim.
+
+Transport tests run the actual pinned SDK over both `RecordingRequest` clients.
+Cover initialization failure cleanup, limiter overlap/cancellation, coalesced
+401 checks, delayed responses after token replacement, and real sender-to-adapter
+fallback/retry without recursive sends. Polling barriers own every suffix and
+getUpdates operation; real SQL cases prove committed conflict fences and failed
+writes. Product replay tests compare the exact origin set, including empty sets,
+and preserve original topic identity through relocation. Logging tests restore
+global filters/handlers and retain diagnostics while redacting credentials.
+The managed transport strict test constructs SDK objects off-loop, then performs
+all asynchronous lifecycle/send work on the Gateway loop. Clear the ZoneInfo
+cache after seeding preferences so the quiet-hours case proves a cold timezone
+lookup stays off-loop rather than benefiting from validation's warmed cache.
 
 `test_agent_chat_tools.py` uses real ToolNode runtime injection and host-only
 execution contexts for bounded page offers. Config tests use independent default

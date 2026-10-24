@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Telegram transport and polling foundation
+
+Add a single-loop Telegram client, bounded rate limiting and ordered polling.
+Retained update batches cannot be acknowledged before durable admission; polling
+conflicts invalidate waiting connect codes before any more input is handled.
+Captured token and delivery claims fence status writes and raw transport. Fixed
+product replies use saved plans, including scheduled plain-text fallback, and
+logging redacts bot credentials across application and library handlers.
+
+No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
+remains version 55. Gateway startup integration follows separately, and managed
+Telegram activation remains deferred.
+
 ### Telegram durable delivery foundation
 
 Add durable input admission, immutable routing and publication identities, and

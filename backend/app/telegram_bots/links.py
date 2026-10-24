@@ -275,6 +275,7 @@ class BotLinkRepository:
         # Causes are deliberately process-local; startup repopulates them. Only
         # install a changed set after its corresponding SQL commit succeeded.
         self._health_causes: dict[str, set[str]] = {}
+        self._health_revisions: dict[str, int] = {}
         self._health_locks: dict[str, asyncio.Lock] = {}
 
     def _health_lock(self, link_id: str) -> asyncio.Lock:
@@ -540,6 +541,39 @@ class BotLinkRepository:
             await session.flush()
             return _snapshot(row)
 
+    async def update_if_current(self, link_id: str, *, token_revision: int, **facts) -> BotLink | None:
+        """Publish only captured transport status, or guard a result without a write."""
+        if type(token_revision) is not int or token_revision < 0:
+            raise ValueError("invalid-token-revision")
+        dates = {"last_ok_at", "last_update_at", "last_error_at"}
+        flags = {"can_manage_bots", "topics_enabled"}
+        if set(facts) - dates - flags - {"last_error"}:
+            raise ValueError("invalid-transport-facts")
+        facts = dict(facts)
+        for key, value in facts.items():
+            if key in flags and type(value) is not bool:
+                raise ValueError("invalid-transport-facts")
+            if key in dates and value is not None:
+                if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+                    raise ValueError("invalid-transport-facts")
+                facts[key] = value.astimezone(UTC)
+            if key == "last_error" and value is not None and (not isinstance(value, str) or len(value) > 500 or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*(?: [a-z][a-z0-9_-]*)?", value)):
+                raise ValueError("invalid-error-classification")
+        try:
+            owner = await self._owner_of(link_id)
+        except ValueError:
+            return None
+        async with self._owner_writer(owner) as session:
+            row = await session.scalar(select(TelegramBotLinkRow).where(TelegramBotLinkRow.id == link_id, TelegramBotLinkRow.owner_user_id == owner).with_for_update())
+            if row is None or row.token_revision != token_revision:
+                return None
+            for key, value in facts.items():
+                setattr(row, key, value)
+            if facts:
+                row.updated_at = _now()
+                await session.flush()
+            return _snapshot(row)
+
     async def _end_codes(self, session: AsyncSession, link_id: str, owner: str) -> None:
         self._borrow(session, owner)
         codes = await session.scalars(select(ChannelOAuthStateRow).where(ChannelOAuthStateRow.owner_user_id == owner, ChannelOAuthStateRow.provider == "telegram", ChannelOAuthStateRow.consumed_at.is_(None)))
@@ -644,13 +678,17 @@ class BotLinkRepository:
             await self._event(session, await self._locked(session, link_id), "blocked", actor_id=owner)
             return True
 
-    async def set_health(self, link_id: str, cause: str | None, *, holds: bool, transition: dict | None = None) -> BotLink:
+    async def set_health(self, link_id: str, cause: str | None, *, holds: bool, transition: dict | None = None, expected_token_revision: int | None = None) -> BotLink | None:
         """Apply cause precedence and optional absolute conflict metadata.
 
         The poller owns its probe-duration constant and supplies all three
         transition fields together on first entry or an explicit new probe.
         Omission preserves an existing window; an explicit null host clears it.
+        A captured revision retires late callbacks without changing SQL or the
+        cause cache. One live supervisor owns ordinary cause publication.
         """
+        if expected_token_revision is not None and (type(expected_token_revision) is not int or expected_token_revision < 0):
+            raise ValueError("invalid-token-revision")
         if cause not in _HEALTH_ORDER and cause is not None:
             raise ValueError("invalid-health-cause")
         if transition is not None:
@@ -668,9 +706,22 @@ class BotLinkRepository:
         # Keep the process-local publication inside the same per-link scope as
         # the SQL commit, including its asynchronous session cleanup.
         async with self._health_lock(link_id):
-            async with self._owner_writer(await self._owner_of(link_id)) as session:
-                row = await self._locked(session, link_id)
-                causes = set(self._health_causes.get(link_id, {row.health} if row.health != "ok" else set()))
+            try:
+                owner = await self._owner_of(link_id)
+            except ValueError:
+                if expected_token_revision is not None:
+                    return None
+                raise
+            async with self._owner_writer(owner) as session:
+                row = await session.scalar(select(TelegramBotLinkRow).where(TelegramBotLinkRow.id == link_id, TelegramBotLinkRow.owner_user_id == owner).with_for_update())
+                if row is None:
+                    if expected_token_revision is not None:
+                        return None
+                    raise ValueError("link-not-found")
+                if expected_token_revision is not None and row.token_revision != expected_token_revision:
+                    return None
+                cached = self._health_causes.get(link_id) if self._health_revisions.get(link_id) == row.token_revision else None
+                causes = set(cached if cached is not None else {row.health} if row.health != "ok" else set())
                 if cause is not None:
                     causes.add(cause) if holds else causes.discard(cause)
                 selected = next((item for item in _HEALTH_ORDER if item in causes), "ok")
@@ -690,6 +741,7 @@ class BotLinkRepository:
                 await session.flush()
                 result = _snapshot(row)
             self._health_causes[link_id] = causes
+            self._health_revisions[link_id] = result.token_revision
             return result
 
     async def _store_token(
@@ -734,6 +786,7 @@ class BotLinkRepository:
                 result = await self._store_token(session, row, encrypted_token, actor_id=actor_id, action=action, expected_revision=expected_revision, expected_encrypted_token=expected_encrypted_token, token_changed=token_changed)
             if action != "rewrap":
                 self._health_causes.pop(link_id, None)
+                self._health_revisions.pop(link_id, None)
             return result
 
     @staticmethod
@@ -1008,6 +1061,7 @@ class BotLinkRepository:
                     receipt["takeover"] = {"owed": True, "done": False}
                 await self._event(session, result, "token_replace_receipt", actor_id=owner_user_id, detail=receipt, operation_id=operation_id, request_digest=request_digest)
             self._health_causes.pop(changed_link or old_link_id, None)
+            self._health_revisions.pop(changed_link or old_link_id, None)
             return receipt
 
     async def _close_deliveries(self, session: AsyncSession, link_id: str) -> None:
