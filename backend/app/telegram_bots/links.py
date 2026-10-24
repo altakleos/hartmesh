@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import re
 import secrets
 import sqlite3
@@ -58,6 +59,21 @@ _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _USERNAME = re.compile(r"[A-Za-z0-9_]{1,64}\Z")
 _HEALTH_ORDER = ("secret_unreadable", "token_rejected", "policy_off", "conflict", "stopped", "agent_unavailable", "unreachable")
 _OPEN_ADDS = ("draft", "confirmed", "definition_created", "created", "bot_pending")
+_NOTICE_KEYS = {
+    "link.conflict": ("conflict", None),
+    "link.conflict_over": ("conflict_over", None),
+    "link.back_online": ("back_online", None),
+    "link.token_rejected_other": ("token_rejected_other", None),
+    "access.off": ("access_off", None),
+    "access.back": ("access_back", None),
+    "policy.off": ("policy", "off"),
+    "policy.on": ("policy", "allowed"),
+    "policy.on_protected": ("policy", "protected"),
+    "policy.protected": ("policy", "protected"),
+    "policy.unprotected": ("policy", "allowed"),
+    "link.removed": ("removed", None),
+    "agent.deleted": ("agent_deleted", None),
+}
 _EVENT_ACTIONS = {
     "add",
     "created_managed",
@@ -676,6 +692,128 @@ class BotLinkRepository:
             if changed.rowcount != 1:
                 return False
             await self._event(session, await self._locked(session, link_id), "blocked", actor_id=owner)
+            return True
+
+    @staticmethod
+    def _lifecycle_fences(token_revision: int, binding_generation: int) -> None:
+        if type(token_revision) is not int or token_revision < 0 or type(binding_generation) is not int or binding_generation < 0:
+            raise ValueError("invalid-lifecycle-basis")
+
+    async def _current_bound_connection(self, session: AsyncSession, row: TelegramBotLinkRow) -> ChannelConnectionRow | None:
+        if row.connection_id is None or row.telegram_user_id is None or row.telegram_user_id <= 0 or row.chat_id != row.telegram_user_id:
+            return None
+        return await session.scalar(
+            select(ChannelConnectionRow)
+            .where(
+                ChannelConnectionRow.id == row.connection_id,
+                ChannelConnectionRow.owner_user_id == row.owner_user_id,
+                ChannelConnectionRow.provider == "telegram",
+                ChannelConnectionRow.external_account_id == str(row.telegram_user_id),
+                ChannelConnectionRow.workspace_id == str(row.bot_id),
+                ChannelConnectionRow.bot_user_id == str(row.bot_id),
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+
+    async def hold_if_current(self, link_id: str, *, token_revision: int, binding_generation: int) -> BotLink | None:
+        """Hold the freshly refused owner's exact captured binding and retire its work.
+
+        The supervisor reads current owner refusal before calling. This writer
+        rechecks connection identity and both fences, and owns no account policy
+        or network operation. A repeated or superseded transition does nothing.
+        """
+        self._lifecycle_fences(token_revision, binding_generation)
+        try:
+            owner = await self._owner_of(link_id)
+        except ValueError:
+            return None
+        async with self._owner_writer(owner) as session:
+            row = await session.scalar(select(TelegramBotLinkRow).where(TelegramBotLinkRow.id == link_id, TelegramBotLinkRow.owner_user_id == owner))
+            if row is None or row.token_revision != token_revision or row.binding_generation != binding_generation or row.state not in {"connected", "blocked"}:
+                return None
+            binding = await self._current_bound_connection(session, row)
+            if binding is None or binding.status not in {"connected", "held"}:
+                return None
+            binding.status = "held"
+            row.state, row.binding_generation, row.updated_at = "held", _advance(row.binding_generation), _now()
+            await session.flush()
+            await self.end_pending(link_id, skip_reason="disabled", session=session)
+            await self._event(session, row, "hold", actor_id=owner)
+            return _snapshot(row)
+
+    async def release_if_current(self, link_id: str, *, token_revision: int, binding_generation: int) -> BotLink | None:
+        """Join an exact binding already restored by the operator, without restoring it."""
+        self._lifecycle_fences(token_revision, binding_generation)
+        try:
+            owner = await self._owner_of(link_id)
+        except ValueError:
+            return None
+        async with self._owner_writer(owner) as session:
+            row = await session.scalar(select(TelegramBotLinkRow).where(TelegramBotLinkRow.id == link_id, TelegramBotLinkRow.owner_user_id == owner))
+            if row is None or row.token_revision != token_revision or row.binding_generation != binding_generation or row.state != "held":
+                return None
+            binding = await self._current_bound_connection(session, row)
+            if binding is None or binding.status != "connected":
+                return None
+            row.state, row.updated_at = "connected", _now()
+            await self._event(session, row, "release", actor_id=owner)
+            return _snapshot(row)
+
+    async def mark_notice_if_current(self, link_id: str, key: str, *, token_revision: int, binding_generation: int, at: datetime, minimum_interval_seconds: float = 0) -> bool:
+        """Claim one bounded fixed notice before transport; no send runs in SQL.
+
+        A lost/failed disposable send retains this claim. The captured revision
+        and binding cannot claim a successor's notice, and stale clock readings
+        cannot overwrite a later claim. Existing notice categories keep their
+        documented ISO timestamp / policy value-and-time representation.
+        """
+        self._lifecycle_fences(token_revision, binding_generation)
+        if (
+            not isinstance(key, str)
+            or key not in _NOTICE_KEYS
+            or not isinstance(at, datetime)
+            or at.tzinfo is None
+            or at.utcoffset() is None
+            or type(minimum_interval_seconds) not in {int, float}
+            or not math.isfinite(minimum_interval_seconds)
+            or minimum_interval_seconds < 0
+        ):
+            raise ValueError("invalid-notice-claim")
+        at = at.astimezone(UTC)
+        try:
+            owner = await self._owner_of(link_id)
+        except ValueError:
+            return False
+        async with self._owner_writer(owner) as session:
+            row = await session.scalar(select(TelegramBotLinkRow).where(TelegramBotLinkRow.id == link_id, TelegramBotLinkRow.owner_user_id == owner))
+            if row is None or row.token_revision != token_revision or row.binding_generation != binding_generation or row.state not in {"connected", "blocked", "held"}:
+                return False
+            binding = await self._current_bound_connection(session, row)
+            if binding is None or binding.status not in {"connected", "held"} or not isinstance(row.notices, dict):
+                return False
+            stored_key, policy_value = _NOTICE_KEYS[key]
+            notices = deepcopy(row.notices)
+            previous = notices.get(stored_key)
+            if previous is not None:
+                if policy_value is not None:
+                    if not isinstance(previous, dict) or set(previous) != {"value", "at"} or not isinstance(previous["value"], str) or previous["value"] not in {"off", "allowed", "protected"}:
+                        return False
+                    previous = previous["at"]
+                try:
+                    if not isinstance(previous, str):
+                        return False
+                    stamp = datetime.fromisoformat(previous)
+                    if stamp.tzinfo is None or stamp.utcoffset() is None:
+                        return False
+                except ValueError:
+                    return False
+                elapsed = (at - stamp).total_seconds()
+                if elapsed <= 0 or elapsed < minimum_interval_seconds:
+                    return False
+            notices[stored_key] = at.isoformat() if policy_value is None else {"value": policy_value, "at": at.isoformat()}
+            row.notices, row.updated_at = notices, _now()
+            await session.flush()
             return True
 
     async def set_health(self, link_id: str, cause: str | None, *, holds: bool, transition: dict | None = None, expected_token_revision: int | None = None) -> BotLink | None:

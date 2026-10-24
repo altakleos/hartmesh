@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Telegram supervisor and Gateway lifecycle
+
+Add Gateway-owned managed-bot startup, health waiting, bounded concurrent bot
+initialization, revision-fenced polling recovery and two-phase shutdown. Cleanup
+also runs when later Gateway startup fails. Current human-account, binding and
+supported-target checks run at claim, between parts and after reply preparation;
+unreadable authority waits instead of granting delivery. Fixed lifecycle notices
+keep captured destinations and transactional throttles.
+
+No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
+remains version 55. Managed-bot activation remains deferred until stage one is
+complete. Model-final, file and instance-policy consumers remain with their
+subsequent changes.
+
+### Local command cancellation
+
+Fix a race where a detached child forked during cancellation could keep the
+command's output pipes open after its shell died. Bounded rescans retain exact
+command markers and Gateway self-exclusion; existing drain timeouts stay unchanged.
+
+No schema or configuration change.
+
 ### Telegram transport and polling foundation
 
 Add a single-loop Telegram client, bounded rate limiting and ordered polling.

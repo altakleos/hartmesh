@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from app.telegram_bots.config import TelegramBotsConfig
     from app.telegram_bots.inbox import InboxRow
     from app.telegram_bots.links import BotLink, BotLinkRepository
-    from app.telegram_bots.producer import Outbox, SendingPart
+    from app.telegram_bots.producer import DeliveryEligibility, Outbox, OutboxItem, SendingPart
     from app.telegram_bots.settings import SettingsRepository
 
 TOKEN_BODY = "[0-9]{6,12}:[A-Za-z0-9_-]{30,}"
@@ -111,6 +111,10 @@ class TransportServices(Protocol):
     tls_context: Any
 
     async def protect_notice(self, context: SendContext) -> bool: ...
+
+    async def eligibility(self, link: BotLink, item: OutboxItem, part: dict | None) -> DeliveryEligibility: ...
+
+    def channel(self, link_id: str) -> TelegramBotChannel | None: ...
 
 
 def _now() -> datetime:
@@ -505,13 +509,13 @@ class TelegramBotChannel(TelegramChannel):
             raise ValueError("notice-destination-required")
         if not self.application.running:
             return None
-        if context.link_id != self.link.id or context.token_revision != self.transport_revision or await self.refresh_link() is None:
+        if not await self._notice_context_current(context):
             return None
         text = await self._render_source(self.link, {"key": key, "values": values})
         protect = await self._services.protect_notice(context)
         if type(protect) is not bool:
             raise ValueError("invalid-notice-policy")
-        if await self.refresh_link() is None:
+        if not await self._notice_context_current(context):
             return None
         try:
             message = await self.bot.send_message(chat_id=context.chat_id, text=text, parse_mode=ParseMode.HTML, reply_to_message_id=reply_to, disable_notification=silent, message_thread_id=thread, protect_content=protect)
@@ -531,6 +535,22 @@ class TelegramBotChannel(TelegramChannel):
             return None
         await self._after_send_success()
         return message.message_id
+
+    async def _notice_context_current(self, context: SendContext) -> bool:
+        # A disposable transition has separate authorization from ordinary
+        # queued delivery (access.off may follow disablement), but never gains
+        # the destination or ownership of a later binding/adapter.
+        if context.link_id != self.link.id or context.token_revision != self.transport_revision:
+            return False
+        current = await self.refresh_link()
+        return (
+            current is not None
+            and current.binding_generation == context.binding_generation
+            and (context.purpose not in {"bound_message", "optional"} or current.chat_id == context.chat_id or context.purpose == "optional" and current.chat_id is None)
+            and self.application.running
+            and not self._stopping
+            and self._services.channel(context.link_id) is self
+        )
 
     async def answer_press(self, query_id: str, key: str | None = None, **values) -> None:
         if not self.application.running:
@@ -592,9 +612,9 @@ class TelegramBotChannel(TelegramChannel):
         raise DeliveryClaimRetired()
 
     async def send_part(self, *, outbox_id: str, part_id: str, claim_owner: str, claim_id: str) -> list[int]:
-        from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryRetry, PermanentDeliveryError, SourceUnavailable
+        from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryEligibility, DeliveryRetry, PermanentDeliveryError, SourceUnavailable
 
-        if not self.application.running:
+        if not self.application.running or self._stopping or self._services.channel(self.link.id) is not self:
             raise DeliveryClaimRetired()
         capture = dict(link_id=self.link.id, outbox_id=outbox_id, part_id=part_id, claim_owner=claim_owner, claim_id=claim_id, token_revision=self.transport_revision)
         saved = await self._services.outbox.capture_sending_part(**capture)
@@ -628,6 +648,25 @@ class TelegramBotChannel(TelegramChannel):
         current = await self._services.outbox.capture_sending_part(**capture)
         if current.part != part or current.item.message_thread_id != saved.item.message_thread_id:
             raise DeliveryClaimRetired()
+        decision = await self._services.eligibility(current.link, current.item, current.part)
+        if not isinstance(decision, DeliveryEligibility) or decision.decision not in {"allow", "wait", "skip"} or type(decision.protect_content) is not bool:
+            raise ValueError("invalid-delivery-eligibility")
+        if decision.decision != "allow" or decision.protect_content and not part.get("protect_content", False):
+            # A new worker must persist stronger protection before any request;
+            # never silently send under a different receipt requirement.
+            raise DeliveryClaimRetired()
+        latest = await self._services.outbox.capture_sending_part(**capture)
+        basis = ("id", "owner_user_id", "agent_kind", "agent_ref", "bot_id", "connection_id", "binding_generation", "telegram_user_id", "chat_id", "token_revision")
+        if (
+            latest.part != current.part
+            or latest.item != current.item
+            or any(getattr(latest.link, name) != getattr(current.link, name) for name in basis)
+            or not self.application.running
+            or self._stopping
+            or self._services.channel(self.link.id) is not self
+        ):
+            raise DeliveryClaimRetired()
+        current = latest
         self.link = current.link
         context = SendContext(current.link.id, current.item.chat_id, current.link.binding_generation, self.transport_revision, "bound_message")
         method = "sendMessage" if part["kind"] != "edit" else "editMessageReplyMarkup" if part.get("remove_keyboard") else "editMessageText"

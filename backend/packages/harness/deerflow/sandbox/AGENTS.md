@@ -2,6 +2,12 @@
 
 Sandbox restore requires a thread ID, even forks.
 
+Local Linux abort kills the selected call's process groups, then rescans exact
+environment markers for detached descendants forked during enumeration. Limit
+the sweep to eight passes/two seconds, checking the deadline per entry; preserve
+Gateway self-exclusion and call ownership. The spawning worker still owns reaping
+and pipe drains; abort must not change their timeouts or kill unrelated processes.
+
 Library guidance uses the operator's `python_libraries_profile: hartmesh`
 declaration, backed by the sandbox Dockerfile's import assertion. It is not a
 runtime probe. The initialized AIO provider's image/profile snapshot wins over

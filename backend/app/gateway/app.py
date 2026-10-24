@@ -103,6 +103,80 @@ _SHUTDOWN_HOOK_TIMEOUT_SECONDS = 5.0
 _RETRIEVAL_WARM_SHUTDOWN_TIMEOUT_SECONDS = 1.0
 
 
+async def _shutdown_channel_services(app: FastAPI, supervisor) -> None:
+    """Drain channels between Telegram's two shutdown phases, even on failure."""
+    cancelled = None
+    try:
+        if supervisor is not None:
+            try:
+                await supervisor.begin_shutdown()
+            except asyncio.CancelledError as error:
+                cancelled = error
+            except Exception as error:
+                logger.warning("Failed to begin Telegram shutdown (%s)", type(error).__name__)
+            finally:
+                start_task = getattr(app.state, "telegram_bots_start", None)
+                if start_task is not None:
+                    if not start_task.done():
+                        start_task.cancel()
+                    await asyncio.gather(start_task, return_exceptions=True)
+    finally:
+        try:
+            from app.channels.service import stop_channel_service
+
+            try:
+                await asyncio.wait_for(stop_channel_service(), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+            except TimeoutError:
+                logger.warning("Channel service shutdown exceeded %.1fs; proceeding with worker exit.", _SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+            except asyncio.CancelledError as error:
+                cancelled = error
+            except Exception:
+                logger.exception("Failed to stop channel service")
+        finally:
+            if supervisor is not None:
+                try:
+                    await asyncio.wait_for(supervisor.stop(), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+                except asyncio.CancelledError as error:
+                    cancelled = error
+                except Exception as error:
+                    logger.warning("Failed to stop Telegram supervisor (%s)", type(error).__name__)
+    if cancelled is not None:
+        raise cancelled
+
+
+@asynccontextmanager
+async def _channel_services_lifetime(app: FastAPI, startup_config):
+    """Own acquired channels across all subsequent startup, serving and cleanup."""
+    channel_service = None
+    supervisor = None
+    try:
+        try:
+            from app.channels.service import start_channel_service
+
+            channel_service = await start_channel_service(startup_config, get_stream_bridge=lambda: getattr(app.state, "stream_bridge", None))
+            logger.info("Channel service started: %s", channel_service.get_status())
+        except Exception:
+            logger.exception("No IM channels configured or channel service failed to start")
+
+        # A missing section has no Telegram state, tasks or log configuration.
+        if "telegram_bots" in (getattr(startup_config, "model_extra", None) or {}):
+            from app.telegram_bots.config import load_config
+            from app.telegram_bots.supervisor import TelegramSupervisor
+
+            supervisor = TelegramSupervisor(app, config=load_config(startup_config), channel_service=channel_service)
+            app.state.telegram_bots = supervisor
+            await supervisor.check()
+            app.state.telegram_bots_start = asyncio.create_task(supervisor.start(), name="telegram-bots-start")
+        yield channel_service
+    finally:
+        preserving_failure = sys.exc_info()[0] is not None
+        try:
+            await await_drained(_shutdown_channel_services(app, supervisor))
+        except BaseException:
+            if not preserving_failure:
+                raise
+
+
 def _installed_plugin_namespace(request: Request, namespace: str) -> bool:
     """True when *namespace* is a plugin installed for this app instance."""
     state = getattr(getattr(request, "app", None), "state", None)
@@ -692,149 +766,113 @@ async def _lifespan_resources(app: FastAPI) -> AsyncGenerator[None, None]:
             if startup_config.scheduler.enabled:
                 raise
 
-        # Start IM channel service only after scheduler recovery succeeds, so a
-        # fail-closed scheduler startup cannot strand channel-owned tasks before
-        # the lifespan reaches its normal shutdown boundary.
-        try:
-            from app.channels.service import start_channel_service
-
-            # Closure over `app` (mirrors ScheduledTaskService's `launch_run`
-            # above) rather than resolving `app.state.stream_bridge` here
-            # directly: `stream_bridge` is a STARTUP_ONLY_FIELDS singleton set
-            # once, above, by `langgraph_runtime(app, startup_config)`, so
-            # either shape is safe by construction — the closure is just the
-            # more defensive/consistent-with-precedent form, and it is what
-            # ChannelManager's follow-up-drain watcher (issue #4121 Slice 2)
-            # uses to reach the same StreamBridge every other run consumer
-            # goes through `get_stream_bridge(request)` for.
-            channel_service = await start_channel_service(
-                startup_config,
-                get_stream_bridge=lambda: getattr(app.state, "stream_bridge", None),
-            )
-            logger.info("Channel service started: %s", channel_service.get_status())
-        except Exception:
-            logger.exception("No IM channels configured or channel service failed to start")
-
-        from app.gateway.services import launch_mcp_task_notification_run
-        from app.mcp_tasks import McpTaskService
-        from deerflow.config.extensions_config import ExtensionsConfig
-        from deerflow.config.mcp_tasks_config import McpTasksConfig
-        from deerflow.mcp.task_tool_caller import McpTaskToolCaller
-        from deerflow.mcp.tasks import (
-            ORDINARY_MCP_TASK_DRIVER,
-            McpTaskDriverRegistry,
-            OrdinaryMcpTaskDriver,
-        )
-        from deerflow.mcp.tasks.runtime import (
-            set_mcp_task_config_snapshot,
-            set_mcp_task_submitter,
-            validate_mcp_task_runtime_configuration,
-        )
-
-        task_extensions_config = ExtensionsConfig.from_file()
-        mcp_tasks_config = getattr(startup_config, "mcp_tasks", McpTasksConfig())
-        mcp_task_repo = getattr(app.state, "mcp_task_repo", None)
-        app.state.mcp_tasks_available = False
-        set_mcp_task_submitter(None)
-        set_mcp_task_config_snapshot(task_extensions_config)
-        validate_mcp_task_runtime_configuration(
-            mcp_tasks_config=mcp_tasks_config,
-            extensions_config=task_extensions_config,
-            repository_available=mcp_task_repo is not None,
-        )
-        if mcp_task_repo is not None:
-            mcp_task_drivers = McpTaskDriverRegistry()
-            mcp_task_drivers.register(
+        # Scheduler recovery must succeed before channels acquire tasks. Their
+        # cleanup scope also covers every later startup failure and cancellation.
+        async with _channel_services_lifetime(app, startup_config):
+            from app.gateway.services import launch_mcp_task_notification_run
+            from app.mcp_tasks import McpTaskService
+            from deerflow.config.extensions_config import ExtensionsConfig
+            from deerflow.config.mcp_tasks_config import McpTasksConfig
+            from deerflow.mcp.task_tool_caller import McpTaskToolCaller
+            from deerflow.mcp.tasks import (
                 ORDINARY_MCP_TASK_DRIVER,
-                OrdinaryMcpTaskDriver(McpTaskToolCaller(task_extensions_config)),
+                McpTaskDriverRegistry,
+                OrdinaryMcpTaskDriver,
             )
-            mcp_task_service = McpTaskService(
-                repository=mcp_task_repo,
-                drivers=mcp_task_drivers,
-                poll_interval_seconds=mcp_tasks_config.poll_interval_seconds,
-                lease_seconds=mcp_tasks_config.lease_seconds,
-                max_concurrent_polls=mcp_tasks_config.max_concurrent_polls,
-                max_poll_backoff_seconds=mcp_tasks_config.max_poll_backoff_seconds,
-                input_required_poll_interval_seconds=mcp_tasks_config.input_required_poll_interval_seconds,
-                tracking_degraded_after_errors=mcp_tasks_config.tracking_degraded_after_errors,
-                max_result_bytes=mcp_tasks_config.max_result_bytes,
-                result_preview_max_chars=mcp_tasks_config.result_preview_max_chars,
-                launch_notification=lambda **kwargs: launch_mcp_task_notification_run(app=app, **kwargs),
-                get_run=lambda run_id, **kwargs: app.state.run_manager.get(
-                    run_id,
-                    raise_on_store_error=True,
-                    **kwargs,
-                ),
+            from deerflow.mcp.tasks.runtime import (
+                set_mcp_task_config_snapshot,
+                set_mcp_task_submitter,
+                validate_mcp_task_runtime_configuration,
             )
-            app.state.mcp_task_drivers = mcp_task_drivers
-            app.state.mcp_task_service = mcp_task_service
-            if mcp_tasks_config.enabled:
-                await mcp_task_service.start()
-                set_mcp_task_submitter(mcp_task_service)
-                app.state.mcp_tasks_available = True
 
-        from app.subagent_batches import SubagentBatchService
-        from app.subagent_batches.service import batch_owner_allowed
-        from deerflow.subagents.batch_runtime import set_subagent_batch_submitter
-
-        batch_repo = getattr(app.state, "subagent_batch_repo", None)
-        app.state.subagent_batches_available = False
-        set_subagent_batch_submitter(None)
-        if subagent_batches_config.enabled and batch_repo is None:
-            raise RuntimeError("subagent_batches.enabled requires database.backend sqlite or postgres")
-        if batch_repo is not None:
-            batch_service = SubagentBatchService(
-                repository=batch_repo,
-                config=subagent_batches_config,
-                runtime_config=subagent_runtime_config,
-                extensions=getattr(app.state, "extensions", None),
-                owner_access=batch_owner_allowed,
+            task_extensions_config = ExtensionsConfig.from_file()
+            mcp_tasks_config = getattr(startup_config, "mcp_tasks", McpTasksConfig())
+            mcp_task_repo = getattr(app.state, "mcp_task_repo", None)
+            app.state.mcp_tasks_available = False
+            set_mcp_task_submitter(None)
+            set_mcp_task_config_snapshot(task_extensions_config)
+            validate_mcp_task_runtime_configuration(
+                mcp_tasks_config=mcp_tasks_config,
+                extensions_config=task_extensions_config,
+                repository_available=mcp_task_repo is not None,
             )
-            app.state.subagent_batch_service = batch_service
-            if subagent_batches_config.enabled:
-                await batch_service.start()
-                set_subagent_batch_submitter(batch_service)
-                app.state.subagent_batches_available = True
+            if mcp_task_repo is not None:
+                mcp_task_drivers = McpTaskDriverRegistry()
+                mcp_task_drivers.register(
+                    ORDINARY_MCP_TASK_DRIVER,
+                    OrdinaryMcpTaskDriver(McpTaskToolCaller(task_extensions_config)),
+                )
+                mcp_task_service = McpTaskService(
+                    repository=mcp_task_repo,
+                    drivers=mcp_task_drivers,
+                    poll_interval_seconds=mcp_tasks_config.poll_interval_seconds,
+                    lease_seconds=mcp_tasks_config.lease_seconds,
+                    max_concurrent_polls=mcp_tasks_config.max_concurrent_polls,
+                    max_poll_backoff_seconds=mcp_tasks_config.max_poll_backoff_seconds,
+                    input_required_poll_interval_seconds=mcp_tasks_config.input_required_poll_interval_seconds,
+                    tracking_degraded_after_errors=mcp_tasks_config.tracking_degraded_after_errors,
+                    max_result_bytes=mcp_tasks_config.max_result_bytes,
+                    result_preview_max_chars=mcp_tasks_config.result_preview_max_chars,
+                    launch_notification=lambda **kwargs: launch_mcp_task_notification_run(app=app, **kwargs),
+                    get_run=lambda run_id, **kwargs: app.state.run_manager.get(
+                        run_id,
+                        raise_on_store_error=True,
+                        **kwargs,
+                    ),
+                )
+                app.state.mcp_task_drivers = mcp_task_drivers
+                app.state.mcp_task_service = mcp_task_service
+                if mcp_tasks_config.enabled:
+                    await mcp_task_service.start()
+                    set_mcp_task_submitter(mcp_task_service)
+                    app.state.mcp_tasks_available = True
 
-        from app.gateway.account_export import AccountExportService, remove_left_exports, runs_in_this_process
-        from deerflow.config.paths import get_paths
+            from app.subagent_batches import SubagentBatchService
+            from app.subagent_batches.service import batch_owner_allowed
+            from deerflow.subagents.batch_runtime import set_subagent_batch_submitter
 
-        app.state.account_export = None
-        if runs_in_this_process(multi_gateway=False):
-            # Also empties what an earlier Gateway left prepared: nothing outlives its download.
-            app.state.account_export = AccountExportService(
-                app,
-                paths=get_paths(),
-                config=lambda: get_app_config().account_export,
-                spill_dir_name=lambda: getattr(getattr(get_app_config(), "tool_output", None), "storage_subdir", None),
-            )
-        else:
-            # No export is prepared here, but one an earlier single-process run left still goes.
-            remove_left_exports(get_paths())
+            batch_repo = getattr(app.state, "subagent_batch_repo", None)
+            app.state.subagent_batches_available = False
+            set_subagent_batch_submitter(None)
+            if subagent_batches_config.enabled and batch_repo is None:
+                raise RuntimeError("subagent_batches.enabled requires database.backend sqlite or postgres")
+            if batch_repo is not None:
+                batch_service = SubagentBatchService(
+                    repository=batch_repo,
+                    config=subagent_batches_config,
+                    runtime_config=subagent_runtime_config,
+                    extensions=getattr(app.state, "extensions", None),
+                    owner_access=batch_owner_allowed,
+                )
+                app.state.subagent_batch_service = batch_service
+                if subagent_batches_config.enabled:
+                    await batch_service.start()
+                    set_subagent_batch_submitter(batch_service)
+                    app.state.subagent_batches_available = True
 
-        try:
-            yield
-        finally:
-            if app.state.account_export is not None:
-                await app.state.account_export.close()
+            from app.gateway.account_export import AccountExportService, remove_left_exports, runs_in_this_process
+            from deerflow.config.paths import get_paths
 
-        await _shutdown_startup_trash_sweep(app)
+            app.state.account_export = None
+            if runs_in_this_process(multi_gateway=False):
+                # Also empties what an earlier Gateway left prepared: nothing outlives its download.
+                app.state.account_export = AccountExportService(
+                    app,
+                    paths=get_paths(),
+                    config=lambda: get_app_config().account_export,
+                    spill_dir_name=lambda: getattr(getattr(get_app_config(), "tool_output", None), "storage_subdir", None),
+                )
+            else:
+                # No export is prepared here, but one an earlier single-process run left still goes.
+                remove_left_exports(get_paths())
 
-        # Stop channel service on shutdown (bounded to prevent worker hang)
-        try:
-            from app.channels.service import stop_channel_service
+            try:
+                yield
+            finally:
+                if app.state.account_export is not None:
+                    await app.state.account_export.close()
 
-            await asyncio.wait_for(
-                stop_channel_service(),
-                timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            logger.warning(
-                "Channel service shutdown exceeded %.1fs; proceeding with worker exit.",
-                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
-            )
-        except Exception:
-            logger.exception("Failed to stop channel service")
+            await _shutdown_startup_trash_sweep(app)
 
         if getattr(app.state, "scheduled_task_service", None) is not None:
             try:

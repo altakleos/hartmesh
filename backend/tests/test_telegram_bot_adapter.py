@@ -39,9 +39,13 @@ async def build(db, *, connected=True, clock=None, normal_request=None, updates_
     async def protect_notice(context):
         return protect_notices
 
-    services = SimpleNamespace(config=db.config, links=db.links, outbox=Outbox(db.sessions, clock=clock.now), settings=db.settings, tls_context=tls, request_factory=request_factory, protect_notice=protect_notice)
+    async def eligibility(link, item, part):
+        return DeliveryEligibility.allow()
+
+    services = SimpleNamespace(config=db.config, links=db.links, outbox=Outbox(db.sessions, clock=clock.now), settings=db.settings, tls_context=tls, request_factory=request_factory, protect_notice=protect_notice, eligibility=eligibility)
     token = str(link.bot_id) + ":" + secrets.token_urlsafe(30)
     channel = TelegramBotChannel(link=link, token=token, supervisor=services, monotonic=clock.monotonic, sleep=clock.sleep, now=clock.now)
+    services.channel = lambda link_id: channel if link_id == link.id else None
     return SimpleNamespace(channel=channel, link=link, request=normal, updates=updates, services=services, clock=clock, created=created, tls=tls)
 
 
@@ -359,14 +363,14 @@ async def test_delayed_old_forbidden_cannot_block_a_successor(db, change):
         await fixture.channel.stop()
 
 
-async def test_notice_uses_captured_destination_after_binding_changes(db):
+async def test_notice_refuses_stale_generation_without_retargeting_destination(db):
     fixture = await build(db)
     await start(fixture)
     context = SendContext(fixture.link.id, fixture.link.chat_id + 123, fixture.link.binding_generation - 1, fixture.link.token_revision, "stranger")
     fixture.request.enqueue("sendMessage", result={"message_id": 501, "date": 1_893_456_000, "chat": {"id": context.chat_id, "type": "private"}, "text": "Notice"})
     fixture.channel.link = replace(fixture.link, chat_id=fixture.link.chat_id + 456)
-    assert await fixture.channel.send_notice("hello.privacy", context=context) == 501
-    assert fixture.request.calls[-1].parameters["chat_id"] == context.chat_id
+    assert await fixture.channel.send_notice("hello.privacy", context=context) is None
+    assert [call.endpoint for call in fixture.request.calls] == ["getMe"]
     await fixture.channel.stop()
 
 
@@ -587,6 +591,7 @@ async def test_reconstructed_adapter_classifies_original_invalid_send_before_raw
         fail(request, code=404, description="Not Found")
     services = SimpleNamespace(**{**vars(fixture.services), "request_factory": lambda **kwargs: request if kwargs["connection_pool_size"] == 8 else updates})
     restored = TelegramBotChannel(link=await db.links.get(fixture.link.id), token=token, supervisor=services, monotonic=fixture.clock.monotonic, sleep=fixture.clock.sleep, now=fixture.clock.now)
+    services.channel = lambda link_id: restored if link_id == fixture.link.id else None
 
     async def allowed(link, row, part):
         return DeliveryEligibility.allow(protect_content=True)

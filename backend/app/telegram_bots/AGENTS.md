@@ -56,8 +56,13 @@ link/outbox/part IDs plus both process/admission fences. Current owner/policy/
 target eligibility is mandatory at claim and each part, outside SQL transactions.
 Never reclaim a live worker by elapsed time. Already-dispatched transport may
 finish during conflict; new parts wait. Saved acknowledgements and presentation
-identities survive retries. This layer starts no supervisor, poller or Gateway
-service; Gateway integration follows separately.
+identities survive retries. `OutboxSender.retire_link` drains only that link's
+owned workers, fencing claims before cancellation and retaining cleanup through
+caller cancellation. Production uses the supervisor's single sender.
+Whole-sender shutdown drains every captured worker even if a SQL fence fails,
+then raises that original failure. A current in-flight acknowledgement may
+settle, but shutdown cannot dispatch a next part. Owned drains can outlast the
+caller's grace budget when transport itself suppresses cancellation.
 A later tick also repairs finished current-process claims after failed cleanup
 SQL, using the process-wide live-admission registry and both saved claim fences.
 
@@ -65,7 +70,11 @@ The adapter queues fixed product replies through public `plan_product`, whose
 saved origin set and original source/destination basis cannot change on replay.
 `capture_sending_part` returns only the first required sending part under the
 current token, binding, presentation and both claim fences. Re-capture after
-awaited source preparation; no ORM row or SQL transaction crosses transport.
+awaited source preparation, await the same mandatory current-authority
+collaborator as the sender, then capture again before dispatch. A wait, refusal,
+changed binding/token/adapter or newly required protection retires admission;
+the next sender pass persists any strengthened protection before transport.
+No ORM row or SQL transaction crosses transport.
 `fallback_to_plain` preserves that part's identity and source and schedules one
 later attempt. `DeliveryClaimRetired` exits normally and never becomes a payload
 failure. Raw `send_part` returns acknowledgement IDs and calls no planner.
@@ -96,6 +105,11 @@ failed persistence owns that retry before another poll. Successful old-token
 results also retire. Pass the complete absolute conflict transition through the
 health callback; a timer alone cannot declare conflict. Held release transfers
 ownership without waiting for database recovery.
+`defer_start_retry` transfers the first startup rate-limit observation before
+any awaited status guard. Restore requests one discard intent with
+`require_drop_pending`; `complete_pending_drop` only joins that intent and cannot
+schedule another negative-offset discard. Await completion outside the lifecycle
+lock needed by health callbacks.
 
 Transport facts use narrow `update_if_current`; health callbacks supply
 `expected_token_revision`. A no-facts status guard writes no timestamp. Cause
@@ -104,11 +118,43 @@ ordinary health causes. SQL revision fences support rotation through another
 repository, but do not merge independent hidden cause sets at the same revision.
 `deployment.py` shares static refusal precedence with future operator/runtime
 callers. `log_filter.py` sanitizes messages and exception text on root and
-non-propagating handlers; installation and logger levels belong to the future
+non-propagating handlers; installation and logger levels belong to the
 supervisor constructor, never imports.
 `api_logging.py` supplies closed error classifications and exact event fields.
 Native call failures have one logging owner; a translated permanent failure
 retains that fact so durable recovery does not log the same attempt twice.
+
+`supervisor.py` owns the one Gateway-loop runtime. Await `check` before serving,
+retain `start` as a task, and use the shared health barrier and ten-start permit
+for scan/add/retry/replacement paths. A permit covers construction and the first
+SDK start attempt; cancelled constructors keep their result owned until loop-side
+cleanup. Captured channel and poll identities fence callbacks even when a retry
+uses the same token revision. Preserve death history across poll recreation.
+`begin_shutdown` drains producers/pollers/workers while retaining the listener;
+the Gateway drains existing channels before `stop` confirms safe offsets,
+unsubscribes and closes clients. The Gateway owns the single five-second stop
+timeout; already-started constructor/client cleanup remains owned after it.
+Do not install future-stage no-op schedulers or trust manager text as a model
+source. This slice sends trusted fixed product/status sources only; model-final
+recovery, CopyGuard, handlers, files, profiles and instance policy have later owners.
+
+`authority.py` rereads the live human account, strict route ceilings, exact
+connection and supported owner-scoped target. Fixed product/status sources need
+no private-read ceiling; withdrawn execution-only permissions do not suppress a
+saved acknowledgement. Missing/disabled/released/inert accounts refuse delivery;
+unreadable config/provider/target state waits. Instance policy is unavailable,
+never implicitly unprotected. Disposable lifecycle notices have separate current
+context/protection checks so `access.off` can follow account disablement.
+Prepare live config off-loop, pass its mode to `account_refusal`, and call
+`resolve_route_permissions(..., prepared_config=..., strict=True)` on the Gateway
+loop. That strict seam shares the HTTP route cache but raises
+`RouteAuthorityUnavailable` for read/provider/malformed-decision errors; HTTP's
+configured fail-open behavior stays with HTTP. Discovery runs off-loop while
+provider construction, evaluation and cache publication stay on the calling loop.
+`hold_if_current` advances the binding generation and ends pending work;
+`release_if_current` rejoins only an exact connection already restored externally.
+Neither invents account authority. `mark_notice_if_current` claims closed notice
+metadata under the token/generation/connection writer before bounded transport.
 
 Binding saves account ownership, channel identity, generation, event, sanitized
 Start identity and ordered welcome/privacy delivery in one unit. Start accepts
