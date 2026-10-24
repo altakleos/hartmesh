@@ -18,11 +18,12 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from sqlalchemy import or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from telegram.error import BadRequest, RetryAfter, TelegramError
+from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 
 from app.telegram_bots.adapter import TOKEN_BODY
 from app.telegram_bots.api_logging import log_call_failure
@@ -42,6 +43,23 @@ _SKIP_REASONS = frozenset({"no-access", "superseded", "link-not-connected", "dis
 _LIVE_CLAIMS: set[tuple[int, str, str]] = set()
 _TOKEN = re.compile(TOKEN_BODY)
 _FORBIDDEN_KEYS = frozenset({"token", "bot_token", "access_token", "raw_update", "update", "audio", "audio_bytes", "download_url", "temporary_url", "bytes"})
+
+
+def validate_url_button(value: dict) -> dict:
+    """Accept the one server-owned navigation control, without callback authority."""
+    if not isinstance(value, dict) or set(value) != {"page", "url"} or value["page"] != "web.memory" or not isinstance(value["url"], str):
+        raise ValueError("invalid-url-button")
+    address = value["url"]
+    if any(ord(character) <= 32 or ord(character) == 127 for character in address) or "\\" in address:
+        raise ValueError("invalid-url-button")
+    try:
+        parsed = urlsplit(address)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+            raise ValueError("invalid-url-button")
+        _ = parsed.port
+    except ValueError:
+        raise ValueError("invalid-url-button") from None
+    return {"page": "web.memory", "url": address}
 
 
 def _safe_json(value: dict) -> dict:
@@ -222,7 +240,7 @@ class Outbox:
             if supplied.get("kind") not in _KINDS or not isinstance(supplied.get("source_ref"), dict) or not supplied["source_ref"]:
                 raise ValueError("invalid-delivery-part")
             part = _safe_json(supplied)
-            for receipt_field in ("sent_at", "dispatched_at", "unavailable_reason", "invalid_token_verification_pending"):
+            for receipt_field in ("sent_at", "dispatched_at", "unavailable_reason", "invalid_token_verification_pending", "url_button_fallback"):
                 part.pop(receipt_field, None)
             source = part["source_ref"]
             if set(source) == {"key", "values"}:
@@ -233,6 +251,10 @@ class Outbox:
                     raise ValueError("invalid-delivery-source")
             elif not {"space_id", "path"} <= set(source) or set(source) - {"space_id", "path", "sha256"}:
                 raise ValueError("invalid-delivery-source")
+            if "url_button" in part:
+                if part["kind"] != "text" or set(source) != {"key", "values"} or source["key"] != "web.memory" or part.get("callback_group_id"):
+                    raise ValueError("invalid-url-button")
+                part["url_button"] = validate_url_button(part["url_button"])
             part.update(part_id=uuid4().hex, presentation_version=version, ordinal=index, state="pending", message_ids=[])
             part.setdefault("callback_group_id", None)
             frozen.append(part)
@@ -293,6 +315,13 @@ class Outbox:
             raise ValueError("invalid-delivery-key")
         if type(finish_route) is not bool:
             raise ValueError("invalid-product-completion")
+        # Transport receipts never become caller-controlled replay basis. The
+        # same sanitized parts are used for both the basis and saved plan.
+        if not isinstance(parts, list) or not parts:
+            raise ValueError("empty-delivery-plan")
+        parts = [_safe_json(supplied) for supplied in parts]
+        for supplied in parts:
+            supplied.pop("url_button_fallback", None)
         origins = sorted((row.link_id, row.message_id, row.chat_id) for row in inbox_rows)
         if len(set(origins)) != len(origins) or any(row.link_id != link.id or row.binding_generation != link.binding_generation or row.chat_id != link.chat_id for row in inbox_rows):
             raise ValueError("product-source-conflict")
@@ -359,6 +388,31 @@ class Outbox:
             parts = deepcopy(row.parts)
             selected = next(part for part in parts if part["part_id"] == current.part["part_id"])
             selected.update(plain_fallback=True, state="pending")
+            row.parts, row.state, row.not_before = parts, "pending", self.clock()
+            row.claim_owner = row.claim_id = row.claimed_at = None
+            return True
+
+    async def fallback_url_button(self, captured: SendingPart) -> bool:
+        """Journal a refused address without replacing its source or sending again."""
+        async with self._writer(captured.link.id) as (session, binding):
+            row = await session.get(TelegramOutboxRow, captured.item.id, with_for_update=True)
+            try:
+                current = self._sending(binding, row, link_id=captured.link.id, part_id=captured.part["part_id"], claim_owner=captured.claim_owner, claim_id=captured.claim_id, token_revision=captured.token_revision, preparing=False)
+            except DeliveryClaimRetired:
+                return False
+            scope = ("owner_user_id", "agent_kind", "agent_ref", "bot_id", "connection_id", "binding_generation", "telegram_user_id", "chat_id", "token_revision")
+            if (
+                current.part != captured.part
+                or current.part.get("url_button_fallback")
+                or current.part["kind"] != "text"
+                or "url_button" not in current.part
+                or current.item.message_thread_id != captured.item.message_thread_id
+                or any(getattr(current.link, field) != getattr(captured.link, field) for field in scope)
+            ):
+                return False
+            parts = deepcopy(row.parts)
+            selected = next(part for part in parts if part["part_id"] == current.part["part_id"])
+            selected.update(url_button_fallback=True, state="pending")
             row.parts, row.state, row.not_before = parts, "pending", self.clock()
             row.claim_owner = row.claim_id = row.claimed_at = None
             return True
@@ -890,6 +944,13 @@ class OutboxSender:
             if not self.outbox._fenced(row, generation=generation, owner=self.run_id, claim=claim):
                 return
             now = self.outbox.clock()
+            if isinstance(error, Forbidden) and binding is not None and binding.state == "blocked" and binding.owner_user_id == row.owner_user_id and binding.binding_generation == row.binding_generation and binding.chat_id == row.chat_id:
+                # The captured bound send already committed the block. Its
+                # structural hold owns the wait, rather than transient backoff.
+                # Reconnect leaves unrelated 429/pacing deadlines untouched.
+                self._pending(row)
+                row.not_before = now
+                return
             if isinstance(error, (DeliveryRetry, RetryAfter)) or isinstance(error, TelegramError) and isinstance(getattr(error, "retry_after", None), (int, float, timedelta)):
                 delay = error.retry_after
                 seconds = delay.total_seconds() if isinstance(delay, timedelta) else float(delay)

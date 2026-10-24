@@ -32,6 +32,12 @@ note; requests use fixed official endpoints with no provider fallback. Keep SDK
 imports lazy and suppress SDK payload logging only inside the voice context.
 The package emits fixed qualification reasons, never keys, audio or transcripts.
 
+`strangers.py` separates touch-only LRU recency from bounded unexpired reply
+charges. The supervisor owns one ledger through adapter/token replacement and
+bot removal/re-add. Forgetting recency never replenishes the 24-hour pair,
+per-bot hourly or global per-sender bad-code allowance. Overflow suppresses a
+notice instead of evicting a live charge; all state resets on process restart.
+
 `links.py` owns capacity and connection transactions. Capacity changes lock the
 deployment singleton, then owner settings, then links in ID order. SQLite takes
 `BEGIN IMMEDIATE` before any read. Retain the writer's initial deployment/owner
@@ -43,6 +49,13 @@ The existing channel repository's committing/ownership-transfer helpers are
 not suitable inside these units; use the local owner-filtered row helpers.
 `BotLink.from_row` captures detached public facts without its credential; use
 this factory instead of importing the link module's private snapshot helper.
+The managed ingress path supplies the prepared live-owner checker to bind and
+unblock. It rereads the shared account repository's derived disabled/released
+state through the borrowed writer; config/provider preparation stays outside
+that writer. Unblock compares the captured account/connection/token/generation,
+records one transition and preserves generation, pause and unrelated deadlines.
+Only deliberate wrong-bot consumption commits a refusal outside the bind writer;
+ordinary binding failures still roll back code, account, welcome and inbox.
 
 `inbox.py` owns immutable admission/routes, compatible grouping and publication
 history. Match the captured chat and generation, and bind runs only to the current
@@ -68,6 +81,12 @@ SQL, using the process-wide live-admission registry and both saved claim fences.
 
 The adapter queues fixed product replies through public `plan_product`, whose
 saved origin set and original source/destination basis cannot change on replay.
+The Memory URL-only part freezes a closed page/address separately from callback
+controls. Caller-supplied URL fallback receipts are removed from both the replay
+basis and parts. A refused button journals the same part's text-address fallback
+under current claim/source/scope fences; another bounded attempt sends it.
+Current blocked-message 403 keeps its row pending/due without transient backoff;
+the blocked state owns that wait, leaving other retry/pacing floors unchanged.
 `capture_sending_part` returns only the first required sending part under the
 current token, binding, presentation and both claim fences. Re-capture after
 awaited source preparation, await the same mandatory current-authority
@@ -95,8 +114,12 @@ cancellation and exhausted retries. A long 429 releases the worker through the
 durable retry path. Capture destination/purpose/generation/token before a call;
 only current bound-message Forbidden can block a link. Start/poll/send token
 checks share one coalesced verifier; two getMe 401s separated by the recheck
-interval are required. Until real gate handlers exist, handle_update refuses to
-acknowledge unclassified input.
+interval are required. Ordered blocking handlers use a per-call acknowledgment:
+the library's swallowed exception path never proves admission. Fixed input
+routes and required reply plans commit before acknowledgment. Token-shaped
+content is refused before hashes/inbox/task payloads; disposable tasks retain
+safe identities only and drain before SDK teardown. Unfinished ordinary text,
+skills, photo/document and voice consumers keep returning False.
 
 `polling.py` owns retained suffixes and startup-held batches. Serialize every
 getUpdates operation, including probes, drops and shutdown confirmation. A
@@ -172,7 +195,8 @@ gets one fixed diagnostic and keeps local refusal. Already-started work may
 outlast grace; no new SQL retry survives the database owner.
 Do not install future-stage no-op schedulers or trust manager text as a model
 source. This slice sends trusted fixed product/status sources only; model-final
-recovery, handlers, files, profiles and instance policy have later owners.
+recovery, content execution, callback actions, files, profiles and instance policy
+have later owners.
 
 `authority.py` rereads the live human account, strict route ceilings, exact
 connection and supported owner-scoped target. Fixed product/status sources need
@@ -191,6 +215,8 @@ provider construction, evaluation and cache publication stay on the calling loop
 `release_if_current` rejoins only an exact connection already restored externally.
 Neither invents account authority. `mark_notice_if_current` claims closed notice
 metadata under the token/generation/connection writer before bounded transport.
+Held-input and reconcile paths share its atomic access-off claim. A real new
+hold clears that category's prior claim; one disposable attempt serves the hold.
 
 Binding saves account ownership, channel identity, generation, event, sanitized
 Start identity and ordered welcome/privacy delivery in one unit. Start accepts

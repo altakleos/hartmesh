@@ -23,8 +23,8 @@ from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, Telegra
 pytestmark = pytest.mark.asyncio
 
 
-async def build(db, *, connected=True, clock=None, normal_request=None, updates_request=None, protect_notices=False):
-    link = await add_link(db)
+async def build(db, *, connected=True, clock=None, normal_request=None, updates_request=None, protect_notices=False, link=None, construct_off_loop=False):
+    link = link if link is not None else await add_link(db)
     if connected:
         link = await bind_link(db, link)
     normal, updates, created = normal_request or RecordingRequest(), updates_request or RecordingRequest(), []
@@ -46,7 +46,11 @@ async def build(db, *, connected=True, clock=None, normal_request=None, updates_
         send_allowed=lambda: True, config=db.config, links=db.links, outbox=Outbox(db.sessions, clock=clock.now), settings=db.settings, tls_context=tls, request_factory=request_factory, protect_notice=protect_notice, eligibility=eligibility
     )
     token = str(link.bot_id) + ":" + secrets.token_urlsafe(30)
-    channel = TelegramBotChannel(link=link, token=token, supervisor=services, monotonic=clock.monotonic, sleep=clock.sleep, now=clock.now)
+
+    def construct():
+        return TelegramBotChannel(link=link, token=token, supervisor=services, monotonic=clock.monotonic, sleep=clock.sleep, now=clock.now)
+
+    channel = await asyncio.to_thread(construct) if construct_off_loop else construct()
     services.channel = lambda link_id: channel if link_id == link.id else None
     return SimpleNamespace(channel=channel, link=link, request=normal, updates=updates, services=services, clock=clock, created=created, tls=tls)
 

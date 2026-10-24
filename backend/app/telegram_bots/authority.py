@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
+
+from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from app.telegram_bots.adapter import SendContext
     from app.telegram_bots.links import BotLink, BotLinkRepository
     from app.telegram_bots.producer import DeliveryEligibility, OutboxItem
+    from deerflow.config.app_config import AppConfig
     from deerflow.persistence.channel_connections.sql import ChannelConnectionRepository
 
 
@@ -24,6 +30,40 @@ class AuthorityUnavailable(Exception):
     """Authority cannot currently be read; saved delivery must wait."""
 
 
+class LiveOwnerCheck(Protocol):
+    @property
+    def email(self) -> str: ...
+
+    async def __call__(self, owner_user_id: str, writer: AsyncSession) -> None: ...
+
+
+@dataclass(frozen=True)
+class _PreparedLiveOwner:
+    owner_user_id: str
+    email: str
+    sign_on_only_mode: bool
+    _users: object
+    _bind: object
+
+    async def __call__(self, owner_user_id: str, writer: AsyncSession) -> None:
+        from app.gateway.auth.mode import account_refusal
+
+        if owner_user_id != self.owner_user_id:
+            raise AccessOff
+        try:
+            if not writer.in_transaction() or not writer.is_active or writer.get_bind() is not self._bind:
+                raise AuthorityUnavailable
+            # The writer retains its SQL ownership through caller cancellation;
+            # it may only roll back after this borrowed cursor has finished.
+            user = await await_drained(self._users.get_user_by_id(owner_user_id, session=writer))
+            if user is None or str(user.id) != owner_user_id or account_refusal(user, sign_on_only_mode=self.sign_on_only_mode) is not None:
+                raise AccessOff
+        except AccessOff:
+            raise
+        except Exception:
+            raise AuthorityUnavailable from None
+
+
 def get_local_provider():
     # Keep catalog and operator imports independent of Gateway startup.
     from app.gateway.deps import get_local_provider as provider
@@ -31,7 +71,7 @@ def get_local_provider():
     return provider()
 
 
-async def ceilings(owner_user_id: str) -> frozenset[str]:
+async def ceilings(owner_user_id: str, *, prepared_config: AppConfig | None = None) -> frozenset[str]:
     """Read the live human's route ceilings without a permissive error fallback."""
     from app.gateway.auth.mode import account_refusal
     from app.gateway.authz import resolve_route_permissions
@@ -41,7 +81,7 @@ async def ceilings(owner_user_id: str) -> frozenset[str]:
         user = await get_local_provider().get_user(owner_user_id)
         if user is None or str(user.id) != owner_user_id or getattr(user, "disabled_at", None) is not None or getattr(user, "released_at", None) is not None:
             raise AccessOff
-        config = await asyncio.to_thread(get_app_config)
+        config = prepared_config if prepared_config is not None else await await_drained(asyncio.to_thread(get_app_config))
         if account_refusal(user, sign_on_only_mode=config.auth.local.enabled is False) is not None:
             raise AccessOff
         return frozenset(await resolve_route_permissions(user, is_internal=False, prepared_config=config.authorization, strict=True))
@@ -51,8 +91,8 @@ async def ceilings(owner_user_id: str) -> frozenset[str]:
         raise AuthorityUnavailable from None
 
 
-async def require(owner_user_id: str, *needed: str) -> frozenset[str]:
-    permissions = await ceilings(owner_user_id)
+async def require(owner_user_id: str, *needed: str, prepared_config: AppConfig | None = None) -> frozenset[str]:
+    permissions = await ceilings(owner_user_id, prepared_config=prepared_config)
     if not set(needed).issubset(permissions):
         raise CeilingRefused
     return permissions
@@ -69,6 +109,34 @@ class TelegramAuthority:
     def __init__(self, *, links: BotLinkRepository, connections: ChannelConnectionRepository):
         self.links = links
         self.connections = connections
+
+    async def prepare_live_owner(self, owner_user_id: str) -> LiveOwnerCheck:
+        """Prepare strict policy off-writer, then recheck the human in its writer.
+
+        The email is presentation only. No saved preflight grants authority to
+        a missing/disabled/released/inert account at the later SQL check.
+        """
+        from app.gateway.auth.mode import account_refusal
+        from app.gateway.deps import bind_user_repo
+        from deerflow.config.app_config import get_app_config
+
+        try:
+            config = await await_drained(asyncio.to_thread(get_app_config))
+            await await_drained(require(owner_user_id, prepared_config=config))
+            sessions = self.links.session_factory
+            users = bind_user_repo(sessions)
+            user = await await_drained(users.get_user_by_id(owner_user_id))
+            mode = config.auth.local.enabled is False
+            if user is None or str(user.id) != owner_user_id or account_refusal(user, sign_on_only_mode=mode) is not None:
+                raise AccessOff
+            bind = sessions.kw.get("bind")
+            if bind is None:
+                raise AuthorityUnavailable
+            return _PreparedLiveOwner(owner_user_id, str(user.email), mode, users, getattr(bind, "sync_engine", bind))
+        except AccessOff:
+            raise
+        except Exception:
+            raise AuthorityUnavailable from None
 
     async def _connection_matches(self, link: BotLink, *, states=("connected",)) -> bool:
         if self.connections is None or link.state not in states or link.chat_id is None or link.telegram_user_id is None or link.connection_id is None:

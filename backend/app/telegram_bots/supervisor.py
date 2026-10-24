@@ -22,7 +22,7 @@ from sqlalchemy import delete
 from sqlalchemy.exc import SQLAlchemyError
 from telegram.error import RetryAfter, TelegramError
 
-from app.telegram_bots.adapter import LongRetryAfter, SendContext, TelegramBotChannel
+from app.telegram_bots.adapter import LongRetryAfter, SendContext, StrangerLedger, TelegramBotChannel
 from app.telegram_bots.api_logging import call_failure_fields
 from app.telegram_bots.cipher import token_cipher, unwrap_token, wrap_token
 from app.telegram_bots.config import TelegramBotsConfig
@@ -38,6 +38,7 @@ from deerflow.config.app_config import get_app_config
 from deerflow.config.ui_config import product_name
 from deerflow.persistence.engine import get_session_factory
 from deerflow.persistence.telegram_bots.model import TelegramBotLinkEventRow
+from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
     from app.channels.message_bus import OutboundMessage
@@ -105,6 +106,7 @@ class TelegramSupervisor:
         self.app, self.config, self.channel_service = app, config, channel_service
         self.session_factory, self.links, self.outbox, self.settings = session_factory, links, outbox, settings
         self.authority, self._app_config = authority, app_config
+        self.strangers = StrangerLedger()
         self.copy_guard = copy_guard
         self._environ = dict(os.environ if environ is None else environ)
         if request_factory is not None:
@@ -780,6 +782,40 @@ class TelegramSupervisor:
         """Final synchronous admission after transport's last awaited guard."""
         return self._send_ready and self._cause is None and not self._stopping
 
+    async def prepare_live_owner(self, owner_user_id: str):
+        return await self.authority.prepare_live_owner(owner_user_id)
+
+    @property
+    def product_name(self) -> str:
+        return product_name(self._app_config)
+
+    async def prepare_ingress_values(self, link: BotLink) -> dict:
+        from app.telegram_bots.pages import page_address
+        from deerflow.config.agents_config import load_agent_config
+
+        def prepare():
+            product = product_name(self._app_config)
+            name = product
+            if link.agent_kind == "custom_agent":
+                target = load_agent_config(link.agent_ref, user_id=link.owner_user_id)
+                name = target.display_name or target.name
+            elif link.agent_kind != "lead_agent":
+                raise ValueError("unsupported-ingress-target")
+            return {"product": product, "name": name, "agent": name, "memory_url": page_address("web.memory", link)}
+
+        return await await_drained(asyncio.to_thread(prepare))
+
+    async def notice_access_off(self, link: BotLink) -> None:
+        channel = self.channel(link.id)
+        if channel is None or channel.transport_revision != link.token_revision:
+            return
+        current = await await_drained(self.links.update_if_current(link.id, token_revision=link.token_revision))
+        scope = ("owner_user_id", "bot_id", "connection_id", "telegram_user_id", "chat_id", "binding_generation", "token_revision")
+        if current is None or current.state != "held" or any(getattr(current, key) != getattr(link, key) for key in scope) or self.channel(link.id) is not channel:
+            return
+        channel.link = current
+        await self._notice(channel, "access.off")
+
     async def eligibility(self, link, item, part=None) -> DeliveryEligibility:
         if self._stopping or self._cause is not None or not self._send_ready:
             return DeliveryEligibility.wait()
@@ -994,14 +1030,22 @@ class TelegramSupervisor:
             async with self._locks[link.id]:
                 if not self._send_ready or self.channel(link.id) is not channel:
                     return
-                claimed = await self.links.mark_notice_if_current(
-                    link.id, key, token_revision=channel.transport_revision, binding_generation=link.binding_generation, at=self._clock(), minimum_interval_seconds=NOTICE_EVERY_HOURS * 3600 if throttle else 0
+                claimed = await await_drained(
+                    self.links.mark_notice_if_current(
+                        link.id,
+                        key,
+                        token_revision=channel.transport_revision,
+                        binding_generation=link.binding_generation,
+                        at=self._clock(),
+                        minimum_interval_seconds=NOTICE_EVERY_HOURS * 3600 if throttle else 0,
+                        only_if_unsent=key == "access.off",
+                    )
                 )
             if not claimed:
                 self._event("notice", link=link, key=key, result="skipped")
                 return
-            preferences = await self.settings.get(link.owner_user_id)
-            quiet = await asyncio.to_thread(silent_now, link, preferences, self.config, self._clock()) if preferences is not None else True
+            preferences = await await_drained(self.settings.get(link.owner_user_id))
+            quiet = await await_drained(asyncio.to_thread(silent_now, link, preferences, self.config, self._clock())) if preferences is not None else True
             context = SendContext(link_id=link.id, chat_id=link.chat_id, binding_generation=link.binding_generation, token_revision=channel.transport_revision, purpose="optional")
             render_key = key
             if key == "link.conflict_over":
@@ -1036,6 +1080,7 @@ class TelegramSupervisor:
             try:
                 await self.links.remove(link_id, actor_id=actor_id, action=action)
                 self._rows.pop(link_id, None)
+                self.strangers.forget_bot(link.bot_id)
             finally:
                 async with self._locks[link_id]:
                     if self._channels.get(link_id) is channel:
@@ -1066,9 +1111,11 @@ class TelegramSupervisor:
         live = {row.id: row for row in rows}
         for identity in tuple(self._channels):
             if identity not in live:
+                bot_id = self._channels[identity].link.bot_id
                 await self._retire(identity, reason="removed")
                 self._rows.pop(identity, None)
                 self._unsupported.discard(identity)
+                self.strangers.forget_bot(bot_id)
         # Failed targeted retirement keeps clients owned until a later drain
         # succeeds. Never close them while their delivery worker remains live.
         for channel in tuple(self._retiring_channels):

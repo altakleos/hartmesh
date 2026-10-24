@@ -1363,8 +1363,11 @@ database without upgrading it or opening a Telegram client. Adopt and resume
 take effect at the next Gateway start and do not clear a bot's action pause.
 If shutdown logs `copy_latch_unpersisted`, the pause was not saved in the database;
 that process stays paused and the next start evaluates the safeguards again.
-The connection flow remains reserved while update handlers and
-the remaining stage-one capabilities are completed.
+Managed update handling includes private-chat filtering, bounded stranger
+replies, single-use account setup and durable fixed command responses. Memory
+navigation uses the configured public address when available. The connection
+flow remains reserved while ordinary chat, files and the remaining stage-one
+capabilities are completed.
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 

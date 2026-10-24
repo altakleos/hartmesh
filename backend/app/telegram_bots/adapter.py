@@ -7,22 +7,34 @@ the exact claimed part, and never inherits the deployment-wide bot lifecycle.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import logging
+import re
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from html import escape
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, Protocol
 
-from telegram import LinkPreviewOptions, Update, User
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Update, User
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, InvalidToken, NetworkError, RetryAfter, TelegramError
-from telegram.ext import AIORateLimiter, Application, Defaults
+from telegram.ext import AIORateLimiter, Application, ApplicationHandlerStop, CallbackQueryHandler, ChatMemberHandler, CommandHandler, Defaults, ManagedBotUpdatedHandler, MessageHandler, TypeHandler, filters
 from telegram.request import HTTPXRequest
 
 from app.channels.telegram import TelegramChannel
 from app.telegram_bots.render import render, render_plain
 from app.telegram_bots.settings import silent_now
+from app.telegram_bots.strangers import BAD_CODE_REPLIES_PER_SENDER_PER_HOUR as BAD_CODE_REPLIES_PER_SENDER_PER_HOUR
+from app.telegram_bots.strangers import STRANGER_MAP_MAX as STRANGER_MAP_MAX
+from app.telegram_bots.strangers import STRANGER_REPLIES_PER_BOT_PER_HOUR as STRANGER_REPLIES_PER_BOT_PER_HOUR
+from app.telegram_bots.strangers import STRANGER_REPLY_EVERY_SECONDS as STRANGER_REPLY_EVERY_SECONDS
+from app.telegram_bots.strangers import StrangerLedger as StrangerLedger
 from app.telegram_bots.token_pattern import TOKEN_BODY as TOKEN_BODY
+from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
     from app.channels.message_bus import OutboundMessage
@@ -34,6 +46,23 @@ if TYPE_CHECKING:
 
 LIMITER_HOLD_MAX_SECONDS = 5
 SEND_RETRY_AFTER_MAX_SECONDS = 60
+EDIT_HASHES_PER_BOT = 256
+MEDIA_UNSUPPORTED_EVERY_SECONDS = 60
+FIXED_COMMANDS = ("work", "assign", "assistants", "employees", "new", "stop", "settings", "help", "web", "status", "privacy", "agent", "bootstrap", "goal", "models", "memory")
+_TOKEN_PASTED = re.compile(r"(?<![0-9])" + TOKEN_BODY)
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _Admission:
+    link: Any
+    update_id: int
+    task: asyncio.Task
+    acknowledged: bool = False
+    failed: bool = False
+
+
+_ADMISSION: ContextVar[_Admission | None] = ContextVar("telegram_ingress_admission", default=None)
 
 
 class LongRetryAfter(TelegramError):
@@ -109,6 +138,14 @@ class TransportServices(Protocol):
     outbox: Outbox
     settings: SettingsRepository
     tls_context: Any
+    strangers: StrangerLedger
+    product_name: str
+
+    async def prepare_live_owner(self, owner_user_id: str) -> Any: ...
+
+    async def prepare_ingress_values(self, link: BotLink) -> dict: ...
+
+    async def notice_access_off(self, link: BotLink) -> None: ...
 
     async def protect_notice(self, context: SendContext) -> bool: ...
 
@@ -163,6 +200,10 @@ class TelegramBotChannel(TelegramChannel):
         self._close_task: asyncio.Task | None = None
         self._deferred_close: asyncio.Task | None = None
         self._stopping = False
+        self._ingress_lock = asyncio.Lock()
+        self._ingress_tasks: set[asyncio.Task] = set()
+        self._edit_hashes: OrderedDict[tuple, bytes] = OrderedDict()
+        self._unsupported_at: dict[tuple, float] = {}
         self._needs_success = True
         self._failure_serial = 0
         factory = getattr(supervisor, "request_factory", HTTPXRequest)
@@ -181,6 +222,7 @@ class TelegramBotChannel(TelegramChannel):
             .job_queue(None)
             .build()
         )
+        self._register_handlers()
 
     @property
     def transport_revision(self) -> int:
@@ -326,6 +368,9 @@ class TelegramBotChannel(TelegramChannel):
 
     async def stop(self) -> None:
         self._stopping = True
+        for task in tuple(self._ingress_tasks):
+            task.cancel()
+        await await_drained(self._drain_ingress())
         if self._verify_task is not None:
             if not self._verify_task.done():
                 self._verify_task.cancel()
@@ -434,10 +479,366 @@ class TelegramBotChannel(TelegramChannel):
         return await self._verify_token(None, from_get_me=False)
 
     async def handle_update(self, update: Update) -> bool:
-        # Handler registration and durable gate classification arrive in 1.12.
-        # process_update alone can swallow exceptions and cannot acknowledge.
-        await self.application.process_update(update)
-        return False
+        async with self._ingress_lock:
+            if not self.application.running or self._stopping or not self._send_allowed() or self._services.channel(self.link.id) is not self:
+                return False
+            current = await await_drained(self.refresh_link())
+            if current is None:
+                return False
+            admission = _Admission(current, update.update_id, asyncio.current_task())
+            marker = _ADMISSION.set(admission)
+            try:
+                await self.application.process_update(update)
+                return admission.acknowledged and not admission.failed
+            finally:
+                _ADMISSION.reset(marker)
+
+    def _register_handlers(self) -> None:
+        self.application.add_handler(TypeHandler(Update, self._gate), group=-1)
+        new = filters.UpdateType.MESSAGE
+        handlers = (
+            ChatMemberHandler(self._on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER),
+            ManagedBotUpdatedHandler(self._on_managed_bot),
+            CallbackQueryHandler(self._on_callback, pattern=r"^h1:[0-9a-f]{32}$"),
+            CallbackQueryHandler(self._on_unknown_callback),
+            MessageHandler(filters.UpdateType.EDITED_MESSAGE, self._on_edited),
+            MessageHandler(new & filters.StatusUpdate.ALL, self._on_service),
+            MessageHandler(new & (filters.Regex(_TOKEN_PASTED) | filters.CaptionRegex(_TOKEN_PASTED)), self._on_token_pasted),
+            CommandHandler("start", self._cmd_start, filters=new),
+            CommandHandler(FIXED_COMMANDS, self._on_command, filters=new),
+            MessageHandler(new & filters.TEXT & filters.COMMAND, self._on_other_slash),
+            MessageHandler(new & filters.TEXT & ~filters.COMMAND, self._on_text),
+            MessageHandler(new & (filters.PHOTO | filters.Document.ALL), self._on_text),
+            MessageHandler(new & filters.VOICE, self._on_voice),
+            MessageHandler(new & filters.ALL, self._on_unsupported),
+        )
+        for handler in handlers:
+            self.application.add_handler(handler, group=0)
+        self.application.add_error_handler(self._on_error, block=True)
+
+    def _admission(self, update) -> _Admission:
+        admission = _ADMISSION.get()
+        if admission is None or admission.task is not asyncio.current_task() or admission.update_id != update.update_id:
+            raise RuntimeError("unowned-ingress-update")
+        return admission
+
+    def _classified(self, update, *, remember=False) -> None:
+        admission = self._admission(update)
+        admission.acknowledged = True
+        message = update.message
+        if remember and message is not None and (message.text is not None or message.caption is not None):
+            value = message.text if message.text is not None else message.caption
+            key = (admission.link.binding_generation, message.chat_id, message.message_id)
+            self._edit_hashes[key] = hashlib.sha256(value.encode("utf-8")).digest()
+            self._edit_hashes.move_to_end(key)
+            while len(self._edit_hashes) > EDIT_HASHES_PER_BOT:
+                self._edit_hashes.popitem(last=False)
+
+    @staticmethod
+    def _same_scope(left, right) -> bool:
+        fields = ("id", "owner_user_id", "agent_kind", "agent_ref", "bot_id", "token_revision", "binding_generation", "connection_id", "telegram_user_id", "chat_id")
+        return right is not None and all(getattr(left, field) == getattr(right, field) for field in fields)
+
+    def _command(self, message) -> tuple[str, list[str]]:
+        text = message.text or ""
+        admission = _ADMISSION.get()
+        captured = admission.link if admission is not None and admission.task is asyncio.current_task() else self.link
+        normalized = self._strip_bot_username_from_leading_command(text.lstrip(), captured.bot_username)
+        words = normalized.split()
+        return (words[0][1:].lower(), words[1:]) if words and words[0].startswith("/") else ("", [])
+
+    def _context(self, link, chat_id, purpose) -> SendContext:
+        return SendContext(link.id, chat_id, link.binding_generation, self.transport_revision, purpose)
+
+    async def _ingress_current(self, context: SendContext) -> bool:
+        if not await self._notice_context_current(context):
+            return False
+        return self.link.health in {"ok", "agent_unavailable"} and self.link.state != "held" and self._send_allowed()
+
+    async def _input_current(self, captured) -> bool:
+        current = await await_drained(self.refresh_link())
+        return self._same_scope(captured, current) and self.application.running and not self._stopping and self._services.channel(captured.id) is self and self._send_allowed() and current.health in {"ok", "agent_unavailable"}
+
+    def _spawn_ingress(self, coroutine) -> bool:
+        if self._stopping or not self.application.running or not self._send_allowed() or self._services.channel(self.link.id) is not self:
+            coroutine.close()
+            return False
+        marker = _ADMISSION.set(None)
+        try:
+            task = self.application.create_task(coroutine, update=None, name="telegram-disposable-ingress")
+        finally:
+            _ADMISSION.reset(marker)
+        self._ingress_tasks.add(task)
+        task.add_done_callback(self._ingress_tasks.discard)
+        return True
+
+    async def _drain_ingress(self) -> None:
+        await asyncio.gather(*tuple(self._ingress_tasks), return_exceptions=True)
+
+    async def _on_error(self, update, context) -> None:
+        logger.warning("telegram_bots handler_failed link=%s bot=%s error=%s", self.link.id, self.link.bot_id, type(context.error).__name__)
+        admission = _ADMISSION.get()
+        if admission is not None and admission.task is asyncio.current_task() and update is not None and admission.update_id == update.update_id:
+            admission.failed = True
+            raise ApplicationHandlerStop
+
+    async def _gate(self, update, context) -> None:
+        admission = self._admission(update)
+        link = admission.link
+        if not self._send_allowed() or self._stopping or self._services.channel(link.id) is not self or link.health not in {"ok", "agent_unavailable"}:
+            raise ApplicationHandlerStop
+        user, chat = update.effective_user, update.effective_chat
+        if user is not None and type(user.id) is int and user.id > 0:
+            self._services.strangers.touch(link.bot_id, user.id, self._time())
+        if update.api_kwargs.get("stopped_message_generation") is not None:
+            self._classified(update)
+            raise ApplicationHandlerStop
+        if update.managed_bot is not None:
+            return
+        if chat is not None and chat.type != "private":
+            member = update.my_chat_member
+            if member is not None and member.new_chat_member.user.id == link.bot_id and member.old_chat_member.status in {"left", "kicked"} and member.new_chat_member.status in {"member", "administrator"}:
+                self._spawn_ingress(self.leave_group(self._context(link, chat.id, "group")))
+            self._classified(update)
+            raise ApplicationHandlerStop
+        if update.my_chat_member is not None:
+            return
+        message = update.message
+        word, arguments = self._command(message) if message is not None else ("", [])
+        if link.state == "waiting_connect" and word == "start" and arguments and link.bind_mode == "code" and user is not None and not user.is_bot:
+            return
+        if user is None or user.is_bot or user.id != link.telegram_user_id:
+            if update.callback_query is not None:
+                self._spawn_ingress(self.answer_press(update.callback_query.id, "stale.other_person", context=self._context(link, chat.id if chat else None, "callback")))
+            elif message is not None and user is not None and not user.is_bot and user.id > 0 and self._services.strangers.seen(link.bot_id, user.id, self._time()):
+                self._spawn_ingress(self._ingress_notice("stranger", self._context(link, message.chat_id, "stranger")))
+            self._classified(update)
+            raise ApplicationHandlerStop
+        if link.state == "held":
+            self._spawn_ingress(self._services.notice_access_off(link))
+            self._classified(update)
+            raise ApplicationHandlerStop
+        if chat is None or chat.id != user.id or chat.id != link.chat_id:
+            if update.callback_query is not None:
+                self._spawn_ingress(self.answer_press(update.callback_query.id, "stale.other_person", context=self._context(link, chat.id if chat else None, "callback")))
+            self._classified(update)
+            raise ApplicationHandlerStop
+        if message is not None and link.state == "blocked":
+            checker = await self._services.prepare_live_owner(link.owner_user_id)
+            if not await self._input_current(link):
+                raise ApplicationHandlerStop
+            await await_drained(self._services.links.mark_unblocked_if_current(link, check_live_owner=checker))
+            current = await await_drained(self.refresh_link())
+            if not self._same_scope(link, current) or current.state != "connected":
+                raise ApplicationHandlerStop
+            admission.link = current
+
+    async def _on_my_chat_member(self, update, context) -> None:
+        link, member = self._admission(update).link, update.my_chat_member
+        if member.chat.type == "private" and member.chat.id == link.chat_id and member.new_chat_member.user.id == link.bot_id:
+            if member.new_chat_member.status == "kicked":
+                await await_drained(self._services.links.mark_blocked_if_current(link_id=link.id, chat_id=member.chat.id, binding_generation=link.binding_generation, token_revision=self.transport_revision))
+            elif member.new_chat_member.status == "member" and link.state == "blocked":
+                checker = await self._services.prepare_live_owner(link.owner_user_id)
+                if not await self._input_current(link):
+                    return
+                await await_drained(self._services.links.mark_unblocked_if_current(link, check_live_owner=checker))
+        self._classified(update)
+
+    async def _on_managed_bot(self, update, context) -> None:
+        logger.info("telegram_bots managed_update_ignored link=%s bot=%s", self.link.id, self.link.bot_id)
+        self._classified(update)
+
+    async def _on_callback(self, update, context) -> None:
+        await self._on_unknown_callback(update, context)
+
+    async def _on_unknown_callback(self, update, context) -> None:
+        link, query = self._admission(update).link, update.callback_query
+        chat = query.message.chat.id if query.message is not None else None
+        self._spawn_ingress(self.answer_press(query.id, "stale.not_waiting" if chat == link.chat_id else "stale.other_person", context=self._context(link, chat, "callback")))
+        self._classified(update)
+
+    async def _on_service(self, update, context) -> None:
+        self._classified(update)
+
+    async def _on_token_pasted(self, update, context) -> None:
+        link = self._admission(update).link
+        message = update.message or update.edited_message
+        # Only safe numeric identity crosses the task boundary, never Update.
+        purpose = "bound_message" if message.chat_id == link.chat_id else "stranger"
+        self._spawn_ingress(self._delete_token(self._context(link, message.chat_id, "optional"), self._context(link, message.chat_id, purpose), message.message_id))
+        self._classified(update)
+
+    async def leave_group(self, context: SendContext) -> None:
+        if context.purpose != "group" or context.chat_id is None or context.chat_id >= 0:
+            raise ValueError("invalid-group-context")
+        if not await self._ingress_current(context):
+            return
+        try:
+            await self.bot.leave_chat(context.chat_id)
+        except InvalidToken as error:
+            self._log_failure("leaveChat", error)
+            await self.verify_token(error)
+        except TelegramError as error:
+            self._log_failure("leaveChat", error)
+
+    async def _ingress_notice(self, key, context, **values):
+        if await self._ingress_current(context):
+            return await self.send_notice(key, context=context, _ingress=True, **values)
+        return None
+
+    async def _delete_token(self, deletion: SendContext, notice: SendContext, message_id: int) -> None:
+        if (
+            deletion.purpose != "optional"
+            or deletion.chat_id is None
+            or deletion.chat_id <= 0
+            or notice.purpose not in {"bound_message", "stranger"}
+            or any(getattr(deletion, key) != getattr(notice, key) for key in ("link_id", "chat_id", "binding_generation", "token_revision"))
+            or type(message_id) is not int
+            or message_id <= 0
+        ):
+            raise ValueError("invalid-token-refusal-context")
+        if not await self._ingress_current(deletion):
+            return
+        deleted = False
+        try:
+            await self.bot.delete_message(chat_id=deletion.chat_id, message_id=message_id)
+            deleted = True
+        except InvalidToken as error:
+            self._log_failure("deleteMessage", error)
+            await self.verify_token(error)
+        except TelegramError as error:
+            self._log_failure("deleteMessage", error)
+        await self._ingress_notice("token.pasted" if deleted else "token.pasted_kept", notice, product=self._services.product_name)
+
+    async def _on_edited(self, update, context) -> None:
+        link, message = self._admission(update).link, update.edited_message
+        if any(_TOKEN_PASTED.search(value or "") for value in (message.text, message.caption)):
+            await self._on_token_pasted(update, context)
+            return
+        value = message.text if message.text is not None else message.caption or ""
+        key = (link.binding_generation, message.chat_id, message.message_id)
+        digest = hashlib.sha256(value.encode("utf-8")).digest()
+        if key in self._edit_hashes and self._edit_hashes[key] != digest:
+            if not await self._input_current(link):
+                return
+            await await_drained(self.send_text("edit.ignored", source_id=self._source(update, "edit"), reply_to=message.message_id, _captured_link=link))
+            self._edit_hashes[key] = digest
+            self._edit_hashes.move_to_end(key)
+        self._classified(update)
+
+    def _source(self, update, kind):
+        link = self._admission(update).link
+        return hashlib.sha256(f"{link.id}:{link.binding_generation}:{link.chat_id}:{update.update_id}:{kind}".encode()).hexdigest()
+
+    async def _cmd_start(self, update, context) -> None:
+        word, arguments = self._command(update.message)
+        if word != "start":
+            await self._on_other_slash(update, context)
+            return
+        link, message = self._admission(update).link, update.message
+        if link.state == "connected":
+            await self._fixed_reply(update, "hello.again", "start")
+            return
+        if link.state != "waiting_connect" or link.bind_mode != "code" or message.from_user is None or message.from_user.is_bot or message.from_user.id != message.chat_id:
+            self._classified(update)
+            return
+        checker = await self._services.prepare_live_owner(link.owner_user_id)
+        values = await self._services.prepare_ingress_values(link)
+        if not await self._input_current(link):
+            return
+        hello = "hello.chat" if link.agent_kind == "lead_agent" else "hello.custom_agent"
+        try:
+            saved = await await_drained(
+                self._services.links.bind(
+                    link,
+                    telegram_user_id=message.from_user.id,
+                    chat_id=message.chat_id,
+                    first_name=message.from_user.first_name,
+                    username=message.from_user.username,
+                    start_identity={"update_id": update.update_id, "message_id": message.message_id, "chat_id": message.chat_id, "message_thread_id": message.message_thread_id},
+                    hello_parts=[{"source_ref": {"key": hello, "values": {"email": checker.email, "product": values["product"], "agent": values["agent"]}}}, {"source_ref": {"key": "hello.privacy", "values": {}}, "silent": True}],
+                    code=arguments[0] if len(arguments) == 1 else None,
+                    check_live_owner=checker,
+                )
+            )
+        except ValueError as error:
+            key = {"expired": "hello.link_expired", "other-bot": "hello.refused", "account-taken": "hello.account_taken"}.get(str(error))
+            if key is None:
+                raise
+            if self._send_allowed() and self._services.strangers.bad_code(link.bot_id, message.from_user.id, self._time()):
+                self._spawn_ingress(self._ingress_notice(key, self._context(link, message.chat_id, "stranger")))
+            self._classified(update)
+            return
+        self.link = saved
+        self._admission(update).link = saved
+        self._classified(update, remember=True)
+
+    async def _fixed_reply(self, update, key, word, *, prepared=None):
+        link, message = self._admission(update).link, update.message
+        await self._services.prepare_live_owner(link.owner_user_id)
+        if not await self._input_current(link):
+            return
+        row, created = await await_drained(self._services.outbox.inbox.accept(link, update, sanitized_input={"command": word}))
+        if row.binding_generation != link.binding_generation:
+            self._classified(update)
+            return
+        if row.route_complete:
+            self._classified(update, remember=True)
+            return
+        if row.route_kind is None:
+            values = prepared or await self._services.prepare_ingress_values(link)
+            if not await self._input_current(link):
+                return
+            source_values = {"name": values["name"]} if key == "cmd.agent" else {"name": values["name"], "product": values["product"]} if key == "web.memory" else {}
+            button = {"page": "web.memory", "url": values["memory_url"]} if key == "web.memory" and values.get("memory_url") else None
+            row = await await_drained(self._services.outbox.inbox.route(row, kind="command", target_id=word or "unknown", basis={"key": key, "values": source_values, "url_button": button}, operation_ids=[]))
+        basis = row.route_basis
+        if not await self._input_current(link):
+            return
+        await await_drained(self.send_text(basis["key"], source_id=self._source(update, "command"), reply_to=message.message_id, inbox_rows=[row], finish_route=True, url_button=basis["url_button"], _captured_link=link, **basis["values"]))
+        self._classified(update, remember=True)
+
+    async def _on_command(self, update, context) -> None:
+        word, arguments = self._command(update.message)
+        if word not in FIXED_COMMANDS:
+            await self._on_other_slash(update, context)
+        elif word == "agent":
+            await self._fixed_reply(update, "cmd.agent", word)
+        elif word == "memory" and self.link.agent_kind == "lead_agent":
+            await self._fixed_reply(update, "web.memory", word)
+        else:
+            await self._fixed_reply(update, "cmd.unknown", word)
+
+    async def _on_other_slash(self, update, context) -> None:
+        from deerflow.skills.slash import parse_slash_skill_reference
+
+        word, arguments = self._command(update.message)
+        if word == "start":
+            await self._cmd_start(update, context)
+        elif word in FIXED_COMMANDS:
+            await self._on_command(update, context)
+        elif parse_slash_skill_reference(update.message.text or "") is None:
+            await self._fixed_reply(update, "cmd.unknown", word)
+        # A genuine potential skill waits for its real catalog/dispatch owner.
+
+    async def _on_text(self, update, context) -> None:
+        if self._command(update.message)[0]:
+            await self._on_other_slash(update, context)
+
+    async def _on_voice(self, update, context) -> None:
+        return
+
+    async def _on_unsupported(self, update, context) -> None:
+        link, message = self._admission(update).link, update.message
+        key = (link.binding_generation, message.chat_id)
+        now = self._time()
+        if now - self._unsupported_at.get(key, float("-inf")) >= MEDIA_UNSUPPORTED_EVERY_SECONDS:
+            if not await self._input_current(link):
+                return
+            await await_drained(self.send_text("media.unsupported", source_id=self._source(update, "unsupported"), reply_to=message.message_id, _captured_link=link))
+            self._unsupported_at = {key: now}
+        self._classified(update)
 
     async def _run_on_telegram_loop(self, coroutine):
         return await coroutine
@@ -451,13 +852,19 @@ class TelegramBotChannel(TelegramChannel):
         # The bus listener/model final planner is not active until 1.14.
         raise PermanentDeliveryError("unsupported-source")
 
-    async def send_text(self, key: str, *, source_id: str, reply_to: int | None = None, buttons=None, silent: bool = False, thread: int | None = None, inbox_rows: Sequence[InboxRow] = (), **values) -> str:
+    async def send_text(
+        self, key: str, *, source_id: str, reply_to: int | None = None, buttons=None, url_button=None, finish_route=False, silent: bool = False, thread: int | None = None, inbox_rows: Sequence[InboxRow] = (), _captured_link=None, **values
+    ) -> str:
         if buttons is not None:
             raise ValueError("unimplemented-callback-authority")
         part = {"kind": "text", "source_ref": {"key": key, "values": values}, "silent": silent}
+        if url_button is not None:
+            from app.telegram_bots.producer import validate_url_button
+
+            part["url_button"] = validate_url_button(url_button)
         if reply_to is not None:
             part["reply_to_message_id"] = reply_to
-        return await self._services.outbox.plan_product(self.link, source_id=source_id, parts=[part], inbox_rows=inbox_rows, message_thread_id=thread)
+        return await self._services.outbox.plan_product(_captured_link or self.link, source_id=source_id, parts=[part], inbox_rows=inbox_rows, finish_route=finish_route, message_thread_id=thread)
 
     async def edit_text(self, message_id: int, key: str, *, source_id: str, buttons=None, inbox_rows: Sequence[InboxRow] = (), **values) -> str:
         if buttons is not None:
@@ -469,7 +876,7 @@ class TelegramBotChannel(TelegramChannel):
 
         if set(source) != {"key", "values"} or not isinstance(source["key"], str) or not isinstance(source["values"], dict):
             raise PermanentDeliveryError("unsupported-source")
-        settings = await self._services.settings.get(link.owner_user_id)
+        settings = await await_drained(self._services.settings.get(link.owner_user_id))
         if settings is None:
             raise PermanentDeliveryError("missing-settings")
         renderer = render_plain if plain else render
@@ -506,18 +913,22 @@ class TelegramBotChannel(TelegramChannel):
             retry_after_seconds=error.seconds if isinstance(error, LongRetryAfter) else None,
         )
 
-    async def send_notice(self, key: str, *, context: SendContext, reply_to: int | None = None, silent: bool = False, thread: int | None = None, **values) -> int | None:
+    async def send_notice(self, key: str, *, context: SendContext, reply_to: int | None = None, silent: bool = False, thread: int | None = None, _ingress=False, **values) -> int | None:
         if context.chat_id is None:
             raise ValueError("notice-destination-required")
         if not self.application.running:
             return None
         if not await self._notice_context_current(context):
             return None
+        if _ingress and (self.link.health not in {"ok", "agent_unavailable"} or self.link.state == "held"):
+            return None
         text = await self._render_source(self.link, {"key": key, "values": values})
         protect = await self._services.protect_notice(context)
         if type(protect) is not bool:
             raise ValueError("invalid-notice-policy")
         if not await self._notice_context_current(context):
+            return None
+        if _ingress and (self.link.health not in {"ok", "agent_unavailable"} or self.link.state == "held"):
             return None
         try:
             message = await self.bot.send_message(chat_id=context.chat_id, text=text, parse_mode=ParseMode.HTML, reply_to_message_id=reply_to, disable_notification=silent, message_thread_id=thread, protect_content=protect)
@@ -547,7 +958,7 @@ class TelegramBotChannel(TelegramChannel):
         # the destination or ownership of a later binding/adapter.
         if context.link_id != self.link.id or context.token_revision != self.transport_revision:
             return False
-        current = await self.refresh_link()
+        current = await await_drained(self.refresh_link())
         return (
             current is not None
             and current.binding_generation == context.binding_generation
@@ -558,15 +969,17 @@ class TelegramBotChannel(TelegramChannel):
             and self._send_allowed()
         )
 
-    async def answer_press(self, query_id: str, key: str | None = None, **values) -> None:
+    async def answer_press(self, query_id: str, key: str | None = None, *, context: SendContext | None = None, **values) -> None:
         if not self.application.running or not self._send_allowed():
             return
         logged = False
         try:
             async with asyncio.timeout(2):
-                if await self.refresh_link() is None:
+                if context is not None and not await self._ingress_current(context) or context is None and await self.refresh_link() is None:
                     return
                 text = await self._render_source(self.link, {"key": key, "values": values}, plain=True) if key else None
+                if context is not None and not await self._ingress_current(context):
+                    return
                 if not self._send_allowed() or self._services.channel(self.link.id) is not self:
                     return
                 try:
@@ -652,6 +1065,16 @@ class TelegramBotChannel(TelegramChannel):
         settings = await self._services.settings.get(saved.link.owner_user_id)
         if settings is None:
             raise PermanentDeliveryError("missing-settings")
+        markup = None
+        button = part.get("url_button")
+        if button is not None:
+            from app.telegram_bots.producer import validate_url_button
+
+            button = validate_url_button(button)
+            if part.get("url_button_fallback"):
+                text += "\n" + (button["url"] if part.get("plain_fallback") else escape(button["url"]))
+            else:
+                markup = InlineKeyboardMarkup([[InlineKeyboardButton(render_plain("label.open_memory", settings.locale), url=button["url"])]])
         silent = saved.item.silent or bool(part.get("silent", False)) or await asyncio.to_thread(silent_now, saved.link, settings, self._services.config, self._now())
         current = await self._services.outbox.capture_sending_part(**capture)
         if current.part != part or current.item.message_thread_id != saved.item.message_thread_id:
@@ -697,6 +1120,7 @@ class TelegramBotChannel(TelegramChannel):
                     disable_notification=silent,
                     message_thread_id=current.item.message_thread_id,
                     protect_content=bool(part.get("protect_content", False)),
+                    reply_markup=markup,
                 )
         except (LongRetryAfter, RetryAfter) as error:
             self._failure()
@@ -729,11 +1153,18 @@ class TelegramBotChannel(TelegramChannel):
             structural = (
                 "can't parse entities" in description
                 and not part.get("plain_fallback")
+                or button is not None
+                and not part.get("url_button_fallback")
+                and "url" in description
+                and "invalid" in description
                 or any(value in description for value in ("message to edit not found", "message can't be edited", "message cannot be edited", "message thread not found"))
             )
             self._log_part_failure(method, error, current, failed_reason=None if structural else "invalid-payload")
             if "can't parse entities" in description and not part.get("plain_fallback"):
                 await self._services.outbox.fallback_to_plain(current)
+                raise DeliveryClaimRetired() from None
+            if button is not None and not part.get("url_button_fallback") and "url" in description and "invalid" in description:
+                await self._services.outbox.fallback_url_button(current)
                 raise DeliveryClaimRetired() from None
             raise
         except NetworkError as error:
