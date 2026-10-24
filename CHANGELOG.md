@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Schema changes
+
+Add revision `0042_telegram_bots`, after `0041_storage_host_replacements`, with
+15 tables for Telegram bot bindings, settings, callbacks, action receipts and
+durable inbound/outbound delivery state. Existing channel, account, preference,
+storage and Work tables are unchanged. Repeated upgrades validate existing table
+shapes; downgrade refuses to erase retained bot links, tokens or history.
+The managed bot connection flow is not enabled by this schema preparation.
+An older binary that does not know this revision needs the pre-upgrade snapshot
+for rollback.
+
 ### Fixed storage reservations
 
 Managed Space fstab entries now exclude loop images from the standard scheduled
@@ -16,7 +27,7 @@ and inventory. Direct trim and custom host-wide trim still require operator
 exclusions. Physical allocation checks remain strict; sparse images are not
 automatically refilled. Native CI exercises both actual trim and the exclusion.
 
-No database schema changes.
+The storage reservation fix itself changes no database schema.
 
 ### Dependencies and verification
 
