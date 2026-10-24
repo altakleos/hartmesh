@@ -7,7 +7,7 @@ import logging
 import math
 import os
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -205,12 +205,12 @@ def _gemini_entry(entry: ModelConfig, class_name: str, config: TelegramBotsConfi
     return GeminiTranscriber(api_key=key, model=config.voice.gemini_model if config.voice.gemini_model is not None else entry.model)
 
 
-def resolve_transcriber(config: TelegramBotsConfig) -> Transcriber | None:
-    """Read a fresh model snapshot; environment keys never supply credentials."""
+def resolve_transcriber(config: TelegramBotsConfig, *, models: Sequence[ModelConfig] | None = None) -> Transcriber | None:
+    """Qualify supplied models or a fresh snapshot; environment keys supply no credentials."""
     provider = config.voice.provider
     if provider == "off":
         return None
-    models = get_app_config().models
+    models = get_app_config().models if models is None else models
     if provider in {"auto", "openai"}:
         for entry in models:
             module, class_name = _class_path(entry.use)

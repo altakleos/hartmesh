@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Telegram copy safeguards and operator commands
+
+Pause managed-bot polling on a known Docker-host change or a qualifying broad
+startup conflict. Keep updates and sending gated until the one-time startup
+decision completes. These checks are best effort: concurrent copies must have
+Telegram disabled before their first boot.
+Expired shutdown grace retires future latch-write retries while retaining active
+database and client cleanup before persistence closes.
+Poll retirement drains its current-link SQL guard before cancellation, fixing a
+reproduced retained SQLite cursor lock during removal.
+Held-input release consumes its serviced wake signal so a failed suffix keeps
+its retry backoff; fresh wakes still interrupt the wait.
+
+Add local JSON `status`, `adopt`, `resume` and account-scoped `remove` commands.
+Status opens existing storage read-only, reports current-generation delivery
+counts and classifies stored tokens without printing or rewriting them. Removal
+rechecks current account access and uses the shared atomic cleanup transaction.
+
+No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
+remains version 55. Managed-bot activation remains deferred.
+
 ### Telegram supervisor and Gateway lifecycle
 
 Add Gateway-owned managed-bot startup, health waiting, bounded concurrent bot

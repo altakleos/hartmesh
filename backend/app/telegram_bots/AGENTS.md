@@ -105,6 +105,14 @@ failed persistence owns that retry before another poll. Successful old-token
 results also retire. Pass the complete absolute conflict transition through the
 health callback; a timer alone cannot declare conflict. Held release transfers
 ownership without waiting for database recovery.
+The poller's complete current-link SQL guard uses `await_drained`: cancellation
+must finish its cursor and transaction before retirement proceeds. A canceled
+SQLite SELECT can retain a lock even after connection invalidation. Recheck
+current poll/token identity after the owned guard; stale work still cannot send
+or admit input. This guarantee covers that guard, not every driver operation.
+Starting pending admission consumes its observed wake. A fresh wake arriving
+during awaited admission remains available to interrupt the following wait;
+a serviced held-release signal must not skip that failed suffix's backoff.
 `defer_start_retry` transfers the first startup rate-limit observation before
 any awaited status guard. Restore requests one discard intent with
 `require_drop_pending`; `complete_pending_drop` only joins that intent and cannot
@@ -116,8 +124,23 @@ Transport facts use narrow `update_if_current`; health callbacks supply
 caches are revision-scoped and publish after commit; one live supervisor owns
 ordinary health causes. SQL revision fences support rotation through another
 repository, but do not merge independent hidden cause sets at the same revision.
-`deployment.py` shares static refusal precedence with future operator/runtime
-callers. `log_filter.py` sanitizes messages and exception text on root and
+`deployment.py` shares static refusal precedence and owns the persisted CopyGuard.
+Host discovery uses only the forced-local Docker CLI off-loop, outside writers.
+Guard writers share the capacity singleton lock. `peek` is SELECT-only and may
+borrow an active read session; `resume` uses stored state without a host read.
+The startup heuristic is conditional, never an ownership election: concurrent
+copies must have Telegram off before first boot, including same-engine-ID copies.
+`cli.py` prints one sorted JSON document for every invocation and starts no bot,
+Gateway or provider service. Its existing-only engine path performs no bootstrap,
+DDL or stamping; status is read-only and captures one real multi-query snapshot.
+Project safe status fields explicitly and count only current-generation delivery.
+Token opening returns classifications only, never credentials or rewrapped data.
+Removal checks fresh derived account access inside the borrowed capacity writer;
+refusal rolls back the entire unit. Preserve settings, acts and audit events.
+`token_pattern.py` keeps repository imports independent of the Telegram SDK;
+`adapter.TOKEN_BODY` remains a compatibility re-export. CLI voice qualification
+passes rendered models to the shared resolver, including an explicit empty list.
+`log_filter.py` sanitizes messages and exception text on root and
 non-propagating handlers; installation and logger levels belong to the
 supervisor constructor, never imports.
 `api_logging.py` supplies closed error classifications and exact event fields.
@@ -130,13 +153,26 @@ for scan/add/retry/replacement paths. A permit covers construction and the first
 SDK start attempt; cancelled constructors keep their result owned until loop-side
 cleanup. Captured channel and poll identities fence callbacks even when a retry
 uses the same token revision. Preserve death history across poll recreation.
+Freeze initial membership/conflict facts before routes are admitted; finalize
+actual startup pollers only after every first attempt. One coordinator times its
+sticky decision from the first actual poll dispatch. Health readiness and send
+admission are separate. Defer notices before claiming metadata and gate control
+acknowledgements, profile/takeover mutations and raw delivery. The mandatory
+`TransportServices.send_allowed()` must return exactly True after the adapter's
+last awaited authority/SQL guard. Retired startup buffers cannot retain Updates
+after the decision; live failed admission suffixes remain owned and ordered.
 `begin_shutdown` drains producers/pollers/workers while retaining the listener;
 the Gateway drains existing channels before `stop` confirms safe offsets,
 unsubscribes and closes clients. The Gateway owns the single five-second stop
-timeout; already-started constructor/client cleanup remains owned after it.
+grace. Only its expiration calls `drain_after_stop_timeout`: retire future latch
+retries, wake/drain backoff, then join the active SQL attempt and the same owned
+client cleanup before database teardown. Ordinary cancelled stop waiters retain
+retry intent. A late successful commit remains durable; an unpersisted latch
+gets one fixed diagnostic and keeps local refusal. Already-started work may
+outlast grace; no new SQL retry survives the database owner.
 Do not install future-stage no-op schedulers or trust manager text as a model
 source. This slice sends trusted fixed product/status sources only; model-final
-recovery, CopyGuard, handlers, files, profiles and instance policy have later owners.
+recovery, handlers, files, profiles and instance policy have later owners.
 
 `authority.py` rereads the live human account, strict route ceilings, exact
 connection and supported owner-scoped target. Fixed product/status sources need

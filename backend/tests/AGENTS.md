@@ -74,6 +74,17 @@ rendering and between parts; a refreshed admission must persist protection befor
 the next raw call. Strict authority tests load an actual cold config and provider:
 file reads/discovery run off-loop, construction/evaluation on the original loop.
 
+CopyGuard tests use both SQL dialects, offline Docker-CLI stand-ins and controlled
+startup poll records; no test probes the host daemon. CLI tests verify one JSON
+document, safe projections, token classifications without rewrap, fresh-process
+runtime-import blockers, refusal rollback and real snapshot consistency under an
+independent writer. Existing-only engine tests prohibit bootstrap and preserve
+live WAL data, foreign-key enforcement and configured PostgreSQL search_path.
+The CLI/live-supervisor bridge removes real rows, reconciles twice and requires
+client/poller retirement without chat/profile calls or row recreation. Expired
+shutdown grace tests distinguish pending retry from an active SQL attempt, keep
+that attempt owned, and forbid later retries before database teardown.
+
 `test_agent_chat_tools.py` uses real ToolNode runtime injection and host-only
 execution contexts for bounded page offers. Config tests use independent default
 expectations; Compose tests load the real template, validate it through the same

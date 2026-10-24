@@ -134,8 +134,22 @@ async def _shutdown_channel_services(app: FastAPI, supervisor) -> None:
                 logger.exception("Failed to stop channel service")
         finally:
             if supervisor is not None:
+                stop_waiter = asyncio.create_task(supervisor.stop(), name="telegram-supervisor-stop-waiter")
                 try:
-                    await asyncio.wait_for(supervisor.stop(), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+                    await asyncio.wait_for(stop_waiter, timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+                except TimeoutError:
+                    if stop_waiter.cancelled():
+                        logger.warning("Telegram shutdown exceeded %.1fs; retiring future latch retries and draining owned cleanup.", _SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+                        try:
+                            await supervisor.drain_after_stop_timeout()
+                        except asyncio.CancelledError as error:
+                            cancelled = error
+                        except Exception as error:
+                            logger.warning("Failed to drain Telegram supervisor (%s)", type(error).__name__)
+                    else:
+                        # A completed stop may itself raise TimeoutError. Only
+                        # expiration of our grace retires future latch retries.
+                        logger.warning("Failed to stop Telegram supervisor (TimeoutError)")
                 except asyncio.CancelledError as error:
                     cancelled = error
                 except Exception as error:

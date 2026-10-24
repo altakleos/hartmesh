@@ -42,7 +42,9 @@ async def build(db, *, connected=True, clock=None, normal_request=None, updates_
     async def eligibility(link, item, part):
         return DeliveryEligibility.allow()
 
-    services = SimpleNamespace(config=db.config, links=db.links, outbox=Outbox(db.sessions, clock=clock.now), settings=db.settings, tls_context=tls, request_factory=request_factory, protect_notice=protect_notice, eligibility=eligibility)
+    services = SimpleNamespace(
+        send_allowed=lambda: True, config=db.config, links=db.links, outbox=Outbox(db.sessions, clock=clock.now), settings=db.settings, tls_context=tls, request_factory=request_factory, protect_notice=protect_notice, eligibility=eligibility
+    )
     token = str(link.bot_id) + ":" + secrets.token_urlsafe(30)
     channel = TelegramBotChannel(link=link, token=token, supervisor=services, monotonic=clock.monotonic, sleep=clock.sleep, now=clock.now)
     services.channel = lambda link_id: channel if link_id == link.id else None

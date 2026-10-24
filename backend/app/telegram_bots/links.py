@@ -28,9 +28,9 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.telegram_bots.adapter import TOKEN_BODY
 from app.telegram_bots.config import TelegramBotsConfig
 from app.telegram_bots.settings import SettingsRepository
+from app.telegram_bots.token_pattern import TOKEN_BODY
 from deerflow.persistence.channel_connections.model import ChannelConnectionRow, ChannelConversationRow, ChannelCredentialRow, ChannelOAuthStateRow
 from deerflow.persistence.channel_connections.sql import ChannelConnectionRepository
 from deerflow.persistence.telegram_bots.model import (
@@ -1298,15 +1298,18 @@ class BotLinkRepository:
         await session.delete(row)
         await session.flush()
 
-    async def remove_all_for_owner(self, owner_user_id: str, *, actor_id: str, detail: dict | None = None) -> list[BotLink]:
-        async with self.capacity_writer(owner_user_id) as session:
-            links = [_snapshot(row) for row in await session.scalars(select(TelegramBotLinkRow).where(TelegramBotLinkRow.owner_user_id == owner_user_id).order_by(TelegramBotLinkRow.id))]
-            for link in links:
-                await self.remove(link.id, actor_id=actor_id, detail=detail, session=session)
-            await session.execute(update(TelegramBotIntentRow).where(TelegramBotIntentRow.owner_user_id == owner_user_id, TelegramBotIntentRow.consumed_at.is_(None), TelegramBotIntentRow.cancelled_at.is_(None)).values(cancelled_at=_now()))
-            await session.execute(update(TelegramAssistantAddRow).where(TelegramAssistantAddRow.owner_user_id == owner_user_id, TelegramAssistantAddRow.state.in_(_OPEN_ADDS)).values(state="abandoned", updated_at=_now()))
-            await session.execute(delete(TelegramAccountRow).where(TelegramAccountRow.owner_user_id == owner_user_id))
-            return links
+    async def remove_all_for_owner(self, owner_user_id: str, *, actor_id: str, detail: dict | None = None, session: AsyncSession | None = None) -> list[BotLink]:
+        if session is None:
+            async with self.capacity_writer(owner_user_id) as writer:
+                return await self.remove_all_for_owner(owner_user_id, actor_id=actor_id, detail=detail, session=writer)
+        self._borrow(session, owner_user_id, capacity=True)
+        links = [_snapshot(row) for row in await session.scalars(select(TelegramBotLinkRow).where(TelegramBotLinkRow.owner_user_id == owner_user_id).order_by(TelegramBotLinkRow.id))]
+        for link in links:
+            await self.remove(link.id, actor_id=actor_id, detail=detail, session=session)
+        await session.execute(update(TelegramBotIntentRow).where(TelegramBotIntentRow.owner_user_id == owner_user_id, TelegramBotIntentRow.consumed_at.is_(None), TelegramBotIntentRow.cancelled_at.is_(None)).values(cancelled_at=_now()))
+        await session.execute(update(TelegramAssistantAddRow).where(TelegramAssistantAddRow.owner_user_id == owner_user_id, TelegramAssistantAddRow.state.in_(_OPEN_ADDS)).values(state="abandoned", updated_at=_now()))
+        await session.execute(delete(TelegramAccountRow).where(TelegramAccountRow.owner_user_id == owner_user_id))
+        return links
 
     async def removed_for_owner(self, owner_user_id: str) -> list[dict]:
         async with self.session_factory() as session:

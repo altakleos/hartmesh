@@ -1347,7 +1347,23 @@ for status changes and delivery. A Gateway-owned supervisor now checks deploymen
 prerequisites before serving requests, waits for its own health endpoint, bounds
 bot startup concurrency, and coordinates polling, retries and shutdown. Saved
 fixed replies recheck the current human owner, exact channel binding and target
-before sending. The connection flow remains reserved while update handlers and
+before sending. A known Docker-host change now pauses polling until an operator
+adopts the new host; a best-effort startup conflict check can also pause a
+deployment when another deployment appears to poll the same bots. Concurrent
+copies must have Telegram disabled before their first boot, since the automatic
+checks cannot identify every copy or elect the rightful deployment.
+
+Local operator commands run inside the Gateway container with its rendered
+configuration and environment: `python -m app.telegram_bots.cli status`
+(`--owner <account id>` includes that person's links), `adopt`, `resume`, and
+`remove --owner <disabled account id>`. For a local-password account,
+`remove --local-account <email>` removes bot links while leaving the account's
+password usable. Every command prints one JSON document. Status reads an existing
+database without upgrading it or opening a Telegram client. Adopt and resume
+take effect at the next Gateway start and do not clear a bot's action pause.
+If shutdown logs `copy_latch_unpersisted`, the pause was not saved in the database;
+that process stays paused and the next start evaluates the safeguards again.
+The connection flow remains reserved while update handlers and
 the remaining stage-one capabilities are completed.
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.

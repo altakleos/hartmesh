@@ -26,10 +26,10 @@ from app.telegram_bots.adapter import LongRetryAfter, SendContext, TelegramBotCh
 from app.telegram_bots.api_logging import call_failure_fields
 from app.telegram_bots.cipher import token_cipher, unwrap_token, wrap_token
 from app.telegram_bots.config import TelegramBotsConfig
-from app.telegram_bots.deployment import feature_reason, static_cause
+from app.telegram_bots.deployment import CopyGuard, feature_reason, static_cause
 from app.telegram_bots.links import BotLink, BotLinkRepository
 from app.telegram_bots.log_filter import install_token_log_filter
-from app.telegram_bots.polling import TASK_DEATHS_BEFORE_STOP, TASK_DEATHS_WINDOW_SECONDS, TASK_RESTART_SECONDS, PollRecord, PollTask
+from app.telegram_bots.polling import CONFLICT_GRACE_SECONDS, TASK_DEATHS_BEFORE_STOP, TASK_DEATHS_WINDOW_SECONDS, TASK_RESTART_SECONDS, PollRecord, PollTask
 from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryEligibility, Outbox, OutboxSender
 from app.telegram_bots.render import render_plain
 from app.telegram_bots.settings import SettingsRepository, silent_now
@@ -67,6 +67,8 @@ _LINES = {
     "unbound-allowed": "telegram: not started (channel_connections.enabled and channel_connections.require_bound_identity must both be true)",
     "secret-missing": "telegram: not started (HARTMESH_PROVIDER_KEYS_SECRET is not set)",
     "secret-invalid": "telegram: not started (HARTMESH_PROVIDER_KEYS_SECRET is shorter than 32 characters)",
+    "host-changed": "telegram: paused (host-changed); run python -m app.telegram_bots.cli adopt",
+    "polled-elsewhere": "telegram: paused (polled-elsewhere); run python -m app.telegram_bots.cli resume",
     "channel-service-failed": "telegram: not started (the channel service failed to start)",
     "gateway-not-ready": "telegram: not started (the Gateway did not answer its own health check in 60 s)",
 }
@@ -84,6 +86,7 @@ class TelegramSupervisor:
         outbox=None,
         settings=None,
         authority=None,
+        copy_guard=None,
         app_config=None,
         environ: Mapping[str, str] | None = None,
         request_factory=None,
@@ -102,6 +105,7 @@ class TelegramSupervisor:
         self.app, self.config, self.channel_service = app, config, channel_service
         self.session_factory, self.links, self.outbox, self.settings = session_factory, links, outbox, settings
         self.authority, self._app_config = authority, app_config
+        self.copy_guard = copy_guard
         self._environ = dict(os.environ if environ is None else environ)
         if request_factory is not None:
             self.request_factory = request_factory
@@ -115,6 +119,21 @@ class TelegramSupervisor:
         self._start_started = False
         self._check_lock = asyncio.Lock()
         self._health_barrier, self._ready = asyncio.Event(), False
+        self._send_event, self._send_ready = asyncio.Event(), False
+        self._copy_wake = asyncio.Event()
+        self._copy_task: asyncio.Task | None = None
+        self._latch_task: asyncio.Task | None = None
+        self._latch_retired = asyncio.Event()
+        self._latch_persisted = False
+        self._unpersisted_logged = False
+        self._copy_decision: bool | None = None
+        self._cohort_complete = False
+        self._initial_links: dict[str, BotLink] = {}
+        self._startup_started: set[str] = set()
+        self._startup_links: tuple[BotLink, ...] = ()
+        self._startup_records: dict[str, tuple[int, PollRecord]] = {}
+        self._startup_polls: set[PollTask] = set()
+        self._first_poll_at: float | None = None
         self._start_task: asyncio.Task | None = None
         self._stop_task: asyncio.Task | None = None
         self._start_limit = asyncio.Semaphore(START_CONCURRENCY)
@@ -156,8 +175,8 @@ class TelegramSupervisor:
         if before.state != saved.state:
             self._event("state", link=saved, **{"from": before.state, "to": saved.state, "reason": "held" if saved.state == "held" else "restored" if before.state == "held" else "forbidden" if saved.state == "blocked" else "inbound"})
 
-    def _refuse(self, cause: str) -> None:
-        self._cause, self._ready = cause, False
+    def _refuse(self, cause: str, **observations) -> None:
+        self._cause, self._ready, self._send_ready = cause, False, False
         line = _LINES[cause]
         if cause == "secret-invalid":
             previous = self._environ.get("HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS", "").strip()
@@ -165,8 +184,11 @@ class TelegramSupervisor:
             if len(present) >= 32 and previous and len(previous) < 32:
                 line = line.replace("HARTMESH_PROVIDER_KEYS_SECRET is", "HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS is")
         logger.info(line)
-        self._event("polling_refused", reason=cause, links=len(self._rows), level=logging.INFO if cause == "off" else logging.ERROR)
+        if cause == "polled-elsewhere":
+            observations = {"polled": 0, "counted": 0, "people": 0, **observations}
+        self._event("polling_refused", reason=cause, links=len(self._rows), level=logging.INFO if cause == "off" else logging.ERROR, **observations)
         self._health_barrier.set()
+        self._send_event.set()
 
     async def check(self) -> None:
         async with self._check_lock:
@@ -187,10 +209,29 @@ class TelegramSupervisor:
             connections = getattr(manager, "connection_repo", None)
             if self.session_factory is None:
                 self.session_factory = get_session_factory()
-            if manager is None or connections is None or self.session_factory is None:
+            if self.session_factory is None:
                 self._refuse("channel-service-failed")
                 return
             self.links = self.links or BotLinkRepository(self.session_factory, connections, self.config)
+            # Freeze membership and original conflict facts before check returns
+            # and the Gateway admits routes that can create/start other links.
+            initial = await self.links.list_all()
+            self._initial_links = {link.id: link for link in initial}
+            self._rows = dict(self._initial_links)
+            self.copy_guard = self.copy_guard or CopyGuard(self.session_factory, clock=self._clock)
+            verdict = await self.copy_guard.at_start()
+            if self.copy_guard.this_host_id is None:
+                self._event("host_unreadable", level=logging.WARNING)
+            if verdict != "running":
+                self._refuse(verdict.replace("_", "-"))
+                return
+            if manager is None or connections is None:
+                self._refuse("channel-service-failed")
+                return
+            if len(self._initial_links) <= 1:
+                # This complete original population cannot meet the predicate;
+                # its first update need not wait for startup announcements.
+                self._copy_decision = False
             self.settings = self.settings or SettingsRepository(self.session_factory, self.config)
             self.outbox = self.outbox or Outbox(self.session_factory, config=self.config, clock=self._clock)
             if self.authority is None:
@@ -243,15 +284,11 @@ class TelegramSupervisor:
                 return
             self._ready = True
             self._health_barrier.set()
-            rows = await self.links.list_all()
-            self._rows = {row.id: row for row in rows}
+            rows = tuple(self._initial_links.values())
             self._event("supervisor_start", links=len(rows), concurrency=START_CONCURRENCY)
             await asyncio.gather(*(self._launch(row, fresh_start=True) for row in rows))
             if self._stopping or self._cause is not None:
                 return
-            for poll in tuple(self._polls.values()):
-                await poll.release_held()
-            await self.sender.recover_prior_claims()
             status = self.status()
             try:
                 transcriber = await asyncio.to_thread(resolve_transcriber, self.config)
@@ -270,15 +307,16 @@ class TelegramSupervisor:
                 voice,
             )
             self._event("supervisor_ready", links=status["bots"], ok=status["polling"], failing=status["failing"], took_ms=round((self._time() - began) * 1000))
-            self._periodic(self._tick_sender, 1, "sender")
-            self._periodic(self.reconcile, self.config.reconcile_interval_seconds, "reconcile")
-            self._periodic(self._refresh_flags, 3600, "bot-flags")
-            self._periodic(self.sweep_retention, RETENTION_SWEEP_SECONDS, "retention")
+            self._startup_links = tuple(link for identity, link in self._initial_links.items() if identity in self._startup_started)
+            self._cohort_complete = True
+            self._copy_task = asyncio.create_task(self._coordinate_copy_start(), name="telegram-copy-decision")
+            await self._copy_task
         except asyncio.CancelledError:
             raise
         except Exception as error:
             self._event("supervisor_start_failed", error=type(error).__name__, level=logging.ERROR)
-            self._refuse("channel-service-failed")
+            if self._cause is None:
+                self._refuse("channel-service-failed")
             await self.begin_shutdown()
             self._unsubscribe()
         finally:
@@ -286,6 +324,149 @@ class TelegramSupervisor:
                 self._start_task = None
             if not self._ready:
                 self._health_barrier.set()
+
+    def _copy_results(self) -> dict[str, PollRecord]:
+        return {identity: record for identity, (_, record) in self._startup_records.items()}
+
+    def _pending_copy_decision(self) -> bool:
+        return self._copy_decision is None
+
+    async def _wait_send_release(self) -> bool:
+        await self._send_event.wait()
+        return self._send_ready and self._cause is None and not self._stopping
+
+    def _poll_dispatched(self) -> None:
+        if self._first_poll_at is None:
+            self._first_poll_at = self._time()
+        self._copy_wake.set()
+
+    def _poll_result(self) -> bool:
+        if self._copy_decision is None and self._cohort_complete and not self.copy_guard.can_still_be_broad_conflict(self._startup_links, self._copy_results()):
+            self._copy_decision = False
+        self._copy_wake.set()
+        return self._copy_decision is not False
+
+    async def _wait_copy_change(self, delay: float | None) -> None:
+        if delay is None:
+            await self._copy_wake.wait()
+            return
+        changed = asyncio.create_task(self._copy_wake.wait())
+        timer = asyncio.create_task(self._sleep(delay))
+        try:
+            await asyncio.wait((changed, timer), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (changed, timer):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(changed, timer, return_exceptions=True)
+
+    async def _coordinate_copy_start(self) -> None:
+        # The complete original population/actual-started cohort is announced
+        # before this retained owner can release senders or persist a latch.
+        while self._copy_decision is None and not self._stopping:
+            self._copy_wake.clear()
+            results = self._copy_results()
+            if not self.copy_guard.can_still_be_broad_conflict(self._startup_links, results):
+                self._copy_decision = False
+                break
+            remaining = None if self._first_poll_at is None else self._first_poll_at + CONFLICT_GRACE_SECONDS - self._time()
+            if remaining is not None and remaining <= 0:
+                polled = tuple(link for link in self._startup_links if link.id in results and results[link.id].polls > 0)
+                self._copy_decision = self.copy_guard.broad_conflict(polled, results)
+                break
+            await self._wait_copy_change(remaining)
+        if self._stopping:
+            return
+        if self._copy_decision:
+            await self._latch_copy_conflict()
+            return
+        # Transfer every suffix promptly; failed admission remains its poller's
+        # job and never blocks another link or the sender's startup.
+        current_polls = set(self._polls.values())
+        for retired in self._startup_polls - current_polls:
+            retired.discard_held()
+        self._startup_polls.clear()
+        for poll in tuple(current_polls):
+            if poll.pending_drop:
+                poll.discard_held()
+            await poll.release_held()
+        while not self._stopping:
+            try:
+                await self.sender.recover_prior_claims()
+                break
+            except SQLAlchemyError as error:
+                self._event("claim_recovery_failed", error=type(error).__name__, level=logging.WARNING)
+                await self._sleep(1)
+        if self._stopping or self._cause is not None:
+            return
+        self._send_ready = True
+        self._send_event.set()
+        for poll in tuple(self._polls.values()):
+            poll.wake()
+        self._periodic(self._tick_sender, 1, "sender")
+        self._periodic(self.reconcile, self.config.reconcile_interval_seconds, "reconcile")
+        self._periodic(self._refresh_flags, 3600, "bot-flags")
+        self._periodic(self.sweep_retention, RETENTION_SWEEP_SECONDS, "retention")
+
+    async def _latch_copy_conflict(self) -> None:
+        # Refuse locally before any await, cancellation or SQL persistence.
+        self._cause, self._send_ready = "polled-elsewhere", False
+        self._send_event.set()
+        self._latch_task = asyncio.create_task(self._complete_copy_latch(), name="telegram-copy-latch-persistence")
+        await asyncio.shield(self._latch_task)
+
+    async def _complete_copy_latch(self) -> None:
+        own = asyncio.current_task()
+        tasks = {*self._background, *self._runners.values(), *self._restarts.values(), *self._operations, *self._notices, *self._callbacks}
+        tasks.discard(own)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if self.sender is not None:
+            await self.sender.stop()
+        polls = set(self._polls.values()) | self._startup_polls
+        dropped = sum(poll.discard_held() for poll in polls)
+        self._startup_polls.clear()
+        self._event("updates_dropped", n=dropped, level=logging.WARNING)
+        results = self._copy_results()
+        polled = tuple(link for link in self._startup_links if link.id in results and results[link.id].polls > 0)
+        observations = self.copy_guard.broad_conflict_counts(polled, results)
+        self._refuse("polled-elsewhere", **observations)
+        await self._persist_copy_latch()
+
+    def _unpersisted_latch(self) -> None:
+        if not self._unpersisted_logged:
+            self._unpersisted_logged = True
+            logger.error("telegram_bots copy_latch_unpersisted")
+
+    async def _latch_backoff(self) -> None:
+        retired = asyncio.create_task(self._latch_retired.wait())
+        backoff = asyncio.create_task(self._sleep(1))
+        try:
+            await asyncio.wait((retired, backoff), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (retired, backoff):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(retired, backoff, return_exceptions=True)
+
+    async def _persist_copy_latch(self) -> None:
+        while True:
+            if self._latch_retired.is_set():
+                self._unpersisted_latch()
+                return
+            try:
+                # Owner retirement never cancels this already-started attempt.
+                await self.copy_guard.stop_for_broad_conflict()
+            except SQLAlchemyError as error:
+                self._event("copy_latch_write_failed", error=type(error).__name__, level=logging.ERROR)
+                if self._latch_retired.is_set():
+                    self._unpersisted_latch()
+                    return
+                await self._latch_backoff()
+            else:
+                self._latch_persisted = True
+                return
 
     def _periodic(self, operation, seconds: float, name: str) -> None:
         async def run():
@@ -365,7 +546,7 @@ class TelegramSupervisor:
                 raise
         finally:
             self._operations.pop(task, None)
-        if drop_pending and not self._stopping:
+        if drop_pending and self._send_ready and not self._stopping:
             channel, poll = self.channel(link.id), self.poll_task(link.id)
             if channel is not None and poll is not None and channel.application.running and channel.transport_revision == link.token_revision and channel.link.binding_generation == link.binding_generation:
                 await poll.complete_pending_drop()
@@ -488,12 +669,43 @@ class TelegramSupervisor:
             elif not holds and cause == "unreachable" and poll.back_online_due:
                 self._schedule_notice(channel, "link.back_online", throttle=True)
 
-        poll = PollTask(channel, on_health=health, record=PollRecord(), clock=self._clock, sleep=self._sleep)
+        identity, revision = channel.link.id, channel.transport_revision
+        record = PollRecord()
+        if identity in self._initial_links:
+            previous = self._startup_records.get(identity)
+            if previous is not None and previous[0] == revision:
+                record = previous[1]
+            else:
+                self._startup_records[identity] = (revision, record)
+
+        def current_pair():
+            return self._cause is None and self._channels.get(identity) is channel and self._polls.get(identity) is poll
+
+        def on_result():
+            return self._poll_result() if current_pair() else True
+
+        def on_dispatch():
+            if current_pair():
+                self._poll_dispatched()
+
+        def control_allowed(mode):
+            if not current_pair():
+                return False
+            return self._copy_decision is False if mode == "confirm" else self._send_ready and not self._stopping
+
+        poll = PollTask(
+            channel, on_health=health, record=record, on_result=on_result, on_dispatch=on_dispatch, decision_pending=self._pending_copy_decision, control_allowed=control_allowed, is_current=current_pair, clock=self._clock, sleep=self._sleep
+        )
+
         return poll
 
     def _start_poll(self, channel: TelegramBotChannel, poll: PollTask) -> None:
         identity = channel.link.id
         self._polls[identity] = poll
+        if not self._cohort_complete:
+            if identity in self._initial_links:
+                self._startup_started.add(identity)
+            self._startup_polls.add(poll)
         task = asyncio.create_task(poll.run(), name=f"telegram-poll-{identity}")
         self._runners[identity] = task
 
@@ -564,14 +776,21 @@ class TelegramSupervisor:
                 self._event("poll_restart_write_failed", link=channel.link, error=type(error).__name__, level=logging.WARNING)
                 await self._sleep(1)
 
+    def send_allowed(self) -> bool:
+        """Final synchronous admission after transport's last awaited guard."""
+        return self._send_ready and self._cause is None and not self._stopping
+
     async def eligibility(self, link, item, part=None) -> DeliveryEligibility:
-        if self._stopping or self._cause is not None or not self._ready:
+        if self._stopping or self._cause is not None or not self._send_ready:
             return DeliveryEligibility.wait()
-        return await self.authority.delivery(link, item, part)
+        verdict = await self.authority.delivery(link, item, part)
+        if self._stopping or self._cause is not None or not self._send_ready:
+            return DeliveryEligibility.wait()
+        return verdict
 
     async def protect_notice(self, context: SendContext) -> bool:
         channel = self.channel(context.link_id)
-        if channel is None or channel.transport_revision != context.token_revision or self._cause is not None:
+        if channel is None or channel.transport_revision != context.token_revision or self._cause is not None or not self._send_ready:
             raise DeliveryClaimRetired
         link = await self.links.update_if_current(context.link_id, token_revision=context.token_revision)
         if link is None or link.binding_generation != context.binding_generation or (context.purpose == "bound_message" or context.purpose == "optional" and link.chat_id is not None) and link.chat_id != context.chat_id:
@@ -579,7 +798,10 @@ class TelegramSupervisor:
         protected = await self.authority.protect_notice(context)
         link = await self.links.update_if_current(context.link_id, token_revision=context.token_revision)
         if (
-            self.channel(context.link_id) is not channel
+            not self._send_ready
+            or self._stopping
+            or self._cause is not None
+            or self.channel(context.link_id) is not channel
             or link is None
             or link.binding_generation != context.binding_generation
             or (context.purpose == "bound_message" or context.purpose == "optional" and link.chat_id is not None)
@@ -589,7 +811,7 @@ class TelegramSupervisor:
         return protected
 
     async def deliver_part(self, *, link_id: str, outbox_id: str, part_id: str, claim_owner: str, claim_id: str) -> list[int]:
-        if self._stopping or self._cause is not None:
+        if self._stopping or self._cause is not None or not self._send_ready:
             raise DeliveryClaimRetired
         channel = self.channel(link_id)
         if channel is None:
@@ -613,7 +835,7 @@ class TelegramSupervisor:
         await channel.send(msg)
 
     async def _tick_sender(self) -> None:
-        if not self._stopping and self._cause is None:
+        if not self._stopping and self._cause is None and self._send_ready:
             await self.sender.tick()
 
     def channel(self, link_id: str) -> TelegramBotChannel | None:
@@ -724,6 +946,11 @@ class TelegramSupervisor:
             channel = self.channel(link_id)
         if channel is not None:
             if take_over_webhook:
+                if not await self._wait_send_release() or self.channel(link_id) is not channel:
+                    return await self.links.get(link_id)
+                captured = await self.links.update_if_current(link_id, token_revision=channel.transport_revision)
+                if captured is None or self.channel(link_id) is not channel or not self.send_allowed():
+                    return await self.links.get(link_id)
                 await channel.bot.delete_webhook()
                 self._event("webhook", link=link, level=logging.WARNING, result="deleted", by="person")
             current_link = await self.links.update_if_current(link_id, token_revision=channel.transport_revision)
@@ -762,8 +989,10 @@ class TelegramSupervisor:
         if self._cause is not None or self.channel(link.id) is not channel or link.chat_id is None:
             return
         try:
+            if not await self._wait_send_release() or self.channel(link.id) is not channel:
+                return
             async with self._locks[link.id]:
-                if self.channel(link.id) is not channel:
+                if not self._send_ready or self.channel(link.id) is not channel:
                     return
                 claimed = await self.links.mark_notice_if_current(
                     link.id, key, token_revision=channel.transport_revision, binding_generation=link.binding_generation, at=self._clock(), minimum_interval_seconds=NOTICE_EVERY_HOURS * 3600 if throttle else 0
@@ -792,13 +1021,15 @@ class TelegramSupervisor:
             return
         channel = await self._retire(link_id, reason="removed", close=False)
         try:
-            if channel is not None and self._cause is None and await self._available():
+            if channel is not None and self._cause is None and self._send_ready and await self._available():
                 if last_text is not None:
                     await self._notice(channel, last_text)
                 try:
                     settings = await self.settings.get(link.owner_user_id)
                     text = render_plain("profile.removed", settings.locale if settings is not None else "en-US")
-                    await asyncio.wait_for(channel.bot.set_my_description(description=text), STOP_TIMEOUT_SECONDS)
+                    captured = await self.links.update_if_current(link_id, token_revision=channel.transport_revision)
+                    if captured is not None and captured.binding_generation == link.binding_generation and self.channel(link_id) is channel and self.send_allowed():
+                        await asyncio.wait_for(channel.bot.set_my_description(description=text), STOP_TIMEOUT_SECONDS)
                 except Exception as error:
                     self._event("profile_removed_failed", link=link, error=type(error).__name__, level=logging.WARNING)
         finally:
@@ -829,7 +1060,7 @@ class TelegramSupervisor:
         return min(candidates, key=rank).id
 
     async def _reconcile_owned(self) -> None:
-        if self._stopping or self._cause is not None or not self._ready:
+        if self._stopping or self._cause is not None or not self._send_ready:
             return
         rows = await self.links.list_all()
         live = {row.id: row for row in rows}
@@ -957,6 +1188,8 @@ class TelegramSupervisor:
     async def begin_shutdown(self) -> None:
         self._stopping, self._ready = True, False
         self._health_barrier.set()
+        self._send_ready = False
+        self._send_event.set()
         own = asyncio.current_task()
         tasks = {*self._background, *self._runners.values(), *self._restarts.values(), *self._operations, *self._notices, *self._callbacks}
         retained_start = getattr(self.app.state, "telegram_bots_start", None)
@@ -964,6 +1197,8 @@ class TelegramSupervisor:
             tasks.add(retained_start)
         if self._start_task is not None:
             tasks.add(self._start_task)
+        if self._copy_task is not None:
+            tasks.add(self._copy_task)
         tasks.discard(own)
         for task in tasks:
             task.cancel()
@@ -1003,11 +1238,28 @@ class TelegramSupervisor:
         # remains owned and loop-affine, and a later stop can await the same task.
         await asyncio.shield(self._stop_task)
 
+    async def drain_after_stop_timeout(self) -> None:
+        """Retire future latch attempts only after the Gateway's stop grace.
+
+        An active SQL attempt and the same owned client cleanup still drain
+        before the Gateway tears down persistence. A cancelled ordinary stop
+        waiter does not invoke this retirement policy.
+        """
+        self._latch_retired.set()
+        try:
+            await self.stop()
+        except asyncio.CancelledError:
+            if self._stop_task is not None:
+                await self._finish_owned(self._stop_task)
+            raise
+
     async def _finish_stop(self) -> None:
         global _current
         began = self._time()
         try:
             await self.begin_shutdown()
+            if self._latch_task is not None:
+                await asyncio.shield(self._latch_task)
             if self._cause is None:
                 await asyncio.gather(*(poll.confirm_offset() for poll in tuple(self._polls.values())), return_exceptions=True)
         finally:
