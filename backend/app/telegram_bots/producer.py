@@ -29,6 +29,7 @@ from app.telegram_bots.api_logging import log_call_failure
 from app.telegram_bots.config import TelegramBotsConfig
 from app.telegram_bots.links import BotLink
 from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
+from deerflow.utils.file_io import await_drained
 
 OUTBOX_SEND_CONCURRENCY = 8
 DELIVERY_RETRY_FIRST_SECONDS = 5
@@ -529,6 +530,9 @@ class OutboxSender:
         self._workers: dict[str, tuple[str, str, asyncio.Task]] = {}
         self._generations: dict[str, int] = {}
         self._callbacks: set[asyncio.Task] = set()
+        self._release_tasks: dict[str, asyncio.Task] = {}
+        self._retirements: dict[str, asyncio.Task] = {}
+        self._stop_task: asyncio.Task | None = None
         self._tick_lock = asyncio.Lock()
         self._recovered, self._stopping = False, False
         self._last_link: str | None = None
@@ -644,7 +648,7 @@ class OutboxSender:
             for link_id in links:
                 if count >= free:
                     break
-                if link_id in self._workers:
+                if link_id in self._workers or link_id in self._retirements:
                     continue
                 # Oldest due reply per link. A waiting row must not block a later
                 # fixed repair/status notice on the same link.
@@ -692,12 +696,16 @@ class OutboxSender:
 
     async def _run(self, link_id: str, row_id: str, generation: int, claim: str) -> None:
         while True:
+            if self._stopping:
+                return
             binding, row = await self._snapshot(link_id, row_id)
             if row is None:
                 return
             version = row.payload.get("presentation_version", 0)
             part = next((part for part in row.parts if part["presentation_version"] == version and part["state"] not in _FINAL_PARTS), None)
             decision = await self._eligibility(binding, row, part)
+            if self._stopping:
+                return
             if decision.decision == "allow" and part is not None and part["kind"] == "edit" and not part.get("remove_keyboard") and decision.protect_content and not part.get("target_protect_content", False):
                 await self._replace(binding, row, claim, reason="protection")
                 return
@@ -734,6 +742,8 @@ class OutboxSender:
                 sending["dispatched_at"] = self.outbox.clock().isoformat()
                 saved.parts = parts
                 required_protection = sending["protect_content"]
+            if self._stopping:
+                return
             try:
                 receipt = await self.deliver_part(link_id=link_id, outbox_id=row_id, part_id=part["part_id"], claim_owner=self.run_id, claim_id=claim)
                 if isinstance(receipt, PartReceipt):
@@ -955,7 +965,15 @@ class OutboxSender:
             task.exception()  # retrieve unexpected exceptions; never log payloads
         callback = asyncio.create_task(self._release(link_id, row_id, generation, claim, task))
         self._callbacks.add(callback)
-        callback.add_done_callback(self._callbacks.discard)
+        self._release_tasks[claim] = callback
+        callback.add_done_callback(lambda done, admission=claim: self._release_done(admission, done))
+
+    def _release_done(self, claim: str, task: asyncio.Task) -> None:
+        self._callbacks.discard(task)
+        if self._release_tasks.get(claim) is task:
+            self._release_tasks.pop(claim, None)
+        if not task.cancelled():
+            task.exception()  # failed cleanup is recovered by the next tick
 
     async def _release(self, link_id: str, row_id: str, generation: int, claim: str, task: asyncio.Task) -> None:
         try:
@@ -970,23 +988,87 @@ class OutboxSender:
                 self._workers.pop(link_id, None)
 
     async def drain(self) -> None:
-        while self._workers or self._callbacks:
-            tasks = [value[2] for value in self._workers.values()] + list(self._callbacks)
+        while self._workers or self._callbacks or self._retirements:
+            tasks = [value[2] for value in self._workers.values()] + list(self._callbacks) + list(self._retirements.values())
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             await asyncio.sleep(0)
 
+    async def retire_link(self, link_id: str) -> None:
+        """Invalidate and drain only this link's currently owned admission.
+
+        The cleanup task remains owned after a caller is cancelled. A tick
+        cannot admit a new worker for that link until the cleanup finishes;
+        stop/drain also await these retained retirement tasks.
+        """
+        if not isinstance(link_id, str) or not link_id or len(link_id) > 32:
+            raise ValueError("invalid-link-id")
+        task = self._retirements.get(link_id)
+        if task is None:
+            task = asyncio.create_task(self._retire_link(link_id))
+            self._retirements[link_id] = task
+            task.add_done_callback(lambda done: self._retirement_done(link_id, done))
+        await asyncio.shield(task)
+
+    def _retirement_done(self, link_id: str, task: asyncio.Task) -> None:
+        if self._retirements.get(link_id) is task:
+            self._retirements.pop(link_id, None)
+        if not task.cancelled():
+            task.exception()
+
+    async def _retire_link(self, link_id: str) -> None:
+        async with self._tick_lock:
+            worker = self._workers.get(link_id)
+            if worker is None:
+                return
+            row_id, claim, task = worker
+            generation = self._generations[claim]
+            # Commit the receipt fence before cancellation, which a transport
+            # is allowed to catch while its already-dispatched call finishes.
+            async with self.outbox._writer(link_id) as (session, binding):
+                row = await session.get(TelegramOutboxRow, row_id, with_for_update=True)
+                if self.outbox._fenced(row, generation=generation, owner=self.run_id, claim=claim):
+                    self._pending(row)
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        while self._workers.get(link_id) == worker:
+            release = self._release_tasks.get(claim)
+            if release is not None:
+                await asyncio.gather(release, return_exceptions=True)
+            else:
+                await asyncio.sleep(0)  # worker completion schedules its release
+
     async def stop(self) -> None:
         self._stopping = True
+        if self._stop_task is None or self._stop_task.done():
+            self._stop_task = asyncio.create_task(self._stop_workers())
+        task = self._stop_task
+
+        async def wait_owned() -> None:
+            await asyncio.shield(task)
+
+        # A cancelled shutdown caller must not proceed to close SDK clients
+        # while an already-dispatched worker still owns one of those clients.
+        await await_drained(wait_owned())
+
+    async def _stop_workers(self) -> None:
+        failure = None
         async with self._tick_lock:
             # Invalidate before cancelling: cancellation may be swallowed by
             # transport. A tick already in admission must finish before this
             # snapshot, so no worker can appear after shutdown drained it.
-            for link_id, (row_id, claim, task) in list(self._workers.items()):
-                generation = self._generations[claim]
-                async with self.outbox._writer(link_id) as (session, binding):
-                    row = await session.get(TelegramOutboxRow, row_id, with_for_update=True)
-                    if self.outbox._fenced(row, generation=generation, owner=self.run_id, claim=claim):
-                        self._pending(row)
-                task.cancel()
+            workers = [(link_id, row_id, claim, task, self._generations[claim]) for link_id, (row_id, claim, task) in self._workers.items()]
+            for link_id, row_id, claim, task, generation in workers:
+                try:
+                    async with self.outbox._writer(link_id) as (session, binding):
+                        row = await session.get(TelegramOutboxRow, row_id, with_for_update=True)
+                        if self.outbox._fenced(row, generation=generation, owner=self.run_id, claim=claim):
+                            self._pending(row)
+                except Exception as error:
+                    if failure is None:
+                        failure = error
+                finally:
+                    task.cancel()
         await self.drain()
+        if failure is not None:
+            raise failure

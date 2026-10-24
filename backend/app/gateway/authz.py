@@ -242,23 +242,72 @@ def _get_cached_route_provider(config: AuthorizationConfig) -> AuthorizationProv
     return provider
 
 
-async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[str]:
+class RouteAuthorityUnavailable(Exception):
+    """Current authority could not be read; this is not an allow or deny."""
+
+
+async def _aget_cached_route_provider(config: AuthorizationConfig) -> AuthorizationProvider | None:
+    """Use the shared route cache, discovering cold classes off the event loop."""
+    global _route_provider_config_id, _route_provider_config_sig
+
+    signature = repr(sorted(config.model_dump().items()))
+    if signature == _route_provider_config_sig and _route_provider_cache:
+        _route_provider_config_id = id(config)
+        return _route_provider_cache.get("provider")
+    spec = await asyncio.to_thread(resolve_authorization_provider_spec, config)
+    # A concurrent request may have populated this same cache during discovery.
+    if signature == _route_provider_config_sig and _route_provider_cache:
+        _route_provider_config_id = id(config)
+        return _route_provider_cache.get("provider")
+    provider = construct_authorization_provider(spec, config)
+    _route_provider_cache.clear()
+    if provider is not None:
+        _route_provider_cache["provider"] = provider
+    _route_provider_config_id = id(config)
+    _route_provider_config_sig = signature
+    return provider
+
+
+async def resolve_route_permissions(
+    user: User,
+    *,
+    is_internal: bool,
+    prepared_config: AuthorizationConfig | None = None,
+    strict: bool = False,
+) -> list[str]:
     """Return the route permissions granted to an authenticated user.
 
     Disabled authorization preserves the legacy all-permissions behavior.
     When enabled, every registered ``resource:action`` permission is evaluated
     independently so a provider failure affects only the route being checked.
     Provider instances are cached per config signature (hot-reload safe).
+
+    Background delivery may supply freshly prepared configuration and request
+    strict reads. Those reads offload cold discovery, construct providers on the
+    calling loop and raise RouteAuthorityUnavailable for configuration/provider
+    errors, irrespective of the HTTP fail-open setting.
     """
-    config = _get_route_authorization_config()
+    if prepared_config is not None:
+        config = prepared_config
+    elif strict:
+        from deerflow.config.app_config import get_app_config
+
+        try:
+            config = (await asyncio.to_thread(get_app_config)).authorization
+        except Exception:
+            raise RouteAuthorityUnavailable from None
+    else:
+        config = _get_route_authorization_config()
     if config.enabled is not True:
         return list(_ALL_PERMISSIONS)
 
     try:
-        provider = _get_cached_route_provider(config)
+        provider = await _aget_cached_route_provider(config) if strict else _get_cached_route_provider(config)
         if provider is None:
             raise ValueError("authorization is enabled but provider resolution returned None")
     except Exception:
+        if strict:
+            raise RouteAuthorityUnavailable from None
         logger.warning("Failed to resolve authorization provider for Gateway routes", exc_info=True)
         return [] if config.fail_closed else list(_ALL_PERMISSIONS)
 
@@ -296,9 +345,13 @@ async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[st
             decision = await provider.aauthorize(request)
             if not isinstance(decision, AuthzDecision):
                 raise TypeError("AuthorizationProvider.aauthorize must return AuthzDecision")
+            if strict and type(decision.allow) is not bool:
+                raise TypeError("AuthorizationProvider decision.allow must be a boolean")
         except asyncio.CancelledError:
             raise
         except Exception:
+            if strict:
+                raise RouteAuthorityUnavailable from None
             logger.warning(
                 "Authorization provider failed while evaluating route permission %s",
                 permission,
@@ -307,7 +360,16 @@ async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[st
             return permission if not config.fail_closed else None
         return permission if decision.allow else None
 
-    results = await asyncio.gather(*[_evaluate(p) for p in _ALL_PERMISSIONS])
+    if strict:
+        # Finish every started provider evaluation before reporting uncertainty.
+        # No detached provider call may outlive this authority read.
+        results = await asyncio.gather(*[_evaluate(p) for p in _ALL_PERMISSIONS], return_exceptions=True)
+        if any(isinstance(result, asyncio.CancelledError) for result in results):
+            raise asyncio.CancelledError
+        if any(isinstance(result, BaseException) for result in results):
+            raise RouteAuthorityUnavailable from None
+    else:
+        results = await asyncio.gather(*[_evaluate(p) for p in _ALL_PERMISSIONS])
     return [p for p in results if p is not None]
 
 

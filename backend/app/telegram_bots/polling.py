@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from sqlalchemy.exc import SQLAlchemyError
-from telegram.error import BadRequest, Conflict, Forbidden, InvalidToken, NetworkError, RetryAfter, TimedOut
+from telegram.error import BadRequest, Conflict, Forbidden, InvalidToken, NetworkError, RetryAfter, TelegramError, TimedOut
 
 if TYPE_CHECKING:
     from telegram import Update
@@ -314,6 +314,26 @@ class PollTask:
         self._rate_until = max(self._rate_until, until) if self._rate_until is not None else until
         self._retry_after = (self._rate_until - self._clock()).total_seconds()
 
+    def defer_start_retry(self, error: Exception, *, observed_at: datetime) -> None:
+        """Transfer an observed first-start wait to this single retry owner.
+
+        The supervisor captures observation before its awaited SQL guard; using
+        that absolute basis neither restarts nor shortens a server wait.
+        """
+        from app.telegram_bots.adapter import LongRetryAfter
+
+        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+            raise ValueError("retry-observation-must-be-aware")
+        if isinstance(error, (RetryAfter, LongRetryAfter)):
+            seconds = error._retry_after.total_seconds() if isinstance(error, RetryAfter) else error.seconds
+        elif isinstance(error, TelegramError):
+            seconds = BACKOFF_FIRST_SECONDS
+        else:
+            raise ValueError("unsupported-start-failure")
+        until = observed_at + timedelta(seconds=seconds)
+        self._rate_until = max(self._rate_until, until) if self._rate_until is not None else until
+        self._retry_after = max(0, (self._rate_until - self._clock()).total_seconds())
+
     def _rate_pending(self) -> bool:
         if self._rate_until is None:
             return False
@@ -530,12 +550,24 @@ class PollTask:
                 return
             await self._fetch_locked(mode="confirm")
 
-    async def drop_pending(self) -> None:
+    def require_drop_pending(self) -> None:
+        """Transfer a restore's discard intent before the poll owner starts."""
+        if self._pending or self._held or self._fence_pending or self._pending_health:
+            raise ValueError("pending-admission-batch")
+        self._drop_required = True
+
+    async def complete_pending_drop(self) -> None:
+        """Join only an already requested discard, never create a second one."""
+        if not self._drop_required:
+            return
         async with self._operation:
-            if self._pending or self._held or self._fence_pending or self._pending_health:
-                raise ValueError("pending-admission-batch")
-            self._drop_required = True
-            await self._fetch_locked(mode="drop")
+            if self._drop_required:
+                await self._fetch_locked(mode="drop")
+
+    async def drop_pending(self) -> None:
+        if not self._drop_required:
+            self.require_drop_pending()
+        await self.complete_pending_drop()
 
     async def run(self) -> None:
         # SQL faults can arise in guards, startup renewal, admission, or

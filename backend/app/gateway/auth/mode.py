@@ -120,16 +120,19 @@ def setup_required() -> HTTPException:
     )
 
 
-def account_refusal(user: Any) -> str | None:
+def account_refusal(user: Any, *, sign_on_only_mode: bool | None = None) -> str | None:
     """Why nothing may act for this account right now, or ``None``.
 
     ``disabled``: the deployer turned the identity off (``user.disabled_at``,
     derived at every read from ``disabled_identities``), in either mode.
     ``inert``: sign-on only, and the account has no provider identity.
+
+    Async background consumers may pass a freshly prepared mode to keep file
+    reads off the event loop; ordinary callers retain live config resolution.
     """
     if getattr(user, "disabled_at", None) is not None or getattr(user, "released_at", None) is not None:
         return ACCOUNT_DISABLED
-    if sign_on_only() and not is_provider_account(user):
+    if (sign_on_only() if sign_on_only_mode is None else sign_on_only_mode) and not is_provider_account(user):
         return ACCOUNT_INERT
     return None
 

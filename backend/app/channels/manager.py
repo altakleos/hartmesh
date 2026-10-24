@@ -1292,6 +1292,16 @@ class ChannelManager:
         # task's done-callback (see _maybe_spawn_followup_watcher).
         self._followup_watcher_tasks: set[asyncio.Task] = set()
 
+    @property
+    def connection_repo(self) -> Any | None:
+        """The existing shared connection authority; consumers must not close it."""
+        return self._connection_repo
+
+    @property
+    def gateway_url(self) -> str:
+        """The resolved Gateway base URL used by this channel runtime."""
+        return self._gateway_url
+
     @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
         from .service import get_channel_service

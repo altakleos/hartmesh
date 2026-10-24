@@ -64,6 +64,16 @@ all asynchronous lifecycle/send work on the Gateway loop. Clear the ZoneInfo
 cache after seeding preferences so the quiet-hours case proves a cold timezone
 lookup stays off-loop rather than benefiting from validation's warmed cache.
 
+Supervisor tests use real SQL and actual recorded SDK transports for the health
+barrier, ten-start limit, cancelled construction, same-token stale callbacks,
+death budgets, missing-row reconciliation and shutdown. Retain every constructor,
+task, barrier and client through teardown. Gateway lifetime tests cover later
+startup failures, repeated cancellation and listener/client cleanup ordering.
+Dispatch-authority barriers withdraw access or change bindings/protection during
+rendering and between parts; a refreshed admission must persist protection before
+the next raw call. Strict authority tests load an actual cold config and provider:
+file reads/discovery run off-loop, construction/evaluation on the original loop.
+
 `test_agent_chat_tools.py` uses real ToolNode runtime injection and host-only
 execution contexts for bounded page offers. Config tests use independent default
 expectations; Compose tests load the real template, validate it through the same

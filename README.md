@@ -1340,7 +1340,12 @@ Durable input and delivery records now retain routing, publication and output
 identities through retries. Fenced workers resume unacknowledged reply parts,
 and an input completes only after all required deliveries settle. The managed
 transport and poller retain unadmitted updates and use captured token revisions
-for status changes and delivery. Gateway startup integration follows separately.
+for status changes and delivery. A Gateway-owned supervisor now checks deployment
+prerequisites before serving requests, waits for its own health endpoint, bounds
+bot startup concurrency, and coordinates polling, retries and shutdown. Saved
+fixed replies recheck the current human owner, exact channel binding and target
+before sending. The connection flow remains reserved while update handlers and
+the remaining stage-one capabilities are completed.
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 
