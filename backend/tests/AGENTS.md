@@ -18,6 +18,15 @@ upgrade plans and pins published ancestry from release fixtures. Keep old
 fixtures immutable; add a new one for a new published head. A single current
 head alone cannot detect a skipped revision inserted behind an applied head.
 
+## Telegram library compatibility
+
+`test_telegram_library_pin.py` pins the Telegram library/API version, native
+methods, error mapping, unknown-field passthrough and parent adapter contracts.
+`_telegram_bot_test_support.py` supplies both socket-free bot transports with
+explicit per-endpoint replies and event-controlled completion/cancellation.
+Generate synthetic bot credentials at runtime; never record token-bearing URLs
+or use real Telegram accounts in these tests.
+
 ## Router auth fixtures
 
 For owner-scoped route assertions, pass a stable `user_factory` and

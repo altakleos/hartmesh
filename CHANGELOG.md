@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Dependencies and verification
+
+Pin python-telegram-bot to 22.8 with its rate-limiter extra and declare Pillow
+directly. Add offline compatibility coverage for Bot API 10.0, error handling,
+request serialization and the existing Telegram adapter. This dependency update
+does not enable new Telegram bot setup or change the database schema.
+
 ## [2.2.0+hartmesh.47] - 2026-10-23
 
 ### Terminal-write recovery
