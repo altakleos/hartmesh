@@ -43,6 +43,17 @@ clients or actual SDKs over socket-free mock transports, including timeout,
 cancellation, endpoint/key capture and context-scoped payload-log suppression.
 Keep recorded credentials synthetic and test artifacts on disk.
 
+Ingress tests run the real Application and recorded SDK through the ordered gate.
+Prove swallowed handler/SQL failures retain PollTask's suffix, while fixed replies
+commit their route and delivery before acknowledgment. Token/stranger input must
+reach no inbox, hash, bus or file consumer. Ledger churn, removal/re-add and
+rotation retain bounded unexpired allowances independently of LRU recency.
+Bind/unblock tests use fresh derived account access and exact captured SQL scope.
+URL fallback tests retain part/source/claim identity, compose with plain fallback
+and preserve unrelated 429/pacing floors through reconnect.
+Exercise lifecycle notices through the actual supervisor, including concurrent
+held-input/reconcile claims and a later genuine hold.
+
 Durable inbox/outbox tests use the same real SQL matrix. Exercise borrowed
 rollback/autoflush, chat-scoped replay, publication/run fences, joined-input
 completion and existing welcome plans. Worker barriers cover delayed same-process

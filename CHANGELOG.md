@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Telegram private input and fixed replies
+
+Add ordered private-chat update handling, bounded stranger replies, token-paste
+refusal, atomic setup-code binding and durable `/start`, `/agent`, `/memory` and
+unknown fixed-command responses. Preserve setup-code consumption after a
+deliberate wrong-bot refusal. Reconnection checks the current human account and
+exact binding without changing its generation or action pause.
+Held-access notices share one persisted claim per hold between input handling
+and background reconciliation.
+
+Memory links use URL-only controls and a saved text-address fallback when
+Telegram rejects the address. A blocked delivery waits for reconnection without
+transient backoff; unrelated server waits and pacing deadlines remain intact.
+Failed handler/database work retains the polling suffix. Ordinary chat, skills,
+files, voice, callback actions and model-final delivery remain inactive.
+
+No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
+remains version 55. Managed-bot activation remains deferred.
+
 ### Telegram copy safeguards and operator commands
 
 Pause managed-bot polling on a known Docker-host change or a qualifying broad

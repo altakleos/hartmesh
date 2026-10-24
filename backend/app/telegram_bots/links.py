@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, fields
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from sqlalchemy import and_, delete, func, or_, select, text, update
@@ -47,6 +47,9 @@ from deerflow.persistence.telegram_bots.model import (
     TelegramPersonSettingsRow,
     TelegramWorkTopicRow,
 )
+
+if TYPE_CHECKING:
+    from app.telegram_bots.authority import LiveOwnerCheck
 
 CONNECT_CODE_SECONDS = 600
 CONNECT_CODES_MAX = 5
@@ -694,6 +697,37 @@ class BotLinkRepository:
             await self._event(session, await self._locked(session, link_id), "blocked", actor_id=owner)
             return True
 
+    async def mark_unblocked_if_current(self, captured_link: BotLink, *, check_live_owner: LiveOwnerCheck) -> BotLink | None:
+        """Reconnect only the live owner's captured blocked private binding."""
+        self._lifecycle_fences(captured_link.token_revision, captured_link.binding_generation)
+        if captured_link.state != "blocked" or type(captured_link.chat_id) is not int or captured_link.chat_id <= 0 or captured_link.chat_id != captured_link.telegram_user_id or captured_link.connection_id is None:
+            return None
+        basis = ("owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "token_revision", "binding_generation")
+        async with self._owner_writer(captured_link.owner_user_id) as session:
+            row = await session.scalar(select(TelegramBotLinkRow).where(TelegramBotLinkRow.id == captured_link.id, TelegramBotLinkRow.owner_user_id == captured_link.owner_user_id).with_for_update().execution_options(populate_existing=True))
+            if row is None or row.state != "blocked" or any(getattr(row, key) != getattr(captured_link, key) for key in basis):
+                return None
+            account = await session.get(TelegramAccountRow, row.telegram_user_id, with_for_update=True, populate_existing=True)
+            if account is None or account.owner_user_id != row.owner_user_id:
+                return None
+            binding = await self._current_bound_connection(session, row)
+            if binding is None or binding.status != "connected":
+                return None
+            await check_live_owner(row.owner_user_id, session)
+            changed = await session.execute(
+                update(TelegramBotLinkRow)
+                .where(TelegramBotLinkRow.id == captured_link.id, TelegramBotLinkRow.state == "blocked", *(getattr(TelegramBotLinkRow, key) == getattr(captured_link, key) for key in basis))
+                .values(state="connected", updated_at=_now())
+                .execution_options(synchronize_session=False)
+            )
+            if changed.rowcount != 1:
+                return None
+            await session.refresh(row)
+            await self._event(session, row, "unblocked", actor_id=row.owner_user_id)
+            # Pending work keeps server/pacing floors. A blocked 403's producer
+            # disposition is already due, held only by structural eligibility.
+            return _snapshot(row)
+
     @staticmethod
     def _lifecycle_fences(token_revision: int, binding_generation: int) -> None:
         if type(token_revision) is not int or token_revision < 0 or type(binding_generation) is not int or binding_generation < 0:
@@ -737,6 +771,10 @@ class BotLinkRepository:
                 return None
             binding.status = "held"
             row.state, row.binding_generation, row.updated_at = "held", _advance(row.binding_generation), _now()
+            if isinstance(row.notices, dict):
+                notices = deepcopy(row.notices)
+                notices.pop("access_off", None)
+                row.notices = notices
             await session.flush()
             await self.end_pending(link_id, skip_reason="disabled", session=session)
             await self._event(session, row, "hold", actor_id=owner)
@@ -760,7 +798,7 @@ class BotLinkRepository:
             await self._event(session, row, "release", actor_id=owner)
             return _snapshot(row)
 
-    async def mark_notice_if_current(self, link_id: str, key: str, *, token_revision: int, binding_generation: int, at: datetime, minimum_interval_seconds: float = 0) -> bool:
+    async def mark_notice_if_current(self, link_id: str, key: str, *, token_revision: int, binding_generation: int, at: datetime, minimum_interval_seconds: float = 0, only_if_unsent: bool = False) -> bool:
         """Claim one bounded fixed notice before transport; no send runs in SQL.
 
         A lost/failed disposable send retains this claim. The captured revision
@@ -778,6 +816,9 @@ class BotLinkRepository:
             or type(minimum_interval_seconds) not in {int, float}
             or not math.isfinite(minimum_interval_seconds)
             or minimum_interval_seconds < 0
+            or type(only_if_unsent) is not bool
+            or only_if_unsent
+            and key != "access.off"
         ):
             raise ValueError("invalid-notice-claim")
         at = at.astimezone(UTC)
@@ -794,6 +835,8 @@ class BotLinkRepository:
                 return False
             stored_key, policy_value = _NOTICE_KEYS[key]
             notices = deepcopy(row.notices)
+            if only_if_unsent and stored_key in notices:
+                return False
             previous = notices.get(stored_key)
             if previous is not None:
                 if policy_value is not None:
@@ -1009,9 +1052,11 @@ class BotLinkRepository:
         await session.flush()
         return binding
 
-    async def bind(self, link: BotLink, *, telegram_user_id: int, chat_id: int, first_name: str | None, username: str | None, start_identity: dict, hello_parts: list[dict], code: str | None = None) -> BotLink:
+    async def bind(
+        self, link: BotLink, *, telegram_user_id: int, chat_id: int, first_name: str | None, username: str | None, start_identity: dict, hello_parts: list[dict], code: str | None = None, check_live_owner: LiveOwnerCheck | None = None
+    ) -> BotLink:
         try:
-            return await self._bind(link, telegram_user_id=telegram_user_id, chat_id=chat_id, first_name=first_name, username=username, start_identity=start_identity, hello_parts=hello_parts, code=code)
+            result = await self._bind(link, telegram_user_id=telegram_user_id, chat_id=chat_id, first_name=first_name, username=username, start_identity=start_identity, hello_parts=hello_parts, code=code, check_live_owner=check_live_owner)
         except IntegrityError as error:
             # _bind's owning transaction and session have fully exited here.
             # A legacy writer does not take our owner/account locks and can win
@@ -1020,8 +1065,15 @@ class BotLinkRepository:
             if _active_identity_collision(error):
                 raise ValueError("account-taken") from None
             raise
+        if result == "other-bot":
+            # Only this deliberate refusal commits its one-use consumption.
+            # Every exception during a successful-code bind still rolls back.
+            raise ValueError("other-bot")
+        return result
 
-    async def _bind(self, link: BotLink, *, telegram_user_id: int, chat_id: int, first_name: str | None, username: str | None, start_identity: dict, hello_parts: list[dict], code: str | None = None) -> BotLink:
+    async def _bind(
+        self, link: BotLink, *, telegram_user_id: int, chat_id: int, first_name: str | None, username: str | None, start_identity: dict, hello_parts: list[dict], code: str | None = None, check_live_owner: LiveOwnerCheck | None = None
+    ) -> BotLink | Literal["other-bot"]:
         identity = self._start_identity(start_identity, telegram_user_id, chat_id)
         for value in (first_name, username):
             if value is not None and (not isinstance(value, str) or len(value) > 64):
@@ -1057,8 +1109,12 @@ class BotLinkRepository:
                 raise ValueError("already-connected")
             if current.token_revision != link.token_revision:
                 raise ValueError("link-changed")
+            if check_live_owner is not None:
+                await check_live_owner(current.owner_user_id, session)
             if current.bind_mode == "code":
                 answer = await self.consume_code(_snapshot(current), code, session=session)
+                if answer == "other-bot":
+                    return "other-bot"
                 if answer != "ok":
                     raise ValueError(answer)
             else:
