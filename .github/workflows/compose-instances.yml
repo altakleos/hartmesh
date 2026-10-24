@@ -254,6 +254,8 @@ jobs:
           docker ps -a --no-trunc > "$EVIDENCE/containers.txt" 2>&1 || true
           docker image ls --digests --no-trunc > "$EVIDENCE/images.txt" 2>&1 || true
           sudo cat /etc/fstab > "$EVIDENCE/fstab.txt" || true
+          sudo journalctl --unit=fstrim.service --no-pager -n 50 > "$EVIDENCE/host-trim.log" 2>&1 || true
+          sudo systemctl show fstrim.timer fstrim.service -p ActiveState -p LastTriggerUSec -p ExecMainStartTimestamp -p ExecMainExitTimestamp >> "$EVIDENCE/host-trim.log" 2>&1 || true
           sudo cat /srv/hartmesh/spaces/inventory.v2.json > "$EVIDENCE/inventory.v2.json" || true
           sudo python3 - <<'PY' > "$EVIDENCE/storage-facts.json"
           import itertools
