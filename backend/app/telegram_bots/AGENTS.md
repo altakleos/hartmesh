@@ -12,6 +12,26 @@ omits the section and `show_web_page` tool. See `deploy/compose/README.md`.
 Keep bot network, supervisor and router startup outside configuration loading.
 Use socket-free transports and synthetic credentials in offline tests.
 
+Product text lives in `texts/` in English and Chinese; keep stage-one keys equal
+and copy English wording from the design. `render` escapes values; `render_plain`
+preserves them for plain labels/alerts. `markdown` accepts only Telegram markup,
+and `split` counts visible UTF-16 units while retaining balanced tags and complete
+canonical content. Preview rendering is presentation only: durable receipts,
+callback authority and execution gating belong to their owning writers.
+Ambiguous details containers display literally. Impossible canonical
+split budgets raise `ValueError`; disposable drafts may clip their first part.
+
+`pages.page_address` uses only the configured base, stored target and supplied
+identities. Restricted instance tabs need current grants; Memory also needs the
+`memory:read` ceiling, and adding an AI employee needs administrator authority.
+Web pages still enforce access. No handover is a sign-in capability.
+
+`voice.resolve_transcriber` rereads configured model entries and never obtains
+keys from environment variables. Capture one qualifying provider/key/model per
+note; requests use fixed official endpoints with no provider fallback. Keep SDK
+imports lazy and suppress SDK payload logging only inside the voice context.
+The package emits fixed qualification reasons, never keys, audio or transcripts.
+
 `links.py` owns capacity and connection transactions. Capacity changes lock the
 deployment singleton, then owner settings, then links in ID order. SQLite takes
 `BEGIN IMMEDIATE` before any read. Retain the writer's initial deployment/owner
