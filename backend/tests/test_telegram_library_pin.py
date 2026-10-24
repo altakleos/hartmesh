@@ -5,15 +5,17 @@ from __future__ import annotations
 import asyncio
 import inspect
 from importlib.metadata import version
+from types import SimpleNamespace
 
 import pytest
 import telegram
-from _telegram_bot_test_support import RecordingRequest, offline_bot
+from _telegram_bot_test_support import ManualClock, RecordingRequest, offline_bot
 from telegram import Bot, Update, User
 from telegram.error import BadRequest, Conflict, Forbidden, InvalidToken, NetworkError, RetryAfter, TimedOut
 from telegram.ext import AIORateLimiter, Application, TypeHandler
 
 from app.channels.telegram import TelegramChannel
+from app.telegram_bots.adapter import BoundedRateLimiter, LongRetryAfter
 
 
 def test_library_version_is_22_8():
@@ -195,3 +197,106 @@ async def test_recording_request_rejects_unscripted_calls():
     with pytest.raises(NetworkError, match="Unscripted Bot API endpoint: getMe"):
         async with offline_bot(request):
             pass
+
+
+def limited_bot(monkeypatch):
+    from telegram.ext import _aioratelimiter
+
+    clock = ManualClock()
+    # Keep the actual pinned parent's event, rate math and retry loop. Only its
+    # wall wait uses the deterministic test clock.
+    monkeypatch.setattr(_aioratelimiter, "asyncio", SimpleNamespace(Event=asyncio.Event, sleep=clock.sleep))
+    limiter = BoundedRateLimiter(monotonic=clock.monotonic, sleep=clock.sleep)
+    request = RecordingRequest()
+    request.enqueue_get_me()
+    return clock, limiter, request, offline_bot(request, rate_limiter=limiter)
+
+
+def retry_reply(request, endpoint, seconds, *, release=None):
+    return request.enqueue(endpoint, status=429, body={"ok": False, "error_code": 429, "description": "Synthetic rate limit", "parameters": {"retry_after": seconds}}, release=release)
+
+
+@pytest.mark.asyncio
+async def test_long_retry_after_is_not_slept_on_and_holds_no_other_call(monkeypatch):
+    clock, limiter, request, bot = limited_bot(monkeypatch)
+    retry_reply(request, "deleteWebhook", 120)
+    request.enqueue("getWebhookInfo", result={"url": "", "has_custom_certificate": False, "pending_update_count": 0})
+    async with bot:
+        with pytest.raises(LongRetryAfter) as caught:
+            await bot.delete_webhook()
+        assert caught.value.seconds == 120
+        assert (await bot.get_webhook_info()).pending_update_count == 0
+    assert limiter._short_hold_until == 0 and clock.sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_short_hold_survives_unrelated_completion_and_overlapping_waits(monkeypatch):
+    clock, limiter, request, bot = limited_bot(monkeypatch)
+    first_release, second_release, old_release = (asyncio.Event() for _ in range(3))
+    old = request.enqueue("getWebhookInfo", result={"url": "", "has_custom_certificate": False, "pending_update_count": 0}, release=old_release)
+    first = retry_reply(request, "setMyName", 2, release=first_release)
+    second = retry_reply(request, "setMyDescription", 1, release=second_release)
+    request.enqueue("setMyName")
+    request.enqueue("setMyDescription")
+    request.enqueue("getWebhookInfo", result={"url": "", "has_custom_certificate": False, "pending_update_count": 0})
+    tasks = []
+    async with bot:
+        try:
+            tasks = [asyncio.create_task(bot.get_webhook_info()), asyncio.create_task(bot.set_my_name("Name")), asyncio.create_task(bot.set_my_description("Description"))]
+            await asyncio.gather(old.started.wait(), first.started.wait(), second.started.wait())
+            first_release.set()
+            await clock.wait_for_sleep()
+            clock.advance(0.5)
+            second_release.set()
+            await clock.wait_for_sleep(2)
+            old_release.set()
+            await tasks[0]
+            tasks.append(asyncio.create_task(bot.get_webhook_info()))
+            await clock.wait_for_sleep(3)
+            clock.advance(1.1)
+            await clock.wait_for_sleep(4)
+            assert len(request.calls) == 4  # getMe + three already dispatched calls
+            assert limiter._short_hold_until == pytest.approx(2.1)
+            clock.advance(0.5)
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+    assert len(request.calls) == 7
+
+
+@pytest.mark.asyncio
+async def test_cancelled_ack_and_retry_exhaustion_preserve_short_hold(monkeypatch):
+    clock, limiter, request, bot = limited_bot(monkeypatch)
+    for _ in range(3):
+        retry_reply(request, "setMyName", 1)
+    request.enqueue("getWebhookInfo", result={"url": "", "has_custom_certificate": False, "pending_update_count": 0})
+    tasks = []
+    async with bot:
+        try:
+            failure = asyncio.create_task(bot.set_my_name("Name"))
+            tasks.append(failure)
+            await clock.wait_for_sleep()
+            acknowledgement = asyncio.create_task(bot.answer_callback_query("query"))
+            tasks.append(acknowledgement)
+            await asyncio.sleep(0)  # it waits on the actual parent's retry event
+            assert not acknowledgement.done()
+            acknowledgement.cancel()
+            await asyncio.gather(acknowledgement, return_exceptions=True)
+            clock.advance(1.1)
+            await clock.wait_for_sleep(2)
+            clock.advance(1.1)
+            with pytest.raises(RetryAfter):
+                await failure
+            later = asyncio.create_task(bot.get_webhook_info())
+            tasks.append(later)
+            await clock.wait_for_sleep(3)
+            assert len(request.calls) == 4 and not later.done()
+            assert limiter._short_hold_until == pytest.approx(3.3)
+            clock.advance(1.1)
+            await later
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)

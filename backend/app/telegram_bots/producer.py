@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import math
 import random
 import re
@@ -26,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram.error import BadRequest, RetryAfter, TelegramError
 
 from app.telegram_bots.adapter import TOKEN_BODY
+from app.telegram_bots.api_logging import log_call_failure
 from app.telegram_bots.config import TelegramBotsConfig
 from app.telegram_bots.links import BotLink
 from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
@@ -41,7 +41,6 @@ _SKIP_REASONS = frozenset({"no-access", "superseded", "link-not-connected", "dis
 _LIVE_CLAIMS: set[tuple[int, str, str]] = set()
 _TOKEN = re.compile(TOKEN_BODY)
 _FORBIDDEN_KEYS = frozenset({"token", "bot_token", "access_token", "raw_update", "update", "audio", "audio_bytes", "download_url", "temporary_url", "bytes"})
-logger = logging.getLogger(__name__)
 
 
 def _safe_json(value: dict) -> dict:
@@ -88,10 +87,28 @@ class OutboxItem:
     parts: list[dict]
     chat_id: int | None
     message_thread_id: int | None
+    attempts: int = 0
+    silent: bool = False
 
 
 def _item(row: TelegramOutboxRow) -> OutboxItem:
     return OutboxItem(**{name: deepcopy(getattr(row, name)) for name in OutboxItem.__dataclass_fields__})
+
+
+@dataclass(frozen=True)
+class SendingPart:
+    """One detached, currently admitted raw transport attempt."""
+
+    link: BotLink
+    item: OutboxItem
+    part: dict
+    claim_owner: str
+    claim_id: str
+    token_revision: int
+
+
+class DeliveryClaimRetired(Exception):
+    """The transport admission no longer authorizes a request; no payload fault."""
 
 
 @dataclass(frozen=True)
@@ -204,7 +221,7 @@ class Outbox:
             if supplied.get("kind") not in _KINDS or not isinstance(supplied.get("source_ref"), dict) or not supplied["source_ref"]:
                 raise ValueError("invalid-delivery-part")
             part = _safe_json(supplied)
-            for receipt_field in ("sent_at", "dispatched_at", "unavailable_reason"):
+            for receipt_field in ("sent_at", "dispatched_at", "unavailable_reason", "invalid_token_verification_pending"):
                 part.pop(receipt_field, None)
             source = part["source_ref"]
             if set(source) == {"key", "values"}:
@@ -268,6 +285,116 @@ class Outbox:
 
     async def add(self, link: BotLink, *, dedupe_key: str, class_: str, payload: dict, not_before: datetime | None = None, session: AsyncSession | None = None, **targets) -> bool:
         return (await self._add(link, dedupe_key=dedupe_key, class_=class_, payload=payload, not_before=not_before, session=session, **targets))[1]
+
+    async def plan_product(self, link: BotLink, *, source_id: str, parts: list[dict], inbox_rows: Sequence = (), finish_route: bool = False, message_thread_id: int | None = None, session: AsyncSession | None = None) -> str:
+        """Save a fixed product delivery, retaining its exact origin and purpose."""
+        if not isinstance(source_id, str) or not source_id:
+            raise ValueError("invalid-delivery-key")
+        if type(finish_route) is not bool:
+            raise ValueError("invalid-product-completion")
+        origins = sorted((row.link_id, row.message_id, row.chat_id) for row in inbox_rows)
+        if len(set(origins)) != len(origins) or any(row.link_id != link.id or row.binding_generation != link.binding_generation or row.chat_id != link.chat_id for row in inbox_rows):
+            raise ValueError("product-source-conflict")
+        topic = message_thread_id if message_thread_id is not None else inbox_rows[0].message_thread_id if inbox_rows else None
+        if topic is not None and (type(topic) is not int or topic <= 0):
+            raise ValueError("invalid-delivery-target")
+        if topic == 1:
+            topic = None
+        basis = _safe_json({"origins": [list(value) for value in origins], "chat_id": link.chat_id, "message_thread_id": topic, "finish_route": finish_route, "parts": parts})
+        if any(part.get("kind") not in {"text", "edit"} or set(part.get("source_ref", {})) != {"key", "values"} for part in parts):
+            raise ValueError("invalid-product-source")
+        async with self._writer(link.id, session=session) as (writer, binding):
+            if not self._binding(binding, link) or binding.state != "connected":
+                raise ValueError("link-not-connected")
+            existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == f"notice:{source_id}").with_for_update())
+            if existing is not None:
+                if (
+                    existing.binding_generation != link.binding_generation
+                    or existing.owner_user_id != link.owner_user_id
+                    or existing.chat_id != link.chat_id
+                    or json.dumps(existing.payload.get("product_basis"), sort_keys=True) != json.dumps(basis, sort_keys=True)
+                ):
+                    raise ValueError("product-source-conflict")
+                identity = existing.id
+            else:
+                identity, _ = await self._add(link, dedupe_key=f"notice:{source_id}", class_="reply", payload={"product_basis": basis, "parts": parts}, message_thread_id=topic, session=writer)
+            if inbox_rows:
+                await self.inbox.register_delivery(inbox_rows, outbox_id=identity, finish=finish_route, session=writer)
+            return identity
+
+    @staticmethod
+    def _sending(binding: TelegramBotLinkRow | None, row: TelegramOutboxRow | None, *, link_id: str, part_id: str, claim_owner: str, claim_id: str, token_revision: int, preparing: bool = True) -> SendingPart:
+        if type(token_revision) is not int or token_revision < 0 or not isinstance(claim_owner, str) or not claim_owner or not isinstance(claim_id, str) or not claim_id:
+            raise DeliveryClaimRetired()
+        if binding is None or row is None or row.link_id != link_id or not Outbox._fenced(row, generation=binding.binding_generation, owner=claim_owner, claim=claim_id):
+            raise DeliveryClaimRetired()
+        if binding.token_revision != token_revision or row.owner_user_id != binding.owner_user_id or row.chat_id != binding.chat_id or preparing and binding.state != "connected":
+            raise DeliveryClaimRetired()
+        status = row.class_ == "reply" and row.payload.get("delivery_kind") == "status_notice" and all(part["kind"] == "text" and part["source_ref"].get("key") in _STATUS_KEYS and not part.get("callback_group_id") for part in row.parts)
+        if preparing and binding.health != "ok" and not (binding.health == "agent_unavailable" and status):
+            raise DeliveryClaimRetired()
+        version = row.payload.get("presentation_version", 0)
+        required = [part for part in row.parts if part["presentation_version"] == version and part["state"] not in _FINAL_PARTS]
+        if not required or required[0]["part_id"] != part_id or required[0]["state"] != "sending" or any(part["state"] == "sending" for part in required[1:]):
+            raise DeliveryClaimRetired()
+        return SendingPart(BotLink.from_row(binding), _item(row), deepcopy(required[0]), claim_owner, claim_id, token_revision)
+
+    async def capture_sending_part(self, *, link_id: str, outbox_id: str, part_id: str, claim_owner: str, claim_id: str, token_revision: int) -> SendingPart:
+        """Read the exact part under its fences, closing SQL before transport."""
+        async with self._writer(link_id) as (session, binding):
+            row = await session.get(TelegramOutboxRow, outbox_id, with_for_update=True)
+            return self._sending(binding, row, link_id=link_id, part_id=part_id, claim_owner=claim_owner, claim_id=claim_id, token_revision=token_revision)
+
+    async def fallback_to_plain(self, captured: SendingPart) -> bool:
+        """Persist one same-source plain fallback; another worker must send it."""
+        async with self._writer(captured.link.id) as (session, binding):
+            row = await session.get(TelegramOutboxRow, captured.item.id, with_for_update=True)
+            try:
+                current = self._sending(binding, row, link_id=captured.link.id, part_id=captured.part["part_id"], claim_owner=captured.claim_owner, claim_id=captured.claim_id, token_revision=captured.token_revision, preparing=False)
+            except DeliveryClaimRetired:
+                return False
+            if current.part.get("plain_fallback") or current.part["kind"] not in {"text", "edit"} or current.part["presentation_version"] != captured.part["presentation_version"] or current.part["source_ref"] != captured.part["source_ref"]:
+                return False
+            parts = deepcopy(row.parts)
+            selected = next(part for part in parts if part["part_id"] == current.part["part_id"])
+            selected.update(plain_fallback=True, state="pending")
+            row.parts, row.state, row.not_before = parts, "pending", self.clock()
+            row.claim_owner = row.claim_id = row.claimed_at = None
+            return True
+
+    async def defer_token_verification(self, captured: SendingPart, *, retry_after_seconds: float | None, http_status: int | None = None) -> bool:
+        """Retain an observed token failure until its original call is classified.
+
+        A server deadline releases the claim. Without one, the caller raises its
+        transient failure and the existing worker owns attempt/backoff updates.
+        """
+        not_before = None
+        if retry_after_seconds is not None:
+            if type(retry_after_seconds) not in {int, float} or not math.isfinite(retry_after_seconds) or retry_after_seconds < 0:
+                raise ValueError("invalid-verification-delay")
+            try:
+                not_before = self.clock() + timedelta(seconds=retry_after_seconds)
+            except (OverflowError, ValueError):
+                raise ValueError("invalid-verification-delay") from None
+        if http_status is not None and (type(http_status) is not int or http_status not in {401, 404}):
+            raise ValueError("invalid-verification-status")
+        async with self._writer(captured.link.id) as (session, binding):
+            row = await session.get(TelegramOutboxRow, captured.item.id, with_for_update=True)
+            try:
+                current = self._sending(binding, row, link_id=captured.link.id, part_id=captured.part["part_id"], claim_owner=captured.claim_owner, claim_id=captured.claim_id, token_revision=captured.token_revision, preparing=False)
+            except DeliveryClaimRetired:
+                return False
+            if current.part["presentation_version"] != captured.part["presentation_version"] or json.dumps(current.part["source_ref"], sort_keys=True) != json.dumps(captured.part["source_ref"], sort_keys=True):
+                return False
+            parts = deepcopy(row.parts)
+            selected = next(part for part in parts if part["part_id"] == current.part["part_id"])
+            selected["invalid_token_verification_pending"] = {"token_revision": captured.token_revision, "http_status": http_status, "failure_logged": True}
+            if not_before is not None:
+                selected["state"] = "pending"
+                row.state, row.not_before = "pending", not_before
+                row.claim_owner = row.claim_id = row.claimed_at = None
+            row.parts = parts
+            return True
 
     async def plan_reply(self, link: BotLink, *, turn_id: str, source: dict, parts: list[dict], inbox_rows: Sequence, session: AsyncSession | None = None) -> str:
         source = _safe_json(source)
@@ -367,7 +494,7 @@ class Outbox:
             version = expected_version + 1
             previous = deepcopy(row.parts)
             for part in previous:
-                if part["state"] != "sent":
+                if part["state"] not in _FINAL_PARTS:
                     part["state"] = "retired"
             row.parts = previous + self._parts(parts, version)
             row.payload = {**row.payload, "presentation_version": version, "replacement_reason": reason}
@@ -409,20 +536,25 @@ class OutboxSender:
     async def recover_prior_claims(self) -> int:
         if self._workers:
             raise RuntimeError("recovery-after-workers-started")
+        count = await self._recover_claims(current_process=False)
+        self._recovered = True
+        return count
+
+    async def _recover_claims(self, *, current_process: bool) -> int:
+        # An absent live admission is an explicit process fact, never an age
+        # heuristic. Revisit finished own claims whose cleanup SQL failed.
+        ownership = TelegramOutboxRow.claim_owner == self.run_id if current_process else or_(TelegramOutboxRow.claim_owner != self.run_id, TelegramOutboxRow.claim_owner.is_(None))
         async with self.outbox.sessions() as session:
-            links = list(await session.scalars(select(TelegramOutboxRow.link_id).where(TelegramOutboxRow.state == "sending", or_(TelegramOutboxRow.claim_owner != self.run_id, TelegramOutboxRow.claim_owner.is_(None))).distinct()))
+            links = list(await session.scalars(select(TelegramOutboxRow.link_id).where(TelegramOutboxRow.state == "sending", ownership).distinct()))
         count = 0
         for identity in sorted(links):
             async with self.outbox._writer(identity) as (session, binding):
-                claimed = await session.scalars(
-                    select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == identity, TelegramOutboxRow.state == "sending", or_(TelegramOutboxRow.claim_owner != self.run_id, TelegramOutboxRow.claim_owner.is_(None))).with_for_update()
-                )
+                claimed = await session.scalars(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == identity, TelegramOutboxRow.state == "sending", ownership).with_for_update())
                 for row in claimed:
                     if any(owner == row.claim_owner and claim == row.claim_id for _, owner, claim in _LIVE_CLAIMS):
                         continue
                     self._pending(row)
                     count += 1
-        self._recovered = True
         return count
 
     @staticmethod
@@ -490,6 +622,7 @@ class OutboxSender:
                 return 0
             if not self._recovered:
                 await self.recover_prior_claims()
+            await self._recover_claims(current_process=True)
             free = min(self.concurrency - len(self._workers), OUTBOX_SEND_CONCURRENCY - len(_LIVE_CLAIMS))
             if free <= 0:
                 return 0
@@ -565,7 +698,7 @@ class OutboxSender:
             version = row.payload.get("presentation_version", 0)
             part = next((part for part in row.parts if part["presentation_version"] == version and part["state"] not in _FINAL_PARTS), None)
             decision = await self._eligibility(binding, row, part)
-            if decision.decision == "allow" and part is not None and part["kind"] == "edit" and decision.protect_content and not part.get("target_protect_content", False):
+            if decision.decision == "allow" and part is not None and part["kind"] == "edit" and not part.get("remove_keyboard") and decision.protect_content and not part.get("target_protect_content", False):
                 await self._replace(binding, row, claim, reason="protection")
                 return
             async with self.outbox._writer(link_id) as (session, current):
@@ -613,6 +746,8 @@ class OutboxSender:
                     raise PermanentDeliveryError()
             except asyncio.CancelledError:
                 raise
+            except DeliveryClaimRetired:
+                return
             except Exception as error:
                 if isinstance(error, SourceUnavailable):
                     await self._unavailable(link_id, row_id, generation, claim, part["part_id"], error)
@@ -634,6 +769,7 @@ class OutboxSender:
                     return
                 parts = deepcopy(saved.parts)
                 acknowledged = next(value for value in parts if value["part_id"] == part["part_id"])
+                acknowledged.pop("invalid_token_verification_pending", None)
                 acknowledged.update(state="sent", message_ids=message_ids, protect_content=required_protection, sent_at=self.outbox.clock().isoformat())
                 saved.parts = parts
                 if all(value["state"] in _FINAL_PARTS for value in parts if value["presentation_version"] == version):
@@ -644,7 +780,7 @@ class OutboxSender:
         version = row.payload.get("presentation_version", 0)
         parts = []
         for part in row.parts:
-            if part["presentation_version"] != version or part["kind"] in {"document", "photo", "album"} and part["state"] == "sent":
+            if part["presentation_version"] != version or part["kind"] in {"document", "photo", "album"} and part["state"] in {"sent", "unavailable"}:
                 continue
             replacement = {key: deepcopy(value) for key, value in part.items() if key not in {"part_id", "presentation_version", "ordinal", "state", "message_ids", "sent_at", "dispatched_at", "target_message_id", "target_protect_content"}}
             if replacement["kind"] == "edit":
@@ -668,7 +804,8 @@ class OutboxSender:
             unavailable = parts[position]
             unavailable.update(state="unavailable", unavailable_reason=error.reason)
             group = unavailable.get("callback_group_id")
-            replacement = Outbox._parts([{"kind": "text", "source_ref": error.source_ref, "replaces_part_id": part_id, "callback_group_id": group}], version)[0]
+            flags = {key: unavailable[key] for key in ("silent", "protect_content", "reply_to_message_id") if key in unavailable}
+            replacement = Outbox._parts([{"kind": "text", "source_ref": error.source_ref, "replaces_part_id": part_id, "callback_group_id": group, **flags}], version)[0]
             # The failed file never acquired a visible anchor. Its existing
             # controls belong to the final visible fallback, with the same
             # callback rows and immutable operation basis.
@@ -757,19 +894,25 @@ class OutboxSender:
                 method = {"text": "sendMessage", "card": "sendMessage", "document": "sendDocument", "photo": "sendPhoto", "album": "sendMediaGroup", "edit": "editMessageText"}.get(part.get("kind"), "sendMessage")
                 if part.get("remove_keyboard"):
                     method = "editMessageReplyMarkup"
-                template = "telegram: send_failed method=%s error=%s"
-                values = [method, type(error).__name__]
-                if error.__cause__ is not None:
-                    template += " cause=%s"
-                    values.append(type(error.__cause__).__name__)
-                if isinstance(error, BadRequest):
-                    description = str(error).lower()
-                    desc = "parse-entities" if "can't parse entities" in description else "button-url" if "url" in description and "invalid" in description else "too-big" if "file is too big" in description else "other"
-                    template += " http=400 desc=%s"
-                    values.append(desc)
-                template += " attempts=%s outbox_id=%s part_id=%s class=%s claim_owner=%s claim_id=%s failed_reason=invalid-payload"
-                logger.warning(template, *values, row.attempts + 1, row.id, part.get("part_id"), row.class_, self.run_id, claim)
+                if getattr(error, "_hartmesh_telegram_failure_logged", False) is not True:
+                    log_call_failure(
+                        link_id=link_id,
+                        bot_id=binding.bot_id if binding is not None else None,
+                        method=method,
+                        error=error,
+                        attempts=row.attempts + 1,
+                        outbox_id=row.id,
+                        part_id=part.get("part_id"),
+                        class_=row.class_,
+                        claim_owner=self.run_id,
+                        claim_id=claim,
+                        failed_reason="invalid-payload",
+                    )
                 self._pending(row)
+                parts = deepcopy(row.parts)
+                for value in parts:
+                    value.pop("invalid_token_verification_pending", None)
+                row.parts = parts
                 row.state, row.failed_reason, row.closed_at = "failed", "invalid-payload", now
                 failure_version = row.payload.get("failure_version", 0) + 1
                 row.payload = {**row.payload, "failure_version": failure_version}

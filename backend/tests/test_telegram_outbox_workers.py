@@ -6,11 +6,13 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from _telegram_repository_test_support import add_link, bind_link, rows
 from _telegram_repository_test_support import db as db
-from sqlalchemy import select
+from sqlalchemy import event, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.orm import Session
 from telegram.error import BadRequest
 
-from app.telegram_bots.producer import DeliveryEligibility, DeliveryRetry, Outbox, OutboxSender, PartReceipt, PermanentDeliveryError, SourceUnavailable, TransientDeliveryError
+from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryEligibility, DeliveryRetry, Outbox, OutboxSender, PartReceipt, PermanentDeliveryError, SourceUnavailable, TransientDeliveryError
 from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramOutboxRow
 
 
@@ -571,7 +573,8 @@ async def test_saved_protection_requirement_survives_policy_relaxation(db):
 
 
 @pytest.mark.asyncio
-async def test_another_session_factory_cannot_recover_a_live_local_transport(db):
+@pytest.mark.parametrize("same_process", [False, True])
+async def test_another_session_factory_cannot_recover_a_live_local_transport(db, same_process):
     link, clock, outbox = await setup(db)
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -582,7 +585,7 @@ async def test_another_session_factory_cannot_recover_a_live_local_transport(db)
 
     first = OutboxSender(outbox, run_id="first", deliver_part=transport(db, send), eligibility=allowed)
     other = Outbox(async_sessionmaker(db.engine, expire_on_commit=False), clock=clock)
-    second = OutboxSender(other, run_id="second", deliver_part=transport(db, send), eligibility=allowed)
+    second = OutboxSender(other, run_id="first" if same_process else "second", deliver_part=transport(db, send), eligibility=allowed)
     try:
         await first.tick()
         await entered.wait()
@@ -591,3 +594,95 @@ async def test_another_session_factory_cannot_recover_a_live_local_transport(db)
     finally:
         release.set()
         await asyncio.gather(first.drain(), second.drain())
+
+
+@pytest.mark.asyncio
+async def test_healthy_tick_recovers_finished_claim_after_receipt_and_release_sql_fail(db):
+    link, clock, outbox = await setup(db)
+    original = await saved(db)
+    failed, calls = [], []
+
+    def fail_receipt_and_release(session):
+        if session.get_bind() is not db.engine.sync_engine:
+            return
+        row = next((row for row in session.identity_map.values() if isinstance(row, TelegramOutboxRow) and row.id == original.id), None)
+        target = "sent" if not failed else "pending"
+        if row is not None and len(failed) < 2 and row.state == target:
+            failed.append(target)
+            raise OperationalError("synthetic receipt/release unavailable", {}, None)
+
+    async def send(link, row, part):
+        calls.append((row.claim_id, part["part_id"]))
+        return [900 + len(calls)]
+
+    sender = OutboxSender(outbox, run_id="same-process", deliver_part=transport(db, send), eligibility=allowed)
+    event.listen(Session, "before_commit", fail_receipt_and_release)
+    try:
+        assert await sender.tick() == 1
+        await sender.drain()
+        assert failed == ["sent", "pending"]
+        stranded = await saved(db)
+        assert stranded.state == "sending" and stranded.claim_owner == "same-process"
+    finally:
+        event.remove(Session, "before_commit", fail_receipt_and_release)
+    clock.advance(1)
+    try:
+        assert await sender.tick() == 1
+        await sender.drain()
+        completed = await saved(db)
+        assert completed.state == "sent" and completed.parts[0]["message_ids"] == [902]
+        assert len(calls) == 2 and calls[0][0] != calls[1][0]
+        assert calls[0][1] == calls[1][1] == original.parts[0]["part_id"]
+    finally:
+        await sender.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_commit", [False, True])
+async def test_verification_marker_consumes_with_failure_and_manual_retry_can_send(db, fail_commit):
+    link, clock, outbox = await setup(db)
+    original = await saved(db)
+    deferred, failed = False, False
+
+    async def deliver(*, link_id, outbox_id, part_id, claim_owner, claim_id):
+        nonlocal deferred
+        snapshot = await outbox.capture_sending_part(link_id=link_id, outbox_id=outbox_id, part_id=part_id, claim_owner=claim_owner, claim_id=claim_id, token_revision=link.token_revision)
+        if not deferred:
+            deferred = True
+            assert await outbox.defer_token_verification(snapshot, retry_after_seconds=0, http_status=404)
+            raise DeliveryClaimRetired()
+        if snapshot.part.get("invalid_token_verification_pending"):
+            raise PermanentDeliveryError()
+        return [802]
+
+    def refuse_failure_once(session):
+        nonlocal failed
+        if fail_commit and not failed and session.get_bind() is db.engine.sync_engine and any(isinstance(row, TelegramOutboxRow) and row.id == original.id and row.state == "failed" for row in session.identity_map.values()):
+            failed = True
+            raise OperationalError("synthetic permanent disposition unavailable", {}, None)
+
+    sender = OutboxSender(outbox, run_id="process", deliver_part=deliver, eligibility=allowed)
+    event.listen(Session, "before_commit", refuse_failure_once)
+    try:
+        await sender.tick()
+        await sender.drain()
+        clock.advance(1)
+        await sender.tick()
+        await sender.drain()
+        if fail_commit:
+            pending = await saved(db)
+            assert failed and pending.state == "pending" and "invalid_token_verification_pending" in pending.parts[0]
+            clock.advance(1)
+            await sender.tick()
+            await sender.drain()
+        final = await saved(db)
+        assert final.state == "failed" and "invalid_token_verification_pending" not in final.parts[0]
+        await outbox.retry(link, final.id)
+        clock.advance(1)
+        await sender.tick()
+        await sender.drain()
+        final = await saved(db)
+        assert final.state == "sent" and final.parts[0]["message_ids"] == [802]
+    finally:
+        event.remove(Session, "before_commit", refuse_failure_once)
+        await sender.stop()
