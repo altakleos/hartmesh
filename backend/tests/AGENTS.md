@@ -37,6 +37,12 @@ must preserve cross-chat records and reject drift during older-stamp replay.
 Current ORM parity is measured after 0043; historical 0042 tests use its frozen
 table metadata.
 
+Presentation tests use explicit route-table expectations, both locale catalogs,
+UTF-16 boundaries and canonical preview reconstruction. Provider tests use fake
+clients or actual SDKs over socket-free mock transports, including timeout,
+cancellation, endpoint/key capture and context-scoped payload-log suppression.
+Keep recorded credentials synthetic and test artifacts on disk.
+
 `test_agent_chat_tools.py` uses real ToolNode runtime injection and host-only
 execution contexts for bounded page offers. Config tests use independent default
 expectations; Compose tests load the real template, validate it through the same

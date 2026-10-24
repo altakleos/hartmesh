@@ -1333,6 +1333,9 @@ ownership/setup-code transactions, durable binding welcomes, and personal
 notification settings. Revision `0043_telegram_inbox_chat_scope` includes the
 chat ID in retained inbox identities so reconnecting another account works
 without deleting earlier receipts. The connection flow remains reserved.
+Its presentation layer includes English and Chinese product text, bounded Telegram
+HTML, complete multipart previews, permission-aware web links and voice-provider
+selection from the deployment's current model configuration.
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 

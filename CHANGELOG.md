@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Telegram presentation foundation
+
+Add English and Chinese product text, safe Markdown-to-Telegram HTML, balanced
+message splitting and complete multipart previews. Web handovers use configured
+addresses, stored bot targets and current reader permissions. Voice transcription
+selects a qualifying configured model entry and uses its captured key with a
+fixed provider endpoint. SDK payload logs are suppressed only during voice calls.
+
+No schema change: the database head remains `0043_telegram_inbox_chat_scope`.
+Configuration remains version 55; managed Telegram activation remains deferred.
+
 ### Telegram ownership foundation
 
 Add bot-specific credential wrapping while preserving existing provider-key
