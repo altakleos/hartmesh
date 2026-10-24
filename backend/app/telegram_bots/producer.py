@@ -1,0 +1,849 @@
+"""Reply-only durable delivery. No models, runs, transport or startup are owned here.
+
+Writers lock the binding, then its delivery, inbox identities and callback groups.
+No SQL transaction crosses a transport/authority call. Every worker write is
+fenced by process, admission and binding; time never transfers a live claim.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import math
+import random
+import re
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import asynccontextmanager
+from copy import deepcopy
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Protocol
+from uuid import uuid4
+
+from sqlalchemy import or_, select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from telegram.error import BadRequest, RetryAfter, TelegramError
+
+from app.telegram_bots.adapter import TOKEN_BODY
+from app.telegram_bots.config import TelegramBotsConfig
+from app.telegram_bots.links import BotLink
+from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
+
+OUTBOX_SEND_CONCURRENCY = 8
+DELIVERY_RETRY_FIRST_SECONDS = 5
+DELIVERY_RETRY_CAP_SECONDS = 300
+ESSENTIAL_DELIVERY_CLASSES = frozenset({"reply", "question", "result", "interrupt", "progress", "service", "reminder"})
+_KINDS = frozenset({"text", "document", "photo", "album", "edit", "card"})
+_FINAL_PARTS = frozenset({"sent", "unavailable", "retired"})
+_STATUS_KEYS = frozenset({"access.agent_off", "agent.paused", "agent.retired", "unavailable.fix", "unavailable.off", "unavailable.paused", "unavailable.moved", "unavailable.files_unchecked", "refused.interrupted"})
+_SKIP_REASONS = frozenset({"no-access", "superseded", "link-not-connected", "disabled", "policy-off", "expired"})
+_LIVE_CLAIMS: set[tuple[int, str, str]] = set()
+_TOKEN = re.compile(TOKEN_BODY)
+_FORBIDDEN_KEYS = frozenset({"token", "bot_token", "access_token", "raw_update", "update", "audio", "audio_bytes", "download_url", "temporary_url", "bytes"})
+logger = logging.getLogger(__name__)
+
+
+def _safe_json(value: dict) -> dict:
+    def valid(item, depth=0):
+        if depth > 16:
+            return False
+        if item is None or type(item) in {bool, int}:
+            return True
+        if type(item) is float:
+            return math.isfinite(item)
+        if isinstance(item, str):
+            return _TOKEN.search(item) is None
+        if isinstance(item, list):
+            return all(valid(child, depth + 1) for child in item)
+        return isinstance(item, dict) and all(isinstance(key, str) and key not in _FORBIDDEN_KEYS and valid(key, depth + 1) and valid(child, depth + 1) for key, child in item.items())
+
+    if not isinstance(value, dict) or not valid(value):
+        raise ValueError("unsafe-delivery-source")
+    try:
+        return json.loads(json.dumps(value, allow_nan=False))
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("unsafe-delivery-source") from None
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _aware(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+@dataclass(frozen=True)
+class OutboxItem:
+    """Detached delivery basis, safe to pass across an awaited policy check."""
+
+    id: str
+    link_id: str
+    owner_user_id: str
+    binding_generation: int
+    dedupe_key: str
+    class_: str
+    payload: dict
+    parts: list[dict]
+    chat_id: int | None
+    message_thread_id: int | None
+
+
+def _item(row: TelegramOutboxRow) -> OutboxItem:
+    return OutboxItem(**{name: deepcopy(getattr(row, name)) for name in OutboxItem.__dataclass_fields__})
+
+
+@dataclass(frozen=True)
+class DeliveryEligibility:
+    decision: str
+    reason: str | None = None
+    protect_content: bool = False
+
+    @classmethod
+    def allow(cls, *, protect_content: bool = False) -> DeliveryEligibility:
+        return cls("allow", protect_content=protect_content)
+
+    @classmethod
+    def wait(cls) -> DeliveryEligibility:
+        return cls("wait")
+
+    @classmethod
+    def skip(cls, reason: str) -> DeliveryEligibility:
+        if reason not in _SKIP_REASONS:
+            raise ValueError("invalid-delivery-skip")
+        return cls("skip", reason)
+
+
+@dataclass(frozen=True)
+class PartReceipt:
+    message_ids: tuple[int, ...]
+    protect_content: bool = False
+
+
+class DeliverPart(Protocol):
+    async def __call__(self, *, link_id: str, outbox_id: str, part_id: str, claim_owner: str, claim_id: str) -> list[int] | PartReceipt: ...
+
+
+class DeliveryRetry(Exception):
+    """A server wait, including long limiter refusals; never an attempt."""
+
+    def __init__(self, retry_after: float | timedelta) -> None:
+        super().__init__("delivery-retry")
+        self.retry_after = retry_after.total_seconds() if isinstance(retry_after, timedelta) else max(0, retry_after)
+
+
+class TransientDeliveryError(Exception):
+    pass
+
+
+class PermanentDeliveryError(Exception):
+    def __init__(self, reason: str = "invalid-payload") -> None:
+        # Never persist transport descriptions, credentials or payloads.
+        super().__init__("invalid-payload")
+        self.reason = "invalid-payload"
+
+
+class SourceUnavailable(Exception):
+    """An authorized file attempt needs an explicit saved product-text fallback.
+
+    The file layer owns byte reads/hashes. This seam only accepts a structured
+    fixed source reference and never substitutes other bytes or a fresh answer.
+    """
+
+    def __init__(self, *, source_ref: dict, reason: str = "source-unavailable") -> None:
+        if reason not in {"source-unavailable", "source-changed"} or set(source_ref) != {"key", "values"} or source_ref["key"] not in {"file.out_failed", "file.too_large_out"} or not isinstance(source_ref["values"], dict):
+            raise ValueError("invalid-unavailable-source-notice")
+        if set(source_ref["values"]) - {"file", "product"} or any(not isinstance(value, str) or len(value) > 4096 for value in source_ref["values"].values()):
+            raise ValueError("invalid-unavailable-source-notice")
+        super().__init__(reason)
+        self.source_ref, self.reason = _safe_json(source_ref), reason
+
+
+class Outbox:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, inbox=None, config: TelegramBotsConfig | None = None, clock: Callable[[], datetime] = _now) -> None:
+        from app.telegram_bots.inbox import InboxRepository
+
+        self.sessions = session_factory
+        self.inbox = inbox if inbox is not None else InboxRepository(session_factory)
+        self.config = config or TelegramBotsConfig()
+        self.clock = clock
+
+    @asynccontextmanager
+    async def _writer(self, link_id: str, *, session: AsyncSession | None = None) -> AsyncIterator[tuple[AsyncSession, TelegramBotLinkRow | None]]:
+        if session is not None:
+            if not session.in_transaction():
+                raise ValueError("caller-owned-transaction-required")
+            if session.get_bind().dialect.name == "sqlite":
+                # sqlite3 legacy mode can leave session.begin() without a native
+                # transaction until its first write. Reserve that caller's
+                # writer before reading authority, without another checkout or
+                # commit. An already reserved writer simply retains its lock.
+                await session.execute(update(TelegramBotLinkRow).where(TelegramBotLinkRow.id == link_id).values(id=TelegramBotLinkRow.id))
+            link = await session.scalar(select(TelegramBotLinkRow).where(TelegramBotLinkRow.id == link_id).with_for_update().execution_options(populate_existing=True))
+            yield session, link
+            return
+        async with self.sessions() as owned, owned.begin():
+            if owned.get_bind().dialect.name == "sqlite":
+                await owned.execute(text("BEGIN IMMEDIATE"))
+            link = await owned.scalar(select(TelegramBotLinkRow).where(TelegramBotLinkRow.id == link_id).with_for_update().execution_options(populate_existing=True))
+            yield owned, link
+
+    @staticmethod
+    def _binding(row: TelegramBotLinkRow | None, link: BotLink) -> bool:
+        return row is not None and row.owner_user_id == link.owner_user_id and row.binding_generation == link.binding_generation and row.chat_id == link.chat_id
+
+    @staticmethod
+    def _parts(parts: list[dict], version: int) -> list[dict]:
+        if not isinstance(parts, list) or not parts:
+            raise ValueError("empty-delivery-plan")
+        frozen = []
+        for index, supplied in enumerate(parts):
+            if index < len(parts) - 1 and supplied.get("callback_group_id"):
+                raise ValueError("invalid-delivery-controls")
+            if supplied.get("kind") not in _KINDS or not isinstance(supplied.get("source_ref"), dict) or not supplied["source_ref"]:
+                raise ValueError("invalid-delivery-part")
+            part = _safe_json(supplied)
+            for receipt_field in ("sent_at", "dispatched_at", "unavailable_reason"):
+                part.pop(receipt_field, None)
+            source = part["source_ref"]
+            if set(source) == {"key", "values"}:
+                if not isinstance(source["key"], str) or not isinstance(source["values"], dict):
+                    raise ValueError("invalid-delivery-source")
+            elif "assistant_message_id" in source:
+                if set(source) - {"assistant_message_id", "thread_id", "run_id", "range", "start", "end"}:
+                    raise ValueError("invalid-delivery-source")
+            elif not {"space_id", "path"} <= set(source) or set(source) - {"space_id", "path", "sha256"}:
+                raise ValueError("invalid-delivery-source")
+            part.update(part_id=uuid4().hex, presentation_version=version, ordinal=index, state="pending", message_ids=[])
+            part.setdefault("callback_group_id", None)
+            frozen.append(part)
+        return frozen
+
+    async def _add(self, link: BotLink, *, dedupe_key: str, class_: str, payload: dict, not_before: datetime | None = None, session: AsyncSession | None = None, server_status: bool = False, **targets) -> tuple[str, bool]:
+        if class_ != "reply":
+            raise ValueError("reply-only-outbox")
+        if payload.get("delivery_kind") == "status_notice" and not server_status:
+            raise ValueError("reserved-status-notice")
+        if not dedupe_key or len(dedupe_key) > 96 or _TOKEN.search(dedupe_key):
+            raise ValueError("invalid-delivery-key")
+        allowed = {"instance_id", "work_id", "request_id", "event_id", "chat_id", "message_thread_id", "silent", "inbox_rows", "finish_route"}
+        if set(targets) - allowed:
+            raise ValueError("invalid-delivery-target")
+        if targets.get("chat_id", link.chat_id) != link.chat_id:
+            raise ValueError("invalid-delivery-target")
+        async with self._writer(link.id, session=session) as (writer, binding):
+            if not self._binding(binding, link) or binding.state != "connected":
+                raise ValueError("link-not-connected")
+            existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == dedupe_key).with_for_update())
+            if existing is not None:
+                if existing.binding_generation != link.binding_generation:
+                    raise ValueError("delivery-generation-mismatch")
+                return existing.id, False
+            frozen_payload = _safe_json(payload)
+            parts = self._parts(frozen_payload.pop("parts", []), 0)
+            frozen_payload["presentation_version"] = 0
+            now = self.clock()
+            row = TelegramOutboxRow(
+                id=uuid4().hex,
+                link_id=link.id,
+                owner_user_id=link.owner_user_id,
+                binding_generation=link.binding_generation,
+                dedupe_key=dedupe_key,
+                class_=class_,
+                payload=frozen_payload,
+                parts=parts,
+                state="pending",
+                not_before=not_before or now,
+                chat_id=link.chat_id,
+                message_thread_id=targets.pop("message_thread_id", None),
+                created_at=now,
+                **{key: value for key, value in targets.items() if key not in {"chat_id", "inbox_rows", "finish_route"}},
+            )
+            writer.add(row)
+            await writer.flush()
+            if targets.get("inbox_rows"):
+                await self.inbox.register_delivery(targets["inbox_rows"], outbox_id=row.id, finish=targets.get("finish_route", False), session=writer)
+            return row.id, True
+
+    async def add(self, link: BotLink, *, dedupe_key: str, class_: str, payload: dict, not_before: datetime | None = None, session: AsyncSession | None = None, **targets) -> bool:
+        return (await self._add(link, dedupe_key=dedupe_key, class_=class_, payload=payload, not_before=not_before, session=session, **targets))[1]
+
+    async def plan_reply(self, link: BotLink, *, turn_id: str, source: dict, parts: list[dict], inbox_rows: Sequence, session: AsyncSession | None = None) -> str:
+        source = _safe_json(source)
+        if "delivery_kind" in source:
+            raise ValueError("reserved-status-notice")
+        async with self._writer(link.id, session=session) as (writer, binding):
+            # Lock the exact existing delivery before its input group. A late
+            # final from a previous publication cannot seal the current retry.
+            await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == f"reply:{turn_id}").with_for_update())
+            marks = list(
+                await writer.scalars(
+                    select(TelegramInboundMarkRow)
+                    .where(TelegramInboundMarkRow.link_id == link.id, TelegramInboundMarkRow.turn_id == turn_id)
+                    .order_by(TelegramInboundMarkRow.message_id, TelegramInboundMarkRow.chat_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            )
+            identities = {(row.link_id, row.message_id, row.chat_id) for row in inbox_rows}
+            if not marks or len(identities) != len(inbox_rows) or identities != {(row.link_id, row.message_id, row.chat_id) for row in marks}:
+                raise ValueError("reply-source-conflict")
+            for mark in marks:
+                publication = mark.route_basis.get("current_publication_id")
+                entry = next((entry for entry in mark.route_basis.get("publications", []) if entry.get("publication_id") == publication), None)
+                if (
+                    mark.thread_id is None
+                    or mark.run_id is None
+                    or source.get("thread_id") != mark.thread_id
+                    or source.get("run_id") != mark.run_id
+                    or publication is None
+                    or source.get("publication_id") != publication
+                    or entry is None
+                    or entry.get("run_id") != mark.run_id
+                    or not isinstance(source.get("assistant_message_id"), str)
+                    or not source["assistant_message_id"]
+                    or mark.assistant_message_id not in (None, source["assistant_message_id"])
+                    or "message_ids" in source
+                    and set(source["message_ids"]) != {row.message_id for row in marks}
+                ):
+                    raise ValueError("reply-source-conflict")
+            identity, _ = await self._add(link, dedupe_key=f"reply:{turn_id}", class_="reply", payload={"source": deepcopy(source), "parts": parts}, session=writer, message_thread_id=inbox_rows[0].message_thread_id if inbox_rows else None)
+            await self.inbox.register_delivery(inbox_rows, outbox_id=identity, primary=True, finish=True, session=writer)
+            for mark in marks:
+                mark.assistant_message_id = source["assistant_message_id"]
+            return identity
+
+    async def plan_status_notice(self, link: BotLink, *, source_id: str, parts: list[dict], inbox_rows: Sequence = (), finish_route: bool = False, session: AsyncSession | None = None) -> str:
+        """Server handler path only; untrusted outbound metadata cannot set this tag."""
+        for part in parts:
+            source = part.get("source_ref", {})
+            if part.get("kind") != "text" or set(source) != {"key", "values"} or source["key"] not in _STATUS_KEYS or not isinstance(source["values"], dict) or part.get("callback_group_id") or set(part) - {"kind", "source_ref", "silent"}:
+                raise ValueError("invalid-status-notice")
+            if any(not isinstance(value, (str, bool, int, type(None))) for value in source["values"].values()):
+                raise ValueError("invalid-status-notice")
+        return (
+            await self._add(
+                link,
+                dedupe_key=f"notice:{source_id}",
+                class_="reply",
+                payload={"delivery_kind": "status_notice", "parts": parts},
+                server_status=True,
+                session=session,
+                inbox_rows=inbox_rows,
+                finish_route=finish_route,
+                message_thread_id=inbox_rows[0].message_thread_id if inbox_rows else None,
+            )
+        )[0]
+
+    async def retry(self, link: BotLink, outbox_id: str) -> None:
+        async with self._writer(link.id) as (session, binding):
+            row = await session.get(TelegramOutboxRow, outbox_id, with_for_update=True)
+            if not self._binding(binding, link) or row is None or row.link_id != link.id or row.binding_generation != link.binding_generation:
+                raise ValueError("delivery-generation-mismatch")
+            if row.state == "sending" or row.state in {"sent", "skipped"}:
+                return
+            row.state, row.not_before, row.failed_reason, row.closed_at = "pending", self.clock(), None, None
+            row.claim_owner = row.claim_id = row.claimed_at = None
+
+    @staticmethod
+    def _fenced(row: TelegramOutboxRow | None, *, generation: int, owner: str, claim: str) -> bool:
+        return row is not None and row.state == "sending" and row.binding_generation == generation and row.claim_owner == owner and row.claim_id == claim
+
+    async def replace_presentation(self, link: BotLink, outbox_id: str, *, expected_version: int, claim_owner: str, claim_id: str, reason: str, parts: list[dict], message_thread_id: int | None) -> None:
+        if reason not in {"edit-anchor-missing", "protection", "topic-missing"}:
+            raise ValueError("invalid-presentation-reason")
+        async with self._writer(link.id) as (session, binding):
+            row = await session.get(TelegramOutboxRow, outbox_id, with_for_update=True)
+            if not self._binding(binding, link) or not self._fenced(row, generation=link.binding_generation, owner=claim_owner, claim=claim_id) or row.link_id != link.id or row.payload.get("presentation_version", 0) != expected_version:
+                return
+            # The canonical sources and action groups are immutable across relocation.
+            old_sources = [{key: value for key, value in part["source_ref"].items() if key not in {"range", "start", "end"}} for part in row.parts]
+            groups = {part.get("callback_group_id") for part in row.parts}
+            for part in parts:
+                basis = {key: value for key, value in part.get("source_ref", {}).items() if key not in {"range", "start", "end"}}
+                if basis not in old_sources or part.get("callback_group_id") not in groups:
+                    raise ValueError("changed-presentation-basis")
+            version = expected_version + 1
+            previous = deepcopy(row.parts)
+            for part in previous:
+                if part["state"] != "sent":
+                    part["state"] = "retired"
+            row.parts = previous + self._parts(parts, version)
+            row.payload = {**row.payload, "presentation_version": version, "replacement_reason": reason}
+            row.message_thread_id, row.state, row.not_before = message_thread_id, "pending", self.clock()
+            row.claim_owner = row.claim_id = row.claimed_at = None
+            callbacks = await session.scalars(
+                select(TelegramCallbackRow)
+                .where(TelegramCallbackRow.link_id == link.id, TelegramCallbackRow.binding_generation == link.binding_generation, TelegramCallbackRow.group_id.in_(groups - {None}))
+                .order_by(TelegramCallbackRow.id)
+                .with_for_update()
+            )
+            for callback in callbacks:
+                if callback.consumed_at is None:
+                    callback.payload = {**callback.payload, "presentation_pending": True, "presentation_version": version, "anchor_outbox_id": row.id}
+
+
+class OutboxSender:
+    def __init__(
+        self,
+        outbox: Outbox,
+        *,
+        run_id: str,
+        deliver_part: DeliverPart,
+        eligibility: Callable[[BotLink, OutboxItem, dict | None], Awaitable[DeliveryEligibility]],
+        concurrency: int = OUTBOX_SEND_CONCURRENCY,
+        jitter: Callable[[], float] = random.random,
+    ) -> None:
+        if not run_id or len(run_id) > 32 or not 1 <= concurrency <= OUTBOX_SEND_CONCURRENCY:
+            raise ValueError("invalid-delivery-worker-settings")
+        self.outbox, self.run_id, self.deliver_part, self.eligibility = outbox, run_id, deliver_part, eligibility
+        self.concurrency, self.jitter = concurrency, jitter
+        self._workers: dict[str, tuple[str, str, asyncio.Task]] = {}
+        self._generations: dict[str, int] = {}
+        self._callbacks: set[asyncio.Task] = set()
+        self._tick_lock = asyncio.Lock()
+        self._recovered, self._stopping = False, False
+        self._last_link: str | None = None
+
+    async def recover_prior_claims(self) -> int:
+        if self._workers:
+            raise RuntimeError("recovery-after-workers-started")
+        async with self.outbox.sessions() as session:
+            links = list(await session.scalars(select(TelegramOutboxRow.link_id).where(TelegramOutboxRow.state == "sending", or_(TelegramOutboxRow.claim_owner != self.run_id, TelegramOutboxRow.claim_owner.is_(None))).distinct()))
+        count = 0
+        for identity in sorted(links):
+            async with self.outbox._writer(identity) as (session, binding):
+                claimed = await session.scalars(
+                    select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == identity, TelegramOutboxRow.state == "sending", or_(TelegramOutboxRow.claim_owner != self.run_id, TelegramOutboxRow.claim_owner.is_(None))).with_for_update()
+                )
+                for row in claimed:
+                    if any(owner == row.claim_owner and claim == row.claim_id for _, owner, claim in _LIVE_CLAIMS):
+                        continue
+                    self._pending(row)
+                    count += 1
+        self._recovered = True
+        return count
+
+    @staticmethod
+    def _pending(row: TelegramOutboxRow) -> None:
+        row.state = "pending"
+        row.claim_owner = row.claim_id = row.claimed_at = None
+        parts = deepcopy(row.parts)
+        for part in parts:
+            if part["state"] == "sending":
+                part["state"] = "pending"
+        row.parts = parts
+
+    def _structural(self, binding: BotLink | None, row: OutboxItem) -> DeliveryEligibility | None:
+        if binding is None or binding.binding_generation != row.binding_generation or binding.owner_user_id != row.owner_user_id or binding.chat_id != row.chat_id:
+            return DeliveryEligibility.skip("link-not-connected")
+        if binding.state == "blocked":
+            return DeliveryEligibility.wait()
+        if binding.state != "connected":
+            return DeliveryEligibility.skip("link-not-connected")
+        if binding.health == "policy_off":
+            return DeliveryEligibility.skip("policy-off")
+        if binding.health == "agent_unavailable":
+            valid = row.class_ == "reply" and row.payload.get("delivery_kind") == "status_notice" and all(part["kind"] == "text" and part["source_ref"].get("key") in _STATUS_KEYS and not part.get("callback_group_id") for part in row.parts)
+            if not valid:
+                return DeliveryEligibility.wait()
+        elif binding.health != "ok":
+            return DeliveryEligibility.wait()
+        return None
+
+    async def _eligibility(self, binding: BotLink | None, row: OutboxItem, part: dict | None) -> DeliveryEligibility:
+        # Current owner/access/policy is required even when transport is waiting.
+        if binding is None:
+            return DeliveryEligibility.skip("link-not-connected")
+        if row.payload.get("kind") == "delivery_failure_notice":
+            async with self.outbox.sessions() as session:
+                original = await session.get(TelegramOutboxRow, row.payload.get("repair_outbox_id"))
+                if original is None or original.binding_generation != row.binding_generation or original.state in {"sent", "skipped"}:
+                    return DeliveryEligibility.skip("superseded")
+        decision = await self.eligibility(binding, row, deepcopy(part))
+        if not isinstance(decision, DeliveryEligibility) or decision.decision not in {"allow", "wait", "skip"} or decision.decision == "skip" and decision.reason not in _SKIP_REASONS:
+            raise ValueError("invalid-delivery-eligibility")
+        if decision.decision != "allow":
+            return decision
+        return self._structural(binding, row) or decision
+
+    async def _snapshot(self, link_id: str, row_id: str) -> tuple[BotLink | None, OutboxItem | None]:
+        async with self.outbox.sessions() as session:
+            link = await session.get(TelegramBotLinkRow, link_id)
+            row = await session.get(TelegramOutboxRow, row_id)
+            return BotLink.from_row(link) if link else None, _item(row) if row else None
+
+    @asynccontextmanager
+    async def _claim_writer(self, link_id: str, claim: str):
+        try:
+            async with self.outbox._writer(link_id) as values:
+                yield values
+        except BaseException:
+            # A failed SQL commit never reserves an in-memory worker slot.
+            _LIVE_CLAIMS.discard((id(self.outbox.sessions), self.run_id, claim))
+            raise
+
+    async def tick(self) -> int:
+        async with self._tick_lock:
+            if self._stopping:
+                return 0
+            if not self._recovered:
+                await self.recover_prior_claims()
+            free = min(self.concurrency - len(self._workers), OUTBOX_SEND_CONCURRENCY - len(_LIVE_CLAIMS))
+            if free <= 0:
+                return 0
+            async with self.outbox.sessions() as session:
+                due = list(
+                    (
+                        await session.execute(
+                            select(TelegramOutboxRow.id, TelegramOutboxRow.link_id, TelegramOutboxRow.created_at)
+                            .where(TelegramOutboxRow.class_ == "reply", TelegramOutboxRow.state == "pending", TelegramOutboxRow.not_before <= self.outbox.clock())
+                            .order_by(TelegramOutboxRow.created_at, TelegramOutboxRow.id)
+                        )
+                    ).all()
+                )
+            links = list(dict.fromkeys(row.link_id for row in due))
+            if self._last_link in links:
+                offset = links.index(self._last_link) + 1
+                links = links[offset:] + links[:offset]
+            count = 0
+            for link_id in links:
+                if count >= free:
+                    break
+                if link_id in self._workers:
+                    continue
+                # Oldest due reply per link. A waiting row must not block a later
+                # fixed repair/status notice on the same link.
+                for candidate in (row for row in due if row.link_id == link_id):
+                    binding, row = await self._snapshot(link_id, candidate.id)
+                    if row is None:
+                        continue
+                    decision = await self._eligibility(binding, row, None)
+                    claim = uuid4().hex
+                    async with self._claim_writer(link_id, claim) as (session, current):
+                        saved = await session.get(TelegramOutboxRow, row.id, with_for_update=True)
+                        if saved is None or saved.state != "pending" or _aware(saved.not_before) > self.outbox.clock():
+                            continue
+                        # An authority check never authorizes a replaced binding/token.
+                        if binding is not None and (
+                            current is None or current.token_revision != binding.token_revision or current.binding_generation != binding.binding_generation or current.health != binding.health or current.state != binding.state
+                        ):
+                            continue
+                        if decision.decision == "skip":
+                            await self._skip(session, saved, decision.reason)
+                            continue
+                        if decision.decision == "wait":
+                            continue
+                        busy = await session.scalar(select(TelegramOutboxRow.id).where(TelegramOutboxRow.link_id == link_id, TelegramOutboxRow.state == "sending").limit(1))
+                        if busy is not None:
+                            break
+                        if len(_LIVE_CLAIMS) >= OUTBOX_SEND_CONCURRENCY:
+                            break
+                        saved.state, saved.claimed_at, saved.claim_owner, saved.claim_id = "sending", self.outbox.clock(), self.run_id, claim
+                        _LIVE_CLAIMS.add((id(self.outbox.sessions), self.run_id, claim))
+                    task = asyncio.create_task(self._run(link_id, row.id, row.binding_generation, claim))
+                    self._generations[claim] = row.binding_generation
+                    self._workers[link_id] = row.id, claim, task
+                    task.add_done_callback(lambda done, link=link_id, item=row.id, generation=row.binding_generation, admission=claim: self._worker_done(link, item, generation, admission, done))
+                    self._last_link = link_id
+                    count += 1
+                    break
+            return count
+
+    async def _skip(self, session: AsyncSession, row: TelegramOutboxRow, reason: str) -> None:
+        row.state, row.skip_reason, row.closed_at = "skipped", reason, self.outbox.clock()
+        row.claim_owner = row.claim_id = row.claimed_at = None
+        await session.flush()
+        await self.outbox.inbox.settle_deliveries(link_id=row.link_id, session=session)
+
+    async def _run(self, link_id: str, row_id: str, generation: int, claim: str) -> None:
+        while True:
+            binding, row = await self._snapshot(link_id, row_id)
+            if row is None:
+                return
+            version = row.payload.get("presentation_version", 0)
+            part = next((part for part in row.parts if part["presentation_version"] == version and part["state"] not in _FINAL_PARTS), None)
+            decision = await self._eligibility(binding, row, part)
+            if decision.decision == "allow" and part is not None and part["kind"] == "edit" and decision.protect_content and not part.get("target_protect_content", False):
+                await self._replace(binding, row, claim, reason="protection")
+                return
+            async with self.outbox._writer(link_id) as (session, current):
+                saved = await session.get(TelegramOutboxRow, row_id, with_for_update=True)
+                if not self.outbox._fenced(saved, generation=generation, owner=self.run_id, claim=claim):
+                    return
+                structural = self._structural(BotLink.from_row(current) if current else None, _item(saved))
+                if structural is not None and (decision.decision == "allow" or structural.decision == "skip"):
+                    decision = structural
+                if binding is not None and current is not None and binding.token_revision != current.token_revision:
+                    return
+                if decision.decision == "skip":
+                    await self._skip(session, saved, decision.reason)
+                    return
+                if decision.decision == "wait":
+                    self._pending(saved)
+                    return
+                if part is None:
+                    await self._complete(session, saved)
+                    return
+                # Pacing belongs to the destination, including other deliveries
+                # and ambiguous attempts, and survives replacement/restart.
+                plans = await session.scalars(select(TelegramOutboxRow.parts).where(TelegramOutboxRow.link_id == link_id, TelegramOutboxRow.binding_generation == generation))
+                last = max((datetime.fromisoformat(stamp) for parts in plans for value in parts for stamp in [value.get("dispatched_at") or value.get("sent_at")] if stamp), default=None)
+                if last is not None and last + timedelta(seconds=1) > self.outbox.clock():
+                    self._pending(saved)
+                    saved.not_before = last + timedelta(seconds=1)
+                    return
+                parts = deepcopy(saved.parts)
+                sending = next(value for value in parts if value["part_id"] == part["part_id"])
+                sending["state"] = "sending"
+                sending["protect_content"] = bool(sending.get("protect_content") or decision.protect_content)
+                sending["dispatched_at"] = self.outbox.clock().isoformat()
+                saved.parts = parts
+                required_protection = sending["protect_content"]
+            try:
+                receipt = await self.deliver_part(link_id=link_id, outbox_id=row_id, part_id=part["part_id"], claim_owner=self.run_id, claim_id=claim)
+                if isinstance(receipt, PartReceipt):
+                    if receipt.protect_content != required_protection:
+                        raise PermanentDeliveryError()
+                    message_ids = list(receipt.message_ids)
+                else:
+                    message_ids = receipt
+                if not isinstance(message_ids, list) or not message_ids or any(type(value) is not int or value <= 0 for value in message_ids):
+                    raise PermanentDeliveryError()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if isinstance(error, SourceUnavailable):
+                    await self._unavailable(link_id, row_id, generation, claim, part["part_id"], error)
+                    return
+                if isinstance(error, BadRequest):
+                    description = str(error).lower()  # in-memory classification only
+                    missing = any(value in description for value in ("message to edit not found", "message can't be edited", "message cannot be edited"))
+                    topic_missing = "message thread not found" in description
+                    if (missing or topic_missing) and row.payload.get("kind") != "keyboard_cleanup":
+                        await self._replace(binding, row, claim, reason="topic-missing" if topic_missing else "edit-anchor-missing")
+                        return
+                await self._failure(link_id, row_id, generation, claim, error)
+                return
+            async with self.outbox._writer(link_id) as (session, current):
+                saved = await session.get(TelegramOutboxRow, row_id, with_for_update=True)
+                if not self.outbox._fenced(saved, generation=generation, owner=self.run_id, claim=claim):
+                    return
+                if current is None or current.binding_generation != generation:
+                    return
+                parts = deepcopy(saved.parts)
+                acknowledged = next(value for value in parts if value["part_id"] == part["part_id"])
+                acknowledged.update(state="sent", message_ids=message_ids, protect_content=required_protection, sent_at=self.outbox.clock().isoformat())
+                saved.parts = parts
+                if all(value["state"] in _FINAL_PARTS for value in parts if value["presentation_version"] == version):
+                    await self._complete(session, saved)
+                    return
+
+    async def _replace(self, binding: BotLink, row: OutboxItem, claim: str, *, reason: str) -> None:
+        version = row.payload.get("presentation_version", 0)
+        parts = []
+        for part in row.parts:
+            if part["presentation_version"] != version or part["kind"] in {"document", "photo", "album"} and part["state"] == "sent":
+                continue
+            replacement = {key: deepcopy(value) for key, value in part.items() if key not in {"part_id", "presentation_version", "ordinal", "state", "message_ids", "sent_at", "dispatched_at", "target_message_id", "target_protect_content"}}
+            if replacement["kind"] == "edit":
+                replacement["kind"] = "text"
+            parts.append(replacement)
+        if parts:
+            await self.outbox.replace_presentation(
+                binding, row.id, expected_version=version, claim_owner=self.run_id, claim_id=claim, reason=reason, parts=parts, message_thread_id=None if reason == "topic-missing" else row.message_thread_id
+            )
+
+    async def _unavailable(self, link_id: str, row_id: str, generation: int, claim: str, part_id: str, error: SourceUnavailable) -> None:
+        async with self.outbox._writer(link_id) as (session, binding):
+            row = await session.get(TelegramOutboxRow, row_id, with_for_update=True)
+            if not self.outbox._fenced(row, generation=generation, owner=self.run_id, claim=claim) or binding is None or binding.binding_generation != generation:
+                return
+            version = row.payload.get("presentation_version", 0)
+            parts = deepcopy(row.parts)
+            position = next((index for index, part in enumerate(parts) if part["part_id"] == part_id and part["presentation_version"] == version and part["kind"] in {"document", "photo", "album"} and part["state"] == "sending"), None)
+            if position is None:
+                raise ValueError("invalid-unavailable-source-part")
+            unavailable = parts[position]
+            unavailable.update(state="unavailable", unavailable_reason=error.reason)
+            group = unavailable.get("callback_group_id")
+            replacement = Outbox._parts([{"kind": "text", "source_ref": error.source_ref, "replaces_part_id": part_id, "callback_group_id": group}], version)[0]
+            # The failed file never acquired a visible anchor. Its existing
+            # controls belong to the final visible fallback, with the same
+            # callback rows and immutable operation basis.
+            unavailable["callback_group_id"] = None
+            replacement["ordinal"] = unavailable["ordinal"] + 1
+            for part in parts[position + 1 :]:
+                if part["presentation_version"] == version:
+                    part["ordinal"] += 1
+            parts.insert(position + 1, replacement)
+            row.parts = parts
+            self._pending(row)
+
+    async def _complete(self, session: AsyncSession, row: TelegramOutboxRow) -> None:
+        version = row.payload.get("presentation_version", 0)
+        current_parts = [part for part in row.parts if part["presentation_version"] == version]
+        if not current_parts or any(part["state"] not in _FINAL_PARTS for part in current_parts):
+            return
+        now = self.outbox.clock()
+        row.state, row.sent_at, row.closed_at = "sent", now, now
+        row.degraded_at = row.failed_reason = None
+        row.claim_owner = row.claim_id = row.claimed_at = None
+        acknowledged = [value for part in current_parts for value in part["message_ids"]]
+        row.message_id = acknowledged[-1] if acknowledged else None
+        await session.flush()
+        await self.outbox.inbox.settle_deliveries(link_id=row.link_id, session=session)
+        groups = {part.get("callback_group_id") for part in current_parts} - {None}
+        callbacks = list(
+            await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.link_id == row.link_id, TelegramCallbackRow.binding_generation == row.binding_generation).order_by(TelegramCallbackRow.id).with_for_update())
+        )
+        for callback in callbacks:
+            if callback.consumed_at is not None:
+                continue
+            if callback.group_id in groups and row.message_id is not None:
+                payload = deepcopy(callback.payload)
+                if payload.get("presentation_pending"):
+                    previous = {"message_id": callback.message_id, "message_thread_id": callback.message_thread_id, "presentation_version": version - 1}
+                    history = list(payload.get("presentation_history", []))
+                    historical_ids = {identity for part in row.parts if part["state"] == "sent" and part["presentation_version"] < version for identity in part["message_ids"]}
+                    if previous["message_id"] in historical_ids and previous not in history:
+                        history.append(previous)
+                    payload["presentation_history"] = history
+                payload.update(presentation_pending=False, presentation_version=version, anchor_outbox_id=row.id)
+                callback.payload, callback.message_id, callback.message_thread_id = payload, row.message_id, row.message_thread_id
+            if callback.kind == "delivery_retry" and callback.target_kind == "outbox" and callback.target_id == row.id:
+                callback.consumed_at, callback.closed_reason = now, "done"
+                if callback.message_id is not None:
+                    # Replayable cleanup only. This row cannot execute the action.
+                    cleanup_key = f"notice:repair-cleanup:{row.id}:{callback.group_id}"
+                    exists = await session.scalar(select(TelegramOutboxRow.id).where(TelegramOutboxRow.link_id == row.link_id, TelegramOutboxRow.dedupe_key == cleanup_key))
+                    if exists is None:
+                        session.add(
+                            TelegramOutboxRow(
+                                id=uuid4().hex,
+                                link_id=row.link_id,
+                                owner_user_id=row.owner_user_id,
+                                binding_generation=row.binding_generation,
+                                dedupe_key=cleanup_key,
+                                class_="reply",
+                                payload={"kind": "keyboard_cleanup", "presentation_version": 0, "target_message_id": callback.message_id},
+                                parts=Outbox._parts([{"kind": "edit", "source_ref": {"key": "delivery.failed", "values": {}}, "remove_keyboard": True, "target_message_id": callback.message_id}], 0),
+                                state="pending",
+                                not_before=now,
+                                chat_id=row.chat_id,
+                                message_thread_id=callback.message_thread_id,
+                                created_at=now,
+                            )
+                        )
+
+    async def _failure(self, link_id: str, row_id: str, generation: int, claim: str, error: Exception) -> None:
+        async with self.outbox._writer(link_id) as (session, binding):
+            row = await session.get(TelegramOutboxRow, row_id, with_for_update=True)
+            if not self.outbox._fenced(row, generation=generation, owner=self.run_id, claim=claim):
+                return
+            now = self.outbox.clock()
+            if isinstance(error, (DeliveryRetry, RetryAfter)) or isinstance(error, TelegramError) and isinstance(getattr(error, "retry_after", None), (int, float, timedelta)):
+                delay = error.retry_after
+                seconds = delay.total_seconds() if isinstance(delay, timedelta) else float(delay)
+                self._pending(row)
+                row.not_before = now + timedelta(seconds=max(1, seconds))
+                return
+            if isinstance(error, (PermanentDeliveryError, BadRequest)):
+                if isinstance(error, BadRequest) and row.payload.get("kind") == "keyboard_cleanup" and any(value in str(error).lower() for value in ("message to edit not found", "message can't be edited", "message cannot be edited")):
+                    await self._skip(session, row, "superseded")
+                    return
+                part = next((part for part in row.parts if part["state"] == "sending"), {})
+                method = {"text": "sendMessage", "card": "sendMessage", "document": "sendDocument", "photo": "sendPhoto", "album": "sendMediaGroup", "edit": "editMessageText"}.get(part.get("kind"), "sendMessage")
+                if part.get("remove_keyboard"):
+                    method = "editMessageReplyMarkup"
+                template = "telegram: send_failed method=%s error=%s"
+                values = [method, type(error).__name__]
+                if error.__cause__ is not None:
+                    template += " cause=%s"
+                    values.append(type(error.__cause__).__name__)
+                if isinstance(error, BadRequest):
+                    description = str(error).lower()
+                    desc = "parse-entities" if "can't parse entities" in description else "button-url" if "url" in description and "invalid" in description else "too-big" if "file is too big" in description else "other"
+                    template += " http=400 desc=%s"
+                    values.append(desc)
+                template += " attempts=%s outbox_id=%s part_id=%s class=%s claim_owner=%s claim_id=%s failed_reason=invalid-payload"
+                logger.warning(template, *values, row.attempts + 1, row.id, part.get("part_id"), row.class_, self.run_id, claim)
+                self._pending(row)
+                row.state, row.failed_reason, row.closed_at = "failed", "invalid-payload", now
+                failure_version = row.payload.get("failure_version", 0) + 1
+                row.payload = {**row.payload, "failure_version": failure_version}
+                # The safe recovery message never recursively produces another.
+                if row.payload.get("kind") == "delivery_failure_notice":
+                    return
+                group, callback_id, notice_id = uuid4().hex, uuid4().hex, uuid4().hex
+                session.add(TelegramCallbackRow(id=callback_id, group_id=group, link_id=link_id, chat_id=row.chat_id, binding_generation=generation, kind="delivery_retry", target_kind="outbox", target_id=row.id, payload={}, created_at=now))
+                session.add(
+                    TelegramOutboxRow(
+                        id=notice_id,
+                        link_id=link_id,
+                        owner_user_id=row.owner_user_id,
+                        binding_generation=generation,
+                        dedupe_key=f"delivery-failed:{row_id}:{failure_version}",
+                        class_="reply",
+                        payload={"kind": "delivery_failure_notice", "repair_outbox_id": row_id, "presentation_version": 0},
+                        parts=Outbox._parts([{"kind": "text", "source_ref": {"key": "delivery.failed", "values": {}}, "callback_group_id": group}], 0),
+                        state="pending",
+                        not_before=now,
+                        chat_id=row.chat_id,
+                        message_thread_id=row.message_thread_id,
+                        created_at=now,
+                    )
+                )
+                return
+            # Unknown local errors retain delivery too. Do not persist exception
+            # text or turn temporary transport/storage failures into payload faults.
+            self._pending(row)
+            row.attempts += 1
+            exponent = min(row.attempts - 1, 16)
+            delay = min(DELIVERY_RETRY_CAP_SECONDS, DELIVERY_RETRY_FIRST_SECONDS * 2**exponent)
+            delay = min(DELIVERY_RETRY_CAP_SECONDS, delay * (1 + max(0, min(1, self.jitter())) * 0.2))
+            row.not_before = now + timedelta(seconds=delay)
+            if row.attempts >= self.outbox.config.outbox.max_attempts and row.degraded_at is None:
+                row.degraded_at = now
+
+    def _worker_done(self, link_id: str, row_id: str, generation: int, claim: str, task: asyncio.Task) -> None:
+        if not task.cancelled():
+            task.exception()  # retrieve unexpected exceptions; never log payloads
+        callback = asyncio.create_task(self._release(link_id, row_id, generation, claim, task))
+        self._callbacks.add(callback)
+        callback.add_done_callback(self._callbacks.discard)
+
+    async def _release(self, link_id: str, row_id: str, generation: int, claim: str, task: asyncio.Task) -> None:
+        try:
+            async with self.outbox._writer(link_id) as (session, binding):
+                row = await session.get(TelegramOutboxRow, row_id, with_for_update=True)
+                if self.outbox._fenced(row, generation=generation, owner=self.run_id, claim=claim):
+                    self._pending(row)
+        finally:
+            _LIVE_CLAIMS.discard((id(self.outbox.sessions), self.run_id, claim))
+            self._generations.pop(claim, None)
+            if self._workers.get(link_id) == (row_id, claim, task):
+                self._workers.pop(link_id, None)
+
+    async def drain(self) -> None:
+        while self._workers or self._callbacks:
+            tasks = [value[2] for value in self._workers.values()] + list(self._callbacks)
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.sleep(0)
+
+    async def stop(self) -> None:
+        self._stopping = True
+        async with self._tick_lock:
+            # Invalidate before cancelling: cancellation may be swallowed by
+            # transport. A tick already in admission must finish before this
+            # snapshot, so no worker can appear after shutdown drained it.
+            for link_id, (row_id, claim, task) in list(self._workers.items()):
+                generation = self._generations[claim]
+                async with self.outbox._writer(link_id) as (session, binding):
+                    row = await session.get(TelegramOutboxRow, row_id, with_for_update=True)
+                    if self.outbox._fenced(row, generation=generation, owner=self.run_id, claim=claim):
+                        self._pending(row)
+                task.cancel()
+        await self.drain()

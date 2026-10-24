@@ -43,6 +43,12 @@ clients or actual SDKs over socket-free mock transports, including timeout,
 cancellation, endpoint/key capture and context-scoped payload-log suppression.
 Keep recorded credentials synthetic and test artifacts on disk.
 
+Durable inbox/outbox tests use the same real SQL matrix. Exercise borrowed
+rollback/autoflush, chat-scoped replay, publication/run fences, joined-input
+completion and existing welcome plans. Worker barriers cover delayed same-process
+completions, fresh claim IDs, exact-part acknowledgements, capacity release,
+per-link pacing and repair. Advance injected clocks rather than real retry waits.
+
 `test_agent_chat_tools.py` uses real ToolNode runtime injection and host-only
 execution contexts for bounded page offers. Config tests use independent default
 expectations; Compose tests load the real template, validate it through the same

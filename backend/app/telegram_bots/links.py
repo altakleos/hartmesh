@@ -184,6 +184,11 @@ class BotLink:
     created_at: datetime
     updated_at: datetime
 
+    @staticmethod
+    def from_row(row: TelegramBotLinkRow) -> BotLink:
+        """Capture detached public link facts without exposing its credential."""
+        return _snapshot(row)
+
 
 @dataclass(frozen=True)
 class Connect:

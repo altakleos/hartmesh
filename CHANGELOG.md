@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Telegram durable delivery foundation
+
+Add durable input admission, immutable routing and publication identities, and
+reply delivery plans with ordered acknowledgements. Delivery workers use fenced
+claims, release capacity between retries and preserve saved content through
+repair. Input completion waits for every required delivery; recovery schedules
+saved output without starting another model run.
+
+No schema change: head remains `0043_telegram_inbox_chat_scope`. Configuration
+stays at version 55. Transport, polling and Gateway integration follow separately;
+managed Telegram activation remains deferred.
+
 ### Telegram presentation foundation
 
 Add English and Chinese product text, safe Markdown-to-Telegram HTML, balanced
