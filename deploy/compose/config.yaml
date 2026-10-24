@@ -26,7 +26,7 @@
 # Everything else is copied through unchanged. Paths are literal because this
 # file cannot interpolate them: HARTMESH_DATA_DIR is therefore fixed at
 # /srv/hartmesh by this file (README: "Mount points").
-config_version: 54
+config_version: 55
 log_level: info
 
 models: []
@@ -254,6 +254,67 @@ ui:
         Look at the spreadsheet I am about to attach and answer questions about
         it. Start by telling me what is in it.
 
+# Reserved until Telegram bot setup ships; the renderer omits this section
+# while HARTMESH_TELEGRAM is absent. Renderer-owned values stay out of here.
+telegram_bots:
+  reconcile_interval_seconds: 30
+  conflict_probe_seconds: 30
+  streaming: draft
+  queue:
+    depth: 10
+    max_wait_seconds: 120
+    retry_seconds: 10
+  files:
+    max_inbound_bytes: 20000000
+    max_outbound_bytes: 50000000
+    in_memory_max_bytes: 200000000
+    retry_seconds: 3
+    retry_max_seconds: 120
+    pending_ttl_hours: 24
+  callbacks:
+    draft_ttl_hours: 24
+    sweep_after_days: 7
+    max_age_days: 180
+  prompts:
+    ttl_seconds: 600
+  intents:
+    ttl_seconds: 600
+  producer:
+    poll_seconds: 15
+    batch: 200
+  outbox:
+    per_link_per_minute: 1
+    per_link_per_hour: 10
+    per_person_per_day: 60
+    digest_threshold: 3
+    progress_edit_seconds: 30
+    max_attempts: 5
+    recent_act_seconds: 1800
+    decision_hold_seconds: 120
+    place_free_hold_seconds: 600
+  quiet:
+    default_enabled: true
+    default_start: "21:00"
+    default_end: "07:00"
+  summary:
+    default_enabled: true
+    default_time: "08:00"
+  assign:
+    model_name: null
+    timeout_seconds: 30
+    max_chars: 4000
+  voice:
+    openai_model: gpt-4o-mini-transcribe
+    gemini_model: null
+    max_seconds: 300
+    max_seconds_per_person_per_day: 1800
+    timeout_seconds: 60
+  acts:
+    retry_seconds: 5
+    max_attempts: 3
+  profile:
+    retry_hours: 24
+
 # Where the Gateway reads the company's brand, provider support and starters:
 # brand.json, an optional PNG or JPEG logo, provider.json and starters.json
 # under /srv/hartmesh/operator/tenant, the operator's own directory on the
@@ -355,6 +416,9 @@ tool_groups:
 # checked and pinned before it is touched. The hosted reader it replaced
 # answered a tenant's address with a 401 for every page.
 tools:
+  - name: show_web_page
+    group: web
+    use: deerflow.agent_instances.chat_tools:show_web_page
   - name: web_search
     group: web
     use: deerflow.community.searxng.tools:web_search_tool

@@ -17,6 +17,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "backend/app/gateway/routers/AGENTS.md",
     "backend/app/channels/AGENTS.md",
     "backend/app/scheduler/AGENTS.md",
+    "backend/app/telegram_bots/AGENTS.md",
     "backend/packages/harness/deerflow/AGENTS.md",
     "backend/packages/harness/deerflow/agent_instances/AGENTS.md",
     "backend/packages/harness/deerflow/agents/AGENTS.md",

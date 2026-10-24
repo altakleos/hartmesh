@@ -89,6 +89,10 @@ COMMAND_ENVIRONMENT_KEYS = {"HARTMESH_PROVIDER_KEYS_SECRET", "HARTMESH_PROVIDER_
 # through the tenant .env (`env_file`) and are read by the profile's own
 # scripts. See tests/test_compose_operator_models.py.
 PASSTHROUGH_KEYS = {
+    "HARTMESH_TELEGRAM",
+    "HARTMESH_TELEGRAM_VOICE",
+    "HARTMESH_TELEGRAM_MAX_BOTS",
+    "HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON",
     "HARTMESH_MODELS_FILE",
     "HARTMESH_PRODUCT_NAME",
     "SANDBOX_READY_TIMEOUT",
@@ -784,7 +788,7 @@ def test_env_example_lists_exactly_the_fixed_contract_keys() -> None:
     keys = {line.split("=", 1)[0] for line in lines if line and not line.startswith("#")}
     assert keys == CONTRACT_KEYS | SIGN_ON_KEYS, "the example shows sign-on-only mode"
     comments = [line for line in lines if line.startswith("#")]
-    assert len(comments) == 20
+    assert len(comments) == 26
     assert "sign-on-only" in comments[0] and LOCAL_PASSWORDS_KEY in comments[0] and "callback" in comments[0]
     assert "Membership follows the claim" in comments[1] and "HARTMESH_SIGN_ON_ROLES" in comments[1]
     assert [line.split("=", 1)[0] for line in comments[2:5]] == ["#HARTMESH_SIGN_ON_ACCESS_CLAIM", "#HARTMESH_SIGN_ON_ACCESS_VALUES", "#HARTMESH_SIGN_ON_ROLES"], "the optional access keys are shown commented out"
@@ -808,7 +812,10 @@ def test_env_example_lists_exactly_the_fixed_contract_keys() -> None:
         "#HARTMESH_AI_EMPLOYEE_STORAGE_GIB=1",
         "#HARTMESH_COMPANY_STORAGE_GIB=1",
     ]
-    assert "verbatim" in comments[19] and "subset" in comments[19]
+    assert "off when absent" in comments[19]
+    assert comments[20] == "#HARTMESH_TELEGRAM=on"
+    assert comments[22:25] == ["#HARTMESH_TELEGRAM_VOICE=auto", "#HARTMESH_TELEGRAM_MAX_BOTS=100", "#HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON=10"]
+    assert "verbatim" in comments[25] and "subset" in comments[25]
     values = dict(line.split("=", 1) for line in lines if line and not line.startswith("#"))
     assert values["HARTMESH_TRUSTED_PROXIES"] == "192.0.2.10,192.0.2.11"
     assert values["HARTMESH_PUBLIC_HOST"] == "tenant.example.com"
@@ -859,7 +866,7 @@ def test_profile_consumes_no_key_outside_the_contract() -> None:
     seams = {"HARTMESH_RENDER_ONLY", "HARTMESH_NGINX_SOURCE", "HARTMESH_NGINX_TARGET"}
     for path in (PROFILE / "gateway" / "run.sh", PROFILE / "gateway" / "entrypoint.sh", PROFILE / "gateway" / "render_config.py", PROFILE / "nginx" / "render.sh"):
         names = set(contract_like.findall(path.read_text(encoding="utf-8"))) - seams
-        allowed = CONTRACT_KEYS | OPTIONAL_KEYS | PASSTHROUGH_KEYS | MODE_KEYS | STORAGE_INIT_KEYS
+        allowed = CONTRACT_KEYS | OPTIONAL_KEYS | PASSTHROUGH_KEYS | MODE_KEYS | STORAGE_INIT_KEYS | COMMAND_ENVIRONMENT_KEYS
         assert names <= allowed, (path.name, names - allowed)
 
 
@@ -1700,3 +1707,177 @@ def test_readme_describes_current_chat_storage_and_reclamation_limits():
     assert "bytes and inodes per conversation are unmeasured" in section
     for key in {"HARTMESH_USERS", "HARTMESH_USER_STORAGE_GIB", "HARTMESH_AI_ASSISTANTS_PER_USER", "HARTMESH_AI_ASSISTANT_STORAGE_GIB", "HARTMESH_AI_EMPLOYEES", "HARTMESH_AI_EMPLOYEE_STORAGE_GIB", "HARTMESH_COMPANY_STORAGE_GIB"}:
         assert key + "=" in section
+
+
+# Telegram configuration is reserved until the complete first stage ships.
+TELEGRAM_ENV_KEYS = {"HARTMESH_TELEGRAM", "HARTMESH_TELEGRAM_VOICE", "HARTMESH_TELEGRAM_MAX_BOTS", "HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON"}
+TELEGRAM_TEMPLATE_REFUSAL = "template `telegram_bots.enabled`, `telegram_bots.public_base_url`, `channel_connections` and `channels.telegram` must be absent; HARTMESH_TELEGRAM and HARTMESH_PUBLIC_HOST select them"
+
+
+@pytest.mark.parametrize("raw", [None, "", " "])
+def test_absent_telegram_key_renders_no_section_while_the_default_is_off(render_config: ModuleType, raw: str | None) -> None:
+    assert render_config.TELEGRAM_ABSENT_MEANS_ON is False
+    environ = _base_environ()
+    if raw is not None:
+        environ["HARTMESH_TELEGRAM"] = raw
+    document, _ = render_config.render(yaml.safe_load(TEMPLATE.read_text(encoding="utf-8")), (), environ)
+    assert not {"telegram_bots", "channel_connections", "channels"} & document.keys()
+    assert "show_web_page" not in {entry["name"] for entry in document["tools"]}
+    assert render_config.telegram_summary(document, environ) == "telegram=off; "
+
+
+@pytest.mark.parametrize("mode", ["on", "off"])
+def test_telegram_off_renders_disabled(render_config: ModuleType, mode: str) -> None:
+    environ = {**_base_environ(), "HARTMESH_TELEGRAM": mode}
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    document, _ = render_config.render(template, (), environ)
+    assert document["telegram_bots"]["enabled"] is (mode == "on")
+    assert document["channel_connections"] == {"enabled": True, "require_bound_identity": True, "telegram": {"enabled": False}}
+    assert document["channels"] == {"max_concurrency": 8}
+    assert "enabled" not in template["telegram_bots"]
+    assert "provider" not in template["telegram_bots"]["voice"]
+    if mode == "off":
+        assert render_config.telegram_summary(document, environ) == "telegram=off; "
+
+
+@pytest.mark.parametrize("path", [("telegram_bots", "enabled"), ("telegram_bots", "public_base_url"), ("channel_connections",), ("channels", "telegram")])
+@pytest.mark.parametrize("value", [None, False, {}])
+def test_template_telegram_keys_refused(render_config: ModuleType, path: tuple[str, ...], value: object) -> None:
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    parent = template
+    for key in path[:-1]:
+        parent = parent.setdefault(key, {})
+    parent[path[-1]] = value
+    with pytest.raises(render_config.RenderError) as exc:
+        render_config.render(template, (), {**_base_environ(), "HARTMESH_TELEGRAM": "bad"})
+    assert str(exc.value) == TELEGRAM_TEMPLATE_REFUSAL
+
+
+@pytest.mark.parametrize(
+    "key,selector,default,accepted,refusal",
+    [
+        ("HARTMESH_TELEGRAM", "select_telegram", "absent", ["on", "off"], "HARTMESH_TELEGRAM must be `on` or `off`"),
+        ("HARTMESH_TELEGRAM_VOICE", "select_telegram_voice", "auto", ["auto", "openai", "gemini", "off"], "HARTMESH_TELEGRAM_VOICE must be one of auto, openai, gemini, off"),
+        ("HARTMESH_TELEGRAM_MAX_BOTS", "select_telegram_max_bots", 100, [1, 500], "HARTMESH_TELEGRAM_MAX_BOTS must be a whole number from 1 to 500"),
+        ("HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON", "select_telegram_max_bots_per_person", 10, [1, 40], "HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON must be a whole number from 1 to 40"),
+    ],
+)
+def test_telegram_env_values_validated(render_config: ModuleType, key: str, selector: str, default: object, accepted: list, refusal: str) -> None:
+    select = getattr(render_config, selector)
+    assert select({}) == select({key: " "}) == default
+    for value in accepted:
+        assert select({key: f" {value} "}) == value
+    invalid = ["bad", "ON", "false", "-1", "+1", "1.0", "1e2", "0", "501", "9" * 5000]
+    if "PER_PERSON" in key:
+        invalid.append("41")
+    for value in invalid:
+        with pytest.raises(render_config.RenderError) as exc:
+            render_config.render(yaml.safe_load(TEMPLATE.read_text(encoding="utf-8")), (), {**_base_environ(), key: value})
+        assert str(exc.value) == refusal
+
+
+@pytest.mark.parametrize("check", [False, True])
+@pytest.mark.parametrize(
+    "mode,secret,host,fragment",
+    [
+        (None, "", "tenant.example.com", "telegram=off"),
+        ("off", "", "tenant.example.com", "telegram=off"),
+        ("on", "", "tenant.example.com", "telegram=on, bots cannot be added (HARTMESH_PROVIDER_KEYS_SECRET not set)"),
+        ("on", " " * 32, "tenant.example.com", "telegram=on, bots cannot be added (HARTMESH_PROVIDER_KEYS_SECRET not set)"),
+        ("on", "x" * 31, "tenant.example.com", "telegram=on, bots cannot be read (HARTMESH_PROVIDER_KEYS_SECRET is shorter than 32 characters)"),
+        ("on", " " + "x" * 31 + " ", "tenant.example.com", "telegram=on, bots cannot be read (HARTMESH_PROVIDER_KEYS_SECRET is shorter than 32 characters)"),
+        ("on", "x" * 32, "https://tenant.example.com", "telegram=on, no link buttons (HARTMESH_PUBLIC_HOST is not a hostname)"),
+        ("on", "x" * 32, "tenant.example.com", "telegram=on"),
+    ],
+)
+def test_summary_line_reports_missing_secret(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], check: bool, mode: str | None, secret: str, host: str, fragment: str) -> None:
+    for key in TELEGRAM_ENV_KEYS | STORAGE_INIT_KEYS | MODE_KEYS | COMMAND_ENVIRONMENT_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    for key, value in {**_base_environ(), "HARTMESH_PUBLIC_HOST": host, "HARTMESH_PROVIDER_KEYS_SECRET": secret}.items():
+        monkeypatch.setenv(key, value)
+    if mode is not None:
+        monkeypatch.setenv("HARTMESH_TELEGRAM", mode)
+    output = tmp_path / "rendered.yaml"
+    args = ["--template", str(TEMPLATE), "--catalog", str(CATALOG), "--output", str(output), *(["--check"] if check else [])]
+    assert render_config.main(args) == 0
+    captured = capsys.readouterr()
+    assert f"agents=on; {fragment}; sign-in=" in captured.out
+    assert "x" * 31 not in captured.out + captured.err
+    assert output.exists() is not check
+
+
+@pytest.mark.parametrize("host,expected", [("tenant.example.com", "https://tenant.example.com"), ("", None), ("https://tenant.example.com", None), ("localhost:2026", None), ("bad host", None)])
+def test_public_base_url_rendered_from_public_host(render_config: ModuleType, host: str, expected: str | None) -> None:
+    environ = {
+        **_base_environ(),
+        "HARTMESH_TELEGRAM": "on",
+        "HARTMESH_PUBLIC_HOST": host,
+        "HARTMESH_TELEGRAM_VOICE": "gemini",
+        "HARTMESH_TELEGRAM_MAX_BOTS": "250",
+        "HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON": "20",
+    }
+    document, _ = render_config.render(yaml.safe_load(TEMPLATE.read_text(encoding="utf-8")), (), environ)
+    section = document["telegram_bots"]
+    assert section["public_base_url"] == expected
+    assert (section["max_bots"], section["max_bots_per_person"], section["voice"]["provider"]) == (250, 20, "gemini")
+
+
+def test_show_web_page_tool_in_template(render_config: ModuleType) -> None:
+    from deerflow.reflection import resolve_variable
+
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    entry = next(tool for tool in template["tools"] if tool["name"] == "show_web_page")
+    assert entry == {"name": "show_web_page", "group": "web", "use": "deerflow.agent_instances.chat_tools:show_web_page"}
+    assert resolve_variable(entry["use"]).name == "show_web_page"
+
+
+def test_config_version_is_55() -> None:
+    assert yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))["config_version"] == yaml.safe_load(_example_config())["config_version"] == 55
+
+
+def test_rendered_bundle_section_validates(render_config: ModuleType) -> None:
+    from app.telegram_bots.config import load_config, section_present
+    from deerflow.config.app_config import AppConfig
+
+    document, _ = render_config.render(yaml.safe_load(TEMPLATE.read_text(encoding="utf-8")), (), {**_base_environ(), "HARTMESH_TELEGRAM": "on"})
+    # Test the real template independently of local config and global AppConfig loading.
+    app_config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}, "telegram_bots": document["telegram_bots"]})
+    assert section_present(app_config)
+    config = load_config(app_config)
+    assert config.enabled is True
+    assert document["telegram_bots"] == config.model_dump(mode="json")
+
+
+@pytest.mark.parametrize("role", ["admin", "user"])
+def test_deployment_wide_telegram_routes_refused_in_bundle(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str) -> None:
+    from unittest.mock import MagicMock
+    from uuid import UUID
+
+    from _router_auth_helpers import make_authed_test_app
+    from fastapi.testclient import TestClient
+
+    from app.channels.runtime_config_store import ChannelRuntimeConfigStore
+    from app.gateway.auth.models import User
+    from app.gateway.routers import channel_connections
+    from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "0")
+    document, _ = render_config.render(yaml.safe_load(TEMPLATE.read_text(encoding="utf-8")), (), {**_base_environ(), "HARTMESH_TELEGRAM": "on"})
+    person = User(id=UUID("11111111-2222-3333-4444-555555555555"), email="person@example.com", password_hash="x", system_role=role)
+    app = make_authed_test_app(user_factory=lambda: person, bind_current_user=True, signed_in=True)
+    app.state.channel_connections_config = ChannelConnectionsConfig.model_validate(document["channel_connections"])
+    app.state.channels_config = document["channels"]
+    repo = MagicMock()
+    app.state.channel_connection_repo = repo
+    path = tmp_path / "runtime-config.json"
+    app.state.channel_runtime_config_store = ChannelRuntimeConfigStore(path)
+    app.include_router(channel_connections.router)
+    with TestClient(app) as client:
+        response = client.post("/api/channels/telegram/connect")
+        assert response.status_code == 400 and response.json()["detail"] == "Channel provider is not enabled"
+        response = client.post("/api/channels/telegram/runtime-config", json={"values": {"bot_token": "synthetic", "bot_username": "example_bot"}})
+        assert response.status_code == (400 if role == "admin" else 403)
+        if role == "admin":
+            assert response.json()["detail"] == "Channel provider is not enabled"
+    assert not path.exists()
+    assert repo.mock_calls == []

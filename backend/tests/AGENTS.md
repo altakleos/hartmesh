@@ -20,6 +20,11 @@ head alone cannot detect a skipped revision inserted behind an applied head.
 
 ## Telegram compatibility and persistence
 
+`test_agent_chat_tools.py` uses real ToolNode runtime injection and host-only
+execution contexts for bounded page offers. Config tests use independent default
+expectations; Compose tests load the real template, validate it through the same
+strict model, and exercise legacy route refusals without a bot transport.
+
 `test_telegram_bot_migration.py` compares frozen migration DDL with cold ORM
 creation on SQLite and isolated PostgreSQL schemas, including index names,
 partial predicates, foreign-key deletion behavior and absent server defaults.
