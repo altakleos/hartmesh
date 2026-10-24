@@ -17,6 +17,8 @@ from urllib.parse import urlsplit
 from sqlalchemy.exc import SQLAlchemyError
 from telegram.error import BadRequest, Conflict, Forbidden, InvalidToken, NetworkError, RetryAfter, TelegramError, TimedOut
 
+from deerflow.utils.file_io import await_drained
+
 if TYPE_CHECKING:
     from telegram import Update
 
@@ -68,10 +70,16 @@ class PollTask:
         on_health: Callable[[str, bool], Awaitable[None]],
         record: PollRecord,
         on_result: Callable[[], bool] | None = None,
+        on_dispatch: Callable[[], None] | None = None,
+        decision_pending: Callable[[], bool] | None = None,
+        control_allowed: Callable[[str], bool] | None = None,
+        is_current: Callable[[], bool] | None = None,
         clock: Callable[[], datetime] = _now,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.channel, self.on_health, self.record, self.on_result = channel, on_health, record, on_result
+        self._on_dispatch, self._decision_pending = on_dispatch, decision_pending
+        self._control_allowed, self._is_current = control_allowed, is_current
         self._transport_revision = channel.transport_revision
         self._link_id, self._bot_id = channel.link.id, channel.link.bot_id
         self._clock, self._sleep = clock, sleep
@@ -122,7 +130,13 @@ class PollTask:
 
     async def _current(self):
         while not self._retired:
-            current = await self.channel.refresh_link()
+            if self._is_current is not None and not self._is_current():
+                self._retired = True
+                return None
+            # Cancellation cannot abandon a live SQLite cursor inside this
+            # complete read/CAS guard. Drain its transaction and cursor before
+            # retirement closes the client or admits a replacement poller.
+            current = await await_drained(self.channel.refresh_link())
             if current is None or current.token_revision != self.transport_revision or current.health == "token_rejected":
                 self._retired = True
                 return None
@@ -131,6 +145,9 @@ class PollTask:
             # follows the last verification gate rather than an earlier CAS.
             verification = await self.channel.wait_token_verification()
             if verification is None:
+                if self._is_current is not None and not self._is_current():
+                    self._retired = True
+                    return None
                 return current
             if verification.status in {"rejected", "retired"}:
                 self._retired = True
@@ -154,6 +171,8 @@ class PollTask:
         logger.log(level, "telegram_bots %s %s", name, " ".join(f"{key}={value}" for key, value in fields.items() if value is not None))
 
     def _result(self, *, success: bool = False, conflict: bool = False) -> bool:
+        if self._is_current is not None and not self._is_current():
+            return True
         self.record.polls += 1
         self.record.successes += int(success)
         self.record.conflicts += int(conflict)
@@ -301,6 +320,8 @@ class PollTask:
         self._fence_pending, self._fence_committed = None, False
         self.record.webhook |= self._webhook
         hold = self._result(conflict=True) if count else False
+        if self._decision_pending is not None:
+            hold = bool(self._decision_pending())
         if self._webhook or not hold and observed - self._first_conflict >= timedelta(seconds=CONFLICT_GRACE_SECONDS):
             # These facts were guarded before publishing the result. Capture
             # its immutable health intent before any further awaited guard.
@@ -344,6 +365,8 @@ class PollTask:
         return False
 
     async def _fetch_locked(self, *, mode: str = "poll") -> str:
+        if mode in {"drop", "confirm"} and self._control_allowed is not None and not self._control_allowed(mode):
+            return "held"
         if await self._current() is None:
             return "invalid-token"
         if self._fence_pending is not None:
@@ -358,6 +381,10 @@ class PollTask:
         elif self.offset is not None:
             parameters["offset"] = self.offset
         count = mode in {"poll", "probe"}
+        if not count and self._control_allowed is not None and not self._control_allowed(mode):
+            return "held"
+        if count and self._on_dispatch is not None:
+            self._on_dispatch()
         try:
             updates = await self.channel.bot.get_updates(**parameters)
         except Conflict as error:
@@ -406,7 +433,7 @@ class PollTask:
         await self._success()
         if self._retired or await self._current() is None:
             return "invalid-token"
-        hold = self._result(success=True)
+        hold = self._result(success=True) or self._drop_required
         if not self._has_success:
             self._event("poll_first_ok", level=logging.INFO, updates=len(updates))
             self._has_success = True
@@ -449,6 +476,19 @@ class PollTask:
                 self.offset = self._batch_last + 1
                 self._batch_last = None
             return accepted
+
+    @property
+    def pending_drop(self) -> bool:
+        return self._drop_required
+
+    def discard_held(self) -> int:
+        """Discard only the startup buffer locally, without acknowledging it."""
+        count = len(self._held)
+        self._held = []
+        return count
+
+    def wake(self) -> None:
+        self._wake.set()
 
     async def release_held(self) -> None:
         if self._held:
@@ -610,7 +650,11 @@ class PollTask:
                     await self._wait(self._backoff)
                     self._backoff = min(BACKOFF_CAP_SECONDS, self._backoff * BACKOFF_FACTOR)
                     continue
-            if self._fence_pending or self._drop_required:
+            drop_allowed = self._control_allowed is None or self._control_allowed("drop")
+            if self._drop_required and not drop_allowed and self._decision_pending is not None and not self._decision_pending():
+                await self._wait()
+                continue
+            if self._fence_pending or self._drop_required and drop_allowed:
                 async with self._operation:
                     # Another owner may have completed the control request
                     # while this run waited for the shared operation lock.
@@ -639,6 +683,9 @@ class PollTask:
                 await self._wait()
                 continue
             if self._pending:
+                # Service the observed transfer notification now. A new wake
+                # during admission still belongs to the subsequent wait.
+                self._wake.clear()
                 await self.admit_batch(tuple(self._pending))
                 if self._pending and not self._retired:
                     await self._wait(self._backoff)

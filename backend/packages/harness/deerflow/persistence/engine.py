@@ -98,6 +98,8 @@ async def init_engine(
     command_timeout: float | None = POSTGRES_COMMAND_TIMEOUT_SECONDS,
     sqlite_dir: str = "",
     postgres_schema: str = "",
+    existing_only: bool = False,
+    read_only: bool = False,
 ) -> None:
     """Create the async engine and session factory, then auto-create tables.
 
@@ -113,8 +115,11 @@ async def init_engine(
             pins the connection ``search_path`` to it via asyncpg
             ``server_settings`` and the schema is created (if missing)
             before tables are auto-created. Ignored for non-postgres.
+        existing_only: Open an existing database without bootstrap, DDL or creation.
+        read_only: Open read-only connections; implies existing_only.
     """
     global _engine, _session_factory
+    existing_only = existing_only or read_only
 
     if backend == "memory":
         logger.info("Persistence backend=memory -- ORM engine not initialized")
@@ -144,7 +149,26 @@ async def init_engine(
         # lifespan event loop, and a sync ``os.makedirs`` (a stat + mkdir
         # syscall) blocks it during startup. Mirrors the #1912 fix for the
         # checkpointer's ``ensure_sqlite_parent_dir``.
-        await asyncio.to_thread(os.makedirs, sqlite_dir or ".", exist_ok=True)
+        if existing_only:
+            from urllib.parse import quote
+
+            from sqlalchemy.engine import make_url
+
+            parsed = make_url(url)
+            database = parsed.database
+            if not database or database in {":memory:", "file::memory:"} or parsed.query.get("mode") == "memory":
+                raise ValueError("Existing SQLite access requires a filesystem database")
+            query = dict(parsed.query)
+            is_uri = str(query.get("uri", "")).lower() in {"true", "1"}
+            if not is_uri or not database.startswith("file:"):
+                database = "file:" + quote(database.replace("\\", "/") if os.name == "nt" else database, safe="/:")
+            # Immutable SQLite ignores concurrent WAL changes. Existing access
+            # must instead keep ordinary locking and use an enforced open mode.
+            query.pop("immutable", None)
+            query.update(mode="ro" if read_only else "rw", uri="true")
+            url = parsed.set(database=database, query=query)
+        else:
+            await asyncio.to_thread(os.makedirs, sqlite_dir or ".", exist_ok=True)
         _engine = create_async_engine(url, echo=echo, json_serializer=_json_serializer)
 
         # Enable WAL on every new connection. SQLite PRAGMA settings are
@@ -166,16 +190,21 @@ async def init_engine(
         def _enable_sqlite_wal(dbapi_conn, _record):  # noqa: ARG001 — SQLAlchemy contract
             cursor = dbapi_conn.cursor()
             try:
-                cursor.execute("PRAGMA journal_mode=WAL;")
-                cursor.execute("PRAGMA synchronous=NORMAL;")
+                if not existing_only:
+                    cursor.execute("PRAGMA journal_mode=WAL;")
+                    cursor.execute("PRAGMA synchronous=NORMAL;")
                 cursor.execute("PRAGMA foreign_keys=ON;")
                 cursor.execute("PRAGMA busy_timeout=30000;")
+                if read_only:
+                    cursor.execute("PRAGMA query_only=ON;")
             finally:
                 cursor.close()
     elif backend == "postgres":
         from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
         pg_connect_args = build_asyncpg_connect_args(postgres_schema)
+        if read_only:
+            pg_connect_args.setdefault("server_settings", {})["default_transaction_read_only"] = "on"
         _engine = create_async_engine(
             url,
             **_postgres_engine_kwargs(
@@ -190,6 +219,17 @@ async def init_engine(
         raise ValueError(f"Unknown persistence backend: {backend!r}")
 
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
+    if existing_only:
+        try:
+            # Validate existence/reachability now, without importing schema or
+            # migration machinery. URI mode also forbids missing SQLite files.
+            async with _engine.connect():
+                pass
+        except BaseException:
+            await close_engine()
+            raise
+        logger.info("Persistence engine initialized: backend=%s", backend)
+        return
 
     # Schema bootstrap (hybrid):
     #   - empty DB        -> create_all + alembic stamp head
@@ -244,21 +284,28 @@ async def init_engine(
     logger.info("Persistence engine initialized: backend=%s", backend)
 
 
-async def init_engine_from_config(config) -> None:
+async def init_engine_from_config(config, *, existing_only: bool = False, read_only: bool = False) -> None:
     """Convenience: init engine from a DatabaseConfig object."""
     if config.backend == "memory":
-        await init_engine("memory")
+        await init_engine("memory", existing_only=existing_only, read_only=read_only)
         return
-    await init_engine(
-        backend=config.backend,
-        url=config.app_sqlalchemy_url,
-        echo=config.echo_sql,
-        pool_size=config.pool_size,
-        pool_recycle=config.pool_recycle,
-        command_timeout=config.command_timeout,
-        sqlite_dir=config.sqlite_dir if config.backend == "sqlite" else "",
-        postgres_schema=config.postgres_schema if config.backend == "postgres" else "",
-    )
+
+    def prepare():
+        # URL properties resolve filesystem paths; prepare on a worker while
+        # engine connections and their lifecycle remain on the calling loop.
+        return {
+            "backend": config.backend,
+            "url": config.app_sqlalchemy_url,
+            "echo": config.echo_sql,
+            "pool_size": config.pool_size,
+            "pool_recycle": config.pool_recycle,
+            "command_timeout": config.command_timeout,
+            "sqlite_dir": config.sqlite_dir if config.backend == "sqlite" else "",
+            "postgres_schema": config.postgres_schema if config.backend == "postgres" else "",
+        }
+
+    options = await await_drained(asyncio.to_thread(prepare))
+    await init_engine(**options, existing_only=existing_only, read_only=read_only)
 
 
 def get_session_factory() -> async_sessionmaker[AsyncSession] | None:

@@ -22,6 +22,7 @@ from telegram.request import HTTPXRequest
 from app.channels.telegram import TelegramChannel
 from app.telegram_bots.render import render, render_plain
 from app.telegram_bots.settings import silent_now
+from app.telegram_bots.token_pattern import TOKEN_BODY as TOKEN_BODY
 
 if TYPE_CHECKING:
     from app.channels.message_bus import OutboundMessage
@@ -31,7 +32,6 @@ if TYPE_CHECKING:
     from app.telegram_bots.producer import DeliveryEligibility, Outbox, OutboxItem, SendingPart
     from app.telegram_bots.settings import SettingsRepository
 
-TOKEN_BODY = "[0-9]{6,12}:[A-Za-z0-9_-]{30,}"
 LIMITER_HOLD_MAX_SECONDS = 5
 SEND_RETRY_AFTER_MAX_SECONDS = 60
 
@@ -115,6 +115,8 @@ class TransportServices(Protocol):
     async def eligibility(self, link: BotLink, item: OutboxItem, part: dict | None) -> DeliveryEligibility: ...
 
     def channel(self, link_id: str) -> TelegramBotChannel | None: ...
+
+    def send_allowed(self) -> bool: ...
 
 
 def _now() -> datetime:
@@ -536,6 +538,9 @@ class TelegramBotChannel(TelegramChannel):
         await self._after_send_success()
         return message.message_id
 
+    def _send_allowed(self) -> bool:
+        return self._services.send_allowed() is True
+
     async def _notice_context_current(self, context: SendContext) -> bool:
         # A disposable transition has separate authorization from ordinary
         # queued delivery (access.off may follow disablement), but never gains
@@ -550,10 +555,11 @@ class TelegramBotChannel(TelegramChannel):
             and self.application.running
             and not self._stopping
             and self._services.channel(context.link_id) is self
+            and self._send_allowed()
         )
 
     async def answer_press(self, query_id: str, key: str | None = None, **values) -> None:
-        if not self.application.running:
+        if not self.application.running or not self._send_allowed():
             return
         logged = False
         try:
@@ -561,6 +567,8 @@ class TelegramBotChannel(TelegramChannel):
                 if await self.refresh_link() is None:
                     return
                 text = await self._render_source(self.link, {"key": key, "values": values}, plain=True) if key else None
+                if not self._send_allowed() or self._services.channel(self.link.id) is not self:
+                    return
                 try:
                     await self.bot.answer_callback_query(query_id, text=text, show_alert=True if key else None)
                 except InvalidToken as error:
@@ -614,7 +622,7 @@ class TelegramBotChannel(TelegramChannel):
     async def send_part(self, *, outbox_id: str, part_id: str, claim_owner: str, claim_id: str) -> list[int]:
         from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryEligibility, DeliveryRetry, PermanentDeliveryError, SourceUnavailable
 
-        if not self.application.running or self._stopping or self._services.channel(self.link.id) is not self:
+        if not self.application.running or self._stopping or self._services.channel(self.link.id) is not self or not self._send_allowed():
             raise DeliveryClaimRetired()
         capture = dict(link_id=self.link.id, outbox_id=outbox_id, part_id=part_id, claim_owner=claim_owner, claim_id=claim_id, token_revision=self.transport_revision)
         saved = await self._services.outbox.capture_sending_part(**capture)
@@ -664,6 +672,7 @@ class TelegramBotChannel(TelegramChannel):
             or not self.application.running
             or self._stopping
             or self._services.channel(self.link.id) is not self
+            or not self._send_allowed()
         ):
             raise DeliveryClaimRetired()
         current = latest

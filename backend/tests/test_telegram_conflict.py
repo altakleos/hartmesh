@@ -35,7 +35,9 @@ async def managed_rig(db, *, start=True, owner="owner-a", bot=9_000_000_001):
     def request_factory(*, connection_pool_size, httpx_kwargs):
         return request if connection_pool_size == 8 else updates
 
-    services = SimpleNamespace(links=db.links, config=db.config, outbox=Outbox(db.sessions), settings=db.settings, tls_context=object(), request_factory=request_factory, protect_notice=AsyncMock(return_value=False))
+    services = SimpleNamespace(
+        send_allowed=lambda: True, links=db.links, config=db.config, outbox=Outbox(db.sessions), settings=db.settings, tls_context=object(), request_factory=request_factory, protect_notice=AsyncMock(return_value=False)
+    )
     token = str(secrets.randbelow(900000) + 100000) + ":" + secrets.token_urlsafe(30)
     channel = TelegramBotChannel(link=link, token=token, supervisor=services, monotonic=clock.monotonic, sleep=clock.sleep, now=clock.now)
     if start:

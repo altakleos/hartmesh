@@ -63,6 +63,7 @@ async def test_cold_recipient_timezone_calculation_is_off_loop_with_actual_sdk(d
         return request if kwargs["connection_pool_size"] == 8 else updates
 
     services = SimpleNamespace(
+        send_allowed=lambda: True,
         config=db.config,
         links=db.links,
         settings=db.settings,

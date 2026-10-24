@@ -1,5 +1,15 @@
 # Persistence lifecycle
 
+`init_engine`/`init_engine_from_config` preserve normal bootstrap by default.
+Operator callers may use `existing_only=True` to prohibit directory/database/
+schema creation, bootstrap and migration stamping. `read_only=True` also implies
+existing-only; SQLite uses an existing-file URI without immutable mode so live
+WAL data remains visible, and PostgreSQL pins read-only behavior on every
+connection while preserving configured search_path. Keep foreign keys and busy
+timeouts; these modes must not change journal settings. Dispose a partially
+initialized engine on failure or cancellation. A multi-query status snapshot
+still needs a real SQLite transaction or PostgreSQL REPEATABLE READ READ ONLY.
+
 RunRepository's private `_borrowed_inflight` requires the caller's active
 same-engine transaction, reads every pending/running row under a strict bound,
 and never checks out or commits another session. Future creation times cannot

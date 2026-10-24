@@ -189,6 +189,53 @@ async def test_held_cap_releases_without_waiting_for_admission_and_advances_only
         await cancel(running)
 
 
+@pytest.mark.parametrize("wake_during_admission", [False, True])
+async def test_transferred_release_wake_is_consumed_before_admission_but_new_wake_survives(env, wake_during_admission):
+    gate = True
+    current_entered, release_current, admission_entered, release_admission = (asyncio.Event() for _ in range(4))
+    env.task.on_result = lambda: gate
+    env.channel.admissions[2] = False
+    env.updates.enqueue("getUpdates", result=[update_payload(n) for n in (1, 2, 3)])
+    next_poll = env.updates.enqueue("getUpdates", result=[], release=asyncio.Event())
+    refresh, handle = env.channel.refresh_link, env.channel.handle_update
+
+    async def current():
+        if env.task.held_count() and not current_entered.is_set():
+            current_entered.set()
+            await release_current.wait()
+        return await refresh()
+
+    async def admission(update):
+        if update.update_id == 2 and not admission_entered.is_set():
+            admission_entered.set()
+            await release_admission.wait()
+        return await handle(update)
+
+    env.channel.refresh_link, env.channel.handle_update = current, admission
+    running = asyncio.create_task(env.task.run())
+    try:
+        await asyncio.wait_for(current_entered.wait(), 2)
+        gate = False
+        await env.task.release_held()
+        release_current.set()
+        await asyncio.wait_for(admission_entered.wait(), 2)
+        if wake_during_admission:
+            env.task.wake()
+        release_admission.set()
+        await env.clock.wait_for_sleep()
+        assert env.channel.accepted == ([1, 2, 2] if wake_during_admission else [1, 2])
+        assert len(env.updates.calls) == 1 and env.task.offset is None
+        env.channel.admissions[2] = True
+        env.clock.advance(env.clock.sleeps[-1])
+        await asyncio.wait_for(next_poll.started.wait(), 2)
+        assert env.channel.accepted == ([1, 2, 2, 2, 3] if wake_during_admission else [1, 2, 2, 3])
+        assert env.updates.calls[-1].parameters["offset"] == 4
+    finally:
+        release_current.set()
+        release_admission.set()
+        await cancel(running)
+
+
 @pytest.mark.parametrize("operation", ["probe", "confirm_offset", "drop_pending"])
 async def test_all_get_updates_operations_share_one_request_owner(env, operation):
     env.task.offset = 10

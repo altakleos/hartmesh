@@ -37,6 +37,7 @@ async def build(db, *, parts=1):
         return False
 
     services = SimpleNamespace(
+        send_allowed=lambda: True,
         config=db.config,
         links=db.links,
         settings=db.settings,

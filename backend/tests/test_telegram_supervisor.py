@@ -37,6 +37,24 @@ def _supervisor_logging():
             handler.filters = filters
 
 
+class ImmediateCopyDecision:
+    """Keep unrelated lifecycle fixtures offline with an explicit false result.
+
+    Dedicated CopyGuard tests supply the real SQL-backed guard instead.
+    """
+
+    this_host_id = "offline-lifecycle-fixture"
+
+    async def at_start(self):
+        return "running"
+
+    def can_still_be_broad_conflict(self, started, results):
+        return False
+
+    def broad_conflict(self, polled, results):
+        return False
+
+
 class Authority:
     async def delivery(self, link, item, part=None):
         return DeliveryEligibility.allow()
@@ -90,6 +108,7 @@ def build(db, monkeypatch, *, health=None, clock=None, factory=None, environ=Non
         outbox=Outbox(db.sessions),
         settings=db.settings,
         authority=Authority(),
+        copy_guard=ImmediateCopyDecision(),
         app_config=object(),
         environ=env,
         request_factory=lambda **kw: normal if kw["connection_pool_size"] == 8 else updates,
@@ -588,6 +607,7 @@ def per_link_factory(records, *, construction_gates=None, construction_entered=N
             settings=supervisor.settings,
             tls_context=supervisor.tls_context,
             eligibility=supervisor.eligibility,
+            send_allowed=supervisor.send_allowed,
             protect_notice=supervisor.protect_notice,
             channel=supervisor.channel,
             request_factory=lambda **kw: normal if kw["connection_pool_size"] == 8 else updates,
