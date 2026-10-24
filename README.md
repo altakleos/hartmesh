@@ -1328,6 +1328,11 @@ preference tables unchanged and does not enable the new bot connection flow.
 Configuration version 55 reserves managed Telegram bot settings and a bounded
 `show_web_page` tool. The Compose bundle omits them while `HARTMESH_TELEGRAM`
 is absent; the unfinished connection flow is not offered in this release.
+The managed-bot foundation now includes bot-bound token wrapping, atomic
+ownership/setup-code transactions, durable binding welcomes, and personal
+notification settings. Revision `0043_telegram_inbox_chat_scope` includes the
+chat ID in retained inbox identities so reconnecting another account works
+without deleting earlier receipts. The connection flow remains reserved.
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 

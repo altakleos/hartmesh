@@ -20,6 +20,23 @@ head alone cannot detect a skipped revision inserted behind an applied head.
 
 ## Telegram compatibility and persistence
 
+Repository tests use `_telegram_repository_test_support.py` with isolated real
+SQLite/PostgreSQL databases, disk-backed fixtures and no runtime bootstrap.
+Group SQLite fixture DDL in one explicit transaction; retain normal production
+writer semantics during tests. Normalize PostgreSQL `sslmode=disable` into the
+asyncpg connect option, matching CI. Exercise concurrent first-owner/capacity
+admission, borrowed-session rollback, account ownership, binding generations,
+durable Start replay, code epochs, cleanup and immutable replacement receipts.
+The tracked-token scan reports locations only; construct credentials at runtime
+and run it after staging so newly added source files are included.
+Revision 0043 preserves retained inbox records while adding chat to their primary
+key. Test duplicate chat-local message IDs across account changes and refuse a
+downgrade that would collapse retained identities. Keep 0042 DDL/metadata/ancestry
+and downgrade guards unchanged; its one exact successor-shape validation path
+must preserve cross-chat records and reject drift during older-stamp replay.
+Current ORM parity is measured after 0043; historical 0042 tests use its frozen
+table metadata.
+
 `test_agent_chat_tools.py` uses real ToolNode runtime injection and host-only
 execution contexts for bounded page offers. Config tests use independent default
 expectations; Compose tests load the real template, validate it through the same

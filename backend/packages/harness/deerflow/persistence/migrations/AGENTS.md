@@ -1,8 +1,16 @@
 ### Schema Migrations (`packages/harness/deerflow/persistence/migrations/`)
 
-The distribution ends in `0042_telegram_bots`, adding fifteen Telegram binding,
-receipt and delivery tables with guarded downgrade and no server defaults.
-It follows `0041_storage_host_replacements`, human input0039, Work0038, lifecycle0037 and identity0034,
+The distribution ends in `0043_telegram_inbox_chat_scope`, widening the retained
+inbox primary key to `(link_id, message_id, chat_id)` without changing records
+or other schema. SQLite rebuilds only the child table with foreign keys enabled;
+PostgreSQL changes its key transactionally. Downgrade serializes writers and
+refuses retained cross-chat collisions before DDL. Current cold-ORM parity is
+measured after 0043. Historical 0042 DDL/metadata/ancestry/guards stay unchanged;
+its existing-table validator recognizes only the exact independently frozen 0043
+inbox shape for older-stamp replay. No live ORM or broad validation bypass.
+Its parent `0042_telegram_bots`
+adds fifteen Telegram binding, receipt and delivery tables with guarded downgrade
+and no server defaults. It follows `0041_storage_host_replacements`, human input0039, Work0038, lifecycle0037 and identity0034,
 conversations0035 and memory/provenance0036. These follow0033_storage_features.
 They add adopted revisions, instances/grants, bindings, memory, lifecycle intent
 and generic Work/attempt/event and human-input request/response/event/read records;

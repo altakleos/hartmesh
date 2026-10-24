@@ -124,9 +124,8 @@ async def connection(database):
             await transaction.rollback()
 
 
-def test_chain_head_is_0042_telegram_bots():
+def test_frozen_0042_parent_is_unchanged():
     script = ScriptDirectory(str(_MIGRATIONS_DIR))
-    assert script.get_heads() == [REVISION]
     assert script.get_revision(REVISION).down_revision == PREVIOUS
 
 
@@ -202,20 +201,16 @@ async def test_person_settings_columns_are_final(connection):
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_models_match_the_migration(connection):
-    import deerflow.persistence.models as registered
-    from deerflow.persistence.base import Base
-
+async def test_historical_revision_matches_its_frozen_metadata(connection):
     await connection.run_sync(apply)
     frozen = await connection.run_sync(shape)
     await connection.run_sync(apply, "downgrade")
     assert await connection.run_sync(shape) == {}
-    await connection.run_sync(lambda c: Base.metadata.create_all(c, tables=[Base.metadata.tables[name] for name in TABLES]))
+    await connection.run_sync(lambda c: migration()._metadata.create_all(c, tables=list(migration()._tables)))
     assert await connection.run_sync(shape) == frozen
     for name in TABLES:
-        assert all(column.server_default is None for column in Base.metadata.tables[name].columns)
-    assert registered.TelegramOutboxRow.__table__.c["class"].name == "class"
-    # Existing create_all users must pass the same frozen validator as upgrades.
+        assert all(column.server_default is None for column in migration()._metadata.tables[name].columns)
+    # 0042 remains frozen; current cold-ORM parity is measured after 0043.
     await connection.run_sync(apply)
     await connection.run_sync(apply)
     assert await connection.run_sync(shape) == frozen

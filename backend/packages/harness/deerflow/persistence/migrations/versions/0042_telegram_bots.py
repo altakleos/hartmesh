@@ -393,8 +393,15 @@ def upgrade():
     for table in _tables:
         inspector = sa.inspect(bind)
         if table.name in inspector.get_table_names():
-            frozen._validate_existing(inspector, table)
-            indexes._validate_indexes(bind, table)
+            if table.name == "telegram_inbound_marks" and inspector.get_pk_constraint(table.name)["constrained_columns"] == ["link_id", "message_id", "chat_id"]:
+                # A legacy stamp may coexist with newer create_all tables.
+                # Recognize only the independently frozen immediate successor;
+                # This changes no 0042 creation DDL or retained data.
+                successor = importlib.import_module("deerflow.persistence.migrations.versions.0043_telegram_inbox_chat_scope")
+                successor._validate(bind, successor._after)
+            else:
+                frozen._validate_existing(inspector, table)
+                indexes._validate_indexes(bind, table)
         else:
             table.create(bind)
 

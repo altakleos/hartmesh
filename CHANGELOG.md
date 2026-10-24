@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Telegram ownership foundation
+
+Add bot-specific credential wrapping while preserving existing provider-key
+cipher compatibility. Durable bot-link transactions serialize capacity, account
+ownership, setup codes, binding generations and ordered welcome/privacy delivery.
+Replacement receipts make retries safe after the old link was removed; rollback
+keeps its token, binding and conversation intact. Conflict epochs fence old
+setup codes, and cleanup retires stale delivery claims and connection authority.
+Personal settings retain time zone, language, quiet hours and notification
+preferences with conflict-safe first initialization.
+
+These additions do not activate managed Telegram bots or change configuration
+version 55. The chat-scoped inbox migration below fixes account reconnection.
+
 ### Configuration and deployment
 
 Configuration version 55 adds strict managed Telegram bot settings, four optional
@@ -28,6 +42,15 @@ shapes; downgrade refuses to erase retained bot links, tokens or history.
 The managed bot connection flow is not enabled by this schema preparation.
 An older binary that does not know this revision needs the pre-upgrade snapshot
 for rollback.
+
+Revision `0043_telegram_inbox_chat_scope` then adds the existing chat ID to the
+inbox primary key. Different accounts can reuse a chat-local message ID on one
+bot link while retaining separate Start/reply histories. Upgrade preserves rows
+and constraints; downgrade refuses before DDL if retained identities would
+collapse across chats. Earlier creation DDL and release ancestry stay unchanged.
+For older-revision replay over already-created current tables, 0042 accepts
+only the independently frozen 0043 inbox shape after full validation; it does
+not change its data, skip revisions or accept unknown schema drift.
 
 ### Fixed storage reservations
 

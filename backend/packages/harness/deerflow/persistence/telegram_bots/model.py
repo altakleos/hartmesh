@@ -342,7 +342,7 @@ class TelegramInboundMarkRow(Base):
     link_id: Mapped[str] = mapped_column(String(32), ForeignKey("telegram_bot_links.id", ondelete="CASCADE"), primary_key=True)
     message_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     update_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, nullable=False)
     message_thread_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     binding_generation: Mapped[int] = mapped_column(Integer, nullable=False)
     accepted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

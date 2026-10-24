@@ -54,8 +54,8 @@ class UnwrappedProviderKey:
 _KEY_LABEL = b"hartmesh-provider-keys/v1"
 
 
-def _fernet(secret: str) -> Fernet:
-    derived = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=_KEY_LABEL).derive(secret.encode("utf-8"))
+def _fernet(secret: str, label: bytes = _KEY_LABEL) -> Fernet:
+    derived = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=label).derive(secret.encode("utf-8"))
     return Fernet(base64.urlsafe_b64encode(derived))
 
 
@@ -69,21 +69,21 @@ def _secret(environ: Mapping[str, str], name: str) -> str | None:
 
 
 class ProviderKeyCipher:
-    def __init__(self, current: str, previous: str | None = None) -> None:
-        self._current = _fernet(current)
-        self._previous = _fernet(previous) if previous else None
+    def __init__(self, current: str, previous: str | None = None, *, label: bytes = _KEY_LABEL) -> None:
+        self._current = _fernet(current, label)
+        self._previous = _fernet(previous, label) if previous else None
 
     def __repr__(self) -> str:
         return f"ProviderKeyCipher(previous={'set' if self._previous else 'unset'})"
 
     @classmethod
-    def from_environ(cls, environ: Mapping[str, str]) -> ProviderKeyCipher | None:
+    def from_environ(cls, environ: Mapping[str, str], *, label: bytes = _KEY_LABEL) -> ProviderKeyCipher | None:
         """The cipher the environment configures, or None when it configures none."""
         current = _secret(environ, WRAPPING_KEY_ENV)
         previous = _secret(environ, PREVIOUS_WRAPPING_KEY_ENV)
         if current is None:
             return None
-        return cls(current, previous)
+        return cls(current, previous, label=label)
 
     def wrap(self, variable: str, key: str) -> str:
         plaintext = json.dumps({"variable": variable, "key": key}, separators=(",", ":")).encode("utf-8")
