@@ -15,6 +15,7 @@ from test_telegram_bot_handlers import ingress, message
 from test_telegram_supervisor import _supervisor_logging as _supervisor_logging
 
 from app.channels.message_bus import InboundMessage
+from app.telegram_bots import pages
 from app.telegram_bots.gateway_client import GatewayClientOwner
 from app.telegram_bots.inbox import InboxRepository
 from deerflow.persistence.channel_connections.model import ChannelConnectionRow
@@ -27,6 +28,9 @@ async def environment(db, monkeypatch, *, lead=True, responder=None, off_loop=Fa
     from app.telegram_bots.threads import ThreadCoordinator
 
     e = await ingress(db, monkeypatch=monkeypatch, lead=lead, off_loop=off_loop)
+    # pages imports this accessor by value. Keep real page/config validation
+    # bound to this fixture even when collection imported pages before ingress.
+    monkeypatch.setattr(pages, "get_app_config", lambda: e.live.config)
     e.http_calls, e.remote = [], {}
     e.current = [e.channel]
 
@@ -296,7 +300,8 @@ async def test_legitimate_generic_writer_beats_delayed_preparation_without_overw
         await close(e)
 
 
-async def test_deleted_custom_plans_only_a_fixed_repair_and_sends_through_actual_sdk(db, monkeypatch):
+@pytest.mark.parametrize("public_base_url", [None, "https://product.example/prefix"])
+async def test_deleted_custom_plans_only_a_fixed_repair_and_sends_through_actual_sdk(db, monkeypatch, tmp_path, public_base_url):
     from test_telegram_bot_handlers import command_sender, sent
 
     from deerflow.config import agents_config
@@ -304,7 +309,9 @@ async def test_deleted_custom_plans_only_a_fixed_repair_and_sends_through_actual
     def missing(name, *, user_id):
         raise FileNotFoundError("synthetic missing owned config")
 
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "deliberately-absent-application.yaml"))
     e = await environment(db, monkeypatch, lead=False)
+    e.live.config.model_extra["telegram_bots"] = {"enabled": True, "public_base_url": public_base_url}
     monkeypatch.setattr(agents_config, "load_agent_config", missing)
     sender = None
     try:
@@ -314,6 +321,12 @@ async def test_deleted_custom_plans_only_a_fixed_repair_and_sends_through_actual
         assert (await db.links.get(e.link.id)).health == "agent_unavailable"
         plans = [row for row in await rows(db, TelegramOutboxRow) if row.payload.get("delivery_kind") == "status_notice"]
         assert len(plans) == 1 and plans[0].parts[0]["source_ref"]["key"] == "custom_agent.deleted"
+        expected_url = public_base_url + "/workspace?settings=channels&telegram=custom_agent." + e.link.agent_ref if public_base_url is not None else None
+        if expected_url is None:
+            assert "url_button" not in plans[0].parts[0]
+        else:
+            assert plans[0].parts[0]["url_button"] == {"page": "web.telegram", "url": expected_url}
+        assert await db.connections.get_thread_id(e.link.connection_id, str(e.link.chat_id)) is None
         e.services.eligibility = e.live.authority.delivery
         e.request.enqueue("sendMessage", result=sent(e))
         sender = await command_sender(db, e)
@@ -321,6 +334,11 @@ async def test_deleted_custom_plans_only_a_fixed_repair_and_sends_through_actual
         await sender.drain()
         assert e.request.calls[-1].endpoint == "sendMessage"
         assert "no longer exists" in e.request.calls[-1].parameters["text"]
+        markup = e.request.calls[-1].parameters.get("reply_markup")
+        if expected_url is None:
+            assert markup is None
+        else:
+            assert markup["inline_keyboard"] == [[{"text": "Open Telegram settings", "url": expected_url}]]
     finally:
         if sender is not None:
             await sender.stop()
