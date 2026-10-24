@@ -3,6 +3,7 @@
 from dataclasses import asdict
 from datetime import UTC
 
+from fastapi import HTTPException
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import aliased
@@ -11,9 +12,13 @@ from deerflow.agent_instances.contract import AgentPermission
 from deerflow.persistence.agent_instances.model import AgentConversationRow, AgentInstanceGrantRow, AgentInstanceRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
+THREAD_BINDING_HEADER_NAME = "X-DeerFlow-Require-Thread-Binding"
 
-async def thread_bindings(app, thread_ids):
+
+async def thread_bindings(app, thread_ids, *, require_authority: bool = False):
     authority = getattr(app.state, "agent_conversations", None)
+    if authority is None and require_authority:
+        raise HTTPException(status_code=503, detail="Thread binding authority unavailable")
     return await authority.bindings(thread_ids) if authority is not None else {}
 
 

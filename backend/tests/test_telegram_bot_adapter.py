@@ -2,6 +2,7 @@
 
 import asyncio
 import secrets
+from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -430,6 +431,76 @@ async def saved(db, identity):
 
 def message(request, endpoint="sendMessage", *, identity=501, chat=7_000_000_001):
     return request.enqueue(endpoint, result={"message_id": identity, "date": 1_893_456_000, "chat": {"id": chat, "type": "private"}, "text": "Saved product text"})
+
+
+@pytest.mark.parametrize("fallback", [None, "url-first", "plain-first"])
+async def test_deleted_custom_fixed_status_uses_real_sender_sdk_and_server_navigation_label(db, fallback):
+    fixture = await build(db)
+    sender = None
+    address = "https://example.test/workspace?settings=telegram&view=all"
+    supplied = {"kind": "text", "source_ref": {"key": "custom_agent.deleted", "values": {"agent": "Fixture AI assistant", "product": "HartMesh"}}, "url_button": {"page": "web.telegram", "url": address}}
+    try:
+        await start(fixture)
+        async with db.sessions.begin() as session:
+            for row in await session.scalars(select(TelegramOutboxRow)):
+                row.state = "sent"
+        identity = await fixture.services.outbox.plan_status_notice(fixture.link, source_id="deleted-target", parts=[supplied])
+        before = await saved(db, identity)
+        ordinary = await fixture.channel.send_text("hello.privacy", source_id="held-ordinary")
+        await db.links.set_health(fixture.link.id, "agent_unavailable", holds=True, expected_token_revision=fixture.link.token_revision)
+        if fallback is not None:
+            errors = ["Button URL invalid", "Can't parse entities"]
+            if fallback == "plain-first":
+                errors.reverse()
+            for description in errors:
+                fail(fixture.request, endpoint="sendMessage", code=400, description=description)
+        message(fixture.request)
+
+        async def deliver(*, link_id, **scope):
+            assert link_id == fixture.link.id
+            return await fixture.channel.send_part(**scope)
+
+        sender = OutboxSender(fixture.services.outbox, run_id="fixed-repair-process", deliver_part=deliver, eligibility=fixture.services.eligibility, jitter=lambda: 0)
+        for _ in range(1 if fallback is None else 3):
+            await sender.tick()
+            await sender.drain()
+            fixture.clock.advance(1)
+        calls = [call for call in fixture.request.calls if call.endpoint == "sendMessage"]
+        assert calls[0].parameters["reply_markup"]["inline_keyboard"] == [[{"text": "Open Telegram settings", "url": address}]]
+        assert "Fixture AI assistant" in calls[0].parameters["text"]
+        final = await saved(db, identity)
+        assert final.state == "sent" and final.parts[0]["part_id"] == before.parts[0]["part_id"]
+        assert final.parts[0]["source_ref"] == supplied["source_ref"] and final.payload == before.payload
+        assert (await saved(db, ordinary)).state == "pending"
+        assert await fixture.services.outbox.plan_status_notice(fixture.link, source_id="deleted-target", parts=[supplied]) == identity
+        if fallback:
+            assert len(calls) == 3 and "reply_markup" not in calls[-1].parameters and "parse_mode" not in calls[-1].parameters
+            assert calls[-1].parameters["text"].endswith(address)
+            assert final.parts[0]["url_button_fallback"] and final.parts[0]["plain_fallback"]
+    finally:
+        if sender is not None:
+            await sender.stop()
+        await fixture.channel.stop()
+
+
+async def test_raw_fixed_navigation_rejects_a_crossed_source_page_before_sdk(db):
+    fixture = await build(db)
+    try:
+        await start(fixture)
+        identity, sender = await delivery(db, fixture)
+        await sender.stop()
+        async with db.sessions.begin() as session:
+            row = await session.get(TelegramOutboxRow, identity)
+            row.state, row.claim_owner, row.claim_id, row.claimed_at = "sending", "test-process", "test-admission", fixture.clock.now()
+            parts = deepcopy(row.parts)
+            parts[0].update(state="sending", url_button={"page": "web.telegram", "url": "https://example.test/settings"})
+            row.parts = parts
+        before_calls = len(fixture.request.calls)
+        with pytest.raises(ValueError, match="invalid-url-button"):
+            await fixture.channel.send_part(outbox_id=identity, part_id=parts[0]["part_id"], claim_owner="test-process", claim_id="test-admission")
+        assert len(fixture.request.calls) == before_calls
+    finally:
+        await fixture.channel.stop()
 
 
 async def test_actual_claimed_sdk_send_records_receipt_and_required_protection(db):

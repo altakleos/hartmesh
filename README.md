@@ -1368,6 +1368,12 @@ replies, single-use account setup and durable fixed command responses. Memory
 navigation uses the configured public address when available. The connection
 flow remains reserved while ordinary chat, files and the remaining stage-one
 capabilities are completed.
+Conversation preparation now saves a single thread-creation identity before
+contacting the Gateway, verifies the stored human owner and selected AI assistant,
+and refuses stale conversation mappings. Retries after a lost response or a
+same-bot token replacement keep that identity. A deleted custom AI assistant can
+produce a fixed repair notice with a Telegram-settings link when a public address
+is configured. These foundations do not activate ordinary Telegram conversations.
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 

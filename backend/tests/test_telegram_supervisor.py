@@ -95,7 +95,7 @@ def build(db, monkeypatch, *, health=None, clock=None, factory=None, environ=Non
     normal, updates = RecordingRequest(), RecordingRequest()
     health = health or Health()
     env = environ or {"HARTMESH_PROVIDER_KEYS_SECRET": secrets.token_urlsafe(48)}
-    manager = SimpleNamespace(connection_repo=db.connections, gateway_url="http://127.0.0.1:8001")
+    manager = SimpleNamespace(connection_repo=db.connections, gateway_url="http://127.0.0.1:8001", langgraph_url="http://127.0.0.1:8001/api")
     service = SimpleNamespace(bus=MessageBus(), manager=manager)
     app = SimpleNamespace(state=SimpleNamespace())
     kwargs = {} if factory is None else {"channel_factory": factory}

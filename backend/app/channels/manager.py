@@ -1302,6 +1302,11 @@ class ChannelManager:
         """The resolved Gateway base URL used by this channel runtime."""
         return self._gateway_url
 
+    @property
+    def langgraph_url(self) -> str:
+        """The independently resolved LangGraph API base for this runtime."""
+        return self._langgraph_url
+
     @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
         from .service import get_channel_service

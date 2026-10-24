@@ -38,7 +38,10 @@ DELIVERY_RETRY_CAP_SECONDS = 300
 ESSENTIAL_DELIVERY_CLASSES = frozenset({"reply", "question", "result", "interrupt", "progress", "service", "reminder"})
 _KINDS = frozenset({"text", "document", "photo", "album", "edit", "card"})
 _FINAL_PARTS = frozenset({"sent", "unavailable", "retired"})
-_STATUS_KEYS = frozenset({"access.agent_off", "agent.paused", "agent.retired", "unavailable.fix", "unavailable.off", "unavailable.paused", "unavailable.moved", "unavailable.files_unchecked", "refused.interrupted"})
+_STATUS_KEYS = frozenset({"access.agent_off", "agent.paused", "agent.retired", "unavailable.fix", "unavailable.off", "unavailable.paused", "unavailable.moved", "unavailable.files_unchecked", "refused.interrupted", "custom_agent.deleted"})
+_URL_SOURCES = {"web.memory": ("web.memory", "label.open_memory"), "custom_agent.deleted": ("web.telegram", "label.open_telegram")}
+_TRANSPORT_RECEIPTS = frozenset({"sent_at", "dispatched_at", "unavailable_reason", "invalid_token_verification_pending", "url_button_fallback", "plain_fallback"})
+_PART_IDENTITY = frozenset({"part_id", "presentation_version", "ordinal", "state", "message_ids"})
 _SKIP_REASONS = frozenset({"no-access", "superseded", "link-not-connected", "disabled", "policy-off", "expired"})
 _LIVE_CLAIMS: set[tuple[int, str, str]] = set()
 _TOKEN = re.compile(TOKEN_BODY)
@@ -46,8 +49,8 @@ _FORBIDDEN_KEYS = frozenset({"token", "bot_token", "access_token", "raw_update",
 
 
 def validate_url_button(value: dict) -> dict:
-    """Accept the one server-owned navigation control, without callback authority."""
-    if not isinstance(value, dict) or set(value) != {"page", "url"} or value["page"] != "web.memory" or not isinstance(value["url"], str):
+    """Accept a closed server-owned navigation control, without callback authority."""
+    if not isinstance(value, dict) or set(value) != {"page", "url"} or not isinstance(value["page"], str) or value["page"] not in {entry[0] for entry in _URL_SOURCES.values()} or not isinstance(value["url"], str):
         raise ValueError("invalid-url-button")
     address = value["url"]
     if any(ord(character) <= 32 or ord(character) == 127 for character in address) or "\\" in address:
@@ -59,7 +62,47 @@ def validate_url_button(value: dict) -> dict:
         _ = parsed.port
     except ValueError:
         raise ValueError("invalid-url-button") from None
-    return {"page": "web.memory", "url": address}
+    return {"page": value["page"], "url": address}
+
+
+def url_button_label(source: dict, button: dict) -> str:
+    """Derive the label from an exact fixed source/page pair at plan and send."""
+    button = validate_url_button(button)
+    if not isinstance(source, dict) or set(source) != {"key", "values"} or not isinstance(source["key"], str) or not isinstance(source["values"], dict):
+        raise ValueError("invalid-url-button")
+    expected = _URL_SOURCES.get(source["key"])
+    if expected is None or expected[0] != button["page"]:
+        raise ValueError("invalid-url-button")
+    return expected[1]
+
+
+def _status_parts(parts: list[dict]) -> list[dict]:
+    """Discard caller receipts before saving the immutable fixed-notice basis."""
+    if not isinstance(parts, list) or not parts:
+        raise ValueError("invalid-status-notice")
+    result = []
+    for supplied in parts:
+        if not isinstance(supplied, dict):
+            raise ValueError("invalid-status-notice")
+        part = _safe_json({key: value for key, value in supplied.items() if key not in _TRANSPORT_RECEIPTS | _PART_IDENTITY})
+        source = part.get("source_ref", {})
+        if (
+            part.get("kind") != "text"
+            or not isinstance(source, dict)
+            or set(source) != {"key", "values"}
+            or not isinstance(source["key"], str)
+            or source["key"] not in _STATUS_KEYS
+            or not isinstance(source["values"], dict)
+            or set(part) - {"kind", "source_ref", "silent", "url_button"}
+            or "silent" in part
+            and type(part["silent"]) is not bool
+            or any(not isinstance(value, (str, bool, int, type(None))) for value in source["values"].values())
+        ):
+            raise ValueError("invalid-status-notice")
+        if "url_button" in part:
+            url_button_label(source, part["url_button"])
+        result.append(part)
+    return result
 
 
 def _safe_json(value: dict) -> dict:
@@ -252,15 +295,28 @@ class Outbox:
             elif not {"space_id", "path"} <= set(source) or set(source) - {"space_id", "path", "sha256"}:
                 raise ValueError("invalid-delivery-source")
             if "url_button" in part:
-                if part["kind"] != "text" or set(source) != {"key", "values"} or source["key"] != "web.memory" or part.get("callback_group_id"):
+                if part["kind"] != "text" or part.get("callback_group_id"):
                     raise ValueError("invalid-url-button")
+                url_button_label(source, part["url_button"])
                 part["url_button"] = validate_url_button(part["url_button"])
             part.update(part_id=uuid4().hex, presentation_version=version, ordinal=index, state="pending", message_ids=[])
             part.setdefault("callback_group_id", None)
             frozen.append(part)
         return frozen
 
-    async def _add(self, link: BotLink, *, dedupe_key: str, class_: str, payload: dict, not_before: datetime | None = None, session: AsyncSession | None = None, server_status: bool = False, **targets) -> tuple[str, bool]:
+    async def _add(
+        self,
+        link: BotLink,
+        *,
+        dedupe_key: str,
+        class_: str,
+        payload: dict,
+        not_before: datetime | None = None,
+        session: AsyncSession | None = None,
+        server_status: bool = False,
+        check_attempt_current: Callable[[], bool] | None = None,
+        **targets,
+    ) -> tuple[str, bool]:
         if class_ != "reply":
             raise ValueError("reply-only-outbox")
         if payload.get("delivery_kind") == "status_notice" and not server_status:
@@ -276,6 +332,8 @@ class Outbox:
             if not self._binding(binding, link) or binding.state != "connected":
                 raise ValueError("link-not-connected")
             existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == dedupe_key).with_for_update())
+            if check_attempt_current is not None and check_attempt_current() is not True:
+                raise ValueError("stale-status-attempt")
             if existing is not None:
                 if existing.binding_generation != link.binding_generation:
                     raise ValueError("delivery-generation-mismatch")
@@ -496,27 +554,56 @@ class Outbox:
                 mark.assistant_message_id = source["assistant_message_id"]
             return identity
 
-    async def plan_status_notice(self, link: BotLink, *, source_id: str, parts: list[dict], inbox_rows: Sequence = (), finish_route: bool = False, session: AsyncSession | None = None) -> str:
+    async def plan_status_notice(
+        self, link: BotLink, *, source_id: str, parts: list[dict], inbox_rows: Sequence = (), finish_route: bool = False, session: AsyncSession | None = None, check_attempt_current: Callable[[], bool] | None = None
+    ) -> str:
         """Server handler path only; untrusted outbound metadata cannot set this tag."""
-        for part in parts:
-            source = part.get("source_ref", {})
-            if part.get("kind") != "text" or set(source) != {"key", "values"} or source["key"] not in _STATUS_KEYS or not isinstance(source["values"], dict) or part.get("callback_group_id") or set(part) - {"kind", "source_ref", "silent"}:
-                raise ValueError("invalid-status-notice")
-            if any(not isinstance(value, (str, bool, int, type(None))) for value in source["values"].values()):
-                raise ValueError("invalid-status-notice")
-        return (
-            await self._add(
-                link,
-                dedupe_key=f"notice:{source_id}",
-                class_="reply",
-                payload={"delivery_kind": "status_notice", "parts": parts},
-                server_status=True,
-                session=session,
-                inbox_rows=inbox_rows,
-                finish_route=finish_route,
-                message_thread_id=inbox_rows[0].message_thread_id if inbox_rows else None,
-            )
-        )[0]
+        if not isinstance(source_id, str) or not source_id:
+            raise ValueError("invalid-delivery-key")
+        if type(finish_route) is not bool:
+            raise ValueError("invalid-status-completion")
+        parts = _status_parts(parts)
+        origins = sorted((row.link_id, row.message_id, row.chat_id) for row in inbox_rows)
+        if len(set(origins)) != len(origins) or any(row.link_id != link.id or row.binding_generation != link.binding_generation or row.chat_id != link.chat_id for row in inbox_rows):
+            raise ValueError("status-source-conflict")
+        topic = inbox_rows[0].message_thread_id if inbox_rows else None
+        if topic is not None and (type(topic) is not int or topic <= 0):
+            raise ValueError("invalid-delivery-target")
+        if topic == 1:
+            topic = None
+        scope = {name: getattr(link, name) for name in ("owner_user_id", "agent_kind", "agent_ref", "bot_id", "connection_id", "telegram_user_id", "binding_generation", "chat_id")}
+        basis = _safe_json({"scope": scope, "origins": [list(value) for value in origins], "message_thread_id": topic, "finish_route": finish_route, "parts": parts})
+        async with self._writer(link.id, session=session) as (writer, binding):
+            if not self._binding(binding, link) or binding.state != "connected" or binding.token_revision != link.token_revision or any(getattr(binding, name) != value for name, value in scope.items()):
+                raise ValueError("link-not-connected")
+            existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == f"notice:{source_id}").with_for_update())
+            if check_attempt_current is not None and check_attempt_current() is not True:
+                raise ValueError("stale-status-attempt")
+            if existing is not None:
+                if (
+                    existing.binding_generation != link.binding_generation
+                    or existing.owner_user_id != link.owner_user_id
+                    or existing.chat_id != link.chat_id
+                    or json.dumps(existing.payload.get("status_basis"), sort_keys=True) != json.dumps(basis, sort_keys=True)
+                ):
+                    raise ValueError("status-source-conflict")
+                identity = existing.id
+            else:
+                identity, _ = await self._add(
+                    link,
+                    dedupe_key=f"notice:{source_id}",
+                    class_="reply",
+                    payload={"delivery_kind": "status_notice", "status_basis": basis, "parts": parts},
+                    server_status=True,
+                    session=writer,
+                    message_thread_id=topic,
+                    check_attempt_current=check_attempt_current,
+                )
+            if inbox_rows:
+                await self.inbox.register_delivery(inbox_rows, outbox_id=identity, finish=finish_route, session=writer)
+            if check_attempt_current is not None and check_attempt_current() is not True:
+                raise ValueError("stale-status-attempt")
+            return identity
 
     async def retry(self, link: BotLink, outbox_id: str) -> None:
         async with self._writer(link.id) as (session, binding):

@@ -64,6 +64,32 @@ place: a sealed route and every required delivery must be sent/skipped. An
 auxiliary receipt never completes unfinished processing. Borrowed helpers share
 the caller's writer/session and never own its commit or rollback.
 
+Conversation preparation reserves `route_basis.thread_preparation` on an actual
+admitted, routed, unsealed input before HTTP. Public routing cannot supply this
+server bookkeeping; business replay/group comparisons omit it and snapshots
+retain it. Save one purpose, endpoint fingerprint, creation UUID and expected
+mapping. The mapping and selected-thread outcome commit together under current
+owner/account/link/connection/target/generation authority. Existing conversation
+row IDs rotate on every replacement, including the generic connection writer,
+so a frozen timestamp cannot hide an A-to-B-to-A mapping change. Expected absence
+uses atomic insertion; it makes no claim about arbitrary absent-present-absent
+history under unchanged authority.
+
+`gateway_client.py` owns one public SDK/HTTPX client for the independently resolved
+LangGraph URL, prepared TLS, finite timeouts and no environment proxy/key discovery.
+Every operation builds fresh bound-human internal and matching CSRF headers.
+Require live `threads:read` before reads and `threads:write` before creation. GET
+requests require authoritative binding availability and exact stored owner,
+thread ID and lead/custom target; every create/replay is followed by that GET.
+No local lookup substitutes for proof at a separately configured endpoint.
+`threads.py` serializes ensure/new through the shared keyed lock and reserves
+before network work. The stable intent excludes token revision: a new authorized
+attempt may reuse it after same-bot rotation, while the old captured adapter/token
+cannot upgrade itself. Writers check current attempt identity after the final
+borrowed-owner await. Retain construction, full SDK/decode operations, lock waiters
+and admitted SQL through cancellation/shutdown before closing the client and
+persistence. These callable foundations activate no ordinary input or `/new`.
+
 `producer.py` owns reply plans and bounded claim workers. Raw delivery receives
 link/outbox/part IDs plus both process/admission fences. Current owner/policy/
 target eligibility is mandatory at claim and each part, outside SQL transactions.
@@ -81,9 +107,17 @@ SQL, using the process-wide live-admission registry and both saved claim fences.
 
 The adapter queues fixed product replies through public `plan_product`, whose
 saved origin set and original source/destination basis cannot change on replay.
-The Memory URL-only part freezes a closed page/address separately from callback
-controls. Caller-supplied URL fallback receipts are removed from both the replay
-basis and parts. A refused button journals the same part's text-address fallback
+Fixed server statuses use a separate immutable `status_basis`, including exact
+scope, origins, topic and completion intent. Strip supplied transport receipts
+before both basis and parts; regenerate part identities and reject extra controls.
+Only exact source/page pairs derive a server label: `web.memory`/`web.memory`
+uses `label.open_memory`, and `custom_agent.deleted`/`web.telegram` uses
+`label.open_telegram`. Validate the pair again at raw delivery. Deleted-custom
+repair follows authoritative owner-scoped config absence, uses a safe captured
+label and an eligible configured public address; uncertainty never means deletion.
+The fixed repair may send during `agent_unavailable`, with no model/file privilege.
+URL-only parts freeze page/address separately from callback controls.
+A refused button journals the same part's text-address fallback
 under current claim/source/scope fences; another bounded attempt sends it.
 Current blocked-message 403 keeps its row pending/due without transient backoff;
 the blocked state owns that wait, leaving other retry/pacing floors unchanged.

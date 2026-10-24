@@ -111,6 +111,120 @@ def test_thread_response_excludes_internal_incarnation() -> None:
     assert "incarnation" not in response.model_dump()
 
 
+@pytest.mark.parametrize("stored_owner", ["stored-human", None])
+def test_thread_get_projects_stored_owner_instead_of_caller_metadata(stored_owner) -> None:
+    app, store, _checkpointer = _build_thread_app()
+    store.put(
+        THREADS_NS,
+        "owner-proof",
+        {"thread_id": "owner-proof", "user_id": stored_owner, "metadata": {"owner_user_id": "forged-human", "user_id": "forged-human"}},
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/owner-proof", headers={"X-DeerFlow-Owner-User-Id": "caller-human"})
+
+    assert response.status_code == 200, response.text
+    assert "owner_user_id" in response.json()
+    assert response.json()["owner_user_id"] == stored_owner
+
+
+def test_checkpoint_only_thread_cannot_claim_owner_from_metadata() -> None:
+    app, _store, checkpointer = _build_thread_app()
+    asyncio.run(checkpointer.aput({"configurable": {"thread_id": "checkpoint-owner", "checkpoint_ns": ""}}, empty_checkpoint(), {"owner_user_id": "forged-human", "user_id": "forged-human"}, {}))
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/checkpoint-owner")
+
+    assert response.status_code == 200, response.text
+    assert "owner_user_id" in response.json()
+    assert response.json()["owner_user_id"] is None
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_thread_create_and_replay_project_persisted_owner(existing) -> None:
+    app, store, _checkpointer = _build_thread_app()
+    if existing:
+        store.put(THREADS_NS, "create-owner-proof", {"thread_id": "create-owner-proof", "user_id": "stored-human", "metadata": {"owner_user_id": "forged-human"}})
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads", json={"thread_id": "create-owner-proof", "metadata": {"owner_user_id": "forged-human"}})
+
+    assert response.status_code == 200, response.text
+    assert "owner_user_id" in response.json()
+    assert response.json()["owner_user_id"] == ("stored-human" if existing else None)
+
+
+@pytest.mark.parametrize("header", ["true", "1"])
+def test_thread_get_strict_binding_refuses_missing_authority(header) -> None:
+    app, store, _checkpointer = _build_thread_app()
+    store.put(THREADS_NS, "binding-proof", {"thread_id": "binding-proof", "user_id": "stored-human"})
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/binding-proof", headers={"X-DeerFlow-Require-Thread-Binding": header})
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == "Thread binding authority unavailable"
+
+
+@pytest.mark.parametrize("header", [None, "false"])
+def test_thread_get_default_preserves_missing_binding_reader_compatibility(header) -> None:
+    app, store, _checkpointer = _build_thread_app()
+    store.put(THREADS_NS, "binding-compat", {"thread_id": "binding-compat"})
+    headers = {} if header is None else {"X-DeerFlow-Require-Thread-Binding": header}
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/binding-compat", headers=headers)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["agent_instance"] is None
+
+
+@pytest.mark.parametrize("binding", [None, {"instance_id": "ai-employee-1", "name": "Fixture"}])
+def test_thread_get_strict_binding_returns_actual_authority_projection(binding) -> None:
+    app, store, _checkpointer = _build_thread_app()
+    store.put(THREADS_NS, "binding-current", {"thread_id": "binding-current"})
+    reader = AsyncMock(return_value={} if binding is None else {"binding-current": binding})
+    app.state.agent_conversations = SimpleNamespace(bindings=reader)
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/binding-current", headers={"X-DeerFlow-Require-Thread-Binding": "true"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["agent_instance"] == binding
+    reader.assert_awaited_once_with(["binding-current"])
+
+
+def test_thread_get_strict_binding_never_reports_reader_failure_as_unbound() -> None:
+    app, store, _checkpointer = _build_thread_app()
+    store.put(THREADS_NS, "binding-failure", {"thread_id": "binding-failure"})
+    app.state.agent_conversations = SimpleNamespace(bindings=AsyncMock(side_effect=RuntimeError("fixture binding reader unavailable")))
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/threads/binding-failure", headers={"X-DeerFlow-Require-Thread-Binding": "true"})
+
+    assert response.status_code == 500
+    assert "agent_instance" not in response.text
+
+
+def test_thread_get_rejects_malformed_binding_requirement_header() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    with TestClient(app) as client:
+        response = client.get("/api/threads/binding-unknown", headers={"X-DeerFlow-Require-Thread-Binding": "uncertain"})
+    assert response.status_code == 422, response.text
+
+
+def test_thread_search_and_update_keep_stored_owner_projection() -> None:
+    app, store, _checkpointer = _build_thread_app()
+    store.put(THREADS_NS, "owner-projections", {"thread_id": "owner-projections", "user_id": "stored-human", "metadata": {"owner_user_id": "forged-human"}})
+    with TestClient(app) as client:
+        search = client.post("/api/threads/search", json={})
+        update = client.patch("/api/threads/owner-projections", json={"metadata": {"title": "Fixture"}})
+    for response in (search, update):
+        assert response.status_code == 200, response.text
+    assert search.json()[0]["owner_user_id"] == "stored-human"
+    assert update.json()["owner_user_id"] == "stored-human"
+
+
 def test_compact_rejects_run_owned_by_another_worker(monkeypatch) -> None:
     """The HTTP guard must consult the shared store, not only local run memory."""
     from deerflow.runtime import RunManager, RunStatus
@@ -1022,6 +1136,7 @@ def test_insert_race_recovery_claims_unscoped_row_for_trusted_owner() -> None:
     response, owner_row, unscoped_lookup = asyncio.run(_scenario())
 
     assert response.thread_id == "channel-thread"
+    assert response.owner_user_id == "owner-1"
     # Recovery claimed the legacy row for the trusted owner, same as the fast path.
     assert owner_row is not None
     assert owner_row["user_id"] == "owner-1"
@@ -4620,10 +4735,12 @@ def test_move_thread_to_project_and_out(tmp_path):
         moved = client.post(f"/api/threads/{thread_id}/move", json={"project_id": project["id"]})
         assert moved.status_code == 200, moved.text
         assert moved.json()["metadata"][THREAD_PROJECT_METADATA_KEY] == project["id"]
+        assert moved.json()["owner_user_id"] == "user-a"
 
         out = client.post(f"/api/threads/{thread_id}/move", json={"project_id": None})
         assert out.status_code == 200, out.text
         assert THREAD_PROJECT_METADATA_KEY not in out.json()["metadata"]
+        assert out.json()["owner_user_id"] == "user-a"
 
         # The key is required-but-nullable: omitting it is a 422.
         missing_key = client.post(f"/api/threads/{thread_id}/move", json={})
