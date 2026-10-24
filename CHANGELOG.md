@@ -21,6 +21,14 @@ remains version 55. Managed-bot activation remains deferred until stage one is
 complete. Model-final, file and instance-policy consumers remain with their
 subsequent changes.
 
+### Local command cancellation
+
+Fix a race where a detached child forked during cancellation could keep the
+command's output pipes open after its shell died. Bounded rescans retain exact
+command markers and Gateway self-exclusion; existing drain timeouts stay unchanged.
+
+No schema or configuration change.
+
 ### Telegram transport and polling foundation
 
 Add a single-loop Telegram client, bounded rate limiting and ordered polling.

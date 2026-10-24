@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from functools import cached_property
@@ -31,6 +32,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
 _COMMAND_CAPTURE_LIMIT_BYTES = 10 * 1024 * 1024
 _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS = 0.2
+_ABORT_TOKEN_SWEEP_MAX_PASSES = 8
+_ABORT_TOKEN_SWEEP_TIMEOUT_SECONDS = 2.0
+_ABORT_TOKEN_SWEEP_RETRY_SECONDS = 0.01
 
 
 class _BoundedPipeCapture:
@@ -822,28 +826,45 @@ class LocalSandbox(Sandbox):
             return
         markers = {f"{ABORT_TOKEN_ENV}={token}".encode() for token in tokens}
         own_pid = os.getpid()
-        try:
-            entries = list(proc.iterdir())
-        except OSError:
-            return
-        for entry in entries:
-            if not entry.name.isdigit():
-                continue
-            pid = int(entry.name)
-            if pid == own_pid:
-                continue
+        deadline = time.monotonic() + _ABORT_TOKEN_SWEEP_TIMEOUT_SECONDS
+        # A detached process can fork after a snapshot but before its kill.
+        # Rescan after observed matches so that new descendant is not left
+        # holding the command's output pipes. Bound both scans and elapsed work.
+        for attempt in range(_ABORT_TOKEN_SWEEP_MAX_PASSES):
+            if time.monotonic() >= deadline:
+                return
             try:
-                environ = (entry / "environ").read_bytes()
-            except (OSError, ValueError):
-                # Gone between the listing and the read, or not ours to read.
-                continue
-            if not markers.intersection(environ.split(b"\0")):
-                continue
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                continue
-            logger.info("Sandbox %s killed detached process %s left by an aborted command", self.id, pid)
+                entries = list(proc.iterdir())
+            except OSError:
+                return
+            found = False
+            for entry in entries:
+                if time.monotonic() >= deadline:
+                    return
+                if not entry.name.isdigit():
+                    continue
+                pid = int(entry.name)
+                if pid == own_pid:
+                    continue
+                try:
+                    environ = (entry / "environ").read_bytes()
+                except (OSError, ValueError):
+                    # Gone between the listing and the read, or not ours to read.
+                    continue
+                if not markers.intersection(environ.split(b"\0")):
+                    continue
+                found = True
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    continue
+                logger.info("Sandbox %s killed detached process %s left by an aborted command", self.id, pid)
+            if not found or attempt + 1 == _ABORT_TOKEN_SWEEP_MAX_PASSES:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(_ABORT_TOKEN_SWEEP_RETRY_SECONDS, remaining))
 
     @staticmethod
     def _terminate_windows_process_tree(process: subprocess.Popen) -> None:

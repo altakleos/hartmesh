@@ -602,47 +602,75 @@ def per_link_factory(records, *, construction_gates=None, construction_entered=N
 async def test_constructor_cancel_does_not_release_tenth_permit_early(db, monkeypatch):
     import threading
 
-    records, entered, gates = {}, [], {}
-    e = build(db, monkeypatch, factory=per_link_factory(records, construction_gates=gates, construction_entered=entered))
+    records, entered, first_calls = {}, [], {}
+    construction_gate, construction_entered = threading.Event(), threading.Event()
+    sdk_release = asyncio.Event()
+    factory = per_link_factory(records)
+    blocked_identity = None
+
+    def capped_factory(*, link, **kwargs):
+        entered.append(link.id)
+        if link.id == blocked_identity:
+            construction_entered.set()
+            assert construction_gate.wait(8)
+        channel = factory(link=link, **kwargs)
+        # Nine first-start attempts wait asynchronously in the actual SDK; only
+        # the constructor being cancelled occupies a physical worker thread.
+        # Ten held startup permits must not require ten executor threads.
+        first_get_me = records[link.id].normal.replies["getMe"][0]
+        first_get_me.release = sdk_release
+        first_calls[link.id] = first_get_me
+        return channel
+
+    e = build(db, monkeypatch, factory=capped_factory)
     cipher, links = token_cipher(e.env), []
-    for i in range(11):
+    for i in range(10):
         link = await add_link(db, owner=f"owner-{i}", bot=9_000_000_200 + i)
         token = str(link.bot_id) + ":" + secrets.token_urlsafe(30)
         link = await db.links.store_token(link.id, wrap_token(cipher, link.bot_id, token), actor_id=link.owner_user_id)
         links.append((link, token))
-        gates[link.id] = threading.Event()
+    blocked_identity = links[0][0].id
     await e.supervisor.check()
     starting = asyncio.create_task(e.supervisor.start())
-    adding = asyncio.create_task(e.supervisor.add(*links[-1]))
+    adding = None
     try:
 
-        async def constructors(count):
-            while len(entered) < count:
+        async def ten_attempts_started():
+            while not construction_entered.is_set() or any(link.id not in first_calls or not first_calls[link.id].started.is_set() for link, _ in links[1:]):
                 await asyncio.sleep(0)
 
-        await asyncio.wait_for(constructors(10), 4)
-        cancelled_identity = next(identity for identity in entered if identity != links[-1][0].id)
-        cancelled = next(task for task, identity in e.supervisor._operations.items() if identity == cancelled_identity)
+        await asyncio.wait_for(ten_attempts_started(), 4)
+        # Add the eleventh link after the scan captured its ten rows, exercising
+        # the shared route/startup limit without scheduling a duplicate attempt.
+        extra = await add_link(db, owner="owner-10", bot=9_000_000_210)
+        extra_token = str(extra.bot_id) + ":" + secrets.token_urlsafe(30)
+        extra = await db.links.store_token(extra.id, wrap_token(cipher, extra.bot_id, extra_token), actor_id=extra.owner_user_id)
+        adding = asyncio.create_task(e.supervisor.add(extra, extra_token))
+        cancelled = next(task for task, identity in e.supervisor._operations.items() if identity == blocked_identity)
         cancelled.cancel()
         await asyncio.sleep(0.02)
-        assert len(entered) == 10
+        assert len(entered) == 10 and extra.id not in entered
         assert not cancelled.done()
-        gates[cancelled_identity].set()
-        await asyncio.wait_for(constructors(11), 4)
-        assert records[cancelled_identity].normal.closed
-        assert records[cancelled_identity].updates.closed
-        assert not records[cancelled_identity].normal.calls
-        for gate in gates.values():
-            gate.set()
+        construction_gate.set()
+
+        async def eleventh_attempt_started():
+            while extra.id not in first_calls or not first_calls[extra.id].started.is_set():
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(eleventh_attempt_started(), 4)
+        assert records[blocked_identity].normal.closed
+        assert records[blocked_identity].updates.closed
+        assert not records[blocked_identity].normal.calls
+        sdk_release.set()
         await asyncio.wait_for(asyncio.gather(starting, adding), 6)
         assert e.supervisor.sender._recovered
         assert len(e.supervisor._channels) == 10
     finally:
-        for gate in gates.values():
-            gate.set()
+        construction_gate.set()
+        sdk_release.set()
         await e.supervisor.begin_shutdown()
         await e.supervisor.stop()
-        await asyncio.gather(starting, adding, return_exceptions=True)
+        await asyncio.gather(*(task for task in (starting, adding) if task is not None), return_exceptions=True)
     assert all(record.normal.closed and record.updates.closed for record in records.values())
 
 
