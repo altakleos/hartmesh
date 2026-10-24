@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import io
 import logging
 import socket
+from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -17,6 +19,36 @@ from app.telegram_bots import voice
 from app.telegram_bots.config import TelegramBotsConfig
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
+
+_VOICE_RECORD_LOGGERS = ("openai._base_client", "google_genai._api_client", "google.genai", "google.auth.credentials", "httpx", "httpcore.http11", "aiohttp.client", "urllib3.connectionpool", "requests")
+
+
+@contextmanager
+def _voice_loggers_at_debug():
+    # Materialize SDK loggers before capturing their state. A preceding test
+    # may have set an explicit level, disabled a logger, or stopped propagation.
+    importlib.import_module("openai")
+    importlib.import_module("google.genai")
+    families = ("openai", "google_genai", "google.genai", "google.auth", "httpx", "httpcore", "aiohttp", "urllib3", "requests", "synthetic_application")
+    loggers = {logging.getLogger(name) for name in (*families, *_VOICE_RECORD_LOGGERS, "google_genai.synthetic_nonpropagating")}
+    loggers.update(candidate for candidate in list(logging.root.manager.loggerDict.values()) if isinstance(candidate, logging.Logger) and any(candidate.name == family or candidate.name.startswith(family + ".") for family in families))
+    for candidate in list(loggers):
+        parent = candidate.parent
+        while parent is not None and parent is not logging.root:
+            loggers.add(parent)
+            parent = parent.parent
+    saved = [(candidate, candidate.level, candidate.disabled, candidate.propagate) for candidate in loggers]
+    try:
+        for candidate, *_ in saved:
+            candidate.setLevel(logging.DEBUG)
+            candidate.disabled = False
+            candidate.propagate = True
+        yield
+    finally:
+        for candidate, level, disabled, propagate in saved:
+            candidate.setLevel(level)
+            candidate.disabled = disabled
+            candidate.propagate = propagate
 
 
 def _key() -> str:
@@ -400,6 +432,13 @@ async def test_transcription_deadline_cancels_the_request_and_closes_client(mode
 @pytest.mark.parametrize("outcome", ["success", "exception", "cancelled"])
 async def test_actual_sdk_voice_logs_are_suppressed_without_hiding_concurrent_calls(models, monkeypatch, caplog, provider, outcome):
     """Run real SDK request packing on an offline transport at DEBUG level."""
+    # Restore deliberate per-case routing changes before restoring the ambient
+    # logger state, including when an assertion or SDK operation raises.
+    with _voice_loggers_at_debug(), monkeypatch.context() as local_patch:
+        await _assert_actual_sdk_voice_logs(models, local_patch, caplog, provider, outcome)
+
+
+async def _assert_actual_sdk_voice_logs(models, monkeypatch, caplog, provider, outcome):
     import httpx
     import openai
     from google import genai
@@ -426,7 +465,7 @@ async def test_actual_sdk_voice_logs_are_suppressed_without_hiding_concurrent_ca
         requests.append(request)
         # Exercise SDK/HTTP families with both nonpropagating and propagating
         # handlers, without recording actual provider credentials or traffic.
-        for family in ("openai._base_client", "google_genai._api_client", "google.genai", "httpx", "httpcore.http11", "aiohttp.client", "urllib3.connectionpool", "requests"):
+        for family in _VOICE_RECORD_LOGGERS:
             logging.getLogger(family).debug("private voice data %s %s %s", secret_key, audio, transcript)
         isolated_logger.debug("private voice data %s", audio)
         logging.getLogger("synthetic_application").info("voice-context-application-visible")
@@ -460,6 +499,8 @@ async def test_actual_sdk_voice_logs_are_suppressed_without_hiding_concurrent_ca
             logging.getLogger("openai._base_client").debug("unrelated-openai-call-visible")
             logging.getLogger("google_genai._api_client").debug("unrelated-gemini-call-visible")
             isolated_logger.debug("unrelated-nonpropagating-call-visible")
+            for family in _VOICE_RECORD_LOGGERS:
+                logging.getLogger(family).debug("unrelated-%s-visible", family)
         finally:
             if outcome == "cancelled":
                 task.cancel()
@@ -483,8 +524,42 @@ async def test_actual_sdk_voice_logs_are_suppressed_without_hiding_concurrent_ca
     assert "private voice data" not in captured
     for marker in ("voice-context-application-visible", "unrelated-openai-call-visible", "unrelated-gemini-call-visible", "unrelated-nonpropagating-call-visible", "after-voice-visible"):
         assert marker in captured
+    for family in _VOICE_RECORD_LOGGERS:
+        assert f"unrelated-{family}-visible" in captured
     assert f"unrelated-{provider}-call-visible" in propagating_stream.getvalue()
     # Installation can run for every note without duplicating handler filters.
     for handler in (isolated_handler, propagating_handler):
         filters = [item for item in handler.filters if isinstance(item, voice._VoiceSDKLogFilter)]
         assert len(filters) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ambient_level", [logging.WARNING, logging.ERROR])
+async def test_actual_sdk_logging_with_restricted_provider_and_http_levels(models, monkeypatch, caplog, ambient_level):
+    with ExitStack() as stack:
+        for name in (*_VOICE_RECORD_LOGGERS, "google"):
+            stack.enter_context(caplog.at_level(ambient_level, logger=name))
+        await test_actual_sdk_voice_logs_are_suppressed_without_hiding_concurrent_calls(models, monkeypatch, caplog, "gemini", "success")
+
+
+@pytest.mark.parametrize("level", [logging.WARNING, logging.ERROR])
+@pytest.mark.parametrize("disabled", [False, True])
+@pytest.mark.parametrize("propagate", [False, True])
+def test_voice_log_capture_normalizes_and_restores_ambient_logger_state(monkeypatch, caplog, level, disabled, propagate):
+    with ExitStack() as stack:
+        loggers = [logging.getLogger(name) for name in (*_VOICE_RECORD_LOGGERS, "google", "synthetic_application")]
+        for candidate in loggers:
+            stack.enter_context(caplog.at_level(level, logger=candidate.name))
+            monkeypatch.setattr(candidate, "disabled", disabled)
+            monkeypatch.setattr(candidate, "propagate", propagate)
+        # Even a failing assertion inside the capture scope must restore every
+        # preceding test's state; setLevel also invalidates logging's caches.
+        with pytest.raises(RuntimeError, match="synthetic capture failure"), caplog.at_level(logging.DEBUG):
+            with _voice_loggers_at_debug():
+                for candidate in loggers:
+                    assert (candidate.level, candidate.disabled, candidate.propagate) == (logging.DEBUG, False, True)
+                    candidate.debug("capture-enabled-%s", candidate.name)
+                raise RuntimeError("synthetic capture failure")
+        for candidate in loggers:
+            assert f"capture-enabled-{candidate.name}" in caplog.text
+            assert (candidate.level, candidate.disabled, candidate.propagate) == (level, disabled, propagate)
