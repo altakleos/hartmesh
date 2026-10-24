@@ -2092,8 +2092,11 @@ when absent or explicitly off. For explicit `on`, its first applicable message i
 
 Neither a missing secret nor a non-hostname public host refuses a render.
 The secret value is never written into the rendered section or printed in the
-summary. The database schema foundation is revision `0042_telegram_bots`; these
-configuration and tool additions require no further migration.
+summary. Revision `0042_telegram_bots` adds the schema foundation, and
+`0043_telegram_inbox_chat_scope` scopes retained inbox message identities to
+their chat. Startup upgrades through the current head on SQLite or PostgreSQL.
+The latter preserves prior records; downgrade refuses if different chats have
+retained the same link/message pair, because the older key cannot represent both.
 
 ## Scheduled tasks
 
@@ -2572,7 +2575,7 @@ key is raised and assignment succeeds.
    Absent keys now prepare the default 31 GiB plan, plus required headroom.
 5. Inspect storage-init/Gateway logs and `/health`; expect prepared/verified
    storage and qualified agent readiness as on a fresh installation. Normal
-   bootstrap applies revision `0042_telegram_bots` on SQLite or PostgreSQL.
+   bootstrap applies revision `0043_telegram_inbox_chat_scope` on SQLite or PostgreSQL.
 
 The snapshot is taken before the database upgrade. No user-file transfer is
 performed by this upgrade. For the additive table/columns and guarded

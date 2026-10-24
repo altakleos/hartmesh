@@ -35,6 +35,7 @@ DISTRIBUTION_REVISIONS = (
     "0040_work_execution",
     "0041_storage_host_replacements",
     "0042_telegram_bots",
+    "0043_telegram_inbox_chat_scope",
 )
 
 
