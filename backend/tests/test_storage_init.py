@@ -58,6 +58,47 @@ def test_fstab_sync_rewrites_only_between_the_markers(tmp_path):
     assert si.fstab_text(replacement, ["new line"])[0] == replacement
 
 
+def test_managed_fstab_entries_disable_discard_and_exclude_scheduled_trim(tmp_path):
+    spec = SimpleNamespace(image_path=tmp_path / "pool with spaces" / "slot.img", mount_path=tmp_path / "pool with spaces" / "slot.volume")
+    line = si.StorageInitializer.fstab_line(spec)
+    options = set(line.split()[3].split(","))
+    assert {"loop", "nodev", "nosuid", "nodiscard", "X-fstrim.notrim"} <= options
+    assert "discard" not in options
+    assert "\\040" in line
+
+
+def test_fstab_sync_upgrades_existing_entries_without_touching_backings(operator):
+    tool, _, commands = operator
+    tool.prepare()
+    inventory = tool.manifest.read_bytes()
+    spec = next(iter(tool.load().volumes.values()))
+    retained = spec.mount_path / "data/retained.txt"
+    retained.write_bytes(b"retained across trim policy update")
+    current = tool.fstab_path.read_text(encoding="utf-8")
+    legacy = current.replace(",nodiscard", "").replace(",X-fstrim.notrim", "")
+    prefix, suffix = "/dev/root / ext4 defaults 0 1\n# unrelated\n", "# unrelated tail\n"
+    tool.fstab_path.write_text(prefix + legacy + suffix, encoding="utf-8")
+    before = tool.fstab_path.read_bytes()
+    commands.clear()
+    tool.mount_all()
+    assert tool.fstab_path.read_bytes() == before
+    assert tool.fstab_sync()["changed"] is True
+    assert tool.fstab_path.read_text(encoding="utf-8") == prefix + current + suffix
+    assert tool.fstab_sync()["changed"] is False
+    assert tool.manifest.read_bytes() == inventory
+    assert retained.read_bytes() == b"retained across trim policy update"
+    assert not [command for command in commands if command[0] in {"mkfs.ext4", "mount", "umount"}]
+
+
+def test_new_mount_explicitly_disables_online_discard(operator):
+    tool, _, commands = operator
+    spec = SimpleNamespace(image_path=tool.pool / "test.img", mount_path=tool.pool / "test.volume")
+    tool.mount(spec)
+    options = next(command[2] for command in commands if command[0] == "mount").split(",")
+    assert {"loop", "nodev", "nosuid", "nodiscard"} <= set(options)
+    assert "discard" not in options
+
+
 @pytest.mark.parametrize("text", ["# hartmesh-storage begin\n", "# hartmesh-storage end\n", "# hartmesh-storage begin\n# hartmesh-storage end\n# hartmesh-storage begin\n# hartmesh-storage end\n"])
 def test_fstab_sync_refuses_malformed_markers(text):
     with pytest.raises(si.Refused, match="fstab"):

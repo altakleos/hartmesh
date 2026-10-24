@@ -2287,6 +2287,29 @@ routes return a structured refusal when their own role is unavailable.
 
 **When an agent cannot reach a site.** A workspace reaches the sites of the standing list, `sandbox.network.allow_domains` of this profile's `config.yaml`, and no other (§ "`SANDBOX_EGRESS=allowlist` (the default)"). That list is the provider's, and nobody at the customer changes it. A person is asked about a blocked site in one case only: in a conversation of that person's own with the agent, when that person can manage it. The card "A site is blocked" then offers "Allow for 5 minutes" and "Keep blocked", and an allowance holds for every conversation and assignment of that agent for those minutes. Nobody is asked while an agent works on an assignment, nor in a conversation of a person who cannot manage it: the connection stays blocked, the work goes on, and the conversation shows one line that names the site. A reader who can manage the agent reads "{name} tried to reach {host}, which is not on the list of sites allowed here. Allow {host} for {minutes} minutes for all of {name}'s conversations and assignments, or keep {host} blocked. The permanent list is set by {provider}." Every other reader reads a line that says "which is not on the list of sites allowed here" and whom to ask. A request to add a site therefore reaches the provider, and widening the standing list remains the operator's decision, as for every sandbox. Web search and web fetch are not governed by the list: they run from the Gateway, as they do for an ordinary chat.
 
+### Fixed-image trim policy
+
+Each Space image must stay fully allocated on the data disk. Trimming the ext4
+filesystem inside a loop image punches holes in that image, releasing its reserved
+capacity. The verifier then refuses the Space, even if its files remain readable.
+
+Storage preparation mounts images with `nodiscard` and writes `X-fstrim.notrim`
+in their managed `/etc/fstab` entries. The standard util-linux scheduled service
+uses `fstrim --listed-in /etc/fstab:/proc/self/mountinfo` and skips these entries.
+It can still trim the underlying data disk and other eligible filesystems.
+
+For an existing pool, update only the managed entries with `si fstab-sync` or run
+normal preparation using the updated image. This preserves the inventory and files.
+`mount-all` does not rewrite fstab or remount an already mounted filesystem; new
+mount options take effect at the next normal unmount/mount maintenance window.
+
+Custom host trim automation must also exclude these loop filesystems. `fstrim -a`
+and direct `fstrim <Space mountpoint>` bypass the fstab exclusion. `nodiscard`
+prevents online discard when blocks are freed; it does not block an explicit
+FITRIM request. Neither this update nor `fstab-sync` repairs an already sparse
+image, and qualification never silently refills one. Inspect unavailable backings
+through the existing storage recovery procedure before resuming work.
+
 ### The keys
 
 All seven keys are validated, including when both agent counts are zero. Values are decimal whole

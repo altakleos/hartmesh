@@ -78,6 +78,54 @@ def test_prepared_pool_has_the_design_owners_and_modes(typed_prepared_pool):
         inventory.verify(spec.slot_id)
 
 
+def test_scheduled_trim_preserves_reserved_images_and_unprotected_control_loses_allocation(typed_prepared_pool, tmp_path):
+    """Real FITRIM on only disposable test mounts; never trim the host table."""
+    from app.gateway.storage_init import KINDS, StorageInitializer
+    from deerflow.config.storage_spaces_config import StoragePlan
+
+    trim = shutil.which("fstrim")
+    assert trim is not None, "Native trim regression requires util-linux fstrim"
+    table = tmp_path / "trim-fstab"
+    table.write_text("# isolated native trim fixture\n", encoding="utf-8")
+    plan = StoragePlan(users=1, user_gib=1, ai_assistants_per_user=0, ai_assistant_gib=1, ai_employees=0, ai_employee_gib=1, company_gib=1)
+    tool = StorageInitializer(tmp_path / "trim-pool", plan, capacities=dict.fromkeys(KINDS, 64 << 20), fstab_path=table)
+    try:
+        with tool.locked(repair_pool=True):
+            doc = tool.prepare()
+            assert doc["returncode"] == 0, doc
+        catalog = tool.load()
+        control, protected = catalog.volumes.values()
+        for spec in (control, protected):
+            catalog.verify(spec.slot_id)
+            assert spec.image_path.stat().st_blocks * 512 >= spec.max_bytes
+        retained = protected.mount_path / "data/retained.txt"
+        with retained.open("wb") as stream:
+            stream.write(b"retained across scheduled trim")
+            stream.flush()
+            os.fsync(stream.fileno())
+        # Keep nodiscard on the control: it must not be mistaken for FITRIM
+        # protection. Only its scheduled-trim exclusion is deliberately removed.
+        line = tool.fstab_line(control)
+        contents = table.read_text(encoding="utf-8")
+        table.write_text(contents.replace(line, line.replace(",X-fstrim.notrim", ""), 1), encoding="utf-8")
+        result = subprocess.run([trim, "--listed-in", str(table), "--verbose"], capture_output=True, text=True, timeout=60)
+        assert result.returncode == 0, result.stderr
+        assert str(control.mount_path) in result.stdout
+        assert str(protected.mount_path) not in result.stdout
+        assert control.image_path.stat().st_blocks * 512 < control.max_bytes
+        with pytest.raises(BackingUnavailable):
+            catalog.verify(control.slot_id)
+        assert protected.image_path.stat().st_blocks * 512 >= protected.max_bytes
+        catalog.verify(protected.slot_id)
+        assert retained.read_bytes() == b"retained across scheduled trim"
+    finally:
+        # Even the deliberately sparse control is detached through the operator's
+        # exact-image path. Failure retains the fixture for diagnosis.
+        with tool.locked():
+            doc = tool.quiesce()
+            assert doc["returncode"] == 0, doc
+
+
 def test_gateway_identity_can_rename_private_siblings(typed_prepared_pool):
     spec = next(spec for spec in typed_prepared_pool.load().volumes.values() if spec.kind == "user")
     root = os.open(spec.mount_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)

@@ -100,6 +100,12 @@ from a path projection, container name or cached client. Unsupported storage
 credentials remain denied by the facade even when their active human identity
 can run a text chat.
 
+Fixed image mounts share `FIXED_VOLUME_MOUNT_OPTIONS`, including `nodiscard`.
+Operators must exclude them from FITRIM; Compose fstab entries use
+`X-fstrim.notrim`. Keep full physical-allocation and FIEMAP qualification intact.
+Never refill sparse backings automatically. Native CI proves actual trim of an
+unprotected disposable image and retained allocation of an excluded one.
+
 `provision.py` owns operator preparation and whole-plan byte/inode arithmetic.
 The legacy script imports its unchanged entry point. Typed schema-2 inventories
 carry user/assistant/employee/company kinds; schema-1 slots remain untyped.

@@ -675,6 +675,11 @@ typed storage pools. It checks disk headroom before preparation and supports
 offline growth that preserves files; see [Storage Spaces](docs/STORAGE_SPACES.md)
 for its privilege requirements and current scope.
 
+Managed loop-backed Spaces reserve their full image capacity. New mounts use
+`nodiscard`, and generated fstab entries exclude them from the standard scheduled
+trim service. Existing pools need updated entries through `si fstab-sync` or
+preparation; see [the trim policy](deploy/compose/README.md#fixed-image-trim-policy).
+
 With managed storage enabled, the backend also provides
 `python -m app.gateway.agent_instances` for operator inspection and recovery.
 Its nine commands list AI assistants and AI employees, report storage/execution

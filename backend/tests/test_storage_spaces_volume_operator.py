@@ -66,7 +66,13 @@ def test_successful_publication_then_exception_preserves_published_backings(tmp_
     monkeypatch.setattr(module.os, "geteuid", lambda: 0)
     monkeypatch.setattr(module.os, "chown", lambda *args, **kwargs: None)
     monkeypatch.setattr(module.shutil, "which", lambda name: "/sbin/" + name)
-    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0))
+    commands = []
+
+    def host_run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(module.subprocess, "run", host_run)
     monkeypatch.setattr(module.PreparedVolumeCatalog, "verify", lambda *args, **kwargs: None)
     monkeypatch.setattr(module.os, "link", link_then_interrupt)
     with pytest.raises(KeyboardInterrupt):
@@ -74,3 +80,5 @@ def test_successful_publication_then_exception_preserves_published_backings(tmp_
     assert (tmp_path / "inventory.v1.json").is_file()
     assert len(list(tmp_path.glob("*.img"))) == 1
     assert len(list(tmp_path.glob("*.volume/data"))) == 1
+    mount = next(command for command in commands if command[0].endswith("/mount"))
+    assert "nodiscard" in mount[mount.index("-o") + 1].split(",")

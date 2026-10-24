@@ -111,6 +111,9 @@ def test_startup_failures_keep_readable_evidence_and_report_service_logs():
     collection = steps["Collect logs"]
     assert 'sudo cat /srv/hartmesh/spaces/inventory.v2.json > "$EVIDENCE/inventory.v2.json"' in collection
     assert 'sudo cat /etc/fstab > "$EVIDENCE/fstab.txt"' in collection
+    assert "journalctl --unit=fstrim.service --no-pager -n 50" in collection
+    assert "systemctl show fstrim.timer fstrim.service" in collection
+    assert "ExecMainStartTimestamp" in collection and "LastTriggerUSec" in collection
     assert "sudo cp" not in collection
 
 
@@ -246,10 +249,14 @@ def test_work_qualification_uses_one_shared_assistant_and_exact_recovery_evidenc
     assert any(isinstance(node, ast.With) for node in ast.walk(functions[STORAGE_TESTS[11]]))
 
 
-def test_native_resident_gate_requires_both_named_real_cases():
+def test_native_storage_gate_requires_resident_and_trim_cases():
     document = yaml.safe_load((ROOT / ".github/workflows/docker-acceptance.yml").read_text(encoding="utf-8"))
     source = next(step["run"] for step in document["jobs"]["managed-storage"]["steps"] if "native.xml" in step.get("run", ""))
-    for name in ("test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol", "test_host_containment_removes_the_real_container_and_the_next_run_attaches_afresh"):
+    for name in (
+        "test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol",
+        "test_host_containment_removes_the_real_container_and_the_next_run_attaches_afresh",
+        "test_scheduled_trim_preserves_reserved_images_and_unprotected_control_loses_allocation",
+    ):
         assert repr(name) in source
     assert "len(names) == len(set(names))" in source
     assert 'tree.findall(".//skipped")' in source

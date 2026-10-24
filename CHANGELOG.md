@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed storage reservations
+
+Managed Space fstab entries now exclude loop images from the standard scheduled
+trim service, and new mounts explicitly disable online discard. Existing pools
+can update their entries with `si fstab-sync` or preparation, preserving files
+and inventory. Direct trim and custom host-wide trim still require operator
+exclusions. Physical allocation checks remain strict; sparse images are not
+automatically refilled. Native CI exercises both actual trim and the exclusion.
+
+No database schema changes.
+
 ## [2.2.0+hartmesh.47] - 2026-10-23
 
 ### Terminal-write recovery
