@@ -56,7 +56,8 @@ async def activate_work_run(request, service, execution, work_id, body):
                 except _NewActivationRequired:
                     await execution.authority.require_ready(execution)
                     try:
-                        reservation = await residents.admit(execution.instance, work=True)
+                        async with residents.entry(execution.instance).lock:
+                            reservation = await residents.admit(execution.instance, work=True)
                     except Refusal as refusal:
                         # Capacity may have yielded while a peer committed this
                         # request. Revalidate every replay grant and field.

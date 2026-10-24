@@ -744,6 +744,7 @@ sandboxes, resident containers, relays and networks before opening execution
 capacity. Untracked resources, uncertain preparations and live foreign leases
 keep admission closed and preserve existing files and accounting. Work activation
 reserves capacity before committing a new attempt; exact retries reuse its receipt.
+A new activation waits for routine workspace checks to finish.
 Shutdown drains pending launches before stopping their workers. The existing
 minute-long maintenance cycle retries qualification, closes eligible workspaces
 and completes authorized releases for every Space kind. Explicit Compose AI
