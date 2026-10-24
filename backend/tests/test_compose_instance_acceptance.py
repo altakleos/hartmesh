@@ -20,6 +20,7 @@ from urllib.parse import quote
 
 import httpx
 import pytest
+from _compose_workspace_barrier import CapturedWorkspace, validate_workspace_capture, wait_for_workspace_retirement
 
 if os.environ.get("HARTMESH_REQUIRE_BUNDLE_INSTANCES") != "1":
     pytest.skip("whole-bundle qualification requires its explicit CI/tenant opt-in", allow_module_level=True)
@@ -140,12 +141,12 @@ class Bundle:
             assert not any(entry["Name"] == "/" + name for entry in self.containers())
             self.state["cleanup_drained"] = True
 
-    def containers(self):
-        ids = self.invoke(["docker", "ps", "-aq", "--no-trunc"]).stdout.split()
+    def containers(self, *, timeout=180):
+        ids = self.invoke(["docker", "ps", "-aq", "--no-trunc"], timeout=timeout).stdout.split()
         assert len(ids) <= 1000 and all(re.fullmatch(r"[0-9a-f]{64}", identity) for identity in ids)
         if not ids:
             return []
-        entries = json.loads(self.invoke(["docker", "inspect", *ids]).stdout)
+        entries = json.loads(self.invoke(["docker", "inspect", *ids], timeout=timeout).stdout)
         assert len(entries) == len(ids) and {entry["Id"] for entry in entries} == set(ids)
         return entries
 
@@ -374,23 +375,95 @@ def employee(compose, session):
     return {"instance": instance, "thread_id": thread["thread_id"], "slot": slot, "root": root, "definition": definition["name"]}
 
 
-def workspace(compose, employee):
+def workspace(compose, employee, *, timeout=180):
     value = compose.psql(
-        "SELECT json_build_object('attachment_id',id,'container_id',container_id)::text FROM storage_space_attachments WHERE actor_kind='nonhuman' AND actor_id=" + sql("agent:" + employee["instance"]["id"]) + " AND phase='active'"
+        "SELECT json_build_object('attachment_id',id,'container_id',container_id)::text FROM storage_space_attachments WHERE actor_kind='nonhuman' AND actor_id=" + sql("agent:" + employee["instance"]["id"]) + " AND phase='active'",
+        timeout=timeout,
     )
     assert value, "AI assistant has no active attachment"
     identity = json.loads(value)
-    (entry,) = json.loads(compose.invoke(["docker", "inspect", "hartmesh-space-" + identity["attachment_id"]]).stdout)
+    (entry,) = json.loads(compose.invoke(["docker", "inspect", "hartmesh-space-" + identity["attachment_id"]], timeout=timeout).stdout)
     assert entry["Id"] == identity["container_id"] and entry["State"]["Running"]
     return identity, entry
 
 
-def container_absent(compose, identity):
-    result = compose.invoke(["docker", "inspect", identity], check=False)
+def read_workspace_attachment(compose, attachment_id, *, timeout):
+    value = compose.psql(
+        "SELECT json_build_object("
+        "'attachment_id',a.id,'incarnation',a.incarnation,'actor_kind',a.actor_kind,'actor_id',a.actor_id,"
+        "'host_id',a.host_id,'container_id',a.container_id,'phase',a.phase,"
+        "'fenced_by_kind',a.fenced_by_kind,'fenced_by_id',a.fenced_by_id,'fence_reason',a.fence_reason,'fenced_at',a.fenced_at,"
+        "'instance_id',i.id,'instance_owner_id',i.owner_id,'instance_generation',i.generation,'instance_status',i.status,'instance_custody',i.custody,"
+        "'home_id',h.id,'home_generation',h.generation,'home_status',h.status,'home_custody_kind',h.custody_kind,"
+        "'home_custodian_kind',h.custodian_kind,'home_custodian_id',h.custodian_id,"
+        "'mount_space_id',m.space_id,'mount_generation',m.generation,'mount_alias',m.alias,'mount_writable',m.writable"
+        ")::text FROM storage_space_attachments a "
+        "JOIN agent_instances i ON a.actor_kind='nonhuman' AND a.actor_id='agent:' || i.id "
+        "JOIN storage_spaces h ON h.id=i.home_id "
+        "JOIN storage_space_mounts m ON m.attachment_id=a.id AND m.space_id=h.id "
+        "WHERE a.id=" + sql(attachment_id),
+        timeout=timeout,
+    )
+    return json.loads(value) if value else None
+
+
+def capture_workspace_retirement(compose, employee):
+    identity, _entry = workspace(compose, employee, timeout=10)
+    row = read_workspace_attachment(compose, identity["attachment_id"], timeout=10)
+    if not isinstance(row, dict):
+        raise AssertionError("Workspace retirement capture is missing its exact attachment scope")
+    entries = compose.containers(timeout=10)
+    primaries = [entry for entry in entries if entry["Id"] == identity["container_id"]]
+    if len(primaries) != 1:
+        raise AssertionError("Workspace retirement capture has no unique current primary")
+    primary = primaries[0]
+    labels = primary["Config"].get("Labels") or {}
+    if labels.get("deerflow.role") != "resident" or labels.get("deerflow.sandbox_id") != identity["attachment_id"]:
+        raise AssertionError("Workspace retirement capture has unexpected primary labels")
+    if primary["State"]["Running"] is not True:
+        raise AssertionError("Workspace retirement capture primary is not running")
+    relays = [entry for entry in entries if (entry["Config"].get("Labels") or {}).get("deerflow.role") == "network-proxy" and entry["Config"]["Labels"].get("deerflow.sandbox_id") == identity["attachment_id"]]
+    if len(relays) != 1:
+        raise AssertionError("Workspace retirement capture has no unique paired relay")
+    relay = relays[0]
+    if relay["State"]["Running"] is not True:
+        raise AssertionError("Workspace retirement capture relay is not running")
+    instance = employee["instance"]
+    captured = CapturedWorkspace(
+        instance_id=instance["id"],
+        owner_id=instance["owner_id"],
+        instance_generation=instance["generation"],
+        home_id=instance["home_id"],
+        home_generation=row["home_generation"],
+        attachment_id=identity["attachment_id"],
+        incarnation=row["incarnation"],
+        host_id=row["host_id"],
+        container_id=primary["Id"],
+        container_name=primary["Name"],
+        relay_id=relay["Id"],
+        relay_name=relay["Name"],
+    )
+    validate_workspace_capture(captured, row)
+    return captured
+
+
+def await_workspace_retirement(compose, session, captured):
+    wait_for_workspace_retirement(
+        captured,
+        read_attachment=lambda timeout: read_workspace_attachment(compose, captured.attachment_id, timeout=timeout),
+        is_absent=lambda reference, timeout: container_absent(compose, reference, timeout=timeout),
+        read_execution=lambda timeout: session.request("GET", "/api/features", timeout=timeout).json()["agent_instances"],
+    )
+
+
+def container_absent(compose, identity, *, timeout=180):
+    result = compose.invoke(["docker", "inspect", identity], check=False, timeout=timeout)
     if result.returncode == 0:
         return False
-    assert result.returncode == 1 and result.stdout.strip() in ("", "[]")
-    assert result.stderr.strip() in ("Error: No such object: " + identity, "error: no such object: " + identity, "Error response from daemon: No such container: " + identity)
+    if result.returncode != 1 or result.stdout.strip() not in ("", "[]"):
+        raise AssertionError("Container absence returned an unrecognized result")
+    if result.stderr.strip() not in ("Error: No such object: " + identity, "error: no such object: " + identity, "Error response from daemon: No such container: " + identity):
+        raise AssertionError("Container absence did not confirm the exact requested reference")
     return True
 
 
@@ -1035,8 +1108,10 @@ def test_bundle_runs_an_agent_and_its_space_survives_gateway_restart_and_workspa
     session.run(thread_id)
     second, _entry = workspace(compose, employee)
     assert second["container_id"] == first["container_id"]
-    compose.invoke(["docker", "rm", "-f", second["container_id"]])
-    assert container_absent(compose, second["container_id"])
+    captured = capture_workspace_retirement(compose, employee)
+    assert captured.container_id == second["container_id"]
+    compose.invoke(["docker", "rm", "-f", captured.container_id])
+    await_workspace_retirement(compose, session, captured)
     session.run(thread_id)
     third, _entry = workspace(compose, employee)
     assert third["container_id"] != second["container_id"]
@@ -1061,8 +1136,9 @@ def test_runtime_alias_is_on_the_workspace_and_the_chat_sandbox_and_not_on_the_r
     assert len(resident_relays) == 1 and resident_relays[0]["HostConfig"]["Runtime"] == default_runtime
     with ProbeObserver(compose) as observer:
         for _retry in range(3):
-            identity, _entry = workspace(compose, employee)
-            compose.invoke(["docker", "rm", "-f", identity["container_id"]])
+            captured = capture_workspace_retirement(compose, employee)
+            compose.invoke(["docker", "rm", "-f", captured.container_id])
+            await_workspace_retirement(compose, session, captured)
             session.run(employee["thread_id"])
             if observer.facts:
                 break
