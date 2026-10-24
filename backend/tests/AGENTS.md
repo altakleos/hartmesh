@@ -18,7 +18,14 @@ upgrade plans and pins published ancestry from release fixtures. Keep old
 fixtures immutable; add a new one for a new published head. A single current
 head alone cannot detect a skipped revision inserted behind an applied head.
 
-## Telegram library compatibility
+## Telegram compatibility and persistence
+
+`test_telegram_bot_migration.py` compares frozen migration DDL with cold ORM
+creation on SQLite and isolated PostgreSQL schemas, including index names,
+partial predicates, foreign-key deletion behavior and absent server defaults.
+Numeric Telegram primary keys disable autoincrement so PostgreSQL adds no SERIAL
+default. Rollback preflights all six history-bearing tables before any drop;
+the partial-schema outbox case isolates its guard from the guarded link parent.
 
 `test_telegram_library_pin.py` pins the Telegram library/API version, native
 methods, error mapping, unknown-field passthrough and parent adapter contracts.

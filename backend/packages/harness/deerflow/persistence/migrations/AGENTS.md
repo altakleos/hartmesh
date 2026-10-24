@@ -1,6 +1,8 @@
 ### Schema Migrations (`packages/harness/deerflow/persistence/migrations/`)
 
-The distribution ends in `0041_storage_host_replacements`, after human input0039, Work0038, lifecycle0037 and identity0034,
+The distribution ends in `0042_telegram_bots`, adding fifteen Telegram binding,
+receipt and delivery tables with guarded downgrade and no server defaults.
+It follows `0041_storage_host_replacements`, human input0039, Work0038, lifecycle0037 and identity0034,
 conversations0035 and memory/provenance0036. These follow0033_storage_features.
 They add adopted revisions, instances/grants, bindings, memory, lifecycle intent
 and generic Work/attempt/event and human-input request/response/event/read records;

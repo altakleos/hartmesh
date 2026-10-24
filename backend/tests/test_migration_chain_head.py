@@ -34,6 +34,7 @@ DISTRIBUTION_REVISIONS = (
     "0039_human_input",
     "0040_work_execution",
     "0041_storage_host_replacements",
+    "0042_telegram_bots",
 )
 
 

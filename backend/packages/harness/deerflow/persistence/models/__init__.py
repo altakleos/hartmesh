@@ -40,6 +40,23 @@ from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperatio
 from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceBackupRow, SpaceMountRow, StorageHostReplacementRow
 from deerflow.persistence.spaces.model import SpaceEventRow, SpaceGrantRow, SpaceRow
 from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow, SubagentBatchRow
+from deerflow.persistence.telegram_bots import (
+    TelegramAccountRow,
+    TelegramActRow,
+    TelegramAssistantAddRow,
+    TelegramBotIntentRow,
+    TelegramBotLinkEventRow,
+    TelegramBotLinkRow,
+    TelegramCallbackRow,
+    TelegramDeploymentRow,
+    TelegramInboundMarkRow,
+    TelegramInstancePolicyRow,
+    TelegramOutboxRow,
+    TelegramPendingFileRow,
+    TelegramPersonSettingsRow,
+    TelegramWorkCursorRow,
+    TelegramWorkTopicRow,
+)
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.access import DisabledIdentityRow, IdentityHoldRow, RoleLimitRow
 from deerflow.persistence.user.model import UserPreferenceRow, UserRow
@@ -65,6 +82,21 @@ __all__ = [
     "ChannelConversationRow",
     "ChannelCredentialRow",
     "ChannelOAuthStateRow",
+    "TelegramBotLinkRow",
+    "TelegramBotLinkEventRow",
+    "TelegramAccountRow",
+    "TelegramPersonSettingsRow",
+    "TelegramBotIntentRow",
+    "TelegramInstancePolicyRow",
+    "TelegramAssistantAddRow",
+    "TelegramWorkTopicRow",
+    "TelegramCallbackRow",
+    "TelegramActRow",
+    "TelegramWorkCursorRow",
+    "TelegramOutboxRow",
+    "TelegramInboundMarkRow",
+    "TelegramPendingFileRow",
+    "TelegramDeploymentRow",
     "FeedbackRow",
     "McpTaskRow",
     "ManagedSubagentRow",

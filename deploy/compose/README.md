@@ -2535,7 +2535,7 @@ key is raised and assignment succeeds.
    Absent keys now prepare the default 31 GiB plan, plus required headroom.
 5. Inspect storage-init/Gateway logs and `/health`; expect prepared/verified
    storage and qualified agent readiness as on a fresh installation. Normal
-   bootstrap applies revision `0041_storage_host_replacements` on SQLite or PostgreSQL.
+   bootstrap applies revision `0042_telegram_bots` on SQLite or PostgreSQL.
 
 The snapshot is taken before the database upgrade. No user-file transfer is
 performed by this upgrade. For the additive table/columns and guarded
