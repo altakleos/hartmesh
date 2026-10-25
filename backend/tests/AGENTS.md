@@ -50,8 +50,11 @@ key. Test duplicate chat-local message IDs across account changes and refuse a
 downgrade that would collapse retained identities. Keep 0042 DDL/metadata/ancestry
 and downgrade guards unchanged; its one exact successor-shape validation path
 must preserve cross-chat records and reject drift during older-stamp replay.
-Current ORM parity is measured after 0043; historical 0042 tests use its frozen
-table metadata.
+Current ORM parity is measured after 0044; historical 0042/0043 tests use their
+frozen table metadata. Revision 0044 widens only the nullable, nonindexed Telegram
+assistant-message ID to Text. Exercise actual legal long SDK IDs through worker
+events/sealing and primary planning on both dialects, old-to-new migration and a
+downgrade refusal before DDL when longer IDs are retained.
 
 Presentation tests use explicit route-table expectations, both locale catalogs,
 UTF-16 boundaries and canonical preview reconstruction. Provider tests use fake

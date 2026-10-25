@@ -1,11 +1,15 @@
 ### Schema Migrations (`packages/harness/deerflow/persistence/migrations/`)
 
-The distribution ends in `0043_telegram_inbox_chat_scope`, widening the retained
-inbox primary key to `(link_id, message_id, chat_id)` without changing records
+The distribution ends in `0044_telegram_assistant_ids`, widening only the nullable,
+nonindexed inbox assistant-message-ID column from String(64) to Text. Preserve
+opaque IDs unchanged; downgrade must refuse retained IDs longer than 64 before
+DDL. Verify old-to-new and fresh-schema parity on both dialects. Its parent,
+`0043_telegram_inbox_chat_scope`, widens the retained inbox primary key to
+`(link_id, message_id, chat_id)` without changing records
 or other schema. SQLite rebuilds only the child table with foreign keys enabled;
 PostgreSQL changes its key transactionally. Downgrade serializes writers and
 refuses retained cross-chat collisions before DDL. Current cold-ORM parity is
-measured after 0043. Historical 0042 DDL/metadata/ancestry/guards stay unchanged;
+measured after 0044. Historical 0042/0043 DDL/metadata/ancestry/guards stay unchanged;
 its existing-table validator recognizes only the exact independently frozen 0043
 inbox shape for older-stamp replay. No live ORM or broad validation bypass.
 Its parent `0042_telegram_bots`

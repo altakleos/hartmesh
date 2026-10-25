@@ -62,6 +62,7 @@ TEXTS: dict[str, str] = {
     "busy.gave_up": "Still busy after two minutes, so your message was not answered. It is kept.",
     "busy.thread": "This conversation is busy with an answer that was started on the web. Your message is in line.",
     "error.generic": "Something went wrong and the message was not answered. It is kept.",
+    "run.cancelled": "This request was cancelled.",
     "chat.restarted": "The service restarted before this was answered. Your message is kept.",
     "chat.files_full": "Your files are full, so a new conversation cannot start. Delete files or old conversations in {product} on the web, then try again. If that is not enough, ask {support} for more room. Your message is kept.",
     "stop.answer": "Stopped. The text above is unfinished.",

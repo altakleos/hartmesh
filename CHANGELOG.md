@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Managed Telegram publication custody
+
+Add dormant SQL primitives for immutable input/publication scope, an irreversible
+dispatch marker, exact run binding and atomic primary reply planning. Freeze
+output proof and rendered presentation; preserve saved delivery receipts on exact
+replay and refuse changed plans. Existing receiptless publications cannot be
+adopted as proof that dispatch never started. Ordinary managed-bot conversations,
+model dispatch and restart reconciliation remain later stages.
+
+Schema change: revision `0044_telegram_assistant_ids` widens the nullable, nonindexed Telegram inbox assistant-message-ID
+column from 64 characters to Text. A legal long SDK ID previously survived worker
+sealing but failed PostgreSQL reply planning. Preserve the original opaque ID;
+downgrade refuses longer retained IDs before DDL. Configuration stays version 55.
+
 ### Captured I/O ownership and shutdown
 
 Give captured runs one host-owned lifetime for finite database, checkpoint,

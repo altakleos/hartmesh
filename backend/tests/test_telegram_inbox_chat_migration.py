@@ -184,7 +184,7 @@ def test_chain_and_current_orm_key():
     from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow
 
     script = ScriptDirectory(str(_MIGRATIONS_DIR))
-    assert script.get_heads() == [REVISION]
+    assert script.get_heads() == ["0044_telegram_assistant_ids"]
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     assert list(TelegramInboundMarkRow.__table__.primary_key.columns.keys()) == NEW_KEY
     assert list(historical()._metadata.tables[TABLE].primary_key.columns.keys()) == OLD_KEY
@@ -311,13 +311,20 @@ async def test_current_orm_matches_all_fifteen_tables_at_new_head(connection):
 
     names = [table.name for table in historical()._tables]
     await connection.run_sync(apply)
+
+    def apply_current(connection):
+        successor = importlib.import_module("deerflow.persistence.migrations.versions.0044_telegram_assistant_ids")
+        with Operations.context(MigrationContext.configure(connection)):
+            successor.upgrade()
+
+    await connection.run_sync(apply_current)
     frozen = await connection.run_sync(shape, names)
     for table in reversed(historical()._tables):
         await connection.run_sync(table.drop)
     await connection.run_sync(lambda c: Base.metadata.create_all(c, tables=[Base.metadata.tables[name] for name in names]))
     assert await connection.run_sync(shape, names) == frozen
     assert all(c.server_default is None for name in names for c in Base.metadata.tables[name].columns)
-    await connection.run_sync(apply)
+    await connection.run_sync(apply_current)
     assert await connection.run_sync(shape, names) == frozen
 
 

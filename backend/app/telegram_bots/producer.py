@@ -8,6 +8,7 @@ fenced by process, admission and binding; time never transfers a live claim.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import random
@@ -15,9 +16,9 @@ import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -31,6 +32,11 @@ from app.telegram_bots.config import TelegramBotsConfig
 from app.telegram_bots.links import BotLink
 from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
+
+if TYPE_CHECKING:
+    from app.gateway.run_output import RunOutputProjection
+    from app.telegram_bots.inbox import PublicationRecord
+    from app.telegram_bots.links import PublicationGuard
 
 OUTBOX_SEND_CONCURRENCY = 8
 DELIVERY_RETRY_FIRST_SECONDS = 5
@@ -237,6 +243,193 @@ class SourceUnavailable(Exception):
             raise ValueError("invalid-unavailable-source-notice")
         super().__init__(reason)
         self.source_ref, self.reason = _safe_json(source_ref), reason
+
+
+def _presentation_digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _digest(value: object) -> bool:
+    return type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+@dataclass(frozen=True)
+class FrozenReplyChunk:
+    html: str
+    visible_text: str
+    visible_sha256: str
+    start: int
+    end: int
+
+    def __post_init__(self) -> None:
+        from app.telegram_bots.split import utf16_units, visible_text
+
+        try:
+            if (
+                type(self.html) is not str
+                or type(self.visible_text) is not str
+                or not self.visible_text
+                or type(self.start) is not int
+                or type(self.end) is not int
+                or self.start < 0
+                or self.end - self.start != len(self.visible_text)
+                or not _digest(self.visible_sha256)
+                or _presentation_digest(self.visible_text) != self.visible_sha256
+                or visible_text(self.html) != self.visible_text
+                or utf16_units(self.visible_text) > 4096
+            ):
+                raise ValueError
+        except Exception:
+            raise ValueError("invalid-publication-presentation") from None
+
+
+@dataclass(frozen=True)
+class FrozenReplyPresentation:
+    renderer_schema: Literal["telegram-html-v1"]
+    text_sha256: str
+    visible_sha256: str
+    chunks: tuple[FrozenReplyChunk, ...]
+
+    def __post_init__(self) -> None:
+        try:
+            if self.renderer_schema != "telegram-html-v1" or type(self.renderer_schema) is not str or not _digest(self.text_sha256) or not _digest(self.visible_sha256) or type(self.chunks) is not tuple or not self.chunks:
+                raise ValueError
+            cursor = 0
+            for chunk in self.chunks:
+                if type(chunk) is not FrozenReplyChunk:
+                    raise ValueError
+                FrozenReplyChunk(**asdict(chunk))
+                if chunk.start != cursor:
+                    raise ValueError
+                cursor = chunk.end
+            if _presentation_digest("".join(chunk.visible_text for chunk in self.chunks)) != self.visible_sha256:
+                raise ValueError
+        except Exception:
+            raise ValueError("invalid-publication-presentation") from None
+
+    def to_json(self) -> dict:
+        return {"renderer_schema": self.renderer_schema, "text_sha256": self.text_sha256, "visible_sha256": self.visible_sha256, "chunks": [asdict(chunk) for chunk in self.chunks]}
+
+    @classmethod
+    def from_json(cls, value: object) -> FrozenReplyPresentation:
+        try:
+            if type(value) is not dict or set(value) != {"renderer_schema", "text_sha256", "visible_sha256", "chunks"} or type(value["chunks"]) is not list:
+                raise ValueError
+            chunks = []
+            for chunk in value["chunks"]:
+                if type(chunk) is not dict or set(chunk) != {"html", "visible_text", "visible_sha256", "start", "end"}:
+                    raise ValueError
+                chunks.append(FrozenReplyChunk(**chunk))
+            return cls(value["renderer_schema"], value["text_sha256"], value["visible_sha256"], tuple(chunks))
+        except Exception:
+            raise ValueError("invalid-publication-presentation") from None
+
+
+def freeze_reply_presentation(text: str, *, text_sha256: str) -> FrozenReplyPresentation:
+    """Freeze the existing renderer's visible basis, retaining the original digest."""
+    from app.telegram_bots.markdown import to_html
+    from app.telegram_bots.split import split_html, visible_text
+
+    try:
+        if type(text) is not str or not text or not _digest(text_sha256) or _presentation_digest(text) != text_sha256:
+            raise ValueError
+        rendered = to_html(text)
+        if rendered.wide_tables:
+            raise ValueError
+        chunks = []
+        cursor = 0
+        for html in split_html(rendered.html):
+            visible = visible_text(html)
+            chunks.append(FrozenReplyChunk(html, visible, _presentation_digest(visible), cursor, cursor + len(visible)))
+            cursor += len(visible)
+        if "".join(chunk.visible_text for chunk in chunks) != rendered.plain:
+            raise ValueError
+        return FrozenReplyPresentation("telegram-html-v1", text_sha256, _presentation_digest(rendered.plain), tuple(chunks))
+    except Exception:
+        raise ValueError("invalid-publication-presentation") from None
+
+
+def _detached_output(value: RunOutputProjection) -> RunOutputProjection:
+    from app.gateway.run_output import RunOutputProjection
+
+    try:
+        if type(value) is not RunOutputProjection:
+            raise ValueError
+        return RunOutputProjection.model_validate(value.model_dump(mode="python"))
+    except Exception:
+        raise ValueError("publication-source-conflict") from None
+
+
+@dataclass(frozen=True)
+class PrimaryTurnNotice:
+    kind: Literal["sealed_failed", "sealed_cancelled"]
+    output: RunOutputProjection
+
+    def __post_init__(self) -> None:
+        if type(self.kind) is not str or self.kind not in {"sealed_failed", "sealed_cancelled"}:
+            raise ValueError("publication-source-conflict")
+        output = _detached_output(self.output)
+        reason = "failed" if self.kind == "sealed_failed" else "cancelled"
+        if output.state != "unavailable" or output.reason != reason or output.output_evidence.kind != "unavailable":
+            raise ValueError("publication-source-conflict")
+        object.__setattr__(self, "output", output)
+
+
+def _publication_identity(record: PublicationRecord) -> dict:
+    from app.telegram_bots.inbox import PublicationRecord
+
+    if type(record) is not PublicationRecord:
+        raise ValueError("publication-source-conflict")
+    result = asdict(record)
+    result.pop("dispatch_started")
+    result.pop("run_id")
+    # Origins are immutable tuples in the host DTO and JSON arrays on disk.
+    result["origins"] = [asdict(origin) for origin in record.origins]
+    return _safe_json(result)
+
+
+def _canonical_primary(value: dict) -> str:
+    return json.dumps(_safe_json(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+
+
+def _prepare_publication_reply(record: PublicationRecord, output: RunOutputProjection | None, notice: PrimaryTurnNotice | None) -> tuple[dict, list[dict]]:
+    identity = _publication_identity(record)
+    scope = identity["scope"]
+    if notice is None:
+        output = _detached_output(output)
+        if output.state != "complete":
+            raise ValueError("publication-source-conflict")
+        presentation = freeze_reply_presentation(output.source.text, text_sha256=output.output_evidence.text_sha256)
+        parts = [
+            {
+                "kind": "text",
+                "source_ref": {"assistant_message_id": output.output_evidence.assistant_message_id, "thread_id": output.thread_id, "run_id": output.run_id, "range": {"basis": "telegram-visible-v1", "start": chunk.start, "end": chunk.end}},
+                "html": chunk.html,
+                "visible_text": chunk.visible_text,
+            }
+            for chunk in presentation.chunks
+        ]
+        outcome = {"kind": "model_text", "projection": output.model_dump(mode="json", exclude={"source"})}
+        frozen = presentation.to_json()
+    else:
+        if type(notice) is not PrimaryTurnNotice:
+            raise ValueError("publication-source-conflict")
+        notice = PrimaryTurnNotice(notice.kind, notice.output)
+        output = notice.output
+        key = {"sealed_failed": "error.generic", "sealed_cancelled": "run.cancelled"}[notice.kind]
+        parts = [{"kind": "text", "source_ref": {"key": key, "values": {}}}]
+        outcome = {"kind": notice.kind, "projection": output.model_dump(mode="json"), "source_ref": parts[0]["source_ref"]}
+        frozen = None
+    if output is not None and (output.owner_user_id, output.thread_id, output.channel_execution.publication_id, output.channel_execution.assistant_id, output.channel_execution.agent_name) != (
+        scope["owner_user_id"],
+        scope["thread_id"],
+        identity["publication_id"],
+        scope["assistant_id"],
+        scope["agent_name"],
+    ):
+        raise ValueError("publication-source-conflict")
+    basis = _safe_json({"version": 1, "publication": identity, "outcome": outcome, "presentation": frozen, "parts": parts, "finish_route": True})
+    return basis, parts
 
 
 class Outbox:
@@ -552,6 +745,56 @@ class Outbox:
             await self.inbox.register_delivery(inbox_rows, outbox_id=identity, primary=True, finish=True, session=writer)
             for mark in marks:
                 mark.assistant_message_id = source["assistant_message_id"]
+            return identity
+
+    async def plan_publication_reply(self, record: PublicationRecord, *, output: RunOutputProjection, guard: PublicationGuard) -> str:
+        """Plan proved text only; this dormant writer performs no source HTTP or send."""
+        basis, parts = await await_drained(asyncio.to_thread(_prepare_publication_reply, record, output, None))
+        return await await_drained(self._write_publication_primary(record, guard=guard, basis=basis, parts=parts))
+
+    async def plan_publication_notice(self, record: PublicationRecord, *, notice: PrimaryTurnNotice, guard: PublicationGuard) -> str:
+        """Seal one trusted fixed outcome, without inventing an assistant identity."""
+        basis, parts = await await_drained(asyncio.to_thread(_prepare_publication_reply, record, None, notice))
+        return await await_drained(self._write_publication_primary(record, guard=guard, basis=basis, parts=parts))
+
+    async def _write_publication_primary(self, record: PublicationRecord, *, guard: PublicationGuard, basis: dict, parts: list[dict]) -> str:
+        scope = basis["publication"]["scope"]
+        link = guard.captured_link
+        fields = ("owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "binding_generation")
+        if type(link) is not BotLink or link.id != scope["link_id"] or any(getattr(link, name) != scope[name] for name in fields):
+            raise ValueError("publication-source-conflict")
+        dedupe = f"reply:{basis['publication']['turn_id']}"
+        async with self._writer(link.id) as (writer, _):
+            await guard.check(writer)
+            existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == dedupe).with_for_update().execution_options(populate_existing=True))
+            fresh, _ = await self.inbox.lock_publication(record, session=writer)
+            if _canonical_primary(_publication_identity(fresh)) != _canonical_primary(basis["publication"]):
+                raise ValueError("publication-source-conflict")
+            outcome = basis["outcome"]
+            projection = outcome["projection"]
+            if fresh.dispatch_started is not True or fresh.run_id is None or fresh.run_id != projection["run_id"]:
+                raise ValueError("publication-source-conflict")
+            assistant = projection["output_evidence"]["assistant_message_id"] if outcome["kind"] == "model_text" else None
+            if existing is not None:
+                if existing.owner_user_id != scope["owner_user_id"] or existing.binding_generation != scope["binding_generation"] or existing.chat_id != scope["chat_id"] or type(existing.payload) is not dict:
+                    raise ValueError("publication-source-conflict")
+                saved = existing.payload.get("reply_basis")
+                # Equality to the closed freshly validated basis also rejects
+                # extra/missing keys and JSON bool/int substitutions on replay.
+                if type(saved) is not dict or _canonical_primary(saved) != _canonical_primary(basis) or _canonical_primary(existing.payload.get("source")) != _canonical_primary(outcome):
+                    raise ValueError("publication-source-conflict")
+                if saved["presentation"] is not None:
+                    FrozenReplyPresentation.from_json(saved["presentation"])
+                identity = existing.id
+            else:
+                identity, created = await self._add(link, dedupe_key=dedupe, class_="reply", payload={"source": outcome, "reply_basis": basis, "parts": parts}, session=writer, message_thread_id=scope["message_thread_id"])
+                if not created:
+                    raise ValueError("publication-source-conflict")
+            await self.inbox.seal_publication(fresh, outbox_id=identity, assistant_message_id=assistant, session=writer)
+            await writer.flush()
+            # The complete owning unit retains commit/session cleanup. No SQL
+            # work follows this guard except the admitted transaction's commit.
+            await guard.check(writer)
             return identity
 
     async def plan_status_notice(

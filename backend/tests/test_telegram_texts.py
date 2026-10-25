@@ -15,7 +15,7 @@ STAGE_ONE_KEYS = frozenset(
     activity.read activity.write activity.edit activity.list activity.command activity.search activity.fetch
     activity.browser activity.image activity.subtask activity.present activity.work activity.other answer.thinking
     busy.followup busy.followup_full busy.queued busy.cancelled busy.gave_up busy.thread error.generic
-    chat.restarted chat.files_full stop.answer stop.nothing stop.failed file.saved_ask_plain file.too_large_in
+    chat.restarted chat.files_full run.cancelled stop.answer stop.nothing stop.failed file.saved_ask_plain file.too_large_in
     file.not_saved file.own_full file.own_preparing file.own_no_seat file.own_unchecked file.own_unavailable
     file.too_large_out file.out_failed voice.unavailable voice.too_long voice.daily_limit voice.first_notice
     voice.agreed voice.not_used voice.writing voice.heard voice.failed voice.unclear media.unsupported
@@ -48,6 +48,12 @@ def test_text_catalog_locales_have_equal_keys():
 def test_chat_texts_never_say_i():
     forbidden = re.compile(r"\b(?:I|I'm|I'll|I've|me|my)\b", re.I)
     assert not [(key, text) for key, text in catalog("en").items() if not key.startswith("label.") and forbidden.search(text)]
+
+
+@pytest.mark.parametrize("locale,expected", [("en", "This request was cancelled."), ("zh-CN", "此次请求已取消。")])
+def test_sealed_cancellation_text_does_not_claim_queue_removal(locale, expected):
+    assert render_plain("run.cancelled", locale) == expected
+    assert catalog(locale)["run.cancelled"] != catalog(locale)["busy.cancelled"]
 
 
 def test_chat_texts_use_no_pronoun_after_name():

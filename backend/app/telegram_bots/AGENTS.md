@@ -64,6 +64,27 @@ place: a sealed route and every required delivery must be sent/skipped. An
 auxiliary receipt never completes unfinished processing. Borrowed helpers share
 the caller's writer/session and never own its commit or rollback.
 
+Managed publication custody uses frozen `PublicationRecord`/scope/origin DTOs.
+Reserve a new model-turn identity and versioned execution receipt atomically;
+never adopt a receiptless legacy publication as dispatch-not-started. Exact replay
+compares complete saved origins, canonical input, target, thread and endpoint.
+Dispatch marker/run ID are fresh observations, not immutable caller identity.
+The marker is irreversible and permits one winner; ambiguous commit never
+authorizes another dispatch. Managed explicit retry remains with later controls.
+The mandatory original-attempt `PublicationGuard` borrows a same-engine writer,
+checks current human/account/connection/link custody and requires literal True
+after its final awaited authority read. Flush mutations before that final guard;
+only commit follows. Keep link/custody -> primary outbox -> sorted inbox order.
+Borrowed publication lookup returns a fresh record and detached complete rows.
+Owned SQL units retain execute/fetch/commit/rollback/exit through cancellation.
+`plan_publication_reply` and closed fixed notices share `reply:<turn_id>` and
+atomic route sealing. Exact canonical proof/presentation replay retains actual
+part acknowledgements; changed plans refuse. Frozen visible-text ranges use
+codepoints, while Telegram chunk limits use UTF-16. These primitives install no
+dispatcher/observer/model sender; strict remote source and artifact/action
+eligibility belong to the later actual consumer. Legacy `plan_reply` keeps its
+compatibility semantics. See [publication custody](../../docs/TELEGRAM_PUBLICATION_CUSTODY.md).
+
 Conversation preparation reserves `route_basis.thread_preparation` on an actual
 admitted, routed, unsealed input before HTTP. Public routing cannot supply this
 server bookkeeping; business replay/group comparisons omit it and snapshots

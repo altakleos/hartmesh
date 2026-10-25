@@ -354,7 +354,7 @@ class TelegramInboundMarkRow(Base):
     grouped_message_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     thread_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    assistant_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    assistant_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     operation_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     outbox_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     delivery_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
