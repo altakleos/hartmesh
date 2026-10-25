@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, fields
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import uuid4
 
 from sqlalchemy import and_, delete, func, or_, select, text, update
@@ -210,6 +210,77 @@ class BotLink:
         return _snapshot(row)
 
 
+class PublicationGuard(Protocol):
+    """Current attempt authority borrowed by one publication writer."""
+
+    @property
+    def captured_link(self) -> BotLink: ...
+
+    async def check(self, writer: AsyncSession) -> BotLink: ...
+
+
+@dataclass(frozen=True)
+class _PublicationGuard:
+    repository: BotLinkRepository
+    _captured: BotLink
+    _live_owner: LiveOwnerCheck
+    _attempt: Callable[[], bool]
+
+    @property
+    def captured_link(self) -> BotLink:
+        return deepcopy(self._captured)
+
+    async def check(self, writer: AsyncSession) -> BotLink:
+        from deerflow.utils.file_io import await_drained
+
+        return await await_drained(self._check(writer))
+
+    async def _check(self, writer: AsyncSession) -> BotLink:
+        captured = self._captured
+        bind = self.repository.session_factory.kw.get("bind")
+        if bind is None or not writer.in_transaction() or not writer.is_active or writer.get_bind() is not getattr(bind, "sync_engine", bind):
+            raise ValueError("publication-writer-required") from None
+        if writer.get_bind().dialect.name == "sqlite":
+            # A caller's session.begin() need not have started a native writer.
+            # Reserve before the first authority read, without another checkout.
+            await writer.execute(update(TelegramBotLinkRow).where(TelegramBotLinkRow.id == captured.id).values(id=TelegramBotLinkRow.id))
+        row = await writer.scalar(select(TelegramBotLinkRow).where(TelegramBotLinkRow.id == captured.id, TelegramBotLinkRow.owner_user_id == captured.owner_user_id).with_for_update().execution_options(populate_existing=True))
+        basis = ("id", "owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "binding_generation", "token_revision")
+        if (
+            row is None
+            or captured.state != "connected"
+            or row.state != "connected"
+            or row.health != "ok"
+            or captured.agent_kind not in {"lead_agent", "custom_agent"}
+            or captured.agent_kind == "lead_agent"
+            and captured.agent_ref != "lead_agent"
+            or not isinstance(captured.agent_ref, str)
+            or not captured.agent_ref
+            or any(type(value) is not int or value < 0 for value in (captured.binding_generation, captured.token_revision))
+            or type(captured.telegram_user_id) is not int
+            or captured.telegram_user_id <= 0
+            or type(captured.chat_id) is not int
+            or captured.chat_id != captured.telegram_user_id
+            or captured.connection_id is None
+            or any(getattr(row, name) != getattr(captured, name) for name in basis)
+        ):
+            raise ValueError("publication-stale") from None
+        account = await writer.get(TelegramAccountRow, captured.telegram_user_id, with_for_update=True, populate_existing=True)
+        connection = await self.repository._current_bound_connection(writer, row)
+        if account is None or account.owner_user_id != captured.owner_user_id or connection is None or connection.status != "connected":
+            raise ValueError("publication-stale") from None
+        detached = BotLink.from_row(row)
+        await self._live_owner(captured.owner_user_id, writer)
+        # No authority/SQL await may follow this original-attempt check.
+        try:
+            current = self._attempt()
+        except Exception:
+            raise ValueError("publication-stale") from None
+        if current is not True:
+            raise ValueError("publication-stale") from None
+        return detached
+
+
 @dataclass(frozen=True)
 class Connect:
     url: str
@@ -336,6 +407,12 @@ class BotLinkRepository:
         self._health_causes: dict[str, set[str]] = {}
         self._health_revisions: dict[str, int] = {}
         self._health_locks: dict[str, asyncio.Lock] = {}
+
+    def publication_guard(self, captured_link: BotLink, *, check_live_owner: LiveOwnerCheck, check_attempt_current: Callable[[], bool]) -> PublicationGuard:
+        """Capture the original attempt without acquiring an owner-wide writer."""
+        if not isinstance(captured_link, BotLink) or not callable(check_live_owner) or not callable(check_attempt_current):
+            raise ValueError("publication-stale") from None
+        return _PublicationGuard(self, deepcopy(captured_link), check_live_owner, check_attempt_current)
 
     def _health_lock(self, link_id: str) -> asyncio.Lock:
         return self._health_locks.setdefault(link_id, asyncio.Lock())

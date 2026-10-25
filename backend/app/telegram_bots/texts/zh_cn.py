@@ -40,6 +40,7 @@ TEXTS: dict[str, str] = {
     "busy.gave_up": "两分钟后仍繁忙，因此未回答你的消息。消息已保留。",
     "busy.thread": "此对话正在回答从网页版开始的问题。你的消息已排队。",
     "error.generic": "出现问题，消息未获回答。消息已保留。",
+    "run.cancelled": "此次请求已取消。",
     "chat.restarted": "服务在回答完成前重启。你的消息已保留。",
     "chat.files_full": "你的文件已满，无法开始新对话。请在 {product} 网页版删除文件或旧对话，然后重试。如果仍不够，请联系{support}增加容量。你的消息已保留。",
     "stop.answer": "已停止。上面的文字尚未完成。",

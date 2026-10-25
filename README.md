@@ -1337,6 +1337,8 @@ ownership/setup-code transactions, durable binding welcomes, and personal
 notification settings. Revision `0043_telegram_inbox_chat_scope` includes the
 chat ID in retained inbox identities so reconnecting another account works
 without deleting earlier receipts. The connection flow remains reserved.
+Revision `0044_telegram_assistant_ids` retains opaque assistant-message IDs in a
+Text column, allowing legal SDK identities longer than 64 characters.
 Its presentation layer includes English and Chinese product text, bounded Telegram
 HTML, complete multipart previews, permission-aware web links and voice-provider
 selection from the deployment's current model configuration.
@@ -1379,8 +1381,11 @@ The shared channel execution boundary now binds an admitted human message to its
 publication, human owner, conversation and actual AI employee definition. Strict
 run and message reads distinguish an authoritative result from unavailable
 storage. Closing new-run admission preserves reads for work already dispatched.
-Durable model-result publication and ordinary managed-bot conversations remain
-for subsequent stages; these changes do not enable them.
+The dormant managed-publication APIs now preserve original input and execution
+identity, prevent a second dispatch claim, and atomically plan one exact primary
+reply. They retain opaque assistant-message IDs and saved multipart presentation.
+Dispatch, restart recovery and ordinary managed-bot conversations remain for
+subsequent stages. See [publication custody](backend/docs/TELEGRAM_PUBLICATION_CUSTODY.md).
 SQL-backed runs can explicitly request versioned output capture. The worker seals
 the exact completed model answer with its durable event source; the authorized
 output API reports pending, complete or unavailable without executing another

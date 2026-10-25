@@ -15,9 +15,10 @@ import re
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from copy import deepcopy
-from dataclasses import dataclass, fields
+from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
+from uuid import uuid4
 
 from sqlalchemy import and_, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -29,13 +30,15 @@ from deerflow.persistence.telegram_bots.model import TelegramAccountRow, Telegra
 if TYPE_CHECKING:
     from telegram import Update
 
-    from app.telegram_bots.links import BotLink
+    from app.telegram_bots.links import BotLink, PublicationGuard
 
 _TOKEN = re.compile(TOKEN_BODY)
 SERVER_BOOKKEEPING_KEYS = frozenset({"publications", "current_publication_id", "thread_preparation"})
 _INPUT_KEYS = {"text", "caption", "files", "voice", "command", "type", "reply_to_message_id", "prompt_id", "media_group_id"}
 _UNSAFE_KEYS = {"raw_update", "update", "token", "bot_token", "access_token", "download_url", "file_path", "audio_bytes", "bytes", "_content", "content_bytes"}
 _FILE_KEYS = {"type", "file_id", "file_unique_id", "filename", "mime_type", "size", "message_id", "telegram_bot_id", "duration", "width", "height"}
+_PUBLICATION_HEX = re.compile(r"[0-9a-f]{32}\Z")
+_PUBLICATION_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def _now() -> datetime:
@@ -177,6 +180,143 @@ def _scope(row: TelegramInboundMarkRow) -> tuple:
     )
 
 
+def _publication_text(value: str, limit: int) -> None:
+    if type(value) is not str:
+        raise ValueError("publication-conflict") from None
+    _identifier(value, limit, "publication-conflict")
+
+
+@dataclass(frozen=True)
+class PublicationOrigin:
+    link_id: str
+    message_id: int
+    chat_id: int
+    update_id: int
+    message_thread_id: int | None
+    binding_generation: int
+
+    def __post_init__(self) -> None:
+        _publication_text(self.link_id, 32)
+        if any(type(value) is not int or value <= 0 for value in (self.message_id, self.chat_id)) or any(type(value) is not int or value < 0 for value in (self.update_id, self.binding_generation)):
+            raise ValueError("publication-conflict") from None
+        object.__setattr__(self, "message_thread_id", _topic(self.message_thread_id))
+
+
+@dataclass(frozen=True)
+class PublicationScope:
+    link_id: str
+    owner_user_id: str
+    bot_id: int
+    agent_kind: Literal["lead_agent", "custom_agent"]
+    agent_ref: str
+    assistant_id: Literal["lead_agent"]
+    agent_name: str | None
+    connection_id: str
+    telegram_user_id: int
+    chat_id: int
+    message_thread_id: int | None
+    binding_generation: int
+    thread_id: str
+    endpoint_id: str
+
+    def __post_init__(self) -> None:
+        for name, limit in (("link_id", 32), ("owner_user_id", 64), ("agent_ref", 128), ("connection_id", 64), ("thread_id", 64)):
+            _publication_text(getattr(self, name), limit)
+        if (
+            any(type(value) is not int or value <= 0 for value in (self.bot_id, self.telegram_user_id, self.chat_id))
+            or self.chat_id != self.telegram_user_id
+            or type(self.binding_generation) is not int
+            or self.binding_generation < 0
+            or self.agent_kind not in {"lead_agent", "custom_agent"}
+            or self.assistant_id != "lead_agent"
+            or self.agent_kind == "lead_agent"
+            and (self.agent_ref != "lead_agent" or self.agent_name is not None)
+            or self.agent_kind == "custom_agent"
+            and (type(self.agent_name) is not str or self.agent_name != self.agent_ref)
+            or type(self.endpoint_id) is not str
+            or not _PUBLICATION_DIGEST.fullmatch(self.endpoint_id)
+        ):
+            raise ValueError("publication-conflict") from None
+        object.__setattr__(self, "message_thread_id", _topic(self.message_thread_id))
+
+
+@dataclass(frozen=True)
+class PublicationRecord:
+    scope: PublicationScope
+    turn_id: str
+    publication_id: str
+    event_id: str
+    origins: tuple[PublicationOrigin, ...]
+    input_version: Literal[1]
+    input_sha256: str
+    dispatch_started: bool
+    run_id: str | None
+
+    def __post_init__(self) -> None:
+        if type(self.scope) is not PublicationScope:
+            raise ValueError("publication-conflict") from None
+        _publication_text(self.turn_id, 32)
+        _publication_text(self.event_id, 96)
+        if (
+            type(self.publication_id) is not str
+            or not _PUBLICATION_HEX.fullmatch(self.publication_id)
+            or self.publication_id != hashlib.sha256((self.turn_id + ":" + self.event_id).encode()).hexdigest()[:32]
+            or type(self.origins) is not tuple
+            or not self.origins
+            or any(type(origin) is not PublicationOrigin for origin in self.origins)
+            or self.origins != tuple(sorted(set(self.origins), key=lambda origin: (origin.link_id, origin.message_id, origin.chat_id)))
+            or any((origin.link_id, origin.chat_id, origin.message_thread_id, origin.binding_generation) != (self.scope.link_id, self.scope.chat_id, self.scope.message_thread_id, self.scope.binding_generation) for origin in self.origins)
+            or type(self.input_version) is not int
+            or self.input_version != 1
+            or type(self.input_sha256) is not str
+            or not _PUBLICATION_DIGEST.fullmatch(self.input_sha256)
+            or type(self.dispatch_started) is not bool
+        ):
+            raise ValueError("publication-conflict") from None
+        if self.run_id is not None:
+            _publication_text(self.run_id, 64)
+            if not self.dispatch_started:
+                raise ValueError("publication-conflict") from None
+
+
+def _publication_identity(record: PublicationRecord) -> dict:
+    if type(record) is not PublicationRecord:
+        raise ValueError("publication-conflict") from None
+    value = asdict(record)
+    value["origins"] = list(value["origins"])
+    value.pop("dispatch_started")
+    value.pop("run_id")
+    return value
+
+
+def _publication_origin(row: InboxRow | TelegramInboundMarkRow) -> PublicationOrigin:
+    return PublicationOrigin(**{field.name: getattr(row, field.name) for field in fields(PublicationOrigin)})
+
+
+def _publication_input(rows: Sequence[InboxRow | TelegramInboundMarkRow]) -> str:
+    assembly = []
+    for row in sorted(rows, key=lambda mark: (_time(mark.accepted_at), mark.update_id, mark.message_id)):
+        stamp = _time(row.accepted_at)
+        if not isinstance(stamp, datetime):
+            raise ValueError("publication-conflict") from None
+        assembly.append(
+            {
+                "origin": asdict(_publication_origin(row)),
+                "accepted_at": stamp.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+                "sanitized_input": _input(row.sanitized_input),
+                "route_kind": row.route_kind,
+                "route_target_id": row.route_target_id,
+                "operation_ids": row.operation_ids,
+                "route_basis": _basis(row),
+            }
+        )
+    try:
+        content = json.dumps({"version": 1, "assembly": assembly}, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError):
+        raise ValueError("publication-conflict") from None
+    return hashlib.sha256(content).hexdigest()
+
+
 class InboxRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
@@ -245,6 +385,294 @@ class InboxRepository:
                 .execution_options(populate_existing=True)
             )
         )
+
+    def _publication_borrow(self, session: AsyncSession) -> None:
+        bind = self.session_factory.kw.get("bind")
+        if bind is None or not session.in_transaction() or not session.is_active or session.get_bind() is not getattr(bind, "sync_engine", bind):
+            raise ValueError("publication-writer-required") from None
+
+    @staticmethod
+    def _publication_scope(link: BotLink | TelegramBotLinkRow, *, topic: int | None, thread_id: str, endpoint_id: str) -> PublicationScope:
+        return PublicationScope(
+            link_id=link.id,
+            owner_user_id=link.owner_user_id,
+            bot_id=link.bot_id,
+            agent_kind=link.agent_kind,
+            agent_ref=link.agent_ref,
+            assistant_id="lead_agent",
+            agent_name=link.agent_ref if link.agent_kind == "custom_agent" else None,
+            connection_id=link.connection_id,
+            telegram_user_id=link.telegram_user_id,
+            chat_id=link.chat_id,
+            message_thread_id=topic,
+            binding_generation=link.binding_generation,
+            thread_id=thread_id,
+            endpoint_id=endpoint_id,
+        )
+
+    @staticmethod
+    def _publication_guard_matches(guard: PublicationGuard, *, link: BotLink | None = None, scope: PublicationScope | None = None) -> None:
+        try:
+            captured = guard.captured_link
+            if link is not None:
+                names = ("id", "owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "binding_generation", "token_revision")
+                if any(getattr(captured, name) != getattr(link, name) for name in names):
+                    raise ValueError
+            if scope is not None and InboxRepository._publication_scope(captured, topic=scope.message_thread_id, thread_id=scope.thread_id, endpoint_id=scope.endpoint_id) != scope:
+                raise ValueError
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError("publication-stale") from None
+
+    @staticmethod
+    def _publication_snapshot_matches(saved: TelegramInboundMarkRow, captured: InboxRow) -> None:
+        try:
+            same = (
+                _publication_origin(saved) == _publication_origin(captured)
+                and _time(saved.accepted_at) == _time(captured.accepted_at)
+                and (saved.route_kind, saved.route_target_id) == (captured.route_kind, captured.route_target_id)
+                and _canonical(_basis(saved)) == _canonical(_basis(captured))
+                and _canonical({"input": _input(saved.sanitized_input), "operations": saved.operation_ids}) == _canonical({"input": _input(captured.sanitized_input), "operations": captured.operation_ids})
+            )
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError("publication-conflict") from None
+        if not same:
+            raise ValueError("publication-conflict") from None
+
+    @staticmethod
+    def _publication_record(marks: Sequence[TelegramInboundMarkRow]) -> PublicationRecord:
+        """Parse a complete locked group and recompute its saved input proof."""
+        try:
+            if not marks or marks[0].turn_id is None or marks[0].thread_id is None:
+                raise ValueError
+            InboxRepository._group(marks)
+            first = marks[0]
+            if first.route_kind != "turn" or any((mark.turn_id, mark.thread_id) != (first.turn_id, first.thread_id) for mark in marks):
+                raise ValueError
+            if any(_canonical(_publication_basis(mark)) != _canonical(_publication_basis(first)) for mark in marks):
+                raise ValueError
+            ordered = sorted(marks, key=lambda mark: (_time(mark.accepted_at), mark.update_id, mark.message_id))
+            if any(_canonical({"group": mark.grouped_message_ids}) != _canonical({"group": [other.message_id for other in ordered if other is not mark]}) for mark in marks):
+                raise ValueError
+            publications = first.route_basis["publications"]
+            current = first.route_basis["current_publication_id"]
+            if type(publications) is not list or not publications or current != publications[-1]["publication_id"]:
+                raise ValueError
+            seen_publications, seen_events = set(), set()
+            for item in publications:
+                if type(item) is not dict or set(item) not in ({"publication_id", "event_id", "run_id"}, {"publication_id", "event_id", "run_id", "publication_execution"}):
+                    raise ValueError
+                _publication_text(item["event_id"], 96)
+                if type(item["publication_id"]) is not str or item["publication_id"] != InboxRepository._publication(first.turn_id, item["event_id"]) or item["publication_id"] in seen_publications or item["event_id"] in seen_events:
+                    raise ValueError
+                seen_publications.add(item["publication_id"])
+                seen_events.add(item["event_id"])
+                if item["run_id"] is not None:
+                    _publication_text(item["run_id"], 64)
+            entry = publications[-1]
+            execution = entry["publication_execution"]
+            if type(execution) is not dict or set(execution) != {"version", "scope", "origins", "input_version", "input_sha256", "dispatch_started"} or type(execution["version"]) is not int or execution["version"] != 1:
+                raise ValueError
+            if type(execution["scope"]) is not dict or set(execution["scope"]) != {field.name for field in fields(PublicationScope)} or type(execution["origins"]) is not list:
+                raise ValueError
+            scope = PublicationScope(**execution["scope"])
+            origins = []
+            for origin in execution["origins"]:
+                if type(origin) is not dict or set(origin) != {field.name for field in fields(PublicationOrigin)}:
+                    raise ValueError
+                origins.append(PublicationOrigin(**origin))
+            record = PublicationRecord(scope, first.turn_id, entry["publication_id"], entry["event_id"], tuple(origins), execution["input_version"], execution["input_sha256"], execution["dispatch_started"], entry["run_id"])
+            if (
+                tuple(_publication_origin(mark) for mark in marks) != record.origins
+                or first.thread_id != scope.thread_id
+                or first.route_target_id != scope.agent_ref
+                or any(mark.run_id != record.run_id for mark in marks)
+                or _publication_input(marks) != record.input_sha256
+            ):
+                raise ValueError
+            return record
+        except (AttributeError, KeyError, TypeError, ValueError, UnicodeError):
+            # Missing execution receipts are uncertainty, never a false marker
+            # from which a legacy publication can be dispatched again.
+            raise ValueError("publication-conflict") from None
+
+    async def _locked_publication(self, record: PublicationRecord, session: AsyncSession) -> tuple[PublicationRecord, list[TelegramInboundMarkRow]]:
+        self._publication_borrow(session)
+        identity = _publication_identity(record)
+        link = await self._link(session, record.scope.link_id)
+        actual_scope = self._publication_scope(link, topic=record.scope.message_thread_id, thread_id=record.scope.thread_id, endpoint_id=record.scope.endpoint_id)
+        if actual_scope != record.scope:
+            raise ValueError("publication-stale") from None
+        marks = await self._turn(session, record.turn_id)
+        fresh = self._publication_record(marks)
+        if _canonical(_publication_identity(fresh)) != _canonical(identity):
+            raise ValueError("publication-conflict") from None
+        return fresh, marks
+
+    async def reserve_publication(self, captured_link: BotLink, rows: Sequence[InboxRow], *, thread_id: str, endpoint_id: str, guard: PublicationGuard) -> PublicationRecord:
+        """Atomically fix the first managed identity; never adopt legacy intent."""
+        from deerflow.utils.file_io import await_drained
+
+        captured_link, rows = deepcopy(captured_link), tuple(deepcopy(rows))
+        link_id = self._requested(rows)
+        self._publication_guard_matches(guard, link=captured_link)
+        if captured_link.id != link_id:
+            raise ValueError("publication-conflict") from None
+        expected = self._publication_scope(captured_link, topic=rows[0].message_thread_id, thread_id=thread_id, endpoint_id=endpoint_id)
+
+        async def perform() -> PublicationRecord:
+            async with self._transaction() as session:
+                checked = await guard.check(session)
+                if self._publication_scope(checked, topic=expected.message_thread_id, thread_id=thread_id, endpoint_id=endpoint_id) != expected:
+                    raise ValueError("publication-stale") from None
+                marks = await self._rows(session, rows)
+                self._group(marks)
+                for mark, captured in zip(marks, sorted(rows, key=_identity), strict=True):
+                    self._publication_snapshot_matches(mark, captured)
+                    if mark.route_kind != "turn" or mark.route_target_id != captured_link.agent_ref:
+                        raise ValueError("publication-conflict") from None
+                    self._current(checked, mark)
+                if any(mark.turn_id is not None for mark in marks):
+                    turns = {mark.turn_id for mark in marks}
+                    if len(turns) != 1 or None in turns:
+                        raise ValueError("publication-conflict") from None
+                    complete = await self._turn(session, marks[0].turn_id)
+                    if {_identity(mark) for mark in complete} != {_identity(mark) for mark in marks}:
+                        raise ValueError("publication-conflict") from None
+                    record = self._publication_record(complete)
+                    if record.scope != expected:
+                        raise ValueError("publication-conflict") from None
+                else:
+                    if any(
+                        mark.thread_id is not None or mark.run_id is not None or mark.assistant_message_id is not None or mark.route_complete or mark.state not in {"accepted", "reply_pending"} or mark.grouped_message_ids for mark in marks
+                    ):
+                        raise ValueError("publication-conflict") from None
+                    if any({"publications", "current_publication_id"}.intersection(mark.route_basis) for mark in marks):
+                        raise ValueError("publication-conflict") from None
+                    turn_id = uuid4().hex
+                    if session.get_bind().dialect.name == "postgresql":
+                        key = int.from_bytes(hashlib.sha256(("telegram-inbox-turn:" + turn_id).encode()).digest()[:8], signed=True)
+                        await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+                    if await self._turn(session, turn_id):
+                        raise ValueError("publication-conflict") from None
+                    ordered = sorted(marks, key=lambda mark: (_time(mark.accepted_at), mark.update_id, mark.message_id))
+                    event_id = f"m{ordered[0].message_id}"
+                    record = PublicationRecord(expected, turn_id, self._publication(turn_id, event_id), event_id, tuple(_publication_origin(mark) for mark in marks), 1, _publication_input(marks), False, None)
+                    execution = {"version": 1, "scope": asdict(record.scope), "origins": [asdict(origin) for origin in record.origins], "input_version": 1, "input_sha256": record.input_sha256, "dispatch_started": False}
+                    history = [{"publication_id": record.publication_id, "event_id": event_id, "run_id": None, "publication_execution": execution}]
+                    for mark in marks:
+                        mark.turn_id, mark.thread_id, mark.state = turn_id, thread_id, "dispatched"
+                        mark.grouped_message_ids = [other.message_id for other in ordered if other is not mark]
+                        mark.route_basis = {**deepcopy(mark.route_basis), "publications": deepcopy(history), "current_publication_id": record.publication_id}
+                await session.flush()
+                await guard.check(session)
+                return record
+
+        return await await_drained(perform())
+
+    async def mark_dispatch_started(self, record: PublicationRecord, *, guard: PublicationGuard) -> bool:
+        """One irreversible winner; an ambiguous committed result is never reset."""
+        from deerflow.utils.file_io import await_drained
+
+        self._publication_guard_matches(guard, scope=record.scope)
+
+        async def perform() -> bool:
+            async with self._transaction() as session:
+                await guard.check(session)
+                fresh, marks = await self._locked_publication(record, session)
+                changed = not fresh.dispatch_started
+                if changed:
+                    if any(mark.route_complete or mark.state == "interrupted" for mark in marks):
+                        raise ValueError("publication-conflict") from None
+                    for mark in marks:
+                        basis = deepcopy(mark.route_basis)
+                        basis["publications"][-1]["publication_execution"]["dispatch_started"] = True
+                        mark.route_basis = basis
+                await session.flush()
+                await guard.check(session)
+                return changed
+
+        return await await_drained(perform())
+
+    async def bind_publication_run(self, record: PublicationRecord, *, run_id: str, guard: PublicationGuard) -> PublicationRecord:
+        """Save only this marked publication's first exact run; HTTP proof is external."""
+        from deerflow.utils.file_io import await_drained
+
+        _publication_text(run_id, 64)
+        self._publication_guard_matches(guard, scope=record.scope)
+
+        async def perform() -> PublicationRecord:
+            async with self._transaction() as session:
+                await guard.check(session)
+                fresh, marks = await self._locked_publication(record, session)
+                if not fresh.dispatch_started or fresh.run_id not in (None, run_id) or fresh.run_id is None and any(mark.route_complete or mark.state == "interrupted" for mark in marks):
+                    raise ValueError("publication-conflict") from None
+                for mark in marks:
+                    basis = deepcopy(mark.route_basis)
+                    basis["publications"][-1]["run_id"] = run_id
+                    mark.run_id, mark.route_basis = run_id, basis
+                await session.flush()
+                result = self._publication_record(marks)
+                await guard.check(session)
+                return result
+
+        return await await_drained(perform())
+
+    async def lock_publication(self, record: PublicationRecord, *, session: AsyncSession) -> tuple[PublicationRecord, tuple[InboxRow, ...]]:
+        """Borrow the planner's already ordered writer and return no ORM rows."""
+        from deerflow.utils.file_io import await_drained
+
+        async def perform():
+            fresh, marks = await self._locked_publication(record, session)
+            return fresh, tuple(_snapshot(mark) for mark in marks)
+
+        return await await_drained(perform())
+
+    async def seal_publication(self, record: PublicationRecord, *, outbox_id: str, assistant_message_id: str | None, session: AsyncSession) -> None:
+        """Attach the exact shared primary, retaining the caller's transaction."""
+        from deerflow.utils.file_io import await_drained
+
+        _publication_text(outbox_id, 32)
+        if assistant_message_id is not None and (type(assistant_message_id) is not str or not assistant_message_id):
+            raise ValueError("publication-conflict") from None
+
+        async def perform():
+            fresh, marks = await self._locked_publication(record, session)
+            delivery = await session.get(TelegramOutboxRow, outbox_id, populate_existing=True)
+            if delivery is None or (delivery.link_id, delivery.owner_user_id, delivery.binding_generation, delivery.chat_id, delivery.dedupe_key, delivery.class_) != (
+                fresh.scope.link_id,
+                fresh.scope.owner_user_id,
+                fresh.scope.binding_generation,
+                fresh.scope.chat_id,
+                f"reply:{fresh.turn_id}",
+                "reply",
+            ):
+                raise ValueError("publication-conflict") from None
+            try:
+                basis = delivery.payload["reply_basis"]
+                if type(basis) is not dict or type(basis["version"]) is not int or basis["version"] != 1 or basis["finish_route"] is not True or _canonical(basis["publication"]) != _canonical(_publication_identity(fresh)):
+                    raise ValueError
+                outcome = basis["outcome"]
+                kind = outcome["kind"]
+                if kind == "model_text":
+                    projection = outcome["projection"]
+                    if not fresh.dispatch_started or fresh.run_id is None or projection["run_id"] != fresh.run_id or projection["output_evidence"]["assistant_message_id"] != assistant_message_id or assistant_message_id is None:
+                        raise ValueError
+                elif kind in {"sealed_failed", "sealed_cancelled"}:
+                    if assistant_message_id is not None or not fresh.dispatch_started or fresh.run_id is None or outcome["projection"]["run_id"] != fresh.run_id:
+                        raise ValueError
+                else:
+                    raise ValueError
+            except (AttributeError, KeyError, TypeError, ValueError):
+                raise ValueError("publication-conflict") from None
+            for mark in marks:
+                if mark.state == "interrupted" or mark.assistant_message_id not in (None, assistant_message_id):
+                    raise ValueError("publication-conflict") from None
+            await self.register_delivery(tuple(_snapshot(mark) for mark in marks), outbox_id=outbox_id, primary=True, finish=True, session=session)
+            for mark in marks:
+                mark.assistant_message_id = assistant_message_id
+            await session.flush()
+
+        await await_drained(perform())
 
     async def accept(self, link: BotLink, update: Update, *, sanitized_input: dict) -> tuple[InboxRow, bool]:
         message = update.message
