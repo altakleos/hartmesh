@@ -245,6 +245,7 @@ class RunJournal(BaseCallbackHandler):
         flush_threshold: int = 20,
         progress_reporter: Callable[[dict], Awaitable[None]] | None = None,
         progress_flush_interval: float = 5.0,
+        output_capture: Any | None = None,
     ):
         super().__init__()
         self.run_id = run_id
@@ -255,6 +256,12 @@ class RunJournal(BaseCallbackHandler):
         self._flush_threshold = flush_threshold
         self._progress_reporter = progress_reporter
         self._progress_flush_interval = progress_flush_interval
+        self._output_capture = output_capture
+        self._capture_write_failed = False
+        self._capture_settled = False
+        self._capture_force_flush_tasks: set[asyncio.Task] = set()
+        self._capture_completion: dict | None = None
+        self._capture_delivery: dict | None = None
         try:
             self._owner_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
         except RuntimeError:
@@ -367,6 +374,10 @@ class RunJournal(BaseCallbackHandler):
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
+        if self._output_capture is not None:
+            if self._closed:
+                return
+            self._output_capture.chain_start(run_id=run_id, parent_run_id=parent_run_id, tags=tags, metadata=metadata, name=kwargs.get("name"), inputs=inputs)
         caller = self._identify_caller(tags)
         if parent_run_id is None:
             # Root graph invocation — emit a single trace event for the run start.
@@ -386,6 +397,10 @@ class RunJournal(BaseCallbackHandler):
         parent_run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
+        if self._output_capture is not None:
+            if self._closed:
+                return
+            self._output_capture.chain_end(outputs, run_id=run_id, parent_run_id=parent_run_id)
         # Nested chain ends fire for internal graph nodes; only the root chain
         # represents the user-visible run lifecycle.
         if parent_run_id is not None:
@@ -416,6 +431,7 @@ class RunJournal(BaseCallbackHandler):
         messages: list[list[BaseMessage]],
         *,
         run_id: UUID,
+        parent_run_id: UUID | None = None,
         tags: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -425,6 +441,10 @@ class RunJournal(BaseCallbackHandler):
         messages are fully structured here, it fires only on real LLM calls,
         and the content is never compressed by checkpoint trimming.
         """
+        if self._output_capture is not None:
+            if self._closed:
+                return
+            self._output_capture.model_start(run_id=run_id, parent_run_id=parent_run_id, tags=tags, messages=messages, metadata=kwargs.get("metadata"))
         rid = str(run_id)
         self._llm_start_times[rid] = time.monotonic()
         self._llm_call_index += 1
@@ -475,6 +495,27 @@ class RunJournal(BaseCallbackHandler):
     ) -> None:
         if self._closed:
             return
+
+        try:
+            self._record_llm_end(response, run_id=run_id, parent_run_id=parent_run_id, tags=tags, **kwargs)
+        except Exception:
+            if self._output_capture is None:
+                raise
+            # Callback managers normally swallow handler errors. A malformed
+            # completed observation must remain uncertainty, not a successful
+            # "no matching source" refusal, and must not log provider payloads.
+            self._output_capture.uncertain = True
+            logger.warning("Output capture callback could not be recorded for run %s", self.run_id)
+
+    def _record_llm_end(
+        self,
+        response: Any,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
 
         messages: list[AnyMessage] = []
         response_events: list[dict] = []
@@ -576,6 +617,9 @@ class RunJournal(BaseCallbackHandler):
                     self._record_model_usage(per_call_model, input_tk, output_tk, total_tk, self._extract_cache_read(usage_dict))
 
                     should_schedule_progress = True
+
+        if self._output_capture is not None and is_canonical_callback:
+            self._output_capture.response(run_id=run_id, events=response_events)
 
         if messages:
             self._queue_llm_response_events(
@@ -922,6 +966,8 @@ class RunJournal(BaseCallbackHandler):
         stay in the buffer and are flushed later by the async ``flush()``
         call in the worker's ``finally`` block.
         """
+        if self._output_capture is not None and (self._closed or self._capture_write_failed):
+            return
         self._commit_pending_llm_response()
         if not self._buffer:
             return
@@ -941,6 +987,15 @@ class RunJournal(BaseCallbackHandler):
         task.add_done_callback(self._on_flush_done)
 
     async def _flush_async(self, batch: list[dict]) -> None:
+        if self._output_capture is not None:
+            try:
+                await self._write_capture_batch(batch)
+            except BaseException:
+                # The batch may have committed. Never append it again to make
+                # an apparently healthy source after an unknown write outcome.
+                self._capture_write_failed = True
+                self._output_capture.uncertain = True
+            return
         try:
             store = self._store
             if store is None:
@@ -1185,6 +1240,8 @@ class RunJournal(BaseCallbackHandler):
         This is a fact record, not a verdict: runs that produced no artifacts
         emit ``presented: 0``.
         """
+        if self._capture_delivery is not None:
+            return deepcopy(self._capture_delivery)
         by_tool: dict[str, list[str]] = {}
         paths: list[str] = []
         for path, tool_name in self._produced_artifacts:
@@ -1210,6 +1267,12 @@ class RunJournal(BaseCallbackHandler):
 
     async def flush(self) -> None:
         """Force flush remaining buffer. Called in worker's finally block."""
+        if self._output_capture is not None:
+            from deerflow.utils.file_io import await_drained
+
+            if not self._closed:
+                await await_drained(self._flush_capture_open())
+            return
         if self._closed:
             return
         self._explicit_flush_in_progress = True
@@ -1260,6 +1323,7 @@ class RunJournal(BaseCallbackHandler):
         self._buffer.clear()
         self._pending_llm_response = None
         self._pending_flush_tasks.clear()
+        self._capture_force_flush_tasks.clear()
         self._explicit_flush_in_progress = False
         self._pending_progress_task = None
         self._pending_progress_delayed = False
@@ -1282,6 +1346,12 @@ class RunJournal(BaseCallbackHandler):
 
     async def close(self, *, flush: bool = True) -> None:
         """Release run-scoped references, optionally flushing buffered events."""
+        if self._output_capture is not None:
+            try:
+                await self.quiesce_output_capture(flush=flush)
+            finally:
+                self._output_capture.detach()
+            return
         if self._closed:
             return
         if flush:
@@ -1314,7 +1384,7 @@ class RunJournal(BaseCallbackHandler):
 
     def _schedule_progress_flush(self) -> None:
         """Best-effort throttled progress snapshot for active run visibility."""
-        if self._progress_reporter is None:
+        if self._closed or self._progress_reporter is None:
             return
         now = time.monotonic()
         elapsed = now - self._last_progress_flush
@@ -1333,6 +1403,8 @@ class RunJournal(BaseCallbackHandler):
         self._pending_progress_task = loop.create_task(self._flush_progress_async(snapshot=self.get_completion_data()))
 
     def _schedule_delayed_progress_flush(self, delay: float) -> None:
+        if self._closed:
+            return
         if self._pending_progress_task is not None and not self._pending_progress_task.done():
             return
         try:
@@ -1365,6 +1437,8 @@ class RunJournal(BaseCallbackHandler):
 
     def get_completion_data(self) -> dict:
         """Return accumulated token and message data for run completion."""
+        if self._capture_completion is not None:
+            return deepcopy(self._capture_completion)
         return {
             "total_input_tokens": self._total_input_tokens,
             "total_output_tokens": self._total_output_tokens,
@@ -1378,6 +1452,104 @@ class RunJournal(BaseCallbackHandler):
             "last_ai_message": self._last_ai_msg,
             "first_human_message": self._first_human_msg,
         }
+
+    async def _write_capture_batch(self, batch: list[dict]) -> None:
+        from deerflow.runtime.runs.output import OutputEvidenceError
+        from deerflow.utils.file_io import await_drained
+
+        store = self._store
+        if store is None or self._capture_write_failed:
+            raise OutputEvidenceError()
+        try:
+            rows = await await_drained(store.put_batch(batch))
+            self._output_capture.persisted(batch, rows)
+            self._feed_generation += 1
+        except BaseException:
+            self._capture_write_failed = True
+            self._output_capture.uncertain = True
+            raise
+
+    async def _drain_capture_progress(self) -> None:
+        while self._pending_progress_task is not None:
+            progress = self._pending_progress_task
+            delayed = self._pending_progress_delayed
+            if delayed:
+                progress.cancel()  # No reporter/native operation is admitted yet.
+            await asyncio.gather(progress, return_exceptions=True)
+            if self._pending_progress_task is progress:
+                self._pending_progress_task = None
+            if delayed:
+                self._progress_dirty = False
+                self._pending_progress_delayed = False
+
+    async def _flush_capture_open(self) -> None:
+        """Force-flush without closing producers; quiescence owns final closure."""
+        from deerflow.runtime.runs.output import OutputEvidenceError
+
+        if self._closed:
+            return
+        task = asyncio.current_task()
+        if task is None:
+            raise OutputEvidenceError()
+        self._capture_force_flush_tasks.add(task)
+        self._explicit_flush_in_progress = True
+        try:
+            self._commit_pending_llm_response()
+            pending = tuple(self._pending_flush_tasks)
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            await self._drain_capture_progress()
+            if self._capture_write_failed:
+                raise OutputEvidenceError()
+            while self._buffer and not self._closed:
+                batch = self._buffer[: self._flush_threshold]
+                del self._buffer[: self._flush_threshold]
+                await self._write_capture_batch(batch)
+        finally:
+            self._explicit_flush_in_progress = False
+            self._capture_force_flush_tasks.discard(task)
+
+    async def quiesce_output_capture(self, *, flush: bool) -> None:
+        """Stop producers, drain admitted writes, and freeze summaries before CAS.
+
+        A fenced close drains previously scheduled work but admits no buffered
+        writes. Cancellation never releases a native write/session early.
+        """
+        from deerflow.runtime.runs.output import OutputEvidenceError
+        from deerflow.utils.file_io import await_drained
+
+        if self._capture_settled:
+            if flush and self._capture_write_failed:
+                raise OutputEvidenceError()
+            return
+        self._commit_pending_llm_response()
+        self._closed = True
+        if not flush:
+            # Queued tasks must observe revocation before their first await.
+            # Started writes retain their local store/coroutine and still drain.
+            self._store = None
+            self._progress_reporter = None
+
+        async def settle():
+            try:
+                pending = tuple(self._pending_flush_tasks | self._capture_force_flush_tasks)
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                await self._drain_capture_progress()
+                if flush:
+                    if self._capture_write_failed:
+                        raise OutputEvidenceError()
+                    while self._buffer:
+                        batch = self._buffer[: self._flush_threshold]
+                        del self._buffer[: self._flush_threshold]
+                        await self._write_capture_batch(batch)
+            finally:
+                self._capture_completion = self.get_completion_data()
+                self._capture_delivery = self.get_delivery_content()
+                self._capture_settled = True
+                self._detach_runtime_dependencies()
+
+        await await_drained(settle())
 
     @property
     def feed_generation(self) -> int:

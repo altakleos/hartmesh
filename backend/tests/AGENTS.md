@@ -20,6 +20,14 @@ head alone cannot detect a skipped revision inserted behind an applied head.
 
 ## Telegram compatibility and persistence
 
+Output-capture tests combine real offline LangGraph/model callbacks with both
+SQL dialects. Assert the actual SDK-assigned human ID, canonical AI ID, committed
+event sequence and exact text digest, then consume a worker seal through the
+production route. Seeded projection rows alone do not qualify worker provenance.
+Hold native writes, source reads, dirty progress and cancellation/rollback CAS
+races; drain all tasks before teardown. Unknown event commits must never be
+blindly appended again. Label API scaffolds separately from behavioral reds.
+
 Repository tests use `_telegram_repository_test_support.py` with isolated real
 SQLite/PostgreSQL databases, disk-backed fixtures and no runtime bootstrap.
 Group SQLite fixture DDL in one explicit transaction; retain normal production
@@ -363,8 +371,9 @@ channel defaults; never run native/Compose suites locally.
 Output-evidence tests use real isolated SQLite/PostgreSQL for atomic seals,
 ambiguous commit recovery, cancellation/version/lease fences and authoritative
 snapshots. Pure projection and mock HTTP tests prove protocol validation only,
-not actual worker-source provenance. Capture remains rejected by the current
-creating schema. Keep missing API scaffolds distinct from behavioral regressions.
+not actual worker-source provenance. Opt-in creating admission requires the
+actual run/event capability pair. Keep missing API scaffolds distinct from
+behavioral regressions.
 
 Run-read ownership tests cover actual SQLite cursors in DELETE/WAL modes and
 both SQL dialects for owner, error and timeout behavior. Measure independent

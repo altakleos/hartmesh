@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Captured worker output and authorized reads
+
+Add explicit versioned output capture for SQL-backed runs. Seal the exact
+completed model answer and its committed source event atomically with status;
+retain genuine SDK message identities and exact UTF-8 text. Nested, auxiliary,
+hidden or unsupported output cannot become a replacement answer. Source-write
+uncertainty fences the worker without replaying the model or claiming success.
+Interrupt and rollback races seal cancellation after cleanup.
+
+Add the private versioned run-output GET with authorized pending, complete and
+unavailable projections, exact source checks and cancellation-safe SQL cleanup.
+Capture intent and disconnect policy stay fixed across idempotent reuse.
+Managed-bot model activation and durable publication recovery remain deferred.
+
+No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
+remains version 55.
+
 ### SQL run read cancellation cleanup
 
 Keep run queries and their sessions owned through repeated cancellation. Resolve
@@ -29,9 +46,9 @@ Text sealing respects durable cancellation, owner, version and lease fences.
 New admissions discard caller-supplied result evidence.
 
 Prepare a host-only capture option and strict output client with retained source
-authorization and closed scope/status/digest validation. Worker capture, server
-admission and the output endpoint are subsequent work: current capture requests
-are rejected before execution, and managed-bot activation remains deferred.
+authorization and closed scope/status/digest validation. The capture and output
+read implementation above extends these primitives; managed-bot activation
+remains deferred.
 
 No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
 remains version 55. Existing ordinary and Memory run behavior stays unchanged.

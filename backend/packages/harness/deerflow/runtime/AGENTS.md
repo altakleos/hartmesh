@@ -10,7 +10,14 @@ absence. Preserve ordinary and raise-only lifecycle semantics. Gateway protocol:
 Optional SQL output seals use immutable generic receipts, exact status+receipt
 confirmation and always-stored deep-frozen snapshots. Cached success is not proof;
 new admissions discard caller evidence. Preserve ordinary/Memory defaults.
-Worker capture and server output admission remain inactive. See
+Opt-in capture owns the host graph UUID, canonical completed model callback,
+actual input identity and committed event sequence before sealing status. Only
+the direct `model` node of that graph is initially qualified; nested/auxiliary
+callbacks, history IDs and multiple epochs never supply replacement text.
+Capture journal quiescence stops producers, drains admitted SQL/progress and
+freezes summaries before CAS. Source uncertainty fences locally and skips
+status-only writes, goal clearing and completion hooks. Keep ordinary defaults.
+Managed-bot activation and nonworker closure remain separate work. See
 [output evidence](../../../../docs/RUN_OUTPUT_EVIDENCE.md).
 
 SQL terminal writes use `runs/terminal.py` and `RunRepository.finalize_owned`.

@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any, Final, Literal, cast
+from uuid import uuid4
 
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
@@ -116,6 +117,9 @@ from deerflow.workspace_changes.types import WorkspaceSnapshot
 from .delivery import DELIVERY_INCOMPLETE_STOP_REASON, DELIVERY_SCAN_INCOMPLETE_ERROR, output_scan_incomplete, publish_delivery_failure
 from .manager import ConflictError, RunManager, RunRecord, RunStartOutcome
 from .naming import resolve_root_run_name
+from .output import OUTPUT_CAPTURE_KEY, OutputEvidenceError, TextOutputReceipt, capture_from_kwargs
+from .output_capture import OutputCaptureObserver
+from .output_source import read_durable_output_source
 from .schemas import RunStatus, ThreadOperationKind
 
 logger = logging.getLogger(__name__)
@@ -1067,7 +1071,11 @@ async def _run_agent(
     event_store = ctx.event_store
     run_events_config = ctx.run_events_config
     thread_store = ctx.thread_store
-    terminal_status_kwargs = {"persist": False} if event_store is not None else {}
+    capture_requested = isinstance(record.kwargs, Mapping) and OUTPUT_CAPTURE_KEY in record.kwargs
+    terminal_status_kwargs = {"persist": False} if event_store is not None or capture_requested else {}
+    output_capture: OutputCaptureObserver | None = None
+    output_confirmed = False
+    execution_cancelled = False
 
     run_id = record.run_id
     thread_id = record.thread_id
@@ -1136,7 +1144,8 @@ async def _run_agent(
         *,
         restore_checkpoint: bool = True,
     ) -> None:
-        nonlocal checkpoint_rollback_completed
+        nonlocal checkpoint_rollback_completed, execution_cancelled
+        execution_cancelled = True
         await run_manager.set_finalizing(run_id, True)
         if action == "rollback":
             await run_manager.set_status(
@@ -1195,7 +1204,88 @@ async def _run_agent(
             await run_manager.set_finalizing(run_id, False)
         await _publish_terminal_stream()
 
+    async def _settle_captured_output() -> None:
+        """Own capture prerequisites and the one status+evidence CAS as a unit."""
+        nonlocal completion_data, delivery_content, checkpoint_rollback_completed, output_confirmed
+        # Keep the real execution outcome before proof I/O or the local fence
+        # can alter record.status/abort_event. Persistence failure is not a
+        # newly executed model failure or human cancellation.
+        outcome = record.status
+        cancelled = execution_cancelled or record.abort_event.is_set()
+        try:
+            if record.ownership_lost:
+                if journal is not None:
+                    await journal.close(flush=False)
+                return
+            await run_manager.set_finalizing(run_id, True)
+            if output_capture is None or journal is None or not run_manager.supports_output_receipts or getattr(event_store, "supports_durable_output_evidence", False) is not True:
+                raise OutputEvidenceError()
+            if _is_edit_replay_run(record) and outcome != RunStatus.success and not checkpoint_rollback_completed:
+                checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
+                    accessor=accessor,
+                    checkpointer=checkpointer,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    rollback_point=rollback_point,
+                    snapshot_capture_failed=snapshot_capture_failed,
+                )
+                if not checkpoint_rollback_completed:
+                    raise OutputEvidenceError()
+                await _publish_restored_checkpoint_values(bridge=bridge, run_id=run_id, accessor=accessor, thread_id=thread_id)
+            if cancelled and record.abort_action == "rollback" and not checkpoint_rollback_completed and started:
+                raise OutputEvidenceError()
+            if subagent_events is not None:
+                await subagent_events.flush()
+            if pre_run_workspace_snapshot is not None:
+                await record_workspace_changes(event_store, thread_id, run_id, pre_run_workspace_snapshot, user_id=workspace_changes_user_id, extra_excluded_dir_names=workspace_excluded_dir_names)
+            # Quiesce stops callbacks and drains ALL admitted flush/progress
+            # work. Its frozen summaries remain available after detachment.
+            await journal.quiesce_output_capture(flush=True)
+            completion_data = journal.get_completion_data()
+            if delivery_content is None:
+                paths = [] if not persist_completion or not chat_files_available else produced_output_paths
+                if paths is None:
+                    paths = await _produced_output_paths(pre_run_output_snapshot, thread_id=thread_id, user_id=workspace_changes_user_id, extra_excluded_dir_names=workspace_excluded_dir_names)
+                delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), paths, _runtime_presented_files(getattr(runtime, "context", None)))
+            if not await _persist_delivery_receipt(event_store, thread_id=thread_id, run_id=run_id, content=delivery_content):
+                raise OutputEvidenceError()
+            if persist_completion:
+                await run_manager.update_finalizing_progress(run_id, **completion_data)
+            if started and checkpointer is not None and outcome == RunStatus.success:
+                created = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
+                updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
+                await _persist_run_duration(checkpointer=checkpointer, thread_id=thread_id, run_id=run_id, duration_seconds=max(0, int((updated - created).total_seconds())))
+            receipt = output_capture.receipt(status=outcome, cancelled=cancelled)
+            if isinstance(receipt, TextOutputReceipt):
+                audit = await read_durable_output_source(event_store, receipt=receipt)
+                if audit.state != "matched":
+                    raise OutputEvidenceError()
+            result = await run_manager.finalize_output(run_id, outcome, output_receipt=receipt, error=record.error, stop_reason=record.stop_reason, respect_cancellation=not cancelled)
+            if result.cancel_action is not None:
+                # Cancellation won while the source was being verified. Keep
+                # the durable row active until the actual rollback/stop settles.
+                await _finish_cancellation(result.cancel_action)
+                if result.cancel_action == "rollback" and started and not checkpoint_rollback_completed:
+                    raise OutputEvidenceError()
+                outcome = record.status
+                receipt = output_capture.receipt(status=outcome, cancelled=True)
+                result = await run_manager.finalize_output(run_id, outcome, output_receipt=receipt, error=record.error, stop_reason=record.stop_reason, respect_cancellation=False)
+            if not result.output_receipt_confirmed:
+                raise OutputEvidenceError()
+            output_confirmed = True
+        except BaseException:
+            # This child may cancel its owning worker via the existing fence.
+            # The caller drains it and distinguishes that induced cancellation
+            # from a real executed cancellation; no status-only fallback runs.
+            await run_manager._mark_ownership_lost(record, require_active=False, reason="Run output evidence could not be confirmed.")
+            if journal is not None:
+                await journal.close(flush=False)
+
     try:
+        if capture_requested:
+            if capture_from_kwargs(record.kwargs) is None or not run_manager.supports_output_receipts or getattr(event_store, "supports_durable_output_evidence", False) is not True or type(record.user_id) is not str or not record.user_id:
+                raise OutputEvidenceError()
+            output_capture = OutputCaptureObserver(owner_user_id=record.user_id, thread_id=thread_id, run_id=run_id)
         normalized_stream_modes = normalize_stream_modes(stream_modes)
         requested_modes: set[str] = set(normalized_stream_modes)
         lg_modes = to_langgraph_stream_modes(normalized_stream_modes)
@@ -1213,6 +1303,7 @@ async def _run_agent(
                 event_store=event_store,
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
+                output_capture=output_capture,
             )
 
         if ctx.agent_execution is not None and ctx.agent_execution.work is not None:
@@ -1598,6 +1689,11 @@ async def _run_agent(
             file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "messages-tuple" in requested_modes else None
             try:
                 async with _checkpoint_thread_lock(thread_id):
+                    if output_capture is not None:
+                        epoch = uuid4()
+                        output_capture.begin_epoch(epoch, input_payload, pre_existing_ids=pre_existing_message_ids)
+                        stream_config = {**stream_config, "run_id": epoch}
+                        runnable_configs.append(stream_config)
                     if len(lg_modes) == 1 and not stream_subgraphs:
                         # Single mode, no subgraphs: astream yields raw chunks
                         single_mode = lg_modes[0]
@@ -1847,13 +1943,21 @@ async def _run_agent(
 
     finally:
         try:
+            if capture_requested:
+                from deerflow.utils.file_io import await_drained
+
+                try:
+                    await await_drained(_settle_captured_output())
+                except asyncio.CancelledError as exc:
+                    if not record.ownership_lost:
+                        deferred_finalization_interrupt = _defer_finalization_interrupt(deferred_finalization_interrupt, exc)
             if record.ownership_lost:
                 logger.warning(
                     "Skipping durable finalization for run %s because this worker no longer owns its lease",
                     run_id,
                 )
 
-            if not record.ownership_lost and _is_edit_replay_run(record) and record.status != RunStatus.success:
+            if not capture_requested and not record.ownership_lost and _is_edit_replay_run(record) and record.status != RunStatus.success:
                 if not record.finalizing:
                     await run_manager.set_finalizing(run_id, True)
                 try:
@@ -1879,10 +1983,10 @@ async def _run_agent(
 
             # Persist any subagent step events still buffered (#3779) — including on
             # abort/exception paths, where the stream loop broke before its own flush.
-            if not record.ownership_lost and subagent_events is not None:
+            if not capture_requested and not record.ownership_lost and subagent_events is not None:
                 await subagent_events.flush()
 
-            if not record.ownership_lost and event_store is not None and pre_run_workspace_snapshot is not None:
+            if not capture_requested and not record.ownership_lost and event_store is not None and pre_run_workspace_snapshot is not None:
                 try:
                     await record_workspace_changes(
                         event_store,
@@ -1900,7 +2004,7 @@ async def _run_agent(
             # the staged terminal status is persisted. This ordering closes the
             # crash window where a terminal run could otherwise outlive its receipt.
             # A fenced worker leaves receipt recovery to the peer that claimed it.
-            if not record.ownership_lost and journal is not None:
+            if not capture_requested and not record.ownership_lost and journal is not None:
                 try:
                     await journal.flush()
                 except Exception:
@@ -1937,7 +2041,7 @@ async def _run_agent(
                         persist=False,
                     )
 
-            if not record.ownership_lost and journal is not None and persist_completion:
+            if not capture_requested and not record.ownership_lost and journal is not None and persist_completion:
                 try:
                     # Advance the final completion fields and timestamp without
                     # terminalizing the durable row. That active row continues to
@@ -1951,7 +2055,7 @@ async def _run_agent(
             # write. A peer Gateway admits history migration from the durable row,
             # not this worker's staged terminal status; terminalizing first would
             # let that migration read an unfinished lifetime and race this write.
-            if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.success:
+            if not capture_requested and started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.success:
                 try:
                     created = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
                     updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
@@ -1968,7 +2072,7 @@ async def _run_agent(
                 except Exception:
                     logger.debug("Failed to persist run duration for thread %s run %s (non-fatal)", thread_id, run_id)
 
-            if not record.ownership_lost and event_store is not None:
+            if not capture_requested and not record.ownership_lost and event_store is not None:
                 try:
                     # Even after bounded receipt retries are exhausted, persist the
                     # real worker outcome. Leaving a successful row inflight would
@@ -1989,7 +2093,8 @@ async def _run_agent(
                 except Exception:
                     logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
 
-            if not record.ownership_lost and journal is not None and persist_completion:
+            followups_confirmed = not capture_requested or output_confirmed
+            if followups_confirmed and not record.ownership_lost and journal is not None and persist_completion:
                 try:
                     # Persist token usage + convenience fields to RunStore
                     completion_data = completion_data or journal.get_completion_data()
@@ -2001,9 +2106,10 @@ async def _run_agent(
             # receipt persistence and durable cancellation arbitration have ended.
             # Status writes are best-effort in single-worker mode: confirm the
             # existing outcome before deleting recoverable goal state.
-            if goal_completion is not None and record.status == RunStatus.success and not record.abort_event.is_set() and not record.ownership_lost:
+            if followups_confirmed and goal_completion is not None and record.status == RunStatus.success and not record.abort_event.is_set() and not record.ownership_lost:
                 try:
-                    if await run_manager.persist_current_status(run_id):
+                    confirmed = output_confirmed if capture_requested else await run_manager.persist_current_status(run_id)
+                    if confirmed:
                         await _clear_completed_goal(
                             candidate=goal_completion,
                             record=record,
@@ -2011,11 +2117,12 @@ async def _run_agent(
                             bridge=bridge,
                             accessor=accessor,
                             checkpointer=checkpointer,
+                            **({"finalizing_run": record} if capture_requested else {}),
                         )
                 except Exception:
                     logger.warning("Could not finalize satisfied goal for thread %s", thread_id, exc_info=True)
 
-            if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
+            if followups_confirmed and started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
                 try:
                     await run_manager.wait_for_prior_finalizing(thread_id, run_id)
                     if not await run_manager.has_later_started_run(thread_id, run_id):
@@ -2024,7 +2131,7 @@ async def _run_agent(
                     logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
 
             # Sync title from checkpoint to threads_meta.display_name
-            if started and not record.ownership_lost and checkpointer is not None and thread_store is not None:
+            if followups_confirmed and started and not record.ownership_lost and checkpointer is not None and thread_store is not None:
                 try:
                     ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
                     ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
@@ -2040,7 +2147,7 @@ async def _run_agent(
                     logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
 
             # Update threads_meta status based on run outcome
-            if started and not record.ownership_lost and thread_store is not None:
+            if followups_confirmed and started and not record.ownership_lost and thread_store is not None:
                 try:
                     final_status = "idle" if record.status == RunStatus.success else record.status.value
                     if ctx.agent_execution is not None:
@@ -2050,7 +2157,7 @@ async def _run_agent(
                 except Exception:
                     logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
 
-            if not record.ownership_lost and ctx.on_run_completed is not None:
+            if followups_confirmed and not record.ownership_lost and ctx.on_run_completed is not None:
                 try:
                     await ctx.on_run_completed(record)
                 except Exception:
@@ -2210,6 +2317,7 @@ async def _clear_completed_goal(
     bridge: StreamBridge,
     accessor: CheckpointStateAccessor,
     checkpointer: Any,
+    finalizing_run: RunRecord | None = None,
 ) -> None:
     """Clear only the evaluated goal after the run has successfully finalized."""
     try:
@@ -2218,7 +2326,7 @@ async def _clear_completed_goal(
         # admitted a new run wins, even before it has written any checkpoint.
         async with (
             goal_thread_lock(record.thread_id),
-            run_manager.reserve_thread_operation(record.thread_id, kind=ThreadOperationKind.checkpoint_write, user_id=record.user_id),
+            run_manager.reserve_thread_operation(record.thread_id, kind=ThreadOperationKind.checkpoint_write, user_id=record.user_id, **({"finalizing_run": finalizing_run} if finalizing_run is not None else {})),
         ):
             checkpoint_tuple = await _call_checkpointer_method(
                 checkpointer,

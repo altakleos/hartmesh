@@ -57,6 +57,11 @@ class RunEventStore(abc.ABC):
        event for each requested ID and performs no storage work for empty input
     """
 
+    @property
+    def supports_durable_output_evidence(self) -> bool:
+        """Only explicitly qualified durable sources may attest output evidence."""
+        return False
+
     @abc.abstractmethod
     async def put(
         self,

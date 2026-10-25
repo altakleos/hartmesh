@@ -91,6 +91,7 @@ from deerflow.runtime.journal import build_checkpoint_history_seed_events
 from deerflow.runtime.keyed_lock import KeyedLockTable
 from deerflow.runtime.presented_files import RUNTIME_PRESENTED_FILES_CONTEXT_KEY
 from deerflow.runtime.runs.naming import resolve_root_run_name
+from deerflow.runtime.runs.output import OUTPUT_CAPTURE_DISCONNECT_KEY, OUTPUT_CAPTURE_KEY, OutputCaptureIntent, OutputEvidenceError, capture_from_kwargs
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
     redact_config_secrets,
@@ -1722,6 +1723,29 @@ def _without_channel_marker(metadata):
     return {key: value for key, value in metadata.items() if key != CHANNEL_TURN_ID_KEY}
 
 
+def _output_capture_preflight(value, *, run_manager, event_store):
+    """Qualify the actual retained authorities, independently of channels."""
+    try:
+        intent = OutputCaptureIntent.model_validate(value)
+    except ValueError:
+        raise HTTPException(422, "Unsupported output capture request") from None
+    try:
+        if run_manager.supports_output_receipts is True and getattr(event_store, "supports_durable_output_evidence", False) is True:
+            return intent
+    except Exception:
+        pass
+    raise HTTPException(503, "Run output evidence is unavailable") from None
+
+
+def _require_same_output_capture(stored_kwargs, requested):
+    try:
+        same = capture_from_kwargs(stored_kwargs) == requested
+    except OutputEvidenceError:
+        same = False
+    if not same:
+        raise HTTPException(409, "Idempotency-Key already used with a different request")
+
+
 async def _channel_execution_preflight(body, thread_id, request, normalized_input, run_ctx, *, work_attempt):
     """Admit the narrow initial-human contract before instance preparation."""
     publication = getattr(body, "channel_execution", None)
@@ -1843,8 +1867,27 @@ async def _start_run(
     # snapshot even if an internal caller mutates nested message/config values
     # while owner or SQL checks yield. Keep cold copying off the event loop and
     # retain it through cancellation. Ordinary callers keep their old semantics.
-    if getattr(body, "channel_execution", None) is not None:
-        body = await await_drained(run_file_io(deepcopy, body))
+    capture_requested = getattr(body, OUTPUT_CAPTURE_KEY, None) is not None
+    if getattr(body, "channel_execution", None) is not None or capture_requested:
+        try:
+            body = await await_drained(run_file_io(deepcopy, body))
+        except Exception:
+            if capture_requested:
+                raise HTTPException(503, "Run output evidence is unavailable") from None
+            raise
+    # A channel request also selects copying. Qualify any capture intent in
+    # that private result, while retaining the original presence so mutation
+    # during copying cannot silently downgrade a requested capture.
+    capture_requested = capture_requested or getattr(body, OUTPUT_CAPTURE_KEY, None) is not None
+
+    capture_intent = None
+    if capture_requested:
+        try:
+            run_mgr = get_run_manager(request)
+            run_ctx = get_run_context(request)
+        except Exception:
+            raise HTTPException(503, "Run output evidence is unavailable") from None
+        capture_intent = _output_capture_preflight(body.output_capture, run_manager=run_mgr, event_store=run_ctx.event_store)
 
     # Cancel-capability gate. interrupt/rollback strategies terminate an already
     # active run — runs:cancel capability, not runs:create — so a create-only
@@ -1872,8 +1915,9 @@ async def _start_run(
 
     stream_modes = normalize_stream_modes(body.stream_mode)
     bridge = get_stream_bridge(request)
-    run_mgr = get_run_manager(request)
-    run_ctx = get_run_context(request)
+    if capture_intent is None:
+        run_mgr = get_run_manager(request)
+        run_ctx = get_run_context(request)
 
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
 
@@ -2348,6 +2392,7 @@ async def _start_run(
                             "input": run_record_input,
                             **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
                             "config": redact_config_secrets(request_config),
+                            **({OUTPUT_CAPTURE_KEY: capture_intent.model_dump(mode="json")} if capture_intent is not None else {}),
                             **({"channel_execution": execution_receipt.model_dump(mode="json")} if execution_receipt is not None else {}),
                             **({"conversation_references": conversation_references} if conversation_references else {}),
                         },
@@ -2359,6 +2404,11 @@ async def _start_run(
 
                 if record.idempotency_reused:
                     stored = record.kwargs or {}
+                    _require_same_output_capture(stored, capture_intent)
+                    if capture_intent is not None:
+                        saved_disconnect = stored.get(OUTPUT_CAPTURE_DISCONNECT_KEY)
+                        if type(saved_disconnect) is not str or saved_disconnect != disconnect.value or record.on_disconnect != disconnect:
+                            raise HTTPException(409, "Idempotency-Key already used with a different request")
                     if ("channel_execution" in stored) != (execution_receipt is not None):
                         raise HTTPException(409, "Idempotency-Key already used with a different request")
                     if execution_receipt is not None:
