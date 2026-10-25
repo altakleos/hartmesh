@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import math
 import mimetypes
@@ -11,7 +12,7 @@ import stat
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from app.channels import buzz_run_policy as _buzz_run_policy  # noqa: F401
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
+from app.channels.execution import ChannelExecutionBusyError, ChannelExecutionContext, ChannelExecutionProtocolError, ChannelOperation
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
     PENDING_CLARIFICATION_METADATA_KEY,
@@ -54,6 +56,7 @@ from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.trace_context import ensure_trace_context
 from deerflow.uploads.manager import apply_upload_sandbox_permits
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 logger = logging.getLogger(__name__)
@@ -909,16 +912,99 @@ def _unknown_command_reply(command: str | None = None) -> str:
     return f"Unknown command. Available commands: {available}"
 
 
-def _human_input_message(content: str, *, original_content: str | None = None, files: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def _human_input_message(content: str, *, original_content: str | None = None, files: list[dict[str, Any]] | None = None, extra_kwargs: dict[str, Any] | None = None) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "human", "content": content}
-    if original_content is not None and original_content != content or files:
-        additional_kwargs: dict[str, Any] = {}
-        if original_content is not None and original_content != content:
-            additional_kwargs[ORIGINAL_USER_CONTENT_KEY] = original_content
-        if files:
-            additional_kwargs["files"] = files
+    additional_kwargs: dict[str, Any] = dict(extra_kwargs or {})
+    if original_content is not None and original_content != content:
+        additional_kwargs[ORIGINAL_USER_CONTENT_KEY] = original_content
+    if files:
+        additional_kwargs["files"] = [*additional_kwargs.get("files", []), *files]
+    if additional_kwargs:
         message["additional_kwargs"] = additional_kwargs
     return message
+
+
+def _capture_execution(msg: InboundMessage) -> ChannelExecutionContext | None:
+    """Select a host capability before any preparation, never from metadata."""
+    required, context = msg.execution_required, msg.execution_context
+    if type(required) is not bool:
+        raise ChannelExecutionProtocolError()
+    if context is None:
+        if required:
+            raise ChannelExecutionProtocolError()
+        return None
+    if type(context) is not ChannelExecutionContext:
+        raise ChannelExecutionProtocolError()
+    if (msg.owner_user_id, msg.connection_id, msg.chat_id) != (context.owner_user_id, context.connection_id, context.chat_id):
+        raise ChannelExecutionProtocolError()
+    try:
+        methods = (context.admission.authorize, context.admission.current, context.client.threads.get, context.client.runs.wait, context.client.runs.stream)
+        if not all(callable(method) for method in methods) or inspect.iscoroutinefunction(context.client.runs.stream):
+            raise ChannelExecutionProtocolError()
+    except Exception:
+        raise ChannelExecutionProtocolError() from None
+    return context
+
+
+def _execution_message(msg: InboundMessage, context: ChannelExecutionContext) -> InboundMessage:
+    """Retain original routing/capability even if a channel rewrites a message."""
+    if not isinstance(msg.metadata, dict):
+        raise ChannelExecutionProtocolError()
+    return replace(msg, metadata=dict(msg.metadata), files=list(msg.files), execution_context=context)
+
+
+async def _authorize_execution(context: ChannelExecutionContext, operation: ChannelOperation) -> None:
+    try:
+        await await_drained(context.admission.authorize(operation))
+        if context.admission.current(operation) is not True:
+            raise ChannelExecutionProtocolError()
+    except Exception:
+        raise ChannelExecutionProtocolError() from None
+
+
+def _validate_execution_carriers(context: ChannelExecutionContext, *carriers: Any) -> None:
+    """Reject explicit conflicting hints before canonicalizing the actual body."""
+
+    def inspect(carrier):
+        if carrier is None:
+            return
+        if not isinstance(carrier, Mapping):
+            raise ChannelExecutionProtocolError()
+        if "assistant_id" in carrier and carrier["assistant_id"] is not None:
+            value = carrier["assistant_id"]
+            same_factory = value == context.assistant_id and context.agent_name is None
+            same_custom = context.assistant_id == DEFAULT_ASSISTANT_ID and type(value) is str and _normalize_custom_agent_name(value) == context.agent_name
+            if not same_factory and not same_custom:
+                raise ChannelExecutionProtocolError()
+        if "agent_name" in carrier:
+            value = carrier["agent_name"]
+            if value != context.agent_name and not (type(value) is str and _normalize_custom_agent_name(value) == context.agent_name):
+                raise ChannelExecutionProtocolError()
+        for key, expected in (
+            ("user_id", context.owner_user_id),
+            ("owner_user_id", context.owner_user_id),
+            ("thread_id", context.thread_id),
+            ("connection_id", context.connection_id),
+            ("chat_id", context.chat_id),
+            ("endpoint_id", context.endpoint_id),
+            ("channel_turn_id", context.publication_id),
+            ("channel_agent_name", context.agent_name or context.assistant_id),
+        ):
+            if key in carrier and carrier[key] != expected:
+                raise ChannelExecutionProtocolError()
+        if "is_bootstrap" in carrier and carrier["is_bootstrap"] is not False and carrier["is_bootstrap"] is not None:
+            raise ChannelExecutionProtocolError()
+        if any(key in carrier and carrier[key] is not None for key in ("agent_instance", "agent_instance_id")):
+            raise ChannelExecutionProtocolError()
+        for key in ("config", "configurable", "context", "metadata", "human_message_kwargs"):
+            if key in carrier:
+                inspect(carrier[key])
+
+    try:
+        for carrier in carriers:
+            inspect(carrier)
+    except Exception:
+        raise ChannelExecutionProtocolError() from None
 
 
 def _auth_disabled_owner_user_id() -> str | None:
@@ -1977,6 +2063,15 @@ class ChannelManager:
             with ensure_trace_context():
                 dedupe_recorded = False
                 try:
+                    # Capture before the dedupe store can yield. A queued host
+                    # capability cannot be replaced while this worker prepares.
+                    try:
+                        execution = _capture_execution(msg)
+                    except ChannelExecutionProtocolError:
+                        await self._handle_message(msg)
+                        continue
+                    if execution is not None:
+                        msg = _execution_message(msg, execution)
                     # Dedupe before logging "received" so a provider retrying an
                     # event N times does not log N accepts. Provider ack side
                     # effects may still happen before this manager-level dedupe.
@@ -2096,8 +2191,15 @@ class ChannelManager:
             logger.error("[Manager] unhandled error in message task: %s", exc, exc_info=exc)
 
     async def _handle_message(self, msg: InboundMessage) -> None:
-        msg = _apply_effective_owner(msg)
         try:
+            execution = _capture_execution(msg)
+            if execution is not None:
+                msg = _execution_message(msg, execution)
+                if msg.msg_type != InboundMessageType.CHAT:
+                    raise ChannelExecutionProtocolError()
+                await self._handle_chat(msg)
+                return
+            msg = _apply_effective_owner(msg)
             # Commands are handled below because provider adapters consume
             # binding commands before manager dispatch, and _handle_command()
             # applies its own admission gate for manager-level commands.
@@ -2112,6 +2214,9 @@ class ChannelManager:
                 await self._handle_command(msg)
             else:
                 await self._handle_chat(msg, bound_identity_checked=True)
+        except ChannelExecutionProtocolError:
+            await self._release_inbound_dedupe_key(msg)
+            await self._send_error(msg, "Channel execution protocol refused")
         except InvalidChannelSessionConfigError as exc:
             logger.warning(
                 "Invalid channel session config for %s (chat=%s): %s",
@@ -2401,6 +2506,12 @@ class ChannelManager:
         *,
         bound_identity_checked: bool = False,
     ) -> None:
+        execution = _capture_execution(msg)
+        if execution is not None:
+            if msg.msg_type != InboundMessageType.CHAT:
+                raise ChannelExecutionProtocolError()
+            await self._handle_execution_chat(_execution_message(msg, execution), execution, extra_context=extra_context, bound_identity_checked=bound_identity_checked)
+            return
         # Normal entry paths already run the bound-identity check in
         # _handle_message() or _handle_command(). Keep this default False so
         # direct callers and future internal paths still fail closed.
@@ -2454,6 +2565,165 @@ class ChannelManager:
                 lock_acquired=serial_lock_acquired,
             )
 
+    def _execution_params(self, msg: InboundMessage, execution: ChannelExecutionContext, extra_context: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any]]:
+        channel, user = self._resolve_session_layer(msg)
+        constructor_target = {"assistant_id": self._assistant_id} if self._assistant_id != DEFAULT_ASSISTANT_ID else {}
+        _validate_execution_carriers(execution, constructor_target, self._default_session, channel, user, msg.metadata, extra_context)
+        config = _merge_dicts(DEFAULT_RUN_CONFIG, self._default_session.get("config"), channel.get("config"), user.get("config"))
+        config["configurable"] = _as_dict(config.get("configurable")) | {"checkpoint_ns": "", "thread_id": execution.thread_id}
+        if isinstance(config.get("context"), Mapping):
+            config["context"] = dict(config["context"])
+        context = _merge_dicts(DEFAULT_RUN_CONTEXT, self._default_session.get("context"), channel.get("context"), user.get("context"), extra_context)
+        context.update(thread_id=execution.thread_id, user_id=execution.owner_user_id, channel_name=msg.channel_name)
+        if msg.user_id:
+            context["channel_user_id"] = msg.user_id
+        _apply_explicit_agent_choice(config, context, execution.agent_name)
+        for carrier in (config["configurable"], config.get("context"), context):
+            if isinstance(carrier, dict):
+                carrier.pop("assistant_id", None)
+        return config, context
+
+    async def _handle_execution_chat(self, msg: InboundMessage, execution: ChannelExecutionContext, *, extra_context: dict[str, Any] | None, bound_identity_checked: bool) -> None:
+        # This path has no thread create/PATCH/current-map or default client.
+        # Validate every explicit target hint before even the first thread GET.
+        self._execution_params(msg, execution, extra_context)
+        policy = CHANNEL_RUN_POLICY.get(msg.channel_name)
+        if policy is not None and (policy.fire_and_forget or policy.buffer_followups_on_busy):
+            raise ChannelExecutionProtocolError()
+        serial_state = None
+        serial_lock_acquired = False
+        try:
+            await _authorize_execution(execution, "thread_read")
+            if not bound_identity_checked:
+                rejection = await self._get_bound_identity_rejection(msg)
+                if rejection is not None:
+                    # A saved publication cannot move to the freshly observed
+                    # owner/connection used by the ordinary bootstrap refusal.
+                    raise ChannelExecutionProtocolError()
+            await _authorize_execution(execution, "thread_read")
+            await execution.client.threads.get(execution.thread_id)
+            serial_state, _queued = self._begin_serialized_thread_run(channel_name=msg.channel_name, thread_id=execution.thread_id)
+            if serial_state is not None:
+                await serial_state.lock.acquire()
+                serial_lock_acquired = True
+            # A message may have waited behind another manager turn. Its
+            # original collaborator refreshes SQL/permissions after that wait.
+            await _authorize_execution(execution, "run_create")
+            config, context = self._execution_params(msg, execution, extra_context)
+            await await_drained(self._apply_channel_policy(msg, context))
+            _validate_execution_carriers(execution, config, context)
+            if msg.files:
+                from .service import get_channel_service
+
+                service = get_channel_service()
+                channel = service.get_channel(msg.channel_name) if service else None
+                if channel is not None:
+                    prepared = await await_drained(channel.receive_file(msg, execution.thread_id, user_id=execution.owner_user_id))
+                    # Content/files may change; the original destination,
+                    # metadata and host capability never follow that rewrite.
+                    msg = replace(msg, text=prepared.text, files=prepared.files)
+            original_text = msg.text
+            uploaded = await await_drained(_ingest_inbound_files(execution.thread_id, msg, user_id=execution.owner_user_id))
+            extras = dict(msg.metadata.get("human_message_kwargs") or {})
+            _validate_execution_carriers(execution, extras)
+            extras["channel_turn_id"] = execution.publication_id
+            human = _human_input_message(msg.text, original_content=original_text, files=uploaded or None, extra_kwargs=extras)
+            _validate_execution_carriers(execution, config, context)
+            await _authorize_execution(execution, "run_create")
+            kwargs = dict(
+                input={"messages": [human]},
+                config=config,
+                context=context,
+                metadata={"channel_turn_id": execution.publication_id},
+                multitask_strategy="reject",
+                channel_execution={"version": 1, "publication_id": execution.publication_id},
+                on_disconnect="continue",
+                on_completion=None,
+                headers={"Idempotency-Key": execution.publication_id},
+            )
+            if self._channel_supports_streaming(msg.channel_name):
+                await self._handle_execution_stream(msg, execution, kwargs)
+            else:
+                result = await execution.client.runs.wait(execution.thread_id, execution.assistant_id, **kwargs)
+                await self._publish_execution_result(msg, execution, result)
+        except ChannelExecutionBusyError:
+            await self._release_inbound_dedupe_key(msg)
+            await self._send_error(msg, THREAD_BUSY_MESSAGE)
+        except ChannelExecutionProtocolError:
+            raise
+        except Exception:
+            raise ChannelExecutionProtocolError() from None
+        finally:
+            self._finish_serialized_thread_run(channel_name=msg.channel_name, thread_id=execution.thread_id, state=serial_state, lock_acquired=serial_lock_acquired)
+
+    async def _handle_execution_stream(self, msg: InboundMessage, execution: ChannelExecutionContext, kwargs: dict[str, Any]) -> None:
+        stream = execution.client.runs.stream(execution.thread_id, execution.assistant_id, **kwargs, stream_mode=list(STREAM_MODES))
+        if not callable(getattr(stream, "aclose", None)):
+            raise ChannelExecutionProtocolError()
+        latest_text = ""
+        current_message_id = None
+        buffers: dict[str, str] = {}
+        last_values = None
+        last_published_text = ""
+        last_published_at = 0.0
+        try:
+            async for part in stream:
+                await _authorize_execution(execution, "run_read")
+                if part.event in MESSAGE_STREAM_EVENTS:
+                    text, current_message_id = _accumulate_stream_text(buffers, current_message_id, part.data)
+                    if text:
+                        latest_text = text
+                elif part.event == "values" and isinstance(part.data, (dict, list)):
+                    last_values = part.data
+                    if _has_current_turn_clarification(last_values):
+                        latest_text = _extract_response_text(last_values) or latest_text
+                now = time.monotonic()
+                if latest_text and latest_text != last_published_text and (not last_published_text or now - last_published_at >= STREAM_UPDATE_MIN_INTERVAL_SECONDS or len(latest_text) - len(last_published_text) >= STREAM_UPDATE_MIN_CHARS):
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            channel_name=msg.channel_name,
+                            chat_id=execution.chat_id,
+                            thread_id=execution.thread_id,
+                            text=latest_text + " ▉",
+                            is_final=False,
+                            thread_ts=msg.thread_ts,
+                            connection_id=execution.connection_id,
+                            owner_user_id=execution.owner_user_id,
+                            metadata=_response_metadata(msg.metadata),
+                        )
+                    )
+                    last_published_text, last_published_at = latest_text, now
+        finally:
+            # Do not rely on generator GC, nor shield an entire model stream.
+            # Repeated cancellation still joins the one owned iterator close.
+            await await_drained(stream.aclose())
+        result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
+        await self._publish_execution_result(msg, execution, result)
+
+    async def _publish_execution_result(self, msg: InboundMessage, execution: ChannelExecutionContext, result: Any) -> None:
+        # The outbound remains a display/wake hint. This PR establishes no
+        # authoritative final-source ID or durable model-delivery receipt.
+        await _authorize_execution(execution, "run_read")
+        text, artifacts = _extract_response_text(result), _extract_artifacts(result)
+        text, attachments = await await_drained(asyncio.to_thread(_prepare_artifact_delivery, execution.thread_id, text, artifacts, user_id=execution.owner_user_id))
+        await _authorize_execution(execution, "run_read")
+        if not text:
+            text = _format_artifact_text([attachment.virtual_path for attachment in attachments]) if attachments else "(No response from agent)"
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel_name=msg.channel_name,
+                chat_id=execution.chat_id,
+                thread_id=execution.thread_id,
+                text=text,
+                artifacts=artifacts,
+                attachments=attachments,
+                thread_ts=msg.thread_ts,
+                connection_id=execution.connection_id,
+                owner_user_id=execution.owner_user_id,
+                metadata=_response_metadata(msg.metadata, pending_clarification=_has_current_turn_clarification(result)),
+            )
+        )
+
     async def _handle_chat_on_thread(
         self,
         client,
@@ -2463,6 +2733,8 @@ class ChannelManager:
         extra_context: dict[str, Any] | None = None,
         storage_user_id: str | None = None,
     ) -> None:
+        if _capture_execution(msg) is not None:
+            raise ChannelExecutionProtocolError()
         if storage_user_id is None:
             storage_user_id = _channel_storage_user_id(msg)
 
@@ -2491,7 +2763,7 @@ class ChannelManager:
 
         original_text = msg.text
         uploaded = await _ingest_inbound_files(thread_id, msg, user_id=storage_user_id)
-        human_message = _human_input_message(msg.text, original_content=original_text, files=uploaded or None)
+        human_message = _human_input_message(msg.text, original_content=original_text, files=uploaded or None, extra_kwargs=(msg.metadata or {}).get("human_message_kwargs"))
 
         if self._channel_supports_streaming(msg.channel_name):
             await self._handle_streaming_chat(
@@ -2622,6 +2894,8 @@ class ChannelManager:
         human_message: dict[str, Any],
         storage_user_id: str | None = None,
     ) -> None:
+        if _capture_execution(msg) is not None:
+            raise ChannelExecutionProtocolError()
         logger.info("[Manager] invoking runs.stream(thread_id=%s, text_len=%d)", thread_id, len(msg.text or ""))
 
         last_values: dict[str, Any] | list | None = None
@@ -2750,6 +3024,8 @@ class ChannelManager:
     # -- command handling --------------------------------------------------
 
     async def _handle_command(self, msg: InboundMessage) -> None:
+        if _capture_execution(msg) is not None:
+            raise ChannelExecutionProtocolError()
         # Commands are the other run-creation entry point besides chat: /new
         # calls _create_thread() directly, and /bootstrap routes into
         # _handle_chat(). Apply the same bound-identity admission boundary here

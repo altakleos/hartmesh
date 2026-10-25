@@ -86,3 +86,69 @@ async def test_repeated_supervisor_stop_cancellation_retains_active_http_and_sdk
         await supervisor.stop()
         if e is not None:
             await e.channel.stop()
+
+
+async def test_actual_manager_drains_a_dispatched_wait_before_supervisor_closes_the_shared_client(db, monkeypatch, tmp_path):
+    from test_channel_execution_client import Admission
+
+    from app.channels.execution import ChannelExecutionContext, ChannelExecutionScope
+    from app.channels.execution_client import ChannelExecutionFacade
+    from app.channels.manager import ChannelManager
+    from app.channels.message_bus import InboundMessage
+    from app.channels.store import ChannelStore
+
+    e = build(db, monkeypatch)
+    entered, release, delivered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def respond(request):
+        calls.append(request)
+        if request.method == "POST":
+            entered.set()
+            await release.wait()
+            return httpx.Response(200, json={"messages": [{"type": "ai", "content": "synthetic completed reply"}]})
+        return httpx.Response(200, json={"thread_id": "original", "owner_user_id": "human", "agent_instance": None, "metadata": {"channel_agent_name": "lead_agent"}})
+
+    async def outbound(message):
+        if message.is_final and message.text == "synthetic completed reply":
+            delivered.set()
+
+    e.service.bus.subscribe_outbound(outbound)
+    manager = ChannelManager(
+        e.service.bus, ChannelStore(str(tmp_path / "channels.json")), connection_repo=db.connections, langgraph_url="https://runtime.example/api", gateway_url="https://gateway.example", max_concurrency=1, shutdown_grace_period_seconds=3
+    )
+    e.service.manager = manager
+    client = GatewayClientOwner(gateway_url=manager.gateway_url, langgraph_url=manager.langgraph_url, transport=httpx.MockTransport(respond))
+    e.supervisor.thread_client = client
+    scope = ChannelExecutionScope("a" * 32, "human", None, "chat", "original", client.endpoint_id, "lead_agent", None)
+    admission = Admission()
+    facade = ChannelExecutionFacade(client, scope=scope, admission=admission)
+    msg = InboundMessage(channel_name="slack", chat_id="chat", user_id="sender", text="synthetic input", owner_user_id="human", execution_required=True, execution_context=ChannelExecutionContext(scope, facade, admission))
+    stopping = None
+    try:
+        await e.supervisor.check()
+        await e.supervisor.start()
+        await manager.start()
+        await e.service.bus.publish_inbound(msg)
+        await asyncio.wait_for(entered.wait(), 3)
+        await e.supervisor.begin_shutdown()
+        assert e.supervisor._subscribed and not client.closed
+        assert e.supervisor.threads._stopped
+        stopping = asyncio.create_task(manager.stop())
+        await asyncio.sleep(0)
+        admission.permitted.remove("run_create")
+        result = await client.request_json(operation="run_read", owner_user_id="human", method="GET", path="threads/original/runs/retained", before_dispatch=lambda: admission.authorize("run_read"))
+        assert result.status_code == 200 and not client.closed
+        release.set()
+        await asyncio.wait_for(stopping, 3)
+        await asyncio.wait_for(delivered.wait(), 3)
+        assert not client.closed
+        assert sum(request.method == "POST" for request in calls) == 1
+        await e.supervisor.stop()
+        assert client.closed and not e.supervisor._subscribed
+    finally:
+        release.set()
+        if stopping is not None:
+            await asyncio.gather(stopping, return_exceptions=True)
+        await manager.stop()
+        await e.supervisor.stop()

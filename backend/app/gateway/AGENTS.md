@@ -70,7 +70,10 @@ takes precedence; invalid values fall back to that default, and
 
 Durable MCP notification trust and retry rules: [run admission](../../docs/run-admission.md).
 
-CORS is same-origin by default when requests enter through nginx on port 2026. Split-origin or port-forwarded browser clients must opt in with `GATEWAY_CORS_ORIGINS` (exact origins); Gateway `CORSMiddleware` and `CSRFMiddleware` both read that variable so browser CORS and auth-origin checks stay aligned. Those clients also need `CORS_EXPOSED_HEADERS` (`csrf_middleware.py`): run-creating routes return the run's id in `Content-Location`, which is not CORS-safelisted, so JS cannot read it unless it is exposed — and the LangGraph SDK resolves run metadata from that header alone, so withholding it breaks `useStream`'s `onCreated` and thread-gated actions.
+CORS defaults to same-origin through nginx:2026. Split-origin/port-forwarded browsers require exact `GATEWAY_CORS_ORIGINS`, read by both `CORSMiddleware` and `CSRFMiddleware` to align CORS/auth checks. Expose `Content-Location` through `CORS_EXPOSED_HEADERS` (`csrf_middleware.py`): creating routes return the run ID there; it is not CORS-safelisted. The SDK resolves run metadata only from that header; hiding it breaks `useStream.onCreated` and thread-gated actions.
+
+Correlated channel admission and strict-read proof: [contract](../../docs/channel-execution.md).
+Metadata and successful status never establish complete final output.
 
 Browser sessions use `app.gateway.auth.session_cookie`. Persist `HttpOnly access_token` only for HTTPS/trusted-forwarded HTTPS, direct-host localhost HTTP or operator opt-in; public HTTP uses session cookies. A `HttpOnly` preference cookie preserves `remember_me` across reissues. Handlers stamp final `max_age` on `request.state`; CSRF mirrors it, including password/OIDC reissues. Logout clears all auth cookies and suppresses CSRF reissue. Never store passwords.
 

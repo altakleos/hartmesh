@@ -12,6 +12,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from app.channels.execution import ChannelExecutionContext
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_INBOUND_QUEUE_MAXSIZE = 1000
@@ -59,6 +61,9 @@ class InboundMessage:
         files: Optional list of file attachments (platform-specific dicts).
         metadata: Arbitrary extra data from the channel.
         created_at: Unix timestamp when the message was created.
+        execution_required: Host-only discriminator; a required missing context
+            refuses. Never derive this from provider metadata.
+        execution_context: Process-local capability issued by trusted host code.
     """
 
     channel_name: str
@@ -74,6 +79,8 @@ class InboundMessage:
     files: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
+    execution_required: bool = False
+    execution_context: ChannelExecutionContext | None = field(default=None, repr=False)
 
 
 @dataclass

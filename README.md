@@ -1375,6 +1375,12 @@ and refuses stale conversation mappings. Retries after a lost response or a
 same-bot token replacement keep that identity. A deleted custom AI assistant can
 produce a fixed repair notice with a Telegram-settings link when a public address
 is configured. These foundations do not activate ordinary Telegram conversations.
+The shared channel execution boundary now binds an admitted human message to its
+publication, human owner, conversation and actual AI employee definition. Strict
+run and message reads distinguish an authoritative result from unavailable
+storage. Closing new-run admission preserves reads for work already dispatched.
+Durable model-result publication and ordinary managed-bot conversations remain
+for subsequent stages; these changes do not enable them.
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 

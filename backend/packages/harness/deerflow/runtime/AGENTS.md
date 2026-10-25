@@ -1,5 +1,12 @@
 ### Stream Bridge Heartbeats
 
+Strict channel proof reads opt into `RunManager`'s `require_store=True` plus
+`raise_on_store_error=True`. Require configured authority before cache; cached
+positives are not store-health probes. Map observed strict rows before cache
+precedence, including page duplicates; malformed kwargs cannot become legacy
+absence. Preserve ordinary and raise-only lifecycle semantics. Gateway protocol:
+[contract](../../../../docs/channel-execution.md).
+
 SQL terminal writes use `runs/terminal.py` and `RunRepository.finalize_owned`.
 Read committed state before recovery; CAS the original change sequence, owner,
 source status, cancellation action and current lease. Never recreate missing rows

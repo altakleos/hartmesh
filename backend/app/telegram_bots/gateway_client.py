@@ -1,14 +1,19 @@
-"""One loop-owned HTTP/SDK client for owner-scoped conversation preparation."""
+"""One loop-owned HTTP/SDK client for preparation and host channel capabilities."""
 
 from __future__ import annotations
 
 import asyncio
+import json
+import re
+from collections.abc import Mapping
 from contextvars import ContextVar
 from hashlib import sha256
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
+from app.channels.execution import BeforeDispatch, ChannelExecutionProtocolError, ChannelHttpError, ChannelJsonResponse, ChannelOperation, ChannelOwnedStream, JsonValue, QueryValue
 from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
@@ -39,6 +44,7 @@ def _construct(base_url, tls_context, transport):
     # SDK/CSRF imports and HTTPX/TLS construction may read files synchronously.
     # The caller retains this worker's result until loop-side close.
     from langgraph_sdk.client import LangGraphClient
+    from langgraph_sdk.sse import SSEDecoder, aiter_lines_raw
 
     from app.gateway.agent_discovery import THREAD_BINDING_HEADER_NAME
     from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
@@ -47,7 +53,181 @@ def _construct(base_url, tls_context, transport):
     csrf = generate_csrf_token()
     headers = {**create_internal_auth_headers(), CSRF_HEADER_NAME: csrf, "Cookie": f"{CSRF_COOKIE_NAME}={csrf}"}
     client = httpx.AsyncClient(base_url=base_url + "/", verify=tls_context if tls_context is not None else True, trust_env=False, timeout=httpx.Timeout(30), transport=transport, event_hooks={"request": [_before_request]})
-    return LangGraphClient(client), headers, THREAD_BINDING_HEADER_NAME
+    return LangGraphClient(client), headers, THREAD_BINDING_HEADER_NAME, client, (SSEDecoder, aiter_lines_raw)
+
+
+def _encode(value):
+    def mapping(item):
+        if isinstance(item, Mapping):
+            return dict(item)
+        raise TypeError("Invalid channel JSON")
+
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"), default=mapping).encode("utf-8")
+
+
+def _decode(value):
+    def invalid_constant(_value):
+        raise ValueError("Invalid channel JSON")
+
+    return json.loads(value, parse_constant=invalid_constant) if value else None
+
+
+def _json_response(status, headers, value):
+    return ChannelJsonResponse(status, headers, _decode(value))
+
+
+def _authority_headers(owner):
+    from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
+    from app.gateway.internal_auth import create_internal_auth_headers
+
+    csrf = generate_csrf_token()
+    return {**create_internal_auth_headers(owner_user_id=owner), CSRF_HEADER_NAME: csrf, "Cookie": f"{CSRF_COOKIE_NAME}={csrf}"}
+
+
+def _path(value):
+    if type(value) is not str or not value or value.startswith("/") or any(ord(c) <= 32 or ord(c) == 127 or c in "\\?#" for c in value):
+        raise ChannelExecutionProtocolError()
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme
+        or parsed.netloc
+        or any(not part or unquote(part) in {".", ".."} or any(c in unquote(part) for c in "/\\") or any(ord(c) <= 32 or ord(c) == 127 for c in unquote(part)) or re.search(r"%(?![0-9a-fA-F]{2})", part) for part in value.split("/"))
+    ):
+        raise ChannelExecutionProtocolError()
+    return value
+
+
+def _extra_headers(headers, *, streaming=False):
+    result = {}
+    for key, value in (headers or {}).items():
+        if type(key) is not str or type(value) is not str or any(ord(c) <= 31 or ord(c) == 127 for c in value):
+            raise ChannelExecutionProtocolError()
+        name = key.lower()
+        if name in result:
+            raise ChannelExecutionProtocolError()
+        if name == "idempotency-key":
+            if not value or len(value) > 256 or any(c.isspace() for c in value):
+                raise ChannelExecutionProtocolError()
+        elif name == "x-deerflow-require-thread-binding":
+            if value != "true":
+                raise ChannelExecutionProtocolError()
+        elif name == "x-deerflow-require-channel-execution":
+            if value != "1":
+                raise ChannelExecutionProtocolError()
+        elif name == "accept":
+            if value != ("text/event-stream" if streaming else "application/json"):
+                raise ChannelExecutionProtocolError()
+        elif name == "content-type":
+            if value != "application/json":
+                raise ChannelExecutionProtocolError()
+        else:
+            raise ChannelExecutionProtocolError()
+        result[name] = value
+    return result
+
+
+def _response_headers(response):
+    return {key: value for key, value in response.headers.items() if key in {"content-type", "x-deerflow-channel-execution-version"}}
+
+
+class _OwnedStream:
+    def __init__(self, owner, kwargs):
+        self._owner, self._kwargs = owner, kwargs
+        self._queue = asyncio.Queue(maxsize=1)
+        self._pump_task = self._close_task = None
+        self._closed = False
+        self._response = None
+        self._cleanup_failed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._closed:
+            raise StopAsyncIteration
+        try:
+            if self._pump_task is None:
+                self._owner._check_operation("run_create")
+                self._owner._streams.add(self)
+                self._pump_task = self._owner._register(self._pump(), "channel-http-stream")
+            kind, value = await self._queue.get()
+            if self._owner._stopping:
+                raise ChannelExecutionProtocolError()
+            if kind == "part":
+                return value
+            await self.aclose()
+            if kind == "error":
+                raise value from None
+            raise StopAsyncIteration
+        except asyncio.CancelledError:
+            await await_drained(self.aclose())
+            if self._owner._stopping:
+                await await_drained(self._owner.stop())
+            raise
+
+    async def _pump(self):
+        try:
+            owner, kw = self._owner, self._kwargs
+            await owner.start()
+            body = await await_drained(asyncio.to_thread(_encode, kw["body"]))
+            headers = await owner._headers_for(kw["owner_user_id"], kw["headers"], streaming=True)
+            owner._check_operation("run_create")
+            context = _BEFORE_DISPATCH.set(owner._dispatch_check("run_create", kw["before_dispatch"]))
+            try:
+                response = await owner._http_client.send(owner._http_client.build_request("POST", kw["path"], content=body, headers=headers, timeout=httpx.Timeout(connect=5, pool=5, read=300, write=300)), stream=True)
+                self._response = response
+                owner._remember_response(response)
+                try:
+                    if not 200 <= response.status_code < 300:
+                        data = await owner._response_content(response)
+                        result = await await_drained(asyncio.to_thread(_json_response, response.status_code, _response_headers(response), data))
+                        await owner._post_response("run_create", kw["after_response"])
+                        raise await await_drained(asyncio.to_thread(ChannelHttpError, result))
+                    if response.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "text/event-stream":
+                        raise ChannelExecutionProtocolError()
+                    decoder_factory, lines = owner._sse
+                    decoder = decoder_factory()
+                    async for line in lines(response):
+                        part = await await_drained(asyncio.to_thread(decoder.decode, line))
+                        if part is not None:
+                            await owner._post_response("run_create", kw["after_response"])
+                            await self._queue.put(("part", part))
+                    if response.is_closed:
+                        owner._responses[response]["confirmed"] = True
+                finally:
+                    await owner._close_response(response)
+            finally:
+                _BEFORE_DISPATCH.reset(context)
+        except asyncio.CancelledError:
+            raise
+        except ChannelHttpError as error:
+            await self._queue.put(("error", error))
+        except Exception:
+            await self._queue.put(("error", ChannelExecutionProtocolError()))
+        else:
+            await self._queue.put(("end", None))
+
+    async def _finish_close(self):
+        if self._pump_task is not None:
+            if not self._pump_task.done():
+                self._pump_task.cancel()
+            await asyncio.gather(self._pump_task, return_exceptions=True)
+        if self._response in self._owner._responses:
+            if not self._cleanup_failed:
+                self._cleanup_failed = True
+                raise ChannelExecutionProtocolError()
+            await self._owner._close_response(self._response)
+        self._closed = True
+        self._kwargs = None
+        while not self._queue.empty():
+            self._queue.get_nowait()
+        self._queue.put_nowait(("end", None))
+        self._owner._streams.discard(self)
+
+    async def aclose(self):
+        if self._close_task is None or self._close_task.done() and not self._closed:
+            self._close_task = asyncio.create_task(self._finish_close(), name="channel-stream-cleanup")
+        await await_drained(GatewayClientOwner._join(self._close_task))
 
 
 class GatewayClientOwner:
@@ -57,10 +237,16 @@ class GatewayClientOwner:
         self._endpoint_id = sha256(self._base_url.encode("utf-8")).hexdigest()
         self._tls_context, self._transport = tls_context, transport
         self._client, self._headers = None, None
+        self._http_client = None
+        self._sse = None
         self._binding_header = None
         self._construction: asyncio.Task | None = None
         self._stop_task: asyncio.Task | None = None
         self._requests: set[asyncio.Task] = set()
+        self._operations: set[asyncio.Task] = set()
+        self._streams: set[_OwnedStream] = set()
+        self._responses: dict[httpx.Response, dict] = {}
+        self._run_admission_closed = False
         self._stopping, self._closed = False, False
 
     @property
@@ -76,7 +262,7 @@ class GatewayClientOwner:
         return self._closed
 
     async def _start_owned(self) -> None:
-        self._client, self._headers, self._binding_header = await asyncio.to_thread(_construct, self._base_url, self._tls_context, self._transport)
+        self._client, self._headers, self._binding_header, self._http_client, self._sse = await asyncio.to_thread(_construct, self._base_url, self._tls_context, self._transport)
 
     async def start(self) -> None:
         if self._stopping:
@@ -89,6 +275,10 @@ class GatewayClientOwner:
             await await_drained(self._join(self._construction))
         except asyncio.CancelledError:
             self.begin_shutdown()
+            if asyncio.current_task() in self._operations:
+                # The caller first retires this tracked operation, then joins
+                # final cleanup; cleanup itself must not wait on this waiter.
+                raise
             await await_drained(self.stop())
             raise
         if self._stopping:
@@ -136,14 +326,158 @@ class GatewayClientOwner:
 
         return await self._request(create, before_dispatch)
 
+    def _check_operation(self, operation):
+        if operation not in {"thread_read", "run_read", "source_read", "run_create"} or self._stopping or operation == "run_create" and self._run_admission_closed:
+            raise ChannelExecutionProtocolError()
+
+    def _register(self, coro, name):
+        task = asyncio.create_task(coro, name=name)
+        self._operations.add(task)
+        task.add_done_callback(self._operations.discard)
+        return task
+
+    def _dispatch_check(self, operation, before_dispatch):
+        async def check():
+            await await_drained(before_dispatch())
+            self._check_operation(operation)
+
+        return check
+
+    async def _post_response(self, operation, callback):
+        if callback is not None:
+            await await_drained(callback())
+        self._check_operation("run_read" if operation == "run_create" else operation)
+
+    def _remember_response(self, response):
+        self._responses.setdefault(response, {"attempted": False, "confirmed": False, "task": None})
+
+    async def _response_content(self, response):
+        value = await response.aread()
+        if response.is_closed:
+            self._responses[response]["confirmed"] = True
+        return value
+
+    async def _close_response(self, response):
+        state = self._responses.get(response)
+        if state is None:
+            return
+
+        async def close():
+            if state["confirmed"]:
+                self._responses.pop(response, None)
+                return
+            if state["attempted"] or response.is_closed:
+                # Response.aclose marks itself closed before the underlying
+                # stream finishes. Retain and retry that public stream closer.
+                await response.stream.aclose()
+            else:
+                state["attempted"] = True
+                await response.aclose()
+            self._responses.pop(response, None)
+
+        if state["task"] is None or state["task"].done():
+            state["task"] = asyncio.create_task(close(), name="channel-response-cleanup")
+        try:
+            await await_drained(self._join(state["task"]))
+        except Exception:
+            raise ChannelExecutionProtocolError() from None
+
+    async def _headers_for(self, owner, headers, *, streaming=False):
+        if type(owner) is not str or not owner or any(ord(c) <= 32 or ord(c) == 127 for c in owner):
+            raise ChannelExecutionProtocolError()
+        extra = _extra_headers(headers, streaming=streaming)
+        authority = await await_drained(asyncio.to_thread(_authority_headers, owner))
+        return {**authority, **extra, "Accept": "text/event-stream" if streaming else "application/json", "Content-Type": "application/json"}
+
+    async def request_json(
+        self,
+        *,
+        operation: ChannelOperation,
+        owner_user_id: str,
+        method: Literal["GET", "POST"],
+        path: str,
+        before_dispatch: BeforeDispatch,
+        after_response: BeforeDispatch | None = None,
+        body: Mapping[str, JsonValue] | None = None,
+        params: Mapping[str, QueryValue] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> ChannelJsonResponse:
+        self._check_operation(operation)
+        path = _path(path)
+        if method != ("POST" if operation == "run_create" else "GET") or not callable(before_dispatch) or after_response is not None and not callable(after_response) or body is not None and not isinstance(body, Mapping):
+            raise ChannelExecutionProtocolError()
+        if params is not None and (not isinstance(params, Mapping) or any(type(k) is not str or type(v) not in {str, int, bool} for k, v in params.items())):
+            raise ChannelExecutionProtocolError()
+
+        async def run():
+            try:
+                await self.start()
+                encoded = await await_drained(asyncio.to_thread(_encode, body)) if body is not None else None
+                fresh_headers = await self._headers_for(owner_user_id, headers)
+                self._check_operation(operation)
+                context = _BEFORE_DISPATCH.set(self._dispatch_check(operation, before_dispatch))
+                try:
+                    response = await self._http_client.send(
+                        self._http_client.build_request(method, path, content=encoded, params=params, headers=fresh_headers, timeout=httpx.Timeout(connect=5, pool=5, read=300, write=300) if operation == "run_create" else httpx.Timeout(30)),
+                        stream=True,
+                    )
+                    self._remember_response(response)
+                    try:
+                        content = await self._response_content(response)
+                        result = await await_drained(asyncio.to_thread(_json_response, response.status_code, _response_headers(response), content))
+                        await self._post_response(operation, after_response)
+                        return result
+                    finally:
+                        await self._close_response(response)
+                finally:
+                    _BEFORE_DISPATCH.reset(context)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                raise ChannelExecutionProtocolError() from None
+
+        task = self._register(run(), "channel-http-json")
+        try:
+            result = await asyncio.shield(task)
+            self._check_operation("run_read" if operation == "run_create" else operation)
+            return result
+        except asyncio.CancelledError:
+            task.cancel()
+            await await_drained(self._join_retired(task))
+            if self._stopping:
+                await await_drained(self.stop())
+            raise
+
+    @staticmethod
+    async def _join_retired(task):
+        await asyncio.gather(task, return_exceptions=True)
+
+    def stream_sse(self, *, owner_user_id: str, path: str, body: Mapping[str, JsonValue], before_dispatch: BeforeDispatch, after_response: BeforeDispatch | None = None, headers: Mapping[str, str] | None = None) -> ChannelOwnedStream:
+        self._check_operation("run_create")
+        if not isinstance(body, Mapping) or not callable(before_dispatch) or after_response is not None and not callable(after_response):
+            raise ChannelExecutionProtocolError()
+        return _OwnedStream(self, {"owner_user_id": owner_user_id, "path": _path(path), "body": body, "before_dispatch": before_dispatch, "after_response": after_response, "headers": headers})
+
+    def close_run_admission(self) -> None:
+        self._run_admission_closed = True
+
     def begin_shutdown(self) -> None:
         self._stopping = True
+        self.close_run_admission()
+        for task in tuple(self._operations):
+            task.cancel()
 
     async def _finish_stop(self) -> None:
         if self._construction is not None:
             await asyncio.gather(self._construction, return_exceptions=True)
         if self._requests:
             await asyncio.gather(*tuple(self._requests), return_exceptions=True)
+        if self._streams:
+            await asyncio.gather(*(stream.aclose() for stream in tuple(self._streams)))
+        if self._operations:
+            await asyncio.gather(*tuple(self._operations), return_exceptions=True)
+        if self._responses:
+            await asyncio.gather(*(self._close_response(response) for response in tuple(self._responses)))
         if self._client is not None:
             await self._client.aclose()
         self._closed = True
