@@ -2,6 +2,10 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+CI shards print each running case and dump Python-thread stacks after 120 seconds
+without ending the test. Very long parametrized IDs can truncate formatted GitHub
+CLI logs; inspect raw run-log ZIP step files before assessing missing results.
+
 Factory default tests establish their own absent-config precondition and restore
 ambient configuration afterward. AppConfig loading can set stream-bridge globals;
 the no-config bridge test clears that global and its Redis environment fallback
