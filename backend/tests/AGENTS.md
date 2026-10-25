@@ -366,6 +366,11 @@ snapshots. Pure projection and mock HTTP tests prove protocol validation only,
 not actual worker-source provenance. Capture remains rejected by the current
 creating schema. Keep missing API scaffolds distinct from behavioral regressions.
 
+Run-read ownership tests cover actual SQLite cursors in DELETE/WAL modes and
+both SQL dialects for owner, error and timeout behavior. Measure independent
+COMMIT/readback before red-only diagnostic cleanup; WAL writer success does not
+prove cursor closure. A cancelled terminal read must not continue its status CAS.
+
 Independent storage startups need fresh app state and the actual storage
 lifecycle owner. Drain each lifetime before disposing its SQL engine or dropping
 its schema; never reuse a completed cleanup task for a new maintenance generation.

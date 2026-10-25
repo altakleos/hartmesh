@@ -24,3 +24,12 @@ Alembic stamp/upgrade workers started inside `bootstrap_schema()` remain owned b
 Scheduler timeouts and completion callbacks use `complete_run(..., only_if_active=True)` under the parent-first lock: the first terminal outcome and parent accounting persist across late callbacks. Do not rely on process-local timeout memory for this fence.
 
 `list_inflight_by_metadata` is an operator-tool observation only; it owns no run.
+
+`RunRepository.get` resolves AUTO/raw owner at entry, then owns the complete SQL
+query, mapping and session exit through cancellation. Do not release the caller's
+scope while a native cursor is active. Terminal retries start only after that
+read settles; logical attempt deadlines do not shorten required cleanup. Preserve
+explicit None, raw owner filtering and ordinary results/errors. Driver tests
+prove independent UPDATE/COMMIT/readback and cursor closure: DELETE can retain a
+read lock after cancellation; production WAL's successful writer is a distinct
+control, not evidence of the same lock failure.

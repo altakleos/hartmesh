@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### SQL run read cancellation cleanup
+
+Keep run queries and their sessions owned through repeated cancellation. Resolve
+the owner before dispatch and let a timed-out read settle before terminal recovery
+starts another attempt. Existing row filtering, results and durable write fences
+continue to apply.
+
+Fix a reproduced stranded-reader COMMIT lock in SQLite DELETE mode. WAL writes
+remain healthy while gaining deterministic cursor cleanup through cancellation.
+
+No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
+remains version 55.
+
 ### Durable output-evidence primitives
 
 Add generic immutable output receipts, atomic SQL status-and-receipt writes and

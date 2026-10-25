@@ -1386,6 +1386,8 @@ authoritative snapshots. Its prepared client protocol remains inactive until
 worker capture and the server output API are implemented; current requests for
 capture are rejected before model execution. See
 [durable output evidence](backend/docs/RUN_OUTPUT_EVIDENCE.md).
+Cancelled SQL run reads now finish their started database work and session
+cleanup before returning cancellation, preventing abandoned read resources.
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 
