@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -11,6 +12,16 @@ import pytest_asyncio
 from test_agent_instances import instances as instances
 
 from deerflow.spaces.contract import PrincipalRef
+
+
+@asynccontextmanager
+async def _startup_app_lifetime(ss):
+    # Independent startups have independent cleanup owners, even when sharing
+    # the fixture database. Reusing a closed app skips the next generation's
+    # drain and can race its maintenance against SQL schema teardown.
+    app = SimpleNamespace(state=SimpleNamespace(thread_store=SimpleNamespace(instance_authority=None)))
+    async with ss.storage_spaces_lifecycle(app):
+        yield app
 
 
 @pytest.mark.asyncio
@@ -147,32 +158,29 @@ async def startup(instances, monkeypatch, tmp_path):
     monkeypatch.setattr(ss, "storage_fit", fit)
     adapter = AsyncMock(return_value=(None, SimpleNamespace(provider=SimpleNamespace(host_id="qualified-test-host"))))
     monkeypatch.setattr(ss, "qualified_attachments", adapter)
-    app = SimpleNamespace(state=SimpleNamespace(thread_store=SimpleNamespace(instance_authority=None)))
-    try:
+    async with _startup_app_lifetime(ss) as app:
         yield ss, app, config, sf, catalog, adapter, agents
-    finally:
-        close = getattr(ss, "close_storage_spaces", None)
-        if close is not None:
-            await close(app)
 
 
 @pytest.mark.asyncio
 async def test_startup_tolerates_missing_or_unreadable_inventory(startup, monkeypatch):
-    ss, app, config, sf, _, adapter, _ = startup
+    ss, _app, config, sf, _, adapter, _ = startup
     for error, reason in [(FileNotFoundError("missing"), "storage-pool-missing"), (ValueError("malformed"), "inventory-unreadable")]:
 
         def missing(_path):
             raise error
 
         monkeypatch.setattr(ss.PreparedVolumeCatalog, "from_manifest", missing)
-        await ss.initialize_storage_spaces(app, config, session_factory=sf)
-        state = await ss.storage_state(app)
-        assert (state.state, state.reason) == ("unavailable", reason)
-        assert app.state.storage_spaces is not None and not app.state.storage_spaces.catalog.volumes
-        assert app.state.agent_instances is not None
-        assert app.state.thread_store.instance_authority is app.state.agent_conversations
-        assert (await ss.execution_state(app)).reason == "storage-unavailable"
-        await ss.close_storage_spaces(app)
+        async with _startup_app_lifetime(ss) as app:
+            await ss.initialize_storage_spaces(app, config, session_factory=sf)
+            state = await ss.storage_state(app)
+            assert (state.state, state.reason) == ("unavailable", reason)
+            assert app.state.storage_spaces is not None and not app.state.storage_spaces.catalog.volumes
+            assert app.state.agent_instances is not None
+            assert app.state.thread_store.instance_authority is app.state.agent_conversations
+            assert (await ss.execution_state(app)).reason == "storage-unavailable"
+            recheck = app.state.storage_recheck_task
+        assert recheck.done()
     assert not adapter.await_count
 
 
@@ -213,8 +221,11 @@ async def test_incomplete_and_empty_nonfitting_plans_have_distinct_states(startu
     fit = ss.storage_fit
     monkeypatch.setattr(ss, "storage_fit", lambda *a: replace(fit(*a), fits=False, free_bytes=1 << 30))
     catalog.volumes.clear()
-    await ss.initialize_storage_spaces(app, config, session_factory=sf)
-    assert (await ss.storage_state(app)).reason == "disk-too-small"
+    async with _startup_app_lifetime(ss) as app:
+        await ss.initialize_storage_spaces(app, config, session_factory=sf)
+        assert (await ss.storage_state(app)).reason == "disk-too-small"
+        recheck = app.state.storage_recheck_task
+    assert recheck.done()
 
 
 @pytest.mark.asyncio
@@ -248,11 +259,14 @@ async def test_admission_failure_recovers_without_a_second_pending_adapter(start
     await ss.close_storage_spaces(app)
     adapter.side_effect = StorageAdapterUnsupported("fixture unavailable daemon")
     monkeypatch.setattr(ss, "qualified_attachments", adapter)
-    await ss.initialize_storage_spaces(app, config, session_factory=sf)
-    assert (await ss.storage_state(app)).reason == "admission-failed"
-    adapter.side_effect = None
-    await ss.storage_recheck(app)
-    assert (await ss.storage_state(app)).state == "ready"
+    async with _startup_app_lifetime(ss) as app:
+        await ss.initialize_storage_spaces(app, config, session_factory=sf)
+        assert (await ss.storage_state(app)).reason == "admission-failed"
+        adapter.side_effect = None
+        await ss.storage_recheck(app)
+        assert (await ss.storage_state(app)).state == "ready"
+        recheck = app.state.storage_recheck_task
+    assert recheck.done(), "The second startup's maintenance escaped its cleanup owner"
 
 
 @pytest.mark.asyncio

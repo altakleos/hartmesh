@@ -6,6 +6,7 @@ import threading
 import pytest
 from sqlalchemy import select
 from test_agent_instances import instances as instances
+from test_storage_spaces_startup import _startup_app_lifetime
 from test_storage_spaces_startup import startup as startup
 
 from deerflow.features.resources import StorageFeatureLinkRow
@@ -39,13 +40,16 @@ async def test_company_creation_is_idempotent_after_restart(startup):
     async with sf() as session:
         identifier = (await session.get(StorageFeatureLinkRow, ("hm.company-space", "company"))).space_id
     await ss.close_storage_spaces(app)
-    await ss.initialize_storage_spaces(app, config, session_factory=sf)
-    await asyncio.gather(ss.ensure_company_space(app), ss.ensure_company_space(app))
-    async with sf() as session:
-        assert (await session.get(StorageFeatureLinkRow, ("hm.company-space", "company"))).space_id == identifier
-        assert len((await session.execute(select(SpaceRow))).scalars().all()) == 1
-        assert len((await session.execute(select(SpaceBackingRow))).scalars().all()) == 1
-        assert not (await session.execute(select(SpaceEventRow))).first()
+    async with _startup_app_lifetime(ss) as app:
+        await ss.initialize_storage_spaces(app, config, session_factory=sf)
+        await asyncio.gather(ss.ensure_company_space(app), ss.ensure_company_space(app))
+        async with sf() as session:
+            assert (await session.get(StorageFeatureLinkRow, ("hm.company-space", "company"))).space_id == identifier
+            assert len((await session.execute(select(SpaceRow))).scalars().all()) == 1
+            assert len((await session.execute(select(SpaceBackingRow))).scalars().all()) == 1
+            assert not (await session.execute(select(SpaceEventRow))).first()
+        recheck = app.state.storage_recheck_task
+    assert recheck.done()
 
 
 @pytest.mark.asyncio

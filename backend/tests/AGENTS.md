@@ -359,3 +359,7 @@ both SQL dialects, strict read acknowledgements, actual binding authority,
 post-await scope fences and retained reads during shutdown. No receipt, cached
 success or fabricated AI identity proves a complete final answer. Preserve legacy
 channel defaults; never run native/Compose suites locally.
+
+Independent storage startups need fresh app state and the actual storage
+lifecycle owner. Drain each lifetime before disposing its SQL engine or dropping
+its schema; never reuse a completed cleanup task for a new maintenance generation.
