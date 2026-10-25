@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Captured run startup and ownership closure
+
+Seal known prestart cancellation and startup failure with their actual unavailable
+outcome. Preserve failed metadata setup through the attached worker's cleanup;
+missing or completed tasks after startup do not establish cancellation cleanup.
+Retain the original identity of an unseen committed admission after a lost result;
+concurrent idempotent retries cannot change its compensation decision.
+
+Recover eligible abandoned captured runs with an atomic failed seal, preserving
+cancellation requests and original scope. Refuse replacement of live captured
+work, resolve exact idempotent reuse first, and commit eligible expired predecessor
+closure with its successor. Lease recovery does not prove native/tool containment.
+
+No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
+remains version 55. Capture resource retirement at shutdown and managed-bot
+publication/activation remain separate work.
+
 ### Captured worker output and authorized reads
 
 Add explicit versioned output capture for SQL-backed runs. Seal the exact

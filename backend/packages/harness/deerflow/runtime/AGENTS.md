@@ -17,7 +17,11 @@ callbacks, history IDs and multiple epochs never supply replacement text.
 Capture journal quiescence stops producers, drains admitted SQL/progress and
 freezes summaries before CAS. Source uncertainty fences locally and skips
 status-only writes, goal clearing and completion hooks. Keep ordinary defaults.
-Managed-bot activation and nonworker closure remain separate work. See
+Host-only startup decisions share `start_lock`; preserve frozen prestart outcomes
+through the worker. Reclaim seals failed under the actual lease CAS; cancellation
+requests and task absence do not prove cleanup. Resolve reuse before captured
+replacement refusal. Unseen admission cleanup uses per-call registration evidence,
+never a shared retry flag. Managed-bot activation and shutdown retirement remain separate. See
 [output evidence](../../../../docs/RUN_OUTPUT_EVIDENCE.md).
 
 SQL terminal writes use `runs/terminal.py` and `RunRepository.finalize_owned`.

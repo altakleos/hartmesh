@@ -115,9 +115,9 @@ from deerflow.workspace_changes.handoff import bind_output_snapshot
 from deerflow.workspace_changes.types import WorkspaceSnapshot
 
 from .delivery import DELIVERY_INCOMPLETE_STOP_REASON, DELIVERY_SCAN_INCOMPLETE_ERROR, output_scan_incomplete, publish_delivery_failure
-from .manager import ConflictError, RunManager, RunRecord, RunStartOutcome
+from .manager import ConflictError, RunManager, RunRecord, RunStartOutcome, RunStartupPhase
 from .naming import resolve_root_run_name
-from .output import OUTPUT_CAPTURE_KEY, OutputEvidenceError, TextOutputReceipt, capture_from_kwargs
+from .output import OUTPUT_CAPTURE_KEY, OutputEvidenceError, TextOutputReceipt, capture_from_kwargs, receipt_from_kwargs, validate_receipt_status
 from .output_capture import OutputCaptureObserver
 from .output_source import read_durable_output_source
 from .schemas import RunStatus, ThreadOperationKind
@@ -1217,6 +1217,16 @@ async def _run_agent(
                 if journal is not None:
                     await journal.close(flush=False)
                 return
+            if record.startup_phase is RunStartupPhase.closed:
+                closed = record.prestart_outcome
+                sealed = receipt_from_kwargs(record.kwargs)
+                if closed is None or not closed.confirmed or sealed is None or sealed.kind != "unavailable" or sealed.reason != closed.reason or (sealed.owner_user_id, sealed.thread_id, sealed.run_id) != (record.user_id, thread_id, run_id):
+                    raise OutputEvidenceError()
+                validate_receipt_status(sealed, closed.status)
+                if journal is not None:
+                    await journal.close(flush=False)
+                output_confirmed = True
+                return
             await run_manager.set_finalizing(run_id, True)
             if output_capture is None or journal is None or not run_manager.supports_output_receipts or getattr(event_store, "supports_durable_output_evidence", False) is not True:
                 raise OutputEvidenceError()
@@ -1337,7 +1347,12 @@ async def _run_agent(
 
         start_outcome = await run_manager.try_start(run_id)
         if start_outcome is not RunStartOutcome.started:
-            if record.abort_event.is_set():
+            if capture_requested and record.startup_phase is RunStartupPhase.closed and record.prestart_outcome is not None:
+                # A host-authoritative prestart failure/cancel has already been
+                # settled (or fenced). Its abort bit cannot reinterpret failure
+                # as executed cancellation or request a conflicting second seal.
+                pass
+            elif record.abort_event.is_set():
                 await _finish_cancellation(
                     record.abort_action,
                     restore_checkpoint=False,

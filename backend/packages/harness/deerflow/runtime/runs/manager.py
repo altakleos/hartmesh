@@ -9,7 +9,7 @@ import sqlite3
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
@@ -21,7 +21,19 @@ from deerflow.utils.file_io import await_drained
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
-from .output import OUTPUT_CAPTURE_DISCONNECT_KEY, OUTPUT_CAPTURE_KEY, OUTPUT_EVIDENCE_KEY, OutputEvidenceError, OutputEvidenceScopeError, OutputReceipt, RunOutputSnapshot, capture_from_kwargs, receipt_from_kwargs, validate_receipt_status
+from .output import (
+    OUTPUT_CAPTURE_DISCONNECT_KEY,
+    OUTPUT_CAPTURE_KEY,
+    OUTPUT_EVIDENCE_KEY,
+    OutputEvidenceError,
+    OutputEvidenceScopeError,
+    OutputReceipt,
+    RunOutputSnapshot,
+    UnavailableOutputReceipt,
+    capture_from_kwargs,
+    receipt_from_kwargs,
+    validate_receipt_status,
+)
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
 from .store.base import (
     EditReplayVisibility,
@@ -198,6 +210,30 @@ class PersistenceRetryPolicy:
     backoff_factor: float = 2.0
 
 
+class RunStartupPhase(StrEnum):
+    """Host-only execution decision; never hydrated from a public/store row."""
+
+    unknown = "unknown"
+    unstarted = "unstarted"
+    started = "started"
+    closed = "closed"
+
+
+class _AdmissionStage(StrEnum):
+    constructed = "constructed"
+    registered = "registered"
+    reused = "reused"
+
+
+@dataclass(frozen=True)
+class PrestartOutcome:
+    status: RunStatus
+    reason: str
+    error: str | None = None
+    stop_reason: str | None = None
+    confirmed: bool = False
+
+
 @dataclass
 class RunRecord:
     """Mutable record for a single run."""
@@ -249,6 +285,8 @@ class RunRecord:
     # True only on the caller that recovered an existing idempotent admission;
     # that caller must not attach a second worker to the durable run.
     idempotency_reused: bool = False
+    startup_phase: RunStartupPhase = field(default=RunStartupPhase.unknown, repr=False)
+    prestart_outcome: PrestartOutcome | None = field(default=None, repr=False)
 
 
 class RunStartOutcome(StrEnum):
@@ -553,6 +591,7 @@ class RunManager:
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
         """Persist token usage and completion data to the backing store."""
+        kwargs = {key: value for key, value in kwargs.items() if key not in {"startup_phase", "prestart_outcome"}}
         row_recovery_payload: dict[str, Any] | None = None
         record: RunRecord | None = None
         async with self._lock:
@@ -618,6 +657,7 @@ class RunManager:
 
     async def update_run_progress(self, run_id: str, **kwargs) -> None:
         """Persist a running token/message snapshot without changing status."""
+        kwargs = {key: value for key, value in kwargs.items() if key not in {"startup_phase", "prestart_outcome"}}
         should_persist = True
         async with self._lock:
             record = self._runs.get(run_id)
@@ -636,6 +676,7 @@ class RunManager:
 
     async def update_finalizing_progress(self, run_id: str, **kwargs) -> None:
         """Persist final fields while the durable row is deliberately active."""
+        kwargs = {key: value for key, value in kwargs.items() if key not in {"startup_phase", "prestart_outcome"}}
         should_persist = False
         async with self._lock:
             record = self._runs.get(run_id)
@@ -685,6 +726,7 @@ class RunManager:
             assistant_id=assistant_id,
             status=RunStatus.pending,
             on_disconnect=on_disconnect,
+            startup_phase=RunStartupPhase.unstarted,
             multitask_strategy=multitask_strategy,
             metadata=metadata or {},
             kwargs=kwargs or {},
@@ -1047,12 +1089,90 @@ class RunManager:
 
         return self._compute_edit_replay_visibility(list(records_by_id.values()))
 
+    def _captures_output(self, record: RunRecord) -> bool:
+        return self.supports_output_receipts and record.operation_kind is ThreadOperationKind.run and capture_from_kwargs(record.kwargs) is not None
+
+    async def _settle_prestart_locked(self, record: RunRecord, outcome: PrestartOutcome) -> bool:
+        """Decide nonexecution under start_lock, then confirm its exact seal."""
+        async with self._lock:
+            if self._runs.get(record.run_id) is not record or record.store_only or record.ownership_lost:
+                return False
+            if record.startup_phase is RunStartupPhase.closed:
+                return record.prestart_outcome is not None and record.prestart_outcome.confirmed
+            if record.startup_phase is not RunStartupPhase.unstarted:
+                return False
+            record.startup_phase = RunStartupPhase.closed
+            record.prestart_outcome = outcome
+            record.status, record.error, record.stop_reason = outcome.status, outcome.error, outcome.stop_reason
+            record.finalizing = record.task is not None and not record.task.done()
+            record.abort_event.set()
+            record.updated_at = _now_iso()
+
+        def receipt(value):
+            return UnavailableOutputReceipt(version=1, kind="unavailable", owner_user_id=record.user_id, thread_id=record.thread_id, run_id=record.run_id, input_message_id=None, reason=value.reason)
+
+        try:
+            result = await self.finalize_output(record.run_id, outcome.status, output_receipt=receipt(outcome), error=outcome.error, stop_reason=outcome.stop_reason, respect_cancellation=outcome.reason != "cancelled")
+            if result.cancel_action is not None:
+                record.abort_action = result.cancel_action
+                outcome = PrestartOutcome(RunStatus.interrupted, "cancelled", stop_reason=record.stop_reason)
+                async with self._lock:
+                    record.prestart_outcome = outcome
+                    record.status, record.error = outcome.status, outcome.error
+                result = await self.finalize_output(record.run_id, outcome.status, output_receipt=receipt(outcome), stop_reason=outcome.stop_reason, respect_cancellation=False)
+            if result.output_receipt_confirmed:
+                async with self._lock:
+                    record.prestart_outcome = replace(outcome, confirmed=True)
+                return True
+        except Exception:
+            pass
+        await self._mark_ownership_lost(record, reason="Run prestart output could not be confirmed.", require_active=False)
+        return False
+
+    async def _close_unstarted_capture(self, record: RunRecord, outcome: PrestartOutcome) -> bool:
+        async def close():
+            async with record.start_lock:
+                return await self._settle_prestart_locked(record, outcome)
+
+        return await await_drained(close())
+
+    async def _try_start_capture(self, record: RunRecord) -> RunStartOutcome:
+        async with record.start_lock:
+            async with self._lock:
+                if self._runs.get(record.run_id) is not record or record.startup_phase is not RunStartupPhase.unstarted:
+                    return RunStartOutcome.cancelled
+                cancelled = record.abort_event.is_set()
+                if record.status != RunStatus.pending and not cancelled:
+                    return RunStartOutcome.cancelled
+            if not cancelled:
+                try:
+                    updated = await self._call_store_with_retry("start_run", record.run_id, lambda: self._store.start_run(record.run_id))
+                except Exception as exc:
+                    raise RunStartupError(f"Failed to start run {record.run_id}: {exc}") from exc
+                if not updated:
+                    row = await self._store.get(record.run_id, user_id=record.user_id)
+                    if row is None or row.get("status") not in {"pending", "running"} or row.get("owner_worker_id") != self.worker_id or row.get("cancel_action") is None:
+                        await self._mark_ownership_lost(record, reason="Run startup authority could not be confirmed.", require_active=False)
+                        return RunStartOutcome.cancelled
+                    record.abort_action = row["cancel_action"]
+                    record.abort_event.set()
+            async with self._lock:
+                if not record.abort_event.is_set() and record.status == RunStatus.pending:
+                    record.startup_phase = RunStartupPhase.started
+                    record.status = RunStatus.running
+                    record.updated_at = _now_iso()
+                    return RunStartOutcome.started
+            await self._settle_prestart_locked(record, PrestartOutcome(RunStatus.interrupted, "cancelled", stop_reason=record.stop_reason))
+            return RunStartOutcome.cancelled
+
     async def try_start(self, run_id: str) -> RunStartOutcome:
         """Transition an uncancelled pending run to running before building the agent."""
         async with self._lock:
             record = self._runs.get(run_id)
         if record is None:
             raise RunStartupError(f"Cannot start unknown run {run_id}")
+        if self._captures_output(record):
+            return await await_drained(self._try_start_capture(record))
 
         async with record.start_lock:
             async with self._lock:
@@ -1098,6 +1218,12 @@ class RunManager:
 
     async def fail_start_if_pending(self, run_id: str, *, error: str) -> bool:
         """Mark an admitted run as failed if its worker task could not be attached."""
+        async with self._lock:
+            record = self._runs.get(run_id)
+        if record is not None and self._captures_output(record):
+            if record.status != RunStatus.pending:
+                return False
+            return await self._close_unstarted_capture(record, PrestartOutcome(RunStatus.error, "failed", error=error, stop_reason=record.stop_reason))
         async with self._lock:
             record = self._runs.get(run_id)
             if record is None or record.status != RunStatus.pending:
@@ -1473,6 +1599,40 @@ class RunManager:
                 record.task.cancel()
         logger.info("Run %s cancellation signalled locally (action=%s)", run_id, action)
 
+    async def _cancel_capture(self, record: RunRecord, *, action: str) -> CancelOutcome:
+        if type(action) is not str or action not in {"interrupt", "rollback"}:
+            raise ValueError("Unsupported cancellation action")
+        if record.startup_phase is RunStartupPhase.closed:
+            saved = record.prestart_outcome
+            return CancelOutcome.cancelled if saved is not None and saved.confirmed and saved.reason == "cancelled" else CancelOutcome.not_cancellable
+        if record.terminal_confirmed and record.status.value in TERMINAL_STATUSES:
+            return CancelOutcome.cancelled if record.status is RunStatus.interrupted else CancelOutcome.not_cancellable
+        outcome, winning = await self._request_durable_cancel(record.run_id, action=action)
+        if outcome not in {CancelOutcome.requested, CancelOutcome.unknown}:
+            return outcome
+        task_to_cancel = None
+        async with self._lock:
+            if self._runs.get(record.run_id) is not record:
+                return CancelOutcome.unknown
+            record.abort_action = winning or action
+            record.abort_event.set()
+            unstarted = record.startup_phase is RunStartupPhase.unstarted
+            if not unstarted:
+                task_active = record.task is not None and not record.task.done()
+                record.finalizing = task_active
+                if task_active and record.status == RunStatus.running and record.task is not asyncio.current_task():
+                    task_to_cancel = record.task
+                if record.status in {RunStatus.pending, RunStatus.running}:
+                    record.status = RunStatus.interrupted
+                    record.updated_at = _now_iso()
+        if task_to_cancel is not None:
+            task_to_cancel.cancel()
+        if not unstarted:
+            # Missing/done tasks do not establish actual execution cleanup.
+            return CancelOutcome.cancelled
+        confirmed = await self._close_unstarted_capture(record, PrestartOutcome(RunStatus.interrupted, "cancelled", stop_reason=record.stop_reason))
+        return CancelOutcome.cancelled if confirmed else CancelOutcome.unknown
+
     async def cancel(self, run_id: str, *, action: str = "interrupt") -> CancelOutcome:
         """Request cancellation of a run.
 
@@ -1506,6 +1666,10 @@ class RunManager:
         # ------------------------------------------------------------------
         # Local path — this worker owns the run in-memory.
         # ------------------------------------------------------------------
+        async with self._lock:
+            captured = self._runs.get(run_id)
+        if captured is not None and self._captures_output(captured):
+            return await await_drained(self._cancel_capture(captured, action=action))
         durable_owner = self._store is not None and (self.heartbeat_enabled or getattr(self._store, "supports_terminal_recovery", False) is True)
         async with self._lock:
             record = self._runs.get(run_id)
@@ -1709,7 +1873,14 @@ class RunManager:
         idempotency_key: str | None = None,
     ) -> RunRecord:
         """Atomically admit a normal agent run for a thread."""
-        return await self._admit_thread_operation(
+        captured = self.supports_output_receipts and capture_from_kwargs(kwargs or {}) is not None
+        registration = None
+
+        def witnessed(record, stage):
+            nonlocal registration
+            registration = (record, stage)
+
+        admission = self._admit_thread_operation(
             thread_id,
             assistant_id,
             operation_kind=ThreadOperationKind.run,
@@ -1720,10 +1891,73 @@ class RunManager:
             model_name=model_name,
             user_id=user_id,
             idempotency_key=idempotency_key,
+            **({"_registration": witnessed} if captured else {}),
         )
+        if not captured:
+            return await admission
+
+        async def own_admission():
+            try:
+                return await admission
+            except Exception:
+                if registration is not None and registration[1] is not _AdmissionStage.reused:
+                    if registration[1] is _AdmissionStage.constructed:
+                        await self._recover_capture_admission(registration[0], witnessed)
+                    else:
+                        await self._close_unstarted_capture(registration[0], PrestartOutcome(RunStatus.error, "failed", error="Run admission failed before execution."))
+                raise
+
+        try:
+            return await await_drained(own_admission())
+        except asyncio.CancelledError:
+            # A committed SQL result must reach local registration before the
+            # caller can disappear. This owner is only for actual run admission;
+            # checkpoint self-handoff retains its original worker-task identity.
+            if registration is not None and registration[1] is _AdmissionStage.registered:
+                await self._close_cancelled_admission(registration[0])
+            raise
+
+    async def _recover_capture_admission(self, record: RunRecord, witnessed: Callable[[RunRecord, _AdmissionStage], None]) -> None:
+        """Recover only this original constructed UUID after an unknown result."""
+        try:
+            row = await await_drained(self._store.get(record.run_id, user_id=None))
+            if (
+                not isinstance(row, Mapping)
+                or (row.get("run_id"), row.get("thread_id"), row.get("user_id"), row.get("operation_kind"), row.get("owner_worker_id"), row.get("idempotency_key"))
+                != (record.run_id, record.thread_id, record.user_id, "run", self.worker_id, record.idempotency_key)
+                or record.owner_worker_id != self.worker_id
+                or row.get("status") not in {"pending", "running"}
+                or row.get("cancel_action") not in {None, "interrupt", "rollback"}
+                or capture_from_kwargs(row.get("kwargs")) != capture_from_kwargs(record.kwargs)
+                or receipt_from_kwargs(row.get("kwargs")) is not None
+                or type(row["kwargs"].get(OUTPUT_CAPTURE_DISCONNECT_KEY)) is not str
+                or row["kwargs"][OUTPUT_CAPTURE_DISCONNECT_KEY] != record.on_disconnect.value
+            ):
+                return
+            if self.heartbeat_enabled:
+                lease = self._parse_lease_deadline(row.get("lease_expires_at"))
+                if lease is None or lease <= datetime.now(UTC):
+                    return
+            async with record.start_lock:
+                async with self._lock:
+                    current = self._runs.get(record.run_id)
+                    if record.startup_phase is not RunStartupPhase.unstarted or current is not None and current is not record:
+                        return
+                    self._runs[record.run_id] = record
+                    self._index_run_locked(record)
+                    witnessed(record, _AdmissionStage.registered)
+                await self._settle_prestart_locked(record, PrestartOutcome(RunStatus.error, "failed", error="Run admission failed before execution."))
+        except Exception:
+            # Preserve the original admission exception. A missing/uncertain or
+            # foreign row never grants upsert or terminal-write authority.
+            logger.warning("Captured admission recovery could not confirm the original row")
 
     async def _close_cancelled_admission(self, record: RunRecord) -> None:
         """Terminalize an unseen replacement and confirm its durable state."""
+        if self._captures_output(record):
+            if not await self._close_unstarted_capture(record, PrestartOutcome(RunStatus.interrupted, "cancelled", stop_reason=record.stop_reason)):
+                raise OutputEvidenceError()
+            return
         await self.cancel(record.run_id)
         if self._store is None:
             return
@@ -1781,6 +2015,7 @@ class RunManager:
         user_id: str | None = None,
         idempotency_key: str | None = None,
         finalizing_run: RunRecord | None = None,
+        _registration: Callable[[RunRecord, _AdmissionStage], None] | None = None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -1817,6 +2052,7 @@ class RunManager:
             status=RunStatus.pending,
             on_disconnect=on_disconnect,
             operation_kind=operation_kind,
+            startup_phase=RunStartupPhase.unstarted if operation_kind is ThreadOperationKind.run else RunStartupPhase.unknown,
             multitask_strategy=multitask_strategy,
             metadata=metadata or {},
             kwargs=kwargs or {},
@@ -1864,6 +2100,8 @@ class RunManager:
                         continue
                     if existing.thread_id != thread_id or existing.user_id != user_id:
                         raise RuntimeError("Run idempotency key resolved to a different thread or user")
+                    if _registration is not None:
+                        _registration(existing, _AdmissionStage.reused)
                     existing.idempotency_reused = True
                     return existing
 
@@ -1879,11 +2117,20 @@ class RunManager:
                 if existing.thread_id != thread_id or existing.user_id != user_id:
                     raise RuntimeError("Run idempotency key resolved to a different thread or user") from conflict
                 existing.idempotency_reused = True
+                if _registration is not None:
+                    _registration(existing, _AdmissionStage.reused)
                 return existing
 
             # 1) Local inflight check (same-worker guard; cross-worker is the
             #    store's partial unique index below).
             local_inflight = [r for r in self._thread_records_locked(thread_id) if r is not finalizing_run and (r.status in (RunStatus.pending, RunStatus.running) or r.finalizing)]
+
+            if multitask_strategy in ("interrupt", "rollback") and any(self._captures_output(prior) for prior in local_inflight):
+                if idempotency_key is not None and self._store is not None:
+                    existing = await await_drained(self._store.get_by_idempotency_key(idempotency_key))
+                    if existing is not None:
+                        return reuse_idempotent_run(RunIdempotencyConflict(existing))
+                raise ConflictError(f"Thread {thread_id} has an active captured run")
 
             if multitask_strategy in ("interrupt", "rollback") and any(record.operation_kind != ThreadOperationKind.run for record in local_inflight):
                 raise ConflictError(f"Thread {thread_id} has an active checkpoint write")
@@ -1902,6 +2149,8 @@ class RunManager:
             # 2) Persist to store while still holding the local lock. The
             #    store is the source of truth for cross-process atomicity.
             if self._store is not None:
+                if _registration is not None:
+                    _registration(record, _AdmissionStage.constructed)
                 if multitask_strategy == "reject":
                     create_kwargs = {
                         "run_id": run_id,
@@ -1984,6 +2233,8 @@ class RunManager:
             # 3) Only now safe to register locally — store insert succeeded.
             self._runs[run_id] = record
             self._index_run_locked(record)
+            if _registration is not None:
+                _registration(record, _AdmissionStage.registered)
 
             # 4) Cancel local in-memory inflight (interrupt/rollback). The
             #    store-side counterparts were already cancelled in step 2.
@@ -2135,7 +2386,7 @@ class RunManager:
 
             async with self._lock:
                 live_record = self._runs.get(record.run_id)
-                if live_record is not None and live_record.status in (RunStatus.pending, RunStatus.running):
+                if live_record is not None and (live_record.status in (RunStatus.pending, RunStatus.running) or live_record.finalizing and self._captures_output(live_record)):
                     # Still owned by a local task — skip
                     continue
 

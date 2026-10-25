@@ -1387,6 +1387,11 @@ output API reports pending, complete or unavailable without executing another
 model. Source uncertainty preserves unresolved state. Ordinary runs keep their
 defaults, and managed-bot model activation remains deferred. See
 [durable output evidence](backend/docs/RUN_OUTPUT_EVIDENCE.md).
+Captured runs also seal known startup failures and prestart cancellations.
+Lease-based recovery records an abandoned run as failed. Replacement requests
+refuse locally active or finishing captured work and captured work with a valid
+lease on another worker. Eligible expired ownership closes atomically with
+admission of its replacement.
 Cancelled SQL run reads now finish their started database work and session
 cleanup before returning cancellation, preventing abandoned read resources.
 
