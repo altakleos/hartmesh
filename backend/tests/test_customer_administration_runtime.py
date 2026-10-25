@@ -151,7 +151,8 @@ async def test_worker_management_binding_uses_host_actor_not_account_role(monkey
 
     monkeypatch.setattr(worker, "_run_agent", execute)
     ctx = worker.RunContext(checkpointer=None, customer_management_actor=CustomerManagementActor(owner_id="owner", administrator=administrator))
-    await worker.run_agent(Mock(), None, SimpleNamespace(run_id="fixture-run", status="success"), ctx=ctx, config={"context": {"user_role": "admin"}})
+    manager = SimpleNamespace(get_capture_io_owner=lambda record: None)
+    await worker.run_agent(Mock(), manager, SimpleNamespace(run_id="fixture-run", status="success"), ctx=ctx, config={"context": {"user_role": "admin"}})
     assert observed == [administrator]
 
 

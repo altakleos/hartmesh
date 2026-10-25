@@ -313,6 +313,9 @@ class _RecordingStreamBridge(MemoryStreamBridge):
 
 
 class _IntegrationRunManager:
+    def get_capture_io_owner(self, _record):
+        return None
+
     def __init__(self, record: RunRecord) -> None:
         self._record = record
 

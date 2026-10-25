@@ -298,13 +298,36 @@ def isolated_app(isolated_deer_flow_home: Path, monkeypatch: pytest.MonkeyPatch)
     return create_app()
 
 
-def test_lifespan_uses_sqlite_store_from_database_config(isolated_app):
+def test_lifespan_uses_sqlite_store_from_database_config(isolated_app, isolated_deer_flow_home: Path):
     """Gateway startup must bind LangGraph Store to the unified database backend."""
     from langgraph.store.sqlite.aio import AsyncSqliteStore
     from starlette.testclient import TestClient
 
-    with TestClient(isolated_app):
-        assert isinstance(isolated_app.state.store, AsyncSqliteStore)
+    namespace, key = ("runtime-lifespan", "unified-sqlite"), "persisted"
+    value = {"source": "Gateway lifespan Store", "nested": {"values": [1, 2]}}
+    sqlite_path = isolated_deer_flow_home / "db" / "deerflow.db"
+
+    with TestClient(isolated_app) as client:
+
+        async def round_trip():
+            await isolated_app.state.store.aput(namespace, key, value, index=False)
+            item = await isolated_app.state.store.aget(namespace, key)
+            assert item is not None and (item.namespace, item.key, item.value) == (namespace, key, value)
+
+        assert client.portal is not None
+        client.portal.call(round_trip)
+
+    # A separate public native adapter reads the configured file after the app
+    # has closed. An in-memory or incorrectly selected Store cannot satisfy it.
+    assert sqlite_path.is_file()
+
+    async def read_persisted():
+        async with AsyncSqliteStore.from_conn_string(str(sqlite_path)) as store:
+            await store.setup()
+            return await store.aget(namespace, key)
+
+    item = asyncio.run(read_persisted())
+    assert item is not None and (item.namespace, item.key, item.value) == (namespace, key, value)
 
 
 @pytest.fixture
