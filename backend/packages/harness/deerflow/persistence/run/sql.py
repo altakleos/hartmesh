@@ -192,6 +192,10 @@ class RunRepository(RunStore):
         user_id: str | None | _AutoSentinel = AUTO,
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.get")
+        return await await_drained(self._get_owned(run_id, resolved_user_id=resolved_user_id))
+
+    async def _get_owned(self, run_id, *, resolved_user_id):
+        """Keep the complete read and session alive until native work settles."""
         async with self._terminal_session() as session:
             row = await session.get(RunRow, run_id)
             if row is None:
