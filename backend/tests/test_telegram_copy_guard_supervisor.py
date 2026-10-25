@@ -194,6 +194,7 @@ async def test_latch_discards_held_without_chat_or_confirmation_and_owns_sql_ret
 
     accepted, conflict_ids = [], set()
     retry_sleeping = asyncio.Event()
+    first_release, first_replies = asyncio.Event(), {}
 
     async def handler(link, update):
         accepted.append((link.id, update.update_id))
@@ -205,6 +206,9 @@ async def test_latch_discards_held_without_chat_or_confirmation_and_owns_sql_ret
         else:
             updates.enqueue("getUpdates", result=[update_payload(i) for i in range(100, 115)])
             updates.enqueue("getUpdates", result=[], release=asyncio.Event())
+        first_reply = updates.replies["getUpdates"][0]
+        first_reply.release = first_release
+        first_replies[link.id] = first_reply
 
     e = environment(db, monkeypatch, script=script, handler=handler)
     links = []
@@ -234,6 +238,11 @@ async def test_latch_discards_held_without_chat_or_confirmation_and_owns_sql_ret
     await e.supervisor.check()
     starting = asyncio.create_task(e.supervisor.start())
     try:
+        # Finish initial SDK dispatch before poll-result SQL competes with the
+        # remaining startup writes; the observation budget starts afterward.
+        await wait_until(lambda: all(link.id in first_replies for link in links))
+        await asyncio.wait_for(asyncio.gather(*(first_replies[link.id].started.wait() for link in links)), 3)
+        first_release.set()
         await poll_results(e, links)
         assert not starting.done()
         assert accepted == []
@@ -276,6 +285,7 @@ async def test_latch_discards_held_without_chat_or_confirmation_and_owns_sql_ret
         async with db.sessions() as session:
             assert (await session.get(TelegramDeploymentRow, 1)).polling_state == "polled_elsewhere"
     finally:
+        first_release.set()
         event.remove(db.engine.sync_engine, "before_cursor_execute", fail_once)
         e.clock.advance(1)
         await stop_environment(e)

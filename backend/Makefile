@@ -36,13 +36,15 @@ test-blocking-io:
 # `make test-shard-durations` after a meaningful change to the test set.
 # `make test-shard SPLITS=4 GROUP=2` runs shard 2 of 4; a bare `make test-shard`
 # runs the whole (non-live) suite as a single split, matching `make test`.
+# Print the running case and dump stalled Python-thread stacks without ending
+# the test; the CI job deadline remains the execution limit.
 SPLITS ?= 1
 GROUP ?= 1
 DURATIONS_FILE ?= .test_durations
 test-shard:
 	@test -f "$(DURATIONS_FILE)" || \
 		(echo "error: $(DURATIONS_FILE) is missing; run 'make test-shard-durations' to regenerate the duration baseline" >&2; exit 1)
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --splits $(SPLITS) --group $(GROUP) --splitting-algorithm least_duration --durations-path=$(DURATIONS_FILE) tests/ -q
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --splits $(SPLITS) --group $(GROUP) --splitting-algorithm least_duration --durations-path=$(DURATIONS_FILE) tests/ -v -o faulthandler_timeout=120
 
 # Regenerate .test_durations from the full offline (non-live, non-blocking-I/O)
 # suite so duration-aware sharding reflects real wall-clock cost. Run locally or

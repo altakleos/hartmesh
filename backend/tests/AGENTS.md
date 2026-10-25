@@ -2,6 +2,10 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+CI shards print each running case and dump Python-thread stacks after 120 seconds
+without ending the test. Very long parametrized IDs can truncate formatted GitHub
+CLI logs; inspect raw run-log ZIP step files before assessing missing results.
+
 Factory default tests establish their own absent-config precondition and restore
 ambient configuration afterward. AppConfig loading can set stream-bridge globals;
 the no-config bridge test clears that global and its Redis environment fallback
@@ -27,6 +31,10 @@ production route. Seeded projection rows alone do not qualify worker provenance.
 Hold native writes, source reads, dirty progress and cancellation/rollback CAS
 races; drain all tasks before teardown. Unknown event commits must never be
 blindly appended again. Label API scaffolds separately from behavioral reds.
+Prestart tests retain the actual start barrier and committed closure through
+cancellation. Reclaim/replacement tests signal actual SQL dispatch before releasing
+held clocks; inspect checkpoint reservations directly, since run lists filter them.
+Keep startup failures distinct from cancellation through the real service/worker.
 
 Repository tests use `_telegram_repository_test_support.py` with isolated real
 SQLite/PostgreSQL databases, disk-backed fixtures and no runtime bootstrap.

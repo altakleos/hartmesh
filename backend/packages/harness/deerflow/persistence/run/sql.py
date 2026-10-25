@@ -924,7 +924,32 @@ class RunRepository(RunStore):
         error: str,
         stop_reason: str | None = None,
     ) -> bool:
-        cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
+        # Scope includes the actual SQL operation, commit response and session
+        # exit. Cancellation cannot detach a cursor/commit from its owner.
+        return await await_drained(self._claim_for_takeover_owned(run_id, grace_seconds=grace_seconds, error=error, stop_reason=stop_reason))
+
+    @staticmethod
+    def _failed_capture_kwargs(row: RunRow) -> dict[str, Any] | None:
+        """Build a lost-owner seal from the locked original row, without I/O."""
+        from deerflow.runtime.runs.output import OUTPUT_CAPTURE_KEY, OUTPUT_EVIDENCE_KEY, OutputEvidenceError, UnavailableOutputReceipt, capture_from_kwargs, receipt_from_kwargs
+
+        values = row.kwargs_json
+        if not isinstance(values, dict):
+            raise OutputEvidenceError()
+        if OUTPUT_CAPTURE_KEY not in values:
+            return None
+        try:
+            capture_from_kwargs(values)
+            if row.operation_kind != "run" or row.status not in {"pending", "running"} or receipt_from_kwargs(values) is not None:
+                raise OutputEvidenceError()
+            # A cancel_action is only a request. Expiry cannot attest that the
+            # old execution performed cancellation, rollback or tool cleanup.
+            receipt = UnavailableOutputReceipt(version=1, kind="unavailable", owner_user_id=row.user_id, thread_id=row.thread_id, run_id=row.run_id, input_message_id=None, reason="failed")
+            return {**deepcopy(values), OUTPUT_EVIDENCE_KEY: receipt.model_dump(mode="json")}
+        except Exception:
+            raise OutputEvidenceError() from None
+
+    async def _claim_for_takeover_owned(self, run_id, *, grace_seconds, error, stop_reason):
         values: dict[str, Any] = {
             "status": "error",
             "error": error,
@@ -932,8 +957,15 @@ class RunRepository(RunStore):
         }
         if stop_reason is not None:
             values["stop_reason"] = stop_reason
-        async with self._sf() as session:
+        async with self._terminal_session() as session:
             values["change_seq"] = await self._next_change_seq(session)
+            row = await session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update())
+            if row is None or row.status not in {"pending", "running"}:
+                return False
+            failed_kwargs = self._failed_capture_kwargs(row)
+            if failed_kwargs is not None:
+                values["kwargs_json"] = failed_kwargs
+            cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
             result = await session.execute(
                 update(RunRow)
                 .where(
@@ -942,6 +974,7 @@ class RunRepository(RunStore):
                     _lease_expired_or_null(RunRow.lease_expires_at, cutoff),
                 )
                 .values(**values)
+                .execution_options(synchronize_session=False)
             )
             await session.commit()
             return result.rowcount != 0
@@ -990,6 +1023,45 @@ class RunRepository(RunStore):
         grace_seconds: int = 10,
         idempotency_key: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Atomically admit a thread operation and settle eligible predecessors."""
+        resolved_user_id = resolve_user_id(user_id or AUTO, method_name="RunRepository.create_thread_operation_atomic")
+        return await await_drained(
+            self._create_thread_operation_atomic_owned(
+                run_id,
+                thread_id=thread_id,
+                owner_worker_id=owner_worker_id,
+                lease_expires_at=lease_expires_at,
+                operation_kind=operation_kind,
+                multitask_strategy=multitask_strategy,
+                assistant_id=assistant_id,
+                user_id=resolved_user_id,
+                model_name=model_name,
+                metadata=metadata,
+                kwargs=kwargs,
+                created_at=created_at,
+                grace_seconds=grace_seconds,
+                idempotency_key=idempotency_key,
+            )
+        )
+
+    async def _create_thread_operation_atomic_owned(
+        self,
+        run_id,
+        *,
+        thread_id,
+        owner_worker_id,
+        lease_expires_at,
+        operation_kind,
+        multitask_strategy,
+        assistant_id,
+        user_id,
+        model_name,
+        metadata,
+        kwargs,
+        created_at,
+        grace_seconds,
+        idempotency_key,
+    ):
         """Atomically create a run with cross-process thread-uniqueness.
 
         - For ``reject``: INSERT, let the partial unique index enforce
@@ -1005,7 +1077,6 @@ class RunRepository(RunStore):
         """
         from deerflow.runtime.runs.manager import ConflictError
 
-        resolved_user_id = resolve_user_id(user_id or AUTO, method_name="RunRepository.create_thread_operation_atomic")
         now = datetime.now(UTC)
         created = datetime.fromisoformat(created_at) if created_at else now
         lease_dt = datetime.fromisoformat(lease_expires_at) if lease_expires_at else None
@@ -1014,7 +1085,7 @@ class RunRepository(RunStore):
         values = {
             "thread_id": thread_id,
             "assistant_id": assistant_id,
-            "user_id": resolved_user_id,
+            "user_id": user_id,
             "model_name": self._normalize_model_name(model_name),
             "status": "pending",
             "operation_kind": operation_kind,
@@ -1028,12 +1099,19 @@ class RunRepository(RunStore):
             "updated_at": now,
         }
 
-        async with self._sf() as session:
+        async with self._terminal_session() as session:
             # Keep the global clock -> run-row lock order used by every other
             # mutator. One position covers this atomic set of changes; run_id
             # provides deterministic ordering within the position.
             change_seq = await self._next_change_seq(session)
             claimed: list[dict[str, Any]] = []
+
+            # Resolve a committed admission before considering a new interrupt.
+            # In particular, a peer retry must not lose to its own live capture.
+            if idempotency_key is not None:
+                existing = await session.scalar(select(RunRow).where(RunRow.idempotency_key == idempotency_key))
+                if existing is not None:
+                    raise RunIdempotencyConflict(self._row_to_dict(existing))
 
             if multitask_strategy in ("interrupt", "rollback"):
                 stmt = (
@@ -1046,6 +1124,7 @@ class RunRepository(RunStore):
                 )
                 result = await session.execute(stmt)
                 for row in result.scalars():
+                    failed_kwargs = self._failed_capture_kwargs(row)
                     lease_expired = False
                     if row.lease_expires_at is not None:
                         # SQLite drops tzinfo on read despite
@@ -1060,6 +1139,8 @@ class RunRepository(RunStore):
                         if row_lease.tzinfo is None:
                             row_lease = row_lease.replace(tzinfo=UTC)
                         lease_expired = row_lease < cutoff
+                        if failed_kwargs is not None and not lease_expired:
+                            raise ConflictError(f"Thread {thread_id} has a live captured run")
                         if row_lease >= cutoff and row.owner_worker_id != owner_worker_id:
                             # Live run owned by another worker — we cannot
                             # interrupt it and the partial unique index would
@@ -1069,9 +1150,14 @@ class RunRepository(RunStore):
                             raise ConflictError(f"Thread {thread_id} already has an active run owned by another worker")
                     if row.operation_kind != "run" and not lease_expired:
                         raise ConflictError(f"Thread {thread_id} has an active checkpoint write")
-                    row.status = "interrupted"
-                    row.error = "Cancelled by newer run"
-                    row.owner_worker_id = owner_worker_id
+                    if failed_kwargs is not None:
+                        row.status = "error"
+                        row.error = "Run reclaimed before replacement because its execution ownership is no longer current."
+                        row.kwargs_json = failed_kwargs
+                    else:
+                        row.status = "interrupted"
+                        row.error = "Cancelled by newer run"
+                        row.owner_worker_id = owner_worker_id
                     row.updated_at = now
                     row.change_seq = change_seq
                     claimed.append(self._row_to_dict(row))

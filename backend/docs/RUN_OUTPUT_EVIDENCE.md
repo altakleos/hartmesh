@@ -53,8 +53,43 @@ lookup. The `local_finalizing` observation is never a durable completion seal.
 An ACTIVE row belonging to this exact locally fenced worker yields fixed
 uncertainty, even after its stream-notification flag clears. A peer-owned row
 or a valid terminal seal follows its own durable authority. Local fence knowledge
-does not survive cache eviction or process restart; nonworker/orphan closure
-remains a separate implementation prerequisite.
+does not survive cache eviction or process restart. Eligible expired ownership
+can instead be closed by the SQL recovery path described below.
+
+## Prestart and abandoned ownership
+
+Locally admitted runs have a host-only startup decision, serialized with
+`try_start` by its start lock. A conclusive prestart cancellation prevents graph
+execution and seals unavailable/cancelled. A known startup or task-attachment
+failure seals error with unavailable/failed. The frozen outcome remains a failure
+when the attached worker later observes its abort flag; it cannot be reclassified
+as human cancellation or acquire a different receipt. Started closure operations
+remain owned through repeated cancellation and committed-result cleanup.
+Each admission retains its own creation/reuse evidence; a shared retry flag cannot
+decide compensation. After a lost SQL result, recovery reads the original host
+UUID and verifies current owned scope before retaining that same constructed
+record and closing its known startup failure. Missing or uncertain reads never
+authorize a new row or an invented outcome; the original exception is preserved.
+
+A missing or completed task after startup does not prove cancellation cleanup.
+Live workers retain their active durable row until their actual cleanup seals
+the outcome. Unknown ownership or cleanup stays uncertain.
+
+SQL recovery locks the change clock and actual row, then applies the existing
+lease/grace predicate. Eligible expired or null-lease captured runs become error
+with unavailable/failed in the same transaction. Stored cancellation requests,
+owner identity, disconnect policy and other kwargs are preserved. A request to
+cancel is not proof that the lost owner stopped or rolled back its execution.
+Lease recovery fences run ownership; it does not prove native/tool containment.
+Malformed intent or evidence refuses recovery rather than becoming an ordinary
+unsealed row. Existing terminal-unsealed rows are never retrofitted.
+
+Interrupt/rollback replacement refuses a live-lease captured predecessor and any
+local captured predecessor still active or finalizing. Exact idempotent reuse
+is resolved first. Eligible expired predecessors receive the failed seal in the
+same transaction as successor admission; a failed insert rolls both back. The
+confirmed finalizer's narrowly authorized goal-checkpoint handoff is preserved.
+Capture resource retirement after shutdown grace remains separate work.
 
 ## Worker source capture
 
@@ -120,8 +155,9 @@ authorization failures carry no supported-absence acknowledgement.
 
 Post-response authorization remains inside the existing retained HTTP owner.
 Shutdown drains started codec and SQL cleanup before releasing ownership. These
-boundaries enable reading independently sealed worker output. They do not enable
-managed-bot model execution, durable publication recovery or orphan-run sealing.
+read boundaries enable reading independently sealed output. Managed-bot model
+execution, durable publication recovery and post-grace resource retirement
+remain separate work.
 
 No schema or configuration version changes are required: the receipt uses the
 existing run kwargs JSON. Schema head remains `0043_telegram_inbox_chat_scope`;
