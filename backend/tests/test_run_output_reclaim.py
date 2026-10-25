@@ -78,7 +78,7 @@ async def test_terminal_unsealed_capture_is_never_retrofitted(output_store, stat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bad", [{"version": True}, None, {"version": 2}])
+@pytest.mark.parametrize("bad", [{"version": True}, None, {"version": 3}])
 async def test_malformed_capture_refuses_instead_of_ordinary_downgrade(output_store, bad):
     e = output_store
     run_id, _thread_id, _ = await seed_reclaim(e)

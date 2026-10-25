@@ -759,6 +759,9 @@ class RunJournal(BaseCallbackHandler):
         """Cache the executing tool name for artifact attribution."""
         if self._owned_producers_closed():
             return
+        inventory = getattr(self._output_capture, "inventory", None)
+        if inventory is not None and not self._closed:
+            inventory.tool_start(run_id=run_id, parent_run_id=parent_run_id, tags=tags)
         tool_run_id = str(run_id)
         tool_name = serialized.get("name") if isinstance(serialized, Mapping) else None
         if isinstance(tool_name, str) and tool_name:
@@ -769,6 +772,9 @@ class RunJournal(BaseCallbackHandler):
         """Handle tool end event, append message and clear node data"""
         if self._owned_producers_closed():
             return
+        inventory = getattr(self._output_capture, "inventory", None)
+        if inventory is not None and not self._closed:
+            inventory.tool_end(output, run_id=run_id, parent_run_id=parent_run_id)
         active_tool_name = self._active_tool_names.pop(str(run_id), None)
         try:
             if isinstance(output, ToolMessage):

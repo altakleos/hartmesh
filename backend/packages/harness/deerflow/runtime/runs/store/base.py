@@ -19,6 +19,7 @@ from deerflow.utils.time import coerce_iso
 
 if TYPE_CHECKING:
     from deerflow.runtime.runs.output import OutputReceipt
+    from deerflow.runtime.runs.output_inventory import InventoryEvidence
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,7 @@ class StatusFinalization:
     finalized: bool
     cancel_action: str | None = None
     output_receipt_confirmed: bool = False
+    inventory_evidence_confirmed: bool = False
 
 
 class RunIdempotencyConflict(RuntimeError):
@@ -118,6 +120,7 @@ class RunStore(abc.ABC):
     # Legacy stores retain their existing public status-update contract.
     supports_terminal_recovery: bool = False
     supports_output_receipts: bool = False
+    supports_output_inventory: bool = False
 
     async def finalize_owned(
         self,
@@ -132,6 +135,7 @@ class RunStore(abc.ABC):
         error: str | None = None,
         stop_reason: str | None = None,
         output_receipt: OutputReceipt | None = None,
+        inventory_evidence: InventoryEvidence | None = None,
     ) -> bool:
         """Conditionally settle exactly the observed owned row, or return False.
 

@@ -12,7 +12,7 @@ from deerflow.workspace_changes.scanner import scan_workspace_roots
 from deerflow.workspace_changes.types import WorkspaceRoot, WorkspaceSnapshot
 
 
-async def capture_chat_snapshot(paths, thread_id, *, user_id, limits=None, include_text=True, outputs_only=False, text_paths=None, extra_excluded_dir_names=None):
+async def capture_chat_snapshot(paths, thread_id, *, user_id, limits=None, include_text=True, outputs_only=False, text_paths=None, extra_excluded_dir_names=None, observe_roots=False):
     paths.mounts(thread_id, user_id=user_id)  # Validate owner/thread even without files.
     if not paths.has_personal_files:
         return WorkspaceSnapshot()
@@ -74,6 +74,7 @@ async def capture_chat_snapshot(paths, thread_id, *, user_id, limits=None, inclu
                 root_opener=open_root,
                 directory_validator=validate_directory,
                 file_opener=open_file,
+                **({"observe_roots": True} if observe_roots else {}),
             )
 
     result = await await_drained(asyncio.to_thread(scan))

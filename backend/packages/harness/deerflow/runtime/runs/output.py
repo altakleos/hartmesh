@@ -40,8 +40,19 @@ class _Versioned(BaseModel):
         return value
 
 
-class OutputCaptureIntent(_Versioned):
+class OutputCaptureIntent(BaseModel):
     """A requested capability; it supplies no result or source authority."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, revalidate_instances="always")
+
+    version: Literal[1, 2]
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def literal_version(cls, value):
+        if type(value) is not int or value not in (1, 2):
+            raise ValueError("Unsupported output capture version")
+        return value
 
 
 class _ScopedReceipt(_Versioned):

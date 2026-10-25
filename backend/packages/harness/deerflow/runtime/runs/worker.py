@@ -116,10 +116,13 @@ from deerflow.workspace_changes.handoff import bind_output_snapshot
 from deerflow.workspace_changes.types import WorkspaceSnapshot
 
 from .delivery import DELIVERY_INCOMPLETE_STOP_REASON, DELIVERY_SCAN_INCOMPLETE_ERROR, output_scan_incomplete, publish_delivery_failure
+from .inventory_finalization import InventoryCleanupOutcome
 from .manager import ConflictError, RunManager, RunRecord, RunStartOutcome, RunStartupPhase
 from .naming import resolve_root_run_name
 from .output import OUTPUT_CAPTURE_KEY, OutputEvidenceError, TextOutputReceipt, capture_from_kwargs, receipt_from_kwargs, validate_receipt_status
 from .output_capture import OutputCaptureObserver
+from .output_inventory import inventory_evidence_from_kwargs, validate_inventory_pair
+from .output_inventory_capture import OutputInventoryCapture, persist_output_inventory
 from .output_source import read_durable_output_source
 from .schemas import RunStatus, ThreadOperationKind
 
@@ -420,6 +423,11 @@ def _runtime_presented_files(runtime_context: Any) -> list[str]:
     return list(dict.fromkeys(path for path in value if isinstance(path, str) and path))
 
 
+def _field_runtime_presentation(runtime):
+    context = getattr(runtime, "context", None)
+    return context.get(RUNTIME_PRESENTED_FILES_CONTEXT_KEY) if isinstance(context, Mapping) else None
+
+
 def _delivery_error(content: dict[str, Any]) -> str | None:
     """Return the terminal error when no changed output was presented."""
     if output_scan_incomplete(content):
@@ -453,12 +461,15 @@ async def _produced_output_paths(
     thread_id: str,
     user_id: str | None,
     extra_excluded_dir_names: frozenset[str] | None = None,
+    inventory_capture: OutputInventoryCapture | None = None,
 ) -> list[str] | None:
     """Detect regular output files created or modified by this run."""
     if before is None or before.truncated:
         return None
     try:
-        after = await run_capture_io(lambda: capture_output_snapshot(thread_id, user_id=user_id, extra_excluded_dir_names=extra_excluded_dir_names))
+        after = await run_capture_io(lambda: capture_output_snapshot(thread_id, user_id=user_id, extra_excluded_dir_names=extra_excluded_dir_names, **({"observe_roots": True} if inventory_capture is not None else {})))
+        if inventory_capture is not None:
+            inventory_capture.observe_scan(after)
         if after.truncated:
             return None
         return get_changed_output_paths(before, after)
@@ -818,6 +829,14 @@ def _assembled_model_name(agent_result: Any) -> str | None:
     return None
 
 
+def _assembled_inventory_profile(agent_result):
+    try:
+        from deerflow.agents.lead_agent.agent import LeadAgentAssembly
+    except Exception:
+        return None
+    return agent_result.inventory_profile if isinstance(agent_result, LeadAgentAssembly) else None
+
+
 class _SubagentEventBuffer:
     """Buffer subagent ``task_*`` step events and flush them in one locked batch (#3779).
 
@@ -1133,6 +1152,8 @@ async def _run_agent(
 
     terminal_status_kwargs = {"persist": False} if event_store is not None or capture_requested else {}
     output_capture: OutputCaptureObserver | None = None
+    inventory_capture: OutputInventoryCapture | None = None
+    inventory_cleanup: InventoryCleanupOutcome | None = None
     output_confirmed = False
     execution_cancelled = False
 
@@ -1202,10 +1223,14 @@ async def _run_agent(
         action: str,
         *,
         restore_checkpoint: bool = True,
-    ) -> None:
-        nonlocal checkpoint_rollback_completed, execution_cancelled
+    ) -> InventoryCleanupOutcome | None:
+        nonlocal checkpoint_rollback_completed, execution_cancelled, inventory_cleanup
+        if inventory_capture is not None:
+            inventory_cleanup = InventoryCleanupOutcome.unconfirmed()
         if capture_requested and (io_retired() or record.terminal_confirmed):
             return
+        if inventory_capture is not None:
+            inventory_capture.invalidate_scan()
         execution_cancelled = True
         await run_manager.set_finalizing(run_id, True)
         if action == "rollback":
@@ -1244,6 +1269,17 @@ async def _run_agent(
                 **terminal_status_kwargs,
             )
             logger.info("Run %s was cancelled", run_id)
+        if inventory_capture is not None:
+            inventory_cleanup = InventoryCleanupOutcome.unconfirmed()
+            if (
+                not io_retired()
+                and not record.ownership_lost
+                and output_capture is not None
+                and (action == "interrupt" and record.status is RunStatus.interrupted or action == "rollback" and checkpoint_rollback_completed and record.status is RunStatus.error)
+            ):
+                cancelled_receipt = output_capture.receipt(status=record.status, cancelled=True)
+                inventory_cleanup = InventoryCleanupOutcome.interrupt_completed(cancelled_receipt) if action == "interrupt" else InventoryCleanupOutcome.rollback_completed(cancelled_receipt)
+            return inventory_cleanup
 
     async def _publish_terminal_stream() -> None:
         nonlocal terminal_stream_closed, terminal_failure_published
@@ -1288,6 +1324,8 @@ async def _run_agent(
                 if closed is None or not closed.confirmed or sealed is None or sealed.kind != "unavailable" or sealed.reason != closed.reason or (sealed.owner_user_id, sealed.thread_id, sealed.run_id) != (record.user_id, thread_id, run_id):
                     raise OutputEvidenceError()
                 validate_receipt_status(sealed, closed.status)
+                if inventory_capture is not None:
+                    validate_inventory_pair(sealed, inventory_evidence_from_kwargs(record.kwargs), status=closed.status)
                 if journal is not None:
                     await journal.close(flush=False)
                 output_confirmed = True
@@ -1320,7 +1358,13 @@ async def _run_agent(
             if delivery_content is None:
                 paths = [] if not persist_completion or not chat_files_available else produced_output_paths
                 if paths is None:
-                    paths = await _produced_output_paths(pre_run_output_snapshot, thread_id=thread_id, user_id=workspace_changes_user_id, extra_excluded_dir_names=workspace_excluded_dir_names)
+                    paths = await _produced_output_paths(
+                        pre_run_output_snapshot,
+                        thread_id=thread_id,
+                        user_id=workspace_changes_user_id,
+                        extra_excluded_dir_names=workspace_excluded_dir_names,
+                        **({"inventory_capture": inventory_capture} if inventory_capture is not None else {}),
+                    )
                 delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), paths, _runtime_presented_files(getattr(runtime, "context", None)))
             if not await _persist_delivery_receipt(event_store, thread_id=thread_id, run_id=run_id, content=delivery_content):
                 raise OutputEvidenceError()
@@ -1335,6 +1379,25 @@ async def _run_agent(
                 audit = await read_durable_output_source(event_store, receipt=receipt)
                 if audit.state != "matched":
                     raise OutputEvidenceError()
+            if inventory_capture is not None:
+                document = inventory_capture.document(
+                    receipt,
+                    status=outcome,
+                    before=pre_run_output_snapshot,
+                    after=inventory_capture.final_scan,
+                    runtime_presented_files=_field_runtime_presentation(runtime),
+                )
+                evidence = await persist_output_inventory(event_store, output_receipt=receipt, status=outcome, document=document)
+                attempt = await run_manager.begin_inventory_finalization(record, outcome, output_receipt=receipt, inventory_evidence=evidence, cleanup_outcome=inventory_cleanup, error=record.error, stop_reason=record.stop_reason)
+
+                async def cancel_inventory(decision):
+                    return await _finish_cancellation(decision.action) or InventoryCleanupOutcome.unconfirmed()
+
+                result = await run_manager.finalize_inventory(attempt, on_cancel=cancel_inventory)
+                if not result.output_receipt_confirmed or not result.inventory_evidence_confirmed:
+                    raise OutputEvidenceError()
+                output_confirmed = True
+                return
             result = await run_manager.finalize_output(run_id, outcome, output_receipt=receipt, error=record.error, stop_reason=record.stop_reason, respect_cancellation=not cancelled)
             if result.cancel_action is not None:
                 # Cancellation won while the source was being verified. Keep
@@ -1365,9 +1428,14 @@ async def _run_agent(
 
     try:
         if capture_requested:
-            if capture_from_kwargs(record.kwargs) is None or not run_manager.supports_output_receipts or getattr(event_store, "supports_durable_output_evidence", False) is not True or type(record.user_id) is not str or not record.user_id:
+            intent = capture_from_kwargs(record.kwargs)
+            if intent is None or not run_manager.supports_output_receipts or getattr(event_store, "supports_durable_output_evidence", False) is not True or type(record.user_id) is not str or not record.user_id:
                 raise OutputEvidenceError()
-            output_capture = OutputCaptureObserver(owner_user_id=record.user_id, thread_id=thread_id, run_id=run_id)
+            if intent.version == 2:
+                if getattr(run_manager, "supports_output_inventory", False) is not True or getattr(event_store, "supports_durable_output_inventory", False) is not True:
+                    raise OutputEvidenceError()
+                inventory_capture = OutputInventoryCapture()
+            output_capture = OutputCaptureObserver(owner_user_id=record.user_id, thread_id=thread_id, run_id=run_id, **({"inventory": inventory_capture} if inventory_capture is not None else {}))
         normalized_stream_modes = normalize_stream_modes(stream_modes)
         requested_modes: set[str] = set(normalized_stream_modes)
         lg_modes = to_langgraph_stream_modes(normalized_stream_modes)
@@ -1534,7 +1602,9 @@ async def _run_agent(
             workspace_changes_user_id = get_effective_user_id()
             workspace_excluded_dir_names = _workspace_excluded_dir_names(ctx.app_config)
             try:
-                pre_run_output_snapshot = await run_capture_io(lambda: capture_output_snapshot(thread_id, user_id=workspace_changes_user_id, extra_excluded_dir_names=workspace_excluded_dir_names))
+                pre_run_output_snapshot = await run_capture_io(
+                    lambda: capture_output_snapshot(thread_id, user_id=workspace_changes_user_id, extra_excluded_dir_names=workspace_excluded_dir_names, **({"observe_roots": True} if inventory_capture is not None else {}))
+                )
             except Exception:
                 logger.warning("Could not capture pre-run output snapshot for run %s", run_id, exc_info=True)
             # Resolved once per run so the pre-run snapshot, the post-run
@@ -1659,6 +1729,8 @@ async def _run_agent(
             with phase_span(TurnPhase.AGENT_BUILD):
                 agent_result = await run_assembly(agent_factory, **agent_factory_kwargs)
             agent = _agent_graph(agent_result)
+            if inventory_capture is not None and not inventory_capture.qualify(_assembled_inventory_profile(agent_result), agent):
+                raise OutputEvidenceError()
 
         # Assembly resolves request, agent, and authorization fallbacks. Trace the
         # model that will run, rather than the model name originally requested.
@@ -1726,6 +1798,21 @@ async def _run_agent(
 
         runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
         _install_runtime_context(config, runtime_ctx)
+        if inventory_capture is not None:
+            # Use the actual selected materialized state after resume handling,
+            # including full mode's explicit older-checkpoint selection. A head
+            # history guess cannot distinguish current offers from inherited UX.
+            if checkpointer is None:
+                if getattr(agent, "checkpointer", None) is not None:
+                    raise OutputEvidenceError()
+                inventory_capture.bind_baseline({})
+            else:
+                async with _checkpoint_thread_lock(thread_id):
+                    selected = await accessor.aget(initial_runnable_config)
+                    selected_values = getattr(selected, "values", None)
+                    if not isinstance(selected_values, Mapping):
+                        raise OutputEvidenceError()
+                    inventory_capture.bind_baseline(selected_values)
 
         # Capture the effective (resolved) model name from the agent's metadata.
         # _resolve_model_name in agent.py may return the default model if the
@@ -1970,6 +2057,7 @@ async def _run_agent(
                     thread_id=thread_id,
                     user_id=workspace_changes_user_id,
                     extra_excluded_dir_names=workspace_excluded_dir_names,
+                    **({"inventory_capture": inventory_capture} if inventory_capture is not None else {}),
                 )
                 if event_store is not None and ctx.agent_execution is None and chat_files_available
                 else []

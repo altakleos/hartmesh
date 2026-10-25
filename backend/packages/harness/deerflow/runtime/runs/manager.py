@@ -22,6 +22,7 @@ from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
 from .capture_io import CaptureIOCleanupError, CaptureIOClosed, CaptureIOOwner, CaptureIOUnsupported, capture_io_scope, current_capture_io_owner, run_capture_io
+from .inventory_finalization import InventoryCleanupOutcome, InventoryFinalizationAttempt, _current_inventory_authority, _inventory_authority, _new_attempt
 from .output import (
     OUTPUT_CAPTURE_DISCONNECT_KEY,
     OUTPUT_CAPTURE_KEY,
@@ -35,6 +36,7 @@ from .output import (
     receipt_from_kwargs,
     validate_receipt_status,
 )
+from .output_inventory import INVENTORY_EVIDENCE_KEY, EventInventoryEvidence, build_unavailable_inventory_evidence, inventory_evidence_from_kwargs, validate_inventory_pair
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
 from .store.base import (
     EditReplayVisibility,
@@ -100,6 +102,9 @@ def _new_run_kwargs(kwargs: dict | None, *, on_disconnect: DisconnectMode) -> di
     """A new admission may request capture, but cannot supply its result."""
     values = dict(kwargs or {})
     values.pop(OUTPUT_EVIDENCE_KEY, None)
+    values.pop(INVENTORY_EVIDENCE_KEY, None)
+    values.pop("output_inventory_profile", None)
+    values.pop("inventory_profile", None)
     values.pop(OUTPUT_CAPTURE_DISCONNECT_KEY, None)
     intent = capture_from_kwargs(values)
     if intent is not None:
@@ -303,6 +308,7 @@ class _CaptureLifetime:
     record: RunRecord | None = None
     controls: dict[asyncio.Task, int] = field(default_factory=dict)
     finished: bool = False
+    inventory_attempts: list[InventoryFinalizationAttempt] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -908,6 +914,8 @@ class RunManager:
         callers should use :meth:`create_or_reject`.
         """
         kwargs = _new_run_kwargs(kwargs, on_disconnect=on_disconnect)
+        if (intent := capture_from_kwargs(kwargs)) is not None and intent.version == 2 and not self.supports_output_inventory:
+            raise OutputEvidenceError()
         run_id = str(uuid.uuid4())
         now = _now_iso()
         user_id = _resolve_record_user_id(user_id)
@@ -1023,9 +1031,13 @@ class RunManager:
         """Whether this actual store supports the optional owned output seal."""
         return self._store is not None and getattr(self._store, "supports_output_receipts", False) is True
 
-    async def get_output_snapshot(self, run_id: str, *, user_id: str) -> RunOutputSnapshot | None:
+    @property
+    def supports_output_inventory(self) -> bool:
+        return self.supports_output_receipts and getattr(self._store, "supports_output_inventory", False) is True
+
+    async def get_output_snapshot(self, run_id: str, *, user_id: str, require_inventory: bool = False) -> RunOutputSnapshot | None:
         """Read exact stored output authority; cached status is never a seal."""
-        if not self.supports_output_receipts or type(user_id) is not str or not user_id or type(run_id) is not str or not run_id:
+        if not self.supports_output_receipts or type(require_inventory) is not bool or require_inventory and not self.supports_output_inventory or type(user_id) is not str or not user_id or type(run_id) is not str or not run_id:
             raise OutputEvidenceError()
         try:
             # Observe a foreign row rather than turning wrong owner into an
@@ -1037,9 +1049,24 @@ class RunManager:
                 raise OutputEvidenceError()
             if row["run_id"] != run_id or row["user_id"] != user_id:
                 raise OutputEvidenceScopeError()
-            if row.get("operation_kind", "run") != "run" or capture_from_kwargs(row.get("kwargs")) is None:
+            intent = capture_from_kwargs(row.get("kwargs"))
+            if row.get("operation_kind", "run") != "run" or intent is None or require_inventory and intent.version != 2:
                 raise OutputEvidenceError()
             saved = receipt_from_kwargs(row["kwargs"])
+            if intent.version == 2:
+                if not self.supports_output_inventory:
+                    raise OutputEvidenceError()
+                inventory = inventory_evidence_from_kwargs(row["kwargs"])
+                if (saved is None) != (inventory is None):
+                    raise OutputEvidenceError()
+                if saved is not None:
+                    validate_inventory_pair(saved, inventory, status=row["status"])
+                elif row["status"] not in {"pending", "running"} or not row.get("owner_worker_id"):
+                    raise OutputEvidenceError()
+                elif self.heartbeat_enabled or row.get("lease_expires_at") is not None:
+                    lease = self._parse_lease_deadline(row.get("lease_expires_at"))
+                    if lease is None or lease <= datetime.now(UTC):
+                        raise OutputEvidenceError()
             if saved is not None:
                 if saved.owner_user_id != user_id or saved.thread_id != row.get("thread_id") or saved.run_id != run_id:
                     raise OutputEvidenceScopeError()
@@ -1077,7 +1104,9 @@ class RunManager:
         except Exception:
             raise OutputEvidenceError() from None
 
-    async def finalize_output(self, run_id: str, status: RunStatus, *, output_receipt: OutputReceipt, error: str | None = None, stop_reason: str | None = None, respect_cancellation: bool = True) -> StatusFinalization:
+    async def finalize_output(
+        self, run_id: str, status: RunStatus, *, output_receipt: OutputReceipt, inventory_evidence=None, error: str | None = None, stop_reason: str | None = None, respect_cancellation: bool = True
+    ) -> StatusFinalization:
         """Seal an opted-in local run through the existing terminal CAS owner."""
         if not self.supports_output_receipts or type(respect_cancellation) is not bool or type(status) is not RunStatus or status.value not in TERMINAL_STATUSES:
             raise OutputEvidenceError()
@@ -1086,8 +1115,113 @@ class RunManager:
             record = self._runs.get(run_id)
             if record is None or record.store_only or record.run_id != wanted.run_id or record.thread_id != wanted.thread_id or record.user_id != wanted.owner_user_id:
                 raise OutputEvidenceScopeError()
+            intent = capture_from_kwargs(record.kwargs)
+            if intent is not None and intent.version == 2:
+                if not self.supports_output_inventory:
+                    raise OutputEvidenceError()
+                wanted, inventory_evidence = validate_inventory_pair(wanted, inventory_evidence, status=status)
+                if inventory_evidence.kind == "unavailable":
+                    authority = _current_inventory_authority()
+                    existing_pair = record.terminal_confirmed and receipt_from_kwargs(record.kwargs) == wanted and inventory_evidence_from_kwargs(record.kwargs) == inventory_evidence
+                    if not existing_pair and not (isinstance(authority, tuple) and len(authority) == 4 and authority[0] == "prestart" and authority[1] is record and authority[2:] == (wanted, inventory_evidence)):
+                        raise OutputEvidenceError()
+            elif inventory_evidence is not None:
+                raise OutputEvidenceError()
         with self._capture_control(record):
-            return await persist_terminal(self, record, status, error=error, stop_reason=stop_reason, respect_cancellation=respect_cancellation, output_receipt=wanted)
+            return await persist_terminal(
+                self,
+                record,
+                status,
+                error=error,
+                stop_reason=stop_reason,
+                respect_cancellation=respect_cancellation,
+                output_receipt=wanted,
+                **({"inventory_evidence": inventory_evidence} if intent is not None and intent.version == 2 else {}),
+            )
+
+    async def begin_inventory_finalization(self, record, status, *, output_receipt, inventory_evidence, cleanup_outcome=None, error=None, stop_reason=None):
+        """Bind one audited candidate to its original host admission, without I/O."""
+        output, inventory = validate_inventory_pair(output_receipt, inventory_evidence, status=status)
+        if type(status) is not RunStatus or status.value not in TERMINAL_STATUSES:
+            raise OutputEvidenceError() from None
+        async with self._lock:
+            lifetime = self._capture_lifetime(record)
+            if (
+                not self.supports_output_inventory
+                or self._runs.get(record.run_id) is not record
+                or record.store_only
+                or record.ownership_lost
+                or lifetime is None
+                or capture_from_kwargs(record.kwargs).version != 2
+                or not isinstance(inventory, EventInventoryEvidence)
+                or (output.owner_user_id, output.thread_id, output.run_id) != (record.user_id, record.thread_id, record.run_id)
+            ):
+                raise OutputEvidenceError() from None
+            lifetime.owner.check_open()
+            if cleanup_outcome is not None and (
+                type(cleanup_outcome) is not InventoryCleanupOutcome
+                or cleanup_outcome.action is None
+                or cleanup_outcome.receipt != output
+                or not record.abort_event.is_set()
+                or status is not (RunStatus.interrupted if cleanup_outcome.action == "interrupt" else RunStatus.error)
+            ):
+                raise OutputEvidenceError() from None
+            attempt = _new_attempt(self, record, status, output, inventory, cleanup_outcome, error, stop_reason)
+            lifetime.inventory_attempts.append(attempt)
+            return attempt
+
+    async def finalize_inventory(self, attempt, *, on_cancel):
+        """Reuse terminal persistence; callbacks stay in this finalizer task."""
+        if type(attempt) is not InventoryFinalizationAttempt or attempt._manager is not self or not callable(on_cancel):
+            raise OutputEvidenceError() from None
+        record = attempt._record
+        lifetime = self._capture_lifetime(record)
+        if lifetime is None or not any(value is attempt for value in lifetime.inventory_attempts) or self._runs.get(record.run_id) is not record or record.store_only:
+            raise OutputEvidenceError() from None
+        if attempt._result is not None:
+            return attempt._result
+        lifetime.owner.check_open()
+        if attempt._running:
+            raise OutputEvidenceError() from None
+        attempt._running = True
+        try:
+            with self._capture_control(record), _inventory_authority(attempt):
+                result = await persist_terminal(
+                    self,
+                    record,
+                    attempt._status,
+                    output_receipt=attempt._output,
+                    inventory_evidence=attempt._inventory,
+                    error=attempt._error,
+                    stop_reason=attempt._stop_reason,
+                    respect_cancellation=attempt._cleanup is None,
+                    _inventory_attempt=attempt,
+                )
+                if result.cancel_action is not None:
+                    decision = attempt._decision
+                    if decision is None or decision.action != result.cancel_action:
+                        raise OutputEvidenceError() from None
+                    cleanup = await on_cancel(decision)
+                    if type(cleanup) is not InventoryCleanupOutcome or cleanup.action != decision.action or record.status is not (RunStatus.interrupted if decision.action == "interrupt" else RunStatus.error):
+                        raise OutputEvidenceError() from None
+                    output = validate_receipt_status(cleanup.receipt, record.status)
+                    if (output.owner_user_id, output.thread_id, output.run_id, output.input_message_id) != (attempt._output.owner_user_id, attempt._output.thread_id, attempt._output.run_id, attempt._output.input_message_id):
+                        raise OutputEvidenceError() from None
+                    attempt._cleanup, attempt._output, attempt._status = cleanup, output, record.status
+                    attempt._inventory = build_unavailable_inventory_evidence(output, status=record.status, reason="cancellation_after_inventory_not_enumerated")
+                    attempt._action_basis, attempt._action_bound = decision.action, True
+                    result = await persist_terminal(
+                        self, record, record.status, output_receipt=output, inventory_evidence=attempt._inventory, error=record.error, stop_reason=record.stop_reason, respect_cancellation=False, _inventory_attempt=attempt
+                    )
+                attempt._result = result
+                return result
+        except CaptureIOClosed:
+            raise
+        except BaseException:
+            await self._mark_ownership_lost(record, reason="Run inventory finalization could not be confirmed.", require_active=False)
+            raise
+        finally:
+            attempt._running = False
 
     def _strict_record_from_store(self, row) -> RunRecord:
         # Do not turn an observed malformed kwargs value into a legacy empty
@@ -1331,16 +1465,24 @@ class RunManager:
         def receipt(value):
             return UnavailableOutputReceipt(version=1, kind="unavailable", owner_user_id=record.user_id, thread_id=record.thread_id, run_id=record.run_id, input_message_id=None, reason=value.reason)
 
+        async def seal(value, *, respect_cancellation):
+            output = receipt(value)
+            if capture_from_kwargs(record.kwargs).version == 2:
+                inventory = build_unavailable_inventory_evidence(output, status=value.status, reason="prestart_not_enumerated")
+                with _inventory_authority(("prestart", record, output, inventory)):
+                    return await self.finalize_output(record.run_id, value.status, output_receipt=output, inventory_evidence=inventory, error=value.error, stop_reason=value.stop_reason, respect_cancellation=respect_cancellation)
+            return await self.finalize_output(record.run_id, value.status, output_receipt=output, error=value.error, stop_reason=value.stop_reason, respect_cancellation=respect_cancellation)
+
         try:
-            result = await self.finalize_output(record.run_id, outcome.status, output_receipt=receipt(outcome), error=outcome.error, stop_reason=outcome.stop_reason, respect_cancellation=outcome.reason != "cancelled")
+            result = await seal(outcome, respect_cancellation=outcome.reason != "cancelled")
             if result.cancel_action is not None:
                 record.abort_action = result.cancel_action
                 outcome = PrestartOutcome(RunStatus.interrupted, "cancelled", stop_reason=record.stop_reason)
                 async with self._lock:
                     record.prestart_outcome = outcome
                     record.status, record.error = outcome.status, outcome.error
-                result = await self.finalize_output(record.run_id, outcome.status, output_receipt=receipt(outcome), stop_reason=outcome.stop_reason, respect_cancellation=False)
-            if result.output_receipt_confirmed:
+                result = await seal(outcome, respect_cancellation=False)
+            if result.output_receipt_confirmed and (capture_from_kwargs(record.kwargs).version != 2 or result.inventory_evidence_confirmed):
                 async with self._lock:
                     record.prestart_outcome = replace(outcome, confirmed=True)
                 return True
@@ -2224,6 +2366,7 @@ class RunManager:
                 or row.get("cancel_action") not in {None, "interrupt", "rollback"}
                 or capture_from_kwargs(row.get("kwargs")) != capture_from_kwargs(record.kwargs)
                 or receipt_from_kwargs(row.get("kwargs")) is not None
+                or inventory_evidence_from_kwargs(row.get("kwargs")) is not None
                 or type(row["kwargs"].get(OUTPUT_CAPTURE_DISCONNECT_KEY)) is not str
                 or row["kwargs"][OUTPUT_CAPTURE_DISCONNECT_KEY] != record.on_disconnect.value
             ):
@@ -2326,6 +2469,8 @@ class RunManager:
         ('pending','running')``.
         """
         kwargs = _new_run_kwargs(kwargs, on_disconnect=on_disconnect)
+        if (intent := capture_from_kwargs(kwargs)) is not None and intent.version == 2 and not self.supports_output_inventory:
+            raise OutputEvidenceError()
         run_id = str(uuid.uuid4())
         now = _now_iso()
         # Resolve before the idempotency checks below compare it with stored rows.
@@ -2383,6 +2528,8 @@ class RunManager:
                     valid = valid and self.supports_output_receipts and capture_from_kwargs(finalizing_run.kwargs) is not None and saved is not None
                     if valid:
                         validate_receipt_status(saved, finalizing_run.status)
+                        if capture_from_kwargs(finalizing_run.kwargs).version == 2:
+                            validate_inventory_pair(saved, inventory_evidence_from_kwargs(finalizing_run.kwargs), status=finalizing_run.status)
                         valid = (saved.run_id, saved.thread_id, saved.owner_user_id) == (finalizing_run.run_id, thread_id, user_id)
                 except OutputEvidenceError:
                     valid = False

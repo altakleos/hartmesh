@@ -16,6 +16,7 @@ from .types import (
     FileSnapshot,
     WorkspaceChangeLimits,
     WorkspaceRoot,
+    WorkspaceRootObservation,
     WorkspaceSnapshot,
 )
 
@@ -139,6 +140,7 @@ def scan_workspace_roots(
     root_opener=None,
     directory_validator=None,
     file_opener=None,
+    observe_roots: bool = False,
 ) -> WorkspaceSnapshot:
     if not callable(getattr(os, "fwalk", None)):
         raise SafeFileAccessUnavailable("Safe workspace capture requires descriptor-relative directory walking")
@@ -157,7 +159,21 @@ def scan_workspace_roots(
     scanned = 0
     directories = 0
     truncated = False
+    observations: list[WorkspaceRootObservation] = []
     text_budget = _TextBudget(max(0, resolved_limits.max_total_text_bytes))
+
+    def result(*, incomplete: bool) -> WorkspaceSnapshot:
+        return WorkspaceSnapshot(
+            files=files,
+            truncated=incomplete,
+            text_cache_dir=str(cache_dir) if cache_dir is not None else None,
+            root_observations=tuple(observations),
+            scan_excluded_dir_names=tuple(sorted(excluded_dir_names)) if observe_roots else None,
+        )
+
+    def observe(root: WorkspaceRoot, state) -> None:
+        if observe_roots:
+            observations.append(WorkspaceRootObservation(root.name, root.virtual_prefix, state))
 
     def scan_error(_error: OSError) -> None:
         nonlocal truncated
@@ -167,13 +183,16 @@ def scan_workspace_roots(
         try:
             root_fd = root_opener(root) if root_opener is not None else open_directory_source(root.host_path)
         except FileNotFoundError:
+            observe(root, "missing")
             continue
         except SafeFileAccessUnavailable:
             raise
         except (OSError, StoreError):
+            observe(root, "unavailable")
             truncated = True
             continue
         try:
+            observe(root, "opened")
             expected_device = os.fstat(root_fd).st_dev if root_opener is not None else None
             # fwalk pins each directory beneath the admitted root and refuses
             # symlink descent. File opens/stat/readlink use its directory fd.
@@ -191,11 +210,11 @@ def scan_workspace_roots(
                     continue
                 directories += 1
                 if directories > max(1, resolved_limits.max_scanned_files):
-                    return WorkspaceSnapshot(files=files, truncated=True, text_cache_dir=str(cache_dir) if cache_dir is not None else None)
+                    return result(incomplete=True)
                 dirnames[:] = [dirname for dirname in dirnames if dirname not in excluded_dir_names]
                 for filename in sorted(filenames):
                     if scanned >= resolved_limits.max_scanned_files:
-                        return WorkspaceSnapshot(files=files, truncated=True, text_cache_dir=str(cache_dir) if cache_dir is not None else None)
+                        return result(incomplete=True)
                     scanned += 1
                     host_file = root.host_path / dirpath / filename
                     try:
@@ -226,11 +245,7 @@ def scan_workspace_roots(
         finally:
             os.close(root_fd)
 
-    return WorkspaceSnapshot(
-        files=files,
-        truncated=truncated,
-        text_cache_dir=str(cache_dir) if cache_dir is not None else None,
-    )
+    return result(incomplete=truncated)
 
 
 def _snapshot_file(

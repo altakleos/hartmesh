@@ -163,7 +163,7 @@ async def test_terminal_status_never_promotes_a_missing_or_different_seal(output
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("capture", [None, {"version": True}, {"version": 2}])
+@pytest.mark.parametrize("capture", [None, {"version": True}, {"version": 3}])
 async def test_only_locked_supported_capture_intent_can_receive_a_seal(output_store, capture):
     manager, record = await capture_run(output_store)
     kwargs = deepcopy(record.kwargs)

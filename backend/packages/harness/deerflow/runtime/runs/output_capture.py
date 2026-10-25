@@ -41,8 +41,9 @@ class _Response:
 class OutputCaptureObserver:
     """Capture-only, owning-loop observer; uncertainty is sticky until disposal."""
 
-    def __init__(self, *, owner_user_id: str, thread_id: str, run_id: str):
+    def __init__(self, *, owner_user_id: str, thread_id: str, run_id: str, inventory=None):
         self.scope = {"owner_user_id": owner_user_id, "thread_id": thread_id, "run_id": run_id}
+        self.inventory = inventory
         self.uncertain = False
         self._epochs = 0
         self._root: str | None = None
@@ -65,6 +66,8 @@ class OutputCaptureObserver:
         self._final: OutputMessageEvidence | None = None
 
     def begin_epoch(self, root: UUID, input_payload: object, *, pre_existing_ids: set[str]) -> None:
+        if self.inventory is not None:
+            self.inventory.begin_epoch(root, input_payload, pre_existing_ids=pre_existing_ids)
         self._epochs += 1
         self._root = str(root)
         self._history.update(pre_existing_ids)
@@ -106,6 +109,8 @@ class OutputCaptureObserver:
                     self._history.add(identity)
 
     def chain_start(self, *, run_id, parent_run_id, tags, metadata, name, inputs) -> None:
+        if self.inventory is not None:
+            self.inventory.chain_start(run_id=run_id, parent_run_id=parent_run_id, tags=tags, metadata=metadata, name=name, inputs=inputs)
         if self._epochs != 1:
             return
         rid = str(run_id)
@@ -193,11 +198,15 @@ class OutputCaptureObserver:
                 observed.append(item)
                 if rid in self._model_starts and event["metadata"].get("caller") == "lead_agent":
                     self._events[id(event)] = (event, item)
+                    if self.inventory is not None:
+                        self.inventory.model_response(event["content"], run_id=run_id, parent_run_id=self._parents.get(rid))
             self._responses[rid] = observed if rid in self._model_starts else []
         except Exception:
             self.uncertain = True
 
     def chain_end(self, outputs: object, *, run_id, parent_run_id) -> None:
+        if self.inventory is not None:
+            self.inventory.chain_end(outputs, run_id=run_id, parent_run_id=parent_run_id)
         if self._epochs != 1 or str(run_id) != self._root:
             return
         try:
@@ -269,6 +278,8 @@ class OutputCaptureObserver:
         return UnavailableOutputReceipt(version=1, kind="unavailable", **self.scope, input_message_id=self.input_message_id, reason=reason)
 
     def detach(self) -> None:
+        if self.inventory is not None:
+            self.inventory.detach()
         self._events.clear()
         self._responses.clear()
         self._parents.clear()

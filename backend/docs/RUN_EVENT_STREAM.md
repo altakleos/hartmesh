@@ -53,7 +53,7 @@ through run-event or specialized APIs:
 | Category | Purpose |
 | --- | --- |
 | `trace` | Execution evidence. |
-| `outputs` | Root graph completion output. |
+| `outputs` | Root completion or terminal inventory evidence; the sealed run row supplies lifecycle authority. |
 | `error` | Callback-observed failure evidence. |
 | `middleware` | Middleware state-change audit evidence. |
 | `context` | Effective hidden-context identity. |
@@ -75,6 +75,11 @@ through run-event or specialized APIs:
 | `llm.error` | `trace` | `on_llm_error()` |
 | `context:memory` | `context` | `record_memory_context()` |
 | `middleware:{tag}` | `middleware` | `record_middleware()` |
+
+Opted-in captured workers additionally write one `run.output_inventory` event in
+`outputs`. Its strict presentation document is bound by the atomically stored
+run-row companion; an event alone is not terminal authority. See
+[terminal output inventory](RUN_OUTPUT_INVENTORY.md).
 
 Current middleware tags are `guardrail`, `loop_detection`,
 `safety_termination`, `skill_activation`, `skill_secrets`, `tool_promotion`,

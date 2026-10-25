@@ -34,7 +34,7 @@ class RunCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     channel_execution: ChannelExecutionRequest | None = Field(default=None, description="Versioned trusted channel publication; ordinary callers omit this field")
-    output_capture: OutputCaptureIntent | None = Field(default=None, description="Opt in to durable final-output evidence; unsupported authorities refuse before execution")
+    output_capture: OutputCaptureIntent | None = Field(default=None, description="Opt in to durable final-output evidence (v1), with terminal presentation inventory in v2; unsupported authorities refuse before execution")
     assistant_id: str | None = Field(default=None, description="Agent / assistant to use")
     input: dict[str, Any] | None = Field(default=None, description="Graph input (e.g. {messages: [...]})")
     command: dict[str, Any] | None = Field(default=None, description="LangGraph Command")

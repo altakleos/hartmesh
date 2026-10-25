@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -13,7 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from deerflow.utils.file_io import await_drained
 
 from .capture_io import CaptureIOClosed, CaptureIOUnsupported, current_capture_io_owner, run_capture_io
-from .output import OUTPUT_EVIDENCE_KEY, OutputEvidenceError, capture_from_kwargs, receipt_from_kwargs, receipt_to_dict
+from .output import OUTPUT_CAPTURE_KEY, OUTPUT_EVIDENCE_KEY, OutputEvidenceError, capture_from_kwargs, receipt_from_kwargs, receipt_to_dict
 from .schemas import RunStatus
 from .store.base import StatusFinalization
 
@@ -66,7 +67,7 @@ def diagnostic(record, status, *, outcome, exception_class="none", attempt=0):
     )
 
 
-async def persist_terminal(manager, record, status, *, error=None, stop_reason=None, respect_cancellation=False, output_receipt=None):
+async def persist_terminal(manager, record, status, *, error=None, stop_reason=None, respect_cancellation=False, output_receipt=None, inventory_evidence=None, _inventory_attempt=None):
     """Confirm or recover one owned outcome; never replay an ambiguous transaction.
 
     The SQL CAS uses the original observed change position, owner, source status,
@@ -83,6 +84,8 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
 
         wanted = validate_receipt_status(output_receipt, status)
     wanted_json = receipt_to_dict(wanted) if wanted is not None else None
+    if inventory_evidence is not None and wanted is None:
+        raise OutputEvidenceError() from None
     async with record.terminal_lock:
         if record.ownership_lost:
             return StatusFinalization(finalized=False)
@@ -100,18 +103,41 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                     elif row.get("owner_worker_id") != record.owner_worker_id or record.owner_worker_id != manager.worker_id:
                         rejection = "stale_owner"
                     saved_receipt = None
+                    saved_inventory = None
+                    wants_inventory = False
                     if rejection is None and wanted is not None:
                         if row.get("user_id") != wanted.owner_user_id or row.get("thread_id") != wanted.thread_id or row.get("run_id") != wanted.run_id or row.get("operation_kind", "run") != "run":
                             rejection = "output_scope_rejected"
                         else:
                             try:
-                                if capture_from_kwargs(row.get("kwargs")) is None:
+                                intent = capture_from_kwargs(row.get("kwargs"))
+                                if intent is None:
                                     rejection = "output_capture_missing"
+                                wants_inventory = intent is not None and intent.version == 2
                                 saved_receipt = receipt_from_kwargs(row.get("kwargs"))
+                                if wants_inventory:
+                                    from .output_inventory import inventory_evidence_from_kwargs, validate_inventory_pair
+
+                                    saved_inventory = inventory_evidence_from_kwargs(row["kwargs"])
+                                    wanted, inventory_evidence = validate_inventory_pair(wanted, inventory_evidence, status=status)
+                                    if (saved_receipt is None) != (saved_inventory is None):
+                                        raise OutputEvidenceError()
+                                    if saved_receipt is not None:
+                                        validate_inventory_pair(saved_receipt, saved_inventory, status=row["status"])
+                                elif inventory_evidence is not None:
+                                    raise OutputEvidenceError()
                                 if saved_receipt is not None:
                                     validate_receipt_status(saved_receipt, row["status"])
                             except OutputEvidenceError:
                                 rejection = "output_evidence_invalid"
+                    elif rejection is None:
+                        # The ordinary API historically permits null/opaque
+                        # kwargs. Only the new literal opt-in selects this guard;
+                        # do not run proof decoding for a legacy status write.
+                        values = row.get("kwargs")
+                        intent = values.get(OUTPUT_CAPTURE_KEY) if isinstance(values, Mapping) else None
+                        if isinstance(intent, Mapping) and type(intent.get("version")) is int and intent["version"] == 2:
+                            rejection = "output_inventory_missing"
                     if rejection:
                         ownership_rejected = True
                         diagnostic(record, status, outcome=rejection, attempt=attempt)
@@ -123,9 +149,10 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                     # worker's rollback error after checkpoint cleanup.
                     rollback_tail = source == "interrupted" and status == RunStatus.error and record.abort_event.is_set() and record.abort_action == "rollback"
                     if wanted is not None:
-                        rollback_tail = rollback_tail and action == "rollback" and wanted.kind == "unavailable" and wanted.reason == "cancelled" and saved_receipt == wanted
+                        rollback_tail = rollback_tail and action == "rollback" and wanted.kind == "unavailable" and wanted.reason == "cancelled" and saved_receipt == wanted and saved_inventory == inventory_evidence
                     if source in TERMINAL_STATUSES and not rollback_tail:
                         output_confirmed = wanted is not None and source == status.value and saved_receipt == wanted
+                        inventory_confirmed = wants_inventory and output_confirmed and saved_inventory == inventory_evidence
                         async with manager._lock:
                             record.status = RunStatus(source)
                             record.error = row.get("error")
@@ -134,7 +161,7 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                             record.terminal_confirmed = True
                             if wanted is not None:
                                 record.kwargs = deepcopy(row["kwargs"])
-                        return StatusFinalization(finalized=True, output_receipt_confirmed=output_confirmed)
+                        return StatusFinalization(finalized=True, output_receipt_confirmed=output_confirmed, inventory_evidence_confirmed=inventory_confirmed)
                     if wanted is not None and saved_receipt is not None and (saved_receipt != wanted or source in {"pending", "running"}):
                         ownership_rejected = True
                         diagnostic(record, status, outcome="output_evidence_conflict", attempt=attempt)
@@ -145,7 +172,26 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                             ownership_rejected = True
                             diagnostic(record, status, outcome="lease_expired", attempt=attempt)
                             break
+                    if wants_inventory and _inventory_attempt is not None and _inventory_attempt._cleanup is not None:
+                        cleanup = _inventory_attempt._cleanup
+                        decision = _inventory_attempt._decision
+                        if (
+                            action not in {None, cleanup.action}
+                            or _inventory_attempt._action_bound
+                            and action != _inventory_attempt._action_basis
+                            or decision is not None
+                            and (row["owner_worker_id"], row["change_seq"], source) != decision._basis[:3]
+                        ):
+                            ownership_rejected = True
+                            diagnostic(record, status, outcome="inventory_cleanup_action_changed", attempt=attempt)
+                            break
+                        _inventory_attempt._action_basis = action
+                        _inventory_attempt._action_bound = True
                     if action is not None and (respect_cancellation or wanted is not None and wanted.kind == "text"):
+                        if wants_inventory and _inventory_attempt is not None:
+                            from .inventory_finalization import _record_decision
+
+                            _record_decision(_inventory_attempt, row)
                         record.abort_action = action
                         record.abort_event.set()
                         return StatusFinalization(finalized=False, cancel_action=action)
@@ -178,6 +224,7 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                             error=saved_error,
                             stop_reason=saved_reason,
                             **({"output_receipt": wanted} if wanted is not None else {}),
+                            **({"inventory_evidence": inventory_evidence} if wants_inventory else {}),
                         )
                     )
                     if finalized:
@@ -189,7 +236,11 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                             record.terminal_confirmed = True
                             if wanted is not None:
                                 record.kwargs = {**record.kwargs, OUTPUT_EVIDENCE_KEY: wanted_json}
-                        return StatusFinalization(finalized=True, output_receipt_confirmed=wanted is not None)
+                                if wants_inventory:
+                                    from .output_inventory import INVENTORY_EVIDENCE_KEY, inventory_evidence_to_dict
+
+                                    record.kwargs[INVENTORY_EVIDENCE_KEY] = inventory_evidence_to_dict(inventory_evidence)
+                        return StatusFinalization(finalized=True, output_receipt_confirmed=wanted is not None, inventory_evidence_confirmed=wants_inventory)
                     ownership_rejected = True
                     diagnostic(record, status, outcome="conditional_rejection", attempt=attempt)
             except (CaptureIOClosed, CaptureIOUnsupported):
