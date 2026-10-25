@@ -13,9 +13,12 @@ from __future__ import annotations
 import abc
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from deerflow.utils.time import coerce_iso
+
+if TYPE_CHECKING:
+    from deerflow.runtime.runs.output import OutputReceipt
 
 
 @dataclass(frozen=True)
@@ -42,6 +45,7 @@ class StatusFinalization:
 
     finalized: bool
     cancel_action: str | None = None
+    output_receipt_confirmed: bool = False
 
 
 class RunIdempotencyConflict(RuntimeError):
@@ -113,9 +117,21 @@ class RunStore(abc.ABC):
     # Opt in only with an atomic owner/version/cancellation/lease predicate.
     # Legacy stores retain their existing public status-update contract.
     supports_terminal_recovery: bool = False
+    supports_output_receipts: bool = False
 
     async def finalize_owned(
-        self, run_id: str, *, owner_worker_id: str, expected_change_seq: int, expected_status: str, expected_cancel_action: str | None, require_lease: bool, status: str, error: str | None = None, stop_reason: str | None = None
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        expected_change_seq: int,
+        expected_status: str,
+        expected_cancel_action: str | None,
+        require_lease: bool,
+        status: str,
+        error: str | None = None,
+        stop_reason: str | None = None,
+        output_receipt: OutputReceipt | None = None,
     ) -> bool:
         """Conditionally settle exactly the observed owned row, or return False.
 

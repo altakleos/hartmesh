@@ -360,6 +360,12 @@ post-await scope fences and retained reads during shutdown. No receipt, cached
 success or fabricated AI identity proves a complete final answer. Preserve legacy
 channel defaults; never run native/Compose suites locally.
 
+Output-evidence tests use real isolated SQLite/PostgreSQL for atomic seals,
+ambiguous commit recovery, cancellation/version/lease fences and authoritative
+snapshots. Pure projection and mock HTTP tests prove protocol validation only,
+not actual worker-source provenance. Capture remains rejected by the current
+creating schema. Keep missing API scaffolds distinct from behavioral regressions.
+
 Independent storage startups need fresh app state and the actual storage
 lifecycle owner. Drain each lifetime before disposing its SQL engine or dropping
 its schema; never reuse a completed cleanup task for a new maintenance generation.

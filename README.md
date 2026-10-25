@@ -1381,6 +1381,11 @@ run and message reads distinguish an authoritative result from unavailable
 storage. Closing new-run admission preserves reads for work already dispatched.
 Durable model-result publication and ordinary managed-bot conversations remain
 for subsequent stages; these changes do not enable them.
+The SQL runtime also provides atomic, generic output-evidence storage and
+authoritative snapshots. Its prepared client protocol remains inactive until
+worker capture and the server output API are implemented; current requests for
+capture are rejected before model execution. See
+[durable output evidence](backend/docs/RUN_OUTPUT_EVIDENCE.md).
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 

@@ -7,6 +7,12 @@ precedence, including page duplicates; malformed kwargs cannot become legacy
 absence. Preserve ordinary and raise-only lifecycle semantics. Gateway protocol:
 [contract](../../../../docs/channel-execution.md).
 
+Optional SQL output seals use immutable generic receipts, exact status+receipt
+confirmation and always-stored deep-frozen snapshots. Cached success is not proof;
+new admissions discard caller evidence. Preserve ordinary/Memory defaults.
+Worker capture and server output admission remain inactive. See
+[output evidence](../../../../docs/RUN_OUTPUT_EVIDENCE.md).
+
 SQL terminal writes use `runs/terminal.py` and `RunRepository.finalize_owned`.
 Read committed state before recovery; CAS the original change sequence, owner,
 source status, cancellation action and current lease. Never recreate missing rows

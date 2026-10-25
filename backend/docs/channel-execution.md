@@ -103,3 +103,11 @@ completeness. The facade also checks the acknowledgement and exact receipt scope
 absence or ambiguity permits further reads, never a second creating POST.
 
 Schema remains revision `0043_telegram_inbox_chat_scope`; config stays version 55.
+
+## Prepared output protocol
+
+The optional host capture flag and strict output reader are dormant client
+primitives. The current creating schema still rejects capture before execution;
+the server output route and worker provenance are separate work. Generic SQL
+receipt/snapshot rules and the prepared closed projection are described in
+[durable output evidence](RUN_OUTPUT_EVIDENCE.md).

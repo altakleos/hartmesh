@@ -17,13 +17,16 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
+from .output import OUTPUT_CAPTURE_KEY, OUTPUT_EVIDENCE_KEY, OutputEvidenceError, OutputEvidenceScopeError, OutputReceipt, RunOutputSnapshot, capture_from_kwargs, receipt_from_kwargs, validate_receipt_status
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
 from .store.base import (
     EditReplayVisibility,
     RunIdempotencyConflict,
+    StatusFinalization,
     normalize_run_created_at_iso,
     run_is_before_cursor,
     run_sort_key,
@@ -78,6 +81,16 @@ def _resolve_record_user_id(user_id: str | None) -> str | None:
         return user_id
     user = get_current_user()
     return str(user.id) if user is not None else None
+
+
+def _new_run_kwargs(kwargs: dict | None) -> dict:
+    """A new admission may request capture, but cannot supply its result."""
+    values = dict(kwargs or {})
+    values.pop(OUTPUT_EVIDENCE_KEY, None)
+    intent = capture_from_kwargs(values)
+    if intent is not None:
+        values[OUTPUT_CAPTURE_KEY] = {"version": intent.version}
+    return values
 
 
 def _cursor_part(value: str | None) -> str | None:
@@ -651,6 +664,7 @@ class RunManager:
         raw ``IntegrityError`` instead of a ``ConflictError``. Production
         callers should use :meth:`create_or_reject`.
         """
+        kwargs = _new_run_kwargs(kwargs)
         run_id = str(uuid.uuid4())
         now = _now_iso()
         user_id = _resolve_record_user_id(user_id)
@@ -744,6 +758,60 @@ class RunManager:
                 raise
             logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
             return None
+
+    @property
+    def supports_output_receipts(self) -> bool:
+        """Whether this actual store supports the optional owned output seal."""
+        return self._store is not None and getattr(self._store, "supports_output_receipts", False) is True
+
+    async def get_output_snapshot(self, run_id: str, *, user_id: str) -> RunOutputSnapshot | None:
+        """Read exact stored output authority; cached status is never a seal."""
+        if not self.supports_output_receipts or type(user_id) is not str or not user_id or type(run_id) is not str or not run_id:
+            raise OutputEvidenceError()
+        try:
+            # Observe a foreign row rather than turning wrong owner into an
+            # acknowledgeable absence. The explicit None bypasses ambient aliases.
+            row = await await_drained(self._store.get(run_id, user_id=None))
+            if row is None:
+                return None
+            if not isinstance(row, Mapping) or any(type(row.get(key)) is not str or not row[key] for key in ("run_id", "thread_id", "user_id")):
+                raise OutputEvidenceError()
+            if row["run_id"] != run_id or row["user_id"] != user_id:
+                raise OutputEvidenceScopeError()
+            if row.get("operation_kind", "run") != "run" or capture_from_kwargs(row.get("kwargs")) is None:
+                raise OutputEvidenceError()
+            saved = receipt_from_kwargs(row["kwargs"])
+            if saved is not None:
+                if saved.owner_user_id != user_id or saved.thread_id != row.get("thread_id") or saved.run_id != run_id:
+                    raise OutputEvidenceScopeError()
+                validate_receipt_status(saved, row["status"])
+            async with self._lock:
+                local = self._runs.get(run_id)
+                finalizing = local is not None and local.user_id == user_id and local.thread_id == row.get("thread_id") and local.finalizing
+            return RunOutputSnapshot(
+                run_id=run_id,
+                thread_id=row["thread_id"],
+                owner_user_id=user_id,
+                assistant_id=row.get("assistant_id"),
+                status=RunStatus(row["status"]),
+                kwargs=row["kwargs"],
+                local_finalizing=finalizing,
+            )
+        except OutputEvidenceScopeError:
+            raise
+        except Exception:
+            raise OutputEvidenceError() from None
+
+    async def finalize_output(self, run_id: str, status: RunStatus, *, output_receipt: OutputReceipt, error: str | None = None, stop_reason: str | None = None, respect_cancellation: bool = True) -> StatusFinalization:
+        """Seal an opted-in local run through the existing terminal CAS owner."""
+        if not self.supports_output_receipts or type(respect_cancellation) is not bool or type(status) is not RunStatus or status.value not in TERMINAL_STATUSES:
+            raise OutputEvidenceError()
+        wanted = validate_receipt_status(output_receipt, status)
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None or record.store_only or record.run_id != wanted.run_id or record.thread_id != wanted.thread_id or record.user_id != wanted.owner_user_id:
+                raise OutputEvidenceScopeError()
+        return await persist_terminal(self, record, status, error=error, stop_reason=stop_reason, respect_cancellation=respect_cancellation, output_receipt=wanted)
 
     def _strict_record_from_store(self, row) -> RunRecord:
         # Do not turn an observed malformed kwargs value into a legacy empty
@@ -1707,6 +1775,7 @@ class RunManager:
         partial unique index on ``(thread_id) WHERE status IN
         ('pending','running')``.
         """
+        kwargs = _new_run_kwargs(kwargs)
         run_id = str(uuid.uuid4())
         now = _now_iso()
         # Resolve before the idempotency checks below compare it with stored rows.
