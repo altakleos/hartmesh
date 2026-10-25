@@ -54,6 +54,19 @@ and preserve unrelated 429/pacing floors through reconnect.
 Exercise lifecycle notices through the actual supervisor, including concurrent
 held-input/reconcile claims and a later genuine hold.
 
+Conversation-preparation tests use both SQL dialects, the real public SDK and
+socket-free HTTP/ASGI routes. Prove stored-owner projection instead of forged
+metadata, strict binding-reader availability, separate GET after create/replay,
+independent URL configuration and isolated owner/CSRF headers. Keep the saved UUID
+and endpoint through lost responses and same-bot token changes; old attempts must
+remain stale. Freeze the clock for mapping ABA tests and include generic and
+fenced replacements in both directions. Reserved preparation cannot enter public
+route/group basis. Cancellation barriers retain cold construction, SDK decode,
+SQL, keyed-lock waiters and client cleanup; delayed HTTP cannot start a late writer.
+Fixed status tests compare immutable origins/scope/topic/completion/source, strip
+caller receipts, reject crossed source/page controls, and use the actual sender
+and recorded Telegram SDK for the server label and URL/plain fallback orders.
+
 Durable inbox/outbox tests use the same real SQL matrix. Exercise borrowed
 rollback/autoflush, chat-scoped replay, publication/run fences, joined-input
 completion and existing welcome plans. Worker barriers cover delayed same-process

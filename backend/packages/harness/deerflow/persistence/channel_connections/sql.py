@@ -12,6 +12,8 @@ from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import delete, func, select, text, update
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -561,27 +563,33 @@ class ChannelConnectionRepository:
     ) -> None:
         topic_id = external_topic_id or ""
         async with self.session_factory() as session:
-            stmt = select(ChannelConversationRow).where(
-                ChannelConversationRow.connection_id == connection_id,
-                ChannelConversationRow.external_conversation_id == external_conversation_id,
-                ChannelConversationRow.external_topic_id == topic_id,
+            dialect = session.get_bind().dialect.name
+            insert = {"postgresql": postgres_insert, "sqlite": sqlite_insert}.get(dialect)
+            if insert is None:
+                raise ValueError("unsupported channel database")
+            if dialect == "postgresql":
+                # Match parent-before-mapping writers. Otherwise a speculative
+                # insert can hold the unique mapping key while its foreign-key
+                # check waits for a parent that is itself about to insert it.
+                await session.scalar(select(ChannelConnectionRow.id).where(ChannelConnectionRow.id == connection_id).with_for_update(read=True, key_share=True))
+            # The opaque row ID is a replacement token, including A -> B -> A.
+            # Update by the natural key atomically: concurrent primary-key
+            # reassignment through loaded ORM rows would lose that guarantee.
+            statement = insert(ChannelConversationRow).values(
+                id=self._new_id(),
+                connection_id=connection_id,
+                owner_user_id=owner_user_id,
+                provider=provider,
+                external_conversation_id=external_conversation_id,
+                external_topic_id=topic_id,
+                thread_id=thread_id,
             )
-            row = (await session.execute(stmt)).scalar_one_or_none()
-            if row is None:
-                row = ChannelConversationRow(
-                    id=self._new_id(),
-                    connection_id=connection_id,
-                    owner_user_id=owner_user_id,
-                    provider=provider,
-                    external_conversation_id=external_conversation_id,
-                    external_topic_id=topic_id,
-                    thread_id=thread_id,
+            await session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["connection_id", "external_conversation_id", "external_topic_id"],
+                    set_={"id": statement.excluded.id, "thread_id": thread_id, "owner_user_id": owner_user_id, "provider": provider, "updated_at": datetime.now(UTC)},
                 )
-                session.add(row)
-            else:
-                row.thread_id = thread_id
-                row.owner_user_id = owner_user_id
-                row.provider = provider
+            )
             await session.commit()
 
     async def get_thread_id(

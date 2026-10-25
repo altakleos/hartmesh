@@ -17,14 +17,15 @@ import logging
 import shutil
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 
+from app.gateway.agent_discovery import THREAD_BINDING_HEADER_NAME
 from app.gateway.authz import require_permission
 from app.gateway.checkpoint_lineage import (
     CheckpointLineageError,
@@ -438,6 +439,7 @@ class ThreadResponse(_MetadataRedactingResponse):
     model_config = ConfigDict(extra="ignore")
 
     thread_id: str = Field(description="Unique thread identifier")
+    owner_user_id: str | None = Field(default=None, description="Stored human owner, or null when ownership is unknown")
     status: str = Field(default="idle", description="Thread status: idle, busy, interrupted, error")
     created_at: str = Field(default="", description="ISO timestamp")
     updated_at: str = Field(default="", description="ISO timestamp")
@@ -927,6 +929,7 @@ async def _resolve_existing_thread(
 def _existing_thread_response(thread_id: str, record: dict) -> ThreadResponse:
     return ThreadResponse(
         thread_id=thread_id,
+        owner_user_id=record.get("user_id"),
         status=record.get("status", "idle"),
         created_at=coerce_iso(record.get("created_at", "")),
         updated_at=coerce_iso(record.get("updated_at", "")),
@@ -1341,6 +1344,7 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
     return [
         ThreadResponse(
             thread_id=r["thread_id"],
+            owner_user_id=r.get("user_id"),
             status=r.get("status", "idle"),
             # ``coerce_iso`` heals legacy unix-second values that
             # ``MemoryThreadMetaStore`` historically wrote with ``time.time()``;
@@ -1382,6 +1386,7 @@ async def patch_thread(thread_id: ThreadId, body: ThreadPatchRequest, request: R
     record = await thread_store.get(thread_id) or record
     return ThreadResponse(
         thread_id=thread_id,
+        owner_user_id=record.get("user_id"),
         status=record.get("status", "idle"),
         created_at=coerce_iso(record.get("created_at", "")),
         updated_at=coerce_iso(record.get("updated_at", "")),
@@ -1409,6 +1414,7 @@ async def move_thread(thread_id: ThreadId, body: ThreadMoveRequest, request: Req
     record = await thread_store.get(thread_id)
     return ThreadResponse(
         thread_id=thread_id,
+        owner_user_id=record.get("user_id"),
         status=record.get("status", "idle"),
         created_at=coerce_iso(record.get("created_at", "")),
         updated_at=coerce_iso(record.get("updated_at", "")),
@@ -1418,7 +1424,7 @@ async def move_thread(thread_id: ThreadId, body: ThreadMoveRequest, request: Req
 
 @router.get("/{thread_id}", response_model=ThreadResponse)
 @require_permission("threads", "read", owner_check=True)
-async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
+async def get_thread(thread_id: ThreadId, request: Request, require_thread_binding: Annotated[bool, Header(alias=THREAD_BINDING_HEADER_NAME)] = False) -> ThreadResponse:
     """Get thread info from metadata plus the graph's materialized state."""
     from app.gateway.agent_discovery import thread_bindings
     from app.gateway.deps import get_thread_store
@@ -1459,10 +1465,11 @@ async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
         }
     stored_status = record.get("status", "idle")
     status = _derive_thread_status(snapshot, pending_writes, fallback_status=stored_status) if checkpoint_id else stored_status
-    bindings = await thread_bindings(request.app, [thread_id])
+    bindings = await thread_bindings(request.app, [thread_id], require_authority=require_thread_binding)
 
     return ThreadResponse(
         thread_id=thread_id,
+        owner_user_id=record.get("user_id"),
         status=status,
         created_at=coerce_iso(record.get("created_at", "")),
         updated_at=coerce_iso(record.get("updated_at", "")),

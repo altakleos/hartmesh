@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Telegram conversation preparation
+
+Prepare owner-scoped conversations with durable thread-creation identities,
+explicit Gateway ownership and agent-binding proof, and atomic conversation-map
+updates. Lost responses and same-bot token replacement reuse the original
+creation request; stale attempts cannot overwrite a newer conversation. A deleted
+custom AI assistant has a fixed repair notice and optional public settings link.
+Fixed status retries retain their original source, destination and completion
+intent through URL/plain-text delivery fallback.
+
+Thread responses now expose the stored human owner as nullable `owner_user_id`.
+Clients can require authoritative binding reads using
+`X-DeerFlow-Require-Thread-Binding: true`; unavailable binding authority returns
+503. Existing reads retain their default behavior.
+
+No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
+remains version 55. Ordinary message handling and managed-bot activation remain
+deferred.
+
 ### Compose workspace recovery qualification
 
 After deliberately removing an idle workspace, wait for its exact attachment

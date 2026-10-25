@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from app.telegram_bots.links import BotLink
 
 _TOKEN = re.compile(TOKEN_BODY)
-_PUBLICATION_KEYS = {"publications", "current_publication_id"}
+SERVER_BOOKKEEPING_KEYS = frozenset({"publications", "current_publication_id", "thread_preparation"})
 _INPUT_KEYS = {"text", "caption", "files", "voice", "command", "type", "reply_to_message_id", "prompt_id", "media_group_id"}
 _UNSAFE_KEYS = {"raw_update", "update", "token", "bot_token", "access_token", "download_url", "file_path", "audio_bytes", "bytes", "_content", "content_bytes"}
 _FILE_KEYS = {"type", "file_id", "file_unique_id", "filename", "mime_type", "size", "message_id", "telegram_bot_id", "duration", "width", "height"}
@@ -134,6 +134,11 @@ class InboxRow:
     state: str
     closed_at: datetime | None
 
+    @staticmethod
+    def from_row(row: TelegramInboundMarkRow) -> InboxRow:
+        """Capture an admitted origin without retaining its writer or ORM row."""
+        return _snapshot(row)
+
 
 def _snapshot(row: TelegramInboundMarkRow) -> InboxRow:
     return InboxRow(**{field.name: _time(value) if isinstance(value := getattr(row, field.name), datetime) else deepcopy(value) for field in fields(InboxRow)})
@@ -144,13 +149,19 @@ def _identity(row: InboxRow | TelegramInboundMarkRow) -> tuple[str, int, int]:
 
 
 def _basis(row: InboxRow | TelegramInboundMarkRow) -> dict:
-    return {key: value for key, value in row.route_basis.items() if key not in _PUBLICATION_KEYS}
+    return {key: value for key, value in row.route_basis.items() if key not in SERVER_BOOKKEEPING_KEYS}
 
 
 def _canonical(value: dict) -> str:
     # Python equality equates True and 1, but displayed routing revisions and
     # choices retain their JSON types. Key insertion order carries no meaning.
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _publication_basis(row: InboxRow | TelegramInboundMarkRow) -> dict:
+    # Each joined input retains its own preparation receipt. Publications are
+    # shared by the group and must still compare their complete identities.
+    return {key: value for key, value in row.route_basis.items() if key != "thread_preparation"}
 
 
 def _scope(row: TelegramInboundMarkRow) -> tuple:
@@ -306,7 +317,7 @@ class InboxRepository:
         if target_id is not None:
             _identifier(target_id, 64, "invalid-inbox-route")
         basis = _json_copy(basis, "invalid-inbox-route")
-        if _PUBLICATION_KEYS.intersection(basis) or not isinstance(operation_ids, list) or any(not isinstance(item, str) for item in operation_ids) or len(set(operation_ids)) != len(operation_ids):
+        if SERVER_BOOKKEEPING_KEYS.intersection(basis) or not isinstance(operation_ids, list) or any(not isinstance(item, str) for item in operation_ids) or len(set(operation_ids)) != len(operation_ids):
             raise ValueError("invalid-inbox-route")
         for operation in operation_ids:
             _identifier(operation, 64, "invalid-inbox-route")
@@ -384,7 +395,7 @@ class InboxRepository:
             if any(mark.route_complete or mark.state == "interrupted" for mark in marks):
                 raise ValueError("inbox-route-complete")
             basis = marks[0].route_basis
-            if any(mark.route_basis != basis for mark in marks):
+            if any(_canonical(_publication_basis(mark)) != _canonical(_publication_basis(marks[0])) for mark in marks):
                 raise ValueError("inbox-publication-conflict")
             publications = deepcopy(basis.get("publications", []))
             current = basis.get("current_publication_id")
@@ -416,7 +427,7 @@ class InboxRepository:
             if not marks:
                 raise ValueError("inbox-publication-conflict")
             self._group(marks)
-            if any(mark.route_basis != marks[0].route_basis for mark in marks):
+            if any(_canonical(_publication_basis(mark)) != _canonical(_publication_basis(marks[0])) for mark in marks):
                 raise ValueError("inbox-publication-conflict")
             for mark in marks:
                 self._current(link, mark)

@@ -88,6 +88,7 @@ class TelegramSupervisor:
         settings=None,
         authority=None,
         copy_guard=None,
+        thread_client=None,
         app_config=None,
         environ: Mapping[str, str] | None = None,
         request_factory=None,
@@ -108,6 +109,7 @@ class TelegramSupervisor:
         self.authority, self._app_config = authority, app_config
         self.strangers = StrangerLedger()
         self.copy_guard = copy_guard
+        self.thread_client, self.threads = thread_client, None
         self._environ = dict(os.environ if environ is None else environ)
         if request_factory is not None:
             self.request_factory = request_factory
@@ -278,7 +280,13 @@ class TelegramSupervisor:
                 return
             self.channel_service.bus.subscribe_outbound(self._listener)
             self._subscribed = True
-            self.tls_context = await asyncio.to_thread(httpx.create_ssl_context)
+            self.tls_context = await await_drained(asyncio.to_thread(httpx.create_ssl_context))
+            from app.telegram_bots.gateway_client import GatewayClientOwner
+            from app.telegram_bots.threads import ThreadCoordinator
+
+            self.thread_client = self.thread_client or GatewayClientOwner(gateway_url=self.channel_service.manager.gateway_url, langgraph_url=self.channel_service.manager.langgraph_url, tls_context=self.tls_context)
+            self.threads = ThreadCoordinator(links=self.links, authority=self.authority, client=self.thread_client, channel=self.channel, send_allowed=self.send_allowed, outbox=self.outbox, product_name=self.product_name)
+            await self.thread_client.start()
             if not await self._wait_health():
                 if not self._stopping:
                     self._refuse("gateway-not-ready")
@@ -1234,6 +1242,8 @@ class TelegramSupervisor:
 
     async def begin_shutdown(self) -> None:
         self._stopping, self._ready = True, False
+        if self.threads is not None:
+            self.threads.begin_shutdown()
         self._health_barrier.set()
         self._send_ready = False
         self._send_event.set()
@@ -1256,6 +1266,8 @@ class TelegramSupervisor:
             await asyncio.gather(*tuple(self._retirements), return_exceptions=True)
         if self._callbacks:
             await asyncio.gather(*tuple(self._callbacks), return_exceptions=True)
+        if self.threads is not None:
+            await self.threads.stop()
         # Listener and clients deliberately survive channel-manager drain.
 
     def _unsubscribe(self) -> None:
@@ -1310,6 +1322,15 @@ class TelegramSupervisor:
             if self._cause is None:
                 await asyncio.gather(*(poll.confirm_offset() for poll in tuple(self._polls.values())), return_exceptions=True)
         finally:
+            thread_error = None
+            if self.thread_client is not None:
+                try:
+                    if self.threads is not None:
+                        await self.threads.stop()
+                    else:
+                        await self.thread_client.stop()
+                except Exception as error:
+                    thread_error = error
             self._unsubscribe()
             for task in tuple(self._notices):
                 task.cancel()
@@ -1328,9 +1349,11 @@ class TelegramSupervisor:
                         self._channels.pop(channel.link.id, None)
                     self._polls.pop(channel.link.id, None)
                     self._runners.pop(channel.link.id, None)
-            self._stopped = not failed
+            self._stopped = not failed and thread_error is None
             if self._stopped and _current is self:
                 _current = None
             if failed:
                 raise RuntimeError("telegram-client-cleanup-failed") from None
+            if thread_error is not None:
+                raise RuntimeError("telegram-thread-client-cleanup-failed") from None
             self._event("supervisor_stop", links=len(channels), took_ms=round((self._time() - began) * 1000))

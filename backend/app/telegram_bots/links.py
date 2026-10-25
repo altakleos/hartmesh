@@ -14,7 +14,7 @@ import math
 import re
 import secrets
 import sqlite3
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, fields
@@ -50,6 +50,7 @@ from deerflow.persistence.telegram_bots.model import (
 
 if TYPE_CHECKING:
     from app.telegram_bots.authority import LiveOwnerCheck
+    from app.telegram_bots.inbox import InboxRow
 
 CONNECT_CODE_SECONDS = 600
 CONNECT_CODES_MAX = 5
@@ -213,6 +214,45 @@ class BotLink:
 class Connect:
     url: str
     expires_at: datetime
+
+
+@dataclass(frozen=True)
+class ThreadPreparation:
+    """Saved logical intent; a token revision belongs to each live attempt only."""
+
+    origin: InboxRow
+    purpose: str
+    creation_id: str
+    endpoint_id: str
+    scope: dict
+    expected_mapping_id: str | None
+    expected_thread_id: str | None
+    selected_thread_id: str | None
+    mapping_id: str | None
+
+
+class _ThreadPreparationStale(ValueError):
+    def __init__(self) -> None:
+        super().__init__("thread-preparation-stale")
+
+
+def _thread_scope(link: BotLink | TelegramBotLinkRow) -> dict:
+    return {"link_id": link.id, **{key: getattr(link, key) for key in ("owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "binding_generation")}}
+
+
+def _thread_payload(preparation: ThreadPreparation) -> dict:
+    return {field.name: deepcopy(getattr(preparation, field.name)) for field in fields(ThreadPreparation) if field.name != "origin"}
+
+
+def _thread_equal(first: dict, second: dict) -> bool:
+    try:
+        return json.dumps(first, sort_keys=True, allow_nan=False) == json.dumps(second, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError):
+        return False
+
+
+def _valid_thread_id(value) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value) is not None and _TOKEN.search(value) is None
 
 
 class BotLinked(Exception):
@@ -750,6 +790,206 @@ class BotLinkRepository:
             .execution_options(populate_existing=True)
         )
 
+    async def _thread_context(self, session: AsyncSession, captured: BotLink, origin: InboxRow) -> tuple[TelegramBotLinkRow, TelegramInboundMarkRow]:
+        from app.telegram_bots.inbox import SERVER_BOOKKEEPING_KEYS, InboxRow
+
+        if not isinstance(origin, InboxRow) or origin.link_id != captured.id:
+            raise _ThreadPreparationStale
+        row = await session.scalar(select(TelegramBotLinkRow).where(TelegramBotLinkRow.id == captured.id, TelegramBotLinkRow.owner_user_id == captured.owner_user_id).with_for_update().execution_options(populate_existing=True))
+        basis = ("owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "binding_generation", "token_revision")
+        if (
+            row is None
+            or row.state != "connected"
+            or captured.state != "connected"
+            or row.agent_kind not in {"lead_agent", "custom_agent"}
+            or type(captured.token_revision) is not int
+            or type(captured.binding_generation) is not int
+            or type(row.telegram_user_id) is not int
+            or row.telegram_user_id <= 0
+            or row.chat_id != row.telegram_user_id
+            or row.connection_id is None
+            or any(getattr(row, key) != getattr(captured, key) for key in basis)
+        ):
+            raise _ThreadPreparationStale
+        account = await session.get(TelegramAccountRow, row.telegram_user_id, with_for_update=True, populate_existing=True)
+        connection = await self._current_bound_connection(session, row)
+        if account is None or account.owner_user_id != row.owner_user_id or connection is None or connection.status != "connected":
+            raise _ThreadPreparationStale
+        mark = await session.scalar(
+            select(TelegramInboundMarkRow)
+            .where(TelegramInboundMarkRow.link_id == origin.link_id, TelegramInboundMarkRow.message_id == origin.message_id, TelegramInboundMarkRow.chat_id == origin.chat_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if mark is None or mark.route_kind is None or (mark.update_id, mark.binding_generation, mark.message_thread_id, mark.chat_id) != (origin.update_id, row.binding_generation, origin.message_thread_id, row.chat_id):
+            raise _ThreadPreparationStale
+
+        def business(value):
+            return json.dumps({key: child for key, child in value.items() if key not in SERVER_BOOKKEEPING_KEYS}, sort_keys=True, allow_nan=False)
+
+        if (
+            origin.binding_generation != mark.binding_generation
+            or (mark.route_kind, mark.route_target_id, mark.operation_ids, mark.sanitized_input) != (origin.route_kind, origin.route_target_id, origin.operation_ids, origin.sanitized_input)
+            or business(mark.route_basis) != business(origin.route_basis)
+        ):
+            raise _ThreadPreparationStale
+        return row, mark
+
+    @staticmethod
+    async def _thread_mapping(session: AsyncSession, link: TelegramBotLinkRow) -> ChannelConversationRow | None:
+        mapping = await session.scalar(
+            select(ChannelConversationRow)
+            .where(ChannelConversationRow.connection_id == link.connection_id, ChannelConversationRow.external_conversation_id == str(link.chat_id), ChannelConversationRow.external_topic_id == "")
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if mapping is not None and (mapping.owner_user_id != link.owner_user_id or mapping.provider != "telegram"):
+            raise _ThreadPreparationStale
+        return mapping
+
+    @staticmethod
+    def _thread_preparation(mark: TelegramInboundMarkRow, link: TelegramBotLinkRow) -> ThreadPreparation:
+        from app.telegram_bots.inbox import InboxRow
+
+        saved = mark.route_basis.get("thread_preparation")
+        keys = {field.name for field in fields(ThreadPreparation)} - {"origin"}
+        if (
+            not isinstance(saved, dict)
+            or set(saved) != keys
+            or saved["purpose"] not in {"ensure", "new"}
+            or not isinstance(saved["creation_id"], str)
+            or not _HEX_ID.fullmatch(saved["creation_id"])
+            or not isinstance(saved["endpoint_id"], str)
+            or not _DIGEST.fullmatch(saved["endpoint_id"])
+            or not _thread_equal(saved["scope"], _thread_scope(link))
+        ):
+            raise _ThreadPreparationStale
+        expected_id, expected_thread, selected, mapping_id = (saved[key] for key in ("expected_mapping_id", "expected_thread_id", "selected_thread_id", "mapping_id"))
+        if (
+            (expected_id is None) != (expected_thread is None)
+            or expected_id is not None
+            and (not _valid_thread_id(expected_id) or not _valid_thread_id(expected_thread))
+            or (selected is None) != (mapping_id is None)
+            or selected is not None
+            and (not _valid_thread_id(selected) or not _valid_thread_id(mapping_id) or selected not in ({saved["creation_id"]} if saved["purpose"] == "new" else {saved["creation_id"], expected_thread}))
+        ):
+            raise _ThreadPreparationStale
+        return ThreadPreparation(origin=InboxRow.from_row(mark), **deepcopy(saved))
+
+    @staticmethod
+    def _thread_attempt(check_attempt_current: Callable[[], bool]) -> None:
+        if check_attempt_current() is not True:
+            raise _ThreadPreparationStale
+
+    async def reserve_thread_preparation(
+        self, captured: BotLink, origin: InboxRow, *, purpose: str, endpoint_id: str, check_live_owner: LiveOwnerCheck, check_attempt_current: Callable[[], bool], require_healthy: bool = False
+    ) -> ThreadPreparation:
+        """Reserve an origin; normal private dispatch also requires healthy state."""
+        from app.telegram_bots.inbox import InboxRow
+
+        if purpose not in {"ensure", "new"} or not isinstance(endpoint_id, str) or not _DIGEST.fullmatch(endpoint_id) or type(require_healthy) is not bool:
+            raise _ThreadPreparationStale
+        async with self._owner_writer(captured.owner_user_id) as session:
+            row, mark = await self._thread_context(session, captured, origin)
+            if "thread_preparation" in mark.route_basis:
+                preparation = self._thread_preparation(mark, row)
+                if preparation.purpose != purpose or preparation.endpoint_id != endpoint_id:
+                    raise _ThreadPreparationStale
+                if preparation.selected_thread_id is None and (mark.route_complete or mark.state == "interrupted" or mark.thread_id is not None):
+                    raise _ThreadPreparationStale
+                if preparation.selected_thread_id is None:
+                    mapping = await self._thread_mapping(session, row)
+                    if (mapping.id if mapping else None, mapping.thread_id if mapping else None) != (preparation.expected_mapping_id, preparation.expected_thread_id):
+                        raise _ThreadPreparationStale
+                await check_live_owner(row.owner_user_id, session)
+                if require_healthy and row.health != "ok":
+                    raise _ThreadPreparationStale
+                self._thread_attempt(check_attempt_current)
+                return preparation
+            if mark.route_complete or mark.state == "interrupted" or mark.thread_id is not None:
+                raise _ThreadPreparationStale
+            mapping = await self._thread_mapping(session, row)
+            await check_live_owner(row.owner_user_id, session)
+            if require_healthy and row.health != "ok":
+                raise _ThreadPreparationStale
+            self._thread_attempt(check_attempt_current)
+            preparation = ThreadPreparation(
+                origin=InboxRow.from_row(mark),
+                purpose=purpose,
+                creation_id=uuid4().hex,
+                endpoint_id=endpoint_id,
+                scope=_thread_scope(row),
+                expected_mapping_id=mapping.id if mapping else None,
+                expected_thread_id=mapping.thread_id if mapping else None,
+                selected_thread_id=None,
+                mapping_id=None,
+            )
+            mark.route_basis = {**deepcopy(mark.route_basis), "thread_preparation": _thread_payload(preparation)}
+            await session.flush()
+            return self._thread_preparation(mark, row)
+
+    async def commit_thread_mapping(self, captured: BotLink, preparation: ThreadPreparation, *, thread_id: str, endpoint_id: str, check_live_owner: LiveOwnerCheck, check_attempt_current: Callable[[], bool]) -> bool:
+        """Compare the original mapping and atomically record this exact outcome."""
+        if not isinstance(preparation, ThreadPreparation) or not _valid_thread_id(thread_id):
+            return False
+        try:
+            async with self._owner_writer(captured.owner_user_id) as session:
+                row, mark = await self._thread_context(session, captured, preparation.origin)
+                saved = self._thread_preparation(mark, row)
+                supplied, persisted = _thread_payload(preparation), _thread_payload(saved)
+                for key in ("selected_thread_id", "mapping_id"):
+                    if supplied[key] is None:
+                        supplied[key] = persisted[key]
+                if not _thread_equal(supplied, persisted) or endpoint_id != saved.endpoint_id or thread_id not in ({saved.creation_id} if saved.purpose == "new" else {saved.creation_id, saved.expected_thread_id}):
+                    raise _ThreadPreparationStale
+                if saved.selected_thread_id is not None:
+                    await check_live_owner(row.owner_user_id, session)
+                    if row.health != "ok":
+                        raise _ThreadPreparationStale
+                    self._thread_attempt(check_attempt_current)
+                    return saved.selected_thread_id == thread_id
+                if mark.route_complete or mark.state == "interrupted" or mark.thread_id is not None:
+                    raise _ThreadPreparationStale
+                mapping = await self._thread_mapping(session, row)
+                if (mapping.id if mapping else None, mapping.thread_id if mapping else None) != (saved.expected_mapping_id, saved.expected_thread_id):
+                    raise _ThreadPreparationStale
+                await check_live_owner(row.owner_user_id, session)
+                if row.health != "ok":
+                    raise _ThreadPreparationStale
+                self._thread_attempt(check_attempt_current)
+                natural_key = (ChannelConversationRow.connection_id == row.connection_id, ChannelConversationRow.external_conversation_id == str(row.chat_id), ChannelConversationRow.external_topic_id == "")
+                if mapping is not None and mapping.thread_id == thread_id:
+                    mapping_id = mapping.id
+                elif mapping is not None:
+                    mapping_id = await session.scalar(
+                        update(ChannelConversationRow)
+                        .where(
+                            *natural_key,
+                            ChannelConversationRow.id == saved.expected_mapping_id,
+                            ChannelConversationRow.thread_id == saved.expected_thread_id,
+                            ChannelConversationRow.owner_user_id == row.owner_user_id,
+                            ChannelConversationRow.provider == "telegram",
+                        )
+                        .values(id=uuid4().hex, thread_id=thread_id, updated_at=_now())
+                        .returning(ChannelConversationRow.id)
+                        .execution_options(synchronize_session=False)
+                    )
+                else:
+                    mapping_id = await session.scalar(
+                        _insert(session)(ChannelConversationRow)
+                        .values(id=uuid4().hex, connection_id=row.connection_id, owner_user_id=row.owner_user_id, provider="telegram", external_conversation_id=str(row.chat_id), external_topic_id="", thread_id=thread_id)
+                        .on_conflict_do_nothing(index_elements=["connection_id", "external_conversation_id", "external_topic_id"])
+                        .returning(ChannelConversationRow.id)
+                    )
+                if mapping_id is None:
+                    raise _ThreadPreparationStale
+                self._thread_attempt(check_attempt_current)
+                mark.route_basis = {**deepcopy(mark.route_basis), "thread_preparation": {**persisted, "selected_thread_id": thread_id, "mapping_id": mapping_id}}
+                await session.flush()
+                return True
+        except _ThreadPreparationStale:
+            return False
+
     async def hold_if_current(self, link_id: str, *, token_revision: int, binding_generation: int) -> BotLink | None:
         """Hold the freshly refused owner's exact captured binding and retire its work.
 
@@ -859,7 +1099,17 @@ class BotLinkRepository:
             await session.flush()
             return True
 
-    async def set_health(self, link_id: str, cause: str | None, *, holds: bool, transition: dict | None = None, expected_token_revision: int | None = None) -> BotLink | None:
+    async def set_health(
+        self,
+        link_id: str,
+        cause: str | None,
+        *,
+        holds: bool,
+        transition: dict | None = None,
+        expected_token_revision: int | None = None,
+        captured_link: BotLink | None = None,
+        check_attempt_current: Callable[[], bool] | None = None,
+    ) -> BotLink | None:
         """Apply cause precedence and optional absolute conflict metadata.
 
         The poller owns its probe-duration constant and supplies all three
@@ -901,6 +1151,21 @@ class BotLinkRepository:
                     raise ValueError("link-not-found")
                 if expected_token_revision is not None and row.token_revision != expected_token_revision:
                     return None
+                if captured_link is not None:
+                    if (
+                        row.id != captured_link.id
+                        or row.state != "connected"
+                        or captured_link.state != "connected"
+                        or not _thread_equal(_thread_scope(row), _thread_scope(captured_link))
+                        or row.token_revision != captured_link.token_revision
+                    ):
+                        return None
+                    account = await session.get(TelegramAccountRow, row.telegram_user_id, with_for_update=True, populate_existing=True)
+                    binding = await self._current_bound_connection(session, row)
+                    if account is None or account.owner_user_id != row.owner_user_id or binding is None or binding.status != "connected":
+                        return None
+                if check_attempt_current is not None and check_attempt_current() is not True:
+                    return None
                 cached = self._health_causes.get(link_id) if self._health_revisions.get(link_id) == row.token_revision else None
                 causes = set(cached if cached is not None else {row.health} if row.health != "ok" else set())
                 if cause is not None:
@@ -921,6 +1186,8 @@ class BotLinkRepository:
                     row.conflict_since = row.probe_until = row.webhook_host = None
                 await session.flush()
                 result = _snapshot(row)
+            if check_attempt_current is not None and check_attempt_current() is not True:
+                return None
             self._health_causes[link_id] = causes
             self._health_revisions[link_id] = result.token_revision
             return result

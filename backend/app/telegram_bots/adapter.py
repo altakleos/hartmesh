@@ -1061,20 +1061,24 @@ class TelegramBotChannel(TelegramChannel):
             raise SourceUnavailable(source_ref={"key": "file.out_failed", "values": {"file": name}})
         if part["kind"] not in {"text", "edit", "card"}:
             raise PermanentDeliveryError("unsupported-source")
+        button = part.get("url_button")
+        if button is not None:
+            from app.telegram_bots.producer import url_button_label, validate_url_button
+
+            if part["kind"] != "text":
+                raise PermanentDeliveryError("invalid-url-button")
+            button = validate_url_button(button)
+            button_label = url_button_label(part["source_ref"], button)
         text = await self._render_source(saved.link, part["source_ref"], plain=part.get("plain_fallback", False))
         settings = await self._services.settings.get(saved.link.owner_user_id)
         if settings is None:
             raise PermanentDeliveryError("missing-settings")
         markup = None
-        button = part.get("url_button")
         if button is not None:
-            from app.telegram_bots.producer import validate_url_button
-
-            button = validate_url_button(button)
             if part.get("url_button_fallback"):
                 text += "\n" + (button["url"] if part.get("plain_fallback") else escape(button["url"]))
             else:
-                markup = InlineKeyboardMarkup([[InlineKeyboardButton(render_plain("label.open_memory", settings.locale), url=button["url"])]])
+                markup = InlineKeyboardMarkup([[InlineKeyboardButton(render_plain(button_label, settings.locale), url=button["url"])]])
         silent = saved.item.silent or bool(part.get("silent", False)) or await asyncio.to_thread(silent_now, saved.link, settings, self._services.config, self._now())
         current = await self._services.outbox.capture_sending_part(**capture)
         if current.part != part or current.item.message_thread_id != saved.item.message_thread_id:
