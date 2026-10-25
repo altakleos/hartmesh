@@ -27,6 +27,15 @@ one Gateway deadline and exact original-record association. Managed-bot activati
 remains separate. See
 [output evidence](../../../../docs/RUN_OUTPUT_EVIDENCE.md).
 
+Capture intent2 adds [terminal inventory](../../../../docs/RUN_OUTPUT_INVENTORY.md)
+while receipts stay1. Seal status and both proofs in one CAS; no half-pair or
+terminal retrofit. The actual assembly profile is independent of observer hashes.
+Collect raw current presentation fragments and positive same-walk root facts;
+historical state and provider tags supply no current handover. Cleanup invalidates
+prior scans. Late cancellation uses the original-record host continuation and
+exact completed action; a DTO cannot attest cleanup. Strict reads audit both
+sources, reread both proofs/scope/status and refresh authority before ack.
+
 SQL terminal writes use `runs/terminal.py` and `RunRepository.finalize_owned`.
 Read committed state before recovery; CAS the original change sequence, owner,
 source status, cancellation action and current lease. Never recreate missing rows

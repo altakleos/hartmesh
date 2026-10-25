@@ -579,7 +579,7 @@ async def test_channel_copy_added_capture_uses_the_detached_intent_for_preflight
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("value", [{}, {"version": True}, {"version": 2}, {"version": 1, "extra": True}])
+@pytest.mark.parametrize("value", [{}, {"version": True}, {"version": 3}, {"version": 1, "extra": True}])
 async def test_internal_model_copy_cannot_bypass_capture_validation(admission, value):
     e = admission
     body = ordinary().model_copy(update={"output_capture": value})

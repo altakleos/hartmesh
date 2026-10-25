@@ -195,6 +195,7 @@ async def capture_workspace_snapshot(
     include_text: bool = True,
     extra_excluded_dir_names: frozenset[str] | None = None,
     outputs_only: bool = False,
+    observe_roots: bool = False,
 ) -> WorkspaceSnapshot:
     from deerflow.runtime.runs.capture_io import current_capture_io_owner, run_capture_io
     from deerflow.spaces.chat_paths import ChatStoragePaths
@@ -206,7 +207,11 @@ async def capture_workspace_snapshot(
     if isinstance(paths, ChatStoragePaths):
         from deerflow.spaces.chat_snapshots import capture_chat_snapshot
 
-        return await run_capture_io(lambda: capture_chat_snapshot(paths, thread_id, user_id=user_id, limits=limits, include_text=include_text, outputs_only=outputs_only, extra_excluded_dir_names=extra_excluded_dir_names))
+        return await run_capture_io(
+            lambda: capture_chat_snapshot(
+                paths, thread_id, user_id=user_id, limits=limits, include_text=include_text, outputs_only=outputs_only, extra_excluded_dir_names=extra_excluded_dir_names, **({"observe_roots": True} if observe_roots else {})
+            )
+        )
     # `_prepare_capture` creates the text cache dir inside the worker, so the
     # handoff must be cancellation-safe: if the run is cancelled after mkdtemp
     # but before we receive the path, the shielded worker still finishes and we
@@ -257,6 +262,7 @@ async def capture_workspace_snapshot(
                 include_text=include_text,
                 text_cache_dir=text_cache_dir,
                 extra_excluded_dir_names=extra_excluded_dir_names,
+                **({"observe_roots": True} if observe_roots else {}),
             )
         )
     )
@@ -294,6 +300,7 @@ async def capture_output_snapshot(
     user_id: str | None = None,
     limits: WorkspaceChangeLimits | None = None,
     extra_excluded_dir_names: frozenset[str] | None = None,
+    observe_roots: bool = False,
 ) -> WorkspaceSnapshot:
     """Capture delivery evidence with its own budget; never scan workspace."""
     return await capture_workspace_snapshot(
@@ -303,6 +310,7 @@ async def capture_output_snapshot(
         include_text=False,
         outputs_only=True,
         extra_excluded_dir_names=extra_excluded_dir_names,
+        **({"observe_roots": True} if observe_roots else {}),
     )
 
 

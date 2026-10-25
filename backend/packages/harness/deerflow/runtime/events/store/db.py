@@ -28,6 +28,10 @@ logger = logging.getLogger(__name__)
 
 class DbRunEventStore(RunEventStore):
     @property
+    def supports_durable_output_inventory(self) -> bool:
+        return True
+
+    @property
     def supports_durable_output_evidence(self) -> bool:
         return True
 

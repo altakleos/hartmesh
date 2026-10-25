@@ -62,6 +62,11 @@ class RunEventStore(abc.ABC):
         """Only explicitly qualified durable sources may attest output evidence."""
         return False
 
+    @property
+    def supports_durable_output_inventory(self) -> bool:
+        """Only qualified durable singleton sources may attest terminal inventory."""
+        return False
+
     @abc.abstractmethod
     async def put(
         self,

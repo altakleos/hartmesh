@@ -55,10 +55,19 @@ class FileSnapshot:
 
 
 @dataclass(frozen=True)
+class WorkspaceRootObservation:
+    name: str
+    virtual_prefix: str
+    state: Literal["opened", "missing", "unavailable"]
+
+
+@dataclass(frozen=True)
 class WorkspaceSnapshot:
     files: dict[str, FileSnapshot] = field(default_factory=dict)
     truncated: bool = False
     text_cache_dir: str | None = None
+    root_observations: tuple[WorkspaceRootObservation, ...] = ()
+    scan_excluded_dir_names: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)

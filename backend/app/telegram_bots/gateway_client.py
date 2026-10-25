@@ -111,7 +111,7 @@ def _extra_headers(headers, *, streaming=False):
         elif name == "x-deerflow-require-thread-binding":
             if value != "true":
                 raise ChannelExecutionProtocolError()
-        elif name == "x-deerflow-require-channel-execution":
+        elif name in {"x-deerflow-require-channel-execution", "x-deerflow-require-output-inventory"}:
             if value != "1":
                 raise ChannelExecutionProtocolError()
         elif name == "accept":
@@ -127,7 +127,7 @@ def _extra_headers(headers, *, streaming=False):
 
 
 def _response_headers(response):
-    return {key: value for key, value in response.headers.items() if key in {"content-type", "x-deerflow-channel-execution-version"}}
+    return {key: value for key, value in response.headers.items() if key in {"content-type", "x-deerflow-channel-execution-version", "x-deerflow-output-inventory-version"}}
 
 
 class _OwnedStream:

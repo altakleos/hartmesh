@@ -12,8 +12,11 @@ intent and disconnect policy before other request compatibility checks.
 
 ## Generic contract
 
-`runtime/runs/output.py` defines strict immutable version-1 capture intent and
-receipts. A receipt contains the exact raw owner, thread and run. Text evidence
+`runtime/runs/output.py` defines strict immutable capture intents and version-1
+receipts. Capture version 2 adds a separately versioned
+[terminal inventory](RUN_OUTPUT_INVENTORY.md), atomically sealed with that same
+receipt; receipt version 1 remains unchanged. A receipt contains the exact raw
+owner, thread and run. Text evidence
 also names a genuine assistant message, its positive durable event sequence and
 the SHA-256 of its exact UTF-8 text. Never trim, normalize or stringify the text.
 Message identities are opaque; never manufacture an assistant or human ID.
@@ -205,5 +208,5 @@ read boundaries enable reading independently sealed output. Managed-bot model
 execution and durable publication recovery remain separate work.
 
 No schema or configuration version changes are required: the receipt uses the
-existing run kwargs JSON. Schema head remains `0043_telegram_inbox_chat_scope`;
+existing run kwargs JSON. Schema head remains `0044_telegram_assistant_ids`;
 configuration remains version 55.

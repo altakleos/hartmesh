@@ -63,7 +63,7 @@
   "categories": {
     "trace": "Execution evidence that is excluded from message projections.",
     "message": "A candidate message projection. Server and frontend visibility filters still apply.",
-    "outputs": "Root graph completion output; not an authoritative run lifecycle status.",
+    "outputs": "Root graph completion or terminal inventory evidence; lifecycle authority remains the sealed run row.",
     "error": "Callback-observed run or chain failure evidence.",
     "middleware": "Middleware state-change audit evidence.",
     "context": "Identity-only evidence about effective hidden context.",
@@ -105,6 +105,33 @@
         "properties": {"status": {"const": "success"}},
         "additionalProperties": true
       }
+    },
+    {
+      "event_type": "run.output_inventory",
+      "category": "outputs",
+      "producer": "Captured worker persist_output_inventory after producer quiescence",
+      "content_description": "Versioned terminal presentation inventory. Complete items and incomplete/unsupported observed_items have disjoint meanings; the atomic run-row companion supplies authority. Full closed models and bounds live in runtime/runs/output_inventory.py and backend/docs/RUN_OUTPUT_INVENTORY.md.",
+      "content_schema": {
+        "type": "object",
+        "required": ["version", "profile", "owner_user_id", "thread_id", "run_id", "input_message_id", "output_receipt_sha256", "root_epoch", "coverage", "reason", "scan"],
+        "properties": {
+          "version": {"const": 1},
+          "profile": {"enum": ["terminal-presentation-v1", null]},
+          "owner_user_id": {"type": "string", "minLength": 1},
+          "thread_id": {"type": "string", "minLength": 1},
+          "run_id": {"type": "string", "minLength": 1},
+          "input_message_id": {"type": ["string", "null"]},
+          "output_receipt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "root_epoch": {"type": ["string", "null"]},
+          "coverage": {"enum": ["complete", "incomplete", "unsupported"]},
+          "reason": {"type": ["string", "null"]},
+          "scan": {"type": ["object", "null"]},
+          "items": {"type": "array"},
+          "observed_items": {"type": "array"}
+        },
+        "additionalProperties": true
+      },
+      "metadata_schema": {"type": "object", "additionalProperties": true}
     },
     {
       "event_type": "run.error",

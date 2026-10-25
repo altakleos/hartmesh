@@ -116,7 +116,7 @@ async def test_snapshot_preserves_exact_nonempty_raw_owner(output_store, owner):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("capture", [None, {"version": True}, {"version": 2}])
+@pytest.mark.parametrize("capture", [None, {"version": True}, {"version": 3}])
 async def test_snapshot_does_not_wait_for_a_non_capture_or_malformed_intent(output_store, capture):
     from deerflow.runtime.runs.output import OutputEvidenceError
 

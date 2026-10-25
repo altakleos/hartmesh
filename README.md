@@ -1392,6 +1392,10 @@ output API reports pending, complete or unavailable without executing another
 model. Source uncertainty preserves unresolved state. Ordinary runs keep their
 defaults, and managed-bot model activation remains deferred. See
 [durable output evidence](backend/docs/RUN_OUTPUT_EVIDENCE.md).
+Capture version 2 also seals a generic inventory of file references and structured
+terminal presentations. Authorized consumers can distinguish complete enumeration
+from an incomplete subset before publishing a reply. See the
+[terminal output inventory](backend/docs/RUN_OUTPUT_INVENTORY.md) contract.
 Captured runs also seal known startup failures and prestart cancellations.
 Lease-based recovery records an abandoned run as failed. Replacement requests
 refuse locally active or finishing captured work and captured work with a valid

@@ -11,7 +11,7 @@ def test_creating_request_accepts_explicit_output_capture():
     assert body.output_capture.model_dump() == {"version": 1}
 
 
-@pytest.mark.parametrize("version", [True, False, 1.0, "1", None, 0, 2])
+@pytest.mark.parametrize("version", [True, False, 1.0, "1", None, 0, 3])
 def test_capture_version_is_a_required_literal_integer(version):
     with pytest.raises(ValidationError) as failure:
         RunCreateRequest.model_validate({"output_capture": {"version": version}})

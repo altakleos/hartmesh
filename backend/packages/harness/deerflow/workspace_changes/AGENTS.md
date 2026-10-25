@@ -1,5 +1,10 @@
 # Workspace change evidence
 
+Inventory capture optionally returns exact same-walk root observations and frozen
+exclusions. Only actually opened before/final roots with complete enumeration
+prove empty output; missing roots and no-files adapters do not. Ordinary snapshot
+calls retain their defaults. Never add a preflight open or a second scanner.
+
 Native ordinary chats use `spaces/chat_snapshots.py`: refresh current User
 admission on the owning Gateway loop before and after scanning, and require the
 same role/root incarnation. Open roots, every walked directory and every regular

@@ -50,6 +50,7 @@ from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+from deerflow.agents.output_inventory_profile import TerminalPresentationProfile
 from deerflow.agents.runtime_scope import build_runtime_scope
 from deerflow.agents.task_continuity.tools import append_task_continuity_tools
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
@@ -102,6 +103,7 @@ class LeadAgentAssembly:
     graph: Any
     descriptor: Any
     effective_model: str | None = None
+    inventory_profile: TerminalPresentationProfile | None = None
 
 
 def unwrap_agent_graph(agent_result: Any) -> Any:
@@ -887,6 +889,158 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     return _assemble_lead_agent(config, app_config=app_config).graph
 
 
+# These are the terminal carriers the first-party collector understands. The
+# other allowed keys carry input, context or retained history; membership alone
+# does not establish that their live values are safe or unchanged.
+_PRESENTATION_STATE_KEYS = frozenset({"todos", "goal", "background_tasks", "structured_response"})
+_INVENTORY_STATE_KEYS = _PRESENTATION_STATE_KEYS | frozenset(
+    {
+        "messages",
+        "artifacts",
+        "jump_to",
+        "sandbox",
+        "thread_data",
+        "title",
+        "uploaded_files",
+        "viewed_images",
+        "promoted",
+        "delegations",
+        "skill_context",
+        "tool_artifacts",
+        "tool_artifact_processed",
+        "task_notes",
+        "task_history",
+        "summary_text",
+    }
+)
+
+
+def _qualify_inventory_profile(graph, *, state_schema, middlewares, tools, mode, extensions):
+    """Qualify actual adapters, without observer descriptions or name claims.
+
+    Tool effects outside standard ToolMessage/Command terminal carriers are not
+    covered by this profile. Unknown middleware, schemas and tool adapters stay
+    ordinary-compatible, but cannot establish an inventory capture profile.
+    """
+    from langchain_core.tools import StructuredTool
+    from langgraph.graph.state import CompiledStateGraph
+
+    if type(graph) is not CompiledStateGraph or state_schema is not get_thread_state_schema(mode):
+        return None
+    if extensions.middleware_contributors or extensions.plugins:
+        return None
+    if any(type(tool) is not StructuredTool for tool in tools):
+        return None
+
+    from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
+    from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+    from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+    from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+    from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
+    from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
+    from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
+    from deerflow.agents.middlewares.mcp_routing_middleware import McpRoutingMiddleware
+    from deerflow.agents.middlewares.pii_redaction_middleware import PiiRedactionMiddleware
+    from deerflow.agents.middlewares.provider_refusal_middleware import ProviderRefusalMiddleware
+    from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+    from deerflow.agents.middlewares.runtime_delivery_middleware import RuntimeDeliveryMiddleware
+    from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
+    from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
+    from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
+    from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
+    from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+    from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
+    from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware
+    from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
+    from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+    from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
+    from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
+    from deerflow.agents.output_inventory_profile import _issue_terminal_presentation_profile
+    from deerflow.agents.thread_state import adapt_state_schema_for_mode
+    from deerflow.guardrails.middleware import GuardrailMiddleware
+    from deerflow.sandbox.middleware import SandboxMiddleware
+
+    qualified_types = {
+        ArtifactCaptureMiddleware,
+        ArtifactResolutionMiddleware,
+        ClarificationMiddleware,
+        DanglingToolCallMiddleware,
+        DeerFlowSummarizationMiddleware,
+        DeferredToolFilterMiddleware,
+        DeferredToolPromotionAuditMiddleware,
+        DurableContextMiddleware,
+        DynamicContextMiddleware,
+        GuardrailMiddleware,
+        InputSanitizationMiddleware,
+        KnowledgeScopeMiddleware,
+        LLMErrorHandlingMiddleware,
+        LoopDetectionMiddleware,
+        McpRoutingMiddleware,
+        MemoryMiddleware,
+        ModelLengthFinishReasonMiddleware,
+        PiiRedactionMiddleware,
+        ProviderRefusalMiddleware,
+        ReadBeforeWriteMiddleware,
+        RuntimeDeliveryMiddleware,
+        SafetyFinishReasonMiddleware,
+        SandboxAuditMiddleware,
+        SandboxMiddleware,
+        SkillActivationMiddleware,
+        SkillToolPolicyMiddleware,
+        SubagentLimitMiddleware,
+        SystemMessageCoalescingMiddleware,
+        TerminalResponseMiddleware,
+        ThreadDataMiddleware,
+        TitleMiddleware,
+        TodoMiddleware,
+        TokenBudgetMiddleware,
+        TokenUsageMiddleware,
+        ToolErrorHandlingMiddleware,
+        ToolOutputBudgetMiddleware,
+        ToolProgressMiddleware,
+        ToolReceiptMiddleware,
+        ToolResultSanitizationMiddleware,
+        UploadsMiddleware,
+        ViewImageMiddleware,
+    }
+    state_keys = set(state_schema.__annotations__)
+    middleware_tools = []
+    runtime_delivery = None
+    for item in middlewares:
+        if type(item) not in qualified_types:
+            return None
+        contributed_tools = getattr(item, "tools", ())
+        if not isinstance(contributed_tools, (list, tuple)):
+            return None
+        if any(type(tool) is not StructuredTool for tool in contributed_tools):
+            return None
+        middleware_tools.extend(contributed_tools)
+        expected = adapt_state_schema_for_mode(type(item).state_schema, mode)
+        if item.state_schema is not expected:
+            return None
+        state_keys.update(expected.__annotations__)
+        if type(item) is RuntimeDeliveryMiddleware:
+            if runtime_delivery is not None:
+                return None
+            runtime_delivery = item
+    if not state_keys <= _INVENTORY_STATE_KEYS:
+        return None
+    return _issue_terminal_presentation_profile(
+        graph,
+        state_schema=state_schema,
+        middlewares=tuple(middlewares),
+        tools=tuple(tools),
+        middleware_tools=tuple(middleware_tools),
+        runtime_delivery=runtime_delivery,
+        state_keys=frozenset(state_keys),
+        presentation_state_keys=_PRESENTATION_STATE_KEYS.intersection(state_keys),
+    )
+
+
 def _complete_assembly(
     *,
     config: RunnableConfig,
@@ -905,6 +1059,9 @@ def _complete_assembly(
     deferred_names: frozenset[str],
     enabled_skills: list[object],
     effective_policies: dict[str, object],
+    inventory_state_schema: type | None = None,
+    inventory_middlewares: list[object] | None = None,
+    inventory_mode: str = "full",
 ) -> LeadAgentAssembly:
     """Describe the finished graph and hand the description to observers.
 
@@ -920,8 +1077,18 @@ def _complete_assembly(
     from deerflow.extensions import get_agent_build_extensions
 
     resolved_extensions = get_agent_build_extensions()
+    inventory_profile = None
+    if inventory_state_schema is not None and inventory_middlewares is not None:
+        inventory_profile = _qualify_inventory_profile(
+            graph,
+            state_schema=inventory_state_schema,
+            middlewares=inventory_middlewares,
+            tools=tools,
+            mode=inventory_mode,
+            extensions=resolved_extensions,
+        )
     if not resolved_extensions.has_agent_assembly_observers:
-        return LeadAgentAssembly(graph=graph, descriptor=None, effective_model=effective_model)
+        return LeadAgentAssembly(graph=graph, descriptor=None, effective_model=effective_model, inventory_profile=inventory_profile)
 
     from deerflow.agents.assembly_descriptor import build_assembly_descriptor
     from deerflow.extensions.notify import notify_agent_assembled
@@ -955,7 +1122,7 @@ def _complete_assembly(
         effective_policies=resolved_policies,
     )
     notify_agent_assembled(descriptor, resolved_extensions)
-    return LeadAgentAssembly(graph=graph, descriptor=descriptor, effective_model=effective_model)
+    return LeadAgentAssembly(graph=graph, descriptor=descriptor, effective_model=effective_model, inventory_profile=inventory_profile)
 
 
 def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> LeadAgentAssembly:
@@ -1275,17 +1442,22 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
             runtime_scope=build_runtime_scope(tools=authorized_tools, memory_enabled=memory_enabled and resolved_app_config.memory.enabled),
             bash_available=has_bash_tool(authorized_tools),
         )
+        graph_middlewares = normalize_middleware_state_schemas(middlewares, mode)
+        state_schema = get_thread_state_schema(mode)
         graph = create_agent(
             model=chat_model,
             tools=final_tools,
-            middleware=normalize_middleware_state_schemas(middlewares, mode),
+            middleware=graph_middlewares,
             system_prompt=system_prompt,
-            state_schema=get_thread_state_schema(mode),
+            state_schema=state_schema,
             context_schema=dict,
         )
         return _complete_assembly(
             config=config,
             graph=graph,
+            inventory_state_schema=state_schema,
+            inventory_middlewares=graph_middlewares,
+            inventory_mode=mode,
             namespace="deerflow",
             agent_name="bootstrap",
             requested_model=requested_model_name or agent_model_name,
@@ -1427,17 +1599,22 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         adopted_soul=instance_execution.definition.soul if instance_execution else None,
         runtime_scope=build_runtime_scope(execution=instance_execution, tools=authorized_tools, memory_enabled=memory_enabled and resolved_app_config.memory.enabled),
     )
+    graph_middlewares = normalize_middleware_state_schemas(middlewares, mode)
+    state_schema = get_thread_state_schema(mode)
     graph = create_agent(
         model=chat_model,
         tools=final_tools,
-        middleware=normalize_middleware_state_schemas(middlewares, mode),
+        middleware=graph_middlewares,
         system_prompt=system_prompt,
-        state_schema=get_thread_state_schema(mode),
+        state_schema=state_schema,
         context_schema=dict,
     )
     return _complete_assembly(
         config=config,
         graph=graph,
+        inventory_state_schema=state_schema,
+        inventory_middlewares=graph_middlewares,
+        inventory_mode=mode,
         namespace="deerflow",
         agent_name=agent_name or "lead-agent",
         requested_model=requested_model_name or agent_model_name,

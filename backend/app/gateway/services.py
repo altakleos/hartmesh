@@ -149,6 +149,8 @@ _TERMINAL_RUN_STATUSES = {
 
 _THREAD_METADATA_SETUP_TIMEOUT_SECONDS = 5.0
 
+_OUTPUT_PROOF_CLAIM_KEYS = frozenset({"output_evidence", "inventory_evidence", "output_inventory_profile"})
+
 _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
     frozenset(
         {
@@ -177,6 +179,7 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
         }
     )
     | PROVENANCE_KEYS
+    | _OUTPUT_PROOF_CLAIM_KEYS
 )
 
 
@@ -459,8 +462,9 @@ def _normalize_input_messages(
         # A publication marker is stamped only after validated channel
         # admission. Even trusted internal callers cannot bring one through
         # the ordinary message input or reuse an old anchor's marker.
-        if CHANNEL_TURN_ID_KEY in message.additional_kwargs:
-            message = message.model_copy(update={"additional_kwargs": {key: value for key, value in message.additional_kwargs.items() if key != CHANNEL_TURN_ID_KEY}})
+        reserved = _OUTPUT_PROOF_CLAIM_KEYS | {CHANNEL_TURN_ID_KEY}
+        if reserved & message.additional_kwargs.keys():
+            message = message.model_copy(update={"additional_kwargs": {key: value for key, value in message.additional_kwargs.items() if key not in reserved}})
         if not trusted_internal:
             if isinstance(message, SystemMessage) or (isinstance(message, ChatMessage) and message.role.strip().lower() in {"system", "developer"}):
                 raise HTTPException(
@@ -621,6 +625,22 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
 # ``interaction_mode`` and ``non_interactive`` control clarification availability;
 # arbitrary HTTP/IM clients must not be able to force autonomous execution.
 _CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"interaction_mode", "non_interactive"})
+
+
+def _without_output_proof_claims(value):
+    if not isinstance(value, dict):
+        return value
+    return {key: item for key, item in value.items() if key not in _OUTPUT_PROOF_CLAIM_KEYS}
+
+
+def _without_output_proof_config(value):
+    result = _without_output_proof_claims(value)
+    if isinstance(result, dict):
+        for section in ("context", "configurable", "metadata"):
+            if section in result:
+                result[section] = _without_output_proof_claims(result[section])
+    return result
+
 
 # Server-owned authorization and sandbox lifecycle identity fields. These must
 # never be accepted from client-supplied ``body.config.context`` or
@@ -1002,6 +1022,8 @@ def build_run_config(
     # limit via `subagents.max_turns`. Do not conflate this budget with the
     # general-purpose subagent's max_turns.
     default_recursion_limit, max_recursion_limit = _resolve_gateway_recursion_limits()
+    request_config = _without_output_proof_config(request_config)
+    metadata = _without_output_proof_claims(metadata)
     config: dict[str, Any] = {"recursion_limit": default_recursion_limit}
     if request_config:
         # LangGraph >= 0.6.0 introduced ``context`` as the preferred way to
@@ -1354,6 +1376,15 @@ def build_checkpoint_state_accessor(
     return accessor, config
 
 
+def _load_checkpoint_read_inspection():
+    # The router dependency chain may cold-import providers doing native work.
+    # Resolve the function on the existing assembly pool; execute its async
+    # authorization on this owning loop below.
+    from app.gateway.agent_conversations import inspection_for_read
+
+    return inspection_for_read
+
+
 async def abuild_checkpoint_state_accessor(
     request: Request,
     *,
@@ -1373,8 +1404,7 @@ async def abuild_checkpoint_state_accessor(
     identity changed while it waited rebuilds instead of reusing the
     winner's graph.
     """
-    from app.gateway.agent_conversations import inspection_for_read
-
+    inspection_for_read = await run_assembly(_load_checkpoint_read_inspection)
     inspection = await inspection_for_read(request, thread_id)
     return await run_assembly(
         build_checkpoint_state_accessor,
@@ -1730,7 +1760,11 @@ def _output_capture_preflight(value, *, run_manager, event_store):
     except ValueError:
         raise HTTPException(422, "Unsupported output capture request") from None
     try:
-        if run_manager.supports_output_receipts is True and getattr(event_store, "supports_durable_output_evidence", False) is True:
+        if (
+            run_manager.supports_output_receipts is True
+            and getattr(event_store, "supports_durable_output_evidence", False) is True
+            and (intent.version == 1 or getattr(run_manager, "supports_output_inventory", False) is True and getattr(event_store, "supports_durable_output_inventory", False) is True)
+        ):
             return intent
     except Exception:
         pass
@@ -2027,7 +2061,7 @@ async def _start_run(
         # without this the run record is the one surface that persists a forged
         # id, disagreeing with the response header, the logs, and the
         # checkpoint. The caller's own metadata keys are preserved.
-        run_metadata = dict(_without_channel_marker(body.metadata)) if isinstance(body.metadata, dict) else {}
+        run_metadata = dict(_without_output_proof_claims(_without_channel_marker(body.metadata))) if isinstance(body.metadata, dict) else {}
         for key in ("agent_work_id", "agent_work_attempt_id"):
             run_metadata.pop(key, None)
         if work_attempt is not None:
@@ -2036,7 +2070,7 @@ async def _start_run(
         if publication is not None:
             run_metadata[CHANNEL_TURN_ID_KEY] = publication.publication_id
 
-        request_config = dict(body.config) if isinstance(body.config, dict) else body.config
+        request_config = _without_output_proof_config(body.config)
         if isinstance(request_config, dict) and "metadata" in request_config:
             request_config["metadata"] = _without_channel_marker(request_config["metadata"])
         config = build_run_config(thread_id, request_config, run_metadata, assistant_id=body.assistant_id)

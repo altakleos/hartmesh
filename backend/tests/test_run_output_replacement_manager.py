@@ -170,7 +170,7 @@ async def test_malformed_capture_does_not_abandon_an_unawaited_admission(output_
     monkeypatch.setattr(manager, "_admit_thread_operation", observed)
     try:
         with pytest.raises(OutputEvidenceError):
-            await manager.create_or_reject(uuid4().hex, user_id=RAW_OWNER, kwargs={"output_capture": {"version": 2}})
+            await manager.create_or_reject(uuid4().hex, user_id=RAW_OWNER, kwargs={"output_capture": {"version": 3}})
         assert all(inspect.getcoroutinestate(coroutine) == inspect.CORO_CLOSED for coroutine in coroutines)
     finally:
         for coroutine in coroutines:

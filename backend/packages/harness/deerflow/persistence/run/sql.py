@@ -36,9 +36,20 @@ def _lease_expired_or_null(lease_col, cutoff: datetime):
     return or_(lease_col.is_(None), lease_col < cutoff)
 
 
+def _without_inventory_capture():
+    """Legacy terminal writers cannot bypass the opted-in atomic pair."""
+    return func.coalesce(RunRow.kwargs_json["output_capture"]["version"].as_integer(), 0) != 2
+
+
+def _captures_inventory(values):
+    intent = values.get("output_capture") if isinstance(values, dict) else None
+    return isinstance(intent, dict) and type(intent.get("version")) is int and intent["version"] == 2
+
+
 class RunRepository(RunStore):
     supports_terminal_recovery = True
     supports_output_receipts = True
+    supports_output_inventory = True
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
@@ -178,6 +189,11 @@ class RunRepository(RunStore):
         async with self._sf() as session:
             values["change_seq"] = await self._next_change_seq(session)
             row = await session.get(RunRow, run_id)
+            from deerflow.runtime.runs.output import OutputEvidenceError
+
+            if _captures_inventory(row.kwargs_json if row is not None else values["kwargs_json"]):
+                if row is None and status in {"success", "error", "timeout", "interrupted"} or row is not None and any(getattr(row, key) != values[key] for key in ("status", "kwargs_json", "user_id", "thread_id", "owner_worker_id")):
+                    raise OutputEvidenceError() from None
             if row is None:
                 session.add(RunRow(run_id=run_id, created_at=created, **values))
             else:
@@ -338,7 +354,7 @@ class RunRepository(RunStore):
             raise ValueError("Invalid terminal reason")
         return {"status": status, "error": error, "stop_reason": stop_reason, "updated_at": datetime.now(UTC)}
 
-    async def finalize_owned(self, run_id, *, owner_worker_id, expected_change_seq, expected_status, expected_cancel_action, require_lease, status, error=None, stop_reason=None, output_receipt=None) -> bool:
+    async def finalize_owned(self, run_id, *, owner_worker_id, expected_change_seq, expected_status, expected_cancel_action, require_lease, status, error=None, stop_reason=None, output_receipt=None, inventory_evidence=None) -> bool:
         """Own a requested seal through native SQL work and transaction exit."""
         fields = {
             "owner_worker_id": owner_worker_id,
@@ -350,6 +366,8 @@ class RunRepository(RunStore):
             "error": error,
             "stop_reason": stop_reason,
         }
+        if inventory_evidence is not None:
+            fields["inventory_evidence"] = inventory_evidence
         if output_receipt is not None:
             from deerflow.runtime.runs.output import validate_receipt_status
             from deerflow.runtime.runs.terminal import TerminalWriteFailure, exception_classification
@@ -361,7 +379,7 @@ class RunRepository(RunStore):
             return await await_drained(self._finalize_owned(run_id, **fields))
         return await self._finalize_owned(run_id, **fields)
 
-    async def _finalize_owned(self, run_id, *, owner_worker_id, expected_change_seq, expected_status, expected_cancel_action, require_lease, status, error=None, stop_reason=None, output_receipt=None) -> bool:
+    async def _finalize_owned(self, run_id, *, owner_worker_id, expected_change_seq, expected_status, expected_cancel_action, require_lease, status, error=None, stop_reason=None, output_receipt=None, inventory_evidence=None) -> bool:
         """CAS finalization, with explicit pre-commit versus ambiguous failure phases."""
         from deerflow.runtime.runs.output import OUTPUT_EVIDENCE_KEY, OutputEvidenceError, capture_from_kwargs, receipt_from_kwargs, receipt_to_dict
         from deerflow.runtime.runs.terminal import TerminalWriteFailure, exception_classification
@@ -371,6 +389,8 @@ class RunRepository(RunStore):
             if expected_status not in {"pending", "running", "interrupted"} or not owner_worker_id or type(expected_change_seq) is not int:
                 raise ValueError("Invalid terminal fence")
             wanted = None
+            if inventory_evidence is not None and output_receipt is None:
+                raise OutputEvidenceError()
             if output_receipt is not None:
                 from deerflow.runtime.runs.output import validate_receipt_status
 
@@ -398,18 +418,44 @@ class RunRepository(RunStore):
                             and row.cancel_action is not None
                         ):
                             return False
+                        intent = capture_from_kwargs(row.kwargs_json)
+                        if intent.version == 2:
+                            from deerflow.runtime.runs.output_inventory import INVENTORY_EVIDENCE_KEY, inventory_evidence_from_kwargs, inventory_evidence_to_dict, validate_inventory_pair
+
+                            wanted, inventory_evidence = validate_inventory_pair(wanted, inventory_evidence, status=status)
+                            saved_inventory = inventory_evidence_from_kwargs(row.kwargs_json)
+                        elif inventory_evidence is not None:
+                            return False
+                        else:
+                            saved_inventory = None
                         saved = receipt_from_kwargs(row.kwargs_json)
+                        if intent.version == 2 and (saved is None) != (saved_inventory is None):
+                            return False
                         if saved is not None:
                             try:
                                 validate_receipt_status(saved, row.status)
+                                if intent.version == 2:
+                                    validate_inventory_pair(saved, saved_inventory, status=row.status)
                             except OutputEvidenceError:
                                 return False
                         if row.status in {"success", "error", "timeout", "interrupted"}:
-                            if not (row.status == "interrupted" and status == "error" and row.cancel_action == "rollback" and wanted.kind == "unavailable" and wanted.reason == "cancelled" and saved == wanted):
+                            if not (
+                                row.status == "interrupted"
+                                and status == "error"
+                                and row.cancel_action == "rollback"
+                                and wanted.kind == "unavailable"
+                                and wanted.reason == "cancelled"
+                                and saved == wanted
+                                and saved_inventory == inventory_evidence
+                            ):
                                 return False
                         elif saved is not None:
                             return False
+                        elif intent.version == 2 and not self._inventory_transition_authorized(inventory_evidence, wanted, expected_cancel_action, owner_worker_id, expected_change_seq, expected_status, status):
+                            return False
                         values["kwargs_json"] = {**deepcopy(row.kwargs_json), OUTPUT_EVIDENCE_KEY: receipt_to_dict(wanted)}
+                        if intent.version == 2:
+                            values["kwargs_json"][INVENTORY_EVIDENCE_KEY] = inventory_evidence_to_dict(inventory_evidence)
                     conditions = [
                         RunRow.run_id == run_id,
                         RunRow.owner_worker_id == owner_worker_id,
@@ -417,6 +463,8 @@ class RunRepository(RunStore):
                         RunRow.status == expected_status,
                         RunRow.cancel_action == expected_cancel_action,
                     ]
+                    if wanted is None:
+                        conditions.append(_without_inventory_capture())
                     if require_lease:
                         # PostgreSQL now() is frozen at transaction start. A
                         # writer waiting for a lock must use the current clock.
@@ -444,6 +492,36 @@ class RunRepository(RunStore):
         except Exception as exc:
             raise TerminalWriteFailure("unknown", exception_classification(exc)) from None
 
+    @staticmethod
+    def _inventory_transition_authorized(inventory, output, action, owner_worker_id, change_seq, status, terminal_status):
+        if inventory.kind == "event":
+            return True
+        from deerflow.runtime.runs.inventory_finalization import InventoryFinalizationAttempt, _current_inventory_authority
+
+        authority = _current_inventory_authority()
+        if inventory.reason == "prestart_not_enumerated":
+            return (
+                isinstance(authority, tuple)
+                and len(authority) == 4
+                and authority[0] == "prestart"
+                and authority[2:] == (output, inventory)
+                and authority[1].startup_phase.value == "closed"
+                and authority[1].prestart_outcome.reason == output.reason
+            )
+        return (
+            inventory.reason == "cancellation_after_inventory_not_enumerated"
+            and isinstance(authority, InventoryFinalizationAttempt)
+            and authority._decision is not None
+            and (owner_worker_id, change_seq, status) == authority._decision._basis[:3]
+            and authority._cleanup is not None
+            and authority._cleanup.action == authority._decision.action
+            and terminal_status == ("interrupted" if authority._cleanup.action == "interrupt" else "error")
+            and authority._action_bound
+            and action == authority._action_basis
+            and authority._output == output
+            and authority._inventory == inventory
+        )
+
     async def update_status(self, run_id, status, *, error=None, stop_reason=None) -> bool:
         values: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
         if error is not None:
@@ -457,7 +535,10 @@ class RunRepository(RunStore):
         # completed run) cannot be overwritten by a late writer.
         async with self._sf() as session:
             values["change_seq"] = await self._next_change_seq(session)
-            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status.in_(("pending", "running", "interrupted"))).values(**values))
+            conditions = [RunRow.run_id == run_id, RunRow.status.in_(("pending", "running", "interrupted"))]
+            if status in {"success", "error", "timeout", "interrupted"}:
+                conditions.append(_without_inventory_capture())
+            result = await session.execute(update(RunRow).where(*conditions).values(**values))
             await session.commit()
             return result.rowcount != 0
 
@@ -686,6 +767,8 @@ class RunRepository(RunStore):
         async with self._sf() as session:
             values["change_seq"] = await self._next_change_seq(session)
             conditions = [RunRow.run_id == run_id, RunRow.status.in_(tuple(allowed_sources))]
+            if expected_owner_worker_id is None:
+                conditions.append(_without_inventory_capture())
             if expected_owner_worker_id is not None:
                 # The worker already confirmed terminal persistence. Completion
                 # is metadata-only and cannot recreate or re-terminalize a row.
@@ -926,6 +1009,7 @@ class RunRepository(RunStore):
                     RunRow.run_id == run_id,
                     RunRow.status.in_(("pending", "running")),
                     RunRow.cancel_action.is_(None),
+                    _without_inventory_capture(),
                 )
                 .values(**values)
                 .returning(RunRow.run_id)
@@ -955,7 +1039,7 @@ class RunRepository(RunStore):
         return await await_drained(self._claim_for_takeover_owned(run_id, grace_seconds=grace_seconds, error=error, stop_reason=stop_reason))
 
     @staticmethod
-    def _failed_capture_kwargs(row: RunRow) -> dict[str, Any] | None:
+    def _failed_capture_kwargs(row: RunRow, *, inventory_reason: str) -> dict[str, Any] | None:
         """Build a lost-owner seal from the locked original row, without I/O."""
         from deerflow.runtime.runs.output import OUTPUT_CAPTURE_KEY, OUTPUT_EVIDENCE_KEY, OutputEvidenceError, UnavailableOutputReceipt, capture_from_kwargs, receipt_from_kwargs
 
@@ -965,13 +1049,20 @@ class RunRepository(RunStore):
         if OUTPUT_CAPTURE_KEY not in values:
             return None
         try:
-            capture_from_kwargs(values)
+            intent = capture_from_kwargs(values)
             if row.operation_kind != "run" or row.status not in {"pending", "running"} or receipt_from_kwargs(values) is not None:
                 raise OutputEvidenceError()
             # A cancel_action is only a request. Expiry cannot attest that the
             # old execution performed cancellation, rollback or tool cleanup.
             receipt = UnavailableOutputReceipt(version=1, kind="unavailable", owner_user_id=row.user_id, thread_id=row.thread_id, run_id=row.run_id, input_message_id=None, reason="failed")
-            return {**deepcopy(values), OUTPUT_EVIDENCE_KEY: receipt.model_dump(mode="json")}
+            result = {**deepcopy(values), OUTPUT_EVIDENCE_KEY: receipt.model_dump(mode="json")}
+            if intent.version == 2:
+                from deerflow.runtime.runs.output_inventory import INVENTORY_EVIDENCE_KEY, build_unavailable_inventory_evidence, inventory_evidence_from_kwargs, inventory_evidence_to_dict
+
+                if inventory_evidence_from_kwargs(values) is not None:
+                    raise OutputEvidenceError()
+                result[INVENTORY_EVIDENCE_KEY] = inventory_evidence_to_dict(build_unavailable_inventory_evidence(receipt, status="error", reason=inventory_reason))
+            return result
         except Exception:
             raise OutputEvidenceError() from None
 
@@ -988,7 +1079,7 @@ class RunRepository(RunStore):
             row = await session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update())
             if row is None or row.status not in {"pending", "running"}:
                 return False
-            failed_kwargs = self._failed_capture_kwargs(row)
+            failed_kwargs = self._failed_capture_kwargs(row, inventory_reason="lease_takeover_not_enumerated")
             if failed_kwargs is not None:
                 values["kwargs_json"] = failed_kwargs
             cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
@@ -1150,7 +1241,7 @@ class RunRepository(RunStore):
                 )
                 result = await session.execute(stmt)
                 for row in result.scalars():
-                    failed_kwargs = self._failed_capture_kwargs(row)
+                    failed_kwargs = self._failed_capture_kwargs(row, inventory_reason="replacement_not_enumerated")
                     lease_expired = False
                     if row.lease_expires_at is not None:
                         # SQLite drops tzinfo on read despite
