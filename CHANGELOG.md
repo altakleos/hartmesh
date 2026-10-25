@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Correlated channel execution foundation
+
+Add a shared execution capability with a captured human owner, conversation,
+publication and AI employee target. The Gateway stamps an admitted visible human
+message and persists a versioned receipt; replay requires the same receipt and
+request. Strict run/message reads acknowledge supported, authorized lookups and
+return 503 when storage or proof is unavailable. Ordinary reads keep their defaults.
+The owned client retains dispatched work and reads while new-run admission closes.
+
+No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
+remains version 55. Durable model-result publication and ordinary managed-bot
+conversation activation remain deferred.
+
 ### Telegram conversation preparation
 
 Prepare owner-scoped conversations with durable thread-creation identities,

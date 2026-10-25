@@ -15,6 +15,7 @@ import re
 import threading
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -27,6 +28,8 @@ from langgraph.types import Command
 
 from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
 from app.gateway.authz import require_cancel_permission_if
+from app.gateway.channel_execution import CHANNEL_TURN_ID_KEY, ChannelExecutionProofError, ChannelExecutionReceipt, ChannelExecutionRequest, receipt_from_run_kwargs
+from app.gateway.channel_execution_reads import channel_lookup_unavailable, live_channel_human
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import (
     INTERNAL_OWNER_USER_ID_HEADER_NAME,
@@ -100,7 +103,7 @@ from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
 from deerflow.utils.assembly_io import run_assembly
-from deerflow.utils.file_io import await_drained
+from deerflow.utils.file_io import await_drained, run_file_io
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -110,7 +113,7 @@ logger = logging.getLogger(__name__)
 class BusyThreadConflict(HTTPException):
     """A retryable run-manager admission conflict exposed as HTTP 409."""
 
-    def __init__(self, detail: str) -> None:
+    def __init__(self, detail: str | dict[str, str]) -> None:
         super().__init__(status_code=409, detail=detail)
 
 
@@ -147,6 +150,7 @@ _THREAD_METADATA_SETUP_TIMEOUT_SECONDS = 5.0
 _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
     frozenset(
         {
+            CHANNEL_TURN_ID_KEY,
             _DYNAMIC_CONTEXT_REMINDER_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
@@ -454,6 +458,11 @@ def _normalize_input_messages(
                 status_code=400,
                 detail=f"Invalid message at {location}[{index}]",
             ) from exc
+        # A publication marker is stamped only after validated channel
+        # admission. Even trusted internal callers cannot bring one through
+        # the ordinary message input or reuse an old anchor's marker.
+        if CHANNEL_TURN_ID_KEY in message.additional_kwargs:
+            message = message.model_copy(update={"additional_kwargs": {key: value for key, value in message.additional_kwargs.items() if key != CHANNEL_TURN_ID_KEY}})
         if not trusted_internal:
             if isinstance(message, SystemMessage) or (isinstance(message, ChatMessage) and message.role.strip().lower() in {"system", "developer"}):
                 raise HTTPException(
@@ -1707,6 +1716,65 @@ async def _validate_scope_thread_binding(
 # ---------------------------------------------------------------------------
 
 
+def _without_channel_marker(metadata):
+    if not isinstance(metadata, Mapping):
+        return metadata
+    return {key: value for key, value in metadata.items() if key != CHANNEL_TURN_ID_KEY}
+
+
+async def _channel_execution_preflight(body, thread_id, request, normalized_input, run_ctx, *, work_attempt):
+    """Admit the narrow initial-human contract before instance preparation."""
+    publication = getattr(body, "channel_execution", None)
+    if publication is None:
+        return None, None
+    try:
+        publication = ChannelExecutionRequest.model_validate(publication)
+    except ValueError:
+        raise HTTPException(422, "Unsupported channel execution request") from None
+    if getattr(request.state, "auth_source", None) != AUTH_SOURCE_INTERNAL or getattr(getattr(request.state, "user", None), "system_role", None) != INTERNAL_SYSTEM_ROLE:
+        raise HTTPException(403, "Channel execution requires a trusted internal caller")
+    config = getattr(body, "config", None) or {}
+    contexts = [getattr(body, "context", None), config.get("context"), config.get("configurable")]
+    if (
+        getattr(body, "command", None) is not None
+        or getattr(body, "checkpoint", None) is not None
+        or getattr(body, "checkpoint_id", None) is not None
+        or body.on_disconnect != "continue"
+        or body.multitask_strategy != "reject"
+        or work_attempt is not None
+        or any(isinstance(context, Mapping) and context.get("is_bootstrap") for context in contexts)
+    ):
+        raise HTTPException(422, "Channel execution supports an initial human turn only")
+    messages = normalized_input.get("messages", []) if isinstance(normalized_input, Mapping) else []
+    humans = [message for message in messages if isinstance(message, HumanMessage) and is_genuine_user_message(message)]
+    if len(humans) != 1 or any(isinstance(message, HumanMessage) and "human_input_response" in message.additional_kwargs for message in messages):
+        raise HTTPException(422, "Channel execution requires one visible human message")
+    owner = await live_channel_human(request)
+    await _require_channel_thread(request, run_ctx, thread_id, owner)
+    # convert_to_messages may return a caller-owned BaseMessage unchanged.
+    # Detach before stamping so concurrent internal admissions cannot exchange
+    # anchors while later configuration or SQL preparation yields.
+    normalized_input["messages"] = [message.model_copy(update={"additional_kwargs": {**message.additional_kwargs, CHANNEL_TURN_ID_KEY: publication.publication_id}}) if message is humans[0] else message for message in messages]
+    return publication, owner
+
+
+async def _require_channel_thread(request, run_ctx, thread_id, owner):
+    from deerflow.agent_instances.conversations import AgentConversations
+
+    authority = getattr(request.app.state, "agent_conversations", None)
+    if not isinstance(authority, AgentConversations):
+        raise channel_lookup_unavailable()
+    try:
+        binding = await authority.binding(thread_id)
+        row = await run_ctx.thread_store.get(thread_id, user_id=None)
+    except Exception:
+        raise channel_lookup_unavailable() from None
+    if binding is not None:
+        raise HTTPException(409, "Channel execution does not support instance conversations")
+    if not isinstance(row, Mapping) or row.get("thread_id") != thread_id or row.get("user_id") != owner:
+        raise HTTPException(404, "Thread not found")
+
+
 class OwnerRefusedLaunchError(ValueError):
     """An internal launch for an owner whose account nothing may act for."""
 
@@ -1771,6 +1839,13 @@ async def _start_run(
         Reject a missing thread instead of auto-creating metadata. Internal
         notification runs use this so a deleted chat cannot be resurrected.
     """
+    # v1's validation, persisted receipt and actual worker must use one private
+    # snapshot even if an internal caller mutates nested message/config values
+    # while owner or SQL checks yield. Keep cold copying off the event loop and
+    # retain it through cancellation. Ordinary callers keep their old semantics.
+    if getattr(body, "channel_execution", None) is not None:
+        body = await await_drained(run_file_io(deepcopy, body))
+
     # Cancel-capability gate. interrupt/rollback strategies terminate an already
     # active run — runs:cancel capability, not runs:create — so a create-only
     # PAT must not reach them. Enforced here, the single choke point every
@@ -1779,7 +1854,8 @@ async def _start_run(
     # multitask_strategy="reject" and are unaffected. Requests without a
     # stamped auth context (internal/test compositions) skip the gate.
     require_cancel_permission_if(request, body.multitask_strategy != "reject")
-    await _refuse_launch_for_refused_owner(request)
+    if getattr(body, "channel_execution", None) is None:
+        await _refuse_launch_for_refused_owner(request)
 
     try:
         validate_thread_id(thread_id)
@@ -1833,7 +1909,13 @@ async def _start_run(
     user = getattr(request.state, "user", None)
     from app.gateway.agent_conversations import execution_for_run
 
-    instance_execution = await execution_for_run(request, thread_id, require_ready=work_attempt is None)
+    is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
+    normalized_input = normalize_input(body.input, trusted_internal=is_internal_caller) if getattr(body, "channel_execution", None) is not None else None
+    publication, publication_owner = await _channel_execution_preflight(body, thread_id, request, normalized_input, run_ctx, work_attempt=work_attempt)
+    if publication is not None:
+        owner_user_id = publication_owner
+        require_existing_thread = True
+    instance_execution = None if publication is not None else await execution_for_run(request, thread_id, require_ready=work_attempt is None)
     if work_attempt is not None:
         from deerflow.agent_instances.work_execution import WorkAttempt
 
@@ -1855,6 +1937,9 @@ async def _start_run(
             await require_conversation(request, thread_id, permission=AgentPermission.MANAGE)
 
     async def thread_access_allowed() -> bool:
+        if publication is not None:
+            await _require_channel_thread(request, run_ctx, thread_id, owner_user_id)
+            return True
         if user is None:
             if not require_existing_thread:
                 return True
@@ -1880,10 +1965,10 @@ async def _start_run(
 
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
-        is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
-        # Validate even when resume takes precedence, so ignored input cannot
-        # appear to have been admitted or persist as unchecked run audit data.
-        normalized_input = normalize_input(body.input, trusted_internal=is_internal_caller)
+        if normalized_input is None:
+            # Preserve ordinary admission's validation order and message
+            # identity. Only the new v1 path normalizes before preparation.
+            normalized_input = normalize_input(body.input, trusted_internal=is_internal_caller)
         agent_factory = resolve_agent_factory(body.assistant_id)
         command = getattr(body, "command", None)
         if command and command.get("resume") is not None:
@@ -1898,14 +1983,19 @@ async def _start_run(
         # without this the run record is the one surface that persists a forged
         # id, disagreeing with the response header, the logs, and the
         # checkpoint. The caller's own metadata keys are preserved.
-        run_metadata = dict(body.metadata) if isinstance(body.metadata, dict) else {}
+        run_metadata = dict(_without_channel_marker(body.metadata)) if isinstance(body.metadata, dict) else {}
         for key in ("agent_work_id", "agent_work_attempt_id"):
             run_metadata.pop(key, None)
         if work_attempt is not None:
             run_metadata.update(agent_work_id=work_attempt.work_id, agent_work_attempt_id=work_attempt.attempt_id)
         run_metadata[DEERFLOW_TRACE_METADATA_KEY] = ensure_trace_id()
+        if publication is not None:
+            run_metadata[CHANNEL_TURN_ID_KEY] = publication.publication_id
 
-        config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
+        request_config = dict(body.config) if isinstance(body.config, dict) else body.config
+        if isinstance(request_config, dict) and "metadata" in request_config:
+            request_config["metadata"] = _without_channel_marker(request_config["metadata"])
+        config = build_run_config(thread_id, request_config, run_metadata, assistant_id=body.assistant_id)
         await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
 
         # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
@@ -1981,6 +2071,17 @@ async def _start_run(
             if not scope_runtime_config.get("is_bootstrap")
             else None
         )
+        execution_receipt = None
+        if publication is not None:
+            agent_name = agent_config.name if agent_config is not None else None
+            if body.assistant_id not in (None, _DEFAULT_ASSISTANT_ID) and body.assistant_id.strip().lower().replace("_", "-") != agent_name:
+                raise HTTPException(422, "Channel execution assistant does not match its agent")
+            execution_receipt = ChannelExecutionReceipt(version=publication.version, publication_id=publication.publication_id, owner_user_id=owner_user_id, thread_id=thread_id, assistant_id=_DEFAULT_ASSISTANT_ID, agent_name=agent_name)
+            # Attest the definition the worker actually receives, rather than
+            # retaining a caller spelling with different validation/loading.
+            for section in ("configurable", "context"):
+                config.setdefault(section, {})["agent_name"] = agent_name
+            scope_assistant_id = agent_name or _DEFAULT_ASSISTANT_ID
         # Keep the pre-default identity even when the agent is initially
         # unbound: adding a default must not reject an already-accepted retry.
         # The durable input still exposes the original accepted scope.
@@ -2246,7 +2347,8 @@ async def _start_run(
                         kwargs={
                             "input": run_record_input,
                             **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
-                            "config": redact_config_secrets(body.config),
+                            "config": redact_config_secrets(request_config),
+                            **({"channel_execution": execution_receipt.model_dump(mode="json")} if execution_receipt is not None else {}),
                             **({"conversation_references": conversation_references} if conversation_references else {}),
                         },
                         multitask_strategy=body.multitask_strategy,
@@ -2257,6 +2359,15 @@ async def _start_run(
 
                 if record.idempotency_reused:
                     stored = record.kwargs or {}
+                    if ("channel_execution" in stored) != (execution_receipt is not None):
+                        raise HTTPException(409, "Idempotency-Key already used with a different request")
+                    if execution_receipt is not None:
+                        try:
+                            matches_receipt = receipt_from_run_kwargs(stored) == execution_receipt
+                        except ChannelExecutionProofError:
+                            matches_receipt = False
+                        if not matches_receipt or record.user_id != owner_user_id or record.thread_id != thread_id or record.on_disconnect != disconnect:
+                            raise HTTPException(409, "Idempotency-Key already used with a different request")
                     stored_input = stored.get("input")
                     # New runs persist the admitted, canonical message snapshot
                     # so a scope display cannot be rewritten through the run
@@ -2293,9 +2404,15 @@ async def _start_run(
                     )
                     raise
         except ConflictError as exc:
+            if publication is not None:
+                raise BusyThreadConflict({"code": "thread_busy"}) from None
             raise BusyThreadConflict(str(exc)) from exc
         except UnsupportedStrategyError as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc
+        except RuntimeError:
+            if publication is not None:
+                raise channel_lookup_unavailable() from None
+            raise
 
         # Title sync is handled by worker.py's finally block which reads the
         # title from the checkpoint and calls thread_store.update_display_name

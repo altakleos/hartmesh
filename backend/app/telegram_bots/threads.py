@@ -27,6 +27,7 @@ class ThreadCoordinator:
         self._locks = AsyncKeyedLockTable()
         self._operations: set[asyncio.Task] = set()
         self._stopping = False
+        self._stopped = False
         self._stop_task = None
 
     def _current(self, attempt: _Attempt) -> bool:
@@ -213,16 +214,15 @@ class ThreadCoordinator:
 
     def begin_shutdown(self) -> None:
         self._stopping = True
-        self.client.begin_shutdown()
 
     async def _finish_stop(self):
         if self._operations:
             await asyncio.gather(*tuple(self._operations), return_exceptions=True)
-        await self.client.stop()
+        self._stopped = True
 
     async def stop(self):
         self.begin_shutdown()
-        if self._stop_task is None or self._stop_task.done() and not self.client.closed:
+        if self._stop_task is None or self._stop_task.done() and not self._stopped:
             self._stop_task = asyncio.create_task(self._finish_stop(), name="telegram-thread-preparation-cleanup")
         await asyncio.shield(self._stop_task)
 

@@ -7,7 +7,7 @@ import logging
 import socket
 import sqlite3
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -694,6 +694,7 @@ class RunManager:
         *,
         user_id: str | None = None,
         raise_on_store_error: bool = False,
+        require_store: bool = False,
     ) -> RunRecord | None:
         """Return a run record by ID, or ``None``.
 
@@ -702,7 +703,13 @@ class RunManager:
             user_id: Optional user ID for permission filtering when hydrating from store.
             raise_on_store_error: Propagate store hydration/mapping failures so
                 lifecycle callers can distinguish them from a missing run.
+            require_store: Require configured read authority, including for a
+                cached positive. Together with raise_on_store_error, an actual
+                miss cannot hide store failures. Cached positives are not a
+                store-health probe.
         """
+        if require_store and self._store is None:
+            raise RunStoreUnavailable()
         async with self._lock:
             record = self._runs.get(run_id)
         if record is not None:
@@ -716,6 +723,10 @@ class RunManager:
                 raise
             logger.warning("Failed to hydrate run %s from store", run_id, exc_info=True)
             return None
+        # A conversion failure cannot disappear behind a local record inserted
+        # while the store read was suspended. Preserve raise-only lifecycle
+        # ordering by opting in only through the new pair of proof-read flags.
+        mapped = self._strict_record_from_store(row) if require_store and raise_on_store_error and row is not None else None
         # Re-check after store await: a concurrent create() may have inserted the
         # in-memory record while the store call was in flight.
         async with self._lock:
@@ -724,6 +735,8 @@ class RunManager:
             return record
         if row is None:
             return None
+        if mapped is not None:
+            return mapped
         try:
             return self._record_from_store(row)
         except Exception:
@@ -732,12 +745,20 @@ class RunManager:
             logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
             return None
 
+    def _strict_record_from_store(self, row) -> RunRecord:
+        # Do not turn an observed malformed kwargs value into a legacy empty
+        # mapping through the ordinary historical-null compatibility mapper.
+        if not isinstance(row, Mapping) or not isinstance(row.get("kwargs"), Mapping):
+            raise ValueError("Run store row has invalid kwargs")
+        return self._record_from_store(row)
+
     async def aget(
         self,
         run_id: str,
         *,
         user_id: str | None = None,
         raise_on_store_error: bool = False,
+        require_store: bool = False,
     ) -> RunRecord | None:
         """Return a run record by ID, checking the persistent store as fallback.
 
@@ -747,6 +768,7 @@ class RunManager:
             run_id,
             user_id=user_id,
             raise_on_store_error=raise_on_store_error,
+            **({"require_store": True} if require_store else {}),
         )
 
     async def list_by_thread(
@@ -757,6 +779,8 @@ class RunManager:
         limit: int = 100,
         before_created_at: str | None = None,
         before_run_id: str | None = None,
+        raise_on_store_error: bool = False,
+        require_store: bool = False,
     ) -> list[RunRecord]:
         """Return runs for a given thread, newest first, at most ``limit`` records.
 
@@ -772,7 +796,14 @@ class RunManager:
             limit: Maximum number of runs to return.
             before_created_at: ISO timestamp of the last run on the previous page.
             before_run_id: Run id of the last run on the previous page.
+            raise_on_store_error: Refuse store/query/mapping failures instead
+                of returning a partial page. Convert every returned row,
+                including duplicates of live local records.
+            require_store: Require configured authority before any cache-only
+                page. Use both flags for an exhaustive supported lookup.
         """
+        if require_store and self._store is None:
+            raise RunStoreUnavailable()
         before_created_at = _cursor_part(before_created_at)
         before_run_id = _cursor_part(before_run_id)
         if (before_created_at is None) != (before_run_id is None):
@@ -815,9 +846,18 @@ class RunManager:
         try:
             rows = await self._store.list_by_thread(thread_id, **store_kwargs)
         except Exception:
+            if raise_on_store_error:
+                raise
             logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
             return _page(memory_records)
         for row in rows:
+            if raise_on_store_error:
+                mapped = self._strict_record_from_store(row) if require_store else self._record_from_store(row)
+                if not isinstance(mapped.run_id, str) or not mapped.run_id:
+                    raise ValueError("Run store row has no valid identity")
+                if mapped.run_id not in records_by_id:
+                    records_by_id[mapped.run_id] = mapped
+                continue
             run_id = row.get("run_id")
             if run_id and run_id not in records_by_id:
                 try:
@@ -2519,3 +2559,10 @@ class ConflictError(Exception):
 
 class UnsupportedStrategyError(Exception):
     """Raised when a multitask_strategy value is not yet implemented."""
+
+
+class RunStoreUnavailable(RuntimeError):
+    """The caller requires read authority that this manager lacks."""
+
+    def __init__(self):
+        super().__init__("Run store read authority is unavailable")

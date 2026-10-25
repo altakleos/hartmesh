@@ -77,7 +77,19 @@ history under unchanged authority.
 
 `gateway_client.py` owns one public SDK/HTTPX client for the independently resolved
 LangGraph URL, prepared TLS, finite timeouts and no environment proxy/key discovery.
-Every operation builds fresh bound-human internal and matching CSRF headers.
+Its tracked JSON/SSE operations build fresh bound-human internal/CSRF headers,
+validate closed relative paths and never follow a response-selected endpoint.
+The generic `channels.execution_client.ChannelExecutionFacade` borrows this owner;
+it validates the detached JSON snapshot actually encoded, original scope, strict
+read acknowledgements and progressing run/event cursors. Neither metadata nor a
+raw stream frame becomes a server receipt or proof of final output.
+Creating waits/streams use explicit continue-on-disconnect and 5/300 timeouts;
+reads retain 30 seconds. There is no automatic POST/reconnect after ambiguity.
+The one-slot public-SSE pump and responses retain cancellation/failed-close
+ownership. Post-response authorization runs inside that same retained operation
+or pump; queued parts recheck current read authority immediately before handoff.
+Stream close also drains its detached-snapshot preparation. Network cancellation
+is prompt; codecs and admitted guards drain.
 Require live `threads:read` before reads and `threads:write` before creation. GET
 requests require authoritative binding availability and exact stored owner,
 thread ID and lead/custom target; every create/replay is followed by that GET.
@@ -87,8 +99,13 @@ before network work. The stable intent excludes token revision: a new authorized
 attempt may reuse it after same-bot rotation, while the old captured adapter/token
 cannot upgrade itself. Writers check current attempt identity after the final
 borrowed-owner await. Retain construction, full SDK/decode operations, lock waiters
-and admitted SQL through cancellation/shutdown before closing the client and
-persistence. These callable foundations activate no ordinary input or `/new`.
+and admitted SQL through cancellation/shutdown. Preparation stop closes only its
+own admission and drains its work. Supervisor phase one also closes new model
+dispatch, while the shared client/final reads survive the actual manager drain.
+Already-dispatched waits/parts recheck current read authority, never new-create
+ceilings. Supervisor final stop closes that client before persistence teardown;
+failed response/client cleanup stays retryable. These callable foundations
+activate no ordinary input, `/new` or model-final source consumer.
 
 `producer.py` owns reply plans and bounded claim workers. Raw delivery receives
 link/outbox/part IDs plus both process/admission fences. Current owner/policy/

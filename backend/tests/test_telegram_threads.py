@@ -73,6 +73,7 @@ def inbound(e):
 
 async def close(e):
     await e.threads.stop()
+    await e.http_client.stop()
     await e.channel.stop()
 
 
@@ -192,6 +193,8 @@ async def test_shutdown_during_http_drains_but_never_installs_a_mapping(db, monk
         with pytest.raises(ValueError, match="thread-attempt-changed"):
             await task
         await cleanup
+        assert not e.http_client.closed
+        await e.http_client.stop()
         assert e.http_client.closed
         assert await db.connections.get_thread_id(e.link.connection_id, str(e.link.chat_id), None) is None
     finally:

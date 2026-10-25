@@ -352,3 +352,10 @@ Stop without assignment cancellation, count refusals and same-kind slot reuse,
 denied-site artifacts, supervisor requests and operator/container-loss settlement.
 The scripted Work branch rejects `ask_clarification` or a missing system question
 rule with HTTP 422. Full suites and large fixtures must use task-owned disk temps.
+
+Channel execution tests separate admitted human/checkpoint provenance from final
+AI output completeness. Exercise real manager, owned HTTP/SSE and Gateway paths,
+both SQL dialects, strict read acknowledgements, actual binding authority,
+post-await scope fences and retained reads during shutdown. No receipt, cached
+success or fabricated AI identity proves a complete final answer. Preserve legacy
+channel defaults; never run native/Compose suites locally.

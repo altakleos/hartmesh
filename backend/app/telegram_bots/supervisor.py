@@ -1242,6 +1242,8 @@ class TelegramSupervisor:
 
     async def begin_shutdown(self) -> None:
         self._stopping, self._ready = True, False
+        if self.thread_client is not None:
+            self.thread_client.close_run_admission()
         if self.threads is not None:
             self.threads.begin_shutdown()
         self._health_barrier.set()
@@ -1327,8 +1329,7 @@ class TelegramSupervisor:
                 try:
                     if self.threads is not None:
                         await self.threads.stop()
-                    else:
-                        await self.thread_client.stop()
+                    await self.thread_client.stop()
                 except Exception as error:
                     thread_error = error
             self._unsubscribe()

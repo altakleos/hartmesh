@@ -21,13 +21,15 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from app.gateway.artifact_archive import ArtifactArchiveError, ArtifactArchiveResult, build_artifact_archive
 from app.gateway.authz import require_cancel_permission_if, require_permission
+from app.gateway.channel_execution import ChannelExecutionProofError
+from app.gateway.channel_execution_reads import ChannelReadDenied, ChannelReadMissing, channel_lookup_unavailable, channel_read_headers, channel_read_scope, strict_channel_read, validate_channel_messages, validate_channel_record
 from app.gateway.checkpoint_lineage import (
     CheckpointLineageError,
     CheckpointParentMissingError,
@@ -61,6 +63,7 @@ from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus,
 from deerflow.runtime.runs.store.base import format_run_cursor_created_at, normalize_run_created_at_iso
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.utils.thread_id import ThreadId
 from deerflow.workspace_changes import get_workspace_changes_response
@@ -1193,7 +1196,7 @@ async def list_runs_page(
     limit: int = Query(default=50, ge=1, le=200),
     before_created_at: str | None = Query(default=None),
     before_run_id: str | None = Query(default=None, min_length=1),
-) -> ThreadRunsPageResponse:
+) -> ThreadRunsPageResponse | Response:
     """Return a newest-first keyset page of runs for a thread.
 
     Response: { data: [...], has_more: bool, next_before_created_at, next_before_run_id }
@@ -1207,6 +1210,27 @@ async def list_runs_page(
     if before_created_at is not None:
         before_created_at = _parse_run_page_created_at(before_created_at)
 
+    if strict_channel_read(request):
+        async with channel_read_scope(request, thread_id) as owner:
+            try:
+                run_mgr = get_run_manager(request)
+                records = await run_mgr.list_by_thread(thread_id, user_id=owner, limit=limit + 1, before_created_at=before_created_at, before_run_id=before_run_id, require_store=True, raise_on_store_error=True)
+                for record in records:
+                    validate_channel_record(record, owner=owner, thread_id=thread_id)
+                has_more = len(records) > limit
+                page = records[:limit]
+                last = page[-1] if page and has_more else None
+                result = ThreadRunsPageResponse(
+                    data=[_record_to_response(record) for record in page],
+                    has_more=has_more,
+                    next_before_created_at=format_run_cursor_created_at(last.created_at) if last else None,
+                    next_before_run_id=last.run_id if last else None,
+                )
+                return JSONResponse(result.model_dump(mode="json"), headers=channel_read_headers())
+            except (ChannelReadDenied, ChannelReadMissing):
+                raise
+            except Exception:
+                raise channel_lookup_unavailable() from None
     run_mgr = get_run_manager(request)
     user_id = await _run_scope_user_id(request, thread_id)
     records = await run_mgr.list_by_thread(
@@ -1229,8 +1253,24 @@ async def list_runs_page(
 
 @router.get("/{thread_id}/runs/{run_id}", response_model=RunResponse)
 @require_permission("runs", "read", owner_check=True)
-async def get_run(thread_id: ThreadId, run_id: str, request: Request) -> RunResponse:
+async def get_run(thread_id: ThreadId, run_id: str, request: Request) -> RunResponse | Response:
     """Get details of a specific run."""
+    if strict_channel_read(request):
+        async with channel_read_scope(request, thread_id) as owner:
+            try:
+                run_mgr = get_run_manager(request)
+                record = await run_mgr.get(run_id, user_id=owner, require_store=True, raise_on_store_error=True)
+                if record is None:
+                    raise ChannelReadMissing()
+                validate_channel_record(record, owner=owner, thread_id=thread_id)
+                if record.run_id != run_id:
+                    raise ChannelExecutionProofError()
+                result = _record_to_response(record)
+                return JSONResponse(result.model_dump(mode="json"), headers=channel_read_headers())
+            except (ChannelReadDenied, ChannelReadMissing):
+                raise
+            except Exception:
+                raise channel_lookup_unavailable() from None
     run_mgr = get_run_manager(request)
     user_id = await _run_scope_user_id(request, thread_id)
     record = await run_mgr.get(run_id, user_id=user_id)
@@ -1622,7 +1662,7 @@ async def list_thread_messages_page(
     )
 
 
-@router.get("/{thread_id}/runs/{run_id}/messages")
+@router.get("/{thread_id}/runs/{run_id}/messages", response_model=dict)
 @require_permission("runs", "read", owner_check=True)
 async def list_run_messages(
     thread_id: ThreadId,
@@ -1631,11 +1671,28 @@ async def list_run_messages(
     limit: int = Query(default=50, le=200, ge=1),
     before_seq: int | None = Query(default=None, ge=1),
     after_seq: int | None = Query(default=None, ge=1),
-) -> dict:
+) -> dict | Response:
     """Return paginated messages for a specific run.
 
     Response: { data: [...], has_more: bool }
     """
+    if strict_channel_read(request):
+        async with channel_read_scope(request, thread_id) as owner:
+            try:
+                record = await get_run_manager(request).get(run_id, user_id=owner, require_store=True, raise_on_store_error=True)
+                if record is None:
+                    raise ChannelReadMissing()
+                validate_channel_record(record, owner=owner, thread_id=thread_id)
+                if record.run_id != run_id:
+                    raise ChannelExecutionProofError()
+                rows = await await_drained(get_run_event_store(request).list_messages_by_run(thread_id, run_id, limit=limit + 1, before_seq=before_seq, after_seq=after_seq))
+                validate_channel_messages(rows, owner=owner, thread_id=thread_id, run_id=run_id, limit=limit + 1, before_seq=before_seq, after_seq=after_seq)
+                data, has_more = trim_run_message_page(rows, limit=limit, after_seq=after_seq)
+                return JSONResponse({"data": data, "has_more": has_more}, headers=channel_read_headers())
+            except (ChannelReadDenied, ChannelReadMissing):
+                raise
+            except Exception:
+                raise channel_lookup_unavailable() from None
     await _require_run_visible_to_scope(run_id, thread_id, request)
     event_store = get_run_event_store(request)
     rows = await event_store.list_messages_by_run(
