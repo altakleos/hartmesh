@@ -1,9 +1,14 @@
 # Durable run output evidence
 
-This is an inactive runtime foundation. Worker capture, its creating-request
-admission, the server output endpoint and managed Telegram publication follow
-separately. The current Gateway rejects `output_capture` as an unknown creating
-field before preparation or model execution. No ordinary run enables capture.
+Run creation accepts an explicit `output_capture: {"version": 1}` capability.
+It requires the actual SQL run repository and durable database event store;
+Memory, JSONL, legacy custom stores and a database factory's Memory fallback do
+not qualify. Omission preserves ordinary behavior. Managed Telegram publication
+and model activation remain separate work.
+New captured admissions persist their server-owned disconnect mode in
+`output_capture_on_disconnect`; caller kwargs cannot override it. Cold peer
+hydration restores that mode, and captured idempotent reuse requires the same
+intent and disconnect policy before other request compatibility checks.
 
 ## Generic contract
 
@@ -45,14 +50,61 @@ tests verify drainage with an independent writer commit.
 returns detached, deeply frozen data. A cached success is not durable authority.
 An observed wrong owner is a scope error; absence requires a completed supported
 lookup. The `local_finalizing` observation is never a durable completion seal.
+An ACTIVE row belonging to this exact locally fenced worker yields fixed
+uncertainty, even after its stream-notification flag clears. A peer-owned row
+or a valid terminal seal follows its own durable authority. Local fence knowledge
+does not survive cache eviction or process restart; nonworker/orphan closure
+remains a separate implementation prerequisite.
 
-## Prepared channel protocol
+## Worker source capture
+
+The worker registers a fresh host graph UUID per invocation and overrides the
+caller's tracing ID. The initial qualified shape is a completed model callback
+directly under that graph's actual `model` node. Nested graphs, middleware and
+auxiliary model calls cannot gain authority by copying lead tags or answer IDs.
+The first completed callback is canonical; usage replays cannot replace it.
+The actual completed root suffix must match the same genuine AI identity, exact
+text and shared eligibility rules. History IDs, manual answers, trailing tools,
+hidden/fallback/refusal output and multiple graph epochs are never promoted into
+replacement text. Completed `AIMessageChunk` callbacks are supported when the
+independently completed root matches; token frames alone prove nothing.
+
+The exact host-normalized human input object receives its real SDK reducer ID.
+Capture matches that identity and the restored original consumed input; it never
+invents an ID or selects a convenient historical human. Autonomous AI-employee
+runs can have no human input. Exact visible text may include separate auxiliary
+reasoning metadata, which is never returned, hashed or used as answer fallback.
+Mixed reasoning/nontext content is conservatively unsupported as a whole.
+
+The journal pairs immutable callback facts with actual committed batch results
+to obtain the durable event sequence. It stops producers and drains admitted
+event/progress writes before freezing completion/delivery summaries. An unknown
+event write is never blindly appended again. The worker audits the exact stored
+source before the existing atomic status-and-receipt CAS. A genuine execution
+failure or completed cancellation can seal a matching unavailable receipt.
+Cancellation winning the text CAS completes interrupt/rollback cleanup while the
+row remains active, then seals that cancelled result atomically.
+
+Flush, decode, source or seal uncertainty fences locally, retains the unsealed
+durable state, and skips status-only finalization, goal deletion and completion
+hooks. Already admitted SQL and cleanup remain owned through repeated host
+cancellation. No model retry or second creating request repairs proof failure.
+After a confirmed compatible seal, only the exact registered finalizing run on
+its own executing task may reserve its goal checkpoint write. The original
+cleanup barrier stays held; other local finalizers and peer SQL reservations
+continue to block that write. Completion hooks cannot admit a replacement run
+before cleanup finishes.
+
+## Private channel read protocol
 
 The host-only `ChannelExecutionFacade.capture_output` option defaults to literal
 `False`. Explicit `True` adds the typed intent to a detached creating request;
 provider metadata cannot switch it. Unsupported responses never trigger a second
-creating POST. The prepared `get_run_output` reader requires the existing strict
-acknowledgement and exact original scope. No server output route is shipped yet.
+creating POST. `GET /api/threads/{thread_id}/runs/{run_id}/output` and the
+retained `get_run_output` client require the existing version-1 strict read
+request/acknowledgement and exact original scope. Generic capture admission is
+independent of channel publication; the private route additionally requires the
+separate server-owned channel admission receipt and human publication marker.
 
 Its closed projection keeps channel admission and generic output evidence
 separate. Complete private-channel text requires a genuine human input identity,
@@ -60,12 +112,16 @@ matching terminal status and the exact source digest. A sealed unavailable resul
 may have no input identity when execution failed before input capture; it exposes
 no model source and retains the server-owned publication admission scope. Source
 loss never rewrites the historical receipt. Unknown versions, malformed proof,
-scope changes and unacknowledged absence remain uncertainty.
+scope changes and unacknowledged absence remain uncertainty. Supported active
+unsealed runs return pending. An authorized supported run miss returns404 with
+the acknowledgement; unsupported stores, malformed proof, unsealed terminal
+rows and backend uncertainty return fixed503 without it. Foreign scope and
+authorization failures carry no supported-absence acknowledgement.
 
 Post-response authorization remains inside the existing retained HTTP owner.
 Shutdown drains started codec and SQL cleanup before releasing ownership. These
-client and data primitives do not establish worker-source provenance or enable
-managed-bot model execution, publication recovery or orphan-run sealing.
+boundaries enable reading independently sealed worker output. They do not enable
+managed-bot model execution, durable publication recovery or orphan-run sealing.
 
 No schema or configuration version changes are required: the receipt uses the
 existing run kwargs JSON. Schema head remains `0043_telegram_inbox_chat_scope`;

@@ -1381,10 +1381,11 @@ run and message reads distinguish an authoritative result from unavailable
 storage. Closing new-run admission preserves reads for work already dispatched.
 Durable model-result publication and ordinary managed-bot conversations remain
 for subsequent stages; these changes do not enable them.
-The SQL runtime also provides atomic, generic output-evidence storage and
-authoritative snapshots. Its prepared client protocol remains inactive until
-worker capture and the server output API are implemented; current requests for
-capture are rejected before model execution. See
+SQL-backed runs can explicitly request versioned output capture. The worker seals
+the exact completed model answer with its durable event source; the authorized
+output API reports pending, complete or unavailable without executing another
+model. Source uncertainty preserves unresolved state. Ordinary runs keep their
+defaults, and managed-bot model activation remains deferred. See
 [durable output evidence](backend/docs/RUN_OUTPUT_EVIDENCE.md).
 Cancelled SQL run reads now finish their started database work and session
 cleanup before returning cancellation, preventing abandoned read resources.

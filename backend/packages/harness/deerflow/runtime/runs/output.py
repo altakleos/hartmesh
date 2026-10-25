@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 from .schemas import RunStatus
 
 OUTPUT_CAPTURE_KEY = "output_capture"
+OUTPUT_CAPTURE_DISCONNECT_KEY = "output_capture_on_disconnect"
 OUTPUT_EVIDENCE_KEY = "output_evidence"
 
 

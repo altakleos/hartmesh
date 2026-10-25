@@ -72,8 +72,8 @@ Durable MCP notification trust and retry rules: [run admission](../../docs/run-a
 
 CORS defaults to same-origin through nginx:2026. Split-origin/port-forwarded browsers require exact `GATEWAY_CORS_ORIGINS`, read by both `CORSMiddleware` and `CSRFMiddleware` to align CORS/auth checks. Expose `Content-Location` through `CORS_EXPOSED_HEADERS` (`csrf_middleware.py`): creating routes return the run ID there; it is not CORS-safelisted. The SDK resolves run metadata only from that header; hiding it breaks `useStream.onCreated` and thread-gated actions.
 
-Correlated channel admission and strict-read proof: [contract](../../docs/channel-execution.md).
-Metadata and successful status never establish complete final output.
+Channel proof: [admission](../../docs/channel-execution.md) and
+[output](../../docs/RUN_OUTPUT_EVIDENCE.md); status alone is insufficient.
 
 Browser sessions use `app.gateway.auth.session_cookie`. Persist `HttpOnly access_token` only for HTTPS/trusted-forwarded HTTPS, direct-host localhost HTTP or operator opt-in; public HTTP uses session cookies. A `HttpOnly` preference cookie preserves `remember_me` across reissues. Handlers stamp final `max_age` on `request.state`; CSRF mirrors it, including password/OIDC reissues. Logout clears all auth cookies and suppresses CSRF reissue. Never store passwords.
 

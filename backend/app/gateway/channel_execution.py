@@ -60,6 +60,7 @@ def receipt_from_run_kwargs(kwargs: object) -> ChannelExecutionReceipt | None:
     try:
         if "channel_execution" not in kwargs:
             return None
-        return ChannelExecutionReceipt.model_validate(kwargs["channel_execution"])
+        value = kwargs["channel_execution"]
+        return ChannelExecutionReceipt.model_validate(dict(value) if isinstance(value, Mapping) else value)
     except Exception:
         raise ChannelExecutionProofError() from None

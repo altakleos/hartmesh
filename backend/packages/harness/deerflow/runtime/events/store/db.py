@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 
 
 class DbRunEventStore(RunEventStore):
+    @property
+    def supports_durable_output_evidence(self) -> bool:
+        return True
+
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, max_trace_content: int = 10240):
         self._sf = session_factory
         self._max_trace_content = max_trace_content

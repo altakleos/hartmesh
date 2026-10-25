@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError,
 from pydantic_core import PydanticCustomError
 
 from app.gateway.channel_execution import ChannelExecutionRequest
+from deerflow.runtime.runs.output import OutputCaptureIntent
 from deerflow.runtime.stream_modes import RunStreamMode, UnsupportedStreamModeError, normalize_stream_modes
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -33,6 +34,7 @@ class RunCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     channel_execution: ChannelExecutionRequest | None = Field(default=None, description="Versioned trusted channel publication; ordinary callers omit this field")
+    output_capture: OutputCaptureIntent | None = Field(default=None, description="Opt in to durable final-output evidence; unsupported authorities refuse before execution")
     assistant_id: str | None = Field(default=None, description="Agent / assistant to use")
     input: dict[str, Any] | None = Field(default=None, description="Graph input (e.g. {messages: [...]})")
     command: dict[str, Any] | None = Field(default=None, description="LangGraph Command")

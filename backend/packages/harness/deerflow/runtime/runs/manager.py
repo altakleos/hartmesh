@@ -21,7 +21,7 @@ from deerflow.utils.file_io import await_drained
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
-from .output import OUTPUT_CAPTURE_KEY, OUTPUT_EVIDENCE_KEY, OutputEvidenceError, OutputEvidenceScopeError, OutputReceipt, RunOutputSnapshot, capture_from_kwargs, receipt_from_kwargs, validate_receipt_status
+from .output import OUTPUT_CAPTURE_DISCONNECT_KEY, OUTPUT_CAPTURE_KEY, OUTPUT_EVIDENCE_KEY, OutputEvidenceError, OutputEvidenceScopeError, OutputReceipt, RunOutputSnapshot, capture_from_kwargs, receipt_from_kwargs, validate_receipt_status
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
 from .store.base import (
     EditReplayVisibility,
@@ -83,13 +83,15 @@ def _resolve_record_user_id(user_id: str | None) -> str | None:
     return str(user.id) if user is not None else None
 
 
-def _new_run_kwargs(kwargs: dict | None) -> dict:
+def _new_run_kwargs(kwargs: dict | None, *, on_disconnect: DisconnectMode) -> dict:
     """A new admission may request capture, but cannot supply its result."""
     values = dict(kwargs or {})
     values.pop(OUTPUT_EVIDENCE_KEY, None)
+    values.pop(OUTPUT_CAPTURE_DISCONNECT_KEY, None)
     intent = capture_from_kwargs(values)
     if intent is not None:
         values[OUTPUT_CAPTURE_KEY] = {"version": intent.version}
+        values[OUTPUT_CAPTURE_DISCONNECT_KEY] = DisconnectMode(on_disconnect).value
     return values
 
 
@@ -505,15 +507,23 @@ class RunManager:
         ``_runs``: only the owning worker's task lifecycle updates and removes
         local records, so a registered snapshot would never leave.
 
-        NULL status/on_disconnect columns (e.g. from rows written before those
-        columns were added) default to ``pending`` and ``cancel`` respectively.
+        Missing status/disconnect values retain the ordinary pending/cancel
+        defaults. SQL capture admissions persist their server-owned disconnect
+        policy in kwargs because that SQL schema has no on_disconnect column.
         """
+        kwargs = row.get("kwargs") or {}
+        disconnect = row.get("on_disconnect") or DisconnectMode.cancel.value
+        if isinstance(kwargs, Mapping) and OUTPUT_CAPTURE_KEY in kwargs and OUTPUT_CAPTURE_DISCONNECT_KEY in kwargs:
+            capture_from_kwargs(kwargs)
+            disconnect = kwargs[OUTPUT_CAPTURE_DISCONNECT_KEY]
+            if type(disconnect) is not str:
+                raise OutputEvidenceError()
         return RunRecord(
             run_id=row["run_id"],
             thread_id=row["thread_id"],
             assistant_id=row.get("assistant_id"),
             status=RunStatus(row.get("status") or RunStatus.pending.value),
-            on_disconnect=DisconnectMode(row.get("on_disconnect") or DisconnectMode.cancel.value),
+            on_disconnect=DisconnectMode(disconnect),
             operation_kind=ThreadOperationKind(row.get("operation_kind") or ThreadOperationKind.run.value),
             multitask_strategy=row.get("multitask_strategy") or "reject",
             metadata=row.get("metadata") or {},
@@ -664,7 +674,7 @@ class RunManager:
         raw ``IntegrityError`` instead of a ``ConflictError``. Production
         callers should use :meth:`create_or_reject`.
         """
-        kwargs = _new_run_kwargs(kwargs)
+        kwargs = _new_run_kwargs(kwargs, on_disconnect=on_disconnect)
         run_id = str(uuid.uuid4())
         now = _now_iso()
         user_id = _resolve_record_user_id(user_id)
@@ -788,6 +798,16 @@ class RunManager:
             async with self._lock:
                 local = self._runs.get(run_id)
                 finalizing = local is not None and local.user_id == user_id and local.thread_id == row.get("thread_id") and local.finalizing
+                if (
+                    row["status"] in {"pending", "running"}
+                    and local is not None
+                    and local.user_id == user_id
+                    and local.thread_id == row["thread_id"]
+                    and row.get("owner_worker_id")
+                    and row["owner_worker_id"] == local.owner_worker_id == self.worker_id
+                    and local.ownership_lost
+                ):
+                    raise OutputEvidenceError()
             return RunOutputSnapshot(
                 run_id=run_id,
                 thread_id=row["thread_id"],
@@ -1760,6 +1780,7 @@ class RunManager:
         model_name: str | None = None,
         user_id: str | None = None,
         idempotency_key: str | None = None,
+        finalizing_run: RunRecord | None = None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -1775,7 +1796,7 @@ class RunManager:
         partial unique index on ``(thread_id) WHERE status IN
         ('pending','running')``.
         """
-        kwargs = _new_run_kwargs(kwargs)
+        kwargs = _new_run_kwargs(kwargs, on_disconnect=on_disconnect)
         run_id = str(uuid.uuid4())
         now = _now_iso()
         # Resolve before the idempotency checks below compare it with stored rows.
@@ -1809,6 +1830,34 @@ class RunManager:
         )
 
         async with self._lock:
+            if finalizing_run is not None:
+                valid = (
+                    operation_kind is ThreadOperationKind.checkpoint_write
+                    and multitask_strategy == "reject"
+                    and idempotency_key is None
+                    and self._runs.get(finalizing_run.run_id) is finalizing_run
+                    and not finalizing_run.store_only
+                    and finalizing_run.operation_kind is ThreadOperationKind.run
+                    and finalizing_run.thread_id == thread_id
+                    and finalizing_run.user_id == user_id
+                    and finalizing_run.owner_worker_id == self.worker_id
+                    and finalizing_run.status is RunStatus.success
+                    and finalizing_run.terminal_confirmed
+                    and finalizing_run.finalizing
+                    and not finalizing_run.ownership_lost
+                    and not finalizing_run.abort_event.is_set()
+                    and finalizing_run.task is asyncio.current_task()
+                )
+                try:
+                    saved = receipt_from_kwargs(finalizing_run.kwargs)
+                    valid = valid and self.supports_output_receipts and capture_from_kwargs(finalizing_run.kwargs) is not None and saved is not None
+                    if valid:
+                        validate_receipt_status(saved, finalizing_run.status)
+                        valid = (saved.run_id, saved.thread_id, saved.owner_user_id) == (finalizing_run.run_id, thread_id, user_id)
+                except OutputEvidenceError:
+                    valid = False
+                if not valid:
+                    raise ConflictError("The finalizing run cannot reserve this checkpoint write")
             if idempotency_key is not None:
                 for existing in self._runs.values():
                     if existing.idempotency_key != idempotency_key:
@@ -1834,7 +1883,7 @@ class RunManager:
 
             # 1) Local inflight check (same-worker guard; cross-worker is the
             #    store's partial unique index below).
-            local_inflight = [r for r in self._thread_records_locked(thread_id) if r.status in (RunStatus.pending, RunStatus.running) or r.finalizing]
+            local_inflight = [r for r in self._thread_records_locked(thread_id) if r is not finalizing_run and (r.status in (RunStatus.pending, RunStatus.running) or r.finalizing)]
 
             if multitask_strategy in ("interrupt", "rollback") and any(record.operation_kind != ThreadOperationKind.run for record in local_inflight):
                 raise ConflictError(f"Thread {thread_id} has an active checkpoint write")
@@ -1987,6 +2036,7 @@ class RunManager:
         *,
         kind: ThreadOperationKind,
         user_id: str | None = None,
+        finalizing_run: RunRecord | None = None,
     ) -> AsyncIterator[None]:
         """Hold exclusive durable admission for a non-run thread operation.
 
@@ -2001,6 +2051,7 @@ class RunManager:
             operation_kind=kind,
             multitask_strategy="reject",
             user_id=user_id,
+            finalizing_run=finalizing_run,
         )
         try:
             reservation_task = asyncio.current_task()

@@ -57,6 +57,7 @@ from app.gateway.routers import (
     projects,
     provider_keys,
     run_delivery,
+    run_output,
     runs,
     scheduled_tasks,
     scheduler_state,
@@ -1376,6 +1377,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Thread Runs API (LangGraph Platform-compatible runs lifecycle)
     app.include_router(thread_runs.router)
+    app.include_router(run_output.router, prefix="/api/threads")
 
     # Stateless Runs API (stream/wait without a pre-existing thread)
     app.include_router(runs.router)
