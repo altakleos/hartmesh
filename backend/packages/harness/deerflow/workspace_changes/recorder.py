@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 from deerflow.config import get_paths
-from deerflow.runtime.runs.capture_io import CaptureIOCleanupError, current_capture_io_owner, run_capture_io
 from deerflow.utils.file_io import await_drained, run_file_io
 
 from .diff import compare_snapshots, get_changed_paths
@@ -49,6 +48,8 @@ class _SnapshotCache:
         pass
 
     async def drain(self):
+        from deerflow.runtime.runs.capture_io import CaptureIOCleanupError
+
         if self._close_task is None:
 
             async def close():
@@ -76,6 +77,8 @@ class _SnapshotCache:
 
 async def _settle_failed_snapshot_cache(cache):
     """Preserve the primary outcome; failed close stays registered for host drain."""
+    from deerflow.runtime.runs.capture_io import CaptureIOCleanupError
+
     try:
         await cache.drain()
     except CaptureIOCleanupError:
@@ -193,6 +196,7 @@ async def capture_workspace_snapshot(
     extra_excluded_dir_names: frozenset[str] | None = None,
     outputs_only: bool = False,
 ) -> WorkspaceSnapshot:
+    from deerflow.runtime.runs.capture_io import current_capture_io_owner, run_capture_io
     from deerflow.spaces.chat_paths import ChatStoragePaths
 
     owner = current_capture_io_owner()
@@ -312,6 +316,8 @@ async def record_workspace_changes(
     limits: WorkspaceChangeLimits | None = None,
     extra_excluded_dir_names: frozenset[str] | None = None,
 ) -> dict | None:
+    from deerflow.runtime.runs.capture_io import CaptureIOCleanupError, run_capture_io
+
     try:
         from deerflow.spaces.chat_paths import ChatStoragePaths
 

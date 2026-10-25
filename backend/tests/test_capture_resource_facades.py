@@ -45,11 +45,10 @@ async def resource_backend(request, tmp_path, monkeypatch):
     schema = "capture_resources_" + uuid4().hex
     uri = None
     if kind == "postgres":
-        import psycopg
-
         raw_uri = os.environ.get("TEST_POSTGRES_URI")
         if not raw_uri:
             pytest.skip("TEST_POSTGRES_URI is not configured")
+        psycopg = pytest.importorskip("psycopg", reason="postgres extra is not installed", exc_type=ModuleNotFoundError)
         uri = normalize_libpq_dsn(raw_uri)
         async with await psycopg.AsyncConnection.connect(uri, autocommit=True) as admin:
             await admin.execute(f'CREATE SCHEMA "{schema}"')
