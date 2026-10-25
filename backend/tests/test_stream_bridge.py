@@ -1321,11 +1321,17 @@ def _redis_available() -> bool:
         return False
 
 
-requires_redis = pytest.mark.skipif(not _redis_available(), reason=f"Redis not reachable at {REDIS_TEST_URL}")
+@pytest.fixture
+def _require_stream_test_redis():
+    if not _redis_available():
+        pytest.skip(f"Redis not reachable at {REDIS_TEST_URL}")
+
+
+requires_redis = pytest.mark.usefixtures("_require_stream_test_redis")
 
 
 @pytest.fixture
-async def real_redis_bridge():
+async def real_redis_bridge(_require_stream_test_redis):
     from redis.asyncio import Redis
 
     client = Redis.from_url(REDIS_TEST_URL, decode_responses=True)

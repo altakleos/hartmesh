@@ -13,6 +13,7 @@ from fastapi import HTTPException, Request
 
 from app.gateway.conversation_reader import read_visible_message_page
 from deerflow.constants import CONVERSATION_TOOL_NAME, CONVERSATION_TOOL_USE
+from deerflow.runtime.runs.capture_io import CaptureIOClosed, CaptureIOUnsupported, run_capture_io
 from deerflow.utils.llm_text import strip_think_blocks
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -173,11 +174,11 @@ def prepare_conversation_reader(
 
     async def admitted_source(thread_id: str):
         if execution is not None:
-            await execution.validate()
-            if await execution.authority.binding(thread_id) != execution.instance.id:
+            await run_capture_io(execution.validate)
+            if await run_capture_io(lambda: execution.authority.binding(thread_id)) != execution.instance.id:
                 return None
-            await execution.authority.context_admission(execution, source_thread_id=thread_id)
-        source = await thread_store.get(thread_id, user_id=user_id)
+            await run_capture_io(lambda: execution.authority.context_admission(execution, source_thread_id=thread_id))
+        source = await run_capture_io(lambda: thread_store.get(thread_id, user_id=user_id))
         if source is None or (execution is None and source.get("user_id") != user_id):
             return None
         return source
@@ -199,6 +200,8 @@ def prepare_conversation_reader(
             current = await admitted_source(thread_id)
             if current is None or current.get("incarnation") != source.get("incarnation"):
                 return None
+        except (CaptureIOClosed, CaptureIOUnsupported):
+            raise
         except Exception:
             logger.warning("Unable to read referenced conversation history", exc_info=True)
             return None

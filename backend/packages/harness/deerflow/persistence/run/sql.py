@@ -548,6 +548,32 @@ class RunRepository(RunStore):
         """Release a reservation using its captured owner, not request context."""
         await self.delete(run_id, user_id=user_id)
 
+    async def release_owned_checkpoint_reservation(self, run_id: str, *, user_id: str, thread_id: str, owner_worker_id: str, expected_change_seq: int) -> bool:
+        """Own one conditional release, including native commit/session exit."""
+        if any(type(value) is not str or not value for value in (run_id, user_id, thread_id, owner_worker_id)) or type(expected_change_seq) is not int or expected_change_seq < 0:
+            raise ValueError("Checkpoint reservation release scope is invalid") from None
+        return await await_drained(self._release_owned_checkpoint_reservation(run_id, user_id=user_id, thread_id=thread_id, owner_worker_id=owner_worker_id, expected_change_seq=expected_change_seq))
+
+    async def _release_owned_checkpoint_reservation(self, run_id: str, *, user_id: str, thread_id: str, owner_worker_id: str, expected_change_seq: int) -> bool:
+        async with self._terminal_session() as session:
+            # Preserve the global writer order even though the deleted row
+            # has no remaining change position to publish.
+            await self._next_change_seq(session)
+            result = await session.execute(
+                delete(RunRow).where(
+                    RunRow.run_id == run_id,
+                    RunRow.user_id == user_id,
+                    RunRow.thread_id == thread_id,
+                    RunRow.operation_kind == "checkpoint_write",
+                    RunRow.owner_worker_id == owner_worker_id,
+                    RunRow.change_seq == expected_change_seq,
+                    RunRow.status == "pending",
+                    RunRow.cancel_action.is_(None),
+                )
+            )
+            await session.commit()
+            return result.rowcount == 1
+
     async def list_pending(self, *, before=None):
         if before is None:
             before_dt = datetime.now(UTC)

@@ -14,7 +14,7 @@ import logging
 import re
 import threading
 from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
@@ -90,6 +90,7 @@ from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
 from deerflow.runtime.keyed_lock import KeyedLockTable
 from deerflow.runtime.presented_files import RUNTIME_PRESENTED_FILES_CONTEXT_KEY
+from deerflow.runtime.runs.capture_io import CaptureIOClosed, capture_io_scope, current_capture_io_owner, run_capture_io
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.runs.output import OUTPUT_CAPTURE_DISCONNECT_KEY, OUTPUT_CAPTURE_KEY, OutputCaptureIntent, OutputEvidenceError, capture_from_kwargs
 from deerflow.runtime.secret_context import (
@@ -216,7 +217,7 @@ def _log_thread_metadata_task_result(task: asyncio.Task, *, thread_id: str) -> N
         return
     try:
         task.result()
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, CaptureIOClosed):
         return
     except Exception:
         logger.warning(
@@ -235,13 +236,13 @@ async def _ensure_thread_metadata(
 ) -> dict[str, Any]:
     """Ensure an admitted run's thread exists without delaying task attachment."""
     thread_store = run_ctx.thread_store
-    existing = await thread_store.get(record.thread_id)
+    existing = await run_capture_io(lambda: thread_store.get(record.thread_id))
     if existing is None and owner_user_id:
-        unscoped = await thread_store.get(record.thread_id, user_id=None)
+        unscoped = await run_capture_io(lambda: thread_store.get(record.thread_id, user_id=None))
         if unscoped is not None:
             if unscoped.get("user_id") != owner_user_id:
-                await thread_store.update_owner(record.thread_id, owner_user_id, user_id=None)
-            existing = await thread_store.get(record.thread_id)
+                await run_capture_io(lambda: thread_store.update_owner(record.thread_id, owner_user_id, user_id=None))
+            existing = await run_capture_io(lambda: thread_store.get(record.thread_id))
     if existing is None:
         if require_existing_thread:
             raise LookupError(f"Thread {record.thread_id} was deleted during run admission")
@@ -257,11 +258,7 @@ async def _ensure_thread_metadata(
             # /threads/{id}/move — so the key must not persist either.
             if key not in (DEERFLOW_TRACE_METADATA_KEY, THREAD_PROJECT_METADATA_KEY)
         }
-        existing = await thread_store.create(
-            record.thread_id,
-            assistant_id=record.assistant_id,
-            metadata=metadata,
-        )
+        existing = await run_capture_io(lambda: thread_store.create(record.thread_id, assistant_id=record.assistant_id, metadata=metadata))
     return existing
 
 
@@ -1292,11 +1289,14 @@ class _RawCheckpointReadAccessor:
                 result.append(_RawCheckpointSnapshot(config, anchor))
         if limit is None or len(result) < limit:
             remaining = None if limit is None else limit - len(result)
-            async for tup in self.checkpointer.alist(walk_config, before=before, limit=remaining):
-                self._gate(tup)
-                result.append(_RawCheckpointSnapshot(config, tup))
-                if limit is not None and len(result) >= limit:
-                    break
+            history = self.checkpointer.alist(walk_config, before=before, limit=remaining)
+            history_scope = aclosing(history) if callable(getattr(history, "aclose", None)) else nullcontext(history)
+            async with history_scope:
+                async for tup in history:
+                    self._gate(tup)
+                    result.append(_RawCheckpointSnapshot(config, tup))
+                    if limit is not None and len(result) >= limit:
+                        break
         return result
 
 
@@ -2220,7 +2220,7 @@ async def _start_run(
         if project_context is not None:
             config["context"][PROJECT_CONTEXT_KEY] = project_context
 
-        async def run_after_metadata(record: RunRecord) -> None:
+        async def _run_after_metadata(record: RunRecord) -> None:
             metadata_task = asyncio.create_task(
                 _ensure_thread_metadata(
                     run_ctx,
@@ -2242,7 +2242,7 @@ async def _start_run(
                 if metadata_task in done:
                     try:
                         metadata_record = metadata_task.result()
-                    except asyncio.CancelledError:
+                    except (asyncio.CancelledError, CaptureIOClosed):
                         pass
                     except Exception as exc:
                         metadata_failure_logged = True
@@ -2266,7 +2266,7 @@ async def _start_run(
                     if metadata_record is None and not metadata_failure_logged:
                         try:
                             metadata_record = metadata_task.result()
-                        except asyncio.CancelledError:
+                        except (asyncio.CancelledError, CaptureIOClosed):
                             pass
                         except Exception as exc:
                             metadata_failure_logged = True
@@ -2288,7 +2288,8 @@ async def _start_run(
                 if not abort_task.done():
                     abort_task.cancel()
                     abort_task.add_done_callback(_consume_task_result)
-            if metadata_failure is not None and require_existing_thread:
+            owner = current_capture_io_owner()
+            if metadata_failure is not None and require_existing_thread and (owner is None or not owner.retired):
                 await run_mgr.fail_start_if_pending(
                     record.run_id,
                     error=str(metadata_failure),
@@ -2334,6 +2335,17 @@ async def _start_run(
                 knowledge_scope=admitted_knowledge_scope,
                 **incarnation_kwargs,
             )
+
+        async def run_after_metadata(record: RunRecord) -> None:
+            # Bind on the original attached task before any metadata child can
+            # reach a native query. A retired entry uses the worker's dedicated
+            # no-new-effects path and preserves its confirmed terminal proof.
+            owner = run_mgr.get_capture_io_owner(record)
+            with capture_io_scope(owner):
+                if owner is not None and owner.retired:
+                    await run_agent(bridge, run_mgr, record, ctx=run_ctx)
+                    return
+                await _run_after_metadata(record)
 
         try:
             from app.gateway.agent_conversations import resident_run_admission

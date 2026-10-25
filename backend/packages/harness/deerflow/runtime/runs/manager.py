@@ -8,7 +8,7 @@ import socket
 import sqlite3
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -21,6 +21,7 @@ from deerflow.utils.file_io import await_drained
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
+from .capture_io import CaptureIOCleanupError, CaptureIOClosed, CaptureIOOwner, CaptureIOUnsupported, capture_io_scope, current_capture_io_owner, run_capture_io
 from .output import (
     OUTPUT_CAPTURE_DISCONNECT_KEY,
     OUTPUT_CAPTURE_KEY,
@@ -296,6 +297,58 @@ class RunStartOutcome(StrEnum):
     cancelled = "cancelled"
 
 
+@dataclass
+class _CaptureLifetime:
+    owner: CaptureIOOwner
+    record: RunRecord | None = None
+    controls: dict[asyncio.Task, int] = field(default_factory=dict)
+    finished: bool = False
+
+
+@dataclass(frozen=True)
+class _ReservationScope:
+    run_id: str
+    user_id: str
+    thread_id: str
+    owner_worker_id: str
+    change_seq: int
+
+
+class _CheckpointReservationRelease:
+    """One exact release continuation; never admits a new data-plane call."""
+
+    def __init__(self, store: RunStore):
+        self.store = store
+        self.scope: _ReservationScope | None = None
+        self.ready = asyncio.Event()
+        self.uncertain = False
+        self.task: asyncio.Task | None = None
+
+    def retire(self) -> None:
+        # The owner starts drain only after admitted calls have settled.
+        pass
+
+    async def drain(self) -> None:
+        await self.ready.wait()
+        if self.uncertain:
+            raise CaptureIOCleanupError() from None
+        if self.scope is None:
+            return
+        if self.task is None:
+            scope = self.scope
+
+            async def release():
+                try:
+                    result = await self.store.release_owned_checkpoint_reservation(scope.run_id, user_id=scope.user_id, thread_id=scope.thread_id, owner_worker_id=scope.owner_worker_id, expected_change_seq=scope.change_seq)
+                except BaseException:
+                    raise CaptureIOCleanupError() from None
+                if result is not True:
+                    raise CaptureIOCleanupError() from None
+
+            self.task = asyncio.create_task(release(), name="capture-checkpoint-reservation-release")
+        await await_drained(self.task)
+
+
 class RunStartupError(RuntimeError):
     """Raised when durable startup cannot be resolved safely."""
 
@@ -339,6 +392,133 @@ class RunManager:
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
         self._orphan_recovery_task: asyncio.Task[None] | None = None
+        # Runtime capabilities stay outside RunRecord and its projections.
+        self._capture_lifetimes: dict[CaptureIOOwner, _CaptureLifetime] = {}
+        self._capture_records: dict[int, tuple[RunRecord, _CaptureLifetime]] = {}
+        self._capture_admissions_sealed = False
+        self._capture_shutdown_task: asyncio.Task | None = None
+
+    def seal_capture_io_admissions(self) -> None:
+        """Close new provisional lifetimes without waiting for the SQL lock."""
+        self._capture_admissions_sealed = True
+
+    def _new_capture_lifetime(self) -> _CaptureLifetime:
+        if self._capture_admissions_sealed:
+            raise CaptureIOClosed() from None
+        lifetime = _CaptureLifetime(CaptureIOOwner())
+        self._capture_lifetimes[lifetime.owner] = lifetime
+        return lifetime
+
+    def _capture_lifetime(self, record: RunRecord) -> _CaptureLifetime | None:
+        saved = self._capture_records.get(id(record))
+        return saved[1] if saved is not None and saved[0] is record else None
+
+    def _associate_capture(self, lifetime: _CaptureLifetime, record: RunRecord) -> None:
+        saved = self._capture_records.get(id(record))
+        if saved is not None and (saved[0] is not record or saved[1] is not lifetime):
+            raise CaptureIOUnsupported() from None
+        lifetime.record = record
+        self._capture_records[id(record)] = (record, lifetime)
+
+    def get_capture_io_owner(self, record: RunRecord) -> CaptureIOOwner | None:
+        """Return only this original record's existing host association."""
+        if not isinstance(record, RunRecord):
+            raise CaptureIOUnsupported() from None
+        lifetime = self._capture_lifetime(record)
+        if lifetime is not None:
+            return lifetime.owner
+        if capture_from_kwargs(record.kwargs) is not None:
+            raise CaptureIOUnsupported() from None
+        return None
+
+    @contextmanager
+    def _capture_control(self, record: RunRecord | None = None, *, lifetime: _CaptureLifetime | None = None):
+        if lifetime is None and record is not None:
+            lifetime = self._capture_lifetime(record)
+            if lifetime is None and self._captures_output(record):
+                raise CaptureIOUnsupported() from None
+        if lifetime is None:
+            yield
+            return
+        lifetime.owner.check_open()
+        task = asyncio.current_task()
+        if task is None:
+            raise CaptureIOUnsupported() from None
+        lifetime.controls[task] = lifetime.controls.get(task, 0) + 1
+        try:
+            with capture_io_scope(lifetime.owner):
+                yield
+        finally:
+            count = lifetime.controls[task] - 1
+            if count:
+                lifetime.controls[task] = count
+            else:
+                lifetime.controls.pop(task)
+
+    async def _finish_capture_lifetime(self, lifetime: _CaptureLifetime, *, discard: bool = False) -> None:
+        lifetime.owner.retire()
+        await lifetime.owner.drain()
+        lifetime.finished = True
+        if discard or lifetime.record is None:
+            if lifetime.record is not None:
+                saved = self._capture_records.get(id(lifetime.record))
+                if saved is not None and saved[1] is lifetime:
+                    self._capture_records.pop(id(lifetime.record))
+            self._capture_lifetimes.pop(lifetime.owner, None)
+        else:
+            self._discard_evicted_capture(lifetime)
+
+    def _discard_evicted_capture(self, lifetime: _CaptureLifetime) -> None:
+        """Release a completed confirmed association only after normal eviction."""
+        record = lifetime.record
+        if record is None or self._runs.get(record.run_id) is record or not lifetime.finished or not record.terminal_confirmed or record.ownership_lost or record.terminal_write_unconfirmed or record.status.value not in TERMINAL_STATUSES:
+            return
+        try:
+            saved = receipt_from_kwargs(record.kwargs)
+            if saved is None or (saved.owner_user_id, saved.thread_id, saved.run_id) != (record.user_id, record.thread_id, record.run_id):
+                return
+            validate_receipt_status(saved, record.status)
+        except OutputEvidenceError:
+            return
+        association = self._capture_records.get(id(record))
+        if association is not None and association[0] is record and association[1] is lifetime:
+            self._capture_records.pop(id(record))
+            self._capture_lifetimes.pop(lifetime.owner, None)
+
+    async def finish_capture_io(self, record: RunRecord) -> None:
+        """Retire after the worker; retain the original closed association."""
+        lifetime = self._capture_lifetime(record)
+        if lifetime is not None:
+            await await_drained(self._finish_capture_lifetime(lifetime))
+
+    @asynccontextmanager
+    async def _maintenance_control(self):
+        """Track finite host maintenance without adopting any peer record."""
+        if current_capture_io_owner() is not None or not self.supports_output_receipts:
+            yield
+            return
+        lifetime = self._new_capture_lifetime()
+        try:
+            with self._capture_control(lifetime=lifetime):
+                yield
+        finally:
+            await await_drained(self._finish_capture_lifetime(lifetime, discard=True))
+
+    async def _capture_retry_sleep(self, seconds: float) -> None:
+        owner = current_capture_io_owner()
+        if owner is None:
+            await asyncio.sleep(seconds)
+            return
+        owner.check_open()
+        sleeping = asyncio.create_task(asyncio.sleep(seconds))
+        retired = asyncio.create_task(owner.wait_retired())
+        try:
+            await asyncio.wait({sleeping, retired}, return_when=asyncio.FIRST_COMPLETED)
+            owner.check_open()
+        finally:
+            sleeping.cancel()
+            retired.cancel()
+            await asyncio.gather(sleeping, retired, return_exceptions=True)
 
     def _index_run_locked(self, record: RunRecord) -> None:
         """Register *record* in the thread index. Caller must hold ``self._lock``."""
@@ -417,7 +597,9 @@ class RunManager:
         delay = policy.initial_delay
         while True:
             try:
-                return await operation()
+                return await run_capture_io(operation)
+            except CaptureIOClosed:
+                raise
             except Exception as exc:
                 retryable = _is_retryable_persistence_error(exc)
                 if attempt >= policy.max_attempts or not retryable:
@@ -430,7 +612,7 @@ class RunManager:
                     policy.max_attempts,
                 )
                 if delay > 0:
-                    await asyncio.sleep(delay)
+                    await self._capture_retry_sleep(delay)
                 delay = min(policy.max_delay, delay * policy.backoff_factor if delay else policy.initial_delay)
                 attempt += 1
 
@@ -445,6 +627,8 @@ class RunManager:
                 lambda: self._store.put(run_id, **payload),
             )
             return True
+        except CaptureIOClosed:
+            raise
         except Exception:
             logger.warning("Failed to persist run %s to store", run_id, exc_info=True)
             return False
@@ -501,7 +685,7 @@ class RunManager:
                 #   (b) the row is terminal — either a peer takeover (``error``)
                 #       or a local cancel/completion race (``interrupted`` /
                 #       ``success``). The log severity branches on which.
-                existing = await self._store.get(record.run_id)
+                existing = await run_capture_io(lambda: self._store.get(record.run_id))
                 if existing is not None:
                     existing_status = existing.get("status")
                     if existing_status == status.value:
@@ -533,6 +717,8 @@ class RunManager:
                     return False
                 return await self._persist_snapshot_to_store(record.run_id, row_recovery_payload)
             return True
+        except CaptureIOClosed:
+            raise
         except Exception as exc:
             diagnostic(record, status, outcome="unknown", exception_class=exception_classification(exc))
             return False
@@ -624,7 +810,7 @@ class RunManager:
                     # Never recreate or overwrite a different owner's row.
                     await self._mark_ownership_lost(record, reason="The durable store rejected owned completion metadata.", require_active=False)
                     return
-                existing = await self._store.get(run_id)
+                existing = await run_capture_io(lambda: self._store.get(run_id))
                 requested_status = kwargs.get("status")
                 if existing is not None and existing.get("status") != requested_status:
                     existing_status = existing.get("status")
@@ -652,6 +838,8 @@ class RunManager:
                 )
                 if recovered is False:
                     logger.warning("Run completion update for %s affected no rows after row recreation", run_id)
+        except CaptureIOClosed:
+            raise
         except Exception as exc:
             logger.warning("Run persistence failed run_id=%s operation=completion reason=run_metadata_write_failed exception_class=%s", run_id, exception_classification(exc))
 
@@ -670,7 +858,9 @@ class RunManager:
                 record.updated_at = _now_iso()
         if should_persist and self._store is not None:
             try:
-                await self._store.update_run_progress(run_id, **kwargs)
+                await run_capture_io(lambda: self._store.update_run_progress(run_id, **kwargs))
+            except CaptureIOClosed:
+                raise
             except Exception as exc:
                 logger.warning("Run persistence failed run_id=%s operation=progress reason=run_metadata_write_failed exception_class=%s", run_id, exception_classification(exc))
 
@@ -691,7 +881,9 @@ class RunManager:
             try:
                 # The local status is already staged as terminal, but the store
                 # row intentionally remains running until checkpoint finalization.
-                await self._store.update_run_progress(run_id, **kwargs)
+                await run_capture_io(lambda: self._store.update_run_progress(run_id, **kwargs))
+            except CaptureIOClosed:
+                raise
             except Exception as exc:
                 logger.warning("Run persistence failed run_id=%s operation=finalizing_progress reason=run_metadata_write_failed exception_class=%s", run_id, exception_classification(exc))
 
@@ -736,21 +928,32 @@ class RunManager:
             owner_worker_id=self._worker_id,
             lease_expires_at=lease_expires_at,
         )
-        async with self._lock:
-            self._runs[run_id] = record
-            self._index_run_locked(record)
-            persisted = False
-            try:
-                await self._persist_new_run_to_store(record)
-                persisted = True
-            except Exception:
-                logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
-                raise
-            finally:
-                # Also covers cancellation, which bypasses ``except Exception``.
-                if not persisted:
-                    self._runs.pop(run_id, None)
-                    self._unindex_run_locked(run_id, record.thread_id)
+        lifetime = self._new_capture_lifetime() if self._captures_output(record) else None
+        if lifetime is not None:
+            self._associate_capture(lifetime, record)
+        try:
+            with self._capture_control(lifetime=lifetime):
+                async with self._lock:
+                    self._runs[run_id] = record
+                    self._index_run_locked(record)
+                    persisted = False
+                    try:
+                        await self._persist_new_run_to_store(record)
+                        persisted = True
+                    except CaptureIOClosed:
+                        raise
+                    except Exception:
+                        logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
+                        raise
+                    finally:
+                        # Also covers cancellation, which bypasses ``except Exception``.
+                        if not persisted:
+                            self._runs.pop(run_id, None)
+                            self._unindex_run_locked(run_id, record.thread_id)
+        except BaseException:
+            if lifetime is not None:
+                await await_drained(self._finish_capture_lifetime(lifetime))
+            raise
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
@@ -783,7 +986,9 @@ class RunManager:
         if self._store is None:
             return None
         try:
-            row = await self._store.get(run_id, user_id=user_id)
+            row = await run_capture_io(lambda: self._store.get(run_id, user_id=user_id))
+        except CaptureIOClosed:
+            raise
         except Exception:
             if raise_on_store_error:
                 raise
@@ -805,6 +1010,8 @@ class RunManager:
             return mapped
         try:
             return self._record_from_store(row)
+        except CaptureIOClosed:
+            raise
         except Exception:
             if raise_on_store_error:
                 raise
@@ -823,7 +1030,7 @@ class RunManager:
         try:
             # Observe a foreign row rather than turning wrong owner into an
             # acknowledgeable absence. The explicit None bypasses ambient aliases.
-            row = await await_drained(self._store.get(run_id, user_id=None))
+            row = await await_drained(run_capture_io(lambda: self._store.get(run_id, user_id=None)))
             if row is None:
                 return None
             if not isinstance(row, Mapping) or any(type(row.get(key)) is not str or not row[key] for key in ("run_id", "thread_id", "user_id")):
@@ -840,14 +1047,18 @@ class RunManager:
             async with self._lock:
                 local = self._runs.get(run_id)
                 finalizing = local is not None and local.user_id == user_id and local.thread_id == row.get("thread_id") and local.finalizing
+                original = local
+                if original is None:
+                    original = next((record for record, _lifetime in self._capture_records.values() if record.run_id == run_id and record.user_id == user_id and record.thread_id == row["thread_id"]), None)
+                lifetime = self._capture_lifetime(original) if original is not None else None
                 if (
                     row["status"] in {"pending", "running"}
-                    and local is not None
-                    and local.user_id == user_id
-                    and local.thread_id == row["thread_id"]
+                    and original is not None
+                    and original.user_id == user_id
+                    and original.thread_id == row["thread_id"]
                     and row.get("owner_worker_id")
-                    and row["owner_worker_id"] == local.owner_worker_id == self.worker_id
-                    and local.ownership_lost
+                    and row["owner_worker_id"] == original.owner_worker_id == self.worker_id
+                    and (original.ownership_lost or lifetime is not None and lifetime.owner.retired)
                 ):
                     raise OutputEvidenceError()
             return RunOutputSnapshot(
@@ -861,6 +1072,8 @@ class RunManager:
             )
         except OutputEvidenceScopeError:
             raise
+        except CaptureIOClosed:
+            raise
         except Exception:
             raise OutputEvidenceError() from None
 
@@ -873,7 +1086,8 @@ class RunManager:
             record = self._runs.get(run_id)
             if record is None or record.store_only or record.run_id != wanted.run_id or record.thread_id != wanted.thread_id or record.user_id != wanted.owner_user_id:
                 raise OutputEvidenceScopeError()
-        return await persist_terminal(self, record, status, error=error, stop_reason=stop_reason, respect_cancellation=respect_cancellation, output_receipt=wanted)
+        with self._capture_control(record):
+            return await persist_terminal(self, record, status, error=error, stop_reason=stop_reason, respect_cancellation=respect_cancellation, output_receipt=wanted)
 
     def _strict_record_from_store(self, row) -> RunRecord:
         # Do not turn an observed malformed kwargs value into a legacy empty
@@ -974,7 +1188,9 @@ class RunManager:
             store_kwargs["before_created_at"] = before_created_at
             store_kwargs["before_run_id"] = before_run_id
         try:
-            rows = await self._store.list_by_thread(thread_id, **store_kwargs)
+            rows = await run_capture_io(lambda: self._store.list_by_thread(thread_id, **store_kwargs))
+        except CaptureIOClosed:
+            raise
         except Exception:
             if raise_on_store_error:
                 raise
@@ -992,6 +1208,8 @@ class RunManager:
             if run_id and run_id not in records_by_id:
                 try:
                     records_by_id[run_id] = self._record_from_store(row)
+                except CaptureIOClosed:
+                    raise
                 except Exception:
                     logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
         return _page(list(records_by_id.values()))
@@ -1014,7 +1232,7 @@ class RunManager:
         async with self._lock:
             memory_records = [record for record in self._thread_records_locked(thread_id) if record.operation_kind == ThreadOperationKind.run and (resolved_user_id is None or record.user_id == resolved_user_id)]
 
-        sources = set(await self._store.list_successful_regenerate_sources(thread_id, user_id=resolved_user_id)) if self._store is not None else set()
+        sources = set(await run_capture_io(lambda: self._store.list_successful_regenerate_sources(thread_id, user_id=resolved_user_id))) if self._store is not None else set()
         # _thread_records_locked preserves the insertion order of the thread
         # index. Applying records oldest-to-newest makes the latest in-memory
         # regeneration attempt authoritative when several attempts reference
@@ -1073,10 +1291,12 @@ class RunManager:
         resolved_user_id = resolve_user_id(user_id, method_name="RunManager.list_edit_replay_visibility")
         records_by_id: dict[str, RunRecord] = {}
         if self._store is not None:
-            rows = await self._store.list_edit_regenerate_runs(thread_id, user_id=resolved_user_id)
+            rows = await run_capture_io(lambda: self._store.list_edit_regenerate_runs(thread_id, user_id=resolved_user_id))
             for row in rows:
                 try:
                     record = self._record_from_store(row)
+                except CaptureIOClosed:
+                    raise
                 except Exception:
                     logger.warning("Failed to map edit replay run row for %s", row.get("run_id"), exc_info=True)
                     continue
@@ -1124,19 +1344,31 @@ class RunManager:
                 async with self._lock:
                     record.prestart_outcome = replace(outcome, confirmed=True)
                 return True
+        except CaptureIOClosed:
+            raise
         except Exception:
             pass
         await self._mark_ownership_lost(record, reason="Run prestart output could not be confirmed.", require_active=False)
         return False
 
     async def _close_unstarted_capture(self, record: RunRecord, outcome: PrestartOutcome) -> bool:
+        if record.startup_phase is RunStartupPhase.closed and record.prestart_outcome is not None and record.prestart_outcome.confirmed:
+            return True
+
         async def close():
-            async with record.start_lock:
-                return await self._settle_prestart_locked(record, outcome)
+            with self._capture_control(record):
+                async with record.start_lock:
+                    return await self._settle_prestart_locked(record, outcome)
 
         return await await_drained(close())
 
     async def _try_start_capture(self, record: RunRecord) -> RunStartOutcome:
+        if record.startup_phase is not RunStartupPhase.unstarted:
+            return RunStartOutcome.cancelled
+        with self._capture_control(record):
+            return await self._try_start_capture_owned(record)
+
+    async def _try_start_capture_owned(self, record: RunRecord) -> RunStartOutcome:
         async with record.start_lock:
             async with self._lock:
                 if self._runs.get(record.run_id) is not record or record.startup_phase is not RunStartupPhase.unstarted:
@@ -1147,10 +1379,12 @@ class RunManager:
             if not cancelled:
                 try:
                     updated = await self._call_store_with_retry("start_run", record.run_id, lambda: self._store.start_run(record.run_id))
+                except CaptureIOClosed:
+                    raise
                 except Exception as exc:
                     raise RunStartupError(f"Failed to start run {record.run_id}: {exc}") from exc
                 if not updated:
-                    row = await self._store.get(record.run_id, user_id=record.user_id)
+                    row = await run_capture_io(lambda: self._store.get(record.run_id, user_id=record.user_id))
                     if row is None or row.get("status") not in {"pending", "running"} or row.get("owner_worker_id") != self.worker_id or row.get("cancel_action") is None:
                         await self._mark_ownership_lost(record, reason="Run startup authority could not be confirmed.", require_active=False)
                         return RunStartOutcome.cancelled
@@ -1186,6 +1420,8 @@ class RunManager:
                         run_id,
                         lambda: self._store.start_run(run_id),
                     )
+                except CaptureIOClosed:
+                    raise
                 except Exception as exc:
                     raise RunStartupError(f"Failed to start run {run_id}: {exc}") from exc
                 if updated is False:
@@ -1258,7 +1494,9 @@ class RunManager:
         if not remaining:
             return records_by_id
         try:
-            rows = await self._store.get_many_by_thread(thread_id, set(remaining), user_id=resolved_user_id)
+            rows = await run_capture_io(lambda: self._store.get_many_by_thread(thread_id, set(remaining), user_id=resolved_user_id))
+        except CaptureIOClosed:
+            raise
         except Exception:
             logger.warning("Failed to batch-hydrate runs for thread %s", thread_id, exc_info=True)
             return records_by_id
@@ -1267,6 +1505,8 @@ class RunManager:
                 continue
             try:
                 records_by_id[run_id] = self._record_from_store(row)
+            except CaptureIOClosed:
+                raise
             except Exception:
                 logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
         return records_by_id
@@ -1370,6 +1610,8 @@ class RunManager:
                     stop_reason=stop_reason,
                 ),
             )
+        except CaptureIOClosed:
+            raise
         except Exception as exc:
             async with self._lock:
                 record = self._runs.get(run_id)
@@ -1404,14 +1646,18 @@ class RunManager:
         if self._event_store is None:
             return True
         try:
-            await self._event_store.put_if_absent(
-                thread_id=record.thread_id,
-                run_id=record.run_id,
-                event_type="run.delivery",
-                category="outputs",
-                content={"presented": 0, "paths": [], "by_tool": {}},
+            await run_capture_io(
+                lambda: self._event_store.put_if_absent(
+                    thread_id=record.thread_id,
+                    run_id=record.run_id,
+                    event_type="run.delivery",
+                    category="outputs",
+                    content={"presented": 0, "paths": [], "by_tool": {}},
+                )
             )
             return True
+        except CaptureIOClosed:
+            raise
         except Exception:
             logger.warning(
                 "Failed to backfill delivery receipt for recovered run %s; preserving its terminal status",
@@ -1496,6 +1742,8 @@ class RunManager:
                 run_id,
                 lambda: self._store.update_model_name(run_id, model_name),
             )
+        except CaptureIOClosed:
+            raise
         except Exception:
             logger.warning("Failed to persist model_name update for run %s", run_id, exc_info=True)
 
@@ -1534,6 +1782,8 @@ class RunManager:
                 run_id,
             )
             return CancelOutcome.lease_valid_elsewhere, None
+        except CaptureIOClosed:
+            raise
         except Exception:
             logger.warning(
                 "Failed to persist cancellation request for run %s",
@@ -1555,7 +1805,9 @@ class RunManager:
         # guarded cancellation UPDATE. Re-read so the API reports that precise
         # terminal result rather than claiming the request was accepted.
         try:
-            fresh = await self._store.get(run_id)
+            fresh = await run_capture_io(lambda: self._store.get(run_id))
+        except CaptureIOClosed:
+            raise
         except Exception:
             fresh = None
         if fresh is None:
@@ -1607,6 +1859,10 @@ class RunManager:
             return CancelOutcome.cancelled if saved is not None and saved.confirmed and saved.reason == "cancelled" else CancelOutcome.not_cancellable
         if record.terminal_confirmed and record.status.value in TERMINAL_STATUSES:
             return CancelOutcome.cancelled if record.status is RunStatus.interrupted else CancelOutcome.not_cancellable
+        with self._capture_control(record):
+            return await self._cancel_capture_owned(record, action=action)
+
+    async def _cancel_capture_owned(self, record: RunRecord, *, action: str) -> CancelOutcome:
         outcome, winning = await self._request_durable_cancel(record.run_id, action=action)
         if outcome not in {CancelOutcome.requested, CancelOutcome.unknown}:
             return outcome
@@ -1634,6 +1890,14 @@ class RunManager:
         return CancelOutcome.cancelled if confirmed else CancelOutcome.unknown
 
     async def cancel(self, run_id: str, *, action: str = "interrupt") -> CancelOutcome:
+        """Cancel under the original local owner or a finite host lifetime."""
+        record = self._runs.get(run_id)
+        if record is not None and self._capture_lifetime(record) is not None:
+            return await self._cancel_with_local_authority(run_id, action=action)
+        async with self._maintenance_control():
+            return await self._cancel_with_local_authority(run_id, action=action)
+
+    async def _cancel_with_local_authority(self, run_id: str, *, action: str) -> CancelOutcome:
         """Request cancellation of a run.
 
         When the call lands on the owning worker the run is cancelled
@@ -1731,7 +1995,9 @@ class RunManager:
                 # guarded ``update_status``. If so, surface ``taken_over``
                 # so the client sees a status consistent with the store.
                 try:
-                    existing = await self._store.get(run_id)
+                    existing = await run_capture_io(lambda: self._store.get(run_id))
+                except CaptureIOClosed:
+                    raise
                 except Exception:
                     existing = None
                 if existing is not None and existing.get("status") == "error":
@@ -1760,7 +2026,9 @@ class RunManager:
             return CancelOutcome.unknown
 
         try:
-            row = await self._store.get(run_id)
+            row = await run_capture_io(lambda: self._store.get(run_id))
+        except CaptureIOClosed:
+            raise
         except Exception:
             logger.warning("Failed to fetch run %s from store during cancel", run_id, exc_info=True)
             return CancelOutcome.unknown
@@ -1791,6 +2059,8 @@ class RunManager:
                     error=take_over_msg,
                 ),
             )
+        except CaptureIOClosed:
+            raise
         except Exception:
             logger.warning("Take-over claim for run %s failed with exception", run_id, exc_info=True)
             return CancelOutcome.unknown
@@ -1806,7 +2076,9 @@ class RunManager:
         #       → not_cancellable or taken_over.
         # Re-read to distinguish.
         try:
-            fresh = await self._store.get(run_id)
+            fresh = await run_capture_io(lambda: self._store.get(run_id))
+        except CaptureIOClosed:
+            raise
         except Exception:
             fresh = None
         if fresh is None:
@@ -1850,7 +2122,7 @@ class RunManager:
             for record in self._runs.values():
                 if record.idempotency_key == key:
                     return validated(record)
-        row = await self._store.get_by_idempotency_key(key) if self._store is not None else None
+        row = await run_capture_io(lambda: self._store.get_by_idempotency_key(key)) if self._store is not None else None
         # A same-worker admission may have committed while the store read
         # yielded. Preserve its task/stream identity instead of a peer handle.
         async with self._lock:
@@ -1874,11 +2146,14 @@ class RunManager:
     ) -> RunRecord:
         """Atomically admit a normal agent run for a thread."""
         captured = self.supports_output_receipts and capture_from_kwargs(kwargs or {}) is not None
+        lifetime = self._new_capture_lifetime() if captured else None
         registration = None
 
         def witnessed(record, stage):
             nonlocal registration
             registration = (record, stage)
+            if lifetime is not None and stage is not _AdmissionStage.reused:
+                self._associate_capture(lifetime, record)
 
         admission = self._admit_thread_operation(
             thread_id,
@@ -1897,15 +2172,29 @@ class RunManager:
             return await admission
 
         async def own_admission():
+            failed = False
+            invoked = False
             try:
-                return await admission
-            except Exception:
-                if registration is not None and registration[1] is not _AdmissionStage.reused:
-                    if registration[1] is _AdmissionStage.constructed:
-                        await self._recover_capture_admission(registration[0], witnessed)
-                    else:
-                        await self._close_unstarted_capture(registration[0], PrestartOutcome(RunStatus.error, "failed", error="Run admission failed before execution."))
+                with self._capture_control(lifetime=lifetime):
+                    invoked = True
+                    return await admission
+            except CaptureIOClosed:
                 raise
+            except Exception:
+                failed = True
+                if registration is not None and registration[1] is not _AdmissionStage.reused and not lifetime.owner.retired:
+                    with self._capture_control(lifetime=lifetime):
+                        if registration[1] is _AdmissionStage.constructed:
+                            await self._recover_capture_admission(registration[0], witnessed)
+                        else:
+                            await self._close_unstarted_capture(registration[0], PrestartOutcome(RunStatus.error, "failed", error="Run admission failed before execution."))
+                raise
+            finally:
+                if not invoked:
+                    admission.close()
+                reused = registration is not None and registration[1] is _AdmissionStage.reused
+                if failed or reused:
+                    await self._finish_capture_lifetime(lifetime, discard=reused)
 
         try:
             return await await_drained(own_admission())
@@ -1914,13 +2203,18 @@ class RunManager:
             # caller can disappear. This owner is only for actual run admission;
             # checkpoint self-handoff retains its original worker-task identity.
             if registration is not None and registration[1] is _AdmissionStage.registered:
-                await self._close_cancelled_admission(registration[0])
+                try:
+                    if not lifetime.owner.retired:
+                        with self._capture_control(lifetime=lifetime):
+                            await self._close_cancelled_admission(registration[0])
+                finally:
+                    await await_drained(self._finish_capture_lifetime(lifetime))
             raise
 
     async def _recover_capture_admission(self, record: RunRecord, witnessed: Callable[[RunRecord, _AdmissionStage], None]) -> None:
         """Recover only this original constructed UUID after an unknown result."""
         try:
-            row = await await_drained(self._store.get(record.run_id, user_id=None))
+            row = await await_drained(run_capture_io(lambda: self._store.get(record.run_id, user_id=None)))
             if (
                 not isinstance(row, Mapping)
                 or (row.get("run_id"), row.get("thread_id"), row.get("user_id"), row.get("operation_kind"), row.get("owner_worker_id"), row.get("idempotency_key"))
@@ -2127,7 +2421,7 @@ class RunManager:
 
             if multitask_strategy in ("interrupt", "rollback") and any(self._captures_output(prior) for prior in local_inflight):
                 if idempotency_key is not None and self._store is not None:
-                    existing = await await_drained(self._store.get_by_idempotency_key(idempotency_key))
+                    existing = await await_drained(run_capture_io(lambda: self._store.get_by_idempotency_key(idempotency_key)))
                     if existing is not None:
                         return reuse_idempotent_run(RunIdempotencyConflict(existing))
                 raise ConflictError(f"Thread {thread_id} has an active captured run")
@@ -2179,6 +2473,8 @@ class RunManager:
                         return reuse_idempotent_run(exc)
                     except ConflictError:
                         raise
+                    except CaptureIOClosed:
+                        raise
                     except Exception as exc:
                         if _is_unique_violation(exc):
                             raise ConflictError(f"Thread {thread_id} already has an active run") from exc
@@ -2215,6 +2511,8 @@ class RunManager:
                             break
                         except RunIdempotencyConflict as exc:
                             return reuse_idempotent_run(exc)
+                        except CaptureIOClosed:
+                            raise
                         except Exception as exc:
                             is_unique = _is_unique_violation(exc)
                             if is_unique and attempt + 1 < max_retries:
@@ -2267,12 +2565,16 @@ class RunManager:
                     await asyncio.shield(cleanup)
                 except asyncio.CancelledError:
                     pass
+                except CaptureIOClosed:
+                    raise
                 except Exception:
                     break
             try:
                 cleanup.result()
             except asyncio.CancelledError:
                 logger.error("Cancelled admission cleanup task was itself cancelled for run %s", record.run_id)
+            except CaptureIOClosed:
+                raise
             except Exception:
                 logger.exception("Failed to close run %s after admission was cancelled", record.run_id)
             raise
@@ -2297,14 +2599,46 @@ class RunManager:
         """
         if kind == ThreadOperationKind.run:
             raise ValueError("Normal runs must be admitted with create_or_reject()")
-        record = await self._admit_thread_operation(
-            thread_id,
-            operation_kind=kind,
-            multitask_strategy="reject",
-            user_id=user_id,
-            finalizing_run=finalizing_run,
-        )
+        owner = current_capture_io_owner()
+        release = None
+        if owner is not None:
+            owner.check_open()
+            if kind is not ThreadOperationKind.checkpoint_write or self._store is None:
+                raise CaptureIOUnsupported() from None
+            release = _CheckpointReservationRelease(self._store)
+            owner.register_resource(release)
+        record = None
         try:
+            try:
+                record = await self._admit_thread_operation(
+                    thread_id,
+                    operation_kind=kind,
+                    multitask_strategy="reject",
+                    user_id=user_id,
+                    finalizing_run=finalizing_run,
+                )
+                if release is not None:
+                    row = await run_capture_io(lambda: self._store.get(record.run_id, user_id=record.user_id))
+                    owner.check_open()
+                    if (
+                        not isinstance(row, dict)
+                        or (row.get("run_id"), row.get("user_id"), row.get("thread_id"), row.get("operation_kind"), row.get("owner_worker_id"), row.get("status"), row.get("cancel_action"))
+                        != (record.run_id, record.user_id, thread_id, "checkpoint_write", self.worker_id, "pending", None)
+                        or type(row.get("change_seq")) is not int
+                        or row["change_seq"] < 0
+                    ):
+                        raise CaptureIOCleanupError() from None
+                    release.scope = _ReservationScope(record.run_id, record.user_id, thread_id, self.worker_id, row["change_seq"])
+            except ConflictError:
+                # The atomic admission refused without constructing a row.
+                raise
+            except BaseException:
+                if release is not None:
+                    release.uncertain = True
+                raise
+            finally:
+                if release is not None:
+                    release.ready.set()
             reservation_task = asyncio.current_task()
             if reservation_task is None:
                 raise RuntimeError("Thread operation reservation requires an active asyncio task")
@@ -2317,18 +2651,31 @@ class RunManager:
                 raise asyncio.CancelledError()
             yield
         except asyncio.CancelledError:
-            if record.abort_event.is_set():
+            if record is not None and record.abort_event.is_set():
                 raise ConflictError(f"Thread {thread_id} reservation lease was lost") from None
             raise
         finally:
             try:
-                if self._store is not None:
+                if release is not None:
+                    try:
+                        # No retry or new ticket after retirement: only the
+                        # already-confirmed exact release capability remains.
+                        await owner.drain()
+                        await release.drain()
+                    except BaseException:
+                        owner.retire()
+                        raise
+                    else:
+                        owner.unregister_resource(release)
+                elif record is not None and self._store is not None:
                     try:
                         await self._call_store_with_retry(
                             "release thread operation",
                             record.run_id,
                             lambda: self._store.delete_thread_operation(record.run_id, user_id=record.user_id),
                         )
+                    except CaptureIOClosed:
+                        raise
                     except Exception:
                         logger.warning(
                             "Failed to release persisted thread operation %s; leaving it for orphan reconciliation",
@@ -2337,11 +2684,21 @@ class RunManager:
                         )
             finally:
                 async with self._lock:
-                    removed = self._runs.pop(record.run_id, None)
+                    removed = self._runs.pop(record.run_id, None) if record is not None else None
                     if removed is not None:
                         self._unindex_run_locked(record.run_id, removed.thread_id)
 
     async def reconcile_orphaned_inflight_runs(
+        self,
+        *,
+        error: str,
+        before: str | None = None,
+        stop_reason: str | None = None,
+    ) -> list[RunRecord]:
+        async with self._maintenance_control():
+            return await self._reconcile_orphaned_inflight_runs(error=error, before=before, stop_reason=stop_reason)
+
+    async def _reconcile_orphaned_inflight_runs(
         self,
         *,
         error: str,
@@ -2371,6 +2728,8 @@ class RunManager:
                 "*",
                 lambda: self._store.list_inflight_with_expired_lease(before=before, grace_seconds=grace_seconds),
             )
+        except CaptureIOClosed:
+            raise
         except Exception:
             logger.warning("Failed to list orphaned inflight runs for reconciliation", exc_info=True)
             return []
@@ -2380,6 +2739,8 @@ class RunManager:
         for row in rows:
             try:
                 record = self._record_from_store(row)
+            except CaptureIOClosed:
+                raise
             except Exception:
                 logger.warning("Failed to map orphaned run row during reconciliation", exc_info=True)
                 continue
@@ -2401,6 +2762,8 @@ class RunManager:
                         stop_reason=stop_reason,
                     ),
                 )
+            except CaptureIOClosed:
+                raise
             except Exception:
                 logger.warning("Failed to claim orphaned run %s for reconciliation", record.run_id, exc_info=True)
                 continue
@@ -2449,6 +2812,9 @@ class RunManager:
             record = self._runs.pop(run_id, None)
             if record is not None:
                 self._unindex_run_locked(run_id, record.thread_id)
+                lifetime = self._capture_lifetime(record)
+                if lifetime is not None:
+                    self._discard_evicted_capture(lifetime)
         logger.debug("Run record %s cleaned up", run_id)
 
     # ------------------------------------------------------------------
@@ -2545,6 +2911,8 @@ class RunManager:
         """
         if not self.heartbeat_enabled:
             return
+        if self._capture_admissions_sealed and self.supports_output_receipts:
+            raise CaptureIOClosed() from None
         if self._heartbeat_task is not None and not self._heartbeat_task.done():
             return
         self._heartbeat_stop = asyncio.Event()
@@ -2601,6 +2969,8 @@ class RunManager:
             cycle += 1
             try:
                 await self._renew_leases()
+            except CaptureIOClosed:
+                return
             except Exception:
                 logger.warning("Heartbeat renewal cycle failed", exc_info=True)
 
@@ -2614,6 +2984,10 @@ class RunManager:
                 self._schedule_orphan_reconciliation()
 
     async def _renew_leases(self) -> None:
+        async with self._maintenance_control():
+            await self._renew_leases_controlled()
+
+    async def _renew_leases_controlled(self) -> None:
         """Renew locally-owned leases, failing closed at their deadlines.
 
         ``RunRecord.lease_expires_at`` advances only after a successful durable
@@ -2647,6 +3021,9 @@ class RunManager:
             ]
 
         for run_id, record in active_runs:
+            lifetime = self._capture_lifetime(record)
+            if lifetime is not None and lifetime.owner.retired:
+                continue
             confirmed_deadline = self._parse_lease_deadline(record.lease_expires_at)
             if confirmed_deadline is None or confirmed_deadline <= datetime.now(UTC):
                 await self._mark_ownership_lost(
@@ -2658,16 +3035,17 @@ class RunManager:
             remaining = (confirmed_deadline - datetime.now(UTC)).total_seconds()
             new_expiry = (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()
             try:
-                async with asyncio.timeout(remaining):
-                    renewal = await self._call_store_with_retry(
-                        "renew_lease",
-                        run_id,
-                        lambda: self._store.renew_lease(
+                with capture_io_scope(lifetime.owner if lifetime is not None else current_capture_io_owner()):
+                    async with asyncio.timeout(remaining):
+                        renewal = await self._call_store_with_retry(
+                            "renew_lease",
                             run_id,
-                            owner_worker_id=self._worker_id,
-                            lease_expires_at=new_expiry,
-                        ),
-                    )
+                            lambda: self._store.renew_lease(
+                                run_id,
+                                owner_worker_id=self._worker_id,
+                                lease_expires_at=new_expiry,
+                            ),
+                        )
                 if renewal.renewed:
                     if confirmed_deadline <= datetime.now(UTC):
                         await self._mark_ownership_lost(
@@ -2717,6 +3095,8 @@ class RunManager:
                             record,
                             reason="The durable store rejected lease renewal for this worker.",
                         )
+            except CaptureIOClosed:
+                raise
             except Exception:
                 if confirmed_deadline <= datetime.now(UTC):
                     await self._mark_ownership_lost(
@@ -2740,6 +3120,10 @@ class RunManager:
             )
 
     async def _reconcile_orphans_periodic(self) -> None:
+        async with self._maintenance_control():
+            await self._reconcile_orphans_periodic_controlled()
+
+    async def _reconcile_orphans_periodic_controlled(self) -> None:
         """Sweep for expired leases owned by dead peers.
 
         Scheduled as a single-flight background task by ``_heartbeat_loop``.
@@ -2759,7 +3143,12 @@ class RunManager:
             )
             if self._on_orphans_recovered is not None:
                 try:
+                    owner = current_capture_io_owner()
+                    if owner is not None:
+                        owner.check_open()
                     await self._on_orphans_recovered(recovered)
+                except CaptureIOClosed:
+                    raise
                 except Exception:
                     logger.warning(
                         "Periodic orphan recovery callback failed for %d run(s): run_ids=%s",
@@ -2770,11 +3159,16 @@ class RunManager:
 
     def _schedule_orphan_reconciliation(self) -> None:
         """Start one supervised recovery pass unless one is already running."""
+        if self._capture_admissions_sealed and self.supports_output_receipts:
+            return
         task = self._orphan_recovery_task
         if task is not None and not task.done():
             logger.debug("Skipping periodic orphan reconciliation: previous pass is still running")
             return
-        task = asyncio.create_task(self._reconcile_orphans_periodic())
+        # This manager-owned background pass gets its own provisional lifetime;
+        # it must not inherit one arbitrary worker's producer retirement.
+        with capture_io_scope(None):
+            task = asyncio.create_task(self._reconcile_orphans_periodic())
         task.set_name("deerflow-periodic-orphan-recovery")
         self._orphan_recovery_task = task
         task.add_done_callback(self._orphan_reconciliation_done)
@@ -2787,6 +3181,8 @@ class RunManager:
             return
         try:
             task.result()
+        except CaptureIOClosed:
+            return
         except Exception:
             logger.warning("Periodic orphan reconciliation failed", exc_info=True)
 
@@ -2805,6 +3201,49 @@ class RunManager:
             )
 
     async def shutdown(self, *, timeout: float = 5.0) -> None:
+        """Use one grace, then retire and drain finite captured operations."""
+        self.seal_capture_io_admissions()
+        if self._capture_shutdown_task is None or self._capture_shutdown_task.done():
+            deadline = asyncio.get_running_loop().time() + timeout
+            self._capture_shutdown_task = asyncio.create_task(self._shutdown_capture_and_tasks(deadline=deadline, timeout=timeout), name="capture-run-shutdown")
+        await await_drained(asyncio.shield(self._capture_shutdown_task))
+
+    async def drain_late_admitted_tasks(self, *, deadline: float) -> None:
+        """Resnapshot already admitted tasks using the host's original D.
+
+        A resident admission can attach an ordinary worker after the first
+        snapshot. Caller cancellation drains this final existing stop sequence;
+        this method opens neither a capture lifetime nor another grace period.
+        """
+        remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+        await await_drained(self._shutdown_tasks(deadline=deadline, timeout=remaining))
+
+    async def _shutdown_capture_and_tasks(self, *, deadline: float, timeout: float) -> None:
+        # This registry is loop-owned and does not wait for _lock. An admitted
+        # transaction may be holding that lock through the whole grace.
+        lifetimes = tuple(value for value in self._capture_lifetimes.values() if not value.finished)
+        legacy = asyncio.create_task(self._shutdown_tasks(deadline=deadline, timeout=timeout))
+        grace = {legacy}
+        for lifetime in lifetimes:
+            grace.update(task for task in lifetime.controls if not task.done())
+            if lifetime.record is not None and lifetime.record.task is not None and not lifetime.record.task.done():
+                grace.add(lifetime.record.task)
+        await asyncio.wait(grace, timeout=max(0.0, deadline - asyncio.get_running_loop().time()))
+        for lifetime in lifetimes:
+            lifetime.owner.retire()
+            task = lifetime.record.task if lifetime.record is not None else None
+            if task is not None and not task.done() and task is not asyncio.current_task():
+                task.cancel()
+        # Pending graph/control continuations are not arbitrary atomic units.
+        # The gate is now closed; only admitted delegate/close work must drain.
+        results = await asyncio.gather(legacy, *(self._finish_capture_lifetime(lifetime) for lifetime in lifetimes), return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                if lifetimes:
+                    raise CaptureIOCleanupError() from None
+                raise result
+
+    async def _shutdown_tasks(self, *, deadline: float, timeout: float) -> None:
         """Cancel and bounded-await all in-flight runs on process shutdown.
 
         Signals active runs first so their cancellation/cleanup can overlap a
@@ -2836,10 +3275,13 @@ class RunManager:
         after ``timeout`` are logged and may still race teardown.
         """
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
 
         async with self._lock:
-            inflight = [record for record in self._runs.values() if (record.status in (RunStatus.pending, RunStatus.running) or (record.finalizing and not record.terminal_confirmed)) and record.task is not None and not record.task.done()]
+            inflight = [
+                record
+                for record in self._runs.values()
+                if (record.status in (RunStatus.pending, RunStatus.running) or (record.finalizing and not record.terminal_confirmed) or self._capture_lifetime(record) is not None) and record.task is not None and not record.task.done()
+            ]
             for record in inflight:
                 if record.status not in (RunStatus.pending, RunStatus.running):
                     # Its graph has ended; drain staged finalization without
@@ -2873,6 +3315,10 @@ class RunManager:
                     # Completed on its own — retrieve any surfaced exception so it
                     # is not reported as "never retrieved", and keep its status.
                     task.exception()  # type: ignore[union-attr]  # done & not cancelled
+                    continue
+                if self._capture_lifetime(record) is not None:
+                    # Retirement/Task cancellation is not execution cleanup or
+                    # authority for a status-only write over a capture row.
                     continue
                 if record.status in (RunStatus.pending, RunStatus.running):
                     record.status = RunStatus.interrupted

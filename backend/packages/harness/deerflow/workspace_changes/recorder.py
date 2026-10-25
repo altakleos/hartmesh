@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import sys
 import tempfile
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 from deerflow.config import get_paths
+from deerflow.runtime.runs.capture_io import CaptureIOCleanupError, current_capture_io_owner, run_capture_io
+from deerflow.utils.file_io import await_drained, run_file_io
 
 from .diff import compare_snapshots, get_changed_paths
 from .scanner import scan_workspace_roots
@@ -22,6 +25,61 @@ from .types import (
 )
 
 logger = logging.getLogger(__name__)
+
+_SNAPSHOT_CACHES: dict[str, _SnapshotCache] = {}
+
+
+class _SnapshotCache:
+    """Retain an exact temporary cache without extending graph lifetime."""
+
+    def __init__(self, owner):
+        self.owner = owner
+        self.path = None
+        self._close_task = None
+        owner.register_resource(self)
+
+    def prepared(self, path):
+        self.path = path
+        if path is not None:
+            _SNAPSHOT_CACHES[str(path)] = self
+
+    def retire(self):
+        # Unlike an idle SQL iterator, the cache may still serve an admitted
+        # scan. The owner joins those operations before invoking drain.
+        pass
+
+    async def drain(self):
+        if self._close_task is None:
+
+            async def close():
+                if self.path is not None:
+
+                    def remove():
+                        try:
+                            shutil.rmtree(self.path)
+                        except FileNotFoundError:
+                            pass
+
+                    failed = False
+                    try:
+                        await run_file_io(remove)
+                    except Exception:
+                        failed = True
+                    if failed:
+                        raise CaptureIOCleanupError() from None
+                    _SNAPSHOT_CACHES.pop(str(self.path), None)
+                self.owner.unregister_resource(self)
+
+            self._close_task = asyncio.create_task(close(), name="snapshot-cache-close")
+        await await_drained(asyncio.shield(self._close_task))
+
+
+async def _settle_failed_snapshot_cache(cache):
+    """Preserve the primary outcome; failed close stays registered for host drain."""
+    try:
+        await cache.drain()
+    except CaptureIOCleanupError:
+        pass
 
 
 def build_thread_workspace_roots(thread_id: str, *, user_id: str | None = None) -> list[WorkspaceRoot]:
@@ -137,16 +195,27 @@ async def capture_workspace_snapshot(
 ) -> WorkspaceSnapshot:
     from deerflow.spaces.chat_paths import ChatStoragePaths
 
+    owner = current_capture_io_owner()
+    if owner is not None:
+        owner.check_open()
     paths = get_paths()
     if isinstance(paths, ChatStoragePaths):
         from deerflow.spaces.chat_snapshots import capture_chat_snapshot
 
-        return await capture_chat_snapshot(paths, thread_id, user_id=user_id, limits=limits, include_text=include_text, outputs_only=outputs_only, extra_excluded_dir_names=extra_excluded_dir_names)
+        return await run_capture_io(lambda: capture_chat_snapshot(paths, thread_id, user_id=user_id, limits=limits, include_text=include_text, outputs_only=outputs_only, extra_excluded_dir_names=extra_excluded_dir_names))
     # `_prepare_capture` creates the text cache dir inside the worker, so the
     # handoff must be cancellation-safe: if the run is cancelled after mkdtemp
     # but before we receive the path, the shielded worker still finishes and we
     # reclaim its result to remove the orphaned dir before re-raising.
-    prepare = asyncio.ensure_future(asyncio.to_thread(_prepare_capture, thread_id, user_id=user_id, include_text=include_text, outputs_only=outputs_only))
+    cache = _SnapshotCache(owner) if owner is not None and include_text else None
+
+    async def prepare_capture():
+        result = await asyncio.to_thread(_prepare_capture, thread_id, user_id=user_id, include_text=include_text, outputs_only=outputs_only)
+        if cache is not None:
+            cache.prepared(result[1])
+        return result
+
+    prepare = asyncio.ensure_future(run_capture_io(prepare_capture))
     try:
         roots, text_cache_dir = await asyncio.shield(prepare)
     except asyncio.CancelledError:
@@ -156,7 +225,18 @@ async def capture_workspace_snapshot(
         # drain repeated cancellation until cleanup finishes, then restore it. A
         # second `shield()` on the await alone would let a re-cancel skip the
         # reclaim and orphan the dir.
-        cleanup = asyncio.ensure_future(_reclaim_prepare_and_cleanup(prepare))
+        if cache is None:
+            cleanup = asyncio.ensure_future(_reclaim_prepare_and_cleanup(prepare))
+        else:
+
+            async def reclaim_owned_prepare():
+                try:
+                    await prepare
+                except Exception:
+                    pass
+                await _settle_failed_snapshot_cache(cache)
+
+            cleanup = asyncio.ensure_future(reclaim_owned_prepare())
         while not cleanup.done():
             try:
                 await asyncio.shield(cleanup)
@@ -165,18 +245,23 @@ async def capture_workspace_snapshot(
         raise
 
     scan = asyncio.ensure_future(
-        asyncio.to_thread(
-            scan_workspace_roots,
-            roots,
-            limits=limits,
-            include_text=include_text,
-            text_cache_dir=text_cache_dir,
-            extra_excluded_dir_names=extra_excluded_dir_names,
+        run_capture_io(
+            lambda: asyncio.to_thread(
+                scan_workspace_roots,
+                roots,
+                limits=limits,
+                include_text=include_text,
+                text_cache_dir=text_cache_dir,
+                extra_excluded_dir_names=extra_excluded_dir_names,
+            )
         )
     )
     try:
-        return await asyncio.shield(scan)
+        return await await_drained(scan) if owner is not None else await asyncio.shield(scan)
     except asyncio.CancelledError:
+        if cache is not None:
+            await _settle_failed_snapshot_cache(cache)
+            raise
         # A metadata-only scan has no cache resource to protect. It still runs in
         # the worker after caller cancellation, so retain ownership only long
         # enough to consume/log its eventual outcome instead of delaying the
@@ -192,7 +277,9 @@ async def capture_workspace_snapshot(
         await _drain_scan_and_cleanup(scan, text_cache_dir, thread_id=thread_id)
         raise
     except Exception:
-        if text_cache_dir is not None:
+        if cache is not None:
+            await _settle_failed_snapshot_cache(cache)
+        elif text_cache_dir is not None:
             await _remove_text_cache_dir(text_cache_dir)
         raise
 
@@ -232,15 +319,15 @@ async def record_workspace_changes(
         if isinstance(paths, ChatStoragePaths):
             from deerflow.spaces.chat_snapshots import capture_chat_snapshot
 
-            after_metadata = await capture_chat_snapshot(paths, thread_id, user_id=user_id, limits=limits, include_text=False, extra_excluded_dir_names=extra_excluded_dir_names)
+            after_metadata = await run_capture_io(lambda: capture_chat_snapshot(paths, thread_id, user_id=user_id, limits=limits, include_text=False, extra_excluded_dir_names=extra_excluded_dir_names))
             changed_paths = get_changed_paths(before, after_metadata)
-            after = await capture_chat_snapshot(paths, thread_id, user_id=user_id, limits=limits, text_paths=changed_paths, extra_excluded_dir_names=extra_excluded_dir_names)
+            after = await run_capture_io(lambda: capture_chat_snapshot(paths, thread_id, user_id=user_id, limits=limits, text_paths=changed_paths, extra_excluded_dir_names=extra_excluded_dir_names))
         else:
-            roots = await asyncio.to_thread(build_thread_workspace_roots, thread_id, user_id=user_id)
-            after_metadata = await asyncio.to_thread(scan_workspace_roots, roots, limits=limits, include_text=False, extra_excluded_dir_names=extra_excluded_dir_names)
+            roots = await run_capture_io(lambda: asyncio.to_thread(build_thread_workspace_roots, thread_id, user_id=user_id))
+            after_metadata = await run_capture_io(lambda: asyncio.to_thread(scan_workspace_roots, roots, limits=limits, include_text=False, extra_excluded_dir_names=extra_excluded_dir_names))
             changed_paths = get_changed_paths(before, after_metadata)
-            after = await asyncio.to_thread(scan_workspace_roots, roots, limits=limits, include_text=True, text_paths=changed_paths, extra_excluded_dir_names=extra_excluded_dir_names)
-        result = compare_snapshots(before, after, limits=limits)
+            after = await run_capture_io(lambda: asyncio.to_thread(scan_workspace_roots, roots, limits=limits, include_text=True, text_paths=changed_paths, extra_excluded_dir_names=extra_excluded_dir_names))
+        result = await run_capture_io(lambda: run_file_io(compare_snapshots, before, after, limits=limits))
         if not result.has_changes():
             return None
 
@@ -248,18 +335,29 @@ async def record_workspace_changes(
         summary = result.summary
         changed_file_count = summary.created + summary.modified + summary.deleted + summary.symlink_created
         content = f"{changed_file_count} file{'s' if changed_file_count != 1 else ''} changed +{summary.additions} -{summary.deletions}"
-        return await event_store.put(
-            thread_id=thread_id,
-            run_id=run_id,
-            event_type=WORKSPACE_CHANGES_EVENT_TYPE,
-            category=WORKSPACE_CHANGES_EVENT_CATEGORY,
-            content=content,
-            metadata={WORKSPACE_CHANGES_METADATA_KEY: payload},
+        return await run_capture_io(
+            lambda: event_store.put(
+                thread_id=thread_id,
+                run_id=run_id,
+                event_type=WORKSPACE_CHANGES_EVENT_TYPE,
+                category=WORKSPACE_CHANGES_EVENT_CATEGORY,
+                content=content,
+                metadata={WORKSPACE_CHANGES_METADATA_KEY: payload},
+            )
         )
     finally:
-        await _cleanup_snapshot_text_cache(before)
+        primary = sys.exc_info()[1]
+        try:
+            await _cleanup_snapshot_text_cache(before)
+        except CaptureIOCleanupError:
+            if primary is None:
+                raise
 
 
 async def _cleanup_snapshot_text_cache(snapshot: WorkspaceSnapshot) -> None:
     if snapshot.text_cache_dir:
-        await _remove_text_cache_dir(snapshot.text_cache_dir)
+        cache = _SNAPSHOT_CACHES.get(str(snapshot.text_cache_dir))
+        if cache is not None:
+            await cache.drain()
+        else:
+            await _remove_text_cache_dir(snapshot.text_cache_dir)

@@ -19,6 +19,7 @@ from _run_output_capture_test_support import output_store as output_store
 from fastapi import FastAPI
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from sqlalchemy import text
 from test_gateway_services import _make_start_run_request
@@ -30,10 +31,12 @@ from app.gateway.auth.models import User
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.csrf_middleware import CSRFMiddleware
 from app.gateway.routers import run_output, thread_runs
+from app.gateway.stream_cleanup import StreamCleanupRegistry
 from app.telegram_bots.gateway_client import GatewayClientOwner
 from deerflow.agent_instances.conversations import AgentConversations
 from deerflow.config import app_config
 from deerflow.runtime import MemoryStreamBridge
+from deerflow.runtime.capture_resources import OwnedCheckpointSaver, OwnedStore
 from deerflow.runtime.runs.output import canonical_text_digest
 from deerflow.runtime.runs.worker import run_agent
 
@@ -109,6 +112,9 @@ async def test_creating_http_runs_the_real_worker_and_returns_exact_private_outp
     for key, value in vars(prototype.app.state).items():
         setattr(app.state, key, value)
     app.state.stream_bridge = bridge
+    app.state.stream_cleanups = StreamCleanupRegistry(bridge)
+    app.state.checkpointer = OwnedCheckpointSaver(InMemorySaver(), profile="memory", loop=asyncio.get_running_loop())
+    app.state.store = OwnedStore(prototype.app.state.store, profile="memory", loop=asyncio.get_running_loop())
     app.state.run_event_store = e.event_store
     app.state.run_store = e.repository
     app.state.agent_conversations = AgentConversations(None, session_factory=e.sf)
@@ -182,4 +188,5 @@ async def test_creating_http_runs_the_real_worker_and_returns_exact_private_outp
     finally:
         await e.manager.shutdown(timeout=2)
         await owner.stop()
+        await app.state.stream_cleanups.close()
         await bridge.close()

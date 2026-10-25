@@ -10,6 +10,8 @@ import re
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
+from deerflow.utils.file_io import await_drained
+
 try:
     from redis.asyncio import Redis
     from redis.exceptions import RedisError, ResponseError
@@ -82,15 +84,23 @@ class RedisStreamBridge(StreamBridge):
         # caps that pool; ``None`` keeps redis-py's effectively-unbounded default.
         self._redis = client if client is not None else Redis.from_url(redis_url, decode_responses=True, max_connections=max_connections)
         self._owns_client = client is None
+        self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("Stream bridge is closed") from None
 
     def _stream_key(self, run_id: str) -> str:
         return f"{self._key_prefix}:{run_id}"
 
     async def check_health(self) -> bool:
         """Probe the same pooled client used by streaming, without writing keys."""
+        self._check_open()
         return bool(await self._redis.ping())
 
     async def _xadd_retained(self, key: str, fields: dict[str, str], *, maxlen: int) -> None:
+        self._check_open()
         if self._stream_ttl_seconds is None:
             await self._redis.xadd(
                 key,
@@ -108,6 +118,7 @@ class RedisStreamBridge(StreamBridge):
                 approximate=False,
             )
             pipe.expire(key, self._stream_ttl_seconds)
+            self._check_open()
             await pipe.execute()
 
     @staticmethod
@@ -170,6 +181,7 @@ class RedisStreamBridge(StreamBridge):
         return None
 
     async def publish(self, run_id: str, event: str, data: Any) -> None:
+        self._check_open()
         key = self._stream_key(run_id)
         await self._xadd_retained(
             key,
@@ -182,6 +194,7 @@ class RedisStreamBridge(StreamBridge):
         )
 
     async def publish_end(self, run_id: str) -> None:
+        self._check_open()
         # Keep the configured number of data events plus the internal end marker.
         key = self._stream_key(run_id)
         await self._xadd_retained(
@@ -192,6 +205,7 @@ class RedisStreamBridge(StreamBridge):
 
     async def stream_exists(self, run_id: str) -> bool:
         """Return whether Redis still has retained stream data for *run_id*."""
+        self._check_open()
         return bool(await self._redis.exists(self._stream_key(run_id)))
 
     async def _resolve_start_stream_id(self, key: str, last_event_id: str | None) -> str:
@@ -199,6 +213,7 @@ class RedisStreamBridge(StreamBridge):
             return "0-0"
         if _REDIS_STREAM_ID_RE.fullmatch(last_event_id):
             return last_event_id
+        self._check_open()
         entries = await self._redis.xrevrange(key, count=1)
         if not entries:
             return "0-0"
@@ -221,10 +236,12 @@ class RedisStreamBridge(StreamBridge):
         This deliberately adds a three-command pipeline per poll (and a second
         round trip while idle) so retained-bound checks cannot race with reads.
         """
+        self._check_open()
         async with self._redis.pipeline(transaction=True) as pipe:
             pipe.xrange(key, count=1)
             pipe.xrevrange(key, count=1)
             pipe.xread({key: stream_id}, count=_XREAD_COUNT)
+            self._check_open()
             earliest, latest, response = await pipe.execute()
         return earliest, latest, response
 
@@ -235,6 +252,7 @@ class RedisStreamBridge(StreamBridge):
         last_event_id: str | None = None,
         heartbeat_interval: float | None = None,
     ) -> AsyncIterator[StreamItem]:
+        self._check_open()
         heartbeat_interval = self._resolve_heartbeat_interval(heartbeat_interval)
         key = self._stream_key(run_id)
         stream_id = await self._resolve_start_stream_id(key, last_event_id)
@@ -244,6 +262,7 @@ class RedisStreamBridge(StreamBridge):
         consecutive_errors = 0
 
         while True:
+            self._check_open()
             snapshot_stream_id = stream_id
             pending_initial_tail_id = None
             if pending_initial_response is not None:
@@ -321,6 +340,7 @@ class RedisStreamBridge(StreamBridge):
                     return
 
                 try:
+                    self._check_open()
                     wake_response = await self._redis.xread(
                         {key: stream_id},
                         count=_XREAD_COUNT,
@@ -373,13 +393,21 @@ class RedisStreamBridge(StreamBridge):
                         yield entry
 
     async def cleanup(self, run_id: str, *, delay: float = 0) -> None:
+        self._check_open()
         if delay > 0:
             await asyncio.sleep(delay)
+        self._check_open()
         await self._redis.delete(self._stream_key(run_id))
 
     async def close(self) -> None:
+        self._closed = True
         if not self._owns_client:
             return
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close_client())
+        await await_drained(self._close_task)
+
+    async def _close_client(self) -> None:
         close = getattr(self._redis, "aclose", None) or getattr(self._redis, "close", None)
         if close is None:
             return

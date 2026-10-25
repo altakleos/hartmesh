@@ -1394,6 +1394,10 @@ lease on another worker. Eligible expired ownership closes atomically with
 admission of its replacement.
 Cancelled SQL run reads now finish their started database work and session
 cleanup before returning cancellation, preventing abandoned read resources.
+Captured runs also close new storage and stream writes after the Gateway's
+shared shutdown grace. Started database calls, scans and resource cleanup finish
+before their providers close; a blocked native call can extend shutdown.
+Retirement preserves confirmed results and leaves uncertain execution unresolved.
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 

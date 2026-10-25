@@ -12,6 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from deerflow.utils.file_io import await_drained
 
+from .capture_io import CaptureIOClosed, CaptureIOUnsupported, current_capture_io_owner, run_capture_io
 from .output import OUTPUT_EVIDENCE_KEY, OutputEvidenceError, capture_from_kwargs, receipt_from_kwargs, receipt_to_dict
 from .schemas import RunStatus
 from .store.base import StatusFinalization
@@ -91,7 +92,7 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
         for attempt in range(1, policy.max_attempts + 1):
             try:
                 async with asyncio.timeout(policy.attempt_timeout):
-                    read = store.get(record.run_id, user_id=record.user_id)
+                    read = run_capture_io(lambda: store.get(record.run_id, user_id=record.user_id))
                     row = await await_drained(read) if wanted is not None else await read
                     rejection = None
                     if row is None:
@@ -165,19 +166,20 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                             saved_error = "The run ended with an error; its original error details could not be saved." if status == RunStatus.error else None
                         if stop_reason is not None and (not isinstance(stop_reason, str) or len(stop_reason) > 50):
                             saved_reason = RECOVERED_METADATA_REASON
-                    write = store.finalize_owned(
-                        record.run_id,
-                        owner_worker_id=record.owner_worker_id,
-                        expected_change_seq=expected_sequence,
-                        expected_status=source,
-                        expected_cancel_action=action,
-                        require_lease=manager.heartbeat_enabled,
-                        status=status.value,
-                        error=saved_error,
-                        stop_reason=saved_reason,
-                        **({"output_receipt": wanted} if wanted is not None else {}),
+                    finalized = await run_capture_io(
+                        lambda: store.finalize_owned(
+                            record.run_id,
+                            owner_worker_id=record.owner_worker_id,
+                            expected_change_seq=expected_sequence,
+                            expected_status=source,
+                            expected_cancel_action=action,
+                            require_lease=manager.heartbeat_enabled,
+                            status=status.value,
+                            error=saved_error,
+                            stop_reason=saved_reason,
+                            **({"output_receipt": wanted} if wanted is not None else {}),
+                        )
                     )
-                    finalized = await write
                     if finalized:
                         async with manager._lock:
                             record.status = status
@@ -190,6 +192,8 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                         return StatusFinalization(finalized=True, output_receipt_confirmed=wanted is not None)
                     ownership_rejected = True
                     diagnostic(record, status, outcome="conditional_rejection", attempt=attempt)
+            except (CaptureIOClosed, CaptureIOUnsupported):
+                raise
             except Exception as exc:
                 diagnostic(
                     record,
@@ -200,7 +204,16 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                 )
                 recovering = True
             if attempt < policy.max_attempts:
-                await asyncio.sleep(policy.retry_delay)
+                owner = current_capture_io_owner()
+                if owner is None:
+                    await asyncio.sleep(policy.retry_delay)
+                else:
+                    owner.check_open()
+                    try:
+                        await asyncio.wait_for(owner.wait_retired(), timeout=max(0.0, policy.retry_delay))
+                    except TimeoutError:
+                        pass
+                    owner.check_open()
 
         # This is a process-local fence only. Restoring persistence and restarting
         # the stopped Gateway invokes existing startup orphan recovery; no peer

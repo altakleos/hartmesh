@@ -179,6 +179,13 @@ def get_store() -> BaseStore:
 
         store_ctx = _sync_store_cm(config)
         store = store_ctx.__enter__()
+        try:
+            from deerflow.runtime.capture_resources import OwnedStore, store_capture_profile
+
+            store = OwnedStore(store, profile=store_capture_profile(store, asynchronous=False), loop=None)
+        except BaseException:
+            store_ctx.__exit__(None, None, None)
+            raise
         _store_ctx = store_ctx
         _store = store
     return _store
@@ -221,5 +228,7 @@ def store_context() -> Iterator[BaseStore]:
     otherwise the unified ``database`` section selects the backend.
     """
     config = _resolve_store_config(get_app_config())
+    from deerflow.runtime.capture_resources import OwnedStore, store_capture_profile
+
     with _sync_store_cm(config) as store:
-        yield store
+        yield OwnedStore(store, profile=store_capture_profile(store, asynchronous=False), loop=None)

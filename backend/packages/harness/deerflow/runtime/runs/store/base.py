@@ -268,6 +268,15 @@ class RunStore(abc.ABC):
         """
         await self.delete(run_id)
 
+    async def release_owned_checkpoint_reservation(self, run_id: str, *, user_id: str, thread_id: str, owner_worker_id: str, expected_change_seq: int) -> bool:
+        """Release only an exact, previously confirmed checkpoint admission.
+
+        This optional capture cleanup capability has no legacy delete fallback.
+        Lease renewal may preserve the revision; replacement or cancellation
+        must make the original release refuse without removing the current row.
+        """
+        raise NotImplementedError
+
     @abc.abstractmethod
     async def update_model_name(
         self,

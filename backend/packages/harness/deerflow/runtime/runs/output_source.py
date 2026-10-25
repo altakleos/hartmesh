@@ -14,6 +14,8 @@ from deerflow.runtime.runs.output import OutputEvidenceError, OutputUnavailableR
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import strip_injected_user_message_id_suffix
 
+from .capture_io import CaptureIOClosed, CaptureIOUnsupported, run_capture_io
+
 
 def _freeze(value):
     if isinstance(value, Mapping):
@@ -199,7 +201,7 @@ async def read_durable_output_source(event_store: RunEventStore, *, receipt: Tex
             human = None
             human_changed = False
             while True:
-                rows = await event_store.list_messages_by_run(receipt.thread_id, receipt.run_id, limit=256, after_seq=cursor, before_seq=receipt.event_seq + 1, user_id=receipt.owner_user_id)
+                rows = await run_capture_io(lambda: event_store.list_messages_by_run(receipt.thread_id, receipt.run_id, limit=256, after_seq=cursor, before_seq=receipt.event_seq + 1, user_id=receipt.owner_user_id))
                 if not isinstance(rows, list) or len(rows) > 256:
                     raise OutputEvidenceError()
                 for row in rows:
@@ -224,6 +226,8 @@ async def read_durable_output_source(event_store: RunEventStore, *, receipt: Tex
             if assistant.state != "matched" or human_changed:
                 return OutputSourceAudit("changed", None)
             return OutputSourceAudit("matched", assistant.text, human)
+        except (CaptureIOClosed, CaptureIOUnsupported):
+            raise
         except Exception:
             raise OutputEvidenceError() from None
 

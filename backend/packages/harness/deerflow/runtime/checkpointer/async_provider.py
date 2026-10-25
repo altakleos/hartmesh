@@ -33,6 +33,7 @@ from deerflow.runtime.checkpointer.provider import (
     SQLITE_INSTALL,
 )
 from deerflow.runtime.store._sqlite_utils import ensure_sqlite_parent_dir, resolve_sqlite_conn_str
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +125,7 @@ async def _async_checkpointer(config) -> AsyncIterator[Checkpointer]:
         except ImportError as exc:
             raise ImportError(SQLITE_INSTALL) from exc
 
-        conn_str = await asyncio.to_thread(_prepare_sqlite_checkpointer_path, config.connection_string or "store.db")
+        conn_str = await await_drained(asyncio.to_thread(_prepare_sqlite_checkpointer_path, config.connection_string or "store.db"))
         async with drained_async_context(AsyncSqliteSaver.from_conn_string(conn_str)) as saver:
             await saver.setup()
             yield saver
@@ -134,7 +135,7 @@ async def _async_checkpointer(config) -> AsyncIterator[Checkpointer]:
         if not config.connection_string:
             raise ValueError(POSTGRES_CONN_REQUIRED)
 
-        AsyncPostgresSaver, _ = _ensure_postgres_imports()
+        AsyncPostgresSaver, _ = await await_drained(asyncio.to_thread(_ensure_postgres_imports))
         pool = _build_postgres_pool(config.connection_string, config.postgres_schema)
         async with drained_async_context(pool):
             await _ensure_postgres_schema_with_pool(pool, config.postgres_schema)
@@ -166,7 +167,7 @@ async def _async_checkpointer_from_database(db_config) -> AsyncIterator[Checkpoi
         except ImportError as exc:
             raise ImportError(SQLITE_INSTALL) from exc
 
-        conn_str = await asyncio.to_thread(_prepare_database_sqlite_checkpointer_path, db_config)
+        conn_str = await await_drained(asyncio.to_thread(_prepare_database_sqlite_checkpointer_path, db_config))
         async with drained_async_context(AsyncSqliteSaver.from_conn_string(conn_str)) as saver:
             await saver.setup()
             yield saver
@@ -176,7 +177,7 @@ async def _async_checkpointer_from_database(db_config) -> AsyncIterator[Checkpoi
         if not db_config.postgres_url:
             raise ValueError("database.postgres_url is required for the postgres backend")
 
-        AsyncPostgresSaver, _ = _ensure_postgres_imports()
+        AsyncPostgresSaver, _ = await await_drained(asyncio.to_thread(_ensure_postgres_imports))
         pool = _build_postgres_pool(db_config.postgres_url, db_config.postgres_schema)
         async with drained_async_context(pool):
             await _ensure_postgres_schema_with_pool(pool, db_config.postgres_schema)
@@ -236,12 +237,15 @@ async def make_checkpointer(app_config: AppConfig | None = None) -> AsyncIterato
     saver is wrapped in a :class:`CachedHistorySaver` backed by a history cache
     whose lifetime equals this context manager's.
     """
+    from deerflow.runtime.capture_resources import OwnedCheckpointSaver, checkpoint_cache_capture_profile, checkpoint_capture_profile
     from deerflow.runtime.checkpoint_mode import frozen_checkpoint_channel_mode
 
     if app_config is None:
         app_config = get_app_config()
 
     async with _select_inner_checkpointer(app_config) as saver:
+        profile = checkpoint_capture_profile(saver, asynchronous=True)
+        loop = asyncio.get_running_loop()
         db_config = getattr(app_config, "database", None)
         mode = frozen_checkpoint_channel_mode() or (db_config.checkpoint_channel_mode if db_config is not None else "full")
         if mode == "delta":
@@ -252,6 +256,6 @@ async def make_checkpointer(app_config: AppConfig | None = None) -> AsyncIterato
             from deerflow.runtime.checkpointer.cached_saver import CachedHistorySaver
 
             async with make_checkpoint_cache(app_config, serde=saver.serde) as cache:
-                yield CachedHistorySaver(saver, cache, key_prefix=checkpoint_cache_key_prefix(app_config))
+                yield OwnedCheckpointSaver(CachedHistorySaver(saver, cache, key_prefix=checkpoint_cache_key_prefix(app_config)), profile=checkpoint_cache_capture_profile(profile, cache), loop=loop)
         else:
-            yield saver
+            yield OwnedCheckpointSaver(saver, profile=profile, loop=loop)

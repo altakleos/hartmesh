@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Captured I/O ownership and shutdown
+
+Give captured runs one host-owned lifetime for finite database, checkpoint,
+Store, event, scan and stream operations. Close new calls after the shared
+shutdown grace and retain started native work and exact resource cleanup across
+repeated cancellation. Retained history iterators and temporary snapshot caches
+close explicitly. Shutdown does not establish tool or container containment.
+
+Keep prestart proof, confirmed terminal evidence and unresolved execution distinct
+from retirement. Release only the exact original checkpoint reservation; peer or
+changed rows remain untouched. Preserve ordinary public SDK behavior; captured
+sync calls backed by async storage refuse before invoking the delegate.
+
+Use an application-owned stream cleanup registry, fence Redis reconnect after
+close, and retain resident launch/worker drainage through cancellation. Local
+offline stream tests no longer probe Redis during collection.
+
+No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
+remains version 55. Managed-bot publication and activation remain deferred.
+
 ### Captured run startup and ownership closure
 
 Seal known prestart cancellation and startup failure with their actual unavailable
@@ -21,8 +41,7 @@ work, resolve exact idempotent reuse first, and commit eligible expired predeces
 closure with its successor. Lease recovery does not prove native/tool containment.
 
 No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55. Capture resource retirement at shutdown and managed-bot
-publication/activation remain separate work.
+remains version 55. Managed-bot publication/activation remains separate work.
 
 ### Captured worker output and authorized reads
 
