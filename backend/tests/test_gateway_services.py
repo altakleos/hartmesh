@@ -4498,6 +4498,7 @@ async def test_run_agent_full_mode_rejects_delta_before_graph_invocation():
         return None
 
     run_manager = SimpleNamespace(
+        get_capture_io_owner=lambda record: None,
         try_start=AsyncMock(return_value=RunStartOutcome.started),
         wait_for_prior_finalizing=AsyncMock(),
         set_status=set_status,
@@ -4578,6 +4579,7 @@ async def test_run_agent_full_mode_checks_selected_checkpoint_before_graph():
         return None
 
     run_manager = SimpleNamespace(
+        get_capture_io_owner=lambda record: None,
         try_start=AsyncMock(return_value=RunStartOutcome.started),
         wait_for_prior_finalizing=AsyncMock(),
         set_status=set_status,

@@ -11,6 +11,8 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from deerflow.runtime.runs.capture_io import run_capture_io
+
 if TYPE_CHECKING:
     from deerflow.runtime.events.store.base import RunEventStore
     from deerflow.runtime.runs.manager import RunManager
@@ -56,8 +58,8 @@ async def read_visible_message_page(
 
 
 async def default_history_hidden_run_ids(run_mgr: RunManager, thread_id: str, *, user_id: str | None) -> set[str]:
-    superseded_run_ids = await run_mgr.list_successful_regenerate_sources(thread_id, user_id=user_id)
-    edit_visibility = await run_mgr.list_edit_replay_visibility(thread_id, user_id=user_id)
+    superseded_run_ids = await run_capture_io(lambda: run_mgr.list_successful_regenerate_sources(thread_id, user_id=user_id))
+    edit_visibility = await run_capture_io(lambda: run_mgr.list_edit_replay_visibility(thread_id, user_id=user_id))
     return set(superseded_run_ids) | set(edit_visibility.hidden_source_run_ids) | set(edit_visibility.hidden_attempt_run_ids)
 
 
@@ -96,11 +98,13 @@ async def scan_visible_thread_messages(
         visible: list[dict[str, Any]] = []
         scan_after = after_seq
         while len(visible) < needed:
-            raw = await event_store.list_messages(
-                thread_id,
-                limit=batch_size,
-                after_seq=scan_after,
-                user_id=user_id,
+            raw = await run_capture_io(
+                lambda: event_store.list_messages(
+                    thread_id,
+                    limit=batch_size,
+                    after_seq=scan_after,
+                    user_id=user_id,
+                )
             )
             if not raw:
                 break
@@ -127,11 +131,13 @@ async def scan_visible_thread_messages(
     visible_desc: list[dict[str, Any]] = []
     scan_before = before_seq
     while len(visible_desc) < needed:
-        raw = await event_store.list_messages(
-            thread_id,
-            limit=batch_size,
-            before_seq=scan_before,
-            user_id=user_id,
+        raw = await run_capture_io(
+            lambda: event_store.list_messages(
+                thread_id,
+                limit=batch_size,
+                before_seq=scan_before,
+                user_id=user_id,
+            )
         )
         if not raw:
             break

@@ -11,6 +11,7 @@ from deerflow.config.paths import _validate_thread_id, _validate_user_id, get_pa
 from deerflow.features.resources import StorageFeatureLinkRow
 from deerflow.persistence.spaces.files import SpaceBackingRow
 from deerflow.persistence.spaces.model import SpaceGrantRow, SpaceRow
+from deerflow.runtime.runs.capture_io import run_capture_io
 from deerflow.spaces.backings import BackingUnavailable
 from deerflow.spaces.chat_paths import ChatStoragePaths, ThreadMounts
 from deerflow.spaces.contract import InvalidPrincipal, Permission, PrincipalRef, SpaceConflict, SpaceDenied, SpaceNotFound
@@ -69,12 +70,20 @@ async def _snapshot_in_session(session, files, actor, namespace, key, *, require
 
 
 async def _snapshot(files, actor, namespace, key, *, required=None):
-    await files.registry._actor(actor)
-    async with files.registry._sf() as session:
-        return await _snapshot_in_session(session, files, actor, namespace, key, required=required)
+    await run_capture_io(lambda: files.registry._actor(actor))
+
+    async def read():
+        async with files.registry._sf() as session:
+            return await _snapshot_in_session(session, files, actor, namespace, key, required=required)
+
+    return await run_capture_io(read)
 
 
 async def _admit_verified(files, actor, user_original, company_original=None):
+    return await run_capture_io(lambda: _admit_verified_transaction(files, actor, user_original, company_original))
+
+
+async def _admit_verified_transaction(files, actor, user_original, company_original=None):
     requests = {user_original[0][0]: (Permission.READ | Permission.WRITE, user_original[0][1])}
     if company_original is not None:
         requests[company_original[0][0]] = (Permission.READ | Permission.EXPORT, company_original[0][1])
@@ -97,9 +106,9 @@ async def _verified_role(files, actor, namespace, key, *, required=None):
     expected_kind = "user" if namespace == "hm.user-space" else "company"
     if spec.kind != expected_kind:
         raise BackingUnavailable("The assigned role has the wrong slot kind")
-    volume = await await_drained(run_file_io(files.catalog.verify, binding.slot_id, previous=files._verified.get(binding.slot_id)))
+    volume = await run_capture_io(lambda: await_drained(run_file_io(files.catalog.verify, binding.slot_id, previous=files._verified.get(binding.slot_id))))
     files._check_incarnation(binding, volume)
-    bound = await await_drained(run_file_io(verify_bound, volume, binding.backing_handle))
+    bound = await run_capture_io(lambda: await_drained(run_file_io(verify_bound, volume, binding.backing_handle)))
     # Recheck current human eligibility and exact role/grant/binding after I/O.
     if await _snapshot(files, actor, namespace, key, required=required) != original:
         raise BackingUnavailable("The assigned role changed during verification")
@@ -125,12 +134,12 @@ async def prepare_chat_storage(app, user_id, thread_id):
         raise InvalidPrincipal("Chat storage requires its current authenticated human owner")
     files = getattr(app.state, "storage_spaces", None)
     if isinstance(files, SpaceFiles):
-        await files.registry._actor(actor)
+        await run_capture_io(lambda: files.registry._actor(actor))
     if _credential_allowed.get() is not True:
         # Unsupported credentials retain text chat, never resource scopes;
         # they still require the actual current, active human identity.
         return projected(reason="credential-unsupported")
-    state = await storage_state(app)
+    state = await run_capture_io(lambda: storage_state(app))
     if not isinstance(files, SpaceFiles) or state.state == "unavailable":
         return projected(reason=state.reason or "admission-failed")
     try:
@@ -176,7 +185,7 @@ async def prepare_chat_request(request, thread_id):
             return None
         from deerflow.runtime.user_context import get_effective_user_id
 
-        return await host.prepare_async(get_effective_user_id(), thread_id)
+        return await run_capture_io(lambda: host.prepare_async(get_effective_user_id(), thread_id))
     scope = getattr(request, "scope", None)
     app = scope.get("app") if isinstance(scope, dict) else getattr(request, "app", None)
     if app is None:
@@ -214,7 +223,7 @@ async def check_chat_thread_capacity(prepared, thread_id):
     from deerflow.spaces.filesystem import FilesystemUnavailable
 
     try:
-        await run_file_io(prepared.paths.check_thread_capacity, thread_id, user_id=prepared.mounts.user_id)
+        await run_capture_io(lambda: run_file_io(prepared.paths.check_thread_capacity, thread_id, user_id=prepared.mounts.user_id))
     except (FilesystemUnavailable, OSError):
         raise HTTPException(503, {"code": "storage-unavailable", "reason": "space-unverified", "message": "Your files are not available right now. Chats run without them."}) from None
 
@@ -229,7 +238,7 @@ def chat_storage_scope_factory(app):
         if prepared is None:
             yield None
             return
-        await await_drained(run_file_io(prepared.paths.check_thread_capacity, thread_id, user_id=user_id))
+        await run_capture_io(lambda: await_drained(run_file_io(prepared.paths.check_thread_capacity, thread_id, user_id=user_id)))
         with paths_scope(prepared.paths):
             yield prepared
 

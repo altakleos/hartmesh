@@ -20,10 +20,53 @@ from deerflow.config.checkpointer_config import (
     set_checkpointer_config,
 )
 from deerflow.config.database_config import DatabaseConfig
+from deerflow.runtime.capture_resources import OwnedCheckpointSaver, OwnedStore
 from deerflow.runtime.checkpointer import get_checkpointer, reset_checkpointer
 from deerflow.runtime.checkpointer.provider import POSTGRES_INSTALL
 from deerflow.runtime.store import get_store, reset_store
 from deerflow.runtime.store.provider import POSTGRES_STORE_INSTALL
+
+_wrapped_resources = []
+
+
+@pytest.fixture(autouse=True)
+def observe_resource_facades(monkeypatch):
+    """Observe constructor composition without a production raw-resource escape."""
+    from deerflow.runtime import capture_resources
+
+    monkeypatch.setattr(sys.modules[__name__], "_wrapped_resources", [])
+
+    def saver(inner, **kwargs):
+        result = OwnedCheckpointSaver(inner, **kwargs)
+        _wrapped_resources.append((result, inner))
+        return result
+
+    def store(inner, **kwargs):
+        result = OwnedStore(inner, **kwargs)
+        _wrapped_resources.append((result, inner))
+        return result
+
+    monkeypatch.setattr(capture_resources, "OwnedCheckpointSaver", saver)
+    monkeypatch.setattr(capture_resources, "OwnedStore", store)
+
+
+def _assert_resource(actual, facade_type, *, expected=None, native_type=None):
+    assert isinstance(actual, facade_type)
+    observed = [inner for outer, inner in _wrapped_resources if outer is actual]
+    assert len(observed) == 1
+    if expected is not None:
+        assert observed[0] is expected
+    if native_type is not None:
+        assert isinstance(observed[0], native_type)
+        assert actual.supports_capture_io is True
+
+
+def _assert_saver(actual, **kwargs):
+    _assert_resource(actual, OwnedCheckpointSaver, **kwargs)
+
+
+def _assert_store(actual, **kwargs):
+    _assert_resource(actual, OwnedStore, **kwargs)
 
 
 @pytest.fixture(autouse=True)
@@ -240,14 +283,14 @@ class TestGetCheckpointer:
         with patch("deerflow.runtime.checkpointer.provider.get_app_config", side_effect=FileNotFoundError):
             cp = get_checkpointer()
         assert cp is not None
-        assert isinstance(cp, InMemorySaver)
+        _assert_saver(cp, native_type=InMemorySaver)
 
     def test_memory_returns_in_memory_saver(self):
         load_checkpointer_config_from_dict({"type": "memory"})
         from langgraph.checkpoint.memory import InMemorySaver
 
         cp = get_checkpointer()
-        assert isinstance(cp, InMemorySaver)
+        _assert_saver(cp, native_type=InMemorySaver)
 
     def test_memory_singleton(self):
         load_checkpointer_config_from_dict({"type": "memory"})
@@ -305,7 +348,7 @@ class TestGetCheckpointer:
             reset_checkpointer()
             cp = get_checkpointer()
 
-        assert cp is mock_saver_instance
+        _assert_saver(cp, expected=mock_saver_instance)
         mock_saver_cls.from_conn_string.assert_called_once()
         mock_saver_instance.setup.assert_called_once()
 
@@ -342,7 +385,7 @@ class TestGetCheckpointer:
             reset_checkpointer()
             cp = get_checkpointer()
 
-        assert cp is mock_saver_instance
+        _assert_saver(cp, expected=mock_saver_instance)
         mock_ensure.assert_called_once_with("/tmp/resolved/relative/test.db")
         mock_saver_cls.from_conn_string.assert_called_once_with("/tmp/resolved/relative/test.db")
 
@@ -401,7 +444,7 @@ class TestGetCheckpointer:
             reset_checkpointer()
             cp = get_checkpointer()
 
-        assert cp is mock_saver_instance
+        _assert_saver(cp, expected=mock_saver_instance)
         mock_saver_cls.from_conn_string.assert_called_once_with("postgresql://localhost/db")
         mock_saver_instance.setup.assert_called_once()
 
@@ -431,7 +474,7 @@ class TestGetCheckpointer:
             reset_checkpointer()
             cp = get_checkpointer()
 
-        assert cp is mock_saver_instance
+        _assert_saver(cp, expected=mock_saver_instance)
         mock_psycopg.connect.assert_called_once_with("postgresql://localhost/db", autocommit=True)
         mock_conn.execute.assert_called_once_with('CREATE SCHEMA IF NOT EXISTS "deerflow"')
         # psycopg 3 __exit__ does not close(); the sync path must close explicitly.
@@ -466,7 +509,7 @@ class TestGetCheckpointer:
             reset_store()
             store = get_store()
 
-        assert store is mock_store_instance
+        _assert_store(store, expected=mock_store_instance)
         mock_psycopg.connect.assert_called_once_with("postgresql://localhost/db", autocommit=True)
         mock_conn.execute.assert_called_once_with('CREATE SCHEMA IF NOT EXISTS "deerflow"')
         # psycopg 3 __exit__ does not close(); the sync path must close explicitly.
@@ -507,7 +550,8 @@ class TestSyncSingletonThreadSafety:
             finally:
                 futures_started.shutdown(wait=True)
 
-        assert all(result is factory.value for result in results)
+        assert all(result is results[0] for result in results)
+        _assert_saver(results[0], expected=factory.value)
         assert factory.enter_count() == 1
 
     def test_concurrent_store_getter_creates_one_instance(self):
@@ -525,7 +569,8 @@ class TestSyncSingletonThreadSafety:
             finally:
                 futures_started.shutdown(wait=True)
 
-        assert all(result is factory.value for result in results)
+        assert all(result is results[0] for result in results)
+        _assert_store(results[0], expected=factory.value)
         assert factory.enter_count() == 1
 
     def test_checkpointer_loads_config_outside_singleton_lock(self):
@@ -585,7 +630,7 @@ class TestSyncSingletonThreadSafety:
             assert factory.exit_count() == 0
 
             factory.release.set()
-            assert get_future.result(timeout=3) is factory.value
+            _assert_saver(get_future.result(timeout=3), expected=factory.value)
             reset_future.result(timeout=3)
 
         assert factory.exit_count() == 1
@@ -615,7 +660,7 @@ class TestSyncSingletonThreadSafety:
             assert factory.exit_count() == 0
 
             factory.release.set()
-            assert get_future.result(timeout=3) is factory.value
+            _assert_store(get_future.result(timeout=3), expected=factory.value)
             reset_future.result(timeout=3)
 
         assert factory.exit_count() == 1
@@ -651,7 +696,7 @@ class TestAsyncCheckpointer:
             ) as mock_to_thread,
         ):
             async with make_checkpointer() as saver:
-                assert saver is mock_saver
+                _assert_saver(saver, expected=mock_saver)
 
         mock_to_thread.assert_awaited_once()
         called_fn, called_path = mock_to_thread.await_args.args
@@ -700,7 +745,7 @@ class TestAsyncCheckpointer:
             # AsyncConnectionPool() is a callable that returns mock_pool_instance
             # We need the constructor to be an async context manager
             async with make_checkpointer() as saver:
-                assert saver is mock_saver
+                _assert_saver(saver, expected=mock_saver)
 
         # Verify the pool was constructed with check Connection
         mock_pool_cls.assert_called_once()
@@ -757,7 +802,7 @@ class TestAsyncCheckpointer:
             patch.dict(sys.modules, {"psycopg_pool": MagicMock(AsyncConnectionPool=mock_pool_cls)}),
         ):
             async with make_checkpointer() as saver:
-                assert saver is mock_saver
+                _assert_saver(saver, expected=mock_saver)
 
         mock_pool_cls.assert_called_once()
         call_kwargs = mock_pool_cls.call_args
@@ -801,7 +846,7 @@ class TestAsyncCheckpointer:
             ) as mock_to_thread,
         ):
             async with make_checkpointer() as saver:
-                assert saver is mock_saver
+                _assert_saver(saver, expected=mock_saver)
 
         mock_to_thread.assert_awaited_once()
         called_fn, called_db_config = mock_to_thread.await_args.args
@@ -842,7 +887,7 @@ class TestAsyncStore:
             patch.dict(sys.modules, {"psycopg": mock_psycopg}),
         ):
             async with make_store(mock_config) as store:
-                assert store is mock_store
+                _assert_store(store, expected=mock_store)
 
         mock_async_connection.connect.assert_awaited_once_with("postgresql://localhost/db", autocommit=True)
         mock_conn.execute.assert_awaited_once_with('CREATE SCHEMA IF NOT EXISTS "deerflow"')
@@ -883,7 +928,7 @@ class TestAsyncStore:
             patch.dict(sys.modules, {"psycopg": mock_psycopg}),
         ):
             async with make_store(mock_config) as store:
-                assert store is mock_store
+                _assert_store(store, expected=mock_store)
 
         mock_async_connection.connect.assert_awaited_once_with("postgresql://localhost/db", autocommit=True)
         mock_conn.execute.assert_awaited_once_with('CREATE SCHEMA IF NOT EXISTS "deerflow"')
@@ -921,7 +966,7 @@ class TestCheckpointerDatabaseConfig:
             patch("deerflow.runtime.checkpointer.provider._sync_checkpointer_cm", factory),
             checkpointer_context() as cp,
         ):
-            assert cp is expected
+            _assert_saver(cp, expected=expected)
 
         resolved = factory.call_args.args[0]
         assert resolved.type == "postgres"
@@ -941,7 +986,7 @@ class TestCheckpointerDatabaseConfig:
             patch("deerflow.runtime.checkpointer.provider._sync_checkpointer_cm", factory),
             checkpointer_context() as cp,
         ):
-            assert cp is expected
+            _assert_saver(cp, expected=expected)
 
         resolved = factory.call_args.args[0]
         assert resolved.type == "sqlite"
@@ -961,7 +1006,7 @@ class TestCheckpointerDatabaseConfig:
             patch("deerflow.runtime.checkpointer.provider.get_app_config", return_value=app_config),
             patch("deerflow.runtime.checkpointer.provider._sync_checkpointer_cm", factory),
         ):
-            assert get_checkpointer() is expected
+            _assert_saver(get_checkpointer(), expected=expected)
 
         resolved = factory.call_args.args[0]
         assert resolved.type == "postgres"
@@ -976,7 +1021,7 @@ class TestCheckpointerDatabaseConfig:
             patch("deerflow.runtime.checkpointer.provider.get_checkpointer_config", return_value=None),
             patch("deerflow.runtime.checkpointer.provider.get_app_config", side_effect=FileNotFoundError),
         ):
-            assert isinstance(get_checkpointer(), InMemorySaver)
+            _assert_saver(get_checkpointer(), native_type=InMemorySaver)
 
     def test_legacy_checkpointer_config_takes_precedence(self):
         """Backward-compatible checkpointer config must override database."""
@@ -994,7 +1039,7 @@ class TestCheckpointerDatabaseConfig:
             patch("deerflow.runtime.checkpointer.provider._sync_checkpointer_cm", factory),
             checkpointer_context() as cp,
         ):
-            assert cp is expected
+            _assert_saver(cp, expected=expected)
 
         resolved = factory.call_args.args[0]
         assert resolved.type == "memory"
@@ -1012,7 +1057,7 @@ class TestCheckpointerDatabaseConfig:
             patch("deerflow.runtime.checkpointer.provider.get_app_config", return_value=app_config),
             checkpointer_context() as cp,
         ):
-            assert isinstance(cp, InMemorySaver)
+            _assert_saver(cp, native_type=InMemorySaver)
 
 
 class TestStoreDatabaseConfig:
@@ -1025,7 +1070,7 @@ class TestStoreDatabaseConfig:
             patch("deerflow.runtime.store.provider.get_checkpointer_config", return_value=None),
             patch("deerflow.runtime.store.provider.get_app_config", side_effect=FileNotFoundError),
         ):
-            assert isinstance(get_store(), InMemoryStore)
+            _assert_store(get_store(), native_type=InMemoryStore)
 
     @pytest.mark.anyio
     async def test_async_postgres_store_uses_database_config(self, caplog):
@@ -1047,7 +1092,7 @@ class TestStoreDatabaseConfig:
 
         with patch.dict(sys.modules, {"langgraph.store.postgres.aio": mock_module}):
             async with make_store(app_config) as store:
-                assert store is mock_store
+                _assert_store(store, expected=mock_store)
 
         mock_store_cls.from_conn_string.assert_called_once_with("postgresql://localhost/db")
         mock_store.setup.assert_awaited_once()
@@ -1056,8 +1101,8 @@ class TestStoreDatabaseConfig:
     @pytest.mark.anyio
     async def test_async_sqlite_store_uses_unified_database_path(self, tmp_path):
         """Unified database SQLite config must use the shared deerflow.db path."""
-        from deerflow.runtime.store.async_provider import make_store
-        from deerflow.runtime.store.provider import ensure_sqlite_parent_dir
+        from deerflow.runtime.store.async_provider import _prepare_sqlite_store_path, make_store
+        from deerflow.runtime.store.provider import _resolve_store_config
 
         db_config = DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path))
         app_config = SimpleNamespace(checkpointer=None, database=db_config)
@@ -1074,14 +1119,17 @@ class TestStoreDatabaseConfig:
             patch(
                 "deerflow.runtime.store.async_provider.asyncio.to_thread",
                 new_callable=AsyncMock,
+                side_effect=lambda call, *args: call(*args),
             ) as mock_to_thread,
         ):
             async with make_store(app_config) as store:
-                assert store is mock_store
+                _assert_store(store, expected=mock_store)
 
-        mock_to_thread.assert_awaited_once()
-        called_fn, called_path = mock_to_thread.await_args.args
-        assert called_fn is ensure_sqlite_parent_dir
+        assert mock_to_thread.await_count == 2
+        resolved_fn, selected_config = mock_to_thread.await_args_list[0].args
+        assert resolved_fn is _resolve_store_config and selected_config is app_config
+        called_fn, called_path = mock_to_thread.await_args_list[1].args
+        assert called_fn is _prepare_sqlite_store_path
         assert called_path == db_config.checkpointer_sqlite_path
         mock_store_cls.from_conn_string.assert_called_once_with(db_config.checkpointer_sqlite_path)
         mock_store.setup.assert_awaited_once()
@@ -1102,7 +1150,7 @@ class TestStoreDatabaseConfig:
             patch("deerflow.runtime.store.provider._sync_store_cm", factory),
             store_context() as store,
         ):
-            assert store is expected_store
+            _assert_store(store, expected=expected_store)
 
         resolved = factory.call_args.args[0]
         assert resolved.type == "postgres"
@@ -1122,7 +1170,7 @@ class TestStoreDatabaseConfig:
             patch("deerflow.runtime.store.provider.get_app_config", return_value=app_config),
             patch("deerflow.runtime.store.provider._sync_store_cm", factory),
         ):
-            assert get_store() is expected_store
+            _assert_store(get_store(), expected=expected_store)
 
         resolved = factory.call_args.args[0]
         assert resolved.type == "postgres"
@@ -1144,7 +1192,7 @@ class TestStoreDatabaseConfig:
             patch("deerflow.runtime.store.provider._sync_store_cm", factory),
             store_context() as store,
         ):
-            assert store is expected_store
+            _assert_store(store, expected=expected_store)
 
         resolved = factory.call_args.args[0]
         assert resolved.type == "memory"
@@ -1162,7 +1210,7 @@ class TestStoreDatabaseConfig:
         )
         with patch("deerflow.runtime.store.provider.get_app_config", return_value=app_config):
             with store_context() as store:
-                assert isinstance(store, InMemoryStore)
+                _assert_store(store, native_type=InMemoryStore)
 
 
 # ---------------------------------------------------------------------------
@@ -1311,7 +1359,7 @@ class TestClientCheckpointerFallback:
             client._ensure_agent(config)
 
         assert "checkpointer" in captured_kwargs
-        assert isinstance(captured_kwargs["checkpointer"], InMemorySaver)
+        _assert_saver(captured_kwargs["checkpointer"], native_type=InMemorySaver)
 
     def test_client_explicit_checkpointer_takes_precedence(self):
         """An explicitly provided checkpointer is used even when config checkpointer is set."""

@@ -37,6 +37,9 @@ class _FakeAgent:
 
 
 class _FakeRunManager:
+    def get_capture_io_owner(self, _record):
+        return None
+
     async def try_start(self, _run_id: str) -> RunStartOutcome:
         return RunStartOutcome.started
 

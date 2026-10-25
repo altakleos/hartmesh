@@ -71,6 +71,9 @@ class _FakeRunManager:
     async def stop_heartbeat(self) -> None:
         pass
 
+    def seal_capture_io_admissions(self) -> None:
+        pass
+
     async def shutdown(self, *, timeout: float = 5.0) -> None:
         # No in-flight tasks in these startup-recovery tests; langgraph_runtime
         # drains the manager on teardown, so the double must accept the call.
@@ -258,7 +261,7 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     assert _FakeRunManager.instances[0].list_by_thread_calls == [{"thread_id": "thread-1", "user_id": None, "limit": 1}]
     assert thread_store.status_updates == [("thread-1", "error", None)]
     assert stream_bridge.publish_end_calls == ["run-1"]
-    assert stream_bridge.cleanup_calls == [("run-1", 60.0)]
+    assert stream_bridge.cleanup_calls == []  # Shutdown cancels the unstarted retention delay.
 
 
 @pytest.mark.anyio
@@ -330,4 +333,4 @@ async def test_sqlite_runtime_does_not_mark_thread_error_when_newer_run_is_succe
     assert _FakeRunManager.instances[0].list_by_thread_calls == [{"thread_id": "thread-1", "user_id": None, "limit": 1}]
     assert thread_store.status_updates == []
     assert stream_bridge.publish_end_calls == ["old-running"]
-    assert stream_bridge.cleanup_calls == [("old-running", 60.0)]
+    assert stream_bridge.cleanup_calls == []  # No delete was admitted before shutdown.

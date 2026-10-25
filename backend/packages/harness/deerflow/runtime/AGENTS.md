@@ -21,7 +21,10 @@ Host-only startup decisions share `start_lock`; preserve frozen prestart outcome
 through the worker. Reclaim seals failed under the actual lease CAS; cancellation
 requests and task absence do not prove cleanup. Resolve reuse before captured
 replacement refusal. Unseen admission cleanup uses per-call registration evidence,
-never a shared retry flag. Managed-bot activation and shutdown retirement remain separate. See
+never a shared retry flag. Host-only `runs/capture_io.py` owns fresh finite leaves,
+native iterators and cleanup; retirement grants no terminal proof. Preserve the
+one Gateway deadline and exact original-record association. Managed-bot activation
+remains separate. See
 [output evidence](../../../../docs/RUN_OUTPUT_EVIDENCE.md).
 
 SQL terminal writes use `runs/terminal.py` and `RunRepository.finalize_owned`.

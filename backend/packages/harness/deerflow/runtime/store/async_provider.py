@@ -35,6 +35,7 @@ from deerflow.runtime.store.provider import (
     ensure_sqlite_parent_dir,
     resolve_sqlite_conn_str,
 )
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,20 @@ logger = logging.getLogger(__name__)
 async def _ensure_postgres_schema(conn_string: str, schema: str) -> None:
     """Create the configured schema before LangGraph creates its store tables."""
     await ensure_postgres_schema_async(conn_string, schema, install_hint=POSTGRES_STORE_INSTALL)
+
+
+def _prepare_sqlite_store_path(raw: str) -> str:
+    conn_str = resolve_sqlite_conn_str(raw)
+    ensure_sqlite_parent_dir(conn_str)
+    return conn_str
+
+
+def _ensure_postgres_store_imports():
+    try:
+        from langgraph.store.postgres.aio import AsyncPostgresStore
+    except ImportError as exc:
+        raise ImportError(POSTGRES_STORE_INSTALL) from exc
+    return AsyncPostgresStore
 
 
 # ---------------------------------------------------------------------------
@@ -69,8 +84,7 @@ async def _async_store(config) -> AsyncIterator[BaseStore]:
         except ImportError as exc:
             raise ImportError(SQLITE_STORE_INSTALL) from exc
 
-        conn_str = resolve_sqlite_conn_str(config.connection_string or "store.db")
-        await asyncio.to_thread(ensure_sqlite_parent_dir, conn_str)
+        conn_str = await await_drained(asyncio.to_thread(_prepare_sqlite_store_path, config.connection_string or "store.db"))
 
         async with drained_async_context(AsyncSqliteStore.from_conn_string(conn_str)) as store:
             await store.setup()
@@ -79,10 +93,7 @@ async def _async_store(config) -> AsyncIterator[BaseStore]:
         return
 
     if config.type == "postgres":
-        try:
-            from langgraph.store.postgres.aio import AsyncPostgresStore  # type: ignore[import]
-        except ImportError as exc:
-            raise ImportError(POSTGRES_STORE_INSTALL) from exc
+        AsyncPostgresStore = await await_drained(asyncio.to_thread(_ensure_postgres_store_imports))
 
         if not config.connection_string:
             raise ValueError(POSTGRES_CONN_REQUIRED)
@@ -119,7 +130,8 @@ async def make_store(app_config: AppConfig | None = None) -> AsyncIterator[BaseS
     """
     if app_config is None:
         app_config = get_app_config()
+    from deerflow.runtime.capture_resources import OwnedStore, store_capture_profile
 
-    config = _resolve_store_config(app_config)
+    config = await await_drained(asyncio.to_thread(_resolve_store_config, app_config))
     async with _async_store(config) as store:
-        yield store
+        yield OwnedStore(store, profile=store_capture_profile(store, asynchronous=True), loop=asyncio.get_running_loop())

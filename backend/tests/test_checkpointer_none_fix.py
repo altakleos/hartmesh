@@ -3,7 +3,8 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from langgraph.checkpoint.memory import InMemorySaver
+
+from deerflow.runtime.capture_resources import OwnedCheckpointSaver
 
 
 class TestCheckpointerNoneFix:
@@ -23,7 +24,8 @@ class TestCheckpointerNoneFix:
             async with make_checkpointer() as checkpointer:
                 # Should return InMemorySaver, not None
                 assert checkpointer is not None
-                assert isinstance(checkpointer, InMemorySaver)
+                assert isinstance(checkpointer, OwnedCheckpointSaver)
+                assert checkpointer.supports_capture_io is True
 
                 # Should be able to call alist() without AttributeError
                 # This is what LangGraph does and what was failing in issue #1016
@@ -47,7 +49,8 @@ class TestCheckpointerNoneFix:
             with checkpointer_context() as checkpointer:
                 # Should return InMemorySaver, not None
                 assert checkpointer is not None
-                assert isinstance(checkpointer, InMemorySaver)
+                assert isinstance(checkpointer, OwnedCheckpointSaver)
+                assert checkpointer.supports_capture_io is True
 
                 # Should be able to call list() without AttributeError
                 result = list(checkpointer.list(config={"configurable": {"thread_id": "test"}}))

@@ -20,6 +20,7 @@ from deerflow.persistence.agent_instances.human_input import HumanInputEventRow,
 from deerflow.persistence.agent_instances.model import AgentConversationRow, AgentLifecycleRow
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow, AgentWorkRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.runtime.runs.capture_io import run_capture_io
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -679,4 +680,4 @@ class WorkExecution:
                 await self._event(session, parent, row, uuid4().hex, "attempt_settled" if attempt.settled_at else "attempt_uncertain", {"attempt_id": attempt.id, "run_id": record.run_id, "status": attempt.status})
                 return attempt.status
 
-        return await await_drained(perform())
+        return await run_capture_io(lambda: await_drained(perform()))

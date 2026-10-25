@@ -229,8 +229,15 @@ def get_checkpointer() -> Checkpointer:
         checkpointer_ctx = _sync_checkpointer_cm(config)
         checkpointer = checkpointer_ctx.__enter__()
         try:
+            from deerflow.runtime.capture_resources import OwnedCheckpointSaver, checkpoint_cache_capture_profile, checkpoint_capture_profile
+
+            profile = checkpoint_capture_profile(checkpointer, asynchronous=False)
             if app_config is not None:
-                checkpointer = _wrap_sync_if_delta(checkpointer, app_config)
+                derived = _wrap_sync_if_delta(checkpointer, app_config)
+                if derived is not checkpointer:
+                    profile = checkpoint_cache_capture_profile(profile, _checkpointer_cache)
+                checkpointer = derived
+            checkpointer = OwnedCheckpointSaver(checkpointer, profile=profile, loop=None)
         except Exception:
             checkpointer_ctx.__exit__(None, None, None)
             raise
@@ -282,5 +289,11 @@ def checkpointer_context() -> Iterator[Checkpointer]:
 
     app_config = get_app_config()
     config = _resolve_checkpointer_config(app_config)
+    from deerflow.runtime.capture_resources import OwnedCheckpointSaver, checkpoint_cache_capture_profile, checkpoint_capture_profile
+
     with _sync_checkpointer_cm(config) as saver:
-        yield _wrap_sync_if_delta(saver, app_config)
+        profile = checkpoint_capture_profile(saver, asynchronous=False)
+        derived = _wrap_sync_if_delta(saver, app_config)
+        if derived is not saver:
+            profile = checkpoint_cache_capture_profile(profile, _checkpointer_cache)
+        yield OwnedCheckpointSaver(derived, profile=profile, loop=None)

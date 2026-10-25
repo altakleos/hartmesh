@@ -16,6 +16,7 @@ from sqlalchemy.util import await_only
 
 from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.persistence.run.model import RunRow
+from deerflow.runtime.capture_resources import OwnedCheckpointSaver
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.output import OutputEvidenceError, canonical_text_digest
@@ -48,7 +49,7 @@ async def _environment(environment, monkeypatch):
     builder.add_edge(START, "model")
     builder.add_edge("model", END)
     graph = builder.compile()
-    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock(), supports_cross_process=False)
     return SimpleNamespace(events=events, manager=manager, record=record, human=human, model=model, calls=calls, graph=graph, bridge=bridge, graph_input={"messages": [human]})
 
 
@@ -58,18 +59,24 @@ async def _execute(env, *, completed=None):
         return env.graph
 
     token = set_current_user(SimpleNamespace(id=RAW_OWNER))
+    cleanup_tasks = []
+
+    def schedule_cleanup(run_id, delay):
+        cleanup_tasks.append(asyncio.create_task(env.bridge.cleanup(run_id, delay=delay)))
+
     try:
         await run_agent(
             env.bridge,
             env.manager,
             env.record,
-            ctx=RunContext(checkpointer=getattr(env, "checkpointer", None), event_store=env.events, on_run_completed=completed),
+            ctx=RunContext(checkpointer=getattr(env, "checkpointer", None), event_store=env.events, on_run_completed=completed, schedule_stream_cleanup=schedule_cleanup),
             agent_factory=factory,
             graph_input=env.graph_input,
             config={"run_id": uuid4(), "configurable": {"thread_id": env.record.thread_id}},
         )
     finally:
         reset_current_user(token)
+        await asyncio.gather(*cleanup_tasks)
 
 
 @pytest.mark.asyncio
@@ -334,7 +341,7 @@ async def test_durable_cancel_wins_text_cas_then_seals_cancelled_from_active(out
     if action == "rollback":
         from langgraph.checkpoint.memory import InMemorySaver
 
-        env.checkpointer = InMemorySaver()
+        env.checkpointer = OwnedCheckpointSaver(InMemorySaver(), profile="memory", loop=asyncio.get_running_loop())
 
         async def node(state, config):
             env.calls.append("actual-node")
@@ -440,7 +447,7 @@ async def test_autonomous_capture_does_not_adopt_historical_human_journal_anchor
 
     env = await _environment(output_store, monkeypatch)
     env.graph_input = {"messages": []}
-    env.checkpointer = InMemorySaver()
+    env.checkpointer = OwnedCheckpointSaver(InMemorySaver(), profile="memory", loop=asyncio.get_running_loop())
 
     async def node(state, config):
         return {"messages": [await env.model.ainvoke(state["messages"], config)]}
@@ -547,7 +554,7 @@ async def test_goal_clearing_requires_confirmed_output_without_second_status_wri
         goal: NotRequired[dict]
 
     env = await _environment(output_store, monkeypatch)
-    env.checkpointer = InMemorySaver()
+    env.checkpointer = OwnedCheckpointSaver(InMemorySaver(), profile="memory", loop=asyncio.get_running_loop())
 
     async def node(state, config):
         env.calls.append("actual-node")

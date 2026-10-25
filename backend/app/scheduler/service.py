@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict, ScheduledTaskAdmissionRejected
 from deerflow.runtime import ConflictError, RunRecord
+from deerflow.runtime.runs.capture_io import run_capture_io
 from deerflow.scheduler.schedules import next_run_at
 from deerflow.trace_context import ensure_trace_context
 from deerflow.utils.thread_id import validate_thread_id
@@ -540,17 +541,19 @@ class ScheduledTaskService:
         if terminal_status is None:
             return
 
-        await self._task_repo.complete_run(
-            task_id,
-            user_id=user_id,
-            task_run_id=task_run_id,
-            run_id=record.run_id,
-            status=terminal_status,
-            error=error,
-            finished_at=datetime.now(UTC),
-            # Timeout or a prior callback may already have committed the
-            # terminal outcome. Fence the occurrence and parent together.
-            only_if_active=True,
+        await run_capture_io(
+            lambda: self._task_repo.complete_run(
+                task_id,
+                user_id=user_id,
+                task_run_id=task_run_id,
+                run_id=record.run_id,
+                status=terminal_status,
+                error=error,
+                finished_at=datetime.now(UTC),
+                # Timeout or a prior callback may already have committed the
+                # terminal outcome. Fence the occurrence and parent together.
+                only_if_active=True,
+            )
         )
 
     async def start(self) -> None:

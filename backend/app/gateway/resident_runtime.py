@@ -864,13 +864,19 @@ class ResidentRuntime:
         return await await_drained(asyncio.shield(task))
 
     async def drain_workers(self):
-        await self.drain_admissions()
-        # An owned launch can attach a worker after seal's first snapshot.
-        manager = self.registry.run_manager
-        workers = set(self._closing_tasks or ()) | {record.task for record in manager._runs.values() if record.task is not None and not record.task.done()}
-        if workers:
-            await await_drained(asyncio.gather(*workers, return_exceptions=True))
-        await self.drain_producers()
+        self.seal()
+
+        async def drain():
+            await self.drain_admissions()
+            # An owned launch can attach a worker after seal's first snapshot.
+            manager = self.registry.run_manager
+            workers = set(self._closing_tasks or ()) | {record.task for record in manager._runs.values() if record.task is not None and not record.task.done()}
+            if workers:
+                await await_drained(asyncio.gather(*workers, return_exceptions=True))
+            await self.drain_producers()
+
+        # Cancellation must not skip the later phases after an admission joins.
+        await await_drained(drain())
 
     async def drain_admissions(self):
         self.seal()

@@ -32,6 +32,7 @@ from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
+from deerflow.runtime.runs.capture_io import CaptureIOCleanupError
 from deerflow.runtime.runs.store.base import RunStore
 from deerflow.utils.file_io import await_drained
 
@@ -230,17 +231,22 @@ def _validate_agent_storage(config: AppConfig) -> None:
         )
 
 
-async def _drain_inflight_runs(run_manager: RunManager) -> None:
+async def _drain_inflight_runs(run_manager: RunManager, *, deadline: float | None = None) -> None:
     """Drain in-flight runs before the checkpointer is torn down (issue #3373).
 
-    Shields the (internally-bounded) drain so that even if the lifespan
+    Shields the drain so that even if the lifespan
     coroutine is repeatedly cancelled mid-shutdown — e.g. signal escalation or
     the server's graceful-shutdown timeout — the checkpointer pool is not closed
     while run tasks are still writing checkpoints. Cancellation is remembered
     and propagated only after the already-running drain reaches a safe terminal
     point.
     """
-    drain = asyncio.create_task(run_manager.shutdown(timeout=_RUN_DRAIN_TIMEOUT_SECONDS))
+
+    async def shutdown():
+        remaining = _RUN_DRAIN_TIMEOUT_SECONDS if deadline is None else max(0.0, deadline - asyncio.get_running_loop().time())
+        await run_manager.shutdown(timeout=remaining)
+
+    drain = asyncio.create_task(shutdown())
     cancellation: asyncio.CancelledError | None = None
 
     while not drain.done():
@@ -249,6 +255,11 @@ async def _drain_inflight_runs(run_manager: RunManager) -> None:
         except asyncio.CancelledError as exc:
             if cancellation is None:
                 cancellation = exc
+        except CaptureIOCleanupError:
+            if cancellation is not None:
+                logger.exception("Owned resource cleanup failed after shutdown cancellation")
+                raise cancellation
+            raise
         except Exception:
             if cancellation is not None:
                 logger.exception("In-flight run drain failed after shutdown cancellation")
@@ -265,6 +276,8 @@ async def _drain_inflight_runs(run_manager: RunManager) -> None:
 
     try:
         drain.result()
+    except CaptureIOCleanupError:
+        raise
     except Exception:
         logger.exception("Failed to drain in-flight runs during shutdown")
 
@@ -275,6 +288,7 @@ async def _publish_recovered_run_stream_end(
     *,
     cleanup_delay: float = 60.0,
     on_cleanup_scheduled: Callable[[str, asyncio.Task[None]], None] | None = None,
+    schedule_cleanup: Callable[[str, float], None] | None = None,
 ) -> list[tuple[str, asyncio.Task[None]]]:
     """Terminate retained streams for runs recovered as orphaned."""
     cleanup_tasks: list[tuple[str, asyncio.Task[None]]] = []
@@ -295,6 +309,9 @@ async def _publish_recovered_run_stream_end(
                 record.run_id,
                 exc_info=True,
             )
+            continue
+        if schedule_cleanup is not None:
+            schedule_cleanup(record.run_id, cleanup_delay)
             continue
         task = asyncio.create_task(bridge.cleanup(record.run_id, delay=cleanup_delay))
         task.add_done_callback(lambda task, run_id=record.run_id: _log_recovered_stream_cleanup_result(task, run_id))
@@ -399,6 +416,7 @@ async def _terminalize_recovered_runs(
     *,
     cleanup_delay: float,
     on_cleanup_scheduled: Callable[[str, asyncio.Task[None]], None] | None = None,
+    schedule_cleanup: Callable[[str, float], None] | None = None,
 ) -> list[tuple[str, asyncio.Task[None]]]:
     """Publish terminal markers and schedule retained-stream cleanup."""
     return await _publish_recovered_run_stream_end(
@@ -406,6 +424,7 @@ async def _terminalize_recovered_runs(
         recovered_runs,
         cleanup_delay=cleanup_delay,
         on_cleanup_scheduled=on_cleanup_scheduled,
+        schedule_cleanup=schedule_cleanup,
     )
 
 
@@ -692,21 +711,18 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         run_ownership_config = getattr(config, "run_ownership", None)
         sb_config = getattr(config, "stream_bridge", None)
         cleanup_delay = getattr(sb_config, "recovered_stream_cleanup_delay_seconds", 60.0) if sb_config else 60.0
-        recovered_stream_cleanup_tasks: dict[asyncio.Task[None], str] = {}
+        from app.gateway.stream_cleanup import StreamCleanupRegistry
 
-        def track_recovered_stream_cleanup(
-            run_id: str,
-            task: asyncio.Task[None],
-        ) -> None:
-            recovered_stream_cleanup_tasks[task] = run_id
-            task.add_done_callback(lambda completed: recovered_stream_cleanup_tasks.pop(completed, None))
+        stream_cleanups = StreamCleanupRegistry(app.state.stream_bridge)
+        app.state.stream_cleanups = stream_cleanups
+        stack.push_async_callback(stream_cleanups.close)
 
         async def terminalize_recovered_runs(recovered_runs: list[RunRecord]) -> None:
             await _terminalize_recovered_runs(
                 app.state.stream_bridge,
                 recovered_runs,
                 cleanup_delay=cleanup_delay,
-                on_cleanup_scheduled=track_recovered_stream_cleanup,
+                schedule_cleanup=stream_cleanups.schedule,
             )
             from app.gateway.work_execution import contain_orphaned_work
 
@@ -735,7 +751,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.stream_bridge,
             recovered_runs,
             cleanup_delay=cleanup_delay,
-            on_cleanup_scheduled=track_recovered_stream_cleanup,
+            schedule_cleanup=stream_cleanups.schedule,
         )
         await _mark_latest_startup_recovered_threads_error(
             app.state.run_manager,
@@ -751,7 +767,11 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         finally:
             from app.gateway.resident_runtime import seal_resident_runtime
 
+            shutdown_deadline = asyncio.get_running_loop().time() + _RUN_DRAIN_TIMEOUT_SECONDS
             seal_resident_runtime(app)
+            run_manager = getattr(app.state, "run_manager", None)
+            if run_manager is not None:
+                run_manager.seal_capture_io_admissions()
             mark_pool_runtime_closing(app)
             # Drain in-flight run tasks BEFORE the AsyncExitStack tears down the
             # checkpointer (and its connection pool). A run still mid-graph would
@@ -759,26 +779,25 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             # _checkpointer_put_after_previous aput races the closed pool and
             # raises PoolClosed (issue #3373).
             try:
-                run_manager = getattr(app.state, "run_manager", None)
                 if run_manager is not None:
                     runtime = getattr(app.state, "resident_runtime", None)
-                    if runtime is not None:
-                        await await_drained(runtime.drain_admissions())
-                    shutdown_deadline = asyncio.get_running_loop().time() + _RUN_DRAIN_TIMEOUT_SECONDS
                     try:
-                        await _drain_inflight_runs(run_manager)
+                        drains = [_drain_inflight_runs(run_manager, deadline=shutdown_deadline)]
+                        if runtime is not None:
+
+                            async def drain_late_admissions():
+                                await runtime.drain_admissions()
+                                # An already admitted ordinary launch can attach
+                                # after the first manager snapshot. Reuse D.
+                                await run_manager.drain_late_admitted_tasks(deadline=shutdown_deadline)
+
+                            drains.append(drain_late_admissions())
+                        results = await await_drained(asyncio.gather(*drains, return_exceptions=True))
+                        for result in results:
+                            if isinstance(result, BaseException):
+                                raise result
                     finally:
-                        await _flush_recovered_stream_cleanups(
-                            app.state.stream_bridge,
-                            recovered_stream_cleanup_tasks,
-                            timeout=min(
-                                1.0,
-                                max(
-                                    0.0,
-                                    shutdown_deadline - asyncio.get_running_loop().time(),
-                                ),
-                            ),
-                        )
+                        await stream_cleanups.close()
             finally:
                 await await_drained(_close_runtime_storage(app))
 
@@ -936,6 +955,7 @@ def get_run_context(request: Request) -> RunContext:
         chat_storage_scope=getattr(request.app.state, "chat_storage_scope", None),
         customer_administration_policy=request_customer_administration_policy(request),
         on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
+        schedule_stream_cleanup=getattr(getattr(request.app.state, "stream_cleanups", None), "schedule", None),
     )
 
 

@@ -53,7 +53,9 @@ lookup. The `local_finalizing` observation is never a durable completion seal.
 An ACTIVE row belonging to this exact locally fenced worker yields fixed
 uncertainty, even after its stream-notification flag clears. A peer-owned row
 or a valid terminal seal follows its own durable authority. Local fence knowledge
-does not survive cache eviction or process restart. Eligible expired ownership
+survives ordinary cache eviction while execution or cleanup remains unresolved.
+Only confirmed, fully drained terminal associations can be released. Process
+restart loses that local fence knowledge. Eligible expired ownership
 can instead be closed by the SQL recovery path described below.
 
 ## Prestart and abandoned ownership
@@ -89,7 +91,51 @@ local captured predecessor still active or finalizing. Exact idempotent reuse
 is resolved first. Eligible expired predecessors receive the failed seal in the
 same transaction as successor admission; a failed insert rolls both back. The
 confirmed finalizer's narrowly authorized goal-checkpoint handoff is preserved.
-Capture resource retirement after shutdown grace remains separate work.
+
+## Captured I/O lifetime
+
+The manager registers a host-only lifetime before the first captured admission
+query. It binds the original run object and is never serialized into kwargs,
+metadata, checkpoints or API projections. Metadata setup, direct worker entry
+and later callbacks reuse that original lifetime; a reconstructed or foreign
+captured record cannot acquire a replacement owner.
+
+At shutdown the Gateway seals admission and uses one cooperative deadline for
+manager retirement and already admitted resident preparation. A later ordinary
+worker attachment receives another task snapshot under that same deadline.
+Retirement refuses new finite operations, pages, batches, retries and stream
+publication. Started delegates keep their complete native, codec, session and
+transaction lifetime. The host joins them and registered resource closes before
+provider teardown, including through repeated cancellation. A blocked native
+operation can exceed the cooperative grace. Arbitrary graph continuations,
+external tools and container containment remain governed by their own contracts.
+
+Factories expose explicit public saver/Store facades over the existing objects,
+optional cache and pools. Supported builtin async methods retain their complete
+delegate call; actual native list iterators remain registered between yields and
+close on retirement. Captured synchronous calls on async-backed providers refuse
+before invoking a delegate, even from a worker thread. Atomic Memory synchronous
+operations remain supported. Ordinary public calls preserve delegation; private
+SDK layout and concrete-type inspection are not part of the facade contract.
+The dormant private-layout checkpoint-retention utility has no qualified capture
+adapter. Embedded captured workers require supported facades and the host cleanup
+callback, and refuse unsupported profiles before model execution.
+
+Each journal batch, progress report, source page and terminal read/CAS has fresh
+admission. Normal open quiescence can flush its buffered tail; retirement cannot.
+Idle native iterators and exact temporary snapshot caches have explicit cleanup
+owners. Checkpoint reservation release is a preauthorized, single-attempt close
+conditioned on the original raw owner, thread, worker, operation kind and change
+sequence. A heartbeat-only lease renewal does not change that reservation identity.
+Failed cleanup stays retained and reports a fixed error without blind replay.
+
+The run's producer view never closes the shared bridge or request subscribers.
+The application owns stream retention separately: the existing serving delay is
+outside the finite delete operation. Shutdown cancels unstarted delays, joins
+started deletes once and rejects later scheduling before creating tasks. Redis
+closure is irreversible even for a wrapper borrowing its client. Retiring I/O
+does not authorize a new failure/cancellation seal, cleanup proof, goal deletion
+or completion hook; confirmed evidence stays fixed and uncertainty stays active.
 
 ## Worker source capture
 
@@ -156,8 +202,7 @@ authorization failures carry no supported-absence acknowledgement.
 Post-response authorization remains inside the existing retained HTTP owner.
 Shutdown drains started codec and SQL cleanup before releasing ownership. These
 read boundaries enable reading independently sealed output. Managed-bot model
-execution, durable publication recovery and post-grace resource retirement
-remain separate work.
+execution and durable publication recovery remain separate work.
 
 No schema or configuration version changes are required: the receipt uses the
 existing run kwargs JSON. Schema head remains `0043_telegram_inbox_chat_scope`;

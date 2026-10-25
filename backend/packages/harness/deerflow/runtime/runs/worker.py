@@ -99,6 +99,7 @@ from deerflow.runtime.goal import (
 )
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.presented_files import RUNTIME_PRESENTED_FILES_CONTEXT_KEY
+from deerflow.runtime.runs.capture_io import CaptureIOClosed, CaptureIOOwner, CaptureIOUnsupported, capture_io_scope, current_capture_io_owner, run_capture_io
 from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
@@ -457,7 +458,7 @@ async def _produced_output_paths(
     if before is None or before.truncated:
         return None
     try:
-        after = await capture_output_snapshot(thread_id, user_id=user_id, extra_excluded_dir_names=extra_excluded_dir_names)
+        after = await run_capture_io(lambda: capture_output_snapshot(thread_id, user_id=user_id, extra_excluded_dir_names=extra_excluded_dir_names))
         if after.truncated:
             return None
         return get_changed_output_paths(before, after)
@@ -741,6 +742,8 @@ class RunContext:
     agent_execution: Any | None = field(default=None)
     # Trusted host scope only; never part of runtime payloads or checkpoints.
     chat_storage_scope: Callable[..., AbstractAsyncContextManager[Any]] | None = None
+    # The owning app retains the task privately; never put this in run payloads.
+    schedule_stream_cleanup: Callable[[str, float], None] | None = None
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -961,6 +964,53 @@ async def _await_task_stop_after_host_cancellation(
 
 
 async def run_agent(bridge: StreamBridge, run_manager: RunManager, record: RunRecord, **kwargs: Any) -> None:
+    """Bind the original host lifetime without moving worker orchestration."""
+    owner = run_manager.get_capture_io_owner(record)
+    if owner is None:
+        return await _run_agent_measured(bridge, run_manager, record, **kwargs)
+    with capture_io_scope(owner):
+        if owner.retired:
+            await _retired_capture_entry(run_manager, record)
+            return
+        if record.startup_phase is RunStartupPhase.closed and record.prestart_outcome is not None and not record.prestart_outcome.confirmed:
+            # A prestart controller publishes nonexecution before its exact
+            # SQL seal. Do not retire that controller's owner from this task.
+            async with record.start_lock:
+                pass
+            if owner.retired:
+                await _retired_capture_entry(run_manager, record)
+                return
+        ctx = kwargs.get("ctx")
+        supported = callable(getattr(ctx, "schedule_stream_cleanup", None)) and all(value is None or getattr(value, "supports_capture_io", False) is True for value in (getattr(ctx, "checkpointer", None), getattr(ctx, "store", None)))
+        if not supported:
+            if not record.terminal_confirmed and record.startup_phase is RunStartupPhase.unstarted:
+                await run_manager.fail_start_if_pending(record.run_id, error="Capture I/O profile is unsupported")
+            await run_manager.finish_capture_io(record)
+            if record.terminal_confirmed:
+                return
+            raise CaptureIOUnsupported() from None
+        # Root owns this same-client producer view; import only at real binding.
+        from deerflow.runtime.stream_bridge.capture import capture_stream_producer
+
+        producer = capture_stream_producer(bridge, owner)
+        try:
+            await _run_agent_measured(producer, run_manager, record, **kwargs)
+        except CaptureIOClosed:
+            # No new failure/cancellation outcome follows retirement.
+            pass
+        finally:
+            await run_manager.finish_capture_io(record)
+
+
+async def _retired_capture_entry(run_manager: RunManager, record: RunRecord) -> None:
+    # No new phase/journal/model/metadata/bridge effects. Previously admitted
+    # physical operations and registered resource closes still have to settle.
+    await run_manager.finish_capture_io(record)
+    if record.finalizing:
+        await run_manager.set_finalizing(record.run_id, False)
+
+
+async def _run_agent_measured(bridge: StreamBridge, run_manager: RunManager, record: RunRecord, **kwargs: Any) -> None:
     """Execute an agent in the background, publishing events to *bridge*.
 
     This wrapper exists only to measure the turn. It opens the phase journal
@@ -974,6 +1024,7 @@ async def run_agent(bridge: StreamBridge, run_manager: RunManager, record: RunRe
     from deerflow.runtime.turn_phases import turn_phases
     from deerflow.runtime.turn_progress import TurnProgressPublisher
 
+    owner = current_capture_io_owner()
     host_policy = getattr(kwargs.get("ctx"), "customer_administration_policy", None)
     if not isinstance(host_policy, CustomerAdministrationPolicy):
         host_policy = DENIED_CUSTOMER_ADMINISTRATION
@@ -1025,13 +1076,15 @@ async def run_agent(bridge: StreamBridge, run_manager: RunManager, record: RunRe
                         cleanup_known = cleanup_known and not (getattr(sandbox, "requires_container_recycle", True) or getattr(sandbox, "execution_outcome_uncertain", True))
                     cleanup_settled = cleanup_known
                 finally:
-                    if execution is not None and execution.work is not None:
+                    if execution is not None and execution.work is not None and not (owner is not None and owner.retired):
                         try:
                             # Promotion requires this later cleanup boundary and
                             # the already persisted terminal run outcome.
-                            stored = await run_manager._store.get(record.run_id, user_id=record.user_id) if run_manager._store is not None else None
+                            stored = await run_capture_io(lambda: run_manager._store.get(record.run_id, user_id=record.user_id)) if run_manager._store is not None else None
                             settled = bool(cleanup_settled and execution.work.owned_cleanup_confirmed and stored and stored.get("status") == record.status.value and stored.get("stop_reason") != "orphan_recovered")
                             await execution.work.finish(execution, record, settled=settled)
+                        except CaptureIOClosed:
+                            pass
                         except Exception:
                             logger.warning("Work settlement remains pending for run %s", record.run_id, exc_info=True)
             progress.close()
@@ -1072,6 +1125,12 @@ async def _run_agent(
     run_events_config = ctx.run_events_config
     thread_store = ctx.thread_store
     capture_requested = isinstance(record.kwargs, Mapping) and OUTPUT_CAPTURE_KEY in record.kwargs
+    io_owner: CaptureIOOwner | None = current_capture_io_owner() if capture_requested else None
+    io_closed = False
+
+    def io_retired():
+        return io_closed or io_owner is not None and io_owner.retired
+
     terminal_status_kwargs = {"persist": False} if event_store is not None or capture_requested else {}
     output_capture: OutputCaptureObserver | None = None
     output_confirmed = False
@@ -1145,6 +1204,8 @@ async def _run_agent(
         restore_checkpoint: bool = True,
     ) -> None:
         nonlocal checkpoint_rollback_completed, execution_cancelled
+        if capture_requested and (io_retired() or record.terminal_confirmed):
+            return
         execution_cancelled = True
         await run_manager.set_finalizing(run_id, True)
         if action == "rollback":
@@ -1206,13 +1267,17 @@ async def _run_agent(
 
     async def _settle_captured_output() -> None:
         """Own capture prerequisites and the one status+evidence CAS as a unit."""
-        nonlocal completion_data, delivery_content, checkpoint_rollback_completed, output_confirmed
+        nonlocal completion_data, delivery_content, checkpoint_rollback_completed, output_confirmed, io_closed
         # Keep the real execution outcome before proof I/O or the local fence
         # can alter record.status/abort_event. Persistence failure is not a
         # newly executed model failure or human cancellation.
         outcome = record.status
         cancelled = execution_cancelled or record.abort_event.is_set()
         try:
+            if io_retired():
+                if journal is not None:
+                    await journal.close(flush=False)
+                return
             if record.ownership_lost:
                 if journal is not None:
                     await journal.close(flush=False)
@@ -1283,11 +1348,18 @@ async def _run_agent(
             if not result.output_receipt_confirmed:
                 raise OutputEvidenceError()
             output_confirmed = True
+        except CaptureIOClosed:
+            io_closed = True
+            if io_owner is not None:
+                io_owner.retire()
+            if journal is not None:
+                await journal.close(flush=False)
         except BaseException:
             # This child may cancel its owning worker via the existing fence.
             # The caller drains it and distinguishes that induced cancellation
             # from a real executed cancellation; no status-only fallback runs.
-            await run_manager._mark_ownership_lost(record, require_active=False, reason="Run output evidence could not be confirmed.")
+            if not io_retired():
+                await run_manager._mark_ownership_lost(record, require_active=False, reason="Run output evidence could not be confirmed.")
             if journal is not None:
                 await journal.close(flush=False)
 
@@ -1414,9 +1486,9 @@ async def _run_agent(
         if not record.ownership_lost and thread_store is not None:
             try:
                 if ctx.agent_execution is not None:
-                    await ctx.agent_execution.authority.update_run_metadata(ctx.agent_execution, status="running")
+                    await run_capture_io(lambda: ctx.agent_execution.authority.update_run_metadata(ctx.agent_execution, status="running"))
                 else:
-                    await thread_store.update_status(thread_id, "running")
+                    await run_capture_io(lambda: thread_store.update_status(thread_id, "running"))
             except Exception:
                 logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
         mode = ctx.checkpoint_channel_mode
@@ -1462,17 +1534,19 @@ async def _run_agent(
             workspace_changes_user_id = get_effective_user_id()
             workspace_excluded_dir_names = _workspace_excluded_dir_names(ctx.app_config)
             try:
-                pre_run_output_snapshot = await capture_output_snapshot(thread_id, user_id=workspace_changes_user_id, extra_excluded_dir_names=workspace_excluded_dir_names)
+                pre_run_output_snapshot = await run_capture_io(lambda: capture_output_snapshot(thread_id, user_id=workspace_changes_user_id, extra_excluded_dir_names=workspace_excluded_dir_names))
             except Exception:
                 logger.warning("Could not capture pre-run output snapshot for run %s", run_id, exc_info=True)
             # Resolved once per run so the pre-run snapshot, the post-run
             # delivery scan, and the workspace-changes scan all agree on the
             # same exclusion set.
             try:
-                pre_run_workspace_snapshot = await capture_workspace_snapshot(
-                    thread_id,
-                    user_id=workspace_changes_user_id,
-                    extra_excluded_dir_names=workspace_excluded_dir_names,
+                pre_run_workspace_snapshot = await run_capture_io(
+                    lambda: capture_workspace_snapshot(
+                        thread_id,
+                        user_id=workspace_changes_user_id,
+                        extra_excluded_dir_names=workspace_excluded_dir_names,
+                    )
                 )
             except Exception:
                 logger.warning("Could not capture pre-run workspace snapshot for run %s", run_id, exc_info=True)
@@ -1923,10 +1997,19 @@ async def _run_agent(
             elif delivery_error is not None and not record.ownership_lost:
                 await publish_delivery_failure(bridge, run_id, message=delivery_error, content=delivery_content)
 
+    except CaptureIOClosed:
+        io_closed = True
+        if io_owner is not None:
+            io_owner.retire()
     except asyncio.CancelledError:
-        await _finish_cancellation(record.abort_action)
+        if not io_retired():
+            await _finish_cancellation(record.abort_action)
 
     except Exception as exc:
+        if io_retired():
+            # A late graph/close exception is not evidence of an executed
+            # failure after the host has withdrawn all new I/O authority.
+            return
         error_msg = f"{exc}"
         logger.exception("Run %s failed: %s", run_id, error_msg)
         from deerflow.agent_instances.runtime import run_error
@@ -1958,7 +2041,7 @@ async def _run_agent(
 
     finally:
         try:
-            if capture_requested:
+            if capture_requested and not io_retired():
                 from deerflow.utils.file_io import await_drained
 
                 try:
@@ -2108,7 +2191,7 @@ async def _run_agent(
                 except Exception:
                     logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
 
-            followups_confirmed = not capture_requested or output_confirmed
+            followups_confirmed = (not capture_requested or output_confirmed) and not io_retired()
             if followups_confirmed and not record.ownership_lost and journal is not None and persist_completion:
                 try:
                     # Persist token usage + convenience fields to RunStore
@@ -2155,9 +2238,9 @@ async def _run_agent(
                         title = ckpt.get("channel_values", {}).get("title")
                         if title:
                             if ctx.agent_execution is not None:
-                                await ctx.agent_execution.authority.update_run_metadata(ctx.agent_execution, display_name=title)
+                                await run_capture_io(lambda: ctx.agent_execution.authority.update_run_metadata(ctx.agent_execution, display_name=title))
                             else:
-                                await thread_store.update_display_name(thread_id, title)
+                                await run_capture_io(lambda: thread_store.update_display_name(thread_id, title))
                 except Exception:
                     logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
 
@@ -2166,9 +2249,9 @@ async def _run_agent(
                 try:
                     final_status = "idle" if record.status == RunStatus.success else record.status.value
                     if ctx.agent_execution is not None:
-                        await ctx.agent_execution.authority.update_run_metadata(ctx.agent_execution, status=final_status)
+                        await run_capture_io(lambda: ctx.agent_execution.authority.update_run_metadata(ctx.agent_execution, status=final_status))
                     else:
-                        await thread_store.update_status(thread_id, final_status)
+                        await run_capture_io(lambda: thread_store.update_status(thread_id, final_status))
                 except Exception:
                     logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
 
@@ -2189,7 +2272,7 @@ async def _run_agent(
                         run_id,
                     )
 
-            if task_info is not None and task_store is not None:
+            if task_info is not None and task_store is not None and not io_retired():
                 # Keep the finalizing barrier held until stop observers finish, so
                 # a same-thread replacement cannot overlap this task's lifecycle.
                 task_stop = asyncio.create_task(
@@ -2230,13 +2313,14 @@ async def _run_agent(
             if record.finalizing:
                 await run_manager.set_finalizing(run_id, False)
 
-            await _publish_terminal_stream()
+            if not io_retired():
+                await _publish_terminal_stream()
 
             if deferred_finalization_interrupt is not None:
                 raise deferred_finalization_interrupt
         finally:
             try:
-                if record.ownership_lost and not terminal_stream_closed:
+                if record.ownership_lost and not terminal_stream_closed and not io_retired():
                     from deerflow.utils.file_io import await_drained
 
                     try:
@@ -2246,7 +2330,7 @@ async def _run_agent(
                         # Preserve the worker's original cancellation/failure.
                 if journal is not None:
                     try:
-                        await journal.close(flush=not record.ownership_lost)
+                        await journal.close(flush=not record.ownership_lost and not io_retired())
                     except Exception:
                         logger.warning("Failed to close journal for run %s", run_id, exc_info=True)
             finally:
@@ -2301,7 +2385,13 @@ async def _run_agent(
 
                 # Durable finalization and terminal publication may depend on
                 # external backends, but local housekeeping must always run.
-                _create_contextless_task(bridge.cleanup(run_id, delay=60))
+                if ctx.schedule_stream_cleanup is not None:
+                    try:
+                        ctx.schedule_stream_cleanup(run_id, 60.0)
+                    except CaptureIOClosed:
+                        pass
+                elif not capture_requested:
+                    _create_contextless_task(bridge.cleanup(run_id, delay=60))
                 # Preserve the existing five-minute grace period for local
                 # join/status paths, then release the terminal record, completed
                 # task, and request payload. Durable run history remains available
