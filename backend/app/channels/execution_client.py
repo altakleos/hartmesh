@@ -1,7 +1,7 @@
 """A scope-bound channel facade over a borrowed, host-owned HTTP capability.
 
-Run receipts and event pages describe admission and observations only. Nothing
-in this module establishes final-output completeness or retries a model POST.
+Admission receipts and event pages do not establish final output. Optional output
+reads validate the server's separately sealed source; creating POSTs never retry.
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ from urllib.parse import quote
 
 from app.channels.execution import ChannelExecutionBusyError, ChannelExecutionProtocolError, ChannelExecutionScope, ChannelHttpError, ChannelHttpOwner, ChannelOwnedStream, ChannelRunAdmission, JsonValue
 from app.gateway.channel_execution import CHANNEL_EXECUTION_BUSY_CODE, CHANNEL_EXECUTION_REQUEST_HEADER, CHANNEL_EXECUTION_RESPONSE_HEADER, CHANNEL_TURN_ID_KEY, ChannelExecutionReceipt, ChannelExecutionRequest, receipt_from_run_kwargs
+from app.gateway.run_output import RunOutputProjection
+from deerflow.runtime.runs.output import OUTPUT_CAPTURE_KEY, OutputCaptureIntent
 from deerflow.utils.file_io import await_drained
 
 
@@ -255,17 +257,28 @@ class _Runs:
 
 
 class ChannelExecutionFacade:
-    def __init__(self, owner: ChannelHttpOwner, *, scope: ChannelExecutionScope, admission: ChannelRunAdmission):
-        if type(scope) is not ChannelExecutionScope or scope.assistant_id != "lead_agent" or owner.endpoint_id != scope.endpoint_id or not callable(getattr(admission, "authorize", None)) or not callable(getattr(admission, "current", None)):
+    def __init__(self, owner: ChannelHttpOwner, *, scope: ChannelExecutionScope, admission: ChannelRunAdmission, capture_output: bool = False):
+        if (
+            type(capture_output) is not bool
+            or type(scope) is not ChannelExecutionScope
+            or scope.assistant_id != "lead_agent"
+            or owner.endpoint_id != scope.endpoint_id
+            or not callable(getattr(admission, "authorize", None))
+            or not callable(getattr(admission, "current", None))
+        ):
             _refuse()
         _identity(scope.thread_id)
-        self._owner, self._scope, self._admission = owner, scope, admission
+        self._owner, self._scope, self._admission, self._capture_output = owner, scope, admission, capture_output
         self._thread_path = "threads/" + quote(scope.thread_id, safe="")
         self.threads, self.runs = _Threads(self), _Runs(self)
 
     @property
     def scope(self):
         return self._scope
+
+    @property
+    def capture_output(self) -> bool:
+        return self._capture_output
 
     async def _authorize(self, operation):
         try:
@@ -347,6 +360,8 @@ class ChannelExecutionFacade:
                 _refuse()
             private["assistant_id"] = self.scope.assistant_id
             private["context"] = (private.get("context") or {}) | {"agent_name": self.scope.agent_name}
+            if self.capture_output:
+                private[OUTPUT_CAPTURE_KEY] = OutputCaptureIntent(version=1).model_dump(mode="json")
             return private, headers
         except Exception:
             _refuse()
@@ -402,6 +417,25 @@ class ChannelExecutionFacade:
         run_id = _identity(run_id)
         result = await self._proof("run_read", self._thread_path + "/runs/" + quote(run_id, safe=""), missing=True)
         return None if result is None else self._run(result, run_id=run_id)
+
+    async def get_run_output(self, run_id: str) -> RunOutputProjection | None:
+        run_id = _identity(run_id)
+        result = await self._proof("source_read", self._thread_path + "/runs/" + quote(run_id, safe="") + "/output", missing=True)
+        if result is None:
+            return None
+        try:
+            output = RunOutputProjection.model_validate(result)
+            channel = output.channel_execution
+            if (output.owner_user_id, output.thread_id, output.run_id) != (self.scope.owner_user_id, self.scope.thread_id, run_id) or (channel.publication_id, channel.assistant_id, channel.agent_name) != (
+                self.scope.publication_id,
+                self.scope.assistant_id,
+                self.scope.agent_name,
+            ):
+                _refuse()
+            self._check_current("source_read")
+            return output
+        except Exception:
+            _refuse()
 
     async def list_runs_page(self, *, limit: int = 100, before: RunCursor | None = None) -> ValidatedRunPage:
         if type(limit) is not int or not 1 <= limit <= 200 or before is not None and type(before) is not RunCursor:

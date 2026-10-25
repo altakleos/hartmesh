@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from deerflow.utils.file_io import await_drained
+
+from .output import OUTPUT_EVIDENCE_KEY, OutputEvidenceError, capture_from_kwargs, receipt_from_kwargs, receipt_to_dict
 from .schemas import RunStatus
 from .store.base import StatusFinalization
 
@@ -61,7 +65,7 @@ def diagnostic(record, status, *, outcome, exception_class="none", attempt=0):
     )
 
 
-async def persist_terminal(manager, record, status, *, error=None, stop_reason=None, respect_cancellation=False):
+async def persist_terminal(manager, record, status, *, error=None, stop_reason=None, respect_cancellation=False, output_receipt=None):
     """Confirm or recover one owned outcome; never replay an ambiguous transaction.
 
     The SQL CAS uses the original observed change position, owner, source status,
@@ -72,6 +76,12 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
     """
     store = manager._store
     policy = manager._terminal_recovery_policy
+    wanted = None
+    if output_receipt is not None:
+        from .output import validate_receipt_status
+
+        wanted = validate_receipt_status(output_receipt, status)
+    wanted_json = receipt_to_dict(wanted) if wanted is not None else None
     async with record.terminal_lock:
         if record.ownership_lost:
             return StatusFinalization(finalized=False)
@@ -81,12 +91,26 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
         for attempt in range(1, policy.max_attempts + 1):
             try:
                 async with asyncio.timeout(policy.attempt_timeout):
-                    row = await store.get(record.run_id, user_id=record.user_id)
+                    read = store.get(record.run_id, user_id=record.user_id)
+                    row = await await_drained(read) if wanted is not None else await read
                     rejection = None
                     if row is None:
                         rejection = "missing_row"
                     elif row.get("owner_worker_id") != record.owner_worker_id or record.owner_worker_id != manager.worker_id:
                         rejection = "stale_owner"
+                    saved_receipt = None
+                    if rejection is None and wanted is not None:
+                        if row.get("user_id") != wanted.owner_user_id or row.get("thread_id") != wanted.thread_id or row.get("run_id") != wanted.run_id or row.get("operation_kind", "run") != "run":
+                            rejection = "output_scope_rejected"
+                        else:
+                            try:
+                                if capture_from_kwargs(row.get("kwargs")) is None:
+                                    rejection = "output_capture_missing"
+                                saved_receipt = receipt_from_kwargs(row.get("kwargs"))
+                                if saved_receipt is not None:
+                                    validate_receipt_status(saved_receipt, row["status"])
+                            except OutputEvidenceError:
+                                rejection = "output_evidence_invalid"
                     if rejection:
                         ownership_rejected = True
                         diagnostic(record, status, outcome=rejection, attempt=attempt)
@@ -97,21 +121,30 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                     # An acknowledged interrupt may still be upgraded to the
                     # worker's rollback error after checkpoint cleanup.
                     rollback_tail = source == "interrupted" and status == RunStatus.error and record.abort_event.is_set() and record.abort_action == "rollback"
+                    if wanted is not None:
+                        rollback_tail = rollback_tail and action == "rollback" and wanted.kind == "unavailable" and wanted.reason == "cancelled" and saved_receipt == wanted
                     if source in TERMINAL_STATUSES and not rollback_tail:
+                        output_confirmed = wanted is not None and source == status.value and saved_receipt == wanted
                         async with manager._lock:
                             record.status = RunStatus(source)
                             record.error = row.get("error")
                             record.stop_reason = row.get("stop_reason")
                             record.updated_at = row["updated_at"]
                             record.terminal_confirmed = True
-                        return StatusFinalization(finalized=True)
+                            if wanted is not None:
+                                record.kwargs = deepcopy(row["kwargs"])
+                        return StatusFinalization(finalized=True, output_receipt_confirmed=output_confirmed)
+                    if wanted is not None and saved_receipt is not None and (saved_receipt != wanted or source in {"pending", "running"}):
+                        ownership_rejected = True
+                        diagnostic(record, status, outcome="output_evidence_conflict", attempt=attempt)
+                        break
                     if manager.heartbeat_enabled:
                         deadline = manager._parse_lease_deadline(row.get("lease_expires_at"))
                         if deadline is None or deadline <= datetime.now(UTC):
                             ownership_rejected = True
                             diagnostic(record, status, outcome="lease_expired", attempt=attempt)
                             break
-                    if action is not None and respect_cancellation:
+                    if action is not None and (respect_cancellation or wanted is not None and wanted.kind == "text"):
                         record.abort_action = action
                         record.abort_event.set()
                         return StatusFinalization(finalized=False, cancel_action=action)
@@ -132,7 +165,7 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                             saved_error = "The run ended with an error; its original error details could not be saved." if status == RunStatus.error else None
                         if stop_reason is not None and (not isinstance(stop_reason, str) or len(stop_reason) > 50):
                             saved_reason = RECOVERED_METADATA_REASON
-                    finalized = await store.finalize_owned(
+                    write = store.finalize_owned(
                         record.run_id,
                         owner_worker_id=record.owner_worker_id,
                         expected_change_seq=expected_sequence,
@@ -142,7 +175,9 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                         status=status.value,
                         error=saved_error,
                         stop_reason=saved_reason,
+                        **({"output_receipt": wanted} if wanted is not None else {}),
                     )
+                    finalized = await write
                     if finalized:
                         async with manager._lock:
                             record.status = status
@@ -150,7 +185,9 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                             record.stop_reason = saved_reason
                             record.updated_at = datetime.now(UTC).isoformat()
                             record.terminal_confirmed = True
-                        return StatusFinalization(finalized=True)
+                            if wanted is not None:
+                                record.kwargs = {**record.kwargs, OUTPUT_EVIDENCE_KEY: wanted_json}
+                        return StatusFinalization(finalized=True, output_receipt_confirmed=wanted is not None)
                     ownership_rejected = True
                     diagnostic(record, status, outcome="conditional_rejection", attempt=attempt)
             except Exception as exc:

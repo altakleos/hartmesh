@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Durable output-evidence primitives
+
+Add generic immutable output receipts, atomic SQL status-and-receipt writes and
+authoritative detached snapshots. Exact committed status and receipt are required
+after an ambiguous write; cached success or terminal status alone is insufficient.
+Text sealing respects durable cancellation, owner, version and lease fences.
+New admissions discard caller-supplied result evidence.
+
+Prepare a host-only capture option and strict output client with retained source
+authorization and closed scope/status/digest validation. Worker capture, server
+admission and the output endpoint are subsequent work: current capture requests
+are rejected before execution, and managed-bot activation remains deferred.
+
+No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
+remains version 55. Existing ordinary and Memory run behavior stays unchanged.
+
 ### Correlated channel execution foundation
 
 Add a shared execution capability with a captured human owner, conversation,

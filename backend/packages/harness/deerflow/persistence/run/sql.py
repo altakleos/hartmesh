@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sys
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -37,6 +38,7 @@ def _lease_expired_or_null(lease_col, cutoff: datetime):
 
 class RunRepository(RunStore):
     supports_terminal_recovery = True
+    supports_output_receipts = True
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
@@ -332,14 +334,43 @@ class RunRepository(RunStore):
             raise ValueError("Invalid terminal reason")
         return {"status": status, "error": error, "stop_reason": stop_reason, "updated_at": datetime.now(UTC)}
 
-    async def finalize_owned(self, run_id, *, owner_worker_id, expected_change_seq, expected_status, expected_cancel_action, require_lease, status, error=None, stop_reason=None) -> bool:
+    async def finalize_owned(self, run_id, *, owner_worker_id, expected_change_seq, expected_status, expected_cancel_action, require_lease, status, error=None, stop_reason=None, output_receipt=None) -> bool:
+        """Own a requested seal through native SQL work and transaction exit."""
+        fields = {
+            "owner_worker_id": owner_worker_id,
+            "expected_change_seq": expected_change_seq,
+            "expected_status": expected_status,
+            "expected_cancel_action": expected_cancel_action,
+            "require_lease": require_lease,
+            "status": status,
+            "error": error,
+            "stop_reason": stop_reason,
+        }
+        if output_receipt is not None:
+            from deerflow.runtime.runs.output import validate_receipt_status
+            from deerflow.runtime.runs.terminal import TerminalWriteFailure, exception_classification
+
+            try:
+                fields["output_receipt"] = validate_receipt_status(output_receipt, status)
+            except Exception as exc:
+                raise TerminalWriteFailure("validation_refused", exception_classification(exc)) from None
+            return await await_drained(self._finalize_owned(run_id, **fields))
+        return await self._finalize_owned(run_id, **fields)
+
+    async def _finalize_owned(self, run_id, *, owner_worker_id, expected_change_seq, expected_status, expected_cancel_action, require_lease, status, error=None, stop_reason=None, output_receipt=None) -> bool:
         """CAS finalization, with explicit pre-commit versus ambiguous failure phases."""
+        from deerflow.runtime.runs.output import OUTPUT_EVIDENCE_KEY, OutputEvidenceError, capture_from_kwargs, receipt_from_kwargs, receipt_to_dict
         from deerflow.runtime.runs.terminal import TerminalWriteFailure, exception_classification
 
         try:
             values = self._terminal_values(status, error, stop_reason)
             if expected_status not in {"pending", "running", "interrupted"} or not owner_worker_id or type(expected_change_seq) is not int:
                 raise ValueError("Invalid terminal fence")
+            wanted = None
+            if output_receipt is not None:
+                from deerflow.runtime.runs.output import validate_receipt_status
+
+                wanted = validate_receipt_status(output_receipt, status)
         except Exception as exc:
             raise TerminalWriteFailure("validation_refused", exception_classification(exc)) from None
 
@@ -348,6 +379,33 @@ class RunRepository(RunStore):
                 committing = False
                 try:
                     values["change_seq"] = await self._next_change_seq(session)
+                    if wanted is not None:
+                        # Preserve the established global clock -> run-row lock
+                        # order. Receipt JSON is merged only from this locked row.
+                        row = await session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update().execution_options(populate_existing=True))
+                        if (
+                            row is None
+                            or row.user_id != wanted.owner_user_id
+                            or row.thread_id != wanted.thread_id
+                            or row.run_id != wanted.run_id
+                            or row.operation_kind != "run"
+                            or capture_from_kwargs(row.kwargs_json) is None
+                            or wanted.kind == "text"
+                            and row.cancel_action is not None
+                        ):
+                            return False
+                        saved = receipt_from_kwargs(row.kwargs_json)
+                        if saved is not None:
+                            try:
+                                validate_receipt_status(saved, row.status)
+                            except OutputEvidenceError:
+                                return False
+                        if row.status in {"success", "error", "timeout", "interrupted"}:
+                            if not (row.status == "interrupted" and status == "error" and row.cancel_action == "rollback" and wanted.kind == "unavailable" and wanted.reason == "cancelled" and saved == wanted):
+                                return False
+                        elif saved is not None:
+                            return False
+                        values["kwargs_json"] = {**deepcopy(row.kwargs_json), OUTPUT_EVIDENCE_KEY: receipt_to_dict(wanted)}
                     conditions = [
                         RunRow.run_id == run_id,
                         RunRow.owner_worker_id == owner_worker_id,
