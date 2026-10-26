@@ -1,0 +1,23 @@
+"""Whole creating and delivery chain; actual SQL/SDK/scans/proofs, no live IO."""
+
+import asyncio
+from zoneinfo import ZoneInfo
+
+import pytest
+import pytest_asyncio
+from _run_output_capture_test_support import capture_environment as capture_environment
+from _run_output_capture_test_support import output_store as output_store
+from test_telegram_supervisor import _supervisor_logging as _supervisor_logging
+from test_telegram_turn_composition import test_actual_managed_turn_creates_once_and_delivers_only_verified_output as exercise_turn
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def timezone_fixture_precondition():
+    await asyncio.to_thread(ZoneInfo, "UTC")
+    await asyncio.to_thread(ZoneInfo, "America/New_York")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["text", "custom_text", "produced_file", "phase_one"])
+async def test_entire_managed_turn_owns_its_io(capture_environment, monkeypatch, tmp_path, case):
+    await exercise_turn(capture_environment, monkeypatch, tmp_path, case)

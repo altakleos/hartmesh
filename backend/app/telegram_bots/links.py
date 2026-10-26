@@ -219,6 +219,30 @@ class PublicationGuard(Protocol):
     async def check(self, writer: AsyncSession) -> BotLink: ...
 
 
+async def prepare_publication_guard(guard: PublicationGuard) -> None:
+    """Refresh an optional host guard immediately before its owned writer.
+
+    Legacy guards have no preparation hook. Provider and target preparation
+    belongs outside a borrowed SQL writer; final custody still uses check().
+    """
+    from inspect import isawaitable
+
+    from deerflow.utils.file_io import await_drained
+
+    missing = object()
+    try:
+        prepare = getattr(guard, "prepare", missing)
+        if prepare is missing:
+            return
+        if not callable(prepare):
+            raise ValueError
+        operation = prepare()
+        if not isawaitable(operation) or await await_drained(operation) is not None:
+            raise ValueError
+    except Exception:
+        raise ValueError("publication-guard-unavailable") from None
+
+
 @dataclass(frozen=True)
 class _PublicationGuard:
     repository: BotLinkRepository

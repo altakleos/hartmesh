@@ -34,7 +34,7 @@ from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, Telegra
 from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
-    from app.gateway.run_output import RunOutputProjection
+    from app.gateway.run_output import RunOutputProjection, RunOutputProjectionV2
     from app.telegram_bots.inbox import PublicationRecord
     from app.telegram_bots.links import PublicationGuard
 
@@ -161,6 +161,44 @@ class OutboxItem:
 
 def _item(row: TelegramOutboxRow) -> OutboxItem:
     return OutboxItem(**{name: deepcopy(getattr(row, name)) for name in OutboxItem.__dataclass_fields__})
+
+
+def _same_fixed_source(left, right, depth: int = 0) -> bool:
+    """Compare the small fixed-notice echo without JSON bool/int coercion."""
+    if depth > 16 or type(left) is not type(right):
+        return False
+    if type(left) is dict:
+        return left.keys() == right.keys() and all(_same_fixed_source(left[key], right[key], depth + 1) for key in left)
+    return type(left) in {str, int, bool, type(None)} and left == right
+
+
+def uses_model_source(item: OutboxItem) -> bool:
+    """A fixed-looking part cannot downgrade a saved model primary's source."""
+    source = item.payload.get("source")
+    if type(source) is dict and source.get("kind") == "model_text":
+        return True
+    if "reply_basis" not in item.payload:
+        return False
+    basis = item.payload["reply_basis"]
+    if type(basis) is not dict or type(basis.get("version")) is not int or basis["version"] != 1:
+        return True
+    outcome = basis.get("outcome")
+    if type(outcome) is not dict or outcome.get("kind") not in {"sealed_failed", "sealed_cancelled"}:
+        return True
+    if not _same_fixed_source(source, outcome):
+        return True
+    projection = outcome.get("projection")
+    reason = "failed" if outcome["kind"] == "sealed_failed" else "cancelled"
+    return not (
+        type(projection) is dict
+        and type(projection.get("version")) is int
+        and projection["version"] == 1
+        and projection.get("state") == "unavailable"
+        and projection.get("reason") == reason
+        and type(projection.get("output_evidence")) is dict
+        and projection["output_evidence"].get("kind") == "unavailable"
+        and projection["output_evidence"].get("reason") == reason
+    )
 
 
 @dataclass(frozen=True)
@@ -757,6 +795,17 @@ class Outbox:
         basis, parts = await await_drained(asyncio.to_thread(_prepare_publication_reply, record, None, notice))
         return await await_drained(self._write_publication_primary(record, guard=guard, basis=basis, parts=parts))
 
+    async def plan_verified_publication_reply(self, record: PublicationRecord, *, output: RunOutputProjectionV2, guard: PublicationGuard) -> str:
+        """Plan strict complete-empty V2 text; legacy bases are never adopted."""
+
+        def prepare():
+            from app.telegram_bots.model_source import prepare_verified_reply
+
+            return prepare_verified_reply(record, output)
+
+        basis, parts = await await_drained(asyncio.to_thread(prepare))
+        return await await_drained(self._write_publication_primary(record, guard=guard, basis=basis, parts=parts))
+
     async def _write_publication_primary(self, record: PublicationRecord, *, guard: PublicationGuard, basis: dict, parts: list[dict]) -> str:
         scope = basis["publication"]["scope"]
         link = guard.captured_link
@@ -764,14 +813,26 @@ class Outbox:
         if type(link) is not BotLink or link.id != scope["link_id"] or any(getattr(link, name) != scope[name] for name in fields):
             raise ValueError("publication-source-conflict")
         dedupe = f"reply:{basis['publication']['turn_id']}"
+        if basis["version"] == 2:
+            from app.telegram_bots.links import prepare_publication_guard
+
+            await prepare_publication_guard(guard)
         async with self._writer(link.id) as (writer, _):
             await guard.check(writer)
             existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == dedupe).with_for_update().execution_options(populate_existing=True))
-            fresh, _ = await self.inbox.lock_publication(record, session=writer)
+            fresh, rows = await self.inbox.lock_publication(record, session=writer)
+            if basis["version"] == 2:
+                # The host DTO sorts origin identities, not arrival order.
+                # Resolve the original reply anchor from the locked saved rows.
+                anchor = min(rows, key=lambda row: (row.accepted_at, row.update_id, row.message_id)).message_id
+                parts = [{**part, "reply_to_message_id": anchor} for part in parts]
+                basis = {**basis, "parts": parts}
             if _canonical_primary(_publication_identity(fresh)) != _canonical_primary(basis["publication"]):
                 raise ValueError("publication-source-conflict")
             outcome = basis["outcome"]
             projection = outcome["projection"]
+            if basis["version"] == 2:
+                projection = projection["output"]
             if fresh.dispatch_started is not True or fresh.run_id is None or fresh.run_id != projection["run_id"]:
                 raise ValueError("publication-source-conflict")
             assistant = projection["output_evidence"]["assistant_message_id"] if outcome["kind"] == "model_text" else None
