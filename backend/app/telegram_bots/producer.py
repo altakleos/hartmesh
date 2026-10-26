@@ -35,7 +35,7 @@ from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
     from app.gateway.run_output import RunOutputProjection, RunOutputProjectionV2
-    from app.telegram_bots.inbox import PublicationRecord
+    from app.telegram_bots.inbox import PublicationRecord, RestartClosure
     from app.telegram_bots.links import PublicationGuard
 
 OUTBOX_SEND_CONCURRENCY = 8
@@ -45,7 +45,7 @@ ESSENTIAL_DELIVERY_CLASSES = frozenset({"reply", "question", "result", "interrup
 _KINDS = frozenset({"text", "document", "photo", "album", "edit", "card"})
 _FINAL_PARTS = frozenset({"sent", "unavailable", "retired"})
 _STATUS_KEYS = frozenset({"access.agent_off", "agent.paused", "agent.retired", "unavailable.fix", "unavailable.off", "unavailable.paused", "unavailable.moved", "unavailable.files_unchecked", "refused.interrupted", "custom_agent.deleted"})
-_URL_SOURCES = {"web.memory": ("web.memory", "label.open_memory"), "custom_agent.deleted": ("web.telegram", "label.open_telegram")}
+_URL_SOURCES = {"web.memory": ("web.memory", "label.open_memory"), "custom_agent.deleted": ("web.telegram", "label.open_telegram"), "chat.restarted": ("web.conversation", "label.open_conversation")}
 _TRANSPORT_RECEIPTS = frozenset({"sent_at", "dispatched_at", "unavailable_reason", "invalid_token_verification_pending", "url_button_fallback", "plain_fallback"})
 _PART_IDENTITY = frozenset({"part_id", "presentation_version", "ordinal", "state", "message_ids"})
 _SKIP_REASONS = frozenset({"no-access", "superseded", "link-not-connected", "disabled", "policy-off", "expired"})
@@ -177,6 +177,12 @@ def uses_model_source(item: OutboxItem) -> bool:
     source = item.payload.get("source")
     if type(source) is dict and source.get("kind") == "model_text":
         return True
+    if type(source) is dict and source.get("kind") == "restart_before_dispatch":
+        try:
+            validate_restart_reply_basis(item)
+            return False
+        except ValueError:
+            return True
     if "reply_basis" not in item.payload:
         return False
     basis = item.payload["reply_basis"]
@@ -199,6 +205,94 @@ def uses_model_source(item: OutboxItem) -> bool:
         and projection["output_evidence"].get("kind") == "unavailable"
         and projection["output_evidence"].get("reason") == reason
     )
+
+
+@dataclass(frozen=True)
+class RestartReplyBasis:
+    record: PublicationRecord
+    closure: RestartClosure
+
+
+def validate_restart_reply_basis(item: OutboxItem, part: dict | None = None) -> RestartReplyBasis:
+    """Closed fixed basis only; no run proof or status-repair privilege."""
+    from app.telegram_bots.inbox import PublicationOrigin, PublicationRecord, PublicationScope, RestartClosure, publication_identity
+
+    try:
+        if type(item) is not OutboxItem or type(item.payload) is not dict or "delivery_kind" in item.payload:
+            raise ValueError
+        basis = item.payload["reply_basis"]
+        if (
+            type(basis) is not dict
+            or set(basis) != {"version", "publication", "outcome", "presentation", "parts", "finish_route"}
+            or type(basis["version"]) is not int
+            or basis["version"] != 3
+            or basis["presentation"] is not None
+            or basis["finish_route"] is not True
+        ):
+            raise ValueError
+        identity = basis["publication"]
+        scope = PublicationScope(**identity["scope"])
+        record = PublicationRecord(**{**identity, "scope": scope, "origins": tuple(PublicationOrigin(**origin) for origin in identity["origins"]), "dispatch_started": False, "run_id": None})
+        if _canonical_primary(identity) != _canonical_primary(publication_identity(record)):
+            raise ValueError
+        outcome = basis["outcome"]
+        if (
+            type(outcome) is not dict
+            or set(outcome) != {"kind", "closure", "source_ref"}
+            or outcome["kind"] != "restart_before_dispatch"
+            or _canonical_primary(outcome["source_ref"]) != _canonical_primary({"key": "chat.restarted", "values": {}})
+        ):
+            raise ValueError
+        fact = RestartClosure.from_json(outcome["closure"])
+        if (fact.publication_id, fact.input_version, fact.input_sha256) != (record.publication_id, record.input_version, record.input_sha256):
+            raise ValueError
+        if _canonical_primary(item.payload["source"]) != _canonical_primary(outcome):
+            raise ValueError
+        if (
+            (item.link_id, item.owner_user_id, item.binding_generation, item.chat_id, item.dedupe_key, item.class_) != (scope.link_id, scope.owner_user_id, scope.binding_generation, scope.chat_id, "reply:" + record.turn_id, "reply")
+            or item.message_thread_id is not None
+            and (type(item.message_thread_id) is not int or item.message_thread_id <= 0)
+            or item.message_thread_id not in (scope.message_thread_id, None)
+        ):
+            raise ValueError
+        planned = basis["parts"]
+        if type(planned) is not list or len(planned) != 1:
+            raise ValueError
+        initial = planned[0]
+        if (
+            type(initial) is not dict
+            or set(initial) - {"kind", "source_ref", "reply_to_message_id", "url_button"}
+            or initial.get("kind") != "text"
+            or _canonical_primary(initial.get("source_ref")) != _canonical_primary(outcome["source_ref"])
+            or type(initial.get("reply_to_message_id")) is not int
+            or initial["reply_to_message_id"] not in {origin.message_id for origin in record.origins}
+        ):
+            raise ValueError
+        if "url_button" in initial:
+            url_button_label(initial["source_ref"], initial["url_button"])
+        version = item.payload.get("presentation_version")
+        if type(version) is not int or version < 0 or type(item.parts) is not list:
+            raise ValueError
+        allowed = _PART_IDENTITY | _TRANSPORT_RECEIPTS | {"protect_content", "sent_protect_content", "callback_group_id"}
+
+        def clean(value):
+            if type(value) is not dict or value.get("callback_group_id") is not None:
+                raise ValueError
+            if any(type(value[key]) is not bool for key in ("protect_content", "sent_protect_content", "plain_fallback", "url_button_fallback") if key in value):
+                raise ValueError
+            if any(type(value[key]) is not int or value[key] < 0 for key in ("presentation_version", "ordinal") if key in value):
+                raise ValueError
+            return {key: child for key, child in value.items() if key not in allowed}
+
+        active = [value for value in item.parts if type(value) is dict and value.get("presentation_version") == version]
+        if len(active) != 1 or _canonical_primary(clean(active[0])) != _canonical_primary(initial):
+            raise ValueError
+        selected = [part] if part is not None else item.parts
+        if not selected or any(_canonical_primary(clean(value)) != _canonical_primary(initial) for value in selected):
+            raise ValueError
+        return RestartReplyBasis(record, fact)
+    except Exception:
+        raise ValueError("publication-source-conflict") from None
 
 
 @dataclass(frozen=True)
@@ -857,6 +951,67 @@ class Outbox:
             # work follows this guard except the admitted transaction's commit.
             await guard.check(writer)
             return identity
+
+    async def plan_restart_before_dispatch(self, record: PublicationRecord, *, ticket, guard: PublicationGuard) -> str:
+        """One startup-only closed primary; no POST, source read or ticket retry."""
+        from app.telegram_bots.inbox import RestartClosure, publication_identity
+        from app.telegram_bots.links import prepare_publication_guard
+        from app.telegram_bots.recovery_authority import check_restart_ticket
+
+        check_restart_ticket(ticket, record)
+        captured = guard.captured_link
+        fields = ("owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "binding_generation")
+        if type(captured) is not BotLink or captured.id != record.scope.link_id or any(getattr(captured, name) != getattr(record.scope, name) for name in fields):
+            raise ValueError("publication-source-conflict") from None
+
+        def prepare():
+            from app.telegram_bots.pages import page_address
+
+            fact = RestartClosure(1, "restart_before_dispatch", ticket.startup_id, record.publication_id, record.input_version, record.input_sha256)
+            outcome = {"kind": "restart_before_dispatch", "closure": asdict(fact), "source_ref": {"key": "chat.restarted", "values": {}}}
+            part = {"kind": "text", "source_ref": outcome["source_ref"]}
+            address = page_address("web.conversation", captured, thread_id=record.scope.thread_id)
+            if address is not None:
+                part["url_button"] = {"page": "web.conversation", "url": address}
+            return outcome, part
+
+        outcome, initial = await await_drained(asyncio.to_thread(prepare))
+
+        async def perform():
+            check_restart_ticket(ticket, record)
+            await prepare_publication_guard(guard)
+            async with self._writer(record.scope.link_id) as (writer, _):
+                await guard.check(writer)
+                existing = await writer.scalar(
+                    select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == record.scope.link_id, TelegramOutboxRow.dedupe_key == "reply:" + record.turn_id).with_for_update().execution_options(populate_existing=True)
+                )
+                fresh, rows = await self.inbox.lock_restart_publication(record, session=writer)
+                anchor = min(rows, key=lambda row: (row.accepted_at, row.update_id, row.message_id)).message_id
+                parts = [{**initial, "reply_to_message_id": anchor}]
+                basis = {"version": 3, "publication": publication_identity(fresh), "outcome": outcome, "presentation": None, "parts": parts, "finish_route": True}
+                closed = any("publication_recovery" in row.route_basis for row in rows)
+                if existing is None:
+                    if closed:
+                        raise ValueError("publication-source-conflict") from None
+                    identity, created = await self._add(
+                        captured, dedupe_key="reply:" + fresh.turn_id, class_="reply", payload={"source": outcome, "reply_basis": basis, "parts": parts}, session=writer, message_thread_id=fresh.scope.message_thread_id
+                    )
+                    if not created:
+                        raise ValueError("publication-source-conflict") from None
+                else:
+                    if not closed:
+                        raise ValueError("publication-source-conflict") from None
+                    proof = await await_drained(asyncio.to_thread(validate_restart_reply_basis, _item(existing)))
+                    if proof.closure != RestartClosure.from_json(outcome["closure"]) or _canonical_primary(existing.payload["reply_basis"]) != _canonical_primary(basis):
+                        raise ValueError("publication-source-conflict") from None
+                    identity = existing.id
+                await self.inbox.seal_restart_before_dispatch(fresh, outbox_id=identity, ticket=ticket, session=writer)
+                await writer.flush()
+                await guard.check(writer)
+                check_restart_ticket(ticket, fresh)
+                return identity
+
+        return await await_drained(perform())
 
     async def plan_status_notice(
         self, link: BotLink, *, source_id: str, parts: list[dict], inbox_rows: Sequence = (), finish_route: bool = False, session: AsyncSession | None = None, check_attempt_current: Callable[[], bool] | None = None

@@ -7,6 +7,7 @@ source, and an irreversible dispatch marker never permits an automatic retry.
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from copy import deepcopy
@@ -200,10 +201,17 @@ class PublicationCoordinator:
         if not self._reading or creating and not self._creating:
             _refuse()
 
-    async def _call(self, factory, *, creating=False, timeout=None, expired=None):
+    async def _call(self, factory, *, creating=False, timeout=None, expired=None, deadline=None):
         self._check_open(creating=creating)
         loop = asyncio.get_running_loop()
-        control = _Control(deadline=None if timeout is None else loop.time() + timeout, clock=loop.time)
+        end = None if timeout is None else loop.time() + timeout
+        if deadline is not None:
+            end = deadline if end is None else min(end, deadline)
+        control = _Control(deadline=end, clock=loop.time)
+        if not control.in_budget():
+            if expired is not None:
+                return expired()
+            _refuse()
 
         async def run():
             # The child may be queued while the parent's timer is delayed too.
@@ -381,10 +389,12 @@ class PublicationCoordinator:
 
         return await self._call(perform, timeout=OUTPUT_READ_TIMEOUT_SECONDS)
 
-    async def observe(self, record: PublicationRecord, current_link: BotLink, *, max_pages: int) -> PublicationObservation:
+    async def observe(self, record: PublicationRecord, current_link: BotLink, *, max_pages: int, deadline: float | None = None) -> PublicationObservation:
         try:
             self._check_open(creating=False)
             if type(max_pages) is not int or not 1 <= max_pages <= MAX_OBSERVATION_PAGES:
+                _refuse()
+            if deadline is not None and (type(deadline) not in {int, float} or not math.isfinite(deadline)):
                 _refuse()
             record, current_link = deepcopy(record), deepcopy(current_link)
             self._record_link(record, current_link)
@@ -450,7 +460,7 @@ class PublicationCoordinator:
             except Exception:
                 return PublicationObservation("held", record, reason="source_unavailable")
 
-        return await self._call(perform, timeout=OBSERVATION_TIMEOUT_SECONDS, expired=lambda: PublicationObservation("budget_exhausted", record, reason="budget_exhausted"))
+        return await self._call(perform, timeout=OBSERVATION_TIMEOUT_SECONDS, expired=lambda: PublicationObservation("budget_exhausted", record, reason="budget_exhausted"), deadline=deadline)
 
     def begin_shutdown(self) -> None:
         self._creating = False
