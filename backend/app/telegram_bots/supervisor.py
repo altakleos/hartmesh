@@ -110,6 +110,8 @@ class TelegramSupervisor:
         self.strangers = StrangerLedger()
         self.copy_guard = copy_guard
         self.thread_client, self.threads = thread_client, None
+        self.publication_authority = self.publications = self.model_source = None
+        self._publication_reads_open = False
         self._environ = dict(os.environ if environ is None else environ)
         if request_factory is not None:
             self.request_factory = request_factory
@@ -282,10 +284,16 @@ class TelegramSupervisor:
             self._subscribed = True
             self.tls_context = await await_drained(asyncio.to_thread(httpx.create_ssl_context))
             from app.telegram_bots.gateway_client import GatewayClientOwner
+            from app.telegram_bots.model_source import ModelSource
+            from app.telegram_bots.publication import PublicationCoordinator
+            from app.telegram_bots.publication_authority import PublicationAttemptAuthority
             from app.telegram_bots.threads import ThreadCoordinator
 
             self.thread_client = self.thread_client or GatewayClientOwner(gateway_url=self.channel_service.manager.gateway_url, langgraph_url=self.channel_service.manager.langgraph_url, tls_context=self.tls_context)
             self.threads = ThreadCoordinator(links=self.links, authority=self.authority, client=self.thread_client, channel=self.channel, send_allowed=self.send_allowed, outbox=self.outbox, product_name=self.product_name)
+            self.publication_authority = PublicationAttemptAuthority(links=self.links, authority=self.authority, client=self.thread_client, channel=self.channel, create_allowed=self.send_allowed, read_allowed=self.publication_read_allowed)
+            self.publications = PublicationCoordinator(inbox=self.outbox.inbox, outbox=self.outbox, bus=self.channel_service.bus, http_owner=self.thread_client, capture_attempt=self.publication_authority.capture)
+            self.model_source = ModelSource(read_output=self.publications.read_output)
             await self.thread_client.start()
             if not await self._wait_health():
                 if not self._stopping:
@@ -293,6 +301,7 @@ class TelegramSupervisor:
                 self._unsubscribe()
                 return
             self._ready = True
+            self._publication_reads_open = True
             self._health_barrier.set()
             rows = tuple(self._initial_links.values())
             self._event("supervisor_start", links=len(rows), concurrency=START_CONCURRENCY)
@@ -790,6 +799,10 @@ class TelegramSupervisor:
         """Final synchronous admission after transport's last awaited guard."""
         return self._send_ready and self._cause is None and not self._stopping
 
+    def publication_read_allowed(self) -> bool:
+        """Retain authorized final reads through the manager's phase-one drain."""
+        return self._publication_reads_open and self._cause is None and not self._stopped
+
     async def prepare_live_owner(self, owner_user_id: str):
         return await self.authority.prepare_live_owner(owner_user_id)
 
@@ -1242,6 +1255,10 @@ class TelegramSupervisor:
 
     async def begin_shutdown(self) -> None:
         self._stopping, self._ready = True, False
+        if self.publication_authority is not None:
+            self.publication_authority.close_creation()
+        if self.publications is not None:
+            self.publications.begin_shutdown()
         if self.thread_client is not None:
             self.thread_client.close_run_admission()
         if self.threads is not None:
@@ -1324,15 +1341,25 @@ class TelegramSupervisor:
             if self._cause is None:
                 await asyncio.gather(*(poll.confirm_offset() for poll in tuple(self._polls.values())), return_exceptions=True)
         finally:
+            publication_error = None
+            self._publication_reads_open = False
+            if self.publication_authority is not None:
+                self.publication_authority.close_reads()
+            if self.publications is not None:
+                try:
+                    await self.publications.stop()
+                except Exception as error:
+                    publication_error = error
             thread_error = None
-            if self.thread_client is not None:
+            if self.thread_client is not None and publication_error is None:
                 try:
                     if self.threads is not None:
                         await self.threads.stop()
                     await self.thread_client.stop()
                 except Exception as error:
                     thread_error = error
-            self._unsubscribe()
+            if publication_error is None:
+                self._unsubscribe()
             for task in tuple(self._notices):
                 task.cancel()
             await asyncio.gather(*tuple(self._notices), return_exceptions=True)
@@ -1350,11 +1377,13 @@ class TelegramSupervisor:
                         self._channels.pop(channel.link.id, None)
                     self._polls.pop(channel.link.id, None)
                     self._runners.pop(channel.link.id, None)
-            self._stopped = not failed and thread_error is None
+            self._stopped = not failed and thread_error is None and publication_error is None
             if self._stopped and _current is self:
                 _current = None
             if failed:
                 raise RuntimeError("telegram-client-cleanup-failed") from None
+            if publication_error is not None:
+                raise RuntimeError("telegram-publication-cleanup-failed") from None
             if thread_error is not None:
                 raise RuntimeError("telegram-thread-client-cleanup-failed") from None
             self._event("supervisor_stop", links=len(channels), took_ms=round((self._time() - began) * 1000))

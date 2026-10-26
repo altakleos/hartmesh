@@ -183,7 +183,7 @@ class TelegramAuthority:
             raise AuthorityUnavailable from None
 
     async def delivery(self, link: BotLink, item: OutboxItem, part: dict | None = None) -> DeliveryEligibility:
-        from app.telegram_bots.producer import DeliveryEligibility
+        from app.telegram_bots.producer import DeliveryEligibility, uses_model_source
 
         try:
             await require(link.owner_user_id)
@@ -200,8 +200,23 @@ class TelegramAuthority:
             ):
                 return DeliveryEligibility.skip("link-not-connected")
             selected = [part] if part is not None else item.parts
-            if not selected or any(not isinstance(value, dict) or set(value.get("source_ref", {})) != {"key", "values"} for value in selected):
-                return DeliveryEligibility.wait()
+            if uses_model_source(item) or not selected or any(not isinstance(value, dict) or set(value.get("source_ref", {})) != {"key", "values"} for value in selected):
+
+                def validate_model():
+                    from app.telegram_bots.model_source import validate_model_reply_basis
+
+                    return validate_model_reply_basis(item, part)
+
+                proof = await await_drained(asyncio.to_thread(validate_model))
+                scope = proof.record.scope
+                if current.id != scope.link_id or any(
+                    getattr(current, field) != getattr(scope, field) for field in ("owner_user_id", "agent_kind", "agent_ref", "bot_id", "connection_id", "telegram_user_id", "chat_id", "binding_generation")
+                ):
+                    return DeliveryEligibility.wait()
+                await require(link.owner_user_id, "threads:read", "runs:read")
+                if await self._supported_target(current) != "ok":
+                    return DeliveryEligibility.wait()
+                return DeliveryEligibility.allow()
             target = await self._supported_target(current)
             # The producer validates the reserved status allowlist and shape.
             if target == "agent_unavailable" and item.payload.get("delivery_kind") == "status_notice":

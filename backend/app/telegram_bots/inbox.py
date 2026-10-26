@@ -8,6 +8,7 @@ inside these transactions.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -520,6 +521,9 @@ class InboxRepository:
         expected = self._publication_scope(captured_link, topic=rows[0].message_thread_id, thread_id=thread_id, endpoint_id=endpoint_id)
 
         async def perform() -> PublicationRecord:
+            from app.telegram_bots.links import prepare_publication_guard
+
+            await prepare_publication_guard(guard)
             async with self._transaction() as session:
                 checked = await guard.check(session)
                 if self._publication_scope(checked, topic=expected.message_thread_id, thread_id=thread_id, endpoint_id=endpoint_id) != expected:
@@ -576,6 +580,9 @@ class InboxRepository:
         self._publication_guard_matches(guard, scope=record.scope)
 
         async def perform() -> bool:
+            from app.telegram_bots.links import prepare_publication_guard
+
+            await prepare_publication_guard(guard)
             async with self._transaction() as session:
                 await guard.check(session)
                 fresh, marks = await self._locked_publication(record, session)
@@ -601,6 +608,9 @@ class InboxRepository:
         self._publication_guard_matches(guard, scope=record.scope)
 
         async def perform() -> PublicationRecord:
+            from app.telegram_bots.links import prepare_publication_guard
+
+            await prepare_publication_guard(guard)
             async with self._transaction() as session:
                 await guard.check(session)
                 fresh, marks = await self._locked_publication(record, session)
@@ -649,11 +659,29 @@ class InboxRepository:
                 raise ValueError("publication-conflict") from None
             try:
                 basis = delivery.payload["reply_basis"]
-                if type(basis) is not dict or type(basis["version"]) is not int or basis["version"] != 1 or basis["finish_route"] is not True or _canonical(basis["publication"]) != _canonical(_publication_identity(fresh)):
+                if type(basis) is not dict or type(basis["version"]) is not int or basis["version"] not in {1, 2} or basis["finish_route"] is not True or _canonical(basis["publication"]) != _canonical(_publication_identity(fresh)):
                     raise ValueError
                 outcome = basis["outcome"]
                 kind = outcome["kind"]
-                if kind == "model_text":
+                if basis["version"] == 2:
+
+                    def validate_verified():
+                        from app.telegram_bots.model_source import validate_model_reply_basis
+                        from app.telegram_bots.producer import _item
+
+                        return validate_model_reply_basis(_item(delivery)).output.output.model_dump(mode="json")
+
+                    projection = await await_drained(asyncio.to_thread(validate_verified))
+                    if (
+                        kind != "model_text"
+                        or not fresh.dispatch_started
+                        or fresh.run_id is None
+                        or projection["run_id"] != fresh.run_id
+                        or projection["output_evidence"]["assistant_message_id"] != assistant_message_id
+                        or assistant_message_id is None
+                    ):
+                        raise ValueError
+                elif kind == "model_text":
                     projection = outcome["projection"]
                     if not fresh.dispatch_started or fresh.run_id is None or projection["run_id"] != fresh.run_id or projection["output_evidence"]["assistant_message_id"] != assistant_message_id or assistant_message_id is None:
                         raise ValueError

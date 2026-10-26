@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from app.telegram_bots.config import TelegramBotsConfig
     from app.telegram_bots.inbox import InboxRow
     from app.telegram_bots.links import BotLink, BotLinkRepository
+    from app.telegram_bots.model_source import ModelSource
     from app.telegram_bots.producer import DeliveryEligibility, Outbox, OutboxItem, SendingPart
     from app.telegram_bots.settings import SettingsRepository
 
@@ -140,6 +141,7 @@ class TransportServices(Protocol):
     tls_context: Any
     strangers: StrangerLedger
     product_name: str
+    model_source: ModelSource | None
 
     async def prepare_live_owner(self, owner_user_id: str) -> Any: ...
 
@@ -1033,7 +1035,7 @@ class TelegramBotChannel(TelegramChannel):
         raise DeliveryClaimRetired()
 
     async def send_part(self, *, outbox_id: str, part_id: str, claim_owner: str, claim_id: str) -> list[int]:
-        from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryEligibility, DeliveryRetry, PermanentDeliveryError, SourceUnavailable
+        from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryEligibility, DeliveryRetry, PermanentDeliveryError, SourceUnavailable, uses_model_source
 
         if not self.application.running or self._stopping or self._services.channel(self.link.id) is not self or not self._send_allowed():
             raise DeliveryClaimRetired()
@@ -1054,6 +1056,14 @@ class TelegramBotChannel(TelegramChannel):
                 raise PermanentDeliveryError("invalid-verification-continuation")
             if pending["token_revision"] == self.transport_revision:
                 await self._resume_invalid_token(saved, pending)
+        model_part = None
+        if uses_model_source(saved.item):
+            # Validate model primaries before any legacy callback/media
+            # disposition can turn an unknown source into a fixed failure.
+            reader = self._services.model_source
+            if reader is None:
+                raise DeliveryClaimRetired()
+            model_part = await reader.read_part(saved)
         if part.get("callback_group_id"):
             raise PermanentDeliveryError("unsupported-callback-authority")
         if part["kind"] in {"document", "photo", "album"}:
@@ -1069,7 +1079,10 @@ class TelegramBotChannel(TelegramChannel):
                 raise PermanentDeliveryError("invalid-url-button")
             button = validate_url_button(button)
             button_label = url_button_label(part["source_ref"], button)
-        text = await self._render_source(saved.link, part["source_ref"], plain=part.get("plain_fallback", False))
+        if model_part is None:
+            text = await self._render_source(saved.link, part["source_ref"], plain=part.get("plain_fallback", False))
+        else:
+            text = model_part.plain_text if part.get("plain_fallback", False) else model_part.html
         settings = await self._services.settings.get(saved.link.owner_user_id)
         if settings is None:
             raise PermanentDeliveryError("missing-settings")

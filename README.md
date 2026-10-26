@@ -1378,14 +1378,19 @@ same-bot token replacement keep that identity. A deleted custom AI assistant can
 produce a fixed repair notice with a Telegram-settings link when a public address
 is configured. These foundations do not activate ordinary Telegram conversations.
 The shared channel execution boundary now binds an admitted human message to its
-publication, human owner, conversation and actual AI employee definition. Strict
+publication, human owner, conversation and selected agent definition. Strict
 run and message reads distinguish an authoritative result from unavailable
 storage. Closing new-run admission preserves reads for work already dispatched.
 The dormant managed-publication APIs now preserve original input and execution
 identity, prevent a second dispatch claim, and atomically plan one exact primary
 reply. They retain opaque assistant-message IDs and saved multipart presentation.
-Dispatch, restart recovery and ordinary managed-bot conversations remain for
-subsequent stages. See [publication custody](backend/docs/TELEGRAM_PUBLICATION_CUSTODY.md).
+A callable coordinator now hands a saved plain-text group to the existing channel
+manager once and plans delivery from the exact durable text and complete-empty
+output inventory. Each model reply part rechecks its source and current access.
+Ordinary input, restart recovery, files and activation remain subsequent work;
+chats without a qualified personal-file view stay unresolved in this internal
+slice. See [turn execution](backend/docs/TELEGRAM_TURN_EXECUTION.md) and
+[publication custody](backend/docs/TELEGRAM_PUBLICATION_CUSTODY.md).
 SQL-backed runs can explicitly request versioned output capture. The worker seals
 the exact completed model answer with its durable event source; the authorized
 output API reports pending, complete or unavailable without executing another

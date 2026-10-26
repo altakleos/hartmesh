@@ -85,6 +85,25 @@ dispatcher/observer/model sender; strict remote source and artifact/action
 eligibility belong to the later actual consumer. Legacy `plan_reply` keeps its
 compatibility semantics. See [publication custody](../../docs/TELEGRAM_PUBLICATION_CUSTODY.md).
 
+`publication.py` supplies finite callable dispatch/observe/read operations, not an
+input handler or recovery scheduler. Accept only complete saved plain-text groups
+with the strict trusted `input_profile`; forwarded/media/unknown input refuses.
+An actual bus reservation precedes the irreversible marker. Only its winner may
+commit synchronously after the original creating fence, with no intervening await.
+Bounded progressing discovery must complete before adopting a unique exact run.
+Root attempt thread/endpoint bookmarks supplement authoritative remote proof.
+Owned reserve/marker/bind and verified-primary operations invoke optional public
+`prepare_publication_guard` after codecs, immediately before opening their writer;
+borrowed checks retain same-engine account/custody and no provider work. This is a
+point-in-time policy fence, not cross-system policy atomicity. V2 primary bases
+retain both proofs, inventory and frozen presentation; V1 is never adopted as V2.
+The existing sender borrows `ModelSource` and rereads every unsent model part.
+Part shape cannot turn a model basis into a fixed source. Unknown/nonempty output
+stays held. Phase one closes creating/sending but retains authorized final reads
+through manager drain; final stop drains coordinator cleanup before the same HTTP
+owner. Failed cleanup retains that owner and listener for retry. NoUser needs a
+separate honest qualification before activation. See [turn execution](../../docs/TELEGRAM_TURN_EXECUTION.md).
+
 Conversation preparation reserves `route_basis.thread_preparation` on an actual
 admitted, routed, unsealed input before HTTP. Public routing cannot supply this
 server bookkeeping; business replay/group comparisons omit it and snapshots
