@@ -217,6 +217,15 @@ class TelegramAuthority:
                 if await self._supported_target(current) != "ok":
                     return DeliveryEligibility.wait()
                 return DeliveryEligibility.allow()
+            if type(item.payload.get("reply_basis")) is dict and item.payload["reply_basis"].get("version") == 3:
+                from app.telegram_bots.producer import validate_restart_reply_basis
+
+                proof = await await_drained(asyncio.to_thread(validate_restart_reply_basis, item, part))
+                scope = proof.record.scope
+                if current.id != scope.link_id or any(
+                    getattr(current, field) != getattr(scope, field) for field in ("owner_user_id", "agent_kind", "agent_ref", "bot_id", "connection_id", "telegram_user_id", "chat_id", "binding_generation")
+                ):
+                    return DeliveryEligibility.wait()
             target = await self._supported_target(current)
             # The producer validates the reserved status allowlist and shape.
             if target == "agent_unavailable" and item.payload.get("delivery_kind") == "status_notice":

@@ -111,6 +111,9 @@ class TelegramSupervisor:
         self.copy_guard = copy_guard
         self.thread_client, self.threads = thread_client, None
         self.publication_authority = self.publications = self.model_source = None
+        self.recovery = None
+        self._recovery_epoch = self._recovery_phase = None
+        self._recovery_started = False
         self._publication_reads_open = False
         self._environ = dict(os.environ if environ is None else environ)
         if request_factory is not None:
@@ -287,6 +290,7 @@ class TelegramSupervisor:
             from app.telegram_bots.model_source import ModelSource
             from app.telegram_bots.publication import PublicationCoordinator
             from app.telegram_bots.publication_authority import PublicationAttemptAuthority
+            from app.telegram_bots.recovery import PublicationRecoveryService
             from app.telegram_bots.threads import ThreadCoordinator
 
             self.thread_client = self.thread_client or GatewayClientOwner(gateway_url=self.channel_service.manager.gateway_url, langgraph_url=self.channel_service.manager.langgraph_url, tls_context=self.tls_context)
@@ -294,6 +298,7 @@ class TelegramSupervisor:
             self.publication_authority = PublicationAttemptAuthority(links=self.links, authority=self.authority, client=self.thread_client, channel=self.channel, create_allowed=self.send_allowed, read_allowed=self.publication_read_allowed)
             self.publications = PublicationCoordinator(inbox=self.outbox.inbox, outbox=self.outbox, bus=self.channel_service.bus, http_owner=self.thread_client, capture_attempt=self.publication_authority.capture)
             self.model_source = ModelSource(read_output=self.publications.read_output)
+            self.recovery = PublicationRecoveryService(inbox=self.outbox.inbox, outbox=self.outbox, coordinator=self.publications, links=self.links, allowed=self.send_allowed)
             await self.thread_client.start()
             if not await self._wait_health():
                 if not self._stopping:
@@ -399,6 +404,9 @@ class TelegramSupervisor:
         if self._copy_decision:
             await self._latch_copy_conflict()
             return
+        await self._recover_startup_publications()
+        if self._stopping or self._cause is not None:
+            return
         # Transfer every suffix promptly; failed admission remains its poller's
         # job and never blocks another link or the sender's startup.
         current_polls = set(self._polls.values())
@@ -424,8 +432,42 @@ class TelegramSupervisor:
             poll.wake()
         self._periodic(self._tick_sender, 1, "sender")
         self._periodic(self.reconcile, self.config.reconcile_interval_seconds, "reconcile")
+        self._periodic(self.recovery.tick, self.config.reconcile_interval_seconds, "publication-recovery")
         self._periodic(self._refresh_flags, 3600, "bot-flags")
         self._periodic(self.sweep_retention, RETENTION_SWEEP_SECONDS, "retention")
+
+    async def _recover_startup_publications(self) -> None:
+        """Capture one complete cohort before any held/create/send release.
+
+        The retained page is bounded in returned groups, not SQL scan time or
+        decoded bytes. Its native exit may delay startup past the logical D;
+        that late result cannot issue a ticket or start a closure writer.
+        """
+        if self._recovery_started or self.recovery is None:
+            return
+        self._recovery_started = True
+        phase = object()
+        self._recovery_phase = phase
+        deadline = asyncio.get_running_loop().time() + 30
+        try:
+            page = await await_drained(self.outbox.inbox.recovery_page(after=None, limit=32, max_origins=64))
+            if asyncio.get_running_loop().time() >= deadline or self._stopping or self._cause is not None:
+                return
+            from app.telegram_bots.recovery_authority import _issue_startup_epoch
+
+            records = tuple(entry.record for entry in page.entries if entry.hold_reason is None and entry.record is not None and entry.record.dispatch_started is False and entry.record.run_id is None)
+            epoch = _issue_startup_epoch(self, records, deadline=deadline, phase=phase)
+            await self.recovery.recover_startup(epoch)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            # Uncertain metadata/authority never becomes another dispatch or a
+            # global startup refusal. The durable rows remain held for review.
+            self._event("publication_recovery_held", error=type(error).__name__, level=logging.WARNING)
+        finally:
+            if self._recovery_epoch is not None:
+                self._recovery_epoch.retire()
+            self._recovery_phase = None
 
     async def _latch_copy_conflict(self) -> None:
         # Refuse locally before any await, cancellation or SQL persistence.
@@ -1255,6 +1297,11 @@ class TelegramSupervisor:
 
     async def begin_shutdown(self) -> None:
         self._stopping, self._ready = True, False
+        if self._recovery_epoch is not None:
+            self._recovery_epoch.retire()
+        self._recovery_phase = None
+        if self.recovery is not None:
+            self.recovery.begin_shutdown()
         if self.publication_authority is not None:
             self.publication_authority.close_creation()
         if self.publications is not None:
@@ -1342,14 +1389,20 @@ class TelegramSupervisor:
                 await asyncio.gather(*(poll.confirm_offset() for poll in tuple(self._polls.values())), return_exceptions=True)
         finally:
             publication_error = None
-            self._publication_reads_open = False
-            if self.publication_authority is not None:
-                self.publication_authority.close_reads()
-            if self.publications is not None:
+            if self.recovery is not None:
                 try:
-                    await self.publications.stop()
+                    await self.recovery.stop()
                 except Exception as error:
                     publication_error = error
+            if publication_error is None:
+                self._publication_reads_open = False
+                if self.publication_authority is not None:
+                    self.publication_authority.close_reads()
+                if self.publications is not None:
+                    try:
+                        await self.publications.stop()
+                    except Exception as error:
+                        publication_error = error
             thread_error = None
             if self.thread_client is not None and publication_error is None:
                 try:
@@ -1358,7 +1411,7 @@ class TelegramSupervisor:
                     await self.thread_client.stop()
                 except Exception as error:
                     thread_error = error
-            if publication_error is None:
+            if publication_error is None and thread_error is None:
                 self._unsubscribe()
             for task in tuple(self._notices):
                 task.cancel()

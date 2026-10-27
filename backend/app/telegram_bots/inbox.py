@@ -13,7 +13,7 @@ import hashlib
 import json
 import math
 import re
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, fields
@@ -31,10 +31,11 @@ from deerflow.persistence.telegram_bots.model import TelegramAccountRow, Telegra
 if TYPE_CHECKING:
     from telegram import Update
 
+    from app.telegram_bots.authority import LiveOwnerCheck
     from app.telegram_bots.links import BotLink, PublicationGuard
 
 _TOKEN = re.compile(TOKEN_BODY)
-SERVER_BOOKKEEPING_KEYS = frozenset({"publications", "current_publication_id", "thread_preparation"})
+SERVER_BOOKKEEPING_KEYS = frozenset({"publications", "current_publication_id", "thread_preparation", "publication_recovery"})
 _INPUT_KEYS = {"text", "caption", "files", "voice", "command", "type", "reply_to_message_id", "prompt_id", "media_group_id"}
 _UNSAFE_KEYS = {"raw_update", "update", "token", "bot_token", "access_token", "download_url", "file_path", "audio_bytes", "bytes", "_content", "content_bytes"}
 _FILE_KEYS = {"type", "file_id", "file_unique_id", "filename", "mime_type", "size", "message_id", "telegram_bot_id", "duration", "width", "height"}
@@ -290,6 +291,122 @@ def _publication_identity(record: PublicationRecord) -> dict:
     return value
 
 
+def publication_identity(record: PublicationRecord) -> dict:
+    """Detached immutable identity; marker/run remain stored observations."""
+    return _publication_identity(record)
+
+
+@dataclass(frozen=True)
+class RestartClosure:
+    version: Literal[1]
+    kind: Literal["restart_before_dispatch"]
+    startup_id: str
+    publication_id: str
+    input_version: Literal[1]
+    input_sha256: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.version) is not int
+            or self.version != 1
+            or self.kind != "restart_before_dispatch"
+            or type(self.input_version) is not int
+            or self.input_version != 1
+            or any(type(value) is not str or not _PUBLICATION_HEX.fullmatch(value) for value in (self.startup_id, self.publication_id))
+            or type(self.input_sha256) is not str
+            or not _PUBLICATION_DIGEST.fullmatch(self.input_sha256)
+        ):
+            raise ValueError("publication-recovery-conflict") from None
+
+    @classmethod
+    def from_json(cls, value) -> RestartClosure:
+        try:
+            if type(value) is not dict or set(value) != {field.name for field in fields(cls)}:
+                raise ValueError
+            return cls(**value)
+        except (TypeError, ValueError):
+            raise ValueError("publication-recovery-conflict") from None
+
+
+@dataclass(frozen=True)
+class RestartReceipt:
+    record: PublicationRecord
+    closure: RestartClosure
+    outbox_id: str
+
+
+def _restart_closure(record: PublicationRecord, rows: Sequence[InboxRow | TelegramInboundMarkRow]) -> RestartClosure | None:
+    present = ["publication_recovery" in row.route_basis for row in rows]
+    if not any(present):
+        return None
+    fact = RestartClosure.from_json(rows[0].route_basis.get("publication_recovery"))
+    if (
+        not all(present)
+        or any(_canonical(row.route_basis["publication_recovery"]) != _canonical(asdict(fact)) for row in rows)
+        or (fact.publication_id, fact.input_version, fact.input_sha256) != (record.publication_id, record.input_version, record.input_sha256)
+        or record.dispatch_started is not False
+        or record.run_id is not None
+        or not rows[0].outbox_id
+        or any(
+            row.outbox_id != rows[0].outbox_id or not row.route_complete or row.run_id is not None or row.assistant_message_id is not None or row.state not in {"reply_pending", "done"} or rows[0].outbox_id not in row.delivery_ids
+            for row in rows
+        )
+    ):
+        raise ValueError("publication-recovery-conflict") from None
+    return fact
+
+
+RecoveryHold = Literal["legacy", "invalid_group", "incomplete_group", "group_too_large", "unsupported_input", "stale_scope"]
+
+
+@dataclass(frozen=True)
+class RecoveryCursor:
+    link_id: str
+    turn_id: str
+
+    def __post_init__(self) -> None:
+        # These are stored SQL bookmarks, not publication authority. Corrupt
+        # empty/control turn IDs still need to advance to a later valid head.
+        if any(type(value) is not str for value in (self.link_id, self.turn_id)):
+            raise ValueError("invalid-recovery-cursor") from None
+
+
+@dataclass(frozen=True)
+class RecoveryEntry:
+    key: RecoveryCursor
+    record: PublicationRecord | None
+    origins: tuple[InboxRow, ...]
+    hold_reason: RecoveryHold | None
+
+
+@dataclass(frozen=True)
+class RecoveryPage:
+    entries: tuple[RecoveryEntry, ...]
+    next_after: RecoveryCursor | None
+    has_more: bool
+
+
+def _recovery_plain_input(rows: Sequence[InboxRow | TelegramInboundMarkRow]) -> bool:
+    for row in rows:
+        profile = row.route_basis.get("input_profile")
+        value = row.sanitized_input
+        if (
+            type(profile) is not dict
+            or set(profile) != {"version", "kind", "forwarded"}
+            or type(profile["version"]) is not int
+            or profile["version"] != 1
+            or profile["kind"] != "plain_text"
+            or profile["forwarded"] is not False
+            or type(value) is not dict
+            or set(value) != {"type", "text"}
+            or value["type"] != "text"
+            or type(value["text"]) is not str
+            or not value["text"].strip()
+        ):
+            return False
+    return True
+
+
 def _publication_origin(row: InboxRow | TelegramInboundMarkRow) -> PublicationOrigin:
     return PublicationOrigin(**{field.name: getattr(row, field.name) for field in fields(PublicationOrigin)})
 
@@ -376,11 +493,12 @@ class InboxRepository:
             raise ValueError("inbox-group-conflict")
 
     @staticmethod
-    async def _turn(session: AsyncSession, turn_id: str) -> list[TelegramInboundMarkRow]:
+    async def _turn(session: AsyncSession, turn_id: str, *, limit: int | None = None) -> list[TelegramInboundMarkRow]:
         return list(
             await session.scalars(
                 select(TelegramInboundMarkRow)
                 .where(TelegramInboundMarkRow.turn_id == turn_id)
+                .limit(limit)
                 .order_by(TelegramInboundMarkRow.link_id, TelegramInboundMarkRow.message_id, TelegramInboundMarkRow.chat_id)
                 .with_for_update()
                 .execution_options(populate_existing=True)
@@ -490,20 +608,23 @@ class InboxRepository:
                 or _publication_input(marks) != record.input_sha256
             ):
                 raise ValueError
+            _restart_closure(record, marks)
             return record
         except (AttributeError, KeyError, TypeError, ValueError, UnicodeError):
             # Missing execution receipts are uncertainty, never a false marker
             # from which a legacy publication can be dispatched again.
             raise ValueError("publication-conflict") from None
 
-    async def _locked_publication(self, record: PublicationRecord, session: AsyncSession) -> tuple[PublicationRecord, list[TelegramInboundMarkRow]]:
+    async def _locked_publication(self, record: PublicationRecord, session: AsyncSession, *, max_origins: int | None = None) -> tuple[PublicationRecord, list[TelegramInboundMarkRow]]:
         self._publication_borrow(session)
         identity = _publication_identity(record)
         link = await self._link(session, record.scope.link_id)
         actual_scope = self._publication_scope(link, topic=record.scope.message_thread_id, thread_id=record.scope.thread_id, endpoint_id=record.scope.endpoint_id)
         if actual_scope != record.scope:
             raise ValueError("publication-stale") from None
-        marks = await self._turn(session, record.turn_id)
+        marks = await self._turn(session, record.turn_id, limit=None if max_origins is None else max_origins + 1)
+        if max_origins is not None and len(marks) > max_origins:
+            raise ValueError("publication-conflict") from None
         fresh = self._publication_record(marks)
         if _canonical(_publication_identity(fresh)) != _canonical(identity):
             raise ValueError("publication-conflict") from None
@@ -532,7 +653,7 @@ class InboxRepository:
                 self._group(marks)
                 for mark, captured in zip(marks, sorted(rows, key=_identity), strict=True):
                     self._publication_snapshot_matches(mark, captured)
-                    if mark.route_kind != "turn" or mark.route_target_id != captured_link.agent_ref:
+                    if "publication_recovery" in mark.route_basis or mark.route_kind != "turn" or mark.route_target_id != captured_link.agent_ref:
                         raise ValueError("publication-conflict") from None
                     self._current(checked, mark)
                 if any(mark.turn_id is not None for mark in marks):
@@ -586,6 +707,8 @@ class InboxRepository:
             async with self._transaction() as session:
                 await guard.check(session)
                 fresh, marks = await self._locked_publication(record, session)
+                if any("publication_recovery" in mark.route_basis for mark in marks):
+                    raise ValueError("publication-conflict") from None
                 changed = not fresh.dispatch_started
                 if changed:
                     if any(mark.route_complete or mark.state == "interrupted" for mark in marks):
@@ -614,6 +737,8 @@ class InboxRepository:
             async with self._transaction() as session:
                 await guard.check(session)
                 fresh, marks = await self._locked_publication(record, session)
+                if any("publication_recovery" in mark.route_basis for mark in marks):
+                    raise ValueError("publication-conflict") from None
                 if not fresh.dispatch_started or fresh.run_id not in (None, run_id) or fresh.run_id is None and any(mark.route_complete or mark.state == "interrupted" for mark in marks):
                     raise ValueError("publication-conflict") from None
                 for mark in marks:
@@ -626,6 +751,149 @@ class InboxRepository:
                 return result
 
         return await await_drained(perform())
+
+    async def lock_restart_publication(self, record: PublicationRecord, *, session: AsyncSession) -> tuple[PublicationRecord, tuple[InboxRow, ...]]:
+        """Borrow link/outbox ordering and decode at most the complete-group sentinel."""
+        from deerflow.utils.file_io import await_drained
+
+        async def perform():
+            fresh, marks = await self._locked_publication(record, session, max_origins=64)
+            return fresh, tuple(_snapshot(mark) for mark in marks)
+
+        return await await_drained(perform())
+
+    async def seal_restart_before_dispatch(self, record: PublicationRecord, *, outbox_id: str, ticket, session: AsyncSession) -> RestartClosure:
+        """Atomically attach one fixed primary and its actual startup closure."""
+        from app.telegram_bots.recovery_authority import check_restart_ticket
+        from deerflow.utils.file_io import await_drained
+
+        async def perform():
+            check_restart_ticket(ticket, record)
+            fresh, marks = await self._locked_publication(record, session, max_origins=64)
+            if fresh.dispatch_started or fresh.run_id is not None or not _recovery_plain_input(marks):
+                raise ValueError("publication-recovery-conflict") from None
+            fact = RestartClosure(1, "restart_before_dispatch", ticket.startup_id, fresh.publication_id, fresh.input_version, fresh.input_sha256)
+            delivery = await session.get(TelegramOutboxRow, outbox_id, populate_existing=True)
+            if delivery is None:
+                raise ValueError("publication-recovery-conflict") from None
+
+            def validate():
+                from app.telegram_bots.producer import _item, validate_restart_reply_basis
+
+                return validate_restart_reply_basis(_item(delivery))
+
+            proof = await await_drained(asyncio.to_thread(validate))
+            if publication_identity(proof.record) != publication_identity(fresh) or proof.closure != fact:
+                raise ValueError("publication-recovery-conflict") from None
+            saved = _restart_closure(fresh, marks)
+            if saved is not None:
+                if saved != fact or any(mark.outbox_id != outbox_id for mark in marks):
+                    raise ValueError("publication-recovery-conflict") from None
+            else:
+                if any(mark.route_complete or mark.outbox_id is not None or mark.assistant_message_id is not None or mark.state != "dispatched" for mark in marks):
+                    raise ValueError("publication-recovery-conflict") from None
+                await self.register_delivery(tuple(_snapshot(mark) for mark in marks), outbox_id=outbox_id, primary=True, finish=True, session=session)
+                for mark in marks:
+                    mark.route_basis = {**deepcopy(mark.route_basis), "publication_recovery": asdict(fact)}
+            await session.flush()
+            check_restart_ticket(ticket, fresh)
+            return fact
+
+        return await await_drained(perform())
+
+    async def read_restart_receipt(self, record: PublicationRecord, *, captured_link: BotLink, check_live_owner: LiveOwnerCheck, check_current: Callable[[], bool]) -> RestartReceipt | None:
+        """Fresh same-engine metadata custody; this read grants no write or send."""
+        from app.telegram_bots.links import BotLink
+        from deerflow.utils.file_io import await_drained
+
+        def current():
+            try:
+                if check_current() is not True:
+                    raise ValueError
+            except Exception:
+                raise ValueError("publication-stale") from None
+
+        captured_link = deepcopy(captured_link)
+        if type(captured_link) is not BotLink or not callable(check_live_owner) or not callable(check_current):
+            raise ValueError("publication-stale") from None
+        current()
+
+        async def custody(reader):
+            link = await reader.get(TelegramBotLinkRow, captured_link.id, populate_existing=True)
+            names = ("id", "owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "binding_generation", "token_revision")
+            if (
+                link is None
+                or link.state != "connected"
+                or link.health != "ok"
+                or captured_link.state != "connected"
+                or any(getattr(link, name) != getattr(captured_link, name) for name in names)
+                or self._publication_scope(link, topic=record.scope.message_thread_id, thread_id=record.scope.thread_id, endpoint_id=record.scope.endpoint_id) != record.scope
+            ):
+                raise ValueError("publication-stale") from None
+            account = await reader.get(TelegramAccountRow, captured_link.telegram_user_id, populate_existing=True)
+            connection = await reader.get(ChannelConnectionRow, captured_link.connection_id, populate_existing=True)
+            if (
+                account is None
+                or account.owner_user_id != captured_link.owner_user_id
+                or connection is None
+                or connection.status != "connected"
+                or connection.owner_user_id != captured_link.owner_user_id
+                or connection.provider != "telegram"
+                or connection.external_account_id != str(captured_link.telegram_user_id)
+                or connection.workspace_id != str(captured_link.bot_id)
+                or connection.bot_user_id != str(captured_link.bot_id)
+            ):
+                raise ValueError("publication-stale") from None
+
+        async def perform():
+            current()
+            async with self.session_factory() as reader, reader.begin():
+                await custody(reader)
+                rows = list(
+                    await reader.scalars(
+                        select(TelegramInboundMarkRow).where(TelegramInboundMarkRow.turn_id == record.turn_id).order_by(TelegramInboundMarkRow.link_id, TelegramInboundMarkRow.message_id, TelegramInboundMarkRow.chat_id).limit(65)
+                    )
+                )
+                if len(rows) > 64:
+                    raise ValueError("publication-recovery-conflict") from None
+                detached = tuple(_snapshot(row) for row in rows)
+                delivery = await reader.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == record.scope.link_id, TelegramOutboxRow.dedupe_key == "reply:" + record.turn_id))
+                from app.telegram_bots.producer import _item
+
+                item = None if delivery is None else _item(delivery)
+
+                def decode():
+                    from app.telegram_bots.producer import validate_restart_reply_basis
+
+                    fresh = self._publication_record(detached)
+                    if _canonical(publication_identity(fresh)) != _canonical(publication_identity(record)):
+                        raise ValueError("publication-recovery-conflict") from None
+                    fact = _restart_closure(fresh, detached)
+                    source = None if item is None else item.payload.get("source")
+                    basis = None if item is None else item.payload.get("reply_basis")
+                    declared = (type(source) is dict and source.get("kind") == "restart_before_dispatch") or (type(basis) is dict and type(basis.get("version")) is int and basis["version"] == 3)
+                    if fact is None:
+                        if declared:
+                            raise ValueError("publication-recovery-conflict") from None
+                        return None
+                    if item is None:
+                        raise ValueError("publication-recovery-conflict") from None
+                    proof = validate_restart_reply_basis(item)
+                    if proof.closure != fact or _canonical(publication_identity(proof.record)) != _canonical(publication_identity(fresh)) or any(row.outbox_id != item.id for row in detached):
+                        raise ValueError("publication-recovery-conflict") from None
+                    return RestartReceipt(fresh, fact, item.id)
+
+                result = await await_drained(asyncio.to_thread(decode))
+                current()
+                await custody(reader)
+                await check_live_owner(captured_link.owner_user_id, reader)
+                current()
+            current()
+            return result
+
+        result = await await_drained(perform())
+        current()
+        return result
 
     async def lock_publication(self, record: PublicationRecord, *, session: AsyncSession) -> tuple[PublicationRecord, tuple[InboxRow, ...]]:
         """Borrow the planner's already ordered writer and return no ORM rows."""
@@ -804,6 +1072,8 @@ class InboxRepository:
                 await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
             marks = await self._rows(session, rows)
             self._group(marks)
+            if any("publication_recovery" in mark.route_basis for mark in marks):
+                raise ValueError("inbox-publication-conflict") from None
             for mark in marks:
                 self._current(link, mark)
             if any(mark.route_complete or mark.state == "interrupted" for mark in marks):
@@ -841,6 +1111,8 @@ class InboxRepository:
             link = await self._link(session, link_id)
             marks = await self._rows(session, rows)
             self._group(marks)
+            if any("publication_recovery" in mark.route_basis for mark in marks):
+                raise ValueError("inbox-publication-conflict") from None
             if marks[0].turn_id is None:
                 raise ValueError("inbox-publication-conflict")
             group = await self._turn(session, marks[0].turn_id)
@@ -883,6 +1155,8 @@ class InboxRepository:
             if not marks:
                 raise ValueError("inbox-publication-conflict")
             self._group(marks)
+            if any("publication_recovery" in mark.route_basis for mark in marks):
+                raise ValueError("inbox-publication-conflict") from None
             if any(_canonical(_publication_basis(mark)) != _canonical(_publication_basis(marks[0])) for mark in marks):
                 raise ValueError("inbox-publication-conflict")
             for mark in marks:
@@ -1004,3 +1278,84 @@ class InboxRepository:
                 .order_by(TelegramInboundMarkRow.accepted_at, TelegramInboundMarkRow.link_id, TelegramInboundMarkRow.update_id)
             )
             return [_snapshot(mark) for mark in marks]
+
+    async def recovery_page(self, *, after: RecoveryCursor | None, limit: int = 32, max_origins: int = 64) -> RecoveryPage:
+        """Bound returned groups/members, without claiming bounded scan bytes/time."""
+        from deerflow.utils.file_io import await_drained
+
+        if type(limit) is not int or not 1 <= limit <= 32 or type(max_origins) is not int or not 1 <= max_origins <= 64 or after is not None and type(after) is not RecoveryCursor:
+            raise ValueError("invalid-recovery-page") from None
+
+        async def perform() -> RecoveryPage:
+            groups = []
+            async with self.session_factory() as session:
+                statement = select(TelegramInboundMarkRow.link_id, TelegramInboundMarkRow.turn_id).where(
+                    TelegramInboundMarkRow.route_kind == "turn", TelegramInboundMarkRow.turn_id.is_not(None), TelegramInboundMarkRow.state != "done", TelegramInboundMarkRow.outbox_id.is_(None)
+                )
+                if after is not None:
+                    statement = statement.where(or_(TelegramInboundMarkRow.link_id > after.link_id, and_(TelegramInboundMarkRow.link_id == after.link_id, TelegramInboundMarkRow.turn_id > after.turn_id)))
+                heads = list((await session.execute(statement.distinct().order_by(TelegramInboundMarkRow.link_id, TelegramInboundMarkRow.turn_id).limit(limit + 1))).all())
+                for link_id, turn_id in heads[:limit]:
+                    # Head eligibility must never manufacture a complete prefix.
+                    # Preserve global _turn collision semantics, including rows
+                    # that are done, interrupted or already have a primary.
+                    members = list(
+                        await session.scalars(
+                            select(TelegramInboundMarkRow).where(TelegramInboundMarkRow.turn_id == turn_id).order_by(TelegramInboundMarkRow.link_id, TelegramInboundMarkRow.message_id, TelegramInboundMarkRow.chat_id).limit(max_origins + 1)
+                        )
+                    )
+                    groups.append((RecoveryCursor(link_id, turn_id), len(members) > max_origins, tuple(_snapshot(row) for row in members) if len(members) <= max_origins else ()))
+
+            def decode() -> tuple[RecoveryEntry, ...]:
+                def legacy(rows) -> bool:
+                    try:
+                        for row in rows:
+                            if type(row.route_basis) is not dict:
+                                return False
+                            history = row.route_basis.get("publications")
+                            if type(history) is not list or not history:
+                                return False
+                            for item in history:
+                                if type(item) is not dict or set(item) != {"publication_id", "event_id", "run_id"}:
+                                    return False
+                                _publication_text(item["event_id"], 96)
+                                if item["publication_id"] != self._publication(row.turn_id, item["event_id"]):
+                                    return False
+                                if item["run_id"] is not None:
+                                    _publication_text(item["run_id"], 64)
+                            if row.route_basis.get("current_publication_id") != history[-1]["publication_id"]:
+                                return False
+                        return True
+                    except (AttributeError, KeyError, TypeError, ValueError):
+                        return False
+
+                entries = []
+                for key, overflow, rows in groups:
+                    if overflow:
+                        entries.append(RecoveryEntry(key, None, (), "group_too_large"))
+                        continue
+                    if not rows:
+                        entries.append(RecoveryEntry(key, None, (), "incomplete_group"))
+                        continue
+                    try:
+                        record = self._publication_record(rows)
+                    except ValueError:
+                        entries.append(RecoveryEntry(key, None, rows, "legacy" if legacy(rows) else "invalid_group"))
+                        continue
+                    if (
+                        any(row.route_complete or row.outbox_id is not None or row.assistant_message_id is not None or row.state not in {"dispatched", "reply_pending"} for row in rows)
+                        or len({row.state for row in rows}) != 1
+                        or any("publication_recovery" in row.route_basis for row in rows)
+                    ):
+                        entries.append(RecoveryEntry(key, record, rows, "incomplete_group"))
+                    elif not _recovery_plain_input(rows):
+                        entries.append(RecoveryEntry(key, record, rows, "unsupported_input"))
+                    else:
+                        entries.append(RecoveryEntry(key, record, rows, None))
+                return tuple(entries)
+
+            entries = await await_drained(asyncio.to_thread(decode))
+            more = len(heads) > limit
+            return RecoveryPage(entries, entries[-1].key if more else None, more)
+
+        return await await_drained(perform())

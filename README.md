@@ -1387,7 +1387,11 @@ reply. They retain opaque assistant-message IDs and saved multipart presentation
 A callable coordinator now hands a saved plain-text group to the existing channel
 manager once and plans delivery from the exact durable text and complete-empty
 output inventory. Each model reply part rechecks its source and current access.
-Ordinary input, restart recovery, files and activation remain subsequent work;
+Bounded recovery now observes already-dispatched saved publications using their
+original conversation and output evidence. During startup, it can atomically
+close a captured undispatched publication with a fixed restart notice. Recovery
+never submits another model run; uncertain work stays held. Ordinary input,
+files and activation remain subsequent work;
 chats without a qualified personal-file view stay unresolved in this internal
 slice. See [turn execution](backend/docs/TELEGRAM_TURN_EXECUTION.md) and
 [publication custody](backend/docs/TELEGRAM_PUBLICATION_CUSTODY.md).

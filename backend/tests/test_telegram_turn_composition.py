@@ -72,7 +72,7 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
     live = await install_live_owner(db, monkeypatch, owner=OWNER)
     paths = await asyncio.to_thread(Paths, tmp_path / "data")
     with paths_scope(paths):
-        custom = case == "custom_text"
+        custom = case in {"custom_text", "recovery_custom_text"}
         target = "profile-agent" if custom else "lead_agent"
         if custom:
             from deerflow.persistence.agents.file import FileAgentStore
@@ -204,7 +204,31 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
                 model_release.set()
             await asyncio.wait_for(final.wait(), 15)
             assert any(message.text == ANSWER for message in frames if message.is_final)
-            observed = await supervisor.publications.observe(record, channel.link, max_pages=2)
+            if case in {"recovery_text", "recovery_custom_text"}:
+                # Recreate only the recovery/coordinator/source consumer. The
+                # worker's real durable SQL seal/event/pair survives; no remote
+                # response or output proof is substituted by this fixture.
+                from app.telegram_bots.model_source import ModelSource
+                from app.telegram_bots.producer import Outbox
+                from app.telegram_bots.publication import PublicationCoordinator
+                from app.telegram_bots.recovery import PublicationRecoveryService
+
+                await supervisor.recovery.stop()
+                await supervisor.publications.stop()
+                async with e.sf() as reader:
+                    previous_primary = await reader.scalar(select(TelegramOutboxRow.id).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == "reply:" + record.turn_id))
+                assert previous_primary is None, "The old consumer had already planned this publication"
+                fresh_outbox = Outbox(e.sf)
+                supervisor.publications = PublicationCoordinator(inbox=fresh_outbox.inbox, outbox=fresh_outbox, bus=boot.service.bus, http_owner=owner, capture_attempt=supervisor.publication_authority.capture)
+                supervisor.model_source = ModelSource(read_output=supervisor.publications.read_output)
+                supervisor.recovery = PublicationRecoveryService(inbox=fresh_outbox.inbox, outbox=fresh_outbox, coordinator=supervisor.publications, links=db.links, allowed=supervisor.send_allowed)
+                await supervisor.recovery.tick()
+                async with e.sf() as reader:
+                    recovered = await reader.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == "reply:" + record.turn_id))
+                assert recovered is not None, "The fresh recovery service did not plan the persisted completed publication"
+                observed = SimpleNamespace(state="planned", outbox_id=recovered.id)
+            else:
+                observed = await supervisor.publications.observe(record, channel.link, max_pages=2)
             assert model.invocations == 1
             assert len(model_inputs) == 1
             assert restore_original_human_message(model_inputs[0]).content == "First accepted question\n\nSecond accepted question"

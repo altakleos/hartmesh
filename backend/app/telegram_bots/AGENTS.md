@@ -104,6 +104,42 @@ through manager drain; final stop drains coordinator cleanup before the same HTT
 owner. Failed cleanup retains that owner and listener for retry. NoUser needs a
 separate honest qualification before activation. See [turn execution](../../docs/TELEGRAM_TURN_EXECUTION.md).
 
+`recovery.py` is the Supervisor-owned bounded scheduler over that same callable
+coordinator and sender. Periodic passes observe marked publications only; no
+empty/404/absent-task fact authorizes dispatch. `recovery_page` keysets heads,
+fetches every global-turn member with a sentinel and holds malformed, mixed,
+oversized, legacy or unsupported groups. Limits bound returned groups/origins,
+decoded-payload counts and retained operations, not bytes, SQL scan time or RAM.
+The schema has no turn/head index; no migration is added for this slice.
+
+Actual negative-copy startup takes one retained page before held/create/send
+release. `recovery_authority.py` issues an opaque one-shot epoch for that fixed
+cohort. Tickets are host capabilities, never UUID/boolean/JSON authority. They
+bind original adapter/token/endpoint/current phase/deadline. Retire all tickets
+synchronously before release; unseen/unarmed tail stays held. The distinct fixed
+guard prepares current account/target outside SQL with no named private or
+execution ceilings, then borrows the existing same-engine custody guard with a
+last synchronous ticket check. `publication_recovery` is reserved bookkeeping;
+exclude it from business input hashes but compare and validate the complete
+stored fact. Atomic `plan_restart_before_dispatch` writes that fact, strict fixed
+basis3 primary and all route seals together, preserving null run/assistant IDs.
+Marker and closure winners serialize; uncertainty never resubmits a model.
+Only the exact closed fact/primary receipt confirms a lost writer result.
+Prepare fresh zero-ceiling read admission for that confirmation; recheck SQL
+custody after decoding, then the borrowed human account and literal original
+read fence. The service compares the actual closure's startup ID with its failed
+attempt. That correlation is evidence, never a renewed write ticket. A retired
+epoch must refuse each startup leaf before a metadata backend is called.
+Known model declarations and malformed bases cannot gain fixed privilege.
+
+Service slots include native/codec/response cleanup. An absolute pass deadline
+shortens coordinator control before its child is queued. Logical expiry admits
+no fresh work; a previously authorized COMMIT can settle late. The startup page
+and native cleanup can outlast that deadline. Final stop drains the service
+before coordinator/client teardown, retaining dependencies on failure. No new
+after-manager observation pass or grace is installed. Ordinary input activation,
+NoUser qualification and queue/Stop/retry consumers remain separate work.
+
 Conversation preparation reserves `route_basis.thread_preparation` on an actual
 admitted, routed, unsealed input before HTTP. Public routing cannot supply this
 server bookkeeping; business replay/group comparisons omit it and snapshots
@@ -169,7 +205,8 @@ scope, origins, topic and completion intent. Strip supplied transport receipts
 before both basis and parts; regenerate part identities and reject extra controls.
 Only exact source/page pairs derive a server label: `web.memory`/`web.memory`
 uses `label.open_memory`, and `custom_agent.deleted`/`web.telegram` uses
-`label.open_telegram`. Validate the pair again at raw delivery. Deleted-custom
+`label.open_telegram`, and `chat.restarted`/`web.conversation` uses
+`label.open_conversation` with the original saved thread. Validate the pair again at raw delivery. Deleted-custom
 repair follows authoritative owner-scoped config absence, uses a safe captured
 label and an eligible configured public address; uncertainty never means deletion.
 The fixed repair may send during `agent_unavailable`, with no model/file privilege.
@@ -285,9 +322,9 @@ retry intent. A late successful commit remains durable; an unpersisted latch
 gets one fixed diagnostic and keeps local refusal. Already-started work may
 outlast grace; no new SQL retry survives the database owner.
 Do not install future-stage no-op schedulers or trust manager text as a model
-source. This slice sends trusted fixed product/status sources only; model-final
-recovery, content execution, callback actions, files, profiles and instance policy
-have later owners.
+source. The existing sender accepts fixed sources and strictly verified model
+finals. Ordinary content activation, callback actions, files, profiles and
+instance policy have later owners.
 
 `authority.py` rereads the live human account, strict route ceilings, exact
 connection and supported owner-scoped target. Fixed product/status sources need
