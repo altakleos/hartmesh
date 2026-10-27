@@ -92,7 +92,7 @@ from deerflow.runtime.keyed_lock import KeyedLockTable
 from deerflow.runtime.presented_files import RUNTIME_PRESENTED_FILES_CONTEXT_KEY
 from deerflow.runtime.runs.capture_io import CaptureIOClosed, capture_io_scope, current_capture_io_owner, run_capture_io
 from deerflow.runtime.runs.naming import resolve_root_run_name
-from deerflow.runtime.runs.output import OUTPUT_CAPTURE_DISCONNECT_KEY, OUTPUT_CAPTURE_KEY, OutputCaptureIntent, OutputEvidenceError, capture_from_kwargs
+from deerflow.runtime.runs.output import OUTPUT_CAPTURE_DISCONNECT_KEY, OUTPUT_CAPTURE_KEY, OutputCaptureIntent, OutputEvidenceError, capture_from_kwargs, capture_intent_to_dict
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
     redact_config_secrets,
@@ -149,7 +149,7 @@ _TERMINAL_RUN_STATUSES = {
 
 _THREAD_METADATA_SETUP_TIMEOUT_SECONDS = 5.0
 
-_OUTPUT_PROOF_CLAIM_KEYS = frozenset({"output_evidence", "inventory_evidence", "output_inventory_profile"})
+_OUTPUT_PROOF_CLAIM_KEYS = frozenset({"output_evidence", "inventory_evidence", "output_inventory_profile", "qualify_output_view"})
 
 _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
     frozenset(
@@ -657,6 +657,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
         {
             "app_config",
             "__agent_execution",
+            "qualify_output_view",
             "is_internal",
             "authz_attributes",
             "channel_user_id",
@@ -1753,13 +1754,18 @@ def _without_channel_marker(metadata):
     return {key: value for key, value in metadata.items() if key != CHANNEL_TURN_ID_KEY}
 
 
-def _output_capture_preflight(value, *, run_manager, event_store):
+def _output_capture_preflight(value, *, run_manager, event_store, qualify_output_view=None):
     """Qualify the actual retained authorities, independently of channels."""
     try:
         intent = OutputCaptureIntent.model_validate(value)
     except ValueError:
         raise HTTPException(422, "Unsupported output capture request") from None
     try:
+        if intent.document_version == 2:
+            from deerflow.runtime.runs.output_view import OutputViewQualifier
+
+            if type(qualify_output_view) is not OutputViewQualifier:
+                raise OutputEvidenceError()
         if (
             run_manager.supports_output_receipts is True
             and getattr(event_store, "supports_durable_output_evidence", False) is True
@@ -1921,7 +1927,7 @@ async def _start_run(
             run_ctx = get_run_context(request)
         except Exception:
             raise HTTPException(503, "Run output evidence is unavailable") from None
-        capture_intent = _output_capture_preflight(body.output_capture, run_manager=run_mgr, event_store=run_ctx.event_store)
+        capture_intent = _output_capture_preflight(body.output_capture, run_manager=run_mgr, event_store=run_ctx.event_store, qualify_output_view=getattr(run_ctx, "qualify_output_view", None))
 
     # Cancel-capability gate. interrupt/rollback strategies terminate an already
     # active run — runs:cancel capability, not runs:create — so a create-only
@@ -2438,7 +2444,7 @@ async def _start_run(
                             "input": run_record_input,
                             **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
                             "config": redact_config_secrets(request_config),
-                            **({OUTPUT_CAPTURE_KEY: capture_intent.model_dump(mode="json")} if capture_intent is not None else {}),
+                            **({OUTPUT_CAPTURE_KEY: capture_intent_to_dict(capture_intent)} if capture_intent is not None else {}),
                             **({"channel_execution": execution_receipt.model_dump(mode="json")} if execution_receipt is not None else {}),
                             **({"conversation_references": conversation_references} if conversation_references else {}),
                         },

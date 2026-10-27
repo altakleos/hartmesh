@@ -1390,10 +1390,12 @@ output inventory. Each model reply part rechecks its source and current access.
 Bounded recovery now observes already-dispatched saved publications using their
 original conversation and output evidence. During startup, it can atomically
 close a captured undispatched publication with a fixed restart notice. Recovery
-never submits another model run; uncertain work stays held. Ordinary input,
-files and activation remain subsequent work;
-chats without a qualified personal-file view stay unresolved in this internal
-slice. See [turn execution](backend/docs/TELEGRAM_TURN_EXECUTION.md) and
+never submits another model run; uncertain work stays held. The internal ordinary
+and custom-agent path now explicitly requests inventory document 2. It can qualify
+a chat intentionally admitted without personal files, while still requiring its
+active human owner and complete presentation evidence. Missing folders and error strings
+cannot qualify it. Ordinary input, files and activation remain subsequent work.
+See [turn execution](backend/docs/TELEGRAM_TURN_EXECUTION.md) and
 [publication custody](backend/docs/TELEGRAM_PUBLICATION_CUSTODY.md).
 SQL-backed runs can explicitly request versioned output capture. The worker seals
 the exact completed model answer with its durable event source; the authorized
@@ -1405,6 +1407,9 @@ Capture version 2 also seals a generic inventory of file references and structur
 terminal presentations. Authorized consumers can distinguish complete enumeration
 from an incomplete subset before publishing a reply. See the
 [terminal output inventory](backend/docs/RUN_OUTPUT_INVENTORY.md) contract.
+Document 2 is an explicit opt-in with negotiated reads; existing capture requests
+keep document 1. It distinguishes a real managed-output scan from a host-qualified
+absence of an admitted output view without inventing an empty scan.
 Captured runs also seal known startup failures and prestart cancellations.
 Lease-based recovery records an abandoned run as failed. Replacement requests
 refuse locally active or finishing captured work and captured work with a valid

@@ -111,7 +111,10 @@ def _extra_headers(headers, *, streaming=False):
         elif name == "x-deerflow-require-thread-binding":
             if value != "true":
                 raise ChannelExecutionProtocolError()
-        elif name in {"x-deerflow-require-channel-execution", "x-deerflow-require-output-inventory"}:
+        elif name == "x-deerflow-require-output-inventory":
+            if value not in {"1", "2"}:
+                raise ChannelExecutionProtocolError()
+        elif name == "x-deerflow-require-channel-execution":
             if value != "1":
                 raise ChannelExecutionProtocolError()
         elif name == "accept":

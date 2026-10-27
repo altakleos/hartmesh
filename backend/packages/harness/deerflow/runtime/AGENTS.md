@@ -35,6 +35,13 @@ historical state and provider tags supply no current handover. Cleanup invalidat
 prior scans. Late cancellation uses the original-record host continuation and
 exact completed action; a DTO cannot attest cleanup. Strict reads audit both
 sources, reread both proofs/scope/status and refresh authority before ack.
+Explicit document2 uses the trailing host `RunContext.qualify_output_view`
+callback; the old storage-scope ABI and document1 bytes stay unchanged. Its
+typed support object is not evidence: a run-bound lease freshly confirms the
+original paths/owner/routing before publication and retires before scope exit.
+Qualified no-view routing replaces no scan facts and never suppresses carriers
+or grants file access. Model-only qualification must not acquire a sandbox;
+AgentExecution remains unsupported for this format.
 
 SQL terminal writes use `runs/terminal.py` and `RunRepository.finalize_owned`.
 Read committed state before recovery; CAS the original change sequence, owner,

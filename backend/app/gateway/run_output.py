@@ -89,6 +89,7 @@ class RunOutputProjection(BaseModel):
 OUTPUT_INVENTORY_REQUIRE_HEADER = "X-DeerFlow-Require-Output-Inventory"
 OUTPUT_INVENTORY_VERSION_HEADER = "X-DeerFlow-Output-Inventory-Version"
 OUTPUT_INVENTORY_VERSION = "1"
+OUTPUT_INVENTORY_VERSION_2 = "2"
 
 
 class InventoryProjection(BaseModel):
@@ -96,7 +97,7 @@ class InventoryProjection(BaseModel):
 
     state: Literal["pending", "matched", "unavailable"]
     evidence: Annotated[InventoryEvidence, Field(discriminator="kind")] | None
-    document: Annotated[InventoryDocument, Field(discriminator="coverage")] | None
+    document: InventoryDocument | None
     reason: InventoryUnavailableReason | Literal["source_missing", "source_changed"] | None
 
     @field_validator("evidence", mode="before")

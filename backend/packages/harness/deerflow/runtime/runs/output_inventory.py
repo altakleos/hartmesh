@@ -195,6 +195,24 @@ class IncompleteInventoryScan(_Closed):
     after_root: Literal["opened", "missing", "unavailable"] | None
 
 
+class NoAdmittedOutputViewScope(_Version1):
+    kind: Literal["managed_output_routing"]
+    virtual_root: Literal["/mnt/user-data/outputs"]
+
+
+class NoAdmittedOutputView(_Closed):
+    kind: Literal["no_admitted_output_view"]
+    scope: NoAdmittedOutputViewScope
+
+
+class ManagedOutputView(_Closed):
+    kind: Literal["managed_outputs"]
+    scan: Annotated[CompleteInventoryScan | IncompleteInventoryScan, Field(discriminator="state")]
+
+
+type InventoryOutputView = Annotated[ManagedOutputView | NoAdmittedOutputView, Field(discriminator="kind")]
+
+
 class MessageEventInventoryWitness(_Closed):
     kind: Literal["message_event"]
     event_seq: int = Field(strict=True, ge=1)
@@ -266,8 +284,12 @@ class _Document(_Scoped):
     def exact_epoch(cls, value):
         return _uuid(value) if value is not None else value
 
+    def _inventory_scan(self):
+        return self.scan
+
     @model_validator(mode="after")
     def joined_witnesses(self):
+        scan = self._inventory_scan()
         items = self.items if self.coverage == "complete" else self.observed_items
         if len(items) > MAX_INVENTORY_DESCRIPTORS:
             raise InventoryLimitExceeded()
@@ -277,7 +299,7 @@ class _Document(_Scoped):
         paths = [item.path for item in items if isinstance(item, FileInventoryDescriptor)]
         if len(paths) != len(set(paths)):
             raise ValueError("Duplicate file reference")
-        if self.coverage == "complete" and not set(self.scan.produced_paths).issubset({item.path for item in items if isinstance(item, FileInventoryDescriptor) and "output_change" in item.surfaces}):
+        if self.coverage == "complete" and isinstance(scan, CompleteInventoryScan) and not set(scan.produced_paths).issubset({item.path for item in items if isinstance(item, FileInventoryDescriptor) and "output_change" in item.surfaces}):
             raise ValueError("Incomplete output delta inventory")
         for item in items:
             witnesses = item.witnesses if isinstance(item, FileInventoryDescriptor) else (item.witness,)
@@ -286,9 +308,9 @@ class _Document(_Scoped):
                     raise ValueError("Inventory root differs")
                 if isinstance(witness, CallbackInventoryWitness) and self.root_epoch is None:
                     raise ValueError("Missing inventory root")
-                if isinstance(witness, OutputScanInventoryWitness) and not isinstance(self.scan, CompleteInventoryScan):
+                if isinstance(witness, OutputScanInventoryWitness) and not isinstance(scan, CompleteInventoryScan):
                     raise ValueError("Missing complete scan")
-            if isinstance(item, FileInventoryDescriptor) and "output_change" in item.surfaces and (not isinstance(self.scan, CompleteInventoryScan) or item.path not in self.scan.produced_paths):
+            if isinstance(item, FileInventoryDescriptor) and "output_change" in item.surfaces and (not isinstance(scan, CompleteInventoryScan) or item.path not in scan.produced_paths):
                 raise ValueError("Output delta differs")
         return self
 
@@ -316,8 +338,53 @@ class UnsupportedInventoryDocument(_Document):
     scan: Annotated[CompleteInventoryScan | IncompleteInventoryScan, Field(discriminator="state")] | None
 
 
-type InventoryDocument = CompleteInventoryDocument | IncompleteInventoryDocument | UnsupportedInventoryDocument
-_DOCUMENT = TypeAdapter(Annotated[InventoryDocument, Field(discriminator="coverage")])
+class _Document2(_Document):
+    version: Literal[2]
+    output_view: InventoryOutputView | None
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def literal_version(cls, value):
+        if type(value) is not int or value != 2:
+            raise ValueError("Invalid inventory version")
+        return value
+
+    def _inventory_scan(self):
+        return self.output_view.scan if isinstance(self.output_view, ManagedOutputView) else None
+
+
+class CompleteInventoryDocument2(_Document2):
+    profile: Literal["terminal-presentation-v1"]
+    root_epoch: str
+    coverage: Literal["complete"]
+    reason: None
+    items: tuple[InventoryDescriptor, ...]
+    output_view: InventoryOutputView
+
+    @model_validator(mode="after")
+    def positive_view(self):
+        if isinstance(self.output_view, ManagedOutputView) and not isinstance(self.output_view.scan, CompleteInventoryScan):
+            raise ValueError("Missing complete scan")
+        return self
+
+
+class IncompleteInventoryDocument2(_Document2):
+    coverage: Literal["incomplete"]
+    reason: Literal["scan_incomplete", "carrier_incomplete", "terminal_membership_unknown", "enumeration_overflow", "execution_stopped"]
+    observed_items: tuple[InventoryDescriptor, ...]
+
+
+class UnsupportedInventoryDocument2(_Document2):
+    coverage: Literal["unsupported"]
+    reason: Literal["unsupported_profile", "unsupported_surface", "multiple_epochs"]
+    observed_items: tuple[InventoryDescriptor, ...]
+
+
+type InventoryDocument1 = Annotated[CompleteInventoryDocument | IncompleteInventoryDocument | UnsupportedInventoryDocument, Field(discriminator="coverage")]
+type InventoryDocument2 = Annotated[CompleteInventoryDocument2 | IncompleteInventoryDocument2 | UnsupportedInventoryDocument2, Field(discriminator="coverage")]
+type InventoryDocument = InventoryDocument1 | InventoryDocument2
+_DOCUMENT1 = TypeAdapter(InventoryDocument1)
+_DOCUMENT2 = TypeAdapter(InventoryDocument2)
 
 
 def validate_inventory_evidence(value: object) -> InventoryEvidence:
@@ -350,7 +417,11 @@ def validate_inventory_document(value: object) -> InventoryDocument:
                 if isinstance(values.get(key), (tuple, list)) and len(values[key]) > MAX_INVENTORY_DESCRIPTORS:
                     raise InventoryLimitExceeded()
         _check_document_size(value)
-        result = _DOCUMENT.validate_python(_plain(value))
+        plain = _plain(value)
+        version = plain.get("version") if isinstance(plain, Mapping) else None
+        if type(version) is not int or version not in {1, 2}:
+            raise OutputEvidenceError()
+        result = (_DOCUMENT1 if version == 1 else _DOCUMENT2).validate_python(plain)
         if len(_encode(result.model_dump(mode="json"))) > MAX_INVENTORY_DOCUMENT_BYTES:
             raise InventoryLimitExceeded()
         return result

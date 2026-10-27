@@ -149,7 +149,7 @@ async def test_source_authority_withdrawn_during_real_response_refuses():
         await owner.stop()
 
 
-@pytest.mark.parametrize("headers", [{HEADER: "2"}, {HEADER: "1 "}, {"X-DeerFlow-Owner-User-Id": "other"}, {"Authorization": "private"}, {"X-Unrelated-Proof": "1"}])
+@pytest.mark.parametrize("headers", [{HEADER: "3"}, {HEADER: "1 "}, {"X-DeerFlow-Owner-User-Id": "other"}, {"Authorization": "private"}, {"X-Unrelated-Proof": "1"}])
 async def test_actual_owner_header_extension_does_not_admit_other_values_or_authority(headers):
     calls = []
     client, owner, admission = client_for(lambda request: calls.append(request) or httpx.Response(200, headers=ACK, json=inventory_projection()))

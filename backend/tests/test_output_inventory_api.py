@@ -140,7 +140,7 @@ INVENTORY_ACK = "X-DeerFlow-Output-Inventory-Version"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("value", ["2", "true", ""])
+@pytest.mark.parametrize("value", ["3", "true", ""])
 async def test_unknown_inventory_version_refuses_without_any_ack(route_environment, value):
     response = await route_environment.client.get("/api/threads/thread/runs/missing/output", headers={HEADER: "1", INVENTORY_HEADER: value})
     assert response.status_code == 422

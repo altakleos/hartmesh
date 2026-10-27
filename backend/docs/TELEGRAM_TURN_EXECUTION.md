@@ -33,7 +33,8 @@ An optional absolute owning-loop deadline can shorten the existing 30 seconds;
 it is pinned before the child is queued and cannot extend that limit.
 
 `read_output(record, current_link)` borrows the same retained HTTP owner and strict
-capture-version-2 facade. It creates nothing and has no latest-history or default
+capture-version-2 facade with explicit inventory document 2 and read protocol 2.
+It creates nothing and has no latest-history or default
 client fallback. A final synchronous original-attempt check follows the public
 waiter's last await before a buffered result is handed back.
 
@@ -72,9 +73,24 @@ and acknowledged prefixes, without a replacement answer or model reexecution.
 
 Pending, unavailable, changed, unsupported, incomplete or nonempty inventories
 remain held, including failed/cancelled runs whose inventory is unavailable.
-No scan is fabricated. Chats without a qualified personal-file view require a
-separate generic qualification before ordinary activation; AI-employee Home
-qualification belongs to the later instance consumer. The existing V1 fixed
+No scan is fabricated. A chat intentionally admitted without personal files can
+use the generic host-qualified `no_admitted_output_view` variant of document 2.
+It still requires an active human owner, the original live worker scope and
+unchanged managed routing, plus the separate actual assembly/presentation proof.
+The host refreshes current owner eligibility and routing before sealing; a copied
+projection, reason string, missing folder, raised or missing preparation result,
+or retired scope cannot grant this qualification. A normal fail-closed host
+projection may qualify its actual no-view routing after fresh confirmation.
+It attests the managed output view only, not
+filesystem emptiness or absence of other effects. Independent file, artifact and
+structured presentation offers still prevent empty-inventory delivery.
+Feature-off legacy paths retain real scans, and unknown or changed routing stays
+held. This first host adapter conservatively holds an already-initialized
+unsupported provider, or a provider initialized/replaced during the run, even
+when it might have been unused. Model-only runs need no sandbox acquisition.
+The same retained HTTP owner negotiates format 2; old servers can reject the
+original creating POST before run/storage/model effects, without a fallback POST.
+AI-employee Home qualification belongs to the later instance consumer. The V1 fixed
 notice API remains compatible and is not used as an empty-inventory permit.
 
 ## Bounded recovery
@@ -132,8 +148,8 @@ after it. A commit already issued after its valid final fence may settle later;
 that exact operation remains owned through cleanup. Schema remains `0044`.
 
 This is dormant recovery infrastructure, not completed ordinary-chat activation.
-The trusted ingress classifier, generic NoUser/no-admitted-output qualification,
-queue/Stop/explicit retry controls, drafts and other stage-one consumers remain
+The trusted ingress classifier, queue/Stop/explicit retry controls, drafts and
+other stage-one consumers remain
 separate work. AI-employee Home/Work authority is never inferred from a human
 requester's access.
 

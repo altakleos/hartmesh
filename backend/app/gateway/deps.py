@@ -956,6 +956,7 @@ def get_run_context(request: Request) -> RunContext:
         customer_administration_policy=request_customer_administration_policy(request),
         on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
         schedule_stream_cleanup=getattr(getattr(request.app.state, "stream_cleanups", None), "schedule", None),
+        qualify_output_view=getattr(request.app.state, "qualify_output_view", None),
     )
 
 
