@@ -12,6 +12,12 @@ inventory capabilities. Unsupported stores refuse before execution. Idempotent
 reuse cannot change capture versions. No table, migration, configuration version
 or existing receipt format changes.
 
+`{"version":2,"inventory_document_version":2}` explicitly selects document2.
+Omitting the selector preserves the exact original intent/document1 encoding;
+selector changes cannot reuse an existing run. This requires the actual typed
+host output-view qualifier in addition to the run/event capabilities. Its
+presence advertises protocol support, not a particular run's routing decision.
+
 ## Coverage
 
 The actual first-party SDK assembly issues a host-only profile bound to its
@@ -33,12 +39,29 @@ Scans cover created or modified regular files under `/mnt/user-data/outputs`,
 using actual frozen internal/spill exclusions. The same bounded confined walk
 reports roots as opened, missing or unavailable. Empty maps do not prove an
 examined empty root. Missing/disabled/truncated scans and chats without a
-qualified personal file view cannot claim complete-empty enumeration.
+qualified personal file view cannot claim complete-empty enumeration in document1.
 Cleanup invalidates scans taken before its effects.
+
+Document2 retains those scan facts under `output_view.kind=managed_outputs`.
+Its separate `no_admitted_output_view` variant positively attests that the
+original ordinary/custom run's managed output routing was pinned without an
+admitted output view. It contains no scan, opened roots, produced paths or
+exclusion promise. The host issues a lease against the original prepared scope,
+paths, human owner, thread, run and capture lifetime, then freshly confirms
+owner/routing and participating adapter fences before inventory publication.
+The worker retires that lease before leaving its original storage scope;
+copied references cannot reopen it. Model-only execution acquires no sandbox
+for this qualification. It grants no resource credentials, file access,
+continuous role-history proof or global filesystem/containment claim.
+
+Missing qualification, a `None` preparation result or a failed scan never proves
+the no-view variant. AgentExecution is outside this profile and refuses before
+environment preparation. The graph/profile/root and all carrier checks remain
+independent: file reoffers, artifacts and controls still count on a viewless run.
 
 | Document coverage | Meaning |
 | --- | --- |
-| `complete` | One completed qualified root, accounted declared carriers and complete before/final scans. `items: []` is positive empty evidence. |
+| `complete` | One completed qualified root and accounted declared carriers, with complete before/final scans or document2's positively confirmed no-view routing. `items: []` is positive empty evidence. |
 | `incomplete` | A closed reason and `observed_items`, only a known subset. An empty subset does not prove absence. |
 | `unsupported` | The profile or surface could not be qualified; observations remain a subset. |
 
@@ -76,6 +99,12 @@ The existing output endpoint accepts
 `X-DeerFlow-Output-Inventory-Version: 1`, alongside the existing channel read
 acknowledgement. Its version 2 result nests the unchanged version 1 `output`
 projection and `inventory: {state, evidence, document, reason}`.
+
+Read protocol2 uses literal `2` in both inventory headers and accepts stored
+documents1 and2. Protocol1 refuses a run declaring document2, including pending
+and unavailable outcomes, without acknowledging inventory support. A matched
+document must have the exact format selected by the durable creating intent;
+neither a protocol upgrade nor a later read can reinterpret an old document.
 
 `matched` proves event integrity, independently of coverage or feature handling.
 `pending` requires actual active authority and both proofs absent. `unavailable`

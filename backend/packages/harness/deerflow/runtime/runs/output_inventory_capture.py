@@ -23,6 +23,7 @@ from .output_inventory import (
     MAX_INVENTORY_DESCRIPTORS,
     MAX_INVENTORY_DOCUMENT_BYTES,
     InventoryLimitExceeded,
+    NoAdmittedOutputView,
     build_event_inventory_evidence,
     inventory_document_to_dict,
     output_receipt_digest,
@@ -32,6 +33,7 @@ from .output_inventory import (
 from .output_inventory_source import audit_inventory_source_event, read_durable_inventory_source
 
 _ROOT = "/mnt/user-data/outputs"
+_MANAGED_SCAN = object()
 
 
 def _field(value, key, default=None):
@@ -64,7 +66,10 @@ def inventory_scan(before, after):
 class OutputInventoryCapture:
     """Owning-loop bounded observer; no I/O, provider work or caller authority."""
 
-    def __init__(self):
+    def __init__(self, *, document_version=1):
+        if type(document_version) is not int or document_version not in {1, 2}:
+            raise OutputEvidenceError() from None
+        self._document_version = document_version
         self._profile = None
         self._root = None
         self._epochs = 0
@@ -475,10 +480,12 @@ class OutputInventoryCapture:
             self._incomplete()
         self._terminal = (tuple(terminal), artifacts)
 
-    def document(self, output_receipt, *, status, before, after, runtime_presented_files):
+    def document(self, output_receipt, *, status, before, after, runtime_presented_files, output_view=_MANAGED_SCAN):
+        if output_view is not _MANAGED_SCAN and (self._document_version != 2 or output_view is not None and type(output_view) is not NoAdmittedOutputView):
+            raise OutputEvidenceError() from None
         receipt = validate_receipt(output_receipt)
         common = dict(
-            version=1,
+            version=self._document_version,
             profile="terminal-presentation-v1" if self._profile is not None else None,
             owner_user_id=receipt.owner_user_id,
             thread_id=receipt.thread_id,
@@ -488,8 +495,16 @@ class OutputInventoryCapture:
             root_epoch=self._root,
         )
         if self._profile is None or self._epochs != 1:
-            return validate_inventory_document({**common, "coverage": "unsupported", "reason": "unsupported_profile" if self._profile is None else "multiple_epochs", "observed_items": [], "scan": None})
-        scan = inventory_scan(before, after)
+            return validate_inventory_document(
+                {
+                    **common,
+                    "coverage": "unsupported",
+                    "reason": "unsupported_profile" if self._profile is None else "multiple_epochs",
+                    "observed_items": [],
+                    **({"scan": None} if self._document_version == 1 else {"output_view": None if output_view is _MANAGED_SCAN else output_view}),
+                }
+            )
+        scan = inventory_scan(before, after) if output_view is _MANAGED_SCAN else None
         files = {}
         structured = []
 
@@ -568,21 +583,28 @@ class OutputInventoryCapture:
             if digest != self._baseline_fields.get(key) or current is not None and current[0] == digest:
                 witness = current[1] if current is not None and current[0] == digest else dict(kind="root_snapshot", root_epoch=self._root, message_id=None)
                 structured.append(dict(kind="structured", carrier="terminal_field", value_sha256=digest, witness=witness))
-        if scan["state"] == "complete":
+        if scan is not None and scan["state"] == "complete":
             for path in scan["produced_paths"]:
                 add_file(path, "output_change", dict(kind="output_scan"))
         items = list(files.values()) + structured
         reason = self._reason
         if reason is None and (not self._complete or str(status) != "success"):
             reason = "execution_stopped"
-        if reason is None and scan["state"] != "complete":
+        if reason is None and not isinstance(output_view, NoAdmittedOutputView) and (scan is None or scan["state"] != "complete"):
             reason = "scan_incomplete"
         if len(items) > MAX_INVENTORY_DESCRIPTORS:
             reason = "enumeration_overflow"
             items = items[:MAX_INVENTORY_DESCRIPTORS]
         original_items = tuple(items)
         while True:
-            data = {**common, "scan": scan, "coverage": "complete" if reason is None else "incomplete", "reason": reason, "items" if reason is None else "observed_items": items}
+            view = output_view if output_view is not _MANAGED_SCAN else dict(kind="managed_outputs", scan=scan) if scan is not None else None
+            data = {
+                **common,
+                **({"scan": scan} if self._document_version == 1 else {"output_view": view}),
+                "coverage": "complete" if reason is None else "incomplete",
+                "reason": reason,
+                "items" if reason is None else "observed_items": items,
+            }
             try:
                 return validate_inventory_document(data)
             except InventoryLimitExceeded:

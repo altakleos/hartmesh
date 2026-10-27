@@ -42,7 +42,7 @@ async def coordinator_environment(attempt_environment):
             return await e.responder(request)
         if request.url.path.endswith("/" + e.thread_id):
             return httpx.Response(200, json={"thread_id": e.thread_id, "owner_user_id": e.link.owner_user_id, "agent_instance": None, "metadata": {"channel_agent_name": "lead_agent"}})
-        return httpx.Response(404, headers={"X-DeerFlow-Channel-Execution-Version": "1", "X-DeerFlow-Output-Inventory-Version": "1"}, json={})
+        return httpx.Response(404, headers={"X-DeerFlow-Channel-Execution-Version": "1", "X-DeerFlow-Output-Inventory-Version": "2"}, json={})
 
     e.http = GatewayClientOwner(gateway_url="https://gateway.example", langgraph_url="https://runtime.example/original/api", transport=httpx.MockTransport(respond))
     e.host = PublicationAttemptAuthority(
@@ -86,6 +86,7 @@ async def test_real_sql_handoff_is_once_with_exact_private_context(coordinator_e
     assert message.execution_required is True
     assert message.execution_context.publication_id == record.publication_id
     assert message.execution_context.client.capture_inventory is True and message.execution_context.client.capture_output is True
+    assert message.execution_context.client.inventory_document_version == 2
     assert message.metadata["channel_turn_id"] == record.publication_id and message.metadata["event_id"] == record.event_id
     assert message.metadata["human_message_kwargs"]["channel_turn_id"] == record.publication_id
     assert record.dispatch_started is True

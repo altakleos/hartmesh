@@ -33,6 +33,7 @@ from .output import (
     RunOutputSnapshot,
     UnavailableOutputReceipt,
     capture_from_kwargs,
+    capture_intent_to_dict,
     receipt_from_kwargs,
     validate_receipt_status,
 )
@@ -108,7 +109,7 @@ def _new_run_kwargs(kwargs: dict | None, *, on_disconnect: DisconnectMode) -> di
     values.pop(OUTPUT_CAPTURE_DISCONNECT_KEY, None)
     intent = capture_from_kwargs(values)
     if intent is not None:
-        values[OUTPUT_CAPTURE_KEY] = {"version": intent.version}
+        values[OUTPUT_CAPTURE_KEY] = capture_intent_to_dict(intent)
         values[OUTPUT_CAPTURE_DISCONNECT_KEY] = DisconnectMode(on_disconnect).value
     return values
 

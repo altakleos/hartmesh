@@ -31,7 +31,7 @@ from test_telegram_supervisor import build
 from app.channels.manager import ChannelManager
 from app.channels.message_bus import InboundMessage
 from app.channels.store import ChannelStore
-from app.gateway import services
+from app.gateway import chat_storage, services
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.csrf_middleware import CSRFMiddleware
 from app.gateway.routers import run_output, thread_runs, threads
@@ -44,7 +44,7 @@ from app.telegram_bots.settings import SettingsRepository
 from deerflow.agent_instances.conversations import AgentConversations
 from deerflow.agents.lead_agent import agent
 from deerflow.config import app_config
-from deerflow.config.paths import Paths, paths_scope
+from deerflow.config.paths import Paths, get_paths, paths_scope
 from deerflow.persistence.channel_connections.sql import ChannelConnectionRepository
 from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow, TelegramOutboxRow
 from deerflow.runtime import MemoryStreamBridge
@@ -57,7 +57,7 @@ ANSWER = "**Durable answer**"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["text", "custom_text", "produced_file", "phase_one"])
+@pytest.mark.parametrize("case", ["text", "custom_text", "produced_file", "phase_one", "no_user_text", "no_user_custom_text", "no_user_uncertain"])
 async def test_actual_managed_turn_creates_once_and_delivers_only_verified_output(capture_environment, monkeypatch, tmp_path, case):
     e = capture_environment
     async with e.engine.begin() as connection:
@@ -72,7 +72,8 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
     live = await install_live_owner(db, monkeypatch, owner=OWNER)
     paths = await asyncio.to_thread(Paths, tmp_path / "data")
     with paths_scope(paths):
-        custom = case in {"custom_text", "recovery_custom_text"}
+        custom = case in {"custom_text", "recovery_custom_text", "no_user_custom_text"}
+        no_user = case.startswith("no_user_")
         target = "profile-agent" if custom else "lead_agent"
         if custom:
             from deerflow.persistence.agents.file import FileAgentStore
@@ -106,16 +107,29 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
         app.state.store = OwnedStore(prototype.app.state.store, profile="memory", loop=asyncio.get_running_loop())
         app.state.run_event_store, app.state.run_store = e.event_store, e.repository
         app.state.agent_conversations = AgentConversations(None, session_factory=e.sf)
+        app.state.storage_spaces_enabled = no_user
+        if no_user:
+            from unittest.mock import AsyncMock
+
+            monkeypatch.setattr(chat_storage, "storage_state", AsyncMock(return_value=SimpleNamespace(state="unavailable", reason="preparing")))
+        # Observe the actual worker scope without creating a sandbox. User
+        # identity is the live SQL account installed above, even without files.
+        monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_initialized_sandbox_provider", lambda: None)
+        storage_lifetime = chat_storage.chat_storage_lifecycle(app, enabled=no_user)
+        storage_entered = False
         app.include_router(threads.router)
         app.include_router(thread_runs.router)
         app.include_router(run_output.router, prefix="/api/threads")
         http_calls = []
+        http_responses = []
 
         class RecordedASGI(httpx.ASGITransport):
             async def handle_async_request(self, request):
                 # Never retain authentication headers/cookies in diagnostics.
                 http_calls.append((request.method, request.url.path, json.loads(request.content) if request.content else None))
-                return await super().handle_async_request(request)
+                response = await super().handle_async_request(request)
+                http_responses.append((request.method, request.url.path, response.status_code))
+                return response
 
         owner = GatewayClientOwner(gateway_url="http://gateway.test", langgraph_url="http://gateway.test/api", transport=RecordedASGI(app=app))
         boot = build(db, monkeypatch)
@@ -142,6 +156,13 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
             messages = args[0] if args else kwargs["messages"]
             model_inputs.extend(message for message in messages if message.type == "human" and "channel_turn_id" in message.additional_kwargs)
             model_entered.set()
+            if no_user:
+                from deerflow.spaces.chat_paths import ChatStoragePaths
+
+                assert type(get_paths()) is ChatStoragePaths
+                assert get_paths().thread_data(thread_id, user_id=OWNER) == {}
+                if case == "no_user_uncertain":
+                    app.state.storage_spaces_enabled = False
             if case == "phase_one":
                 await model_release.wait()
             if case == "produced_file":
@@ -150,6 +171,8 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
 
         monkeypatch.setattr(type(model), "_agenerate", generate)
         try:
+            await storage_lifetime.__aenter__()
+            storage_entered = True
             await supervisor.check()
             await supervisor.start()
             await asyncio.wait_for(supervisor._send_event.wait(), 3)
@@ -191,18 +214,24 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
                 origins.append(await inbox.route(row, kind="turn", target_id=target, basis={"input_profile": {"version": 1, "kind": "plain_text", "forwarded": False}}, operation_ids=[]))
             inbound = InboundMessage(channel_name="telegram", chat_id=str(link.chat_id), user_id=str(link.telegram_user_id), text="First accepted question", connection_id=link.connection_id, owner_user_id=OWNER, workspace_id=str(bot))
             thread_id = await supervisor.threads.ensure_thread(channel.link, inbound, origin=origins[0])
-            await asyncio.to_thread(paths.ensure_thread_dirs, thread_id, user_id=OWNER)
+            if not no_user:
+                await asyncio.to_thread(paths.ensure_thread_dirs, thread_id, user_id=OWNER)
             async with e.sf.begin() as writer:
                 for row in await writer.scalars(select(TelegramOutboxRow)):
                     row.state = "sent"  # Initial welcome is outside this model-delivery test.
             await manager.start()
             record = await supervisor.publications.dispatch(channel.link, origins, thread_id=thread_id)
-            await asyncio.wait_for(model_entered.wait(), 15)
+            try:
+                await asyncio.wait_for(model_entered.wait(), 15)
+            except TimeoutError:
+                pytest.fail(f"Model never entered; HTTP outcomes: {http_responses!r}")
             if case == "phase_one":
                 await supervisor.begin_shutdown()
                 assert not owner.closed and supervisor._subscribed
                 model_release.set()
             await asyncio.wait_for(final.wait(), 15)
+            if case == "no_user_uncertain":
+                app.state.storage_spaces_enabled = True
             assert any(message.text == ANSWER for message in frames if message.is_final)
             if case in {"recovery_text", "recovery_custom_text"}:
                 # Recreate only the recovery/coordinator/source consumer. The
@@ -234,14 +263,14 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
             assert restore_original_human_message(model_inputs[0]).content == "First accepted question\n\nSecond accepted question"
             assert model_inputs[0].additional_kwargs["channel_turn_id"] == record.publication_id
             runs = await e.repository.list_by_thread(thread_id, user_id=OWNER)
-            assert len(runs) == 1 and runs[0]["kwargs"]["output_capture"] == {"version": 2}
+            assert len(runs) == 1 and runs[0]["kwargs"]["output_capture"] == {"version": 2, "inventory_document_version": 2}
             assert runs[0]["kwargs"]["channel_execution"]["publication_id"] == record.publication_id
             assert runs[0]["kwargs"]["channel_execution"]["agent_name"] == (target if custom else None)
             assert runs[0]["kwargs"]["output_evidence"]["input_message_id"] == strip_injected_user_message_id_suffix(model_inputs[0].id)
             creates = [body for method, path, body in http_calls if method == "POST" and path.endswith(("/runs/stream", "/runs/wait", "/runs"))]
             assert len(creates) == 1
             assert creates[0]["channel_execution"]["publication_id"] == record.publication_id
-            if case == "produced_file":
+            if case in {"produced_file", "no_user_uncertain"}:
                 assert observed.state == "held" and observed.reason == "inventory_unhandled"
                 assert not any(call.endpoint == "sendMessage" for call in boot.normal.calls)
             else:
@@ -251,6 +280,8 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
                 proof = planned.payload["reply_basis"]["outcome"]["projection"]
                 assert planned.payload["reply_basis"]["version"] == 2
                 assert proof["inventory"]["document"]["coverage"] == "complete" and proof["inventory"]["document"]["items"] == []
+                assert proof["inventory"]["document"]["version"] == 2
+                assert proof["inventory"]["document"]["output_view"]["kind"] == ("no_admitted_output_view" if no_user else "managed_outputs")
                 if case == "phase_one":
                     assert not owner.closed and planned.state == "pending"
                     assert not any(call.endpoint == "sendMessage" for call in boot.normal.calls)
@@ -275,3 +306,5 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
             await e.manager.shutdown(timeout=2)
             await app.state.stream_cleanups.close()
             await bridge.close()
+            if storage_entered:
+                await storage_lifetime.__aexit__(None, None, None)

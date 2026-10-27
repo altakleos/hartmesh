@@ -361,7 +361,7 @@ class PublicationCoordinator:
     def _facade(self, record, admission):
         if (admission.thread_id, admission.endpoint_id) != (record.scope.thread_id, record.scope.endpoint_id):
             _refuse()
-        return ChannelExecutionFacade(self._http_owner, scope=_channel_scope(record), admission=admission, capture_output=True, capture_inventory=True)
+        return ChannelExecutionFacade(self._http_owner, scope=_channel_scope(record), admission=admission, capture_output=True, capture_inventory=True, inventory_document_version=2)
 
     @staticmethod
     def _matches(run, record):

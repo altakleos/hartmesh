@@ -16,8 +16,8 @@ from urllib.parse import quote
 
 from app.channels.execution import ChannelExecutionBusyError, ChannelExecutionProtocolError, ChannelExecutionScope, ChannelHttpError, ChannelHttpOwner, ChannelOwnedStream, ChannelRunAdmission, JsonValue
 from app.gateway.channel_execution import CHANNEL_EXECUTION_BUSY_CODE, CHANNEL_EXECUTION_REQUEST_HEADER, CHANNEL_EXECUTION_RESPONSE_HEADER, CHANNEL_TURN_ID_KEY, ChannelExecutionReceipt, ChannelExecutionRequest, receipt_from_run_kwargs
-from app.gateway.run_output import OUTPUT_INVENTORY_REQUIRE_HEADER, OUTPUT_INVENTORY_VERSION, OUTPUT_INVENTORY_VERSION_HEADER, RunOutputProjection, RunOutputProjectionV2
-from deerflow.runtime.runs.output import OUTPUT_CAPTURE_KEY, OutputCaptureIntent
+from app.gateway.run_output import OUTPUT_INVENTORY_REQUIRE_HEADER, OUTPUT_INVENTORY_VERSION_HEADER, RunOutputProjection, RunOutputProjectionV2
+from deerflow.runtime.runs.output import OUTPUT_CAPTURE_KEY, capture_intent_to_dict
 from deerflow.utils.file_io import await_drained
 
 
@@ -257,10 +257,14 @@ class _Runs:
 
 
 class ChannelExecutionFacade:
-    def __init__(self, owner: ChannelHttpOwner, *, scope: ChannelExecutionScope, admission: ChannelRunAdmission, capture_output: bool = False, capture_inventory: bool = False):
+    def __init__(self, owner: ChannelHttpOwner, *, scope: ChannelExecutionScope, admission: ChannelRunAdmission, capture_output: bool = False, capture_inventory: bool = False, inventory_document_version: int = 1):
         if (
             type(capture_output) is not bool
             or type(capture_inventory) is not bool
+            or type(inventory_document_version) is not int
+            or inventory_document_version not in (1, 2)
+            or inventory_document_version == 2
+            and not capture_inventory
             or capture_inventory
             and not capture_output
             or type(scope) is not ChannelExecutionScope
@@ -272,6 +276,7 @@ class ChannelExecutionFacade:
             _refuse()
         _identity(scope.thread_id)
         self._owner, self._scope, self._admission, self._capture_output, self._capture_inventory = owner, scope, admission, capture_output, capture_inventory
+        self._inventory_document_version = inventory_document_version
         self._thread_path = "threads/" + quote(scope.thread_id, safe="")
         self.threads, self.runs = _Threads(self), _Runs(self)
 
@@ -286,6 +291,10 @@ class ChannelExecutionFacade:
     @property
     def capture_inventory(self) -> bool:
         return self._capture_inventory
+
+    @property
+    def inventory_document_version(self) -> int:
+        return self._inventory_document_version
 
     async def _authorize(self, operation):
         try:
@@ -368,7 +377,7 @@ class ChannelExecutionFacade:
             private["assistant_id"] = self.scope.assistant_id
             private["context"] = (private.get("context") or {}) | {"agent_name": self.scope.agent_name}
             if self.capture_output:
-                private[OUTPUT_CAPTURE_KEY] = {"version": 2} if self.capture_inventory else OutputCaptureIntent(version=1).model_dump(mode="json")
+                private[OUTPUT_CAPTURE_KEY] = capture_intent_to_dict({"version": 2 if self.capture_inventory else 1, **({"inventory_document_version": 2} if self.inventory_document_version == 2 else {})})
             return private, headers
         except Exception:
             _refuse()
@@ -429,8 +438,9 @@ class ChannelExecutionFacade:
         run_id = _identity(run_id)
         path = self._thread_path + "/runs/" + quote(run_id, safe="") + "/output"
         if self.capture_inventory:
-            response = await self._request("source_read", path, headers={CHANNEL_EXECUTION_REQUEST_HEADER: "1", OUTPUT_INVENTORY_REQUIRE_HEADER: OUTPUT_INVENTORY_VERSION})
-            if response.headers.get(CHANNEL_EXECUTION_RESPONSE_HEADER.lower()) != "1" or response.headers.get(OUTPUT_INVENTORY_VERSION_HEADER.lower()) != OUTPUT_INVENTORY_VERSION:
+            version = str(self.inventory_document_version)
+            response = await self._request("source_read", path, headers={CHANNEL_EXECUTION_REQUEST_HEADER: "1", OUTPUT_INVENTORY_REQUIRE_HEADER: version})
+            if response.headers.get(CHANNEL_EXECUTION_RESPONSE_HEADER.lower()) != "1" or response.headers.get(OUTPUT_INVENTORY_VERSION_HEADER.lower()) != version:
                 _refuse()
             if response.status_code == 404:
                 return None
@@ -443,6 +453,8 @@ class ChannelExecutionFacade:
             return None
         try:
             projection = RunOutputProjectionV2.model_validate(result) if self.capture_inventory else RunOutputProjection.model_validate(result)
+            if self.capture_inventory and projection.inventory.document is not None and projection.inventory.document.version > self.inventory_document_version:
+                _refuse()
             output = projection.output if self.capture_inventory else projection
             channel = output.channel_execution
             if (output.owner_user_id, output.thread_id, output.run_id) != (self.scope.owner_user_id, self.scope.thread_id, run_id) or (channel.publication_id, channel.assistant_id, channel.agent_name) != (

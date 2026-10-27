@@ -102,12 +102,48 @@ before acknowledgement. This proves a supported source lookup, not final-output
 completeness. The facade also checks the acknowledgement and exact receipt scope;
 absence or ambiguity permits further reads, never a second creating POST.
 
-Schema remains revision `0043_telegram_inbox_chat_scope`; config stays version 55.
+Output negotiation adds no database migration or configuration setting.
 
-## Prepared output protocol
+## Output and inventory negotiation
 
-The optional host capture flag and strict output reader are dormant client
-primitives. The current creating schema still rejects capture before execution;
-the server output route and worker provenance are separate work. Generic SQL
-receipt/snapshot rules and the prepared closed projection are described in
-[durable output evidence](RUN_OUTPUT_EVIDENCE.md).
+Creating requests may select `output_capture: {"version": 1}` for sealed text or
+`{"version": 2}` for text plus terminal inventory document1. These exact existing
+encodings remain the defaults. The explicit request
+`{"version": 2, "inventory_document_version": 2}` selects document2; the selector
+accepts only integer2, and cannot accompany capture1. An idempotent retry must
+match the entire original capture request. Receipts and inventory evidence keep
+their existing version1 and atomic pair persistence.
+
+Document2 distinguishes a positively qualified managed output view from the
+host's run-bound `no_admitted_output_view` routing fact. A missing personal file
+view, empty input, failed scan or absent provider is not that fact. The actual
+host qualifier must be available before preparation. A viewless completion also
+needs its original run/path/I/O-owner lease freshly confirmed, independently of
+the qualified terminal presentation profile. Unqualified routing remains
+incomplete; instance execution refuses this explicit format. Existing callers
+retain their behavior.
+
+The output endpoint uses the existing strict channel-read header plus
+`X-DeerFlow-Require-Output-Inventory: 1` or `2`. Exactly one supported value is
+required when requesting inventory. The matching response header is
+`X-DeerFlow-Output-Inventory-Version`. Protocol2 can return original documents1
+and2; it never upgrades their format. A matched document must equal the format
+selected by the durable creating request. Protocol1 refuses a saved selector2,
+including pending and unavailable outcomes, without acknowledgement. The
+text-only read remains unchanged.
+
+Both protocols audit the durable text and inventory sources, reread the original
+pair/status/admission, then refresh current authority before acknowledgement. A
+supported404 acknowledges only after actual backend/codec qualification and
+fresh scope checks. Missing acknowledgement, malformed evidence or a backend
+failure remains uncertainty, never empty inventory.
+
+`ChannelExecutionFacade(..., capture_output=True, capture_inventory=True,
+inventory_document_version=2)` explicitly selects the new request and read
+protocol using its original retained HTTP owner. The property is read-only;
+omission preserves the old body/header. An older peer may refuse the one
+original creating POST before preparation/model work. The client does not
+discover support with a second request, retry, downgrade or replace its owner.
+
+See [durable output evidence](RUN_OUTPUT_EVIDENCE.md) and
+[terminal inventory](RUN_OUTPUT_INVENTORY.md) for provenance and lifecycle rules.

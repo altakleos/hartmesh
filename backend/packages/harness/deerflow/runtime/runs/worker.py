@@ -124,6 +124,7 @@ from .output_capture import OutputCaptureObserver
 from .output_inventory import inventory_evidence_from_kwargs, validate_inventory_pair
 from .output_inventory_capture import OutputInventoryCapture, persist_output_inventory
 from .output_source import read_durable_output_source
+from .output_view import NoAdmittedOutputViewLease, OutputViewQualifier, OutputViewRequest
 from .schemas import RunStatus, ThreadOperationKind
 
 logger = logging.getLogger(__name__)
@@ -622,6 +623,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             "__run_loop_detection_recorder",
             "__run_tool_promotion_recorder",
             "__run_tool_progress_recorder",
+            "qualify_output_view",
             # The Gateway pins the run's project snapshot under this key at
             # admission (spec §7.1); a caller-supplied value in
             # ``config['context']`` must never be merged (§12).
@@ -755,6 +757,8 @@ class RunContext:
     chat_storage_scope: Callable[..., AbstractAsyncContextManager[Any]] | None = None
     # The owning app retains the task privately; never put this in run payloads.
     schedule_stream_cleanup: Callable[[str, float], None] | None = None
+    # Host-only output routing qualification; never runtime/checkpoint data.
+    qualify_output_view: OutputViewQualifier | None = None
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -1001,6 +1005,11 @@ async def run_agent(bridge: StreamBridge, run_manager: RunManager, record: RunRe
                 return
         ctx = kwargs.get("ctx")
         supported = callable(getattr(ctx, "schedule_stream_cleanup", None)) and all(value is None or getattr(value, "supports_capture_io", False) is True for value in (getattr(ctx, "checkpointer", None), getattr(ctx, "store", None)))
+        intent = capture_from_kwargs(record.kwargs)
+        if intent is not None and intent.document_version == 2:
+            # Refuse an identifiable unsupported profile before instance
+            # preparation can acquire a provider/environment.
+            supported = supported and getattr(ctx, "agent_execution", None) is None and type(getattr(ctx, "qualify_output_view", None)) is OutputViewQualifier
         if not supported:
             if not record.terminal_confirmed and record.startup_phase is RunStartupPhase.unstarted:
                 await run_manager.fail_start_if_pending(record.run_id, error="Capture I/O profile is unsupported")
@@ -1153,6 +1162,8 @@ async def _run_agent(
     terminal_status_kwargs = {"persist": False} if event_store is not None or capture_requested else {}
     output_capture: OutputCaptureObserver | None = None
     inventory_capture: OutputInventoryCapture | None = None
+    output_view_request: OutputViewRequest | None = None
+    output_view_lease: NoAdmittedOutputViewLease | None = None
     inventory_cleanup: InventoryCleanupOutcome | None = None
     output_confirmed = False
     execution_cancelled = False
@@ -1380,12 +1391,22 @@ async def _run_agent(
                 if audit.state != "matched":
                     raise OutputEvidenceError()
             if inventory_capture is not None:
+                output_view_kwargs = {}
+                if output_view_lease is not None:
+                    try:
+                        output_view_kwargs["output_view"] = await output_view_lease.confirm(output_view_request)
+                    except OutputEvidenceError:
+                        # A failed routing audit is unknown view coverage,
+                        # independent of the already-audited text source.
+                        # Explicit None prevents adoption of an older scan.
+                        output_view_kwargs["output_view"] = None
                 document = inventory_capture.document(
                     receipt,
                     status=outcome,
                     before=pre_run_output_snapshot,
                     after=inventory_capture.final_scan,
                     runtime_presented_files=_field_runtime_presentation(runtime),
+                    **output_view_kwargs,
                 )
                 evidence = await persist_output_inventory(event_store, output_receipt=receipt, status=outcome, document=document)
                 attempt = await run_manager.begin_inventory_finalization(record, outcome, output_receipt=receipt, inventory_evidence=evidence, cleanup_outcome=inventory_cleanup, error=record.error, stop_reason=record.stop_reason)
@@ -1434,7 +1455,7 @@ async def _run_agent(
             if intent.version == 2:
                 if getattr(run_manager, "supports_output_inventory", False) is not True or getattr(event_store, "supports_durable_output_inventory", False) is not True:
                     raise OutputEvidenceError()
-                inventory_capture = OutputInventoryCapture()
+                inventory_capture = OutputInventoryCapture(document_version=intent.document_version)
             output_capture = OutputCaptureObserver(owner_user_id=record.user_id, thread_id=thread_id, run_id=run_id, **({"inventory": inventory_capture} if inventory_capture is not None else {}))
         normalized_stream_modes = normalize_stream_modes(stream_modes)
         requested_modes: set[str] = set(normalized_stream_modes)
@@ -1597,6 +1618,11 @@ async def _run_agent(
             prepared_chat = await chat_storage_stack.enter_async_context(ctx.chat_storage_scope(user_id=get_effective_user_id(), thread_id=thread_id))
             if prepared_chat is not None:
                 chat_files_available = prepared_chat.mounts.user is not None
+                if inventory_capture is not None and intent.document_version == 2:
+                    from deerflow.config.paths import peek_scoped_paths
+
+                    output_view_request = OutputViewRequest(record.user_id, thread_id, run_id, peek_scoped_paths(), prepared_chat, io_owner)
+                    output_view_lease = await ctx.qualify_output_view(output_view_request)
 
         if event_store is not None and ctx.agent_execution is None and chat_files_available:
             workspace_changes_user_id = get_effective_user_id()
@@ -2441,6 +2467,8 @@ async def _run_agent(
                         run_id,
                     )
                 finally:
+                    if output_view_lease is not None:
+                        output_view_lease.retire()
                     try:
                         await chat_storage_stack.aclose()
                     except BaseException as exc:

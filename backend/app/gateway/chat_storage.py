@@ -1,8 +1,9 @@
 """Host-only fresh personal/company chat storage admission."""
 
 import asyncio
+import sys
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 
@@ -40,6 +41,120 @@ class PreparedChatStorage:
     reason: str | None = None
     shared_reason: str | None = None
     protected_roots: tuple[Path, ...] = ()
+    _output_scope: object | None = field(default=None, repr=False, compare=False)
+
+
+class _OutputViewScope:
+    """Original worker admission lifetime; copying a DTO cannot copy authority."""
+
+    def __init__(self, app, prepared, user_id, thread_id):
+        from deerflow.runtime.runs.capture_io import current_capture_io_owner
+        from deerflow.sandbox.sandbox_provider import get_initialized_sandbox_provider
+
+        self.app, self.user_id, self.thread_id = app, user_id, thread_id
+        self.host = getattr(app.state, "chat_storage_host", None)
+        self.paths = prepared.paths
+        self.signature = self.paths.routing_signature()
+        self.credential = _credential_allowed.get()
+        self.io_owner = current_capture_io_owner()
+        self.provider = get_initialized_sandbox_provider()
+        self.open = True
+        self.prepared = replace(prepared, _output_scope=self)
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
+    def check(self, request):
+        from deerflow.runtime.runs.output import OutputEvidenceError
+        from deerflow.sandbox.sandbox_provider import get_initialized_sandbox_provider
+        from deerflow.spaces.chat_bridge import get_chat_storage_host
+
+        if (
+            not self.open
+            or request.prepared is not self.prepared
+            or request.paths is not self.paths
+            or request.io_owner is not self.io_owner
+            or get_paths() is not self.paths
+            or (request.owner_user_id, request.thread_id) != (self.user_id, self.thread_id)
+            or _credential_allowed.get() is not self.credential
+            or self.paths.routing_signature() != self.signature
+            or getattr(self.app.state, "storage_spaces_enabled", False) is not True
+            or self.host is None
+            or getattr(self.app.state, "chat_storage_host", None) is not self.host
+            or get_chat_storage_host() is not self.host
+            or get_initialized_sandbox_provider() is not self.provider
+        ):
+            raise OutputEvidenceError() from None
+        with self.host._lock:
+            if self.host._closed:
+                raise OutputEvidenceError() from None
+        if self.provider is not None:
+            # Only this concrete adapter refreshes every actual managed use
+            # against the pinned routing and its retained-client incarnation.
+            # An actual initialized instance already loaded its concrete
+            # modules; refusing another provider must not cold-import them.
+            provider_type = getattr(sys.modules.get("deerflow.community.aio_sandbox.aio_sandbox_provider"), "AioSandboxProvider", None)
+            backend_type = getattr(sys.modules.get("deerflow.community.aio_sandbox.local_backend"), "LocalContainerBackend", None)
+            if provider_type is None or type(self.provider) is not provider_type or backend_type is None or type(self.provider._backend) is not backend_type or self.provider._storage_host() is not self.host:
+                raise OutputEvidenceError() from None
+
+    async def check_owner(self):
+        from app.gateway.deps import get_user_repo
+        from app.gateway.storage_spaces import human_lookup
+        from deerflow.runtime.runs.output import OutputEvidenceError
+
+        actor = _bound_principal()
+        if actor != PrincipalRef("human", self.user_id):
+            raise OutputEvidenceError() from None
+        files = getattr(self.app.state, "storage_spaces", None)
+        if isinstance(files, SpaceFiles):
+            await run_capture_io(lambda: files.registry._actor(actor))
+        elif await run_capture_io(lambda: human_lookup(get_user_repo())(actor)) is None:
+            raise OutputEvidenceError() from None
+
+    async def refresh(self, request):
+        from deerflow.runtime.runs.output import OutputEvidenceError
+
+        self.check(request)
+        await self.check_owner()
+        current = await prepare_chat_storage(self.app, self.user_id, self.thread_id)
+        if type(current) is not PreparedChatStorage or type(current.paths) is not ChatStoragePaths or current.paths.routing_signature() != self.signature or current.mounts.binds != ():
+            raise OutputEvidenceError() from None
+        await self.check_owner()
+        self.check(request)
+
+
+def output_view_qualifier(app):
+    """Implementation support is explicit; positive evidence stays per-run."""
+    from deerflow.runtime.runs.output import OutputEvidenceError
+    from deerflow.runtime.runs.output_view import NoAdmittedOutputViewLease, OutputViewQualifier
+
+    async def issue(request):
+        prepared = request.prepared
+        scope = getattr(prepared, "_output_scope", None)
+        if type(prepared) is not PreparedChatStorage or type(scope) is not _OutputViewScope or scope.app is not app or scope.prepared is not prepared:
+            return None
+        # The exact host-created projection has no User or Shared route.
+        # Reasons and has_personal_files are deliberately not evidence.
+        if scope.signature != (request.owner_user_id, (None, None), (None, None)) or prepared.mounts.binds != ():
+            return None
+        try:
+            await scope.refresh(request)
+        except (OutputEvidenceError, InvalidPrincipal, SpaceDenied, SpaceConflict, SpaceNotFound, BackingUnavailable, OSError, ValueError):
+            return None
+
+        async def refresh():
+            try:
+                await scope.refresh(request)
+            except (InvalidPrincipal, SpaceDenied, SpaceConflict, SpaceNotFound, BackingUnavailable, OSError, ValueError):
+                raise OutputEvidenceError() from None
+
+        return NoAdmittedOutputViewLease(request, refresh=refresh)
+
+    return OutputViewQualifier(issue)
 
 
 async def _snapshot_in_session(session, files, actor, namespace, key, *, required=None):
@@ -239,8 +354,13 @@ def chat_storage_scope_factory(app):
             yield None
             return
         await run_capture_io(lambda: await_drained(run_file_io(prepared.paths.check_thread_capacity, thread_id, user_id=user_id)))
-        with paths_scope(prepared.paths):
-            yield prepared
+        output_scope = _OutputViewScope(app, prepared, user_id, thread_id) if type(prepared) is PreparedChatStorage and type(prepared.paths) is ChatStoragePaths else None
+        try:
+            with paths_scope(prepared.paths):
+                yield output_scope.prepared if output_scope is not None else prepared
+        finally:
+            if output_scope is not None:
+                output_scope.open = False
 
     return scope
 
@@ -275,18 +395,22 @@ async def chat_storage_lifecycle(app, *, enabled):
 
     app.state.chat_storage_host = None
     app.state.chat_storage_scope = None
+    qualifier = output_view_qualifier(app)
+    app.state.qualify_output_view = qualifier
     app.state.resident_runtime = None
-    if enabled:
-        from app.gateway.native_screenshots import publish_screenshot
-        from deerflow.sandbox.admission import ProviderAdmission
-
-        owner = getattr(app.state, "pool_runtime_owner", None)
-        admission = ProviderAdmission() if owner is not None else None
-        host = ChatStorageHost(asyncio.get_running_loop(), partial(prepare_chat_storage, app), publish=partial(publish_screenshot, app), pool_runtime_owner=owner, admission=admission)
-        install_chat_storage_host(host)
-        app.state.chat_storage_host = host
-        app.state.chat_storage_scope = chat_storage_scope_factory(app)
     try:
+        if enabled:
+            from app.gateway.native_screenshots import publish_screenshot
+            from deerflow.sandbox.admission import ProviderAdmission
+
+            owner = getattr(app.state, "pool_runtime_owner", None)
+            admission = ProviderAdmission() if owner is not None else None
+            host = ChatStorageHost(asyncio.get_running_loop(), partial(prepare_chat_storage, app), publish=partial(publish_screenshot, app), pool_runtime_owner=owner, admission=admission)
+            app.state.chat_storage_host = host
+            install_chat_storage_host(host)
+            app.state.chat_storage_scope = chat_storage_scope_factory(app)
         yield
     finally:
+        if getattr(app.state, "qualify_output_view", None) is qualifier:
+            app.state.qualify_output_view = None
         await await_drained(close_chat_storage_host(app))

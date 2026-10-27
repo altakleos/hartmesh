@@ -4,6 +4,7 @@ Storage and operator CLI: [guide](../../../docs/STORAGE_SPACES.md).
 CLI `settle` edits file-op rows; other verbs use domain APIs. No slot release.
 
 One owner for retries; retain uncertainty.
+Output-view qualification: [contract](../../../docs/RUN_OUTPUT_INVENTORY.md).
 
 Managed chats check first-conversation capacity before checkpoint seeding/run
 admission (HTTP 507). Reuse idempotency keys first; after capacity refusal recheck

@@ -101,8 +101,8 @@ The existing sender borrows `ModelSource` and rereads every unsent model part.
 Part shape cannot turn a model basis into a fixed source. Unknown/nonempty output
 stays held. Phase one closes creating/sending but retains authorized final reads
 through manager drain; final stop drains coordinator cleanup before the same HTTP
-owner. Failed cleanup retains that owner and listener for retry. NoUser needs a
-separate honest qualification before activation. See [turn execution](../../docs/TELEGRAM_TURN_EXECUTION.md).
+owner. Failed cleanup retains that owner and listener for retry. Explicit document
+2 uses generic live-host NoUser qualification; see [turn execution](../../docs/TELEGRAM_TURN_EXECUTION.md).
 
 `recovery.py` is the Supervisor-owned bounded scheduler over that same callable
 coordinator and sender. Periodic passes observe marked publications only; no
@@ -138,7 +138,7 @@ no fresh work; a previously authorized COMMIT can settle late. The startup page
 and native cleanup can outlast that deadline. Final stop drains the service
 before coordinator/client teardown, retaining dependencies on failure. No new
 after-manager observation pass or grace is installed. Ordinary input activation,
-NoUser qualification and queue/Stop/retry consumers remain separate work.
+queue/Stop/retry consumers remain separate work.
 
 Conversation preparation reserves `route_basis.thread_preparation` on an actual
 admitted, routed, unsealed input before HTTP. Public routing cannot supply this

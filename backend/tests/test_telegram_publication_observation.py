@@ -22,7 +22,7 @@ from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
 from deerflow.runtime.runs.output_inventory import build_event_inventory_evidence, build_unavailable_inventory_evidence, output_receipt_digest
 
 pytestmark = pytest.mark.asyncio
-ACK = {"X-DeerFlow-Channel-Execution-Version": "1", "X-DeerFlow-Output-Inventory-Version": "1"}
+ACK = {"X-DeerFlow-Channel-Execution-Version": "1", "X-DeerFlow-Output-Inventory-Version": "2"}
 
 
 def channel(record):

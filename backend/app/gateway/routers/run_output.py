@@ -7,7 +7,7 @@ from app.gateway.authz import require_permission
 from app.gateway.channel_execution import CHANNEL_TURN_ID_KEY, receipt_from_run_kwargs
 from app.gateway.channel_execution_reads import ChannelReadDenied, ChannelReadMissing, channel_read_headers, channel_read_scope, strict_channel_read
 from app.gateway.deps import get_run_event_store, get_run_manager
-from app.gateway.run_output import OUTPUT_INVENTORY_REQUIRE_HEADER, OUTPUT_INVENTORY_VERSION, OUTPUT_INVENTORY_VERSION_HEADER, RunOutputProjection, RunOutputProjectionV2
+from app.gateway.run_output import OUTPUT_INVENTORY_REQUIRE_HEADER, OUTPUT_INVENTORY_VERSION, OUTPUT_INVENTORY_VERSION_2, OUTPUT_INVENTORY_VERSION_HEADER, RunOutputProjection, RunOutputProjectionV2
 from deerflow.runtime.runs.output import OutputEvidenceError, OutputEvidenceScopeError, TextOutputReceipt, capture_from_kwargs, receipt_from_kwargs, validate_receipt_status
 from deerflow.runtime.runs.output_inventory import EventInventoryEvidence, inventory_evidence_from_kwargs, validate_inventory_pair
 from deerflow.runtime.runs.output_inventory_source import read_durable_inventory_source
@@ -52,7 +52,7 @@ def _admission(snapshot, *, owner, thread_id, run_id):
 
 
 @require_permission("runs", "read", owner_check=True)
-async def _read_owned(thread_id: str, run_id: str, request: Request, *, require_inventory: bool = False):
+async def _read_owned(thread_id: str, run_id: str, request: Request, *, require_inventory: bool = False, inventory_version: str = OUTPUT_INVENTORY_VERSION):
     async with channel_read_scope(request, thread_id) as owner:
         try:
             manager = get_run_manager(request)
@@ -67,13 +67,14 @@ async def _read_owned(thread_id: str, run_id: str, request: Request, *, require_
                 await _refresh_scope(request, thread_id, owner)
                 missing = ChannelReadMissing()
                 if require_inventory:
-                    missing.headers = {**channel_read_headers(), OUTPUT_INVENTORY_VERSION_HEADER: OUTPUT_INVENTORY_VERSION}
+                    missing.headers = {**channel_read_headers(), OUTPUT_INVENTORY_VERSION_HEADER: inventory_version}
                 raise missing
             admission = _admission(snapshot, owner=owner, thread_id=thread_id, run_id=run_id)
             receipt = receipt_from_kwargs(snapshot.kwargs)
             inventory = None
             if require_inventory:
-                if capture_from_kwargs(snapshot.kwargs).version != 2:
+                intent = capture_from_kwargs(snapshot.kwargs)
+                if intent.version != 2 or inventory_version == OUTPUT_INVENTORY_VERSION and intent.document_version != 1:
                     raise OutputEvidenceError()
                 inventory = inventory_evidence_from_kwargs(snapshot.kwargs)
                 if receipt is None:
@@ -116,6 +117,8 @@ async def _read_owned(thread_id: str, run_id: str, request: Request, *, require_
                     inventory_projection = {"state": "pending", "evidence": None, "document": None, "reason": None}
                 elif isinstance(inventory, EventInventoryEvidence):
                     inventory_audit = await read_durable_inventory_source(events, evidence=inventory, output_receipt=receipt)
+                    if inventory_audit.document is not None and inventory_audit.document.version != intent.document_version:
+                        raise OutputEvidenceError()
                     inventory_projection = {
                         "state": "matched" if inventory_audit.state == "matched" else "unavailable",
                         "evidence": inventory,
@@ -131,7 +134,7 @@ async def _read_owned(thread_id: str, run_id: str, request: Request, *, require_
                     raise OutputEvidenceError()
                 _admission(current, owner=owner, thread_id=thread_id, run_id=run_id)
                 result = RunOutputProjectionV2(version=2, output=result, inventory=inventory_projection)
-                headers[OUTPUT_INVENTORY_VERSION_HEADER] = OUTPUT_INVENTORY_VERSION
+                headers[OUTPUT_INVENTORY_VERSION_HEADER] = inventory_version
             await _refresh_scope(request, thread_id, owner)
             return JSONResponse(result.model_dump(mode="json"), headers=headers)
         except (ChannelReadDenied, ChannelReadMissing, _ScopeDenied):
@@ -147,11 +150,11 @@ async def get_run_output(thread_id: ThreadId, run_id: str, request: Request):
     if not strict_channel_read(request):
         raise HTTPException(422, "Unsupported channel execution read version")
     versions = request.headers.getlist(OUTPUT_INVENTORY_REQUIRE_HEADER)
-    if versions and versions != [OUTPUT_INVENTORY_VERSION]:
+    if versions and (len(versions) != 1 or versions[0] not in {OUTPUT_INVENTORY_VERSION, OUTPUT_INVENTORY_VERSION_2}):
         raise HTTPException(422, "Unsupported output inventory read version")
     try:
         # Includes permission/ownership SQL, live scope and response construction.
-        return await await_drained(_read_owned(thread_id=thread_id, run_id=run_id, request=request, **({"require_inventory": True} if versions else {})))
+        return await await_drained(_read_owned(thread_id=thread_id, run_id=run_id, request=request, **({"require_inventory": True, "inventory_version": versions[0]} if versions else {})))
     except (ChannelReadDenied, ChannelReadMissing):
         raise
     except HTTPException as error:

@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_serializer, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from .schemas import RunStatus
 
@@ -46,6 +47,33 @@ class OutputCaptureIntent(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, revalidate_instances="always")
 
     version: Literal[1, 2]
+    inventory_document_version: Literal[2] | SkipJsonSchema[None] = Field(default=None, json_schema_extra=lambda schema: schema.pop("default", None))
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def exact_selector(cls, value, handler):
+        # Revalidation must distinguish an omitted default from explicit null,
+        # including copies of valid instances and model_copy/construct bypasses.
+        if isinstance(value, cls):
+            if value.model_fields_set - cls.model_fields.keys():
+                raise ValueError("Unsupported output capture request")
+            supplied = dict(vars(value))
+            if supplied.get("inventory_document_version") is None and "inventory_document_version" not in value.model_fields_set:
+                supplied.pop("inventory_document_version", None)
+            value = supplied
+        if isinstance(value, Mapping):
+            value = dict(value)
+            if "inventory_document_version" in value and (type(value["inventory_document_version"]) is not int or value["inventory_document_version"] != 2 or value.get("version") != 2):
+                raise ValueError("Unsupported inventory document version")
+        return handler(value)
+
+    @property
+    def document_version(self) -> Literal[1, 2]:
+        return 1 if self.inventory_document_version is None else 2
+
+    @model_serializer(mode="plain")
+    def canonical_request(self):
+        return capture_intent_to_dict(self)
 
     @field_validator("version", mode="before")
     @classmethod
@@ -53,6 +81,18 @@ class OutputCaptureIntent(BaseModel):
         if type(value) is not int or value not in (1, 2):
             raise ValueError("Unsupported output capture version")
         return value
+
+
+def capture_intent_to_dict(value: object) -> dict[str, Any]:
+    """Canonical request bytes, preserving omitted legacy selector defaults."""
+    try:
+        intent = OutputCaptureIntent.model_validate(value)
+        result = {"version": intent.version}
+        if intent.document_version == 2:
+            result["inventory_document_version"] = 2
+        return result
+    except Exception:
+        raise OutputEvidenceError() from None
 
 
 class _ScopedReceipt(_Versioned):
