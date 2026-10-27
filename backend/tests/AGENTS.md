@@ -2,6 +2,11 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Follow the [focused verification workflow](../../CONTRIBUTING.md#testing).
+Subsystem coverage below applies to affected contracts, not every edit. Reuse
+unchanged passing checks; preserve native/Compose restrictions and required CI
+qualification.
+
 CI shards print each running case and dump Python-thread stacks after 120 seconds
 without ending the test. Very long parametrized IDs can truncate formatted GitHub
 CLI logs; inspect raw run-log ZIP step files before assessing missing results.

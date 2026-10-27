@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = BACKEND_ROOT.parent
@@ -166,17 +167,25 @@ def test_default_ci_workflow_does_not_opt_in_to_live_tests() -> None:
 
 
 def test_ci_unit_test_workflow_runs_duration_aware_shards() -> None:
-    workflow = (REPO_ROOT / ".github" / "workflows" / "backend-unit-tests.yml").read_text(encoding="utf-8")
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "backend-unit-tests.yml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["backend-unit-tests"]
+    matrix = job["strategy"]["matrix"]
+    assert set(matrix) == {"shard"}
+    shards = matrix["shard"]
+    count = len(shards)
+    assert count >= 2 and all(type(shard) is int for shard in shards)
+    assert sorted(shards) == list(range(1, count + 1))
 
-    assert "shard: [1, 2, 3, 4]" in workflow
-    assert "make test-shard SPLITS=4" in workflow
-    assert "GROUP=${{ matrix.shard }}" in workflow
+    # Validate complete group coverage and the caller together, so changing
+    # parallelism cannot silently omit groups or retain an old split count.
+    calls = [step["run"] for step in job["steps"] if step.get("run", "").startswith("make test-shard")]
+    assert calls == [f"make test-shard SPLITS={count} GROUP=" + "${{ matrix.shard }}"]
 
     # The sharded command must select the offline suite and balance the shards by
     # real wall-clock cost (duration-aware), not fall back to an even split.
-    command = _dry_run_make_target("test-shard", "SPLITS=4", "GROUP=2")
+    command = _dry_run_make_target("test-shard", f"SPLITS={count}", "GROUP=2")
 
-    assert "--splits 4" in command
+    assert f"--splits {count}" in command
     assert "--group 2" in command
     assert 'pytest -m "not live"' in command
     assert "--ignore=tests/blocking_io" in command

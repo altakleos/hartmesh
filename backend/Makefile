@@ -32,8 +32,9 @@ test-blocking-io:
 #   SPLITS = total number of shards; GROUP = 1-based shard index.
 # Duration-aware: `least_duration` balances the shards by real wall-clock cost
 # read from .test_durations. Shards only READ that file (no --store-durations),
-# so concurrent CI jobs cannot race writes on it. Refresh it with
-# `make test-shard-durations` after a meaningful change to the test set.
+# so concurrent CI jobs cannot race writes on it. Refresh timings when measured
+# imbalance warrants it; reuse existing qualified timings where available.
+# Full regeneration is explicit maintenance, not a per-change prerequisite.
 # `make test-shard SPLITS=4 GROUP=2` runs shard 2 of 4; a bare `make test-shard`
 # runs the whole (non-live) suite as a single split, matching `make test`.
 # Print the running case and dump stalled Python-thread stacks without ending
@@ -47,8 +48,8 @@ test-shard:
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --splits $(SPLITS) --group $(GROUP) --splitting-algorithm least_duration --durations-path=$(DURATIONS_FILE) tests/ -v -o faulthandler_timeout=120
 
 # Regenerate .test_durations from the full offline (non-live, non-blocking-I/O)
-# suite so duration-aware sharding reflects real wall-clock cost. Run locally or
-# in a periodic job, then commit the refreshed file.
+# suite so duration-aware sharding reflects real wall-clock cost. Use when
+# existing qualified results are insufficient for explicit baseline maintenance.
 test-shard-durations:
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --store-durations --clean-durations --durations-path=$(DURATIONS_FILE) tests/ -q
 
