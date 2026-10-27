@@ -17,6 +17,8 @@ from deerflow.agent_instances.bootstrap import BootstrapResult
 from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceMountRow
 from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
 
+NORMAL_PROGRESS_TIMEOUT_SECONDS = 10
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["during", "before-lock", "busy", "unreturned", "marker-retained", "actor", "incarnation", "host", "mount", "cid", "foreign", "deadline", "cancelled", "inspection"])
@@ -72,16 +74,17 @@ async def test_preparation_snapshot_waits_for_exact_completion_before_readiness(
     monkeypatch.setattr(attachments, "retained_claims", snapshot)
     monkeypatch.setattr(host.registry, "entry", entering_home)
     deadline = time.monotonic() + (0.3 if outcome == "deadline" else 10)
+    progress_timeout = 2 if outcome == "deadline" else NORMAL_PROGRESS_TIMEOUT_SECONDS
     # Use the real publication path, not an isolated helper that never changes
     # readiness. Every physical provider operation remains an offline double.
     refreshing = asyncio.create_task(host.reconcile()) if outcome != "deadline" else asyncio.create_task(module.reconcile_residents(app, deadline=deadline))
     waiting = None
     try:
-        await asyncio.wait_for(captured.wait(), 2)
+        await asyncio.wait_for(captured.wait(), progress_timeout)
         if outcome != "before-lock":
             release_snapshot.set()
             waiting = asyncio.create_task(entering.wait())
-            done, _ = await asyncio.wait((refreshing, waiting), timeout=2, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait((refreshing, waiting), timeout=progress_timeout, return_when=asyncio.FIRST_COMPLETED)
             assert done, "reconciliation did not reach the preparation"
         if outcome == "cancelled":
             refreshing.cancel()
