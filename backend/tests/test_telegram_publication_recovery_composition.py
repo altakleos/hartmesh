@@ -27,11 +27,13 @@ async def test_fresh_recovery_consumer_plans_real_saved_output_without_second_mo
 @pytest.mark.asyncio
 async def test_actual_startup_closes_and_sends_fixed_notice_without_private_or_model_call(recovery_environment, monkeypatch):
     """Real startup, custody, SQL, sender and SDK; target config controlled."""
+    from app.telegram_bots import pages
     from app.telegram_bots.cipher import token_cipher, wrap_token
     from app.telegram_bots.gateway_client import GatewayClientOwner
     from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow, TelegramOutboxRow
 
     e = recovery_environment
+    monkeypatch.setattr(pages, "get_app_config", lambda: e.live.config)
     boot = build(e.db, monkeypatch)
     host = boot.supervisor
     host.authority = e.live.authority
@@ -82,3 +84,19 @@ async def test_actual_startup_closes_and_sends_fixed_notice_without_private_or_m
         assert private_calls == []
     finally:
         await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_startup_restart_uses_own_config_after_page_module_was_loaded(recovery_environment, monkeypatch):
+    """An earlier module import must not select another fixture's page config."""
+    from app.telegram_bots import pages
+
+    foreign_calls = []
+
+    def foreign_config():
+        foreign_calls.append(True)
+        raise FileNotFoundError("Synthetic unavailable configuration outside this fixture")
+
+    monkeypatch.setattr(pages, "get_app_config", foreign_config)
+    await test_actual_startup_closes_and_sends_fixed_notice_without_private_or_model_call(recovery_environment, monkeypatch)
+    assert foreign_calls == []
