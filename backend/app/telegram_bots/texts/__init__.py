@@ -1,4 +1,4 @@
-"""Immutable locale catalogs; keyboards join when their delivery flows exist."""
+"""Immutable locale catalogs and current-stage stored keyboard descriptions."""
 
 from collections.abc import Callable, Mapping
 from types import MappingProxyType
@@ -9,8 +9,25 @@ _CATALOGS = {"en": MappingProxyType(en.TEXTS), "zh-CN": MappingProxyType(zh_cn.T
 
 FIRST_KEYS: frozenset[str] = frozenset({"hello.privacy", "link.conflict", "link.conflict_over.chat", "link.conflict_over.custom_agent", "link.back_online", "link.removed", "access.off", "access.back", "delivery.failed"})
 
-# Builders are introduced with their callback flows, starting in change 1.13.
-KEYBOARDS: dict[str, Callable] = {}
+
+def _language_keyboard(*, link):
+    return [[{"label": label, "kind": "settings_set", "target_kind": "link", "target_id": link.id, "payload": {"field": "locale", "value": value}} for label, value in (("label.english", "en-US"), ("label.chinese", "zh-CN"))]]
+
+
+def _new_keyboard(*, thread_id):
+    return [[{"label": label, "kind": kind, "target_kind": "thread", "target_id": thread_id, "payload": {"thread_id": thread_id}} for label, kind in (("label.start_new", "new_confirm"), ("label.keep_conversation", "new_keep"))]]
+
+
+def _help_keyboard(*, link):
+    return [[{"label": "label.web_list", "kind": "web_list", "target_kind": "link", "target_id": link.id, "payload": {}}]]
+
+
+KEYBOARDS: dict[str, Callable] = {
+    "settings.state_basic": _language_keyboard,
+    "new.confirm_plain": _new_keyboard,
+    "help.chat": _help_keyboard,
+    "help.custom_agent": _help_keyboard,
+}
 
 
 def _locale(locale: str) -> str:

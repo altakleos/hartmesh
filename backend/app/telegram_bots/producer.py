@@ -735,6 +735,107 @@ class Outbox:
                 await self.inbox.register_delivery(inbox_rows, outbox_id=identity, finish=finish_route, session=writer)
             return identity
 
+    async def plan_product_keyboard(
+        self,
+        link: BotLink,
+        *,
+        source_id: str,
+        parts: list[dict],
+        keyboard,
+        callbacks,
+        guard: PublicationGuard,
+        inbox_rows: Sequence = (),
+        finish_route: bool = False,
+        message_thread_id: int | None = None,
+        session: AsyncSession | None = None,
+    ) -> str:
+        """Commit fixed presentation and its random controls as one replayable plan."""
+        from app.telegram_bots.callbacks import canonical_keyboard
+        from app.telegram_bots.links import prepare_publication_guard
+
+        controls = canonical_keyboard(keyboard)
+        if not isinstance(source_id, str) or not source_id or type(finish_route) is not bool or not isinstance(parts, list) or not parts:
+            raise ValueError("invalid-product-source")
+        parts = [_safe_json(part) for part in parts]
+        if any(part.get("kind") not in {"text", "edit"} or set(part.get("source_ref", {})) != {"key", "values"} or {"callback_group_id", "stored_keyboard", "url_button"}.intersection(part) for part in parts):
+            raise ValueError("invalid-product-source")
+        origins = sorted((row.link_id, row.message_id, row.chat_id) for row in inbox_rows)
+        topic = message_thread_id if message_thread_id is not None else inbox_rows[0].message_thread_id if inbox_rows else None
+        if topic is not None and (type(topic) is not int or topic <= 0):
+            raise ValueError("invalid-delivery-target")
+        if topic == 1:
+            topic = None
+        if len(set(origins)) != len(origins) or any(
+            row.link_id != link.id or row.binding_generation != link.binding_generation or row.chat_id != link.chat_id or (None if row.message_thread_id == 1 else row.message_thread_id) != topic for row in inbox_rows
+        ):
+            raise ValueError("product-source-conflict")
+        basis = _safe_json({"origins": [list(value) for value in origins], "chat_id": link.chat_id, "message_thread_id": topic, "finish_route": finish_route, "parts": parts})
+        scope = ("id", "owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "binding_generation", "token_revision")
+        captured = guard.captured_link
+        if any(getattr(captured, name) != getattr(link, name) for name in scope):
+            raise ValueError("product-source-conflict")
+        if session is not None:
+            bind = self.sessions.kw.get("bind")
+            if bind is None or not session.in_transaction() or not session.is_active or session.get_bind() is not getattr(bind, "sync_engine", bind):
+                raise ValueError("caller-owned-transaction-required")
+
+        async def save():
+            # A borrowed writer's owner already prepared this guard before
+            # taking SQL ownership. Never reach provider/config preparation
+            # through a second checkout while that writer is held.
+            if session is None:
+                await prepare_publication_guard(guard)
+            async with self._writer(link.id, session=session) as (writer, _binding):
+                current = await guard.check(writer)
+                if any(getattr(current, name) != getattr(link, name) for name in scope):
+                    raise ValueError("product-source-conflict")
+                existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == f"notice:{source_id}").with_for_update())
+                if existing is not None:
+                    if (
+                        existing.binding_generation != link.binding_generation
+                        or existing.owner_user_id != link.owner_user_id
+                        or existing.chat_id != link.chat_id
+                        or existing.payload.get("product_basis") != basis
+                        or existing.payload.get("product_keyboard_basis") != controls
+                    ):
+                        raise ValueError("product-source-conflict")
+                    identity = existing.id
+                else:
+                    saved_parts = deepcopy(parts)
+                    saved_parts[-1]["stored_keyboard"] = True
+                    identity, _ = await self._add(
+                        link,
+                        dedupe_key=f"notice:{source_id}",
+                        class_="reply",
+                        payload={"product_basis": basis, "product_keyboard_basis": controls, "parts": saved_parts},
+                        message_thread_id=topic,
+                        session=writer,
+                    )
+                    parent = await writer.get(TelegramOutboxRow, identity)
+                    if controls:
+                        group = await callbacks.write_group(
+                            link,
+                            controls,
+                            anchor_outbox_id=identity,
+                            presentation_version=0,
+                            chat_id=link.chat_id,
+                            message_id=parts[-1].get("target_message_id") if parts[-1]["kind"] == "edit" else None,
+                            message_thread_id=topic,
+                            session=writer,
+                        )
+                        saved = deepcopy(parent.parts)
+                        saved[-1]["callback_group_id"] = group.group_id
+                        parent.parts = saved
+                if inbox_rows:
+                    await self.inbox.register_delivery(inbox_rows, outbox_id=identity, finish=finish_route, session=writer)
+                await writer.flush()
+                # Original host/current-custody fence is the last await before
+                # owned commit; a borrowed caller retains its final guard too.
+                await guard.check(writer)
+                return identity
+
+        return await await_drained(save())
+
     @staticmethod
     def _sending(binding: TelegramBotLinkRow | None, row: TelegramOutboxRow | None, *, link_id: str, part_id: str, claim_owner: str, claim_id: str, token_revision: int, preparing: bool = True) -> SendingPart:
         if type(token_revision) is not int or token_revision < 0 or not isinstance(claim_owner, str) or not claim_owner or not isinstance(claim_id, str) or not claim_id:
@@ -783,12 +884,21 @@ class Outbox:
                 current = self._sending(binding, row, link_id=captured.link.id, part_id=captured.part["part_id"], claim_owner=captured.claim_owner, claim_id=captured.claim_id, token_revision=captured.token_revision, preparing=False)
             except DeliveryClaimRetired:
                 return False
+            stored_urls = False
+            if current.part.get("stored_keyboard") is True and set(current.part.get("source_ref", {})) == {"key", "values"} and not uses_model_source(current.item):
+                from app.telegram_bots.callbacks import canonical_keyboard
+
+                try:
+                    keyboard = canonical_keyboard(current.item.payload.get("product_keyboard_basis"))
+                except ValueError:
+                    return False
+                stored_urls = any("url" in button for line in keyboard for button in line)
             scope = ("owner_user_id", "agent_kind", "agent_ref", "bot_id", "connection_id", "binding_generation", "telegram_user_id", "chat_id", "token_revision")
             if (
                 current.part != captured.part
                 or current.part.get("url_button_fallback")
                 or current.part["kind"] != "text"
-                or "url_button" not in current.part
+                or not ("url_button" in current.part or stored_urls)
                 or current.item.message_thread_id != captured.item.message_thread_id
                 or any(getattr(current.link, field) != getattr(captured.link, field) for field in scope)
             ):
@@ -1064,9 +1174,13 @@ class Outbox:
                 raise ValueError("stale-status-attempt")
             return identity
 
-    async def retry(self, link: BotLink, outbox_id: str) -> None:
-        async with self._writer(link.id) as (session, binding):
-            row = await session.get(TelegramOutboxRow, outbox_id, with_for_update=True)
+    async def retry(self, link: BotLink, outbox_id: str, *, session: AsyncSession | None = None) -> None:
+        if session is not None:
+            bind = self.sessions.kw.get("bind")
+            if bind is None or not session.in_transaction() or not session.is_active or session.get_bind() is not getattr(bind, "sync_engine", bind):
+                raise ValueError("caller-owned-transaction-required")
+        async with self._writer(link.id, session=session) as (writer, binding):
+            row = await writer.get(TelegramOutboxRow, outbox_id, with_for_update=True)
             if not self._binding(binding, link) or row is None or row.link_id != link.id or row.binding_generation != link.binding_generation:
                 raise ValueError("delivery-generation-mismatch")
             if row.state == "sending" or row.state in {"sent", "skipped"}:
@@ -1536,25 +1650,44 @@ class OutboxSender:
                 # The safe recovery message never recursively produces another.
                 if row.payload.get("kind") == "delivery_failure_notice":
                     return
-                group, callback_id, notice_id = uuid4().hex, uuid4().hex, uuid4().hex
-                session.add(TelegramCallbackRow(id=callback_id, group_id=group, link_id=link_id, chat_id=row.chat_id, binding_generation=generation, kind="delivery_retry", target_kind="outbox", target_id=row.id, payload={}, created_at=now))
-                session.add(
-                    TelegramOutboxRow(
-                        id=notice_id,
-                        link_id=link_id,
-                        owner_user_id=row.owner_user_id,
-                        binding_generation=generation,
-                        dedupe_key=f"delivery-failed:{row_id}:{failure_version}",
-                        class_="reply",
-                        payload={"kind": "delivery_failure_notice", "repair_outbox_id": row_id, "presentation_version": 0},
-                        parts=Outbox._parts([{"kind": "text", "source_ref": {"key": "delivery.failed", "values": {}}, "callback_group_id": group}], 0),
-                        state="pending",
-                        not_before=now,
-                        chat_id=row.chat_id,
-                        message_thread_id=row.message_thread_id,
-                        created_at=now,
-                    )
-                )
+                if binding is None or binding.state != "connected" or (binding.owner_user_id, binding.binding_generation, binding.chat_id) != (row.owner_user_id, generation, row.chat_id):
+                    return
+                from app.telegram_bots.callbacks import CallbackRefused, CallbackRepository
+
+                source = {"kind": "text", "source_ref": {"key": "delivery.failed", "values": {}}}
+                # Preserve the original failed-delivery journal even if its
+                # account/connection custody has since ended. Only construction
+                # of the now-undeliverable old-scope notice is rolled back.
+                try:
+                    async with session.begin_nested():
+                        notice = TelegramOutboxRow(
+                            id=uuid4().hex,
+                            link_id=link_id,
+                            owner_user_id=row.owner_user_id,
+                            binding_generation=generation,
+                            dedupe_key=f"delivery-failed:{row_id}:{failure_version}",
+                            class_="reply",
+                            payload={
+                                "kind": "delivery_failure_notice",
+                                "repair_outbox_id": row_id,
+                                "presentation_version": 0,
+                                "product_basis": {"origins": [], "chat_id": row.chat_id, "message_thread_id": row.message_thread_id, "finish_route": False, "parts": [source]},
+                            },
+                            parts=Outbox._parts([{**source, "stored_keyboard": True}], 0),
+                            state="pending",
+                            not_before=now,
+                            chat_id=row.chat_id,
+                            message_thread_id=row.message_thread_id,
+                            created_at=now,
+                        )
+                        session.add(notice)
+                        await session.flush()
+                        group = await CallbackRepository(self.outbox.sessions, config=self.outbox.config, clock=self.outbox.clock).write_repair_group(
+                            BotLink.from_row(binding), failed_outbox_id=row.id, anchor_outbox_id=notice.id, session=session
+                        )
+                        notice.parts = [{**part, "callback_group_id": group.group_id} for part in notice.parts]
+                except CallbackRefused:
+                    return
                 return
             # Unknown local errors retain delivery too. Do not persist exception
             # text or turn temporary transport/storage failures into payload faults.

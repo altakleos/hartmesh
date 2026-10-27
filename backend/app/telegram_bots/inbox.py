@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from app.telegram_bots.links import BotLink, PublicationGuard
 
 _TOKEN = re.compile(TOKEN_BODY)
-SERVER_BOOKKEEPING_KEYS = frozenset({"publications", "current_publication_id", "thread_preparation", "publication_recovery"})
+SERVER_BOOKKEEPING_KEYS = frozenset({"publications", "current_publication_id", "thread_preparation", "publication_recovery", "callback_choice"})
 _INPUT_KEYS = {"text", "caption", "files", "voice", "command", "type", "reply_to_message_id", "prompt_id", "media_group_id"}
 _UNSAFE_KEYS = {"raw_update", "update", "token", "bot_token", "access_token", "download_url", "file_path", "audio_bytes", "bytes", "_content", "content_bytes"}
 _FILE_KEYS = {"type", "file_id", "file_unique_id", "filename", "mime_type", "size", "message_id", "telegram_bot_id", "duration", "width", "height"}
@@ -1035,6 +1035,94 @@ class InboxRepository:
             session.add(mark)
             await session.flush()
             return _snapshot(mark), True
+
+    async def claim_callback_choice(
+        self, link: BotLink, origin: InboxRow, *, callback_id: str, chat_id: int, message_id: int, message_thread_id: int | None, callbacks, guard: PublicationGuard, session: AsyncSession | None = None
+    ) -> InboxRow:
+        """Fix one /new choice before HTTP; completion remains its caller's job."""
+        from app.telegram_bots.callbacks import CALLBACK_METADATA_KEYS
+        from app.telegram_bots.links import prepare_publication_guard
+        from deerflow.utils.file_io import await_drained
+
+        if not isinstance(origin, InboxRow) or origin.link_id != link.id or origin.message_thread_id is not None or _topic(message_thread_id) is not None:
+            raise ValueError("callback-choice-conflict") from None
+        self._publication_guard_matches(guard, link=link)
+        if session is not None:
+            self._publication_borrow(session)
+
+        async def claim(writer):
+            group = await callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=guard, session=writer)
+            parent = await writer.get(TelegramOutboxRow, group.anchor_outbox_id)
+            mark = (await self._rows(writer, [origin]))[0]
+            self._publication_snapshot_matches(mark, origin)
+            self._current(link, mark)
+            basis = _basis(mark)
+            prep = mark.route_basis.get("thread_preparation")
+            scope = {"link_id": link.id, **{key: getattr(link, key) for key in ("owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "binding_generation")}}
+            if (
+                mark.route_kind != "command"
+                or mark.route_target_id != "new"
+                or mark.route_complete
+                or mark.state not in {"accepted", "reply_pending"}
+                or mark.turn_id is not None
+                or mark.thread_id is not None
+                or mark.run_id is not None
+                or mark.assistant_message_id is not None
+                or mark.grouped_message_ids
+                or basis.get("key") != "new.confirm_plain"
+                or basis.get("keyboard_template") != "new.confirm_plain"
+                or type(basis.get("values")) is not dict
+                or type(prep) is not dict
+                or set(prep) != {"purpose", "creation_id", "endpoint_id", "scope", "expected_mapping_id", "expected_thread_id", "selected_thread_id", "mapping_id"}
+                or prep["purpose"] != "new"
+                or type(prep["creation_id"]) is not str
+                or not _PUBLICATION_HEX.fullmatch(prep["creation_id"])
+                or type(prep["endpoint_id"]) is not str
+                or not _PUBLICATION_DIGEST.fullmatch(prep["endpoint_id"])
+                or _canonical(prep["scope"]) != _canonical(scope)
+                or (prep["expected_mapping_id"] is None) != (prep["expected_thread_id"] is None)
+                or any(type(prep[key]) is not str or not prep[key] for key in ("expected_mapping_id", "expected_thread_id") if prep[key] is not None)
+                or (prep["selected_thread_id"] is None) != (prep["mapping_id"] is None)
+                or prep["selected_thread_id"] is not None
+                and (prep["selected_thread_id"] != prep["creation_id"] or type(prep["mapping_id"]) is not str or not prep["mapping_id"])
+            ):
+                raise ValueError("callback-choice-conflict") from None
+            expected = {
+                "origins": [[mark.link_id, mark.message_id, mark.chat_id]],
+                "chat_id": link.chat_id,
+                "message_thread_id": None,
+                "finish_route": False,
+                "parts": [{"kind": "text", "source_ref": {"key": "new.confirm_plain", "values": basis["values"]}}],
+            }
+            bookmark = prep["expected_thread_id"] or prep["creation_id"]
+            if (
+                parent is None
+                or _canonical(parent.payload.get("product_basis")) != _canonical(expected)
+                or parent.id not in mark.delivery_ids
+                or len(group.rows) != 2
+                or {row.kind for row in group.rows} != {"new_confirm", "new_keep"}
+                or any(
+                    row.target_kind != "thread" or row.target_id != bookmark or _canonical({key: value for key, value in row.payload.items() if key not in CALLBACK_METADATA_KEYS}) != _canonical({"thread_id": bookmark}) for row in group.rows
+                )
+            ):
+                raise ValueError("callback-choice-conflict") from None
+            choice = {"version": 1, "callback_id": group.selected.id, "kind": group.selected.kind, "group_id": group.selected.group_id, "anchor_outbox_id": group.anchor_outbox_id}
+            if "callback_choice" in mark.route_basis and _canonical(mark.route_basis["callback_choice"]) != _canonical(choice):
+                raise ValueError("callback-choice-conflict") from None
+            mark.route_basis = {**deepcopy(mark.route_basis), "callback_choice": choice}
+            await writer.flush()
+            result = _snapshot(mark)
+            await guard.check(writer)
+            return result
+
+        async def perform():
+            if session is not None:
+                return await claim(session)
+            await prepare_publication_guard(guard)
+            async with self._transaction() as writer:
+                return await claim(writer)
+
+        return await await_drained(perform())
 
     async def route(self, row: InboxRow, *, kind: str, target_id: str | None, basis: dict, operation_ids: list[str]) -> InboxRow:
         _identifier(kind, 24, "invalid-inbox-route")

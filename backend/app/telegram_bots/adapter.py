@@ -38,6 +38,9 @@ from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
     from app.channels.message_bus import OutboundMessage
+    from app.telegram_bots.acts import Acts
+    from app.telegram_bots.callbacks import CallbackRepository, Prompts
+    from app.telegram_bots.commands import CallbackCommands
     from app.telegram_bots.config import TelegramBotsConfig
     from app.telegram_bots.inbox import InboxRow
     from app.telegram_bots.links import BotLink, BotLinkRepository
@@ -142,6 +145,10 @@ class TransportServices(Protocol):
     strangers: StrangerLedger
     product_name: str
     model_source: ModelSource | None
+    callbacks: CallbackRepository | None
+    prompts: Prompts | None
+    acts: Acts | None
+    commands: CallbackCommands | None
 
     async def prepare_live_owner(self, owner_user_id: str) -> Any: ...
 
@@ -195,6 +202,7 @@ class TelegramBotChannel(TelegramChannel):
         self._transport_revision = link.token_revision
         self._services = supervisor
         self._monotonic, self._sleep, self._now = monotonic, sleep, now
+        self._callback_locale: tuple[str, int, str] | None = None
         self._verify_lock, self._lifecycle_lock, self._success_lock = asyncio.Lock(), asyncio.Lock(), asyncio.Lock()
         self._verify_task: asyncio.Task[TokenVerification] | None = None
         self._verify_not_before = 0.0
@@ -561,6 +569,9 @@ class TelegramBotChannel(TelegramChannel):
         current = await await_drained(self.refresh_link())
         return self._same_scope(captured, current) and self.application.running and not self._stopping and self._services.channel(captured.id) is self and self._send_allowed() and current.health in {"ok", "agent_unavailable"}
 
+    def _callback_current(self, captured) -> bool:
+        return bool(self._same_scope(captured, self.link) and self.transport_revision == captured.token_revision and self.application.running and not self._stopping and self._services.channel(captured.id) is self and self._send_allowed())
+
     def _spawn_ingress(self, coroutine) -> bool:
         if self._stopping or not self.application.running or not self._send_allowed() or self._services.channel(self.link.id) is not self:
             coroutine.close()
@@ -652,7 +663,24 @@ class TelegramBotChannel(TelegramChannel):
         self._classified(update)
 
     async def _on_callback(self, update, context) -> None:
-        await self._on_unknown_callback(update, context)
+        from app.telegram_bots.callbacks import CallbackHandler
+
+        repository = getattr(self._services, "callbacks", None)
+        if repository is None or getattr(self._services, "commands", None) is None:
+            await self._on_unknown_callback(update, context)
+            return
+        captured = self._admission(update).link
+        query = update.callback_query
+
+        async def execute(channel, row):
+            await channel.execute_callback(row, query_id=query.id)
+
+        handler = CallbackHandler(repository, execute=execute)
+        self._spawn_ingress(handler.press(self, query, captured_link=captured))
+        self._classified(update)
+
+    async def execute_callback(self, row, *, query_id=None):
+        await self._services.commands.execute(self, row, query_id=query_id)
 
     async def _on_unknown_callback(self, update, context) -> None:
         link, query = self._admission(update).link, update.callback_query
@@ -792,12 +820,19 @@ class TelegramBotChannel(TelegramChannel):
             values = prepared or await self._services.prepare_ingress_values(link)
             if not await self._input_current(link):
                 return
-            source_values = {"name": values["name"]} if key == "cmd.agent" else {"name": values["name"], "product": values["product"]} if key == "web.memory" else {}
+            source_values = {"command": word} if key == "cmd.unknown" else {"name": values["name"]} if key == "cmd.agent" else {"name": values["name"], "product": values["product"]} if key == "web.memory" else {}
             button = {"page": "web.memory", "url": values["memory_url"]} if key == "web.memory" and values.get("memory_url") else None
             row = await await_drained(self._services.outbox.inbox.route(row, kind="command", target_id=word or "unknown", basis={"key": key, "values": source_values, "url_button": button}, operation_ids=[]))
         basis = row.route_basis
         if not await self._input_current(link):
             return
+        prompts = getattr(self._services, "prompts", None)
+        if prompts is not None:
+            if not self._callback_current(link):
+                return
+            await prompts.close(link, row.chat_id, row.message_thread_id, reason="command")
+            if not self._callback_current(link):
+                return
         await await_drained(self.send_text(basis["key"], source_id=self._source(update, "command"), reply_to=message.message_id, inbox_rows=[row], finish_route=True, url_button=basis["url_button"], _captured_link=link, **basis["values"]))
         self._classified(update, remember=True)
 
@@ -809,6 +844,9 @@ class TelegramBotChannel(TelegramChannel):
             await self._fixed_reply(update, "cmd.agent", word)
         elif word == "memory" and self.link.agent_kind == "lead_agent":
             await self._fixed_reply(update, "web.memory", word)
+        elif word in {"new", "help", "privacy", "settings", "web"} and getattr(self._services, "commands", None) is not None:
+            await self._services.commands.handle(self, update, word)
+            self._classified(update, remember=True)
         else:
             await self._fixed_reply(update, "cmd.unknown", word)
 
@@ -881,6 +919,7 @@ class TelegramBotChannel(TelegramChannel):
         settings = await await_drained(self._services.settings.get(link.owner_user_id))
         if settings is None:
             raise PermanentDeliveryError("missing-settings")
+        self._callback_locale = (link.owner_user_id, link.binding_generation, settings.locale)
         renderer = render_plain if plain else render
         try:
             return renderer(source["key"], settings.locale, **source["values"])
@@ -971,17 +1010,35 @@ class TelegramBotChannel(TelegramChannel):
             and self._send_allowed()
         )
 
-    async def answer_press(self, query_id: str, key: str | None = None, *, context: SendContext | None = None, **values) -> None:
+    async def answer_callback_ack(self, query_id: str, key: str | None, *, captured_link: BotLink, deadline: float) -> None:
+        """Acknowledge the original press without granting action authority.
+
+        The cached locale is presentation only and cannot cross owner/generation.
+        Later actions still need their own current SQL custody/owner guard.
+        """
+        await self.answer_press(query_id, key, _captured_link=captured_link, _deadline=deadline)
+
+    async def answer_press(self, query_id: str, key: str | None = None, *, context: SendContext | None = None, _captured_link: BotLink | None = None, _deadline: float | None = None, **values) -> None:
         if not self.application.running or not self._send_allowed():
             return
         logged = False
         try:
-            async with asyncio.timeout(2):
-                if context is not None and not await self._ingress_current(context) or context is None and await self.refresh_link() is None:
-                    return
-                text = await self._render_source(self.link, {"key": key, "values": values}, plain=True) if key else None
-                if context is not None and not await self._ingress_current(context):
-                    return
+            deadline = asyncio.get_running_loop().time() + 2
+            if _deadline is not None:
+                deadline = min(deadline, _deadline)
+            async with asyncio.timeout_at(deadline):
+                if _captured_link is not None:
+                    if not self._callback_current(_captured_link):
+                        return
+                    remembered = self._callback_locale
+                    locale = remembered[2] if remembered is not None and remembered[:2] == (_captured_link.owner_user_id, _captured_link.binding_generation) else "en-US"
+                    text = render_plain(key, locale, **values) if key else None
+                else:
+                    if context is not None and not await self._ingress_current(context) or context is None and await self.refresh_link() is None:
+                        return
+                    text = await self._render_source(self.link, {"key": key, "values": values}, plain=True) if key else None
+                    if context is not None and not await self._ingress_current(context):
+                        return
                 if not self._send_allowed() or self._services.channel(self.link.id) is not self:
                     return
                 try:
@@ -1064,7 +1121,12 @@ class TelegramBotChannel(TelegramChannel):
             if reader is None:
                 raise DeliveryClaimRetired()
             model_part = await reader.read_part(saved)
-        if part.get("callback_group_id"):
+        stored_keyboard = None
+        if part.get("stored_keyboard"):
+            if model_part is not None or getattr(self._services, "callbacks", None) is None:
+                raise DeliveryClaimRetired()
+            stored_keyboard = await self._services.callbacks.read_keyboard(saved)
+        elif part.get("callback_group_id"):
             raise PermanentDeliveryError("unsupported-callback-authority")
         if part["kind"] in {"document", "photo", "album"}:
             name = PurePosixPath(str(part["source_ref"].get("path", "file"))).name or "file"
@@ -1087,6 +1149,25 @@ class TelegramBotChannel(TelegramChannel):
         if settings is None:
             raise PermanentDeliveryError("missing-settings")
         markup = None
+        stored_urls = tuple(button.url for line in stored_keyboard or () for button in line if button.url is not None)
+        if stored_keyboard is not None:
+            try:
+                rendered_rows = [
+                    [
+                        InlineKeyboardButton(render_plain(button.label, settings.locale, **part["source_ref"].get("values", {})), callback_data=button.callback_data, url=button.url)
+                        for button in line
+                        if not (part.get("url_button_fallback") and button.url is not None)
+                    ]
+                    for line in stored_keyboard
+                ]
+                rows = [line for line in rendered_rows if line]
+                # The SDK drops empty sequences from TelegramObject.to_dict().
+                # Preserve the Bot API's explicit keyboard-clear representation.
+                markup = InlineKeyboardMarkup(rows) if rows else {"inline_keyboard": []}
+            except (KeyError, TypeError, ValueError):
+                raise PermanentDeliveryError("invalid-product-source") from None
+            if part.get("url_button_fallback"):
+                text += "".join("\n" + (address if part.get("plain_fallback") else escape(address)) for address in stored_urls)
         if button is not None:
             if part.get("url_button_fallback"):
                 text += "\n" + (button["url"] if part.get("plain_fallback") else escape(button["url"]))
@@ -1115,6 +1196,11 @@ class TelegramBotChannel(TelegramChannel):
             or not self._send_allowed()
         ):
             raise DeliveryClaimRetired()
+        if stored_keyboard is not None:
+            # Group consumption can change during rendering without changing the
+            # outbox part. Never dispatch the earlier buffered controls afterward.
+            if await self._services.callbacks.read_keyboard(latest) != stored_keyboard or not self._callback_current(latest.link):
+                raise DeliveryClaimRetired()
         current = latest
         self.link = current.link
         context = SendContext(current.link.id, current.item.chat_id, current.link.binding_generation, self.transport_revision, "bound_message")
@@ -1127,7 +1213,7 @@ class TelegramBotChannel(TelegramChannel):
                 if part.get("remove_keyboard"):
                     message = await self.bot.edit_message_reply_markup(chat_id=context.chat_id, message_id=target, reply_markup=None)
                 else:
-                    message = await self.bot.edit_message_text(chat_id=context.chat_id, message_id=target, text=text, parse_mode=None if part.get("plain_fallback") else ParseMode.HTML)
+                    message = await self.bot.edit_message_text(chat_id=context.chat_id, message_id=target, text=text, parse_mode=None if part.get("plain_fallback") else ParseMode.HTML, reply_markup=markup)
             else:
                 message = await self.bot.send_message(
                     chat_id=context.chat_id,
@@ -1170,7 +1256,7 @@ class TelegramBotChannel(TelegramChannel):
             structural = (
                 "can't parse entities" in description
                 and not part.get("plain_fallback")
-                or button is not None
+                or (button is not None or stored_urls)
                 and not part.get("url_button_fallback")
                 and "url" in description
                 and "invalid" in description
@@ -1180,7 +1266,7 @@ class TelegramBotChannel(TelegramChannel):
             if "can't parse entities" in description and not part.get("plain_fallback"):
                 await self._services.outbox.fallback_to_plain(current)
                 raise DeliveryClaimRetired() from None
-            if button is not None and not part.get("url_button_fallback") and "url" in description and "invalid" in description:
+            if (button is not None or stored_urls) and not part.get("url_button_fallback") and "url" in description and "invalid" in description:
                 await self._services.outbox.fallback_url_button(current)
                 raise DeliveryClaimRetired() from None
             raise

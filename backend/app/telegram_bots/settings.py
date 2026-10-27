@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.telegram_bots.config import TelegramBotsConfig
 from deerflow.persistence.telegram_bots.model import TelegramPersonSettingsRow
+from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
     from app.telegram_bots.links import BotLink
@@ -153,22 +155,36 @@ class SettingsRepository:
             raise RuntimeError("settings initialization did not produce a row")
         return _snapshot(row)
 
-    async def update(self, owner_user_id: str, **columns) -> PersonSettings:
+    async def update(self, owner_user_id: str, *, session: AsyncSession | None = None, **columns) -> PersonSettings:
         if set(columns) - _Preferences.model_fields.keys():
             raise ValueError("unknown or immutable settings field")
+
+        if session is not None:
+            bind = self.session_factory.kw.get("bind")
+            if not isinstance(session, AsyncSession) or bind is None or not session.in_transaction() or not session.is_active or session.get_bind() is not getattr(bind, "sync_engine", bind):
+                raise ValueError("settings-writer-required") from None
+            return await await_drained(self._update_in_session(session, owner_user_id, columns))
+        return await await_drained(self._update_owned(owner_user_id, columns))
+
+    async def _update_owned(self, owner_user_id: str, columns: dict) -> PersonSettings:
         async with self._writer() as session:
-            row = await session.scalar(select(TelegramPersonSettingsRow).where(TelegramPersonSettingsRow.owner_user_id == owner_user_id).with_for_update())
-            if row is None:
-                raise ValueError("settings-not-found")
-            if not columns:
-                return _snapshot(row)
-            current = _snapshot(row)
-            preferences = _Preferences.model_validate({**{name: getattr(current, name) for name in _Preferences.model_fields}, **columns})
-            for name, value in preferences.model_dump().items():
-                setattr(row, name, value)
-            row.updated_at = datetime.now(UTC)
-            await session.flush()
+            return await self._update_in_session(session, owner_user_id, columns)
+
+    async def _update_in_session(self, session: AsyncSession, owner_user_id: str, columns: dict) -> PersonSettings:
+        row = await session.scalar(select(TelegramPersonSettingsRow).where(TelegramPersonSettingsRow.owner_user_id == owner_user_id).with_for_update().execution_options(populate_existing=True))
+        if row is None:
+            raise ValueError("settings-not-found")
+        if not columns:
             return _snapshot(row)
+        current = _snapshot(row)
+        # A cold ZoneInfo validation can inspect timezone files. Retain the
+        # complete existing validator off-loop before mutating this row.
+        preferences = await await_drained(asyncio.to_thread(_Preferences.model_validate, {**{name: getattr(current, name) for name in _Preferences.model_fields}, **columns}))
+        for name, value in preferences.model_dump().items():
+            setattr(row, name, value)
+        row.updated_at = datetime.now(UTC)
+        await session.flush()
+        return _snapshot(row)
 
 
 def local_now(settings: PersonSettings, now: datetime | None = None) -> datetime:
