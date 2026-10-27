@@ -63,6 +63,21 @@ async def recovery_rows(e, record):
         return tuple(InboxRow.from_row(row) for row in rows)
 
 
+async def test_live_owner_installs_own_page_config_after_prior_import(db, monkeypatch):
+    from app.telegram_bots import pages
+
+    foreign_calls = []
+
+    def foreign_config():
+        foreign_calls.append(True)
+        raise FileNotFoundError("Synthetic unavailable preimported page configuration")
+
+    monkeypatch.setattr(pages, "get_app_config", foreign_config)
+    live = await install_live_owner(db, monkeypatch)
+    assert pages.get_app_config() is live.config
+    assert foreign_calls == []
+
+
 async def test_reserved_recovery_bookkeeping_cannot_enter_public_route(recovery_environment):
     e = recovery_environment
     incoming = Update(1999, message=Message(999, NOW, Chat(e.link.chat_id, "private"), from_user=User(e.link.telegram_user_id, "Synthetic human", False), text="new input"))

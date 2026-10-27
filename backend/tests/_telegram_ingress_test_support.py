@@ -15,6 +15,7 @@ from deerflow.persistence.user.model import UserRow
 
 
 async def install_live_owner(db, monkeypatch, *, owner=None, email="ingress@example.com", provider=False, local_enabled=True):
+    from app.telegram_bots import pages
     from deerflow.config import app_config
 
     async with db.engine.begin() as connection:
@@ -36,5 +37,7 @@ async def install_live_owner(db, monkeypatch, *, owner=None, email="ingress@exam
         auth["oidc"] = {"enabled": True, "providers": {"fixture": {"display_name": "Fixture", "issuer": "https://issuer.example", "client_id": "fixture"}}}
     config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}, "auth": auth})
     monkeypatch.setattr(app_config, "get_app_config", lambda: config)
+    # Pages retains an imported getter, including when loaded before this fixture.
+    monkeypatch.setattr(pages, "get_app_config", lambda: config)
     authority = TelegramAuthority(links=db.links, connections=db.connections)
     return SimpleNamespace(id=owner, users=users, config=config, authority=authority)
