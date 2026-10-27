@@ -115,4 +115,14 @@ jobs:
           # mapping those tests silently skip and the headline capability is never
           # exercised in CI.
           DEDUPE_TEST_POSTGRES_URL: ${{ env.TEST_POSTGRES_URI }}
+          PYTEST_ADDOPTS: --junitxml=test-results/backend-unit-shard-${{ matrix.shard }}.xml
         run: make test-shard SPLITS=4 GROUP=${{ matrix.shard }}
+
+      - name: Upload backend unit test results (shard ${{ matrix.shard }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-unit-shard-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: backend/test-results/backend-unit-shard-${{ matrix.shard }}.xml
+          if-no-files-found: warn
+          retention-days: 7

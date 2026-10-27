@@ -338,13 +338,33 @@ before review.
 
 ## Testing
 
-```bash
-# Default backend tests (excludes live and blocking-I/O tests)
-cd backend
-make test
+Start with the smallest regression that demonstrates the changed behavior, then
+make it pass. Before committing/publishing, run tests and static checks for the
+affected contracts and obtain independent review. Include compatibility,
+dialect/profile and blocking-I/O coverage where relevant. Reuse passed checks
+and parent CI while the exercised code, configuration and fixtures are unchanged.
 
-# Strict blocking-I/O tests
-make test-blocking-io
+Publish promptly so CI starts early. Merge requires fresh successful applicable
+CI on the exact published head, preserving every existing required gate. An
+optional broad local run need not delay publication; retain its ownership,
+report failures and drain owned work.
+
+Full local suites before/after every change are not required. Use broader runs
+for a concrete failure or cross-cutting risk, following the
+[backend test restrictions](backend/tests/AGENTS.md), including native/Compose
+acceptance. Reuse prepared dependencies; update them only when needed.
+
+Record commands, outcomes and the reviewed revision once in the PR. Add further
+diagnostics for failures or required qualification; do not create routine
+continuation manifests or duplicate baseline/evidence pipelines.
+
+```bash
+# Focused backend regression in an already prepared environment
+cd backend
+PYTHONPATH=. uv run --no-sync pytest tests/test_<feature>.py -q
+
+# Relevant strict blocking-I/O regression
+PYTHONPATH=. uv run --no-sync pytest tests/blocking_io/test_<feature>.py -q --tb=short
 
 # Live DeerFlowClient integration tests (explicit opt-in)
 # Requires a valid root config.yaml and API credentials.
@@ -359,6 +379,9 @@ cd frontend-hm
 make test-e2e
 ```
 
+`make test`, `make test-blocking-io` and `make test-shard` remain available for
+justified broad diagnostics.
+
 `make test-live` calls real external APIs and may incur API costs or create
 local sandboxes, artifacts, and files. It is never run by the default backend
 test command or CI. Direct pytest invocations of `tests/test_client_live.py`
@@ -366,7 +389,8 @@ must also set `DEER_FLOW_RUN_LIVE_TESTS=1`.
 
 ### PR Regression Checks
 
-Every pull request triggers the following CI workflows:
+Committed workflow triggers determine applicability. Every required check must
+succeed on the current published head before merge. The regression workflows include:
 
 - **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml)
 - **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml)

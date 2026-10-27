@@ -55,10 +55,13 @@ Fixes #
 
 ## Validation
 
-<!-- What you actually ran. Run at least the checks for the area you changed:
-       Backend:   cd backend  && make lint && make test
-       Frontend:  cd frontend && pnpm format && pnpm lint && pnpm typecheck && BETTER_AUTH_SECRET=local-dev-secret pnpm build && make test
-       Frontend E2E (if you touched frontend/): cd frontend && make test-e2e -->
+<!-- Record checks actually run and their outcomes. Before publication, check
+     affected contracts and obtain independent review. Follow the
+     [verification workflow](../CONTRIBUTING.md#testing).
+     Frontend product changes: cd frontend-hm && pnpm check, plus focused tests
+     with pnpm rstest run <pattern>. Reuse unchanged passing checks and parent CI.
+     Merge requires fresh successful applicable CI on the exact published head,
+     preserving every existing required gate. -->
 
 
 ## AI assistance
