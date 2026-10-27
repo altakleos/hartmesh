@@ -290,7 +290,10 @@ Starting pending admission consumes its observed wake. A fresh wake arriving
 during awaited admission remains available to interrupt the following wait;
 a serviced held-release signal must not skip that failed suffix's backoff.
 `defer_start_retry` transfers the first startup rate-limit observation before
-any awaited status guard. Restore requests one discard intent with
+any awaited status guard. Rate waits retain that absolute deadline across guards
+and queued sleeper startup; ordinary timed waits retain their entry deadline.
+Wake/cancel still joins both timer and wake children. Restore requests one discard
+intent with
 `require_drop_pending`; `complete_pending_drop` only joins that intent and cannot
 schedule another negative-offset discard. Await completion outside the lifecycle
 lock needed by health callbacks.
