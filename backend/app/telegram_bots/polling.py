@@ -499,7 +499,7 @@ class PollTask:
     def held_count(self) -> int:
         return len(self._held)
 
-    async def _wait(self, seconds: float | None = None) -> None:
+    async def _wait(self, seconds: float | None = None, *, until: datetime | None = None) -> None:
         if self._wake.is_set():
             self._wake.clear()
             return
@@ -507,7 +507,14 @@ class PollTask:
             await self._wake.wait()
             self._wake.clear()
             return
-        sleeper = asyncio.create_task(self._sleep(seconds))
+        deadline = until if until is not None else self._clock() + timedelta(seconds=seconds)
+
+        async def sleep_remaining():
+            # Task scheduling and awaited guards consume the existing wait;
+            # they must not restart a relative delay at child entry.
+            await self._sleep(max(0, (deadline - self._clock()).total_seconds()))
+
+        sleeper = asyncio.create_task(sleep_remaining())
         wake = asyncio.create_task(self._wake.wait())
         try:
             await asyncio.wait((sleeper, wake), return_when=asyncio.FIRST_COMPLETED)
@@ -631,7 +638,7 @@ class PollTask:
             if current is None or current.state == "held" or current.health in {"token_rejected", "policy_off", "secret_unreadable", "stopped"}:
                 return
             if self._rate_pending():
-                await self._wait(self._retry_after)
+                await self._wait(self._retry_after, until=self._rate_until)
                 continue
             if not self.channel.application.running:
                 try:
@@ -663,7 +670,7 @@ class PollTask:
                     result = await self._finish_conflict() if self._fence_pending else await self._fetch_locked(mode="drop")
                 if self._fence_pending or self._drop_required:
                     if result == "rate":
-                        await self._wait(self._retry_after)
+                        await self._wait(self._retry_after, until=self._rate_until)
                     else:
                         await self._wait(self._backoff)
                         self._backoff = min(BACKOFF_CAP_SECONDS, self._backoff * BACKOFF_FACTOR)
@@ -714,4 +721,4 @@ class PollTask:
                 await self._wait(self._backoff)
                 self._backoff = min(BACKOFF_CAP_SECONDS, self._backoff * BACKOFF_FACTOR)
             elif result == "rate":
-                await self._wait(self._retry_after)
+                await self._wait(self._retry_after, until=self._rate_until)

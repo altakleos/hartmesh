@@ -476,6 +476,78 @@ async def test_first_start_429_transfers_original_wait_before_delayed_guard(db, 
         await e.supervisor.stop()
 
 
+def wait_fixture():
+    """Actual PollTask timer primitive; no transport or persistence is run."""
+    from app.telegram_bots.polling import PollRecord, PollTask
+
+    clock = ManualClock()
+    channel = SimpleNamespace(transport_revision=1, link=SimpleNamespace(id="queued-wait", bot_id=9_000_000_001, webhook_host=None, health="ok", probe_until=None))
+
+    async def no_health(*_args):
+        pytest.fail("A timer primitive must not publish health")
+
+    return PollTask(channel, on_health=no_health, record=PollRecord(), clock=clock.now, sleep=clock.sleep), clock
+
+
+async def test_poll_wait_does_not_restart_duration_when_sleep_child_is_queued():
+    poll, clock = wait_fixture()
+    waiting = asyncio.create_task(poll._wait(1))
+    try:
+        # Parent queues its sleeper; this continuation runs before that child.
+        await asyncio.sleep(0)
+        assert clock.sleeps == []
+        clock.advance(1)
+        await asyncio.wait_for(waiting, 2)
+        assert clock.sleeps == [0]
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+    assert clock._waiters == []
+
+
+async def test_poll_rate_wait_keeps_original_server_deadline_after_guard_elapsed():
+    from app.telegram_bots.adapter import LongRetryAfter
+
+    poll, clock = wait_fixture()
+    poll.defer_start_retry(LongRetryAfter(90), observed_at=clock.now())
+    clock.advance(40)
+    assert poll._rate_pending() and poll._retry_after == 50
+    # The absolute server deadline survives a later guard, even when the
+    # relative retry value was observed before that guard completed.
+    clock.advance(49)
+    waiting = asyncio.create_task(poll._wait(poll._retry_after, until=poll._rate_until))
+    try:
+        await asyncio.sleep(0)
+        assert clock.sleeps == []
+        clock.advance(1)
+        await asyncio.wait_for(waiting, 2)
+        assert clock.sleeps == [0]
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+    assert clock._waiters == []
+
+
+@pytest.mark.parametrize("finish", ["wake", "cancel"])
+async def test_poll_queued_sleep_still_drains_on_wake_or_cancellation(finish):
+    poll, clock = wait_fixture()
+    waiting = asyncio.create_task(poll._wait(1))
+    try:
+        await asyncio.sleep(0)
+        assert clock.sleeps == []
+        if finish == "wake":
+            poll.wake()
+            await asyncio.wait_for(waiting, 2)
+        else:
+            waiting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(waiting, 2)
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+    assert clock._waiters == []
+
+
 def notice_reply(request, link, *, message=901):
     return request.enqueue("sendMessage", result={"message_id": message, "date": 1_893_456_000, "chat": {"id": link.chat_id, "type": "private"}, "text": "Fixed product notice"})
 

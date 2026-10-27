@@ -6,6 +6,8 @@ import asyncio
 from dataclasses import dataclass
 
 from app.telegram_bots.authority import require
+from app.telegram_bots.inbox import InboxRow
+from app.telegram_bots.links import ThreadPreparation
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.utils.file_io import await_drained
 
@@ -182,10 +184,30 @@ class ThreadCoordinator:
                 raise ValueError("thread-mapping-changed")
             return identity
 
-    async def _run(self, link, inbound, origin, purpose):
+    async def _reserve_new(self, attempt, origin):
+        if not isinstance(origin, InboxRow) or origin.route_kind != "command" or origin.route_target_id != "new" or origin.message_thread_id is not None:
+            raise ValueError("invalid-new-command")
+        link = attempt.link
+        key = (link.owner_user_id, link.id, link.connection_id, link.chat_id, link.binding_generation)
+        async with self._locks.hold(key):
+            await self._guard(attempt)
+            owner = await self.authority.prepare_live_owner(link.owner_user_id)
+            await self._guard(attempt)
+            preparation = await await_drained(
+                self.links.reserve_thread_preparation(link, origin, purpose="new", endpoint_id=self.client.endpoint_id, check_live_owner=owner, check_attempt_current=lambda: self._current(attempt), require_healthy=True)
+            )
+            self._check(attempt)
+            if preparation.origin.route_complete or preparation.origin.state not in {"accepted", "reply_pending"}:
+                raise ValueError("invalid-new-command")
+            await self._target(attempt, preparation.origin)
+            await self._guard(attempt)
+            return preparation
+
+    async def _run(self, link, inbound, origin, purpose, *, reserve_only=False):
         attempt = _Attempt(link, self._channel(link.id))
         self._check(attempt)
-        task = asyncio.create_task(self._prepare(attempt, inbound, origin, purpose), name="telegram-thread-preparation")
+        work = self._reserve_new(attempt, origin) if reserve_only else self._prepare(attempt, inbound, origin, purpose)
+        task = asyncio.create_task(work, name="telegram-thread-preparation")
         self._operations.add(task)
         task.add_done_callback(self._operations.discard)
         try:
@@ -211,6 +233,10 @@ class ThreadCoordinator:
 
     async def new_conversation(self, link, *, origin) -> str:
         return await self._run(link, None, origin, "new")
+
+    async def reserve_new_conversation(self, link, *, origin) -> ThreadPreparation:
+        """Pin a General /new offer without dispatching any thread request."""
+        return await self._run(link, None, origin, "new", reserve_only=True)
 
     def begin_shutdown(self) -> None:
         self._stopping = True

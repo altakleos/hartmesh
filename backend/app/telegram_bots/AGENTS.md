@@ -18,6 +18,27 @@ preserves them for plain labels/alerts. `markdown` accepts only Telegram markup,
 and `split` counts visible UTF-16 units while retaining balanced tags and complete
 canonical content. Preview rendering is presentation only: durable receipts,
 callback authority and execution gating belong to their owning writers.
+`KEYBOARDS` supplies fixed, closed descriptions for current settings, help and
+new-conversation controls. `callbacks.py` owns canonical layout, saved authority,
+group adoption and prompt scope. Callback data carries only `h1:<random row id>`;
+never derive an action or target from Telegram message text. Compare original
+link/account/chat/topic/generation, anchor, presentation and the complete group.
+Historical aliases route only to a stale guard, never to a new action. Clear
+keyboards explicitly at raw delivery; the SDK omits empty object sequences.
+One two-second logical press budget covers checks and acknowledgement; reserve
+ack time and admit no fresh metadata/action leaf after retirement. The fast fixed
+ack uses only captured transport state and a presentation-only locale cache.
+An already-started SQL unit remains owned through cleanup beyond that budget.
+
+`commands.py` handles fixed navigation and language settings only. Deliberate
+navigation closes only that prompt scope. `acts.py` commits a saved settings
+choice, its exact old/new preference, completed Act, consumed group and replacement
+controls in one guarded writer. `SettingsRepository.update(session=...)` borrows
+the owning engine/writer without committing. Future Act kinds have no consumer.
+`plan_product_keyboard` freezes descriptions with the original product basis and
+creates parent, group and controls atomically; exact replay reuses identities.
+The supervisor constructs these services after resolving default repositories.
+
 Ambiguous details containers display literally. Impossible canonical
 split budgets raise `ValueError`; disposable drafts may clip their first part.
 
@@ -181,7 +202,11 @@ dispatch, while the shared client/final reads survive the actual manager drain.
 Already-dispatched waits/parts recheck current read authority, never new-create
 ceilings. Supervisor final stop closes that client before persistence teardown;
 failed response/client cleanup stays retryable. These callable foundations
-activate no ordinary input, `/new` or model-final source consumer.
+activate no ordinary model input. `/new` reserves its original routed command and
+mapping/creation bookmark without HTTP. A saved first-choice claim precedes
+confirm's existing thread API; Keep never creates. Final guarded delivery planning
+consumes the exact group and seals the original input. The bot message is never
+fabricated into a human-origin receipt.
 
 `producer.py` owns reply plans and bounded claim workers. Raw delivery receives
 link/outbox/part IDs plus both process/admission fences. Current owner/policy/
@@ -265,7 +290,10 @@ Starting pending admission consumes its observed wake. A fresh wake arriving
 during awaited admission remains available to interrupt the following wait;
 a serviced held-release signal must not skip that failed suffix's backoff.
 `defer_start_retry` transfers the first startup rate-limit observation before
-any awaited status guard. Restore requests one discard intent with
+any awaited status guard. Rate waits retain that absolute deadline across guards
+and queued sleeper startup; ordinary timed waits retain their entry deadline.
+Wake/cancel still joins both timer and wake children. Restore requests one discard
+intent with
 `require_drop_pending`; `complete_pending_drop` only joins that intent and cannot
 schedule another negative-offset discard. Await completion outside the lifecycle
 lock needed by health callbacks.

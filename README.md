@@ -1371,6 +1371,12 @@ replies, single-use account setup and durable fixed command responses. Memory
 navigation uses the configured public address when available. The connection
 flow remains reserved while ordinary chat, files and the remaining stage-one
 capabilities are completed.
+The reserved managed-bot path now supports `/help`, `/privacy`, `/web`, basic
+language settings, and `/new` with explicit Start new / Keep this one
+buttons. Buttons use saved, scoped identities; stale or foreign presses cannot
+change settings or conversations. Delivery repair retries the saved message
+without rerunning the AI agent. Ordinary managed-bot model input and the connection
+UI remain deferred. This change adds no database schema revision.
 Conversation preparation now saves a single thread-creation identity before
 contacting the Gateway, verifies the stored human owner and selected AI assistant,
 and refuses stale conversation mappings. Retries after a lost response or a

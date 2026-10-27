@@ -91,6 +91,15 @@ Fixed status tests compare immutable origins/scope/topic/completion/source, stri
 caller receipts, reject crossed source/page controls, and use the actual sender
 and recorded Telegram SDK for the server label and URL/plain fallback orders.
 
+Callback tests use that matrix for complete saved groups, historical aliases,
+scope/adoption, pause policy and ten-minute prompts. Command integration runs the
+actual pinned Telegram SDK and recorded Gateway HTTP, including confirm/keep,
+locale Acts, explicit keyboard clearing and delivery-only repair. Hold the real
+post-route/precheck boundaries to prove retirement cannot admit a later leaf.
+Strict items cover the whole command/press lifetime and cold preference validation.
+Default-supervisor tests omit injected repositories so wiring cannot be qualified
+only by richer test fixtures. Do not add routine local full-suite runs here.
+
 Durable inbox/outbox tests use the same real SQL matrix. Exercise borrowed
 rollback/autoflush, chat-scoped replay, publication/run fences, joined-input
 completion and existing welcome plans. Worker barriers cover delayed same-process

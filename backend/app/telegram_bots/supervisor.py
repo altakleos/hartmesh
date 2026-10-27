@@ -22,9 +22,12 @@ from sqlalchemy import delete
 from sqlalchemy.exc import SQLAlchemyError
 from telegram.error import RetryAfter, TelegramError
 
+from app.telegram_bots.acts import Acts
 from app.telegram_bots.adapter import LongRetryAfter, SendContext, StrangerLedger, TelegramBotChannel
 from app.telegram_bots.api_logging import call_failure_fields
+from app.telegram_bots.callbacks import CallbackRepository, Prompts
 from app.telegram_bots.cipher import token_cipher, unwrap_token, wrap_token
+from app.telegram_bots.commands import CallbackCommands
 from app.telegram_bots.config import TelegramBotsConfig
 from app.telegram_bots.deployment import CopyGuard, feature_reason, static_cause
 from app.telegram_bots.links import BotLink, BotLinkRepository
@@ -107,6 +110,7 @@ class TelegramSupervisor:
         self.app, self.config, self.channel_service = app, config, channel_service
         self.session_factory, self.links, self.outbox, self.settings = session_factory, links, outbox, settings
         self.authority, self._app_config = authority, app_config
+        self.callbacks = self.prompts = self.acts = self.commands = None
         self.strangers = StrangerLedger()
         self.copy_guard = copy_guard
         self.thread_client, self.threads = thread_client, None
@@ -243,6 +247,10 @@ class TelegramSupervisor:
                 self._copy_decision = False
             self.settings = self.settings or SettingsRepository(self.session_factory, self.config)
             self.outbox = self.outbox or Outbox(self.session_factory, config=self.config, clock=self._clock)
+            self.callbacks = CallbackRepository(self.session_factory, config=self.config)
+            self.prompts = Prompts(self.callbacks)
+            self.acts = Acts(self.session_factory, settings=self.settings, callbacks=self.callbacks, outbox=self.outbox)
+            self.commands = CallbackCommands(self)
             if self.authority is None:
                 from app.telegram_bots.authority import TelegramAuthority
 

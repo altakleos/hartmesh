@@ -6,7 +6,7 @@ from string import Formatter
 import pytest
 
 from app.telegram_bots.render import render_plain, render_preview
-from app.telegram_bots.texts import FIRST_KEYS, KEYBOARDS, catalog
+from app.telegram_bots.texts import FIRST_KEYS, catalog
 
 STAGE_ONE_KEYS = frozenset(
     """
@@ -37,7 +37,6 @@ STAGE_ONE_KEYS = frozenset(
 def test_text_catalog_locales_have_equal_keys():
     assert set(catalog("en")) == set(catalog("zh-CN"))
     assert STAGE_ONE_KEYS == {key for key in catalog("en") if not key.startswith(("label.", "menu."))}
-    assert KEYBOARDS == {}
     assert catalog("zh_cn") is catalog("zh-CN")
     assert catalog("unrecognised") is catalog("en")
     assert all(text and "<br>" not in text for text in catalog("en").values())
