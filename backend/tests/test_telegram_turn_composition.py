@@ -58,7 +58,7 @@ ANSWER = "**Durable answer**"
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", ["text", "custom_text", "produced_file", "phase_one", "no_user_text", "no_user_custom_text", "no_user_uncertain"])
-async def test_actual_managed_turn_creates_once_and_delivers_only_verified_output(capture_environment, monkeypatch, tmp_path, case, *, managed_ingress=False):
+async def test_actual_managed_turn_creates_once_and_delivers_only_verified_output(capture_environment, monkeypatch, tmp_path, case, *, managed_ingress=False, dialogue=None):
     e = capture_environment
     async with e.engine.begin() as connection:
         if e.dialect == "sqlite":
@@ -81,9 +81,19 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
             confined = await asyncio.to_thread(lambda: paths.user_agent_dir(OWNER, target).resolve().is_relative_to(tmp_path.resolve()))
             assert confined
             await asyncio.to_thread(FileAgentStore().create, target, {"name": target, "memory_enabled": False}, "Synthetic custom configuration", user_id=OWNER)
-        assembly, _built, model = await asyncio.to_thread(assemble_offline, monkeypatch, custom=custom)
+        tools = []
+        if dialogue is not None:
+            from deerflow.tools.builtins.clarification_tool import ask_clarification_tool
+
+            tools = [ask_clarification_tool]
+        assembly, _built, model = await asyncio.to_thread(assemble_offline, monkeypatch, custom=custom, tools=tools)
         assert assembly.inventory_profile is not None and services.run_agent is run_agent
         model.responses = [AIMessage(ANSWER)]
+        if dialogue is not None:
+            args = {"question": "Choose a value", "options": ["First", "Second"]}
+            if dialogue == "form":
+                args = {"question": "Supply a value", "fields": [{"name": "value", "label": "A value", "type": "text", "required": True}]}
+            model.responses = [AIMessage("", tool_calls=[{"id": "actual-dialogue-call", "name": "ask_clarification", "args": args}]), AIMessage(ANSWER)]
         configured = agent.get_app_config()
         for name in ("_app_config", "_app_config_path", "_app_config_mtime", "_app_config_signature", "_app_config_is_custom"):
             monkeypatch.setattr(app_config, name, getattr(app_config, name))
@@ -134,6 +144,8 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
         owner = GatewayClientOwner(gateway_url="http://gateway.test", langgraph_url="http://gateway.test/api", transport=RecordedASGI(app=app))
         boot = build(db, monkeypatch)
         supervisor = boot.supervisor
+        if dialogue is not None:
+            supervisor.outbox.clock = boot.clock.now
         supervisor.app, supervisor.authority, supervisor._app_config = app, live.authority, configured
         supervisor.thread_client = owner
         channel_store = await asyncio.to_thread(ChannelStore, str(tmp_path / "manager.json"))
@@ -249,6 +261,12 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
                 assert not owner.closed and supervisor._subscribed
                 model_release.set()
             await asyncio.wait_for(final.wait(), 15)
+            if dialogue is not None:
+                await _complete_actual_human_input_dialogue(
+                    SimpleNamespace(e=e, boot=boot, supervisor=supervisor, channel=channel, link=link, model=model, model_inputs=model_inputs, record=record, first=active_turn, http_calls=http_calls, http_responses=http_responses),
+                    dialogue=dialogue,
+                )
+                return
             if case == "no_user_uncertain":
                 app.state.storage_spaces_enabled = True
             assert any(message.text == ANSWER for message in frames if message.is_final)
@@ -340,3 +358,131 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
 async def test_actual_sdk_ingress_controller_worker_and_sender_compose(capture_environment, monkeypatch, tmp_path, case):
     """No scripted run/output proof or substituted controller/view/worker."""
     await test_actual_managed_turn_creates_once_and_delivers_only_verified_output(capture_environment, monkeypatch, tmp_path, case, managed_ingress=True)
+
+
+async def _complete_actual_human_input_dialogue(env, *, dialogue):
+    from test_telegram_callback_commands import press
+
+    from deerflow.persistence.telegram_bots.model import TelegramCallbackRow
+
+    e, supervisor, channel, boot, link = env.e, env.supervisor, env.channel, env.boot, env.link
+
+    async def until(predicate):
+        async with asyncio.timeout(20):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+    def sent(identity):
+        return {"message_id": identity, "date": 1_893_456_000, "chat": {"id": link.chat_id, "type": "private"}, "text": "Offline delivery"}
+
+    await asyncio.wait_for(env.first.done.wait(), 20)
+    async with e.sf() as reader:
+        primary = await reader.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == "reply:" + env.record.turn_id))
+    assert primary is not None and primary.payload["reply_basis"]["version"] == 5
+    assert primary.payload["reply_basis"]["outcome"]["projection"]["output"]["reason"] == "human_input_required"
+    request = primary.payload["reply_basis"]["outcome"]["request_basis"]["messages"][-1]["content"]["artifact"]["human_input"]
+    boot.normal.enqueue("sendMessage", result=sent(501))
+    boot.clock.advance(2)
+    await supervisor.sender.tick()
+    await supervisor.sender.drain()
+    card = [call for call in boot.normal.calls if call.endpoint == "sendMessage"][-1]
+    assert "value" in card.parameters["text"]
+    if dialogue == "choice":
+        callback_id = card.parameters["reply_markup"]["inline_keyboard"][0][0]["callback_data"].removeprefix("h1:")
+        expected = "First"
+        expected_kind = "option"
+    else:
+        assert card.parameters["reply_markup"]["force_reply"] is True
+        from _telegram_bot_test_support import update_payload
+
+        errors = []
+
+        async def record_ingress_error(update, context):
+            errors.append(context.error)
+
+        channel.application.add_error_handler(record_ingress_error)
+        incoming = Update.de_json(update_payload(1702, message_id=712, account=link.telegram_user_id, text="Actual field value"), channel.bot)
+        assert await channel.handle_update(incoming), [repr(error) for error in errors]
+        boot.normal.enqueue("editMessageText", result=sent(501))
+        boot.clock.advance(2)
+        await supervisor.sender.tick()
+        await supervisor.sender.drain()
+        review = [call for call in boot.normal.calls if call.endpoint == "editMessageText"][-1]
+        assert "Actual field value" in review.parameters["text"]
+        callback_id = review.parameters["reply_markup"]["inline_keyboard"][0][0]["callback_data"].removeprefix("h1:")
+        expected = 'A value: Actual field value [values: {"value":"Actual field value"}]'
+        expected_kind = "text"
+    boot.normal.enqueue("answerCallbackQuery")
+    boot.normal.enqueue("editMessageText", result=sent(501))
+    boot.normal.enqueue("sendMessageDraft")
+    assert await channel.handle_update(press(SimpleNamespace(link=link, channel=channel), 1703, callback_id, message_id=501))
+    await channel._drain_ingress()
+    async with e.sf() as reader:
+        staged_choice = await reader.get(TelegramCallbackRow, callback_id)
+    assert staged_choice.payload.get("publication_owner"), {
+        "acknowledgements": [call.parameters for call in boot.normal.calls if call.endpoint == "answerCallbackQuery"],
+        "controller_turns": len(supervisor.turns._turns),
+        "model_invocations": env.model.invocations,
+    }
+    try:
+        await until(lambda: env.model.invocations == 2)
+    except TimeoutError:
+        saved_runs = await e.repository.list_by_thread(env.first.record.scope.thread_id, user_id=OWNER)
+        async with e.sf() as reader:
+            staged_choice = await reader.get(TelegramCallbackRow, callback_id)
+        owner = staged_choice.payload.get("publication_owner", {})
+        pytest.fail(
+            str(
+                {
+                    "model_invocations": env.model.invocations,
+                    "turns": [
+                        {
+                            "record": turn.record.publication_id if turn.record else None,
+                            "task_done": turn.task.done() if turn.task else None,
+                            "capacity_waiting": turn.capacity_waiting,
+                            "refusal": turn.refusal is not None,
+                            "error_type": type(turn.task.exception()).__name__ if turn.task and turn.task.done() and not turn.task.cancelled() and turn.task.exception() else None,
+                        }
+                        for turn in supervisor.turns._turns.values()
+                    ],
+                    "saved_input": {key: owner.get(key) for key in ("current_publication_id", "confirmed_publication_id", "route_complete", "state")},
+                    "runs": [{key: run.get(key) for key in ("run_id", "status", "stop_reason")} for run in saved_runs],
+                    "creating_requests": [(method, path) for method, path, body in env.http_calls if method == "POST" and "/runs" in path],
+                    "creating_responses": [(method, path, status) for method, path, status in env.http_responses if method == "POST" and "/runs" in path],
+                }
+            )
+        )
+    await until(lambda: not supervisor.turns._turns)
+    actual = env.model_inputs[-1]
+    response = actual.additional_kwargs["human_input_response"]
+    assert restore_original_human_message(actual).content == expected
+    assert response["value"] == expected and response["response_kind"] == expected_kind
+    assert response["source"] == request["source"] == "ask_clarification" and response["request_id"] == request["request_id"]
+    if dialogue == "choice":
+        assert response["option_id"] == request["options"][0]["id"]
+    assert actual.additional_kwargs["channel_turn_id"] != env.record.publication_id
+    runs = await e.repository.list_by_thread(env.first.record.scope.thread_id, user_id=OWNER)
+    assert len(runs) == 2 and all(run["status"] == "success" for run in runs)
+    assert len([1 for method, path, body in env.http_calls if method == "POST" and path.endswith(("/runs/stream", "/runs/wait", "/runs"))]) == 2
+    async with e.sf() as reader:
+        selected = await reader.get(TelegramCallbackRow, callback_id)
+        answer = await reader.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key != primary.dedupe_key, TelegramOutboxRow.dedupe_key.like("reply:%")))
+    assert selected.consumed_at is not None and answer is not None
+    boot.normal.enqueue("sendMessage", result=sent(503))
+    # Exercise the production pacing floor with an explicit clock.
+    for _ in range(4):
+        boot.clock.advance(2)
+        await supervisor.sender.tick()
+        await supervisor.sender.drain()
+        async with e.sf() as reader:
+            saved = await reader.get(TelegramOutboxRow, answer.id)
+        if saved.state == "sent":
+            break
+    assert saved.state == "sent"
+    assert any(call.endpoint == "sendMessage" and call.parameters["text"] == "<b>Durable answer</b>" for call in boot.normal.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dialogue,case", [("choice", "no_user_text"), ("form", "no_user_custom_text")])
+async def test_actual_worker_request_and_sdk_answer_complete_the_next_qualified_run(capture_environment, monkeypatch, tmp_path, dialogue, case):
+    await test_actual_managed_turn_creates_once_and_delivers_only_verified_output(capture_environment, monkeypatch, tmp_path, case, managed_ingress=True, dialogue=dialogue)

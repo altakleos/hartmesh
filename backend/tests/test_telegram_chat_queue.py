@@ -215,7 +215,7 @@ def test_invalid_or_repeated_callback_input_never_takes_a_waiting_position():
             queue.admit_callback(link, message(link, 2), callback_id=value)
     queue.admit_callback(link, message(link, 2), callback_id="c" * 32)
     with pytest.raises(ValueError):
-        queue.admit_callback(link, message(link, 2), callback_id="d" * 32)
+        queue.admit_callback(link, message(link, 2), callback_id="c" * 32)
     assert queue.waiting_count(link, None) == 1
     queue.cancel_wait(link, None)
     assert queue.waiting_inputs(link, None) == ()

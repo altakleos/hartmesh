@@ -8,7 +8,7 @@ import secrets
 import weakref
 from contextlib import asynccontextmanager
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from app.channels.message_bus import InboundMessage
 from app.telegram_bots.queue import ChatQueue
@@ -82,6 +82,7 @@ class _Turn:
     capacity_waiting: bool = False
     capacity_notice_sent: bool = False
     stop_marker_checked: bool = False
+    submission: object = None
 
     @property
     def topic(self):
@@ -93,6 +94,7 @@ class ChatTurns:
         self.services = services
         self.queue = ChatQueue(services.config)
         self._turns, self._origins = {}, {}
+        self._callback_origins = {}
         self._tasks = set()
         self._task_channels = {}
         self._entries = {}
@@ -162,6 +164,50 @@ class ChatTurns:
         async with self._entry(channel):
             return await self._accept(channel, update)
 
+    async def accept_staged(self, channel, stage):
+        """Admit one actual durable answer as an indivisible FIFO input."""
+        async with self._entry(channel):
+            link = deepcopy(channel.link)
+
+            def current():
+                return not self._closed and channel not in self._retired and self.services.channel(link.id) is channel and channel._callback_current(link)
+
+            guard = _Guard(self.services, channel, link, current, repair=True)
+            if not current():
+                return False
+            stage = await self.services.outbox.inbox.read_submission(link, stage, guard=guard)
+            guard.current()
+            if stage.route_complete or stage.record is not None:
+                return True
+            if stage.callback_id is not None:
+                if any(turn.callback_id == stage.callback_id for turn in self._turns.values()) or any(entry.callback_id == stage.callback_id for entry in self.queue.waiting_inputs(link, stage.origins[0].message_thread_id)):
+                    return True
+            elif any((link.id, row.message_id) in self._origins for row in stage.origins):
+                return True
+            inbound = replace(self._inbound(link, stage.origins), text=stage.text)
+            result = self.queue.admit_callback(link, inbound, callback_id=stage.callback_id) if stage.callback_id is not None else self.queue.admit_submission(link, inbound)
+            if result == "full":
+                await self.services.outbox.plan_input_outcome(
+                    link,
+                    source_id="submission-full:" + (stage.callback_id or str(stage.origins[0].message_id)),
+                    source_ref={"key": "busy.followup_full", "values": {}},
+                    keyboard=self._button("retry_message", stage.callback_id or str(stage.origins[0].message_id), target_kind="request"),
+                    callbacks=self.services.callbacks,
+                    guard=guard,
+                    inbox_rows=() if stage.callback_id else stage.origins,
+                    input_owner_callback_id=stage.callback_id,
+                )
+                return True
+            if stage.callback_id is not None:
+                self._callback_origins[(link.id, stage.callback_id)] = (channel, stage.origins)
+            else:
+                for row in stage.origins:
+                    self._origins[(link.id, row.message_id)] = row
+                    self._origin_channels[(link.id, row.message_id)] = channel
+            if result == "run":
+                self._start(channel, link, inbound)
+            return True
+
     async def _accept(self, channel, update):
         link, message = deepcopy(channel._admission(update).link), update.message
         if self._closed or channel in self._retired or message is None or type(message.text) is not str or not message.text.strip():
@@ -200,7 +246,7 @@ class ChatTurns:
             workspace_id=str(link.bot_id),
             metadata={"message_id": message.message_id, "message_thread_id": row.message_thread_id, _SOURCES: [message.message_id]},
         )
-        disposition = self.queue.admit(link, inbound)
+        disposition = self.queue.admit_submission(link, inbound) if "reply_to_message_id" in row.sanitized_input else self.queue.admit(link, inbound)
         if disposition == "full":
             await channel.send_text("busy.followup_full", source_id=f"chat-full:{row.chat_id}:{row.message_id}", reply_to=row.message_id, thread=row.message_thread_id, inbox_rows=[row], finish_route=True, _captured_link=link)
         else:
@@ -216,9 +262,13 @@ class ChatTurns:
         return True
 
     def _start(self, channel, link, inbound):
-        origins = tuple(self._origins[(link.id, identity)] for identity in inbound.metadata[_SOURCES])
+        topic = inbound.metadata.get("message_thread_id")
+        callback_id = self.queue.current_callback(link, topic)
+        origins = self._callback_origins.pop((link.id, callback_id))[1] if callback_id is not None else tuple(self._origins[(link.id, identity)] for identity in inbound.metadata[_SOURCES])
         turn = _Turn(channel, link, inbound, origins)
-        turn.callback_id = self.queue.current_callback(link, turn.topic)
+        turn.callback_id = callback_id
+        if turn.callback_id is None and len(origins) == 1 and "submission" in origins[0].route_basis:
+            turn.submission = self.services.outbox.inbox.typed_submission_stage(origins[0])
         self._turns[(link.id, turn.topic)] = turn
         if self._creating(turn):
             turn.task = self._spawn(self._drive(turn), channel=channel)
@@ -229,9 +279,10 @@ class ChatTurns:
         turn.done.set()
         if turn.record is not None and self._observer is not None:
             self.observer.retire(turn.record)
-        for row in turn.origins:
-            self._origins.pop((turn.link.id, row.message_id), None)
-            self._origin_channels.pop((turn.link.id, row.message_id), None)
+        if turn.callback_id is None:
+            for row in turn.origins:
+                self._origins.pop((turn.link.id, row.message_id), None)
+                self._origin_channels.pop((turn.link.id, row.message_id), None)
         next_input = self.queue.turn_ended(turn.link, turn.topic)
         self._turns.pop((turn.link.id, turn.topic), None)
         if next_input is not None:
@@ -304,9 +355,24 @@ class ChatTurns:
             return False
         try:
             if turn.callback_id is None:
-                turn.origins = await self.services.outbox.inbox.group_prepublication(turn.origins, guard=guard)
-                guard.current()
-                thread = await self.services.threads.ensure_thread(turn.link, turn.inbound, origin=turn.origins[0])
+                if turn.submission is not None:
+                    stage = await self.services.outbox.inbox.read_submission(turn.link, turn.submission, guard=guard)
+                    guard.current()
+                    turn.origins = stage.origins
+                    if stage.record is not None:
+                        turn.record = stage.record
+                        return True
+                    turn.origins = await self.services.outbox.inbox.group_prepublication(turn.origins, guard=guard)
+                    thread = await self.services.threads.ensure_submission_thread(turn.link, stage)
+                else:
+                    turn.origins = await self.services.outbox.inbox.group_prepublication(turn.origins, guard=guard)
+                    guard.current()
+                    human_inputs = getattr(self.services, "human_inputs", None)
+                    before = getattr(human_inputs, "before_plain_publication", None)
+                    if before is not None:
+                        await before(turn.channel, turn.link, turn.origins)
+                        guard.current()
+                    thread = await self.services.threads.ensure_thread(turn.link, turn.inbound, origin=turn.origins[0])
             else:
                 stage = await self.services.outbox.inbox.read_callback_input(turn.link, turn.callback_id, guard=guard)
                 guard.current()
@@ -425,7 +491,7 @@ class ChatTurns:
         # their actual owner, never by fabricating a thread/publication.
         while turn.cancelled_waiting:
             entry = turn.cancelled_waiting[0]
-            origins = tuple(self._origins[(turn.link.id, identity)] for identity in entry.inbound.metadata[_SOURCES])
+            origins = self._callback_origins[(turn.link.id, entry.callback_id)][1] if entry.callback_id else tuple(self._origins[(turn.link.id, identity)] for identity in entry.inbound.metadata[_SOURCES])
             held = _Turn(turn.channel, turn.link, entry.inbound, origins, callback_id=entry.callback_id)
             guard = _Guard(self.services, turn.channel, turn.link, lambda: self._current(turn), repair=True)
             await self.services.outbox.plan_input_outcome(
@@ -440,9 +506,12 @@ class ChatTurns:
             )
             if not self._current(turn):
                 return
-            for origin in origins:
-                self._origins.pop((turn.link.id, origin.message_id), None)
-                self._origin_channels.pop((turn.link.id, origin.message_id), None)
+            if entry.callback_id is not None:
+                self._callback_origins.pop((turn.link.id, entry.callback_id), None)
+            else:
+                for origin in origins:
+                    self._origins.pop((turn.link.id, origin.message_id), None)
+                    self._origin_channels.pop((turn.link.id, origin.message_id), None)
             turn.cancelled_waiting = turn.cancelled_waiting[1:]
         for row in turn.stop_commands:
             guard = self._guard(turn, repair=True)
@@ -535,6 +604,12 @@ class ChatTurns:
                     stopped = turn.stop_requested and run.row.get("status") == "interrupted"
                     if stopped or failure is None:
                         if await self._observe(turn, lambda: self._pause_ui(turn, final=True)):
+                            inputs = getattr(self.services, "human_inputs", None)
+                            if not stopped and inputs is not None:
+                                planned = await self._observe(turn, lambda: inputs.plan_terminal(record, turn.link))
+                                if planned is not None:
+                                    await self._observe(turn, lambda: self._complete(turn))
+                                    return
                             waiting = bool(turn.cancelled_waiting) if turn.waiting_dropped else bool(self.queue.waiting_count(turn.link, turn.topic))
                             identity = await self._observe(turn, lambda: self.observer.plan_final(record, turn.link, stopped=stopped, waiting=waiting))
                             if identity is not None:
@@ -729,6 +804,11 @@ class ChatTurns:
                 return
             if row.route_complete or not created:
                 return
+            human_inputs = getattr(self.services, "human_inputs", None)
+            if human_inputs is not None:
+                await human_inputs.command(channel, update, "stop", captured_link=link)
+            if self._closed or channel in self._retired or not channel._callback_current(link):
+                return
             row = await await_drained(self.services.outbox.inbox.route(row, kind="command", target_id="stop", basis={}, operation_ids=[]))
             if not channel._callback_current(link):
                 return
@@ -809,9 +889,7 @@ class ChatTurns:
                     input_owner_callback_id=row.id,
                 )
                 return
-            for origin in stage.origins:
-                self._origins[(link.id, origin.message_id)] = origin
-                self._origin_channels[(link.id, origin.message_id)] = channel
+            self._callback_origins[(link.id, row.id)] = (channel, stage.origins)
             if result == "run":
                 self._start(channel, link, inbound)
 
@@ -957,6 +1035,9 @@ class ChatTurns:
             if owner is channel:
                 self._origin_channels.pop(key, None)
                 self._origins.pop(key, None)
+        for key, (owner, _origins) in tuple(self._callback_origins.items()):
+            if owner is channel:
+                self._callback_origins.pop(key, None)
         return retired
 
     async def retire(self, channel):
@@ -1000,6 +1081,7 @@ class ChatTurns:
                 self._turns.clear()
                 self._origins.clear()
                 self._origin_channels.clear()
+                self._callback_origins.clear()
                 for result in results:
                     if isinstance(result, BaseException):
                         raise result

@@ -73,6 +73,7 @@ def _copy(message):
 class QueuedInput:
     inbound: InboundMessage
     callback_id: str | None = None
+    separate: bool = False
 
 
 @dataclass
@@ -113,6 +114,14 @@ class ChatQueue:
     def admit(self, link, inbound):
         return self._admit(link, inbound, callback_id=None)
 
+    def admit_submission(self, link, inbound):
+        """Keep one durably staged typed response separate in FIFO order.
+
+        The controller, rather than message metadata, selects this boundary.
+        The queue neither validates nor grants authority to a response.
+        """
+        return self._admit(link, inbound, callback_id=None, separate=True)
+
     def admit_callback(self, link, inbound, *, callback_id):
         """Queue an already-staged host callback as an indivisible input unit.
 
@@ -123,7 +132,7 @@ class ChatQueue:
             _refuse()
         return self._admit(link, inbound, callback_id=callback_id)
 
-    def _admit(self, link, inbound, *, callback_id):
+    def _admit(self, link, inbound, *, callback_id, separate=False):
         if self._closed:
             _refuse()
         scope, key = self._input(link, inbound)
@@ -133,15 +142,21 @@ class ChatQueue:
             return "run"
         if turn.scope != scope:
             _refuse()
-        known = {identity for item in [turn.current, *(entry.inbound for entry in turn.waiting)] for identity in _sources(item)}
-        if known.intersection(_sources(inbound)):
-            _refuse()
+        if callback_id is not None:
+            # A callback owns a new input unit. Its retained human origins may
+            # still belong to the question-producing turn being released.
+            if callback_id == turn.callback_id or any(entry.callback_id == callback_id for entry in turn.waiting):
+                _refuse()
+        else:
+            known = {identity for item in [turn.current, *(entry.inbound for entry in turn.waiting)] for identity in _sources(item)}
+            if known.intersection(_sources(inbound)):
+                _refuse()
         if len(turn.waiting) >= self.depth:
             return "full"
         # Stop dropped the then-current tail. A later actual input waits for
         # that same turn's one completion; it cannot resurrect dropped units.
         turn.cancelled = False
-        turn.waiting.append(QueuedInput(_copy(inbound), callback_id))
+        turn.waiting.append(QueuedInput(_copy(inbound), callback_id, separate))
         return "first-waiting" if len(turn.waiting) == 1 else "waiting"
 
     def _find(self, link, topic):
@@ -161,7 +176,7 @@ class ChatQueue:
 
     def waiting_inputs(self, link, topic):
         turn = self._find(link, topic)
-        return tuple(QueuedInput(_copy(entry.inbound), entry.callback_id) for entry in turn.waiting) if turn is not None else ()
+        return tuple(QueuedInput(_copy(entry.inbound), entry.callback_id, entry.separate) for entry in turn.waiting) if turn is not None else ()
 
     def retry_later(self, link, inbound):
         scope, key = self._input(link, inbound)
@@ -190,8 +205,8 @@ class ChatQueue:
             return None
         entry = turn.waiting[0]
         count = 1
-        if entry.callback_id is None:
-            while count < len(turn.waiting) and turn.waiting[count].callback_id is None:
+        if entry.callback_id is None and not entry.separate:
+            while count < len(turn.waiting) and turn.waiting[count].callback_id is None and not turn.waiting[count].separate:
                 count += 1
         selected = [value.inbound for value in turn.waiting[:count]]
         first = entry.inbound

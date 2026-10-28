@@ -12,6 +12,7 @@ import stat
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from html import escape
 from pathlib import Path
@@ -654,10 +655,22 @@ def _has_current_turn_clarification(result: dict | list) -> bool:
     return False
 
 
-def _response_metadata(base_metadata: dict[str, Any], *, pending_clarification: bool = False) -> dict[str, Any]:
+TURN_ARTIFACTS_MAX = 8
+
+
+def _current_turn_artifacts(result: dict | list) -> list[dict[str, Any]]:
+    found = [message["artifact"] for message in _current_turn_messages(result) if message.get("type") == "tool" and isinstance(message.get("artifact"), dict)]
+    selected = found if len(found) <= TURN_ARTIFACTS_MAX else [*found[: TURN_ARTIFACTS_MAX - 1], found[-1]]
+    return deepcopy(selected)
+
+
+def _response_metadata(base_metadata: dict[str, Any], *, pending_clarification: bool = False, turn_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     metadata = _slim_metadata(base_metadata)
+    metadata.pop("turn_artifacts", None)
     if pending_clarification:
         metadata[PENDING_CLARIFICATION_METADATA_KEY] = True
+    if turn_artifacts:
+        metadata["turn_artifacts"] = deepcopy(turn_artifacts)
     return metadata
 
 
@@ -2707,6 +2720,7 @@ class ChannelManager:
         # authoritative final-source ID or durable model-delivery receipt.
         await _authorize_execution(execution, "run_read")
         text, artifacts = _extract_response_text(result), _extract_artifacts(result)
+        turn_artifacts = _current_turn_artifacts(result)
         text, attachments = await await_drained(asyncio.to_thread(_prepare_artifact_delivery, execution.thread_id, text, artifacts, user_id=execution.owner_user_id))
         await _authorize_execution(execution, "run_read")
         if not text:
@@ -2722,7 +2736,7 @@ class ChannelManager:
                 thread_ts=msg.thread_ts,
                 connection_id=execution.connection_id,
                 owner_user_id=execution.owner_user_id,
-                metadata=_response_metadata(msg.metadata, pending_clarification=_has_current_turn_clarification(result)),
+                metadata=_response_metadata(msg.metadata, pending_clarification=_has_current_turn_clarification(result), turn_artifacts=turn_artifacts),
             )
         )
 
@@ -2880,7 +2894,7 @@ class ChannelManager:
             thread_ts=msg.thread_ts,
             connection_id=msg.connection_id,
             owner_user_id=msg.owner_user_id,
-            metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
+            metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification, turn_artifacts=_current_turn_artifacts(result)),
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
         await self.bus.publish_outbound(outbound)
@@ -3013,7 +3027,7 @@ class ChannelManager:
                     thread_ts=msg.thread_ts,
                     connection_id=msg.connection_id,
                     owner_user_id=msg.owner_user_id,
-                    metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
+                    metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification, turn_artifacts=_current_turn_artifacts(result)),
                 )
             )
             if stream_error is not None:

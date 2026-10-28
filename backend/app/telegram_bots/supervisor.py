@@ -116,6 +116,7 @@ class TelegramSupervisor:
         self.thread_client, self.threads = thread_client, None
         self.publication_authority = self.publications = self.model_source = None
         self.turns = None
+        self.forms = self.human_inputs = None
         self.recovery = None
         self._recovery_epoch = self._recovery_phase = None
         self._recovery_started = False
@@ -250,6 +251,9 @@ class TelegramSupervisor:
             self.outbox = self.outbox or Outbox(self.session_factory, config=self.config, clock=self._clock)
             self.callbacks = CallbackRepository(self.session_factory, config=self.config)
             self.prompts = Prompts(self.callbacks)
+            from app.telegram_bots.forms import Forms
+
+            self.forms = Forms(self.callbacks)
             self.acts = Acts(self.session_factory, settings=self.settings, callbacks=self.callbacks, outbox=self.outbox)
             self.commands = CallbackCommands(self)
             if self.authority is None:
@@ -307,7 +311,12 @@ class TelegramSupervisor:
             self.threads = ThreadCoordinator(links=self.links, authority=self.authority, client=self.thread_client, channel=self.channel, send_allowed=self.send_allowed, outbox=self.outbox, product_name=self.product_name)
             self.publication_authority = PublicationAttemptAuthority(links=self.links, authority=self.authority, client=self.thread_client, channel=self.channel, create_allowed=self.send_allowed, read_allowed=self.publication_read_allowed)
             self.publications = PublicationCoordinator(inbox=self.outbox.inbox, outbox=self.outbox, bus=self.channel_service.bus, http_owner=self.thread_client, capture_attempt=self.publication_authority.capture)
-            self.model_source = ModelSource(read_output=self.publications.read_output)
+            from app.telegram_bots.human_input import HumanInputs
+
+            self.human_inputs = HumanInputs(self)
+            self.publications.human_input_planner = self.human_inputs.plan_terminal
+            self.model_source = ModelSource(read_output=self.publications.read_output, human_input_source=self.human_inputs.source)
+            self.outbox.inbox.on_callback_confirmed = lambda record, writer: self.acts.confirm_network_publication(record, session=writer)
             self.recovery = PublicationRecoveryService(inbox=self.outbox.inbox, outbox=self.outbox, coordinator=self.publications, links=self.links, allowed=self.send_allowed)
             self.turns = ChatTurns(self)
             await self.thread_client.start()
@@ -897,6 +906,8 @@ class TelegramSupervisor:
     async def eligibility(self, link, item, part=None) -> DeliveryEligibility:
         if self._stopping or self._cause is not None or not self._send_ready:
             return DeliveryEligibility.wait()
+        if self.human_inputs is not None and item.payload.get("reply_basis", {}).get("version") == 5 and not await self.human_inputs.step_current(item):
+            return DeliveryEligibility.skip("superseded")
         verdict = await self.authority.delivery(link, item, part)
         if self._stopping or self._cause is not None or not self._send_ready:
             return DeliveryEligibility.wait()

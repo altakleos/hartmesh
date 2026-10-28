@@ -123,7 +123,8 @@ class CallbackCommands:
             guard.current()
             origin = preparation.origin
             keyboard = KEYBOARDS["new.confirm_plain"](thread_id=preparation.expected_thread_id or preparation.creation_id)
-        await self.services.prompts.close(link, origin.chat_id, origin.message_thread_id, reason="command")
+        if origin.route_basis.get("human_input_ui") != {"command_closed": word}:
+            await self.services.prompts.close(link, origin.chat_id, origin.message_thread_id, reason="command")
         guard.current()
         part = {"kind": "text", "source_ref": {"key": basis["key"], "values": basis["values"]}}
         if basis.get("keyboard_template") != "new.confirm_plain":

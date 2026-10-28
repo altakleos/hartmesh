@@ -20,7 +20,7 @@ from app.channels.execution import ChannelExecutionContext, ChannelExecutionScop
 from app.channels.execution_client import ChannelExecutionFacade, ValidatedRun
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus
 from app.gateway.run_output import RunOutputProjectionV2
-from app.telegram_bots.inbox import InboxRepository, InboxRow, PublicationRecord, PublicationScope
+from app.telegram_bots.inbox import InboxRepository, InboxRow, PublicationRecord, PublicationScope, is_plain_text_input
 from app.telegram_bots.links import BotLink, prepare_publication_guard
 from app.telegram_bots.producer import Outbox, freeze_reply_presentation
 from deerflow.utils.file_io import await_drained
@@ -144,6 +144,10 @@ class _Guard:
     def captured_link(self):
         return self.actual.captured_link
 
+    def current(self):
+        """Synchronous original-operation fence for composed host readers."""
+        return self.admission.current(self.operation)
+
     async def prepare(self) -> None:
         self.admission.check(self.operation)
         await prepare_publication_guard(self.actual)
@@ -194,7 +198,7 @@ def _plain_origins(link, origins, *, thread_id, endpoint_id):
         if type(profile) is not dict or set(profile) != {"version", "kind", "forwarded"} or type(profile["version"]) is not int or profile["version"] != 1 or profile["kind"] != "plain_text" or profile["forwarded"] is not False:
             _refuse()
         value = row.sanitized_input
-        if type(value) is not dict or set(value) != {"text", "type"} or value["type"] != "text" or type(value["text"]) is not str or not value["text"].strip():
+        if not is_plain_text_input(value):
             _refuse()
     return tuple(sorted(origins, key=lambda row: (row.accepted_at.astimezone(UTC), row.update_id, row.message_id)))
 
@@ -217,6 +221,7 @@ class PublicationCoordinator:
         self._creating = self._reading = True
         self._operations: set[asyncio.Task] = set()
         self._stop_task = None
+        self.human_input_planner = None
 
     def _check_open(self, *, creating):
         if not self._reading or creating and not self._creating:
@@ -346,11 +351,15 @@ class PublicationCoordinator:
             return record
         execution_scope = _channel_scope(record)
         facade = self._facade(record, admission)
+        text = "\n\n".join(row.sanitized_input["text"] for row in origins)
+        human_kwargs = {}
+        if record.owner_callback_id is not None or any("submission" in row.route_basis for row in origins):
+            text, human_kwargs = await self.inbox.read_publication_submission(record, guard=create_guard)
         message = InboundMessage(
             channel_name="telegram",
             chat_id=str(link.chat_id),
             user_id=str(link.telegram_user_id),
-            text="\n\n".join(row.sanitized_input["text"] for row in origins),
+            text=text,
             msg_type=InboundMessageType.CHAT,
             thread_ts=str(origins[0].message_id),
             topic_id=str(record.scope.message_thread_id) if record.scope.message_thread_id is not None else None,
@@ -363,7 +372,7 @@ class PublicationCoordinator:
                 "message_id": origins[0].message_id,
                 "event_id": record.event_id,
                 "channel_turn_id": record.publication_id,
-                "human_message_kwargs": {"channel_turn_id": record.publication_id},
+                "human_message_kwargs": {**human_kwargs, "channel_turn_id": record.publication_id},
             },
             execution_required=True,
             execution_context=ChannelExecutionContext(execution_scope, facade, admission),
@@ -573,6 +582,21 @@ class PublicationCoordinator:
                 if output.output.state == "pending":
                     return PublicationObservation("pending", fresh, reason="awaiting_output")
                 inventory = output.inventory
+                if self.human_input_planner is not None and output.output.state == "unavailable" and output.output.reason == "human_input_required" and inventory.state == "matched" and inventory.document.coverage == "complete":
+                    control.check_budget()
+                    admission.check("source_read")
+                    identity = await self.human_input_planner(fresh, current_link, guard=read_guard)
+                    control.check_budget()
+                    admission.check("source_read")
+                    if identity is not None:
+                        from app.telegram_bots.inbox import publication_identity
+                        from app.telegram_bots.model_source import validate_model_reply_basis
+
+                        item = await self.outbox.get(current_link, identity)
+                        proof = await await_drained(asyncio.to_thread(validate_model_reply_basis, item))
+                        if proof.kind != "human_input" or proof.output != output or publication_identity(proof.record) != publication_identity(fresh) or item.payload["reply_basis"]["finish_route"] is not True:
+                            _refuse()
+                        return PublicationObservation("planned", fresh, outbox_id=identity)
                 if inventory.state != "matched" or inventory.document.coverage != "complete" or inventory.document.items:
                     return PublicationObservation("held", fresh, reason="inventory_unhandled")
                 if output.output.state != "complete":

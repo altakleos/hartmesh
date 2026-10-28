@@ -93,6 +93,7 @@ from deerflow.runtime.presented_files import RUNTIME_PRESENTED_FILES_CONTEXT_KEY
 from deerflow.runtime.runs.capture_io import CaptureIOClosed, capture_io_scope, current_capture_io_owner, run_capture_io
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.runs.output import OUTPUT_CAPTURE_DISCONNECT_KEY, OUTPUT_CAPTURE_KEY, OutputCaptureIntent, OutputEvidenceError, capture_from_kwargs, capture_intent_to_dict
+from deerflow.runtime.runs.output_source import qualified_human_input_response
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
     redact_config_secrets,
@@ -1811,8 +1812,16 @@ async def _channel_execution_preflight(body, thread_id, request, normalized_inpu
         raise HTTPException(422, "Channel execution supports an initial human turn only")
     messages = normalized_input.get("messages", []) if isinstance(normalized_input, Mapping) else []
     humans = [message for message in messages if isinstance(message, HumanMessage) and is_genuine_user_message(message)]
-    if len(humans) != 1 or any(isinstance(message, HumanMessage) and "human_input_response" in message.additional_kwargs for message in messages):
+    if len(humans) != 1 or bool(humans[0].additional_kwargs.get("hide_from_ui")):
         raise HTTPException(422, "Channel execution requires one visible human message")
+    for message in messages:
+        if isinstance(message, HumanMessage) and "human_input_response" in message.additional_kwargs:
+            try:
+                qualified_human_input_response(message.additional_kwargs)
+            except OutputEvidenceError:
+                raise HTTPException(422, "Channel execution requires a canonical human-input response") from None
+            if message is not humans[0]:
+                raise HTTPException(422, "Channel execution requires one visible human message")
     owner = await live_channel_human(request)
     await _require_channel_thread(request, run_ctx, thread_id, owner)
     # convert_to_messages may return a caller-owned BaseMessage unchanged.

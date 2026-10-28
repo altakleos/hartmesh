@@ -39,6 +39,32 @@ the owning engine/writer without committing. Future Act kinds have no consumer.
 creates parent, group and controls atomically; exact replay reuses identities.
 The supervisor constructs these services after resolving default repositories.
 
+`human_input.py` composes finite clarification/form/network interactions with the
+existing turn controller and sender; it owns no scheduler. `human_input_source.py`
+qualifies one exact lead/tool request using the persisted document-2 output,
+complete inventory and actual messages. Manager `turn_artifacts` are bounded
+presentation hints only. V5 human-input plans freeze that source and their input
+snapshots; every unsent private part rereads source and live scope, including
+inside the SDK limiter. Recovery passes its original read guard into the same
+planner. Fixed navigation can close scoped metadata without reading old private
+content; any private keyboard cleanup still needs fresh source qualification.
+
+`forms.py` stores bounded field values/revisions in existing callback rows. Saved
+option identities, required-checkbox truth, field-by-field prompts and the final
+review/Send determine the exact response; caller labels never select an action.
+Prompt/group/plan changes share one guarded writer. Staging a response retains
+the source control until actual enqueue/bind confirmation, so interrupted handoff
+can repair delivery without applying a second gesture. A network Act records the
+saved choice and completes only with that same confirmation; it grants no access
+directly. The next run's existing network middleware applies policy.
+
+Submission owner version 2 closes over the canonical response and original
+thread; outer publication input version 1 still identifies the origin receipt.
+Typed alternatives retain actual inbox origins, callback choices their saved
+callback owner. Neither invents a human message row. Plain text after a free-text
+question carries no response mark. Old quoted prompt input is held until explicit
+reopen, send-as-new or discard, and is never silently applied to another field.
+
 `turns.py` owns ordinary/custom plain-text turn admission and the ephemeral queue.
 Save actual sanitized input/profile before effects; forwarded input cannot acquire
 plain provenance. Persist complete joined groups before thread preparation.
