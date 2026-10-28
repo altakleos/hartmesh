@@ -1385,7 +1385,8 @@ class TelegramBotChannel(TelegramChannel):
                 if type(target) is not int or target <= 0:
                     raise PermanentDeliveryError("missing-edit-anchor")
                 if part.get("remove_keyboard"):
-                    message = await self.bot.edit_message_reply_markup(chat_id=context.chat_id, message_id=target, reply_markup={"inline_keyboard": []}, rate_limit_args=preview_fence)
+                    clear_markup = {"inline_keyboard": []} if model_part is not None and model_part.human_input else None
+                    message = await self.bot.edit_message_reply_markup(chat_id=context.chat_id, message_id=target, reply_markup=clear_markup, rate_limit_args=preview_fence)
                 else:
                     message = await self.bot.edit_message_text(chat_id=context.chat_id, message_id=target, text=text, parse_mode=None if part.get("plain_fallback") else ParseMode.HTML, reply_markup=markup, rate_limit_args=preview_fence)
             else:

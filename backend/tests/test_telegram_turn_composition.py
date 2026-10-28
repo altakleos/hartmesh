@@ -144,6 +144,8 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
         owner = GatewayClientOwner(gateway_url="http://gateway.test", langgraph_url="http://gateway.test/api", transport=RecordedASGI(app=app))
         boot = build(db, monkeypatch)
         supervisor = boot.supervisor
+        if dialogue is not None:
+            supervisor.outbox.clock = boot.clock.now
         supervisor.app, supervisor.authority, supervisor._app_config = app, live.authority, configured
         supervisor.thread_client = owner
         channel_store = await asyncio.to_thread(ChannelStore, str(tmp_path / "manager.json"))
@@ -380,6 +382,7 @@ async def _complete_actual_human_input_dialogue(env, *, dialogue):
     assert primary.payload["reply_basis"]["outcome"]["projection"]["output"]["reason"] == "human_input_required"
     request = primary.payload["reply_basis"]["outcome"]["request_basis"]["messages"][-1]["content"]["artifact"]["human_input"]
     boot.normal.enqueue("sendMessage", result=sent(501))
+    boot.clock.advance(2)
     await supervisor.sender.tick()
     await supervisor.sender.drain()
     card = [call for call in boot.normal.calls if call.endpoint == "sendMessage"][-1]
@@ -401,6 +404,7 @@ async def _complete_actual_human_input_dialogue(env, *, dialogue):
         incoming = Update.de_json(update_payload(1702, message_id=712, account=link.telegram_user_id, text="Actual field value"), channel.bot)
         assert await channel.handle_update(incoming), [repr(error) for error in errors]
         boot.normal.enqueue("editMessageText", result=sent(501))
+        boot.clock.advance(2)
         await supervisor.sender.tick()
         await supervisor.sender.drain()
         review = [call for call in boot.normal.calls if call.endpoint == "editMessageText"][-1]
@@ -465,9 +469,9 @@ async def _complete_actual_human_input_dialogue(env, *, dialogue):
         answer = await reader.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key != primary.dedupe_key, TelegramOutboxRow.dedupe_key.like("reply:%")))
     assert selected.consumed_at is not None and answer is not None
     boot.normal.enqueue("sendMessage", result=sent(503))
-    # Receipts retain the existing sender's real inter-message pacing.
+    # Exercise the production pacing floor with an explicit clock.
     for _ in range(4):
-        await asyncio.sleep(1.1)
+        boot.clock.advance(2)
         await supervisor.sender.tick()
         await supervisor.sender.drain()
         async with e.sf() as reader:
