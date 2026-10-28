@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from app.channels import manager as mgr
+from app.channels.inbound_files import InboundFileLease
 from app.channels.message_bus import InboundMessage
 from deerflow.uploads.manager import get_uploads_dir
 
@@ -55,3 +56,27 @@ async def test_ingest_inbound_files_does_not_block_event_loop(tmp_path: Path, mo
     assert created[0]["filename"] == "report.txt"
     written = await asyncio.to_thread(lambda: (get_uploads_dir("t1") / "report.txt").exists())
     assert written, "inbound file should be written under the tmp uploads dir"
+
+
+async def test_leased_inbound_file_is_written_and_released_off_loop(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    import deerflow.config.paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "_paths", None)
+    released = []
+
+    async def release():
+        assert lease.data is None
+        released.append("done")
+
+    lease = InboundFileLease(b"Leased payload", release)
+
+    async def reader(_file, _client):
+        return lease
+
+    monkeypatch.setitem(mgr.INBOUND_FILE_READERS, "strict-lease", reader)
+    msg = InboundMessage(channel_name="strict-lease", chat_id="chat", user_id="person", text="A file", files=[{"filename": "leased.txt"}])
+    created = await mgr._ingest_inbound_files("leased-thread", msg, user_id="owner")
+    assert [item["filename"] for item in created] == ["leased.txt"]
+    actual = await asyncio.to_thread(lambda: (get_uploads_dir("leased-thread", user_id="owner") / "leased.txt").read_bytes())
+    assert actual == b"Leased payload" and released == ["done"]

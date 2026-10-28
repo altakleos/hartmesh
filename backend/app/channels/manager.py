@@ -28,6 +28,7 @@ from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
 from app.channels.execution import ChannelExecutionBusyError, ChannelExecutionContext, ChannelExecutionProtocolError, ChannelOperation
+from app.channels.inbound_files import InboundFileLease
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
     PENDING_CLARIFICATION_METADATA_KEY,
@@ -155,7 +156,7 @@ CHANNEL_CAPABILITIES = {
     "wecom": {"supports_streaming": True},
 }
 
-InboundFileReader = Callable[[dict[str, Any], httpx.AsyncClient], Awaitable[bytes | None]]
+InboundFileReader = Callable[[dict[str, Any], httpx.AsyncClient], Awaitable[bytes | InboundFileLease | None]]
 
 # Cap for URL-based inbound attachments fetched by the generic reader (WeCom
 # media today; the WeChat reader is path-only by design — see
@@ -197,10 +198,15 @@ def _slim_metadata(meta: dict[str, Any]) -> dict[str, Any]:
 
 
 INBOUND_FILE_READERS: dict[str, InboundFileReader] = {}
+INBOUND_FILE_WRITE_FAILED: dict[str, Callable[[dict[str, Any], Exception], Awaitable[None]]] = {}
 
 
 def register_inbound_file_reader(channel_name: str, reader: InboundFileReader) -> None:
     INBOUND_FILE_READERS[channel_name] = reader
+
+
+def register_inbound_file_write_failed(channel_name: str, handler: Callable[[dict[str, Any], Exception], Awaitable[None]]) -> None:
+    INBOUND_FILE_WRITE_FAILED[channel_name] = handler
 
 
 async def _read_http_inbound_file(file_info: dict[str, Any], client: httpx.AsyncClient) -> bytes | None:
@@ -1197,26 +1203,51 @@ def _make_inbound_file_sandbox_readable(file_path: Path) -> None:
     apply_upload_sandbox_permits(file_path, stat.S_IRGRP | stat.S_IROTH)
 
 
+async def _write_inbound_file(uploads_dir: Path, safe_name: str, data: bytes) -> tuple[Path | None, Exception | None]:
+    """Finish the native write unit without returning buffer-bearing tracebacks."""
+    from deerflow.uploads.manager import write_upload_file_no_symlink
+
+    def write():
+        nonlocal data
+        try:
+            dest = write_upload_file_no_symlink(uploads_dir, safe_name, data)
+            _make_inbound_file_sandbox_readable(dest)
+            return dest, None
+        except Exception as exc:
+            # An exception crossing a Future can retain the worker's arguments
+            # even after cancellation discards its result. Retain the original
+            # objects/type/errno, but drop completed native traceback chains.
+            pending, visited = [exc], set()
+            while pending:
+                error = pending.pop()
+                if id(error) in visited:
+                    continue
+                visited.add(id(error))
+                pending.extend(linked for linked in (error.__cause__, error.__context__) if linked is not None)
+                error.__traceback__ = None
+            return None, exc
+        finally:
+            # The executor owns this callable, not a separate bytes argument.
+            # Drop its data cell before completion wakes the awaiting consumer.
+            data = None
+
+    return await asyncio.to_thread(write)
+
+
 async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id: str | None = None) -> list[dict[str, Any]]:
     if not msg.files:
         return []
 
-    from deerflow.uploads.manager import (
-        UnsafeUploadPathError,
-        claim_unique_filename,
-        ensure_uploads_dir,
-        normalize_filename,
-        write_upload_file_no_symlink,
-    )
+    from deerflow.uploads.manager import UnsafeUploadPathError, claim_unique_filename, ensure_uploads_dir, normalize_filename
 
     def _prepare_uploads_dir() -> tuple[Path, set[str]]:
-        # Worker thread: ensure_uploads_dir's mkdir and the iterdir enumeration are
-        # blocking filesystem IO that must stay off the event loop.
+        # Preparation happens before a reader can transfer a lease. Preserve
+        # its existing failure boundary while owning any started native work.
         target = ensure_uploads_dir(thread_id, user_id=user_id)
         existing = {entry.name for entry in target.iterdir() if entry.is_file()}
         return target, existing
 
-    uploads_dir, seen_names = await asyncio.to_thread(_prepare_uploads_dir)
+    uploads_dir, seen_names = await await_drained(asyncio.to_thread(_prepare_uploads_dir))
 
     created: list[dict[str, Any]] = []
     file_reader = INBOUND_FILE_READERS.get(msg.channel_name, _read_http_inbound_file)
@@ -1225,74 +1256,76 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
             if not isinstance(f, dict):
                 continue
 
-            ftype = f.get("type") if isinstance(f.get("type"), str) else "file"
-            filename = f.get("filename") if isinstance(f.get("filename"), str) else ""
+            lease = reader_result = data = inline_content = error = None
+            try:
+                ftype = f.get("type") if isinstance(f.get("type"), str) else "file"
+                filename = f.get("filename") if isinstance(f.get("filename"), str) else ""
+                inline_content = f.pop(INBOUND_FILE_CONTENT_KEY, None)
+                if isinstance(inline_content, bytes):
+                    data = inline_content
+                elif isinstance(inline_content, (bytearray, memoryview)):
+                    data = bytes(inline_content)
+                else:
+                    try:
+                        reader_result = await file_reader(f, client)
+                        if isinstance(reader_result, InboundFileLease):
+                            # Transfer ownership before filename/path validation.
+                            lease = reader_result
+                            data = lease.data
+                        else:
+                            data = reader_result
+                    except Exception as exc:
+                        # Signed media URLs must never enter logs or tracebacks.
+                        logger.warning(
+                            "[Manager] failed to read inbound file: channel=%s, file=%s, error=%s",
+                            msg.channel_name,
+                            _inbound_file_label(f, idx=idx),
+                            _reader_error_summary(exc),
+                        )
+                        continue
 
-            inline_content = f.pop(INBOUND_FILE_CONTENT_KEY, None)
-            if isinstance(inline_content, bytes):
-                data = inline_content
-            elif isinstance(inline_content, (bytearray, memoryview)):
-                data = bytes(inline_content)
-            else:
-                try:
-                    data = await file_reader(f, client)
-                except Exception as exc:
-                    # Sanitized on purpose: the URL-bearing exception message
-                    # and traceback must not reach the logs (see
-                    # _reader_error_summary).
+                if data is None:
                     logger.warning(
-                        "[Manager] failed to read inbound file: channel=%s, file=%s, error=%s",
+                        "[Manager] inbound file reader returned no data: channel=%s, file=%s",
                         msg.channel_name,
                         _inbound_file_label(f, idx=idx),
-                        _reader_error_summary(exc),
                     )
                     continue
 
-            if data is None:
-                logger.warning(
-                    "[Manager] inbound file reader returned no data: channel=%s, file=%s",
-                    msg.channel_name,
-                    _inbound_file_label(f, idx=idx),
-                )
-                continue
+                if not filename:
+                    ext = ".png" if ftype == "image" else ".bin"
+                    filename = f"{msg.thread_ts or 'msg'}_{idx}{ext}"
+                try:
+                    safe_name = claim_unique_filename(normalize_filename(filename), seen_names)
+                except ValueError:
+                    logger.warning("[Manager] skipping inbound file with unsafe filename: channel=%s, file=%r", msg.channel_name, filename)
+                    continue
 
-            if not filename:
-                ext = ".bin"
-                if ftype == "image":
-                    ext = ".png"
-                filename = f"{msg.thread_ts or 'msg'}_{idx}{ext}"
+                size = len(data)
+                dest, error = await await_drained(_write_inbound_file(uploads_dir, safe_name, data))
+                if isinstance(error, UnsafeUploadPathError):
+                    logger.warning("[Manager] skipping inbound file with unsafe destination: %s", safe_name)
+                    continue
+                if error is not None:
+                    logger.warning("[Manager] failed to write inbound file: channel=%s, file=%s, error=%s", msg.channel_name, safe_name, _reader_error_summary(error))
+                    handler = INBOUND_FILE_WRITE_FAILED.get(msg.channel_name)
+                    if handler is not None:
+                        try:
+                            await await_drained(handler(f, error))
+                        except Exception as exc:
+                            logger.warning("[Manager] inbound write failure notification failed: channel=%s, error=%s", msg.channel_name, _reader_error_summary(exc))
+                    continue
 
-            try:
-                safe_name = claim_unique_filename(normalize_filename(filename), seen_names)
-            except ValueError:
-                logger.warning(
-                    "[Manager] skipping inbound file with unsafe filename: channel=%s, file=%r",
-                    msg.channel_name,
-                    filename,
-                )
-                continue
-
-            dest = uploads_dir / safe_name
-            try:
-                dest = await asyncio.to_thread(write_upload_file_no_symlink, uploads_dir, safe_name, data)
-                # Root-written 0o600 files are unreadable to the non-root
-                # sandbox; grant group/other read like the HTTP upload path.
-                await asyncio.to_thread(_make_inbound_file_sandbox_readable, dest)
-            except UnsafeUploadPathError:
-                logger.warning("[Manager] skipping inbound file with unsafe destination: %s", safe_name)
-                continue
-            except Exception:
-                logger.exception("[Manager] failed to write inbound file: %s", dest)
-                continue
-
-            created.append(
-                {
-                    "filename": safe_name,
-                    "size": len(data),
-                    "path": f"/mnt/user-data/uploads/{safe_name}",
-                    "is_image": ftype == "image",
-                }
-            )
+                created.append({"filename": safe_name, "size": size, "path": f"/mnt/user-data/uploads/{safe_name}", "is_image": ftype == "image"})
+            finally:
+                # RHS awaits otherwise retain the PREVIOUS file's local bytes
+                # while a new reader spends a freshly released reservation.
+                data = reader_result = inline_content = error = None
+                if lease is not None:
+                    try:
+                        await await_drained(lease.aclose())
+                    finally:
+                        lease = None
 
     return created
 
