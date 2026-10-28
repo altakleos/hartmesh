@@ -10,6 +10,17 @@ from app.channels.outcomes import CreationRefusal, validate_creation_refusal
 from app.gateway.channel_execution import ChannelExecutionReceipt, receipt_from_run_kwargs
 
 RUN_STOP_REASONS: Mapping[str, str] = MappingProxyType({"sandbox_capacity_exceeded": "busy.queued", "files-full": "chat.files_full", "orphan_recovered": "refused.interrupted"})
+STORAGE_REFERENCE_WORDS: Mapping[str, str] = MappingProxyType(
+    {
+        "disk-too-small": "disk-too-small",
+        "storage-pool-missing": "storage-missing",
+        "inventory-unreadable": "storage-unreadable",
+        "host-unqualified": "server-not-ready",
+        "admission-failed": "server-check-failed",
+        "host-replaced": "server-moved",
+        "space-unverified": "files-unchecked",
+    }
+)
 
 # Legacy display vocabulary and source pins only. A matching sentence grants
 # neither creating-refusal provenance nor permission to retry a publication.

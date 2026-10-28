@@ -45,7 +45,12 @@ ESSENTIAL_DELIVERY_CLASSES = frozenset({"reply", "question", "result", "interrup
 _KINDS = frozenset({"text", "document", "photo", "album", "edit", "card"})
 _FINAL_PARTS = frozenset({"sent", "unavailable", "retired"})
 _STATUS_KEYS = frozenset({"access.agent_off", "agent.paused", "agent.retired", "unavailable.fix", "unavailable.off", "unavailable.paused", "unavailable.moved", "unavailable.files_unchecked", "refused.interrupted", "custom_agent.deleted"})
-_URL_SOURCES = {"web.memory": ("web.memory", "label.open_memory"), "custom_agent.deleted": ("web.telegram", "label.open_telegram"), "chat.restarted": ("web.conversation", "label.open_conversation")}
+_URL_SOURCES = {
+    "file.too_large_in": ("web.conversation", "label.open_conversation"),
+    "web.memory": ("web.memory", "label.open_memory"),
+    "custom_agent.deleted": ("web.telegram", "label.open_telegram"),
+    "chat.restarted": ("web.conversation", "label.open_conversation"),
+}
 _TRANSPORT_RECEIPTS = frozenset({"sent_at", "dispatched_at", "unavailable_reason", "invalid_token_verification_pending", "url_button_fallback", "plain_fallback"})
 _PART_IDENTITY = frozenset({"part_id", "presentation_version", "ordinal", "state", "message_ids"})
 _SKIP_REASONS = frozenset({"no-access", "superseded", "link-not-connected", "disabled", "policy-off", "expired"})
@@ -1019,6 +1024,7 @@ class Outbox:
         _extra=None,
         _dedupe=None,
         _attach=None,
+        _url_button=None,
     ) -> str:
         """Commit fixed presentation and its random controls as one replayable plan."""
         from app.telegram_bots.callbacks import canonical_keyboard
@@ -1032,6 +1038,10 @@ class Outbox:
         parts = [_safe_json(part) for part in parts]
         if any(part.get("kind") not in {"text", "edit"} or set(part.get("source_ref", {})) != {"key", "values"} or {"callback_group_id", "stored_keyboard", "url_button"}.intersection(part) for part in parts):
             raise ValueError("invalid-product-source")
+        if _url_button is not None:
+            button = validate_url_button(_url_button)
+            url_button_label(parts[-1]["source_ref"], button)
+            parts[-1]["url_button"] = button
         origins = sorted((row.link_id, row.message_id, row.chat_id) for row in inbox_rows)
         topic = message_thread_id if message_thread_id is not None else inbox_rows[0].message_thread_id if inbox_rows else None
         if topic is not None and (type(topic) is not int or topic <= 0):
@@ -1111,6 +1121,56 @@ class Outbox:
                 return identity
 
         return await await_drained(save())
+
+    async def plan_inbound_file_notice(self, record, file, *, source_ref, callbacks, guard, retry=False, url_button=None):
+        """Freeze an auxiliary file failure over actual input, never its final."""
+        from app.telegram_bots.inbox import file_notice_inputs, publication_identity, publication_message_parts, validate_chat_file
+
+        if (
+            type(source_ref) is not dict
+            or set(source_ref) != {"key", "values"}
+            or source_ref["key"] not in {"file.not_saved", "file.own_full", "file.too_large_in", "file.own_preparing", "file.own_no_seat", "file.own_unchecked", "file.own_unavailable"}
+            or type(retry) is not bool
+            or retry
+            and source_ref["key"] != "file.not_saved"
+        ):
+            raise ValueError("file-notice-conflict") from None
+        file = validate_chat_file(file)
+        if source_ref["values"].get("file") != file.get("filename"):
+            raise ValueError("file-notice-conflict") from None
+        link = guard.captured_link
+        part = {"kind": "text", "source_ref": deepcopy(source_ref), "reply_to_message_id": file["message_id"]}
+        if url_button is not None:
+            url_button = validate_url_button(url_button)
+            url_button_label(source_ref, url_button)
+        dedupe = f"file-input:{record.publication_id}:{file['message_id']}:{source_ref['key']}"
+        async with callbacks.writer(link, guard) as writer:
+            fresh, origins = await self.inbox.lock_publication(record, session=writer)
+            receipt = await self.inbox.snapshot_publication_inputs(fresh, session=writer)
+            text, _kwargs, files = publication_message_parts(origins, submission=receipt["submission"])
+            if file not in files:
+                raise ValueError("file-notice-conflict") from None
+            basis = {"version": 1, "publication": publication_identity(fresh), "inputs": receipt, "file": deepcopy(file), "text": text, "files": files}
+            existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == dedupe).with_for_update())
+            if existing is not None:
+                old_source, _old_origins, old_basis = file_notice_inputs(existing.payload)
+                if publication_identity(old_source) != publication_identity(fresh) or old_basis["file"] != file:
+                    raise ValueError("file-notice-conflict") from None
+                basis = old_basis
+            keyboard = [[{"label": "label.send_again", "kind": "file_retry", "target_kind": "thread", "target_id": fresh.scope.thread_id, "payload": {"message_id": origins[0].message_id, "text": text, "files": files}}]] if retry else []
+            return await self._plan_product_keyboard(
+                link,
+                source_id=dedupe,
+                parts=[part],
+                keyboard=keyboard,
+                callbacks=callbacks,
+                guard=guard,
+                message_thread_id=fresh.scope.message_thread_id,
+                session=writer,
+                _extra={"inbound_file_basis": basis},
+                _dedupe=dedupe,
+                _url_button=url_button,
+            )
 
     async def plan_input_outcome(self, link, *, source_id, source_ref, keyboard, callbacks, guard, inbox_rows=(), input_owner_callback_id=None):
         if bool(inbox_rows) == (input_owner_callback_id is not None) or type(source_ref) is not dict or set(source_ref) != {"key", "values"} or source_ref["key"] not in INPUT_OUTCOME_KEYS:

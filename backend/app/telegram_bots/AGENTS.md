@@ -65,9 +65,12 @@ callback owner. Neither invents a human message row. Plain text after a free-tex
 question carries no response mark. Old quoted prompt input is held until explicit
 reopen, send-as-new or discard, and is never silently applied to another field.
 
-`turns.py` owns ordinary/custom plain-text turn admission and the ephemeral queue.
+`turns.py` owns ordinary/custom chat-input admission and the ephemeral queue.
 Save actual sanitized input/profile before effects; forwarded input cannot acquire
-plain provenance. Persist complete joined groups before thread preparation.
+plain provenance. Closed V2 media/forward input keeps actual SDK descriptors;
+V1 plain input and typed form/Other provenance stay strict. Persist complete
+joined groups before thread preparation. Album, long-paste and forward timers
+use the existing Application/turn lifetime and never occupy a manager worker.
 `queue.py` never owns workers or authorization. A terminal durable plan releases
 one logical turn; transport retries do not hold it. Only exact typed terminal
 reasons or opaque host creating-refusals authorize capacity retry. Explicit retry
@@ -161,8 +164,9 @@ Strict remote source and artifact/action eligibility stay mandatory. Legacy `pla
 compatibility semantics. See [publication custody](../../docs/TELEGRAM_PUBLICATION_CUSTODY.md).
 
 `publication.py` supplies finite callable dispatch/observe/read operations, not an
-input handler or recovery scheduler. Accept only complete saved plain-text groups
-with the strict trusted `input_profile`; forwarded/media/unknown input refuses.
+input handler or recovery scheduler. Accept only complete saved groups with a
+closed trusted `input_profile`; unknown input refuses. Media and forwarded
+material use their V2 projection.
 An actual bus reservation precedes the irreversible marker. Only its winner may
 commit synchronously after the original creating fence, with no intervening await.
 Bounded progressing discovery must complete before adopting a unique exact run.
@@ -325,9 +329,23 @@ interval are required. Ordered blocking handlers use a per-call acknowledgment:
 the library's swallowed exception path never proves admission. Fixed input
 routes and required reply plans commit before acknowledgment. Token-shaped
 content is refused before hashes/inbox/task payloads; disposable tasks retain
-safe identities only and drain before SDK teardown. Ordinary text uses the managed
-turn controller. Deferred photo/document and voice receive the fixed unsupported
-notice without download or model admission; potential skill references stay held.
+safe identities only and drain before SDK teardown. Text/photos/documents use the
+managed turn controller. Voice receives the fixed unsupported notice until its
+consumer is complete; potential skill references stay held.
+
+`files.py` owns one Supervisor byte budget and pending attachment descriptors.
+Reserve whole batches before reads, shrink only, and retain each charge until
+native writes and transport cleanup finish. `capped_download.py` reuses the
+normal bot request's HTTPX client with raw bounded streaming and no redirects;
+failed response closes retain their actual stream and capacity release for
+shutdown retry. No download URL, token, Update or file bytes enter persisted input.
+Pending add/take uses real admitted rows and the same guarded writer: original
+input plus even an empty take is saved, so replay never adopts later attachments.
+Source-bound file notices are auxiliary to the actual publication. File Retry
+keeps the original thread and input snapshot across restart, /new and collection;
+its control is consumed only after actual enqueue/bind confirmation. Storage
+preflight uses the separately configured Gateway as the bound human; capacity
+is discovered only from an actual write failure.
 
 `polling.py` owns retained suffixes and startup-held batches. Serialize every
 getUpdates operation, including probes, drops and shutdown confirmation. A
@@ -406,8 +424,8 @@ gets one fixed diagnostic and keeps local refusal. Already-started work may
 outlast grace; no new SQL retry survives the database owner.
 Do not install future-stage no-op schedulers or trust manager text as a model
 source. The existing sender accepts fixed sources and strictly verified model
-finals. Managed text and its saved controls use `turns.py`; files, profiles and
-instance policy have later owners.
+finals. Managed text, inbound files and saved controls use `turns.py`; outbound
+files, profiles and instance policy have later owners.
 
 `authority.py` rereads the live human account, strict route ceilings, exact
 connection and supported owner-scoped target. Fixed product/status sources need

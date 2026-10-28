@@ -12,7 +12,7 @@ from test_telegram_supervisor import _supervisor_logging as _supervisor_logging
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["photo", "document", "voice"])
+@pytest.mark.parametrize("kind", ["voice"])
 async def test_deferred_media_is_classified_without_download_or_model_admission(db, monkeypatch, kind):
     e = await setup(db, monkeypatch)
     e.services.turns = SimpleNamespace(accept=AsyncMock(return_value=False), retire=AsyncMock(), message_sent=lambda *args, **kwargs: None)

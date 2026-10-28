@@ -20,6 +20,26 @@ from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, Telegr
 @pytest_asyncio.fixture
 async def submission_environment(coordinator_environment, request):
     e = coordinator_environment
+    if getattr(request, "param", None) == "media_question":
+        from datetime import UTC, datetime
+
+        from telegram import Chat, Document, Message, Update, User
+
+        incoming = Update(
+            2801,
+            message=Message(
+                801,
+                datetime.now(UTC),
+                Chat(e.link.chat_id, "private"),
+                from_user=User(e.link.telegram_user_id, "Actual human", False),
+                caption="Question about this file",
+                document=Document("question-file", "question-unique", file_name="question.pdf", mime_type="application/pdf", file_size=3),
+            ),
+        )
+        file = {"type": "file", "file_id": "question-file", "file_unique_id": "question-unique", "filename": "question.pdf", "mime_type": "application/pdf", "size": 3, "message_id": 801, "telegram_bot_id": e.link.bot_id}
+        row, _ = await e.inbox.accept(e.link, incoming, sanitized_input={"type": "media", "text": incoming.message.caption, "files": [file]})
+        row = await e.inbox.route(row, kind="turn", target_id=e.link.agent_ref, basis={"input_profile": {"version": 2, "kind": "chat_input", "forwarded": False, "origin": None}}, operation_ids=[])
+        e.origins = (row,)
     qualified, reader, _basis = await source(e)
     network = getattr(request, "param", None) in {"network", "network_mismatch"}
     form_request = getattr(request, "param", None) == "form"
@@ -265,3 +285,17 @@ async def test_explicit_retry_of_typed_answer_keeps_its_response_and_original_th
     sent = e.bus.get_inbound_nowait()
     e.bus.inbound_task_done()
     assert sent.text == typed.text and sent.metadata["human_message_kwargs"]["human_input_response"] == response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("submission_environment", ["media_question"], indirect=True)
+async def test_new_clarification_answer_does_not_resend_historical_question_file(submission_environment):
+    e = submission_environment
+    assert e.origins[0].sanitized_input["files"][0]["file_id"] == "question-file"
+    stage = await e.stage()
+    record = await e.inbox.reserve_callback_publication(e.link, stage.callback_id, thread_id=e.thread_id, endpoint_id=e.http.endpoint_id, guard=e.guard)
+    await e.coordinator.dispatch_record(record, e.link)
+    sent = e.bus.get_inbound_nowait()
+    e.bus.inbound_task_done()
+    assert sent.text == "First" and sent.files == []
+    assert sent.metadata["human_message_kwargs"]["human_input_response"] == e.response

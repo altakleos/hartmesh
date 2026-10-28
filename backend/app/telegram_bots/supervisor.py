@@ -30,6 +30,7 @@ from app.telegram_bots.cipher import token_cipher, unwrap_token, wrap_token
 from app.telegram_bots.commands import CallbackCommands
 from app.telegram_bots.config import TelegramBotsConfig
 from app.telegram_bots.deployment import CopyGuard, feature_reason, static_cause
+from app.telegram_bots.files import FileBytesBudget, PendingFiles
 from app.telegram_bots.links import BotLink, BotLinkRepository
 from app.telegram_bots.log_filter import install_token_log_filter
 from app.telegram_bots.polling import CONFLICT_GRACE_SECONDS, TASK_DEATHS_BEFORE_STOP, TASK_DEATHS_WINDOW_SECONDS, TASK_RESTART_SECONDS, PollRecord, PollTask
@@ -117,6 +118,8 @@ class TelegramSupervisor:
         self.publication_authority = self.publications = self.model_source = None
         self.turns = None
         self.forms = self.human_inputs = None
+        self.file_bytes_budget = FileBytesBudget(config.files.in_memory_max_bytes)
+        self.pending_files = None
         self.recovery = None
         self._recovery_epoch = self._recovery_phase = None
         self._recovery_started = False
@@ -256,6 +259,7 @@ class TelegramSupervisor:
             self.forms = Forms(self.callbacks)
             self.acts = Acts(self.session_factory, settings=self.settings, callbacks=self.callbacks, outbox=self.outbox)
             self.commands = CallbackCommands(self)
+            self.pending_files = PendingFiles(self.callbacks, self.outbox.inbox, guard_factory=self._pending_file_guard, config=self.config, clock=self._clock)
             if self.authority is None:
                 from app.telegram_bots.authority import TelegramAuthority
 
@@ -311,6 +315,7 @@ class TelegramSupervisor:
             self.threads = ThreadCoordinator(links=self.links, authority=self.authority, client=self.thread_client, channel=self.channel, send_allowed=self.send_allowed, outbox=self.outbox, product_name=self.product_name)
             self.publication_authority = PublicationAttemptAuthority(links=self.links, authority=self.authority, client=self.thread_client, channel=self.channel, create_allowed=self.send_allowed, read_allowed=self.publication_read_allowed)
             self.publications = PublicationCoordinator(inbox=self.outbox.inbox, outbox=self.outbox, bus=self.channel_service.bus, http_owner=self.thread_client, capture_attempt=self.publication_authority.capture)
+            self.publications.file_preflight = self.preflight_inbound_files
             from app.telegram_bots.human_input import HumanInputs
 
             self.human_inputs = HumanInputs(self)
@@ -872,6 +877,18 @@ class TelegramSupervisor:
     async def prepare_live_owner(self, owner_user_id: str):
         return await self.authority.prepare_live_owner(owner_user_id)
 
+    def _pending_file_guard(self, link):
+        channel = self.channel(link.id)
+        if channel is None or channel.transport_revision != link.token_revision:
+            raise DeliveryClaimRetired()
+        return self.commands._guard(channel, link)
+
+    async def preflight_inbound_files(self, link, record, files, *, execution_context):
+        channel = self.channel(link.id)
+        if channel is None or channel.transport_revision != link.token_revision:
+            raise DeliveryClaimRetired()
+        return [file for file in files if await channel.preflight_inbound_file(file, publication_id=record.publication_id, execution_context=execution_context)]
+
     @property
     def product_name(self) -> str:
         return product_name(self._app_config)
@@ -1308,13 +1325,14 @@ class TelegramSupervisor:
                 continue
 
     async def sweep_retention(self, now: datetime | None = None) -> dict[str, int]:
-        # This slice has no callback/act/file consumers or full dependency
-        # retention implementation. Delete only independent expired link events;
-        # conservatively retain every inbox and delivery identity.
-        counts = {"inbound": 0, "outbox": 0, "acts": 0, "events": 0}
+        # Pending files are independent expiring descriptors. Retain callback,
+        # inbox and delivery custody until their dependency-aware collector.
+        counts = {"inbound": 0, "outbox": 0, "acts": 0, "events": 0, "pending_files": 0}
         if self.session_factory is None or self._cause is not None:
             return counts
         began = self._time()
+        if self.pending_files is not None:
+            counts["pending_files"] = await self.pending_files.sweep(now or self._clock())
         async with self.session_factory() as session, session.begin():
             result = await session.execute(delete(TelegramBotLinkEventRow).where(TelegramBotLinkEventRow.created_at < (now or self._clock()) - timedelta(days=LINK_EVENT_RETENTION_DAYS)))
             counts["events"] = result.rowcount

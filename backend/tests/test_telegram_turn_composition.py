@@ -58,7 +58,7 @@ ANSWER = "**Durable answer**"
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", ["text", "custom_text", "produced_file", "phase_one", "no_user_text", "no_user_custom_text", "no_user_uncertain"])
-async def test_actual_managed_turn_creates_once_and_delivers_only_verified_output(capture_environment, monkeypatch, tmp_path, case, *, managed_ingress=False, dialogue=None):
+async def test_actual_managed_turn_creates_once_and_delivers_only_verified_output(capture_environment, monkeypatch, tmp_path, case, *, managed_ingress=False, dialogue=None, inbound_file=False):
     e = capture_environment
     async with e.engine.begin() as connection:
         if e.dialect == "sqlite":
@@ -130,6 +130,22 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
         app.include_router(threads.router)
         app.include_router(thread_runs.router)
         app.include_router(run_output.router, prefix="/api/threads")
+        feature_readers, file_downloads, charged_writes = [], [], []
+        inbound_bytes = b"a,b\n1,2\n"
+        if inbound_file:
+            from app.gateway.routers import features as feature_routes
+
+            # Only the provider availability projection is controlled. The
+            # actual features route, internal-owner headers and owner decoding
+            # run over the same bound Gateway client as thread/run requests.
+            async def available_storage(request, config):
+                actual_owner = await feature_routes._feature_owner(request)
+                assert actual_owner == OWNER
+                feature_readers.append(actual_owner)
+                return feature_routes.StorageSpacesFeature(enabled=True, state="ready", own="ready"), feature_routes.AccountsFeature(), feature_routes.AgentInstancesFeature()
+
+            monkeypatch.setattr(feature_routes, "_storage_features", available_storage)
+            app.include_router(feature_routes.router)
         http_calls = []
         http_responses = []
 
@@ -144,6 +160,60 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
         owner = GatewayClientOwner(gateway_url="http://gateway.test", langgraph_url="http://gateway.test/api", transport=RecordedASGI(app=app))
         boot = build(db, monkeypatch)
         supervisor = boot.supervisor
+        if inbound_file:
+            from urllib.parse import parse_qs
+
+            from app.telegram_bots.capped_download import ManagedHTTPXRequest
+            from deerflow.uploads import manager as upload_manager
+
+            async def telegram_transport(request):
+                if request.method == "GET":
+                    file_downloads.append("actual-capped-get")
+                    return httpx.Response(200, content=inbound_bytes)
+                parameters = {}
+                for key, values in parse_qs(request.content.decode("utf-8"), keep_blank_values=True).items():
+                    value = values[0]
+                    try:
+                        value = json.loads(value)
+                    except ValueError:
+                        pass
+                    parameters[key] = value
+                endpoint = request.url.path.rsplit("/", 1)[-1]
+                status, body = await boot.normal.do_request("https://offline.invalid/" + endpoint, request.method, SimpleNamespace(parameters=parameters))
+                return httpx.Response(status, content=body)
+
+            def file_request_factory(**kwargs):
+                if kwargs["connection_pool_size"] == 1:
+                    return boot.updates
+                # Supervisor invokes channel construction (and this factory)
+                # off-loop. This is the real prepared normal HTTPX client for
+                # both actual SDK Bot API posts and streamed file GETs.
+                kwargs["httpx_kwargs"] = {**kwargs["httpx_kwargs"], "transport": httpx.MockTransport(telegram_transport)}
+                return ManagedHTTPXRequest(**kwargs)
+
+            supervisor.request_factory = file_request_factory
+            actual_write = upload_manager.write_upload_file_no_symlink
+            actual_prepare_uploads = upload_manager.ensure_uploads_dir
+            prepared_threads = []
+
+            def prepare_actual_uploads(thread, *, user_id=None):
+                # The offline graph has no sandbox startup to prepare its
+                # outputs/workspace roots. Preserve the existing fixture's
+                # precondition only once the manager has the actual admitted
+                # thread, on its native preparation worker.
+                assert isinstance(thread, str) and user_id == OWNER
+                paths.ensure_thread_dirs(thread, user_id=user_id)
+                prepared_threads.append(thread)
+                return actual_prepare_uploads(thread, user_id=user_id)
+
+            monkeypatch.setattr(upload_manager, "ensure_uploads_dir", prepare_actual_uploads)
+
+            def write_actual_upload(directory, filename, data):
+                charged_writes.append(supervisor.file_bytes_budget.used)
+                assert data == inbound_bytes and supervisor.file_bytes_budget.used == len(inbound_bytes)
+                return actual_write(directory, filename, data)
+
+            monkeypatch.setattr(upload_manager, "write_upload_file_no_symlink", write_actual_upload)
         if dialogue is not None:
             supervisor.outbox.clock = boot.clock.now
         supervisor.app, supervisor.authority, supervisor._app_config = app, live.authority, configured
@@ -173,6 +243,12 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
                 # before its bus handoff can enter this real model callback.
                 active_turn = next(iter(supervisor.turns._turns.values()))
                 thread_id = active_turn.record.scope.thread_id
+            if inbound_file:
+                uploaded = model_inputs[-1].additional_kwargs.get("files")
+                assert uploaded == [{"filename": "input.csv", "size": len(inbound_bytes), "path": "/mnt/user-data/uploads/input.csv", "is_image": False}]
+                actual_path = paths.sandbox_uploads_dir(thread_id, user_id=OWNER) / "input.csv"
+                assert await asyncio.to_thread(actual_path.read_bytes) == inbound_bytes
+                assert supervisor.file_bytes_budget.used == 0 and prepared_threads == [thread_id]
             model_entered.set()
             if no_user:
                 from deerflow.spaces.chat_paths import ChatStoragePaths
@@ -233,7 +309,7 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
             if not managed_ingress:
                 inbound = InboundMessage(channel_name="telegram", chat_id=str(link.chat_id), user_id=str(link.telegram_user_id), text="First accepted question", connection_id=link.connection_id, owner_user_id=OWNER, workspace_id=str(bot))
                 thread_id = await supervisor.threads.ensure_thread(channel.link, inbound, origin=origins[0])
-            if not no_user:
+            if not no_user and thread_id is not None:
                 await asyncio.to_thread(paths.ensure_thread_dirs, thread_id, user_id=OWNER)
             async with e.sf.begin() as writer:
                 for row in await writer.scalars(select(TelegramOutboxRow)):
@@ -244,7 +320,12 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
 
                 boot.normal.enqueue("sendChatAction")
                 boot.normal.enqueue("sendMessageDraft")
-                incoming = Update.de_json(update_payload(1701, message_id=711, account=link.telegram_user_id, text="First accepted question"), channel.bot)
+                payload = update_payload(1701, message_id=711, account=link.telegram_user_id, text="First accepted question")
+                if inbound_file:
+                    payload["message"]["caption"] = payload["message"].pop("text")
+                    payload["message"]["document"] = {"file_id": "actual-inbound-file", "file_unique_id": "actual-inbound-unique", "file_name": "input.csv", "mime_type": "text/csv", "file_size": len(inbound_bytes)}
+                    boot.normal.enqueue("getFile", result={"file_id": "actual-inbound-file", "file_unique_id": "actual-inbound-unique", "file_size": len(inbound_bytes), "file_path": "documents/input.csv"})
+                incoming = Update.de_json(payload, channel.bot)
                 assert await channel.handle_update(incoming), "Actual SDK ingress must commit admission before advancing polling"
                 active_turn = next(iter(supervisor.turns._turns.values()))
             else:
@@ -305,6 +386,13 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
             assert len(model_inputs) == 1
             assert restore_original_human_message(model_inputs[0]).content == ("First accepted question" if managed_ingress else "First accepted question\n\nSecond accepted question")
             assert model_inputs[0].additional_kwargs["channel_turn_id"] == record.publication_id
+            if inbound_file:
+                assert len(feature_readers) >= 2 and set(feature_readers) == {OWNER}
+                assert any(method == "GET" and path == "/api/features" for method, path, _body in http_calls)
+                assert file_downloads == ["actual-capped-get"] and charged_writes == [len(inbound_bytes)]
+                assert [call.endpoint for call in boot.normal.calls].count("getFile") == 1
+                assert isinstance(channel._requests[0], ManagedHTTPXRequest) and channel._requests[1] is boot.updates
+                assert supervisor.file_bytes_budget.used == 0
             runs = await e.repository.list_by_thread(thread_id, user_id=OWNER)
             assert len(runs) == 1 and runs[0]["kwargs"]["output_capture"] == {"version": 2, "inventory_document_version": 2}
             assert runs[0]["kwargs"]["channel_execution"]["publication_id"] == record.publication_id

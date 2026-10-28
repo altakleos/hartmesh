@@ -4,8 +4,27 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 
+from app.channels.execution import ChannelExecutionContext
 from deerflow.utils.file_io import await_drained
+
+_CONTEXT: ContextVar[ChannelExecutionContext | None] = ContextVar("inbound_file_context", default=None)
+
+
+def current_inbound_file_context() -> ChannelExecutionContext | None:
+    """Actual manager caller, separate from transport descriptors/metadata."""
+    return _CONTEXT.get()
+
+
+@contextmanager
+def inbound_file_context(context: ChannelExecutionContext | None):
+    token = _CONTEXT.set(context)
+    try:
+        yield
+    finally:
+        _CONTEXT.reset(token)
 
 
 class InboundFileLease:
