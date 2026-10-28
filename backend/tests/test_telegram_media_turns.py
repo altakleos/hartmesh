@@ -10,12 +10,15 @@ from test_telegram_bot_handlers import ingress, message
 from test_telegram_chat_turns import controlled_execution, until
 
 
-def media(e, identity, *, caption=None, album=None, forward=False):
+def media(e, identity, *, caption=None, album=None, forward=False, kind="document"):
     payload = message(e, identity, content="Actual file").to_dict()
     saved = payload["message"]
     saved.pop("text")
     saved.pop("entities", None)
-    saved["document"] = {"file_id": f"sdk-file-{identity}", "file_unique_id": f"sdk-unique-{identity}", "file_name": f"input-{identity}.pdf", "mime_type": "application/pdf", "file_size": 3}
+    if kind == "photo":
+        saved["photo"] = [{"file_id": f"sdk-file-{identity}", "file_unique_id": f"sdk-unique-{identity}", "width": 20, "height": 30, "file_size": 3}]
+    else:
+        saved["document"] = {"file_id": f"sdk-file-{identity}", "file_unique_id": f"sdk-unique-{identity}", "file_name": f"input-{identity}.pdf", "mime_type": "application/pdf", "file_size": 3}
     if caption is not None:
         saved["caption"] = caption
     if album is not None:
@@ -34,14 +37,17 @@ async def controller(db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_captioned_actual_media_enters_the_existing_turn(db, monkeypatch):
+@pytest.mark.parametrize("kind", ["document", "photo"])
+async def test_captioned_actual_media_enters_the_existing_turn(db, monkeypatch, kind):
     e, turns, state = await controller(db, monkeypatch)
     try:
-        assert await turns.accept(e.channel, media(e, 1801, caption="Read the actual file"))
+        assert await turns.accept(e.channel, media(e, 1801, caption="Read the actual file", kind=kind))
         await until(lambda: state.posts == 1)
         turn = next(iter(turns._turns.values()))
         assert turn.inbound.text == "Read the actual file"
         assert turn.inbound.files[0]["file_id"] == "sdk-file-1801"
+        assert turn.inbound.files[0]["type"] == ("image" if kind == "photo" else "file")
+        assert turn.inbound.files[0]["filename"] == ("telegram-photo-1801.jpg" if kind == "photo" else "input-1801.pdf")
         assert turn.record.origins[0].message_id == 1801
     finally:
         await turns.stop()

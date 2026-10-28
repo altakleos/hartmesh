@@ -818,11 +818,15 @@ def validate_chat_file(value):
     return _input({"files": [value]})["files"][0]
 
 
+def _plain_input_profile(profile) -> bool:
+    return type(profile) is dict and set(profile) == {"version", "kind", "forwarded"} and type(profile["version"]) is int and profile["version"] == 1 and profile["kind"] == "plain_text" and profile["forwarded"] is False
+
+
 def chat_input_parts(row, *, bot_id=None):
     """Decode only supported persisted chat shapes, never a private response."""
     value = _input(row.sanitized_input)
     profile = row.route_basis.get("input_profile")
-    plain = profile == {"version": 1, "kind": "plain_text", "forwarded": False} and type(profile.get("version")) is int
+    plain = _plain_input_profile(profile)
     media = (
         type(profile) is dict
         and set(profile) == {"version", "kind", "forwarded", "origin"}
@@ -2820,7 +2824,7 @@ class InboxRepository:
                 not is_plain_text_input(mark.sanitized_input)
                 or mark.route_kind not in (None, "turn")
                 or mark.route_kind == "turn"
-                and (mark.route_target_id != link.agent_ref or mark.route_basis.get("input_profile") != {"version": 1, "kind": "plain_text", "forwarded": False})
+                and (mark.route_target_id != link.agent_ref or not _plain_input_profile(mark.route_basis.get("input_profile")))
                 or {"submission", "human_input_ui", "prepublication_group"}.intersection(mark.route_basis)
                 or mark.turn_id is not None
                 or mark.thread_id is not None

@@ -137,3 +137,31 @@ async def test_empty_pending_take_is_reserved_and_preserves_plain_hash(coordinat
     async with e.inbox._transaction() as writer:
         _, taken = await e.inbox.pending_file_take(e.link, routed, session=writer, guard=guard)
         assert taken == []
+
+
+@pytest.mark.asyncio
+async def test_malformed_v1_profile_cannot_augment_or_consume_actual_pending(coordinator_environment):
+    e = coordinator_environment
+    await pending(e, 800)
+    _incoming, first, guard = await consumer(e)
+    for index, profile in enumerate(
+        (
+            {"version": 1, "kind": "plain_text", "forwarded": 0},
+            {"version": True, "kind": "plain_text", "forwarded": False},
+        )
+    ):
+        if index == 0:
+            row = first
+        else:
+            incoming = update(e, 803)
+            row, _created = await e.inbox.accept(e.link, incoming, sanitized_input={"type": "text", "text": incoming.message.text})
+        row = await e.inbox.route(row, kind="turn", target_id=e.link.agent_ref, basis={"input_profile": profile}, operation_ids=[])
+        async with e.inbox._transaction() as writer:
+            selected = list(await writer.scalars(select(TelegramPendingFileRow)))
+            with pytest.raises(ValueError, match="pending-file-conflict"):
+                await e.inbox.attach_pending_files(e.link, row, selected, session=writer, guard=guard)
+        async with e.db.sessions() as reader:
+            actual = await reader.get(TelegramInboundMarkRow, (row.link_id, row.message_id, row.chat_id))
+            assert actual.sanitized_input == row.sanitized_input
+            assert "pending_files" not in actual.route_basis
+            assert list(await reader.scalars(select(TelegramPendingFileRow.message_id))) == [800]
