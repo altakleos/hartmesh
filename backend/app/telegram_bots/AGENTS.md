@@ -39,6 +39,34 @@ the owning engine/writer without committing. Future Act kinds have no consumer.
 creates parent, group and controls atomically; exact replay reuses identities.
 The supervisor constructs these services after resolving default repositories.
 
+`turns.py` owns ordinary/custom plain-text turn admission and the ephemeral queue.
+Save actual sanitized input/profile before effects; forwarded input cannot acquire
+plain provenance. Persist complete joined groups before thread preparation.
+`queue.py` never owns workers or authorization. A terminal durable plan releases
+one logical turn; transport retries do not hold it. Only exact typed terminal
+reasons or opaque host creating-refusals authorize capacity retry. Explicit retry
+owns a new saved callback input identity. Stop binds the original publication,
+including before a run exists, and never guesses a newest run.
+Only an accepted cancellation or a proven undispatched input drops waiting input;
+a refused Stop preserves it. A guarded read failure holds the same publication
+and retries observation, never model dispatch. Callback-owned input retains its
+actual original-message snapshots across inbox collection. Reservation and the
+dispatch marker alone never consume the retry control.
+
+`streaming.py` consumes only opaque qualified lead previews from `progress.py`.
+Raw source offsets and UTF-16 chunk limits stay separate. Earlier acknowledged
+edit parts remain fixed; the newest anchor may be replaced. Drafts coalesce,
+keep alive and redisplay after chat sends. Thinking placeholders require an actual
+live view at delivery, including inside limiter retries; old process rows cannot
+revive a preview. Pause drains admitted display acknowledgements before Stop
+freezes them. Final/stopped plans recheck exact source through `ModelSource`.
+Each publication uses a fresh random draft ID to reject late Stop gestures from
+an earlier attempt; the reply anchor remains the actual first human message.
+Retiring the last auxiliary Thinking row also settles its original input in the
+same writer, including when its primary reply was already acknowledged.
+`ManagedExtBot` preserves empty draft strings across the pinned SDK defaults
+conversion; keep the real SDK serialization check when changing that boundary.
+
 Ambiguous details containers display literally. Impossible canonical
 split budgets raise `ValueError`; disposable drafts may clip their first part.
 
@@ -91,7 +119,7 @@ never adopt a receiptless legacy publication as dispatch-not-started. Exact repl
 compares complete saved origins, canonical input, target, thread and endpoint.
 Dispatch marker/run ID are fresh observations, not immutable caller identity.
 The marker is irreversible and permits one winner; ambiguous commit never
-authorizes another dispatch. Managed explicit retry remains with later controls.
+authorizes another dispatch. Managed explicit retry uses a newly saved callback input.
 The mandatory original-attempt `PublicationGuard` borrows a same-engine writer,
 checks current human/account/connection/link custody and requires literal True
 after its final awaited authority read. Flush mutations before that final guard;
@@ -102,8 +130,8 @@ Owned SQL units retain execute/fetch/commit/rollback/exit through cancellation.
 atomic route sealing. Exact canonical proof/presentation replay retains actual
 part acknowledgements; changed plans refuse. Frozen visible-text ranges use
 codepoints, while Telegram chunk limits use UTF-16. These primitives install no
-dispatcher/observer/model sender; strict remote source and artifact/action
-eligibility belong to the later actual consumer. Legacy `plan_reply` keeps its
+dispatcher/observer/model sender themselves; `turns.py` owns their composition.
+Strict remote source and artifact/action eligibility stay mandatory. Legacy `plan_reply` keeps its
 compatibility semantics. See [publication custody](../../docs/TELEGRAM_PUBLICATION_CUSTODY.md).
 
 `publication.py` supplies finite callable dispatch/observe/read operations, not an
@@ -159,7 +187,7 @@ no fresh work; a previously authorized COMMIT can settle late. The startup page
 and native cleanup can outlast that deadline. Final stop drains the service
 before coordinator/client teardown, retaining dependencies on failure. No new
 after-manager observation pass or grace is installed. Ordinary input activation,
-queue/Stop/retry consumers remain separate work.
+queue/Stop/retry consumers belong to `turns.py`.
 
 Conversation preparation reserves `route_basis.thread_preparation` on an actual
 admitted, routed, unsealed input before HTTP. Public routing cannot supply this
@@ -201,8 +229,8 @@ own admission and drains its work. Supervisor phase one also closes new model
 dispatch, while the shared client/final reads survive the actual manager drain.
 Already-dispatched waits/parts recheck current read authority, never new-create
 ceilings. Supervisor final stop closes that client before persistence teardown;
-failed response/client cleanup stays retryable. These callable foundations
-activate no ordinary model input. `/new` reserves its original routed command and
+failed response/client cleanup stays retryable. `turns.py` composes these callable
+foundations for ordinary model input. `/new` reserves its original routed command and
 mapping/creation bookmark without HTTP. A saved first-choice claim precedes
 confirm's existing thread API; Keep never creates. Final guarded delivery planning
 consumes the exact group and seals the original input. The bot message is never
@@ -271,8 +299,9 @@ interval are required. Ordered blocking handlers use a per-call acknowledgment:
 the library's swallowed exception path never proves admission. Fixed input
 routes and required reply plans commit before acknowledgment. Token-shaped
 content is refused before hashes/inbox/task payloads; disposable tasks retain
-safe identities only and drain before SDK teardown. Unfinished ordinary text,
-skills, photo/document and voice consumers keep returning False.
+safe identities only and drain before SDK teardown. Ordinary text uses the managed
+turn controller. Deferred photo/document and voice receive the fixed unsupported
+notice without download or model admission; potential skill references stay held.
 
 `polling.py` owns retained suffixes and startup-held batches. Serialize every
 getUpdates operation, including probes, drops and shutdown confirmation. A
@@ -351,7 +380,7 @@ gets one fixed diagnostic and keeps local refusal. Already-started work may
 outlast grace; no new SQL retry survives the database owner.
 Do not install future-stage no-op schedulers or trust manager text as a model
 source. The existing sender accepts fixed sources and strictly verified model
-finals. Ordinary content activation, callback actions, files, profiles and
+finals. Managed text and its saved controls use `turns.py`; files, profiles and
 instance policy have later owners.
 
 `authority.py` rereads the live human account, strict route ceilings, exact

@@ -15,6 +15,7 @@ from uuid import uuid4
 from sqlalchemy import select, text
 
 from app.telegram_bots.config import TelegramBotsConfig
+from app.telegram_bots.inbox import callback_publication_pending
 from app.telegram_bots.links import BotLink
 from app.telegram_bots.token_pattern import TOKEN_BODY
 from deerflow.persistence.channel_connections.model import ChannelConnectionRow
@@ -26,7 +27,7 @@ PRESS_TIMEOUT_SECONDS = 2.0
 _ID = re.compile(r"^[0-9a-f]{32}$")
 _TOKEN = re.compile(TOKEN_BODY)
 _SCOPE = ("id", "owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "binding_generation", "token_revision")
-_RESERVED = frozenset({"label", "keyboard_row", "keyboard_column", "anchor_outbox_id", "presentation_version", "presentation_pending", "presentation_history", "message_adopted", "prompt_successor"})
+_RESERVED = frozenset({"label", "keyboard_row", "keyboard_column", "anchor_outbox_id", "presentation_version", "presentation_pending", "presentation_history", "message_adopted", "prompt_successor", "publication_owner"})
 CALLBACK_METADATA_KEYS = _RESERVED
 _SECRET = frozenset({"token", "bot_token", "access_token", "raw_update", "update", "audio", "audio_bytes", "download_url", "temporary_url", "bytes"})
 _KINDS = frozenset(
@@ -660,8 +661,11 @@ class CallbackRepository:
         async def perform():
             async with self._writer() as session:
                 rows = list(await session.scalars(select(TelegramCallbackRow).order_by(TelegramCallbackRow.id).with_for_update()))
+                pending_groups = {row.group_id for row in rows if callback_publication_pending(row.payload)}
                 removed = 0
                 for row in rows:
+                    if row.group_id in pending_groups:
+                        continue
                     age = _aware(now) - _aware(row.created_at)
                     if row.kind == "prompt" and row.consumed_at is None and row.expires_at is not None and _aware(now) >= _aware(row.expires_at):
                         row.consumed_at, row.closed_reason = now, "expired"

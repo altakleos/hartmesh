@@ -1366,41 +1366,30 @@ database without upgrading it or opening a Telegram client. Adopt and resume
 take effect at the next Gateway start and do not clear a bot's action pause.
 If shutdown logs `copy_latch_unpersisted`, the pause was not saved in the database;
 that process stays paused and the next start evaluates the safeguards again.
-Managed update handling includes private-chat filtering, bounded stranger
-replies, single-use account setup and durable fixed command responses. Memory
-navigation uses the configured public address when available. The connection
-flow remains reserved while ordinary chat, files and the remaining stage-one
-capabilities are completed.
-The reserved managed-bot path now supports `/help`, `/privacy`, `/web`, basic
-language settings, and `/new` with explicit Start new / Keep this one
-buttons. Buttons use saved, scoped identities; stale or foreign presses cannot
-change settings or conversations. Delivery repair retries the saved message
-without rerunning the AI agent. Ordinary managed-bot model input and the connection
-UI remain deferred. This change adds no database schema revision.
-Conversation preparation now saves a single thread-creation identity before
-contacting the Gateway, verifies the stored human owner and selected AI assistant,
-and refuses stale conversation mappings. Retries after a lost response or a
-same-bot token replacement keep that identity. A deleted custom AI assistant can
-produce a fixed repair notice with a Telegram-settings link when a public address
-is configured. These foundations do not activate ordinary Telegram conversations.
-The shared channel execution boundary now binds an admitted human message to its
-publication, human owner, conversation and selected agent definition. Strict
-run and message reads distinguish an authoritative result from unavailable
-storage. Closing new-run admission preserves reads for work already dispatched.
-The dormant managed-publication APIs now preserve original input and execution
-identity, prevent a second dispatch claim, and atomically plan one exact primary
-reply. They retain opaque assistant-message IDs and saved multipart presentation.
-A callable coordinator now hands a saved plain-text group to the existing channel
-manager once and plans delivery from the exact durable text and complete-empty
-output inventory. Each model reply part rechecks its source and current access.
-Bounded recovery now observes already-dispatched saved publications using their
-original conversation and output evidence. During startup, it can atomically
-close a captured undispatched publication with a fixed restart notice. Recovery
-never submits another model run; uncertain work stays held. The internal ordinary
-and custom-agent path now explicitly requests inventory document 2. It can qualify
-a chat intentionally admitted without personal files, while still requiring its
-active human owner and complete presentation evidence. Missing folders and error strings
-cannot qualify it. Ordinary input, files and activation remain subsequent work.
+Managed bots for the ordinary chat and custom agents accept plain text. While an
+answer runs, further messages wait without occupying a model worker and are
+answered together in order. `/stop` and the current answer's Stop control stop
+that exact turn and discard its waiting messages. Transient execution-capacity
+refusals wait for up to two minutes; Cancel takes the input out of line, and
+Try again makes a new authorized attempt. Redelivering an update never retries
+the model. Files, voice notes, forwarded-input normalization and the connection
+UI remain reserved for subsequent stages.
+
+Answers appear as temporary drafts by default, or as edited messages when
+`telegram_bots.streaming` is `edit`. Protected content always uses protected
+messages. Final replies use saved delivery plans; retries resume only
+unacknowledged parts. Missing edit anchors replace the pending suffix while
+retaining earlier acknowledgements. Preview text and final output must belong to
+the exact saved publication and run; model wording cannot authorize retries or
+cancellation. Recovery observes saved execution and never starts a model run.
+
+The managed path also supports `/help`, `/privacy`, `/web`, basic language
+settings, and `/new` with Start new / Keep this one controls. Buttons use saved,
+scoped identities; stale or foreign presses cannot change settings or
+conversations. Memory navigation uses the configured public address when
+available. A deleted custom agent can produce a fixed repair notice with a
+Telegram-settings link. Delivery repair retries the saved message without
+rerunning the AI agent. This change adds no database schema revision.
 See [turn execution](backend/docs/TELEGRAM_TURN_EXECUTION.md) and
 [publication custody](backend/docs/TELEGRAM_PUBLICATION_CUSTODY.md).
 SQL-backed runs can explicitly request versioned output capture. The worker seals

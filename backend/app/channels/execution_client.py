@@ -160,6 +160,42 @@ class _FacadeStream:
         await await_drained(join())
 
 
+class _JoinedRunStream(_FacadeStream):
+    """Read-only observation with the creating stream's retained cleanup."""
+
+    def __init__(self, facade, run_id, after_event_id):
+        super().__init__(facade, facade.scope.thread_id, facade.scope.assistant_id, {})
+        self._run_id, self._after_event_id = run_id, after_event_id
+
+    async def _next(self):
+        if self._closed:
+            raise StopAsyncIteration
+        try:
+            if self._inner is None:
+                if self._preparing is None:
+                    self._preparing = asyncio.create_task(self._facade._require_publication_run(self._run_id), name="channel-join-proof")
+                await asyncio.shield(self._preparing)
+                self._facade._check_current("run_read")
+                if self._closed:
+                    raise StopAsyncIteration
+                self._inner = self._facade._owner.join_sse(
+                    owner_user_id=self._facade.scope.owner_user_id,
+                    path=self._facade._thread_path + "/runs/" + quote(self._run_id, safe="") + "/join",
+                    after_event_id=self._after_event_id,
+                    before_dispatch=lambda: self._facade._authorize("run_read"),
+                    after_response=lambda: self._facade._authorize("run_read"),
+                )
+            part = await anext(self._inner)
+            self._facade._check_current("run_read")
+            return part
+        except ChannelHttpError:
+            await await_drained(self.aclose())
+            _refuse()
+        except BaseException:
+            await await_drained(self.aclose())
+            raise
+
+
 class _Threads:
     def __init__(self, facade):
         self._facade = facade
@@ -433,6 +469,64 @@ class ChannelExecutionFacade:
         run_id = _identity(run_id)
         result = await self._proof("run_read", self._thread_path + "/runs/" + quote(run_id, safe=""), missing=True)
         return None if result is None else self._run(result, run_id=run_id)
+
+    async def _require_publication_run(self, run_id):
+        run = await self.get_run(run_id)
+        return self._publication_run(run)
+
+    def _publication_run(self, run):
+        proof = run.receipt if run is not None else None
+        if (
+            proof is None
+            or (proof.owner_user_id, proof.thread_id, proof.publication_id, proof.assistant_id, proof.agent_name) != (self.scope.owner_user_id, self.scope.thread_id, self.scope.publication_id, self.scope.assistant_id, self.scope.agent_name)
+            or type(run.row.get("metadata")) is not dict
+            or run.row["metadata"].get(CHANNEL_TURN_ID_KEY) != self.scope.publication_id
+        ):
+            _refuse()
+        return run
+
+    async def lookup_run(self) -> ValidatedRun | None:
+        """Read this exact POST key; absence grants no creating fallback."""
+        response = await self._request("run_read", self._thread_path + "/runs/by-idempotency-key", headers={CHANNEL_EXECUTION_REQUEST_HEADER: "1", "Idempotency-Key": self.scope.publication_id})
+        if response.headers.get(CHANNEL_EXECUTION_RESPONSE_HEADER.lower()) != "1":
+            _refuse()
+        if response.status_code == 404:
+            if type(response.body) is not dict or response.body.get("lookup") != "idempotency-key":
+                _refuse()
+            return None
+        if response.status_code != 200 or response.body is None:
+            _refuse()
+        run = self._publication_run(self._run(response.body))
+        self._check_current("run_read")
+        return run
+
+    async def cancel_run(self, run_id: str) -> str:
+        run_id = _identity(run_id)
+        await self._authorize("run_cancel")
+        run = await self._require_publication_run(run_id)
+        if run.row["status"] in {"success", "error", "timeout", "interrupted"}:
+            return "terminal"
+        response = await self._owner.request_json(
+            operation="run_cancel",
+            owner_user_id=self.scope.owner_user_id,
+            method="POST",
+            path=self._thread_path + "/runs/" + quote(run_id, safe="") + "/cancel",
+            params={"wait": False, "action": "interrupt"},
+            before_dispatch=lambda: self._authorize("run_cancel"),
+            after_response=lambda: self._authorize("run_cancel"),
+        )
+        self._check_current("run_cancel")
+        if response.status_code == 409:
+            return "refused"
+        if response.status_code not in {202, 204}:
+            _refuse()
+        return "requested"
+
+    def join_run(self, run_id: str, *, after_event_id: str | None = None) -> ChannelOwnedStream:
+        run_id = _identity(run_id)
+        if after_event_id is not None and (type(after_event_id) is not str or not after_event_id or len(after_event_id) > 256 or not after_event_id.isprintable()):
+            _refuse()
+        return _JoinedRunStream(self, run_id, after_event_id)
 
     async def get_run_output(self, run_id: str) -> RunOutputProjection | RunOutputProjectionV2 | None:
         run_id = _identity(run_id)

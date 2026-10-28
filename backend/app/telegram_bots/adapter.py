@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Update, User
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, InvalidToken, NetworkError, RetryAfter, TelegramError
-from telegram.ext import AIORateLimiter, Application, ApplicationHandlerStop, CallbackQueryHandler, ChatMemberHandler, CommandHandler, Defaults, ManagedBotUpdatedHandler, MessageHandler, TypeHandler, filters
+from telegram.ext import AIORateLimiter, Application, ApplicationHandlerStop, CallbackQueryHandler, ChatMemberHandler, CommandHandler, Defaults, ExtBot, ManagedBotUpdatedHandler, MessageHandler, TypeHandler, filters
 from telegram.request import HTTPXRequest
 
 from app.channels.telegram import TelegramChannel
@@ -75,6 +75,21 @@ class LongRetryAfter(TelegramError):
         self.seconds = seconds
 
 
+@dataclass(frozen=True)
+class LiveRequestFence:
+    check: Callable[[], Awaitable[None]]
+
+
+class ManagedExtBot(ExtBot):
+    def _insert_defaults(self, data):
+        # The pinned SDK treats the empty string as an empty InputPollOption
+        # sequence. Telegram's empty initial draft requires a string on wire.
+        empty_draft = "draft_id" in data and data.get("text") == ""
+        super()._insert_defaults(data)
+        if empty_draft:
+            data["text"] = ""
+
+
 class BoundedRateLimiter(AIORateLimiter):
     """Retain the pinned parent's math/retries with an independent short hold."""
 
@@ -88,9 +103,13 @@ class BoundedRateLimiter(AIORateLimiter):
         return self._monotonic() if self._monotonic else asyncio.get_running_loop().time()
 
     async def process_request(self, callback, args, kwargs, endpoint, data, rate_limit_args):
+        fence = rate_limit_args if type(rate_limit_args) is LiveRequestFence else None
+
         async def guarded(*callback_args, **callback_kwargs):
             while (remaining := self._short_hold_until - self._time()) > 0:
                 await self._sleep(remaining)
+            if fence is not None:
+                await fence.check()
             try:
                 return await callback(*callback_args, **callback_kwargs)
             except RetryAfter as error:
@@ -100,7 +119,7 @@ class BoundedRateLimiter(AIORateLimiter):
                 self._short_hold_until = max(self._short_hold_until, self._time() + seconds + 0.1)
                 raise
 
-        return await super().process_request(guarded, args, kwargs, endpoint, data, rate_limit_args)
+        return await super().process_request(guarded, args, kwargs, endpoint, data, None if fence is not None else rate_limit_args)
 
 
 @dataclass(frozen=True)
@@ -223,11 +242,15 @@ class TelegramBotChannel(TelegramChannel):
         )
         self._application = (
             Application.builder()
-            .token(token)
-            .request(self._requests[0])
-            .get_updates_request(self._requests[1])
-            .defaults(Defaults(link_preview_options=LinkPreviewOptions(is_disabled=True), allow_sending_without_reply=True))
-            .rate_limiter(BoundedRateLimiter(overall_max_rate=30, overall_time_period=1, max_retries=2, monotonic=monotonic, sleep=sleep))
+            .bot(
+                ManagedExtBot(
+                    token=token,
+                    request=self._requests[0],
+                    get_updates_request=self._requests[1],
+                    defaults=Defaults(link_preview_options=LinkPreviewOptions(is_disabled=True), allow_sending_without_reply=True),
+                    rate_limiter=BoundedRateLimiter(overall_max_rate=30, overall_time_period=1, max_retries=2, monotonic=monotonic, sleep=sleep),
+                )
+            )
             .updater(None)
             .job_queue(None)
             .build()
@@ -252,7 +275,8 @@ class TelegramBotChannel(TelegramChannel):
 
     @property
     def supports_streaming(self) -> bool:
-        return False  # advisory/model output belongs to PLAN 1.14
+        # Qualified previews join the exact persisted run independently.
+        return False
 
     def _time(self) -> float:
         return self._monotonic() if self._monotonic else asyncio.get_running_loop().time()
@@ -310,6 +334,11 @@ class TelegramBotChannel(TelegramChannel):
             # The SDK has already returned its acknowledgement. Auxiliary
             # connectivity bookkeeping cannot turn that known send into retry.
             self._failure()
+
+    def _chat_message_sent(self, chat_id, topic):
+        turns = getattr(self._services, "turns", None)
+        if turns is not None:
+            turns.message_sent(self, chat_id=chat_id, topic=topic)
 
     async def _shutdown_resources(self) -> None:
         try:
@@ -378,6 +407,9 @@ class TelegramBotChannel(TelegramChannel):
 
     async def stop(self) -> None:
         self._stopping = True
+        turns = getattr(self._services, "turns", None)
+        if turns is not None:
+            await turns.retire(self)
         for task in tuple(self._ingress_tasks):
             task.cancel()
         await await_drained(self._drain_ingress())
@@ -604,6 +636,9 @@ class TelegramBotChannel(TelegramChannel):
         if user is not None and type(user.id) is int and user.id > 0:
             self._services.strangers.touch(link.bot_id, user.id, self._time())
         if update.api_kwargs.get("stopped_message_generation") is not None:
+            turns = getattr(self._services, "turns", None)
+            if turns is not None and link.state == "connected":
+                await turns.native_stop(self, update)
             self._classified(update)
             raise ApplicationHandlerStop
         if update.managed_bot is not None:
@@ -673,13 +708,16 @@ class TelegramBotChannel(TelegramChannel):
         query = update.callback_query
 
         async def execute(channel, row):
-            await channel.execute_callback(row, query_id=query.id)
+            await channel.execute_callback(row, query_id=query.id, update_id=update.update_id)
 
         handler = CallbackHandler(repository, execute=execute)
         self._spawn_ingress(handler.press(self, query, captured_link=captured))
         self._classified(update)
 
-    async def execute_callback(self, row, *, query_id=None):
+    async def execute_callback(self, row, *, query_id=None, update_id=None):
+        turns = getattr(self._services, "turns", None)
+        if turns is not None and row.kind in {"retry_message", "cancel_wait", "stop_answer"}:
+            return await turns.execute_callback(self, row, update_id=update_id, query_id=query_id)
         await self._services.commands.execute(self, row, query_id=query_id)
 
     async def _on_unknown_callback(self, update, context) -> None:
@@ -838,7 +876,11 @@ class TelegramBotChannel(TelegramChannel):
 
     async def _on_command(self, update, context) -> None:
         word, arguments = self._command(update.message)
-        if word not in FIXED_COMMANDS:
+        turns = getattr(self._services, "turns", None)
+        if word == "stop" and turns is not None:
+            await turns.stop_chat(self, update)
+            self._classified(update, remember=True)
+        elif word not in FIXED_COMMANDS:
             await self._on_other_slash(update, context)
         elif word == "agent":
             await self._fixed_reply(update, "cmd.agent", word)
@@ -865,9 +907,26 @@ class TelegramBotChannel(TelegramChannel):
     async def _on_text(self, update, context) -> None:
         if self._command(update.message)[0]:
             await self._on_other_slash(update, context)
+            return
+        turns = getattr(self._services, "turns", None)
+        if turns is not None:
+            if type(update.message.text) is not str or not update.message.text.strip():
+                await self._on_unsupported(update, context)
+                return
+            link = self._admission(update).link
+            typing_allowed = getattr(turns, "typing_allowed", None)
+            topic = update.message.message_thread_id
+
+            def current():
+                return self._callback_current(link) and (typing_allowed is None or typing_allowed(self, topic=topic))
+
+            if current():
+                self._spawn_ingress(self.live_request(link, "send_chat_action", is_current=current, action="typing", message_thread_id=topic))
+            await turns.accept(self, update)
 
     async def _on_voice(self, update, context) -> None:
-        return
+        if getattr(self._services, "turns", None) is not None:
+            await self._on_unsupported(update, context)
 
     async def _on_unsupported(self, update, context) -> None:
         link, message = self._admission(update).link, update.message
@@ -883,13 +942,60 @@ class TelegramBotChannel(TelegramChannel):
     async def _run_on_telegram_loop(self, coroutine):
         return await coroutine
 
+    async def live_request(self, link, method, *, is_current, protected=None, **kwargs):
+        """Disposable presentation call with a fence inside limiter retries."""
+        from app.telegram_bots.authority import require
+        from app.telegram_bots.producer import DeliveryClaimRetired
+
+        context = self._context(link, link.chat_id, "bound_message")
+
+        async def check():
+            if is_current() is not True or not await self._input_current(link):
+                raise DeliveryClaimRetired()
+            await self._services.prepare_live_owner(link.owner_user_id)
+            await require(link.owner_user_id, "threads:read", "runs:read")
+            policy = await self._services.protect_notice(context)
+            if type(policy) is not bool or protected is not None and policy != protected or is_current() is not True or not await self._input_current(link):
+                raise DeliveryClaimRetired()
+            if is_current() is not True or not self._callback_current(link):
+                raise DeliveryClaimRetired()
+
+        try:
+            await check()
+            result = await await_drained(getattr(self.bot, method)(chat_id=link.chat_id, rate_limit_args=LiveRequestFence(check), **kwargs))
+        except DeliveryClaimRetired:
+            return None
+        except Forbidden as error:
+            self._failure()
+            self._log_failure(method, error)
+            await self._forbidden(context)
+            return None
+        except InvalidToken as error:
+            self._failure()
+            self._log_failure(method, error)
+            await self.verify_token(error)
+            return None
+        except TelegramError as error:
+            self._failure()
+            self._log_failure(method, error)
+            return None
+        await self._after_send_success()
+        return result
+
+    async def react_waiting(self, link, row):
+        from telegram import ReactionTypeEmoji
+
+        return await self.live_request(link, "set_message_reaction", is_current=lambda: self._callback_current(link), message_id=row.message_id, reaction=[ReactionTypeEmoji("👀")])
+
     async def _get_download_bot(self):
         return self.bot
 
     async def send(self, msg: OutboundMessage, _max_retries: int = 3) -> int | None:
         from app.telegram_bots.producer import PermanentDeliveryError
 
-        # The bus listener/model final planner is not active until 1.14.
+        turns = getattr(self._services, "turns", None)
+        if turns is not None:
+            return await turns.outbound(self, msg)
         raise PermanentDeliveryError("unsupported-source")
 
     async def send_text(
@@ -987,6 +1093,7 @@ class TelegramBotChannel(TelegramChannel):
             self._failure()
             self._log_failure("sendMessage", error)
             return None
+        self._chat_message_sent(context.chat_id, thread)
         await self._after_send_success()
         return message.message_id
 
@@ -1092,12 +1199,15 @@ class TelegramBotChannel(TelegramChannel):
         raise DeliveryClaimRetired()
 
     async def send_part(self, *, outbox_id: str, part_id: str, claim_owner: str, claim_id: str) -> list[int]:
-        from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryEligibility, DeliveryRetry, PermanentDeliveryError, SourceUnavailable, uses_model_source
+        from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryEligibility, DeliveryRetry, PermanentDeliveryError, PreviewExpired, SourceUnavailable, uses_model_source
 
         if not self.application.running or self._stopping or self._services.channel(self.link.id) is not self or not self._send_allowed():
             raise DeliveryClaimRetired()
         capture = dict(link_id=self.link.id, outbox_id=outbox_id, part_id=part_id, claim_owner=claim_owner, claim_id=claim_id, token_revision=self.transport_revision)
         saved = await self._services.outbox.capture_sending_part(**capture)
+        turns = getattr(self._services, "turns", None)
+        if saved.item.dedupe_key.startswith("notice:chat-stream:") and (turns is None or turns.preview_allowed(self, saved.item) is not True):
+            raise PreviewExpired()
         part = saved.part
         pending = part.get("invalid_token_verification_pending")
         if pending is not None:
@@ -1202,9 +1312,33 @@ class TelegramBotChannel(TelegramChannel):
             if await self._services.callbacks.read_keyboard(latest) != stored_keyboard or not self._callback_current(latest.link):
                 raise DeliveryClaimRetired()
         current = latest
+        if current.item.dedupe_key.startswith("notice:chat-stream:") and (turns is None or turns.preview_allowed(self, current.item) is not True):
+            raise PreviewExpired()
         self.link = current.link
         context = SendContext(current.link.id, current.item.chat_id, current.link.binding_generation, self.transport_revision, "bound_message")
         method = "sendMessage" if part["kind"] != "edit" else "editMessageReplyMarkup" if part.get("remove_keyboard") else "editMessageText"
+        preview_fence = None
+        if current.item.dedupe_key.startswith("notice:chat-stream:"):
+
+            async def check_preview():
+                if turns.preview_allowed(self, current.item) is not True:
+                    raise PreviewExpired()
+                latest_preview = await self._services.outbox.capture_sending_part(**capture)
+                decision = await self._services.eligibility(latest_preview.link, latest_preview.item, latest_preview.part)
+                if not isinstance(decision, DeliveryEligibility) or decision.decision != "allow" or decision.protect_content and not part.get("protect_content"):
+                    raise DeliveryClaimRetired()
+                if turns.preview_allowed(self, latest_preview.item) is not True:
+                    raise PreviewExpired()
+                if not await self._input_current(current.link):
+                    raise DeliveryClaimRetired()
+                if stored_keyboard is not None and await self._services.callbacks.read_keyboard(latest_preview) != stored_keyboard:
+                    raise DeliveryClaimRetired()
+                if turns.preview_allowed(self, latest_preview.item) is not True:
+                    raise PreviewExpired()
+                if not self._callback_current(current.link):
+                    raise DeliveryClaimRetired()
+
+            preview_fence = LiveRequestFence(check_preview)
         try:
             if part["kind"] == "edit":
                 target = part.get("target_message_id")
@@ -1224,6 +1358,7 @@ class TelegramBotChannel(TelegramChannel):
                     message_thread_id=current.item.message_thread_id,
                     protect_content=bool(part.get("protect_content", False)),
                     reply_markup=markup,
+                    rate_limit_args=preview_fence,
                 )
         except (LongRetryAfter, RetryAfter) as error:
             self._failure()
@@ -1274,5 +1409,7 @@ class TelegramBotChannel(TelegramChannel):
             self._failure()
             self._log_part_failure(method, error, current)
             raise
+        if method == "sendMessage":
+            self._chat_message_sent(context.chat_id, current.item.message_thread_id)
         await self._after_send_success()
         return [part["target_message_id"] if message is True else message.message_id]

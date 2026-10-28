@@ -16,6 +16,7 @@ import httpx
 from deerflow.agent_instances.contract import RESIDENT_INTERRUPTED, AgentDenied, AgentPermission, Refusal
 from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
 from deerflow.runtime.turn_phases import TurnPhase, phase_span
+from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 from deerflow.spaces.attachments import ResourceMount, SpaceAttachments
 from deerflow.spaces.facade import storage_actor_scope
@@ -95,6 +96,8 @@ async def run_error(execution, record, exc: BaseException) -> dict:
     plain = {"name": type(exc).__name__, "reason": None, "stop_reason": None}
     if isinstance(exc, Refusal):
         return {"name": type(exc).__name__, "reason": exc.reason, "stop_reason": exc.reason}
+    if isinstance(exc, SandboxCapacityExceededError):
+        plain["stop_reason"] = "sandbox_capacity_exceeded"
     if execution is None:
         return plain
     try:

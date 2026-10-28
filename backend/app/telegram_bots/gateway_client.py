@@ -97,7 +97,7 @@ def _path(value):
     return value
 
 
-def _extra_headers(headers, *, streaming=False):
+def _extra_headers(headers, *, streaming=False, replay=False):
     result = {}
     for key, value in (headers or {}).items():
         if type(key) is not str or type(value) is not str or any(ord(c) <= 31 or ord(c) == 127 for c in value):
@@ -116,6 +116,9 @@ def _extra_headers(headers, *, streaming=False):
                 raise ChannelExecutionProtocolError()
         elif name == "x-deerflow-require-channel-execution":
             if value != "1":
+                raise ChannelExecutionProtocolError()
+        elif name == "last-event-id":
+            if not replay or not value or len(value) > 256 or not value.isprintable():
                 raise ChannelExecutionProtocolError()
         elif name == "accept":
             if value != ("text/event-stream" if streaming else "application/json"):
@@ -150,7 +153,7 @@ class _OwnedStream:
             raise StopAsyncIteration
         try:
             if self._pump_task is None:
-                self._owner._check_operation("run_create")
+                self._owner._check_operation(self._kwargs.get("operation", "run_create"))
                 self._owner._streams.add(self)
                 self._pump_task = self._owner._register(self._pump(), "channel-http-stream")
             kind, value = await self._queue.get()
@@ -171,20 +174,26 @@ class _OwnedStream:
     async def _pump(self):
         try:
             owner, kw = self._owner, self._kwargs
+            operation = kw.get("operation", "run_create")
             await owner.start()
-            body = await await_drained(asyncio.to_thread(_encode, kw["body"]))
-            headers = await owner._headers_for(kw["owner_user_id"], kw["headers"], streaming=True)
-            owner._check_operation("run_create")
-            context = _BEFORE_DISPATCH.set(owner._dispatch_check("run_create", kw["before_dispatch"]))
+            body = await await_drained(asyncio.to_thread(_encode, kw["body"])) if kw.get("body") is not None else None
+            headers = await owner._headers_for(kw["owner_user_id"], kw["headers"], streaming=True, replay=operation == "run_read")
+            owner._check_operation(operation)
+            context = _BEFORE_DISPATCH.set(owner._dispatch_check(operation, kw["before_dispatch"]))
             try:
-                response = await owner._http_client.send(owner._http_client.build_request("POST", kw["path"], content=body, headers=headers, timeout=httpx.Timeout(connect=5, pool=5, read=300, write=300)), stream=True)
+                response = await owner._http_client.send(
+                    owner._http_client.build_request(
+                        "POST" if operation == "run_create" else "GET", kw["path"], content=body, headers=headers, timeout=httpx.Timeout(connect=5, pool=5, read=300, write=300) if operation == "run_create" else httpx.Timeout(30)
+                    ),
+                    stream=True,
+                )
                 self._response = response
                 owner._remember_response(response)
                 try:
                     if not 200 <= response.status_code < 300:
                         data = await owner._response_content(response)
                         result = await await_drained(asyncio.to_thread(_json_response, response.status_code, _response_headers(response), data))
-                        await owner._post_response("run_create", kw["after_response"])
+                        await owner._post_response(operation, kw["after_response"])
                         raise await await_drained(asyncio.to_thread(ChannelHttpError, result))
                     if response.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "text/event-stream":
                         raise ChannelExecutionProtocolError()
@@ -193,7 +202,7 @@ class _OwnedStream:
                     async for line in lines(response):
                         part = await await_drained(asyncio.to_thread(decoder.decode, line))
                         if part is not None:
-                            await owner._post_response("run_create", kw["after_response"])
+                            await owner._post_response(operation, kw["after_response"])
                             await self._queue.put(("part", part))
                     if response.is_closed:
                         owner._responses[response]["confirmed"] = True
@@ -330,7 +339,7 @@ class GatewayClientOwner:
         return await self._request(create, before_dispatch)
 
     def _check_operation(self, operation):
-        if operation not in {"thread_read", "run_read", "source_read", "run_create"} or self._stopping or operation == "run_create" and self._run_admission_closed:
+        if operation not in {"thread_read", "run_read", "source_read", "run_create", "run_cancel"} or self._stopping or operation == "run_create" and self._run_admission_closed:
             raise ChannelExecutionProtocolError()
 
     def _register(self, coro, name):
@@ -385,10 +394,10 @@ class GatewayClientOwner:
         except Exception:
             raise ChannelExecutionProtocolError() from None
 
-    async def _headers_for(self, owner, headers, *, streaming=False):
+    async def _headers_for(self, owner, headers, *, streaming=False, replay=False):
         if type(owner) is not str or not owner or any(ord(c) <= 32 or ord(c) == 127 for c in owner):
             raise ChannelExecutionProtocolError()
-        extra = _extra_headers(headers, streaming=streaming)
+        extra = _extra_headers(headers, streaming=streaming, replay=replay)
         authority = await await_drained(asyncio.to_thread(_authority_headers, owner))
         return {**authority, **extra, "Accept": "text/event-stream" if streaming else "application/json", "Content-Type": "application/json"}
 
@@ -407,7 +416,7 @@ class GatewayClientOwner:
     ) -> ChannelJsonResponse:
         self._check_operation(operation)
         path = _path(path)
-        if method != ("POST" if operation == "run_create" else "GET") or not callable(before_dispatch) or after_response is not None and not callable(after_response) or body is not None and not isinstance(body, Mapping):
+        if method != ("POST" if operation in {"run_create", "run_cancel"} else "GET") or not callable(before_dispatch) or after_response is not None and not callable(after_response) or body is not None and not isinstance(body, Mapping):
             raise ChannelExecutionProtocolError()
         if params is not None and (not isinstance(params, Mapping) or any(type(k) is not str or type(v) not in {str, int, bool} for k, v in params.items())):
             raise ChannelExecutionProtocolError()
@@ -460,6 +469,14 @@ class GatewayClientOwner:
         if not isinstance(body, Mapping) or not callable(before_dispatch) or after_response is not None and not callable(after_response):
             raise ChannelExecutionProtocolError()
         return _OwnedStream(self, {"owner_user_id": owner_user_id, "path": _path(path), "body": body, "before_dispatch": before_dispatch, "after_response": after_response, "headers": headers})
+
+    def join_sse(self, *, owner_user_id: str, path: str, before_dispatch: BeforeDispatch, after_response: BeforeDispatch | None = None, after_event_id: str | None = None) -> ChannelOwnedStream:
+        self._check_operation("run_read")
+        if not callable(before_dispatch) or after_response is not None and not callable(after_response):
+            raise ChannelExecutionProtocolError() from None
+        headers = {} if after_event_id is None else {"Last-Event-ID": after_event_id}
+        _extra_headers(headers, streaming=True, replay=True)
+        return _OwnedStream(self, {"operation": "run_read", "owner_user_id": owner_user_id, "path": _path(path), "before_dispatch": before_dispatch, "after_response": after_response, "headers": headers})
 
     def close_run_admission(self) -> None:
         self._run_admission_closed = True

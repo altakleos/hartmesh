@@ -9,6 +9,7 @@ import sqlite3
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager, contextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -2250,6 +2251,29 @@ class RunManager:
             return None
         lease_seconds = self._run_ownership_config.lease_seconds
         return (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()
+
+    async def lookup_idempotent_run(self, thread_id: str, key: str, *, user_id: str) -> RunRecord | None:
+        """Read a detached durable key snapshot without changing admission state."""
+        if any(type(value) is not str or not value for value in (thread_id, key, user_id)) or len(key) > 255:
+            raise ValueError("Invalid run lookup scope")
+        if self._store is None:
+            raise RunStoreUnavailable()
+        row = await await_drained(run_capture_io(lambda: self._store.get_by_idempotency_key(key)))
+        if row is None:
+            return None
+        if not isinstance(row, Mapping) or row.get("idempotency_key") != key or any(type(row.get(name)) is not str or not row[name] for name in ("run_id", "thread_id", "user_id")):
+            raise ValueError("Invalid run lookup result")
+        if row["thread_id"] != thread_id or row["user_id"] != user_id:
+            return None
+        if row.get("operation_kind") != ThreadOperationKind.run.value or type(row.get("status")) is not str or not isinstance(row.get("metadata"), Mapping):
+            raise ValueError("Invalid run lookup result")
+        for name in ("created_at", "updated_at"):
+            value = row.get(name)
+            if type(value) is not str or datetime.fromisoformat(value).utcoffset() is None:
+                raise ValueError("Invalid run lookup timestamp")
+        # The memory store returns its own nested mappings. Neither response
+        # serialization nor a caller may mutate that durable/live source.
+        return self._strict_record_from_store(deepcopy(row))
 
     async def find_idempotent_run(self, thread_id: str, key: str, *, user_id: str | None = None) -> RunRecord | None:
         """Read a recorded retry without admitting or registering a peer run."""

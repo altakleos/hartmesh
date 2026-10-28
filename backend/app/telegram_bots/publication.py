@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import math
 import re
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Literal
 from urllib.parse import quote
 
 from app.channels.execution import ChannelExecutionContext, ChannelExecutionScope, ChannelHttpOwner
-from app.channels.execution_client import ChannelExecutionFacade
+from app.channels.execution_client import ChannelExecutionFacade, ValidatedRun
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus
 from app.gateway.run_output import RunOutputProjectionV2
 from app.telegram_bots.inbox import InboxRepository, InboxRow, PublicationRecord, PublicationScope
@@ -64,6 +64,21 @@ class PublicationObservation:
             if type(self.outbox_id) is not str or re.fullmatch(r"[0-9a-f]{32}", self.outbox_id) is None:
                 _refuse()
         elif self.outbox_id is not None:
+            _refuse()
+
+
+@dataclass(frozen=True)
+class PublicationRunObservation:
+    state: Literal["pending", "matched", "held", "budget_exhausted"]
+    record: PublicationRecord
+    run: ValidatedRun | None = None
+    reason: str | None = None
+
+    def __post_init__(self):
+        allowed = {"pending": {"awaiting_run"}, "matched": {None}, "held": {"ambiguous_run", "source_unavailable"}, "budget_exhausted": {"budget_exhausted"}}
+        if type(self.record) is not PublicationRecord or self.state not in allowed or self.reason not in allowed[self.state] or (type(self.run) is not ValidatedRun if self.state == "matched" else self.run is not None):
+            _refuse()
+        if self.state == "matched" and self.record.run_id != self.run.row.get("run_id"):
             _refuse()
 
 
@@ -182,6 +197,12 @@ def _plain_origins(link, origins, *, thread_id, endpoint_id):
         if type(value) is not dict or set(value) != {"text", "type"} or value["type"] != "text" or type(value["text"]) is not str or not value["text"].strip():
             _refuse()
     return tuple(sorted(origins, key=lambda row: (row.accepted_at.astimezone(UTC), row.update_id, row.message_id)))
+
+
+def channel_execution_scope(record: PublicationRecord) -> ChannelExecutionScope:
+    if type(record) is not PublicationRecord:
+        _refuse()
+    return _channel_scope(record)
 
 
 def _channel_scope(record):
@@ -316,45 +337,116 @@ class PublicationCoordinator:
             record = await self.inbox.reserve_publication(link, origins, thread_id=thread_id, endpoint_id=scope.endpoint_id, guard=create_guard)
             if type(record) is not PublicationRecord or record.scope != scope:
                 _refuse()
-            if record.dispatch_started:
-                return record
-            execution_scope = _channel_scope(record)
-            facade = self._facade(record, admission)
-            message = InboundMessage(
-                channel_name="telegram",
-                chat_id=str(link.chat_id),
-                user_id=str(link.telegram_user_id),
-                text="\n\n".join(row.sanitized_input["text"] for row in origins),
-                msg_type=InboundMessageType.CHAT,
-                thread_ts=str(origins[0].message_id),
-                topic_id=None,
-                owner_user_id=link.owner_user_id,
-                connection_id=link.connection_id,
-                workspace_id=str(link.bot_id),
-                metadata={
-                    "telegram_bot_id": link.bot_id,
-                    "workspace_id": str(link.bot_id),
-                    "message_id": origins[0].message_id,
-                    "event_id": record.event_id,
-                    "channel_turn_id": record.publication_id,
-                    "human_message_kwargs": {"channel_turn_id": record.publication_id},
-                },
-                execution_required=True,
-                execution_context=ChannelExecutionContext(execution_scope, facade, admission),
-            )
+            return await self._dispatch_reserved(link, record, origins, admission, create_guard)
+
+        return await self._call(perform, creating=True)
+
+    async def _dispatch_reserved(self, link, record, origins, admission, create_guard):
+        if record.dispatch_started:
+            return record
+        execution_scope = _channel_scope(record)
+        facade = self._facade(record, admission)
+        message = InboundMessage(
+            channel_name="telegram",
+            chat_id=str(link.chat_id),
+            user_id=str(link.telegram_user_id),
+            text="\n\n".join(row.sanitized_input["text"] for row in origins),
+            msg_type=InboundMessageType.CHAT,
+            thread_ts=str(origins[0].message_id),
+            topic_id=str(record.scope.message_thread_id) if record.scope.message_thread_id is not None else None,
+            owner_user_id=link.owner_user_id,
+            connection_id=link.connection_id,
+            workspace_id=str(link.bot_id),
+            metadata={
+                "telegram_bot_id": link.bot_id,
+                "workspace_id": str(link.bot_id),
+                "message_id": origins[0].message_id,
+                "event_id": record.event_id,
+                "channel_turn_id": record.publication_id,
+                "human_message_kwargs": {"channel_turn_id": record.publication_id},
+            },
+            execution_required=True,
+            execution_context=ChannelExecutionContext(execution_scope, facade, admission),
+        )
+        await admission.authorize("run_create")
+        reservation = self.bus.reserve_inbound(message)
+        try:
+            won = await self.inbox.mark_dispatch_started(record, guard=create_guard)
+            if won is True:
+                # Keep this fence and actual enqueue synchronous: no await.
+                admission.check("run_create")
+                reservation.commit(message)
+                if record.owner_callback_id is not None:
+                    await self.inbox.confirm_callback_dispatch(replace(record, dispatch_started=True), guard=create_guard)
+            elif won is not False:
+                _refuse()
+            return replace(record, dispatch_started=True)
+        finally:
+            reservation.release()
+
+    async def dispatch_record(self, record: PublicationRecord, current_link: BotLink) -> PublicationRecord:
+        self._check_open(creating=True)
+        record, current_link = deepcopy(record), deepcopy(current_link)
+        self._record_link(record, current_link)
+
+        async def perform(control):
+            admission, create_guard, _ = await self._attempt(current_link, record.scope, control)
             await admission.authorize("run_create")
-            reservation = self.bus.reserve_inbound(message)
-            try:
-                won = await self.inbox.mark_dispatch_started(record, guard=create_guard)
-                if won is True:
-                    # Keep this fence and actual enqueue synchronous: no await.
-                    admission.check("run_create")
-                    reservation.commit(message)
-                elif won is not False:
+            await self._thread_proof(current_link, record.scope.thread_id, admission)
+            fresh, origins = await self.inbox.read_publication_input(record, guard=create_guard)
+            origins = _plain_origins(current_link, origins, thread_id=record.scope.thread_id, endpoint_id=record.scope.endpoint_id)
+            return await self._dispatch_reserved(current_link, fresh, origins, admission, create_guard)
+
+        return await self._call(perform, creating=True)
+
+    async def retry(self, previous: PublicationRecord, current_link: BotLink, *, on_reserved: Callable[[PublicationRecord], None] | None = None) -> PublicationRecord:
+        return await self._retry(previous, current_link, refusal=None, on_reserved=on_reserved)
+
+    async def retry_refused(self, previous: PublicationRecord, current_link: BotLink, refusal, *, on_reserved: Callable[[PublicationRecord], None] | None = None) -> PublicationRecord:
+        from app.channels.outcomes import validate_creation_refusal
+
+        validate_creation_refusal(refusal, channel_execution_scope(previous))
+        return await self._retry(previous, current_link, refusal=refusal, on_reserved=on_reserved)
+
+    async def _retry(self, previous, current_link, *, refusal, on_reserved):
+        self._check_open(creating=True)
+        if on_reserved is not None and not callable(on_reserved):
+            _refuse()
+        previous, current_link = deepcopy(previous), deepcopy(current_link)
+        self._record_link(previous, current_link)
+
+        async def perform(control):
+            admission, create_guard, read_guard = await self._attempt(current_link, previous.scope, control)
+            control.final_check = lambda: admission.check("run_create")
+            await admission.authorize("run_create")
+            await self._thread_proof(current_link, previous.scope.thread_id, admission)
+            if refusal is None:
+                # Read the original predecessor even if its immediate successor
+                # committed before a caller lost the result. SQL owns replay CAS.
+                facade = self._facade(previous, admission)
+                run = await facade.get_run(previous.run_id) if previous.run_id is not None else await facade.lookup_run()
+                if run is None or not self._matches(run, previous) or run.row.get("metadata", {}).get("channel_turn_id") != previous.publication_id:
                     _refuse()
-                return replace(record, dispatch_started=True)
-            finally:
-                reservation.release()
+                # Binding is only needed for a still-current original receipt.
+                # The successor writer independently checks the stored run ID.
+                if previous.run_id is None:
+                    try:
+                        await self.inbox.bind_publication_run(previous, run_id=run.row["run_id"], guard=read_guard)
+                    except ValueError:
+                        pass
+                successor = await self.inbox.reserve_retry_publication(previous, terminal=run, guard=create_guard)
+            else:
+                successor = await self.inbox.reserve_refused_publication(previous, creation_refusal=refusal, guard=create_guard)
+            if on_reserved is not None:
+                # Original host bookkeeping only: pin the actual owner before
+                # marker/enqueue. This callback grants no dispatch authority.
+                result = on_reserved(successor)
+                if result is not None:
+                    if asyncio.iscoroutine(result):
+                        result.close()
+                    _refuse()
+            fresh, origins = await self.inbox.read_publication_input(successor, guard=create_guard)
+            return await self._dispatch_reserved(current_link, fresh, _plain_origins(current_link, origins, thread_id=fresh.scope.thread_id, endpoint_id=fresh.scope.endpoint_id), admission, create_guard)
 
         return await self._call(perform, creating=True)
 
@@ -389,6 +481,70 @@ class PublicationCoordinator:
 
         return await self._call(perform, timeout=OUTPUT_READ_TIMEOUT_SECONDS)
 
+    async def _locate(self, record, admission, read_guard, facade, max_pages, *, metadata):
+        def matches(run):
+            saved = run.row.get("metadata")
+            receipt_match = self._matches(run, record)
+            marker_match = isinstance(saved, Mapping) and saved.get("channel_turn_id") == record.publication_id
+            if metadata and receipt_match != marker_match:
+                _refuse()
+            return receipt_match and (not metadata or marker_match)
+
+        if record.run_id is not None:
+            run = await facade.get_run(record.run_id)
+            if run is None or not matches(run):
+                return PublicationRunObservation("held", record, reason="source_unavailable")
+            return PublicationRunObservation("matched", record, run)
+        if metadata:
+            match = await facade.lookup_run()
+            if match is None:
+                return PublicationRunObservation("pending", record, reason="awaiting_run")
+            if not matches(match):
+                _refuse()
+            admission.check("source_read")
+            fresh = await self.inbox.bind_publication_run(record, run_id=match.row["run_id"], guard=read_guard)
+            return PublicationRunObservation("matched", fresh, match)
+        cursor, match, seen = None, None, set()
+        for _ in range(max_pages):
+            page = await facade.list_runs_page(limit=OBSERVATION_PAGE_SIZE, before=cursor)
+            for run in page.data:
+                identity = run.row["run_id"]
+                if identity in seen:
+                    _refuse()
+                seen.add(identity)
+                if matches(run):
+                    if match is not None:
+                        return PublicationRunObservation("held", record, reason="ambiguous_run")
+                    match = run
+            if not page.has_more:
+                break
+            cursor = page.next_before
+        else:
+            return PublicationRunObservation("budget_exhausted", record, reason="budget_exhausted")
+        if match is None:
+            return PublicationRunObservation("pending", record, reason="awaiting_run")
+        admission.check("source_read")
+        fresh = await self.inbox.bind_publication_run(record, run_id=match.row["run_id"], guard=read_guard)
+        return PublicationRunObservation("matched", fresh, match)
+
+    async def locate_run(self, record: PublicationRecord, current_link: BotLink, *, max_pages: int, deadline: float | None = None) -> PublicationRunObservation:
+        self._record_link(record, current_link)
+        if type(max_pages) is not int or not 1 <= max_pages <= MAX_OBSERVATION_PAGES or deadline is not None and (type(deadline) not in {int, float} or not math.isfinite(deadline)):
+            _refuse()
+        record, current_link = deepcopy(record), deepcopy(current_link)
+
+        async def perform(control):
+            try:
+                admission, _, guard = await self._attempt(current_link, record.scope, control)
+                control.final_check = lambda: admission.check("source_read")
+                return await self._locate(record, admission, guard, self._facade(record, admission), max_pages, metadata=True)
+            except (asyncio.CancelledError, _DeadlineExceeded):
+                raise
+            except Exception:
+                return PublicationRunObservation("held", record, reason="source_unavailable")
+
+        return await self._call(perform, timeout=OBSERVATION_TIMEOUT_SECONDS, expired=lambda: PublicationRunObservation("budget_exhausted", record, reason="budget_exhausted"), deadline=deadline)
+
     async def observe(self, record: PublicationRecord, current_link: BotLink, *, max_pages: int, deadline: float | None = None) -> PublicationObservation:
         try:
             self._check_open(creating=False)
@@ -406,34 +562,10 @@ class PublicationCoordinator:
                 admission, _, read_guard = await self._attempt(current_link, record.scope, control)
                 control.final_check = lambda: admission.check("source_read")
                 facade = self._facade(record, admission)
-                fresh = record
-                if record.run_id is None:
-                    cursor, match, seen = None, None, set()
-                    for _ in range(max_pages):
-                        page = await facade.list_runs_page(limit=OBSERVATION_PAGE_SIZE, before=cursor)
-                        for run in page.data:
-                            identity = run.row["run_id"]
-                            if identity in seen:
-                                _refuse()
-                            seen.add(identity)
-                            if self._matches(run, record):
-                                if match is not None:
-                                    return PublicationObservation("held", record, reason="ambiguous_run")
-                                match = run
-                        if not page.has_more:
-                            break
-                        cursor = page.next_before
-                    else:
-                        return PublicationObservation("budget_exhausted", record, reason="budget_exhausted")
-                    if match is None:
-                        return PublicationObservation("pending", record, reason="awaiting_run")
-                    identity = match.row["run_id"]
-                    admission.check("source_read")
-                    fresh = await self.inbox.bind_publication_run(record, run_id=identity, guard=read_guard)
-                else:
-                    proved = await facade.get_run(record.run_id)
-                    if proved is None or not self._matches(proved, record):
-                        return PublicationObservation("held", record, reason="source_unavailable")
+                located = await self._locate(record, admission, read_guard, facade, max_pages, metadata=False)
+                if located.state != "matched":
+                    return PublicationObservation(located.state, located.record, reason=located.reason)
+                fresh = located.record
                 output = await facade.get_run_output(fresh.run_id)
                 admission.check("source_read")
                 if output is None:

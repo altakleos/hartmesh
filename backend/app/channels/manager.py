@@ -36,6 +36,7 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
+from app.channels.outcomes import CreationRefusal, CreationRefusedMessage, capture_creation_refusal
 from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
 from app.channels.store import ChannelStore
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
@@ -2646,9 +2647,10 @@ class ChannelManager:
             else:
                 result = await execution.client.runs.wait(execution.thread_id, execution.assistant_id, **kwargs)
                 await self._publish_execution_result(msg, execution, result)
-        except ChannelExecutionBusyError:
+        except ChannelExecutionBusyError as error:
             await self._release_inbound_dedupe_key(msg)
-            await self._send_error(msg, THREAD_BUSY_MESSAGE)
+            await _authorize_execution(execution, "run_read")
+            await self._send_error(msg, THREAD_BUSY_MESSAGE, execution=execution, creation_refusal=capture_creation_refusal(execution, error))
         except ChannelExecutionProtocolError:
             raise
         except Exception:
@@ -3258,15 +3260,20 @@ class ChannelManager:
 
     # -- error helper ------------------------------------------------------
 
-    async def _send_error(self, msg: InboundMessage, error_text: str) -> None:
-        outbound = OutboundMessage(
+    async def _send_error(self, msg: InboundMessage, error_text: str, *, execution: ChannelExecutionContext | None = None, creation_refusal: CreationRefusal | None = None) -> None:
+        if (execution is None) != (creation_refusal is None):
+            raise ChannelExecutionProtocolError()
+        outbound_type = OutboundMessage if execution is None else CreationRefusedMessage
+        extra = {} if execution is None else {"creation_refusal": creation_refusal}
+        outbound = outbound_type(
             channel_name=msg.channel_name,
-            chat_id=msg.chat_id,
-            thread_id=await self._lookup_thread_id(msg) or "",
+            chat_id=msg.chat_id if execution is None else execution.chat_id,
+            thread_id=(await self._lookup_thread_id(msg) or "") if execution is None else execution.thread_id,
             text=error_text,
             thread_ts=msg.thread_ts,
-            connection_id=msg.connection_id,
-            owner_user_id=msg.owner_user_id,
+            connection_id=msg.connection_id if execution is None else execution.connection_id,
+            owner_user_id=msg.owner_user_id if execution is None else execution.owner_user_id,
             metadata=_slim_metadata(msg.metadata),
+            **extra,
         )
         await self.bus.publish_outbound(outbound)

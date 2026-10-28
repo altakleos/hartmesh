@@ -5,7 +5,8 @@ RunEventStore. It standardizes callback data into RunEvent records and
 handles token usage accumulation.
 
 Key design decisions:
-- on_llm_new_token is NOT implemented -- only complete messages via on_llm_end
+- on_llm_new_token only captures transient qualified preview facts; complete
+  messages alone are journaled through on_llm_end
 - on_chat_model_start reconciles consumed middleware tool results and captures the
   first user-visible prompt as llm.human.input. It extracts the first human message
   for run.input because it is more reliable than on_chain_start (fires on every
@@ -596,6 +597,11 @@ class RunJournal(BaseCallbackHandler):
         if self._owned_producers_closed():
             return
         self._llm_start_times[str(run_id)] = time.monotonic()
+
+    def on_llm_new_token(self, token, *, run_id, chunk=None, **kwargs):
+        if self._closed or self._owned_producers_closed() or self._output_capture is None:
+            return
+        self._output_capture.preview_token(run_id=run_id, chunk=chunk)
 
     def on_llm_end(
         self,

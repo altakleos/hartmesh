@@ -7,6 +7,8 @@ synchronously and reduced to immutable facts before callbacks return.
 
 from __future__ import annotations
 
+import asyncio
+import weakref
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
@@ -16,6 +18,7 @@ from langchain_core.messages import BaseMessage, HumanMessage
 
 from deerflow.runtime.runs.output import OutputEvidenceError, TextOutputReceipt, UnavailableOutputReceipt, canonical_text_digest
 from deerflow.runtime.runs.output_source import OutputMessageEvidence, audit_output_source_event, inspect_output_message
+from deerflow.runtime.runs.preview import PreviewSpan, text_digest
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.utils.messages import restore_original_human_message, strip_injected_user_message_id_suffix
 
@@ -41,7 +44,7 @@ class _Response:
 class OutputCaptureObserver:
     """Capture-only, owning-loop observer; uncertainty is sticky until disposal."""
 
-    def __init__(self, *, owner_user_id: str, thread_id: str, run_id: str, inventory=None):
+    def __init__(self, *, owner_user_id: str, thread_id: str, run_id: str, inventory=None, publication_id: str | None = None):
         self.scope = {"owner_user_id": owner_user_id, "thread_id": thread_id, "run_id": run_id}
         self.inventory = inventory
         self.uncertain = False
@@ -64,6 +67,16 @@ class OutputCaptureObserver:
         self._input_bound = False
         self.input_message_id: str | None = None
         self._final: OutputMessageEvidence | None = None
+        self._preview_publication = publication_id
+        self._preview_pending: dict[int, tuple[BaseMessage, OutputMessageEvidence, str]] = {}
+        self._preview_prefixes: dict[tuple[str, str], str] = {}
+        self._preview_sequence = 0
+        self._preview_uncertain = False
+        self._preview_seen: dict[int, weakref.ReferenceType] = {}
+        try:
+            self._preview_loop = asyncio.get_running_loop() if publication_id is not None else None
+        except RuntimeError:
+            self._preview_loop = None
 
     def begin_epoch(self, root: UUID, input_payload: object, *, pre_existing_ids: set[str]) -> None:
         if self.inventory is not None:
@@ -204,6 +217,75 @@ class OutputCaptureObserver:
         except Exception:
             self.uncertain = True
 
+    def preview_token(self, *, run_id, chunk) -> None:
+        """Inspect actual callback objects synchronously; perform no token I/O."""
+        rid = str(run_id)
+        if not self._preview_here() or self._preview_publication is None or self._preview_uncertain or self.uncertain or self._epochs != 1 or not self._input_bound or rid not in self._model_starts:
+            return
+        try:
+            message = getattr(chunk, "message", None)
+            if not isinstance(message, BaseMessage):
+                return
+            facts = inspect_output_message(_dump(message))
+            if facts.role != "assistant" or facts.unavailable_reason is not None or facts.message_id in self._history:
+                return
+            if id(message) in self._preview_seen or len(self._preview_pending) >= 1024:
+                self._preview_uncertain = True
+                self._preview_pending.clear()
+                return
+            identity = id(message)
+
+            def forget(reference):
+                if self._preview_seen.get(identity) is reference:
+                    self._preview_seen.pop(identity)
+
+            self._preview_seen[identity] = weakref.ref(message, forget)
+            self._preview_pending[id(message)] = (message, facts, rid)
+        except Exception:
+            self._preview_uncertain = True
+            self._preview_pending.clear()
+
+    def _preview_here(self):
+        try:
+            return asyncio.get_running_loop() is self._preview_loop
+        except RuntimeError:
+            return False
+
+    def preview_span(self, chunk) -> PreviewSpan | None:
+        """Consume one actual root astream object, never copied stream metadata."""
+        if not self._preview_here() or self._epochs != 1 or self._preview_publication is None or self._preview_uncertain or self.uncertain or not isinstance(chunk, (tuple, list)) or len(chunk) != 2:
+            return None
+        message = chunk[0]
+        saved = self._preview_pending.pop(id(message), None)
+        if saved is None:
+            return None
+        try:
+            original, facts, rid = saved
+            if original is not message or inspect_output_message(_dump(message)) != facts:
+                self._preview_uncertain = True
+                return None
+            key = (rid, facts.message_id)
+            previous = self._preview_prefixes.get(key, "")
+            prefix = previous + facts.text
+            self._preview_sequence += 1
+            stamp = PreviewSpan(
+                version=1,
+                **self.scope,
+                publication_id=self._preview_publication,
+                invocation_id=self._root,
+                model_call_id=rid,
+                message_id=facts.message_id,
+                sequence=self._preview_sequence,
+                offset=len(previous),
+                text_sha256=text_digest(facts.text),
+                prefix_sha256=text_digest(prefix),
+            )
+            self._preview_prefixes[key] = prefix
+            return stamp
+        except Exception:
+            self._preview_uncertain = True
+            return None
+
     def chain_end(self, outputs: object, *, run_id, parent_run_id) -> None:
         if self.inventory is not None:
             self.inventory.chain_end(outputs, run_id=run_id, parent_run_id=parent_run_id)
@@ -289,3 +371,7 @@ class OutputCaptureObserver:
         self._history.clear()
         self._input = None
         self._input_dump = None
+        self._preview_pending.clear()
+        self._preview_seen.clear()
+        self._preview_prefixes.clear()
+        self._preview_uncertain = True

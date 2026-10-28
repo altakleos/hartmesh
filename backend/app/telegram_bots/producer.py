@@ -159,6 +159,96 @@ class OutboxItem:
     silent: bool = False
 
 
+_TURN_OUTCOME_KEYS = frozenset(
+    {
+        "error.generic",
+        "busy.cancelled",
+        "busy.gave_up",
+        "chat.restarted",
+        "chat.files_full",
+        "refused.interrupted",
+        "refused.restarting",
+        "refused.files_busy",
+        "start.ws_failed",
+        "busy.queued",
+        "busy.thread",
+        "busy.starting_elsewhere",
+        "busy.two_conversations",
+    }
+)
+INPUT_OUTCOME_KEYS = (_TURN_OUTCOME_KEYS - {"busy.queued", "busy.thread", "busy.starting_elsewhere", "busy.two_conversations"}) | {"custom_agent.deleted", "busy.followup_full"}
+
+
+@dataclass(frozen=True)
+class PublicationOutcomeBasis:
+    record: PublicationRecord
+    run_id: str | None
+    kind: str
+    source_ref: dict
+    stop_id: str | None = None
+
+
+def _prepare_publication_outcome(record, *, run, creation_refusal, source_ref):
+    from app.channels.execution import ChannelExecutionScope
+    from app.telegram_bots.errors import classify_creation_refusal, classify_run
+
+    if (run is None) == (creation_refusal is None) or type(source_ref) is not dict or set(source_ref) != {"key", "values"}:
+        raise ValueError("publication-outcome-conflict") from None
+    scope = record.scope
+    execution = ChannelExecutionScope(record.publication_id, scope.owner_user_id, scope.connection_id, str(scope.chat_id), scope.thread_id, scope.endpoint_id, scope.assistant_id, scope.agent_name)
+    classified = classify_run(run, execution) if run is not None else classify_creation_refusal(creation_refusal, execution)
+    if classified is None or source_ref["key"] != classified.text_key and not (classified.retry_later and source_ref["key"] in {"busy.gave_up", "busy.cancelled"}) or source_ref["key"] in {"busy.queued", "busy.thread"}:
+        raise ValueError("publication-outcome-conflict") from None
+    proof = {"kind": "run", "row": dict(run.row)} if run is not None else {"kind": "creation_refusal", "scope": asdict(execution)}
+    return _safe_json({"version": 1, "publication": _publication_identity(record), "proof": proof, "source_ref": source_ref, "finish_route": True})
+
+
+def validate_publication_outcome(item: OutboxItem) -> PublicationOutcomeBasis:
+    """Read only the closed server-authored fixed outcome, never model wording."""
+    from types import MappingProxyType
+
+    from app.channels.execution import ChannelExecutionScope
+    from app.channels.execution_client import ValidatedRun
+    from app.gateway.channel_execution import receipt_from_run_kwargs
+    from app.telegram_bots.errors import classify_run
+    from app.telegram_bots.inbox import PublicationOrigin, PublicationRecord, PublicationScope
+
+    try:
+        basis = item.payload["turn_outcome_basis"]
+        if type(basis) is not dict or set(basis) != {"version", "publication", "proof", "source_ref", "finish_route"} or type(basis["version"]) is not int or basis["version"] != 1 or basis["finish_route"] is not True:
+            raise ValueError
+        identity, proof, source = basis["publication"], basis["proof"], basis["source_ref"]
+        scope = PublicationScope(**identity["scope"])
+        record = PublicationRecord(
+            **{**identity, "scope": scope, "origins": tuple(PublicationOrigin(**origin) for origin in identity["origins"]), "dispatch_started": proof.get("kind") != "before_dispatch_stop", "run_id": proof.get("row", {}).get("run_id")}
+        )
+        if (item.link_id, item.owner_user_id, item.binding_generation, item.chat_id, item.dedupe_key, item.class_) != (scope.link_id, scope.owner_user_id, scope.binding_generation, scope.chat_id, "reply:" + record.turn_id, "reply"):
+            raise ValueError
+        execution = ChannelExecutionScope(record.publication_id, scope.owner_user_id, scope.connection_id, str(scope.chat_id), scope.thread_id, scope.endpoint_id, scope.assistant_id, scope.agent_name)
+        if proof.get("kind") == "run" and set(proof) == {"kind", "row"}:
+            run = ValidatedRun(MappingProxyType(proof["row"]), receipt_from_run_kwargs(proof["row"].get("kwargs")))
+            classified = classify_run(run, execution)
+            if classified is None or source["key"] != classified.text_key and not (classified.retry_later and source["key"] in {"busy.gave_up", "busy.cancelled"}):
+                raise ValueError
+        elif proof.get("kind") == "creation_refusal" and set(proof) == {"kind", "scope"}:
+            if _canonical_primary(proof["scope"]) != _canonical_primary(asdict(execution)) or source["key"] not in {"busy.gave_up", "busy.cancelled"}:
+                raise ValueError
+        elif proof.get("kind") == "before_dispatch_stop" and set(proof) == {"kind", "stop_id"}:
+            if type(proof["stop_id"]) is not str or not proof["stop_id"] or len(proof["stop_id"]) > 128 or not proof["stop_id"].isprintable() or source != {"key": "busy.cancelled", "values": {}}:
+                raise ValueError
+        else:
+            raise ValueError
+        if type(source) is not dict or set(source) != {"key", "values"} or source["key"] not in _TURN_OUTCOME_KEYS or source["key"] in {"busy.queued", "busy.thread"}:
+            raise ValueError
+        if _canonical_primary({"parts": item.payload["product_basis"]["parts"]}) != _canonical_primary({"parts": [{"kind": "text", "source_ref": source}]}):
+            raise ValueError
+        if "delivery_kind" in item.payload or "reply_basis" in item.payload or type(item.binding_generation) is not int or type(item.chat_id) is not int:
+            raise ValueError
+        return PublicationOutcomeBasis(record, record.run_id, proof["kind"], source, proof.get("stop_id"))
+    except Exception:
+        raise ValueError("publication-outcome-conflict") from None
+
+
 def _item(row: TelegramOutboxRow) -> OutboxItem:
     return OutboxItem(**{name: deepcopy(getattr(row, name)) for name in OutboxItem.__dataclass_fields__})
 
@@ -309,6 +399,10 @@ class SendingPart:
 
 class DeliveryClaimRetired(Exception):
     """The transport admission no longer authorizes a request; no payload fault."""
+
+
+class PreviewExpired(DeliveryClaimRetired):
+    """An actual host view ended; only its strict temporary plan may retire."""
 
 
 @dataclass(frozen=True)
@@ -515,6 +609,8 @@ def _publication_identity(record: PublicationRecord) -> dict:
     result = asdict(record)
     result.pop("dispatch_started")
     result.pop("run_id")
+    if result.get("owner_callback_id") is None:
+        result.pop("owner_callback_id", None)
     # Origins are immutable tuples in the host DTO and JSON arrays on disk.
     result["origins"] = [asdict(origin) for origin in record.origins]
     return _safe_json(result)
@@ -522,6 +618,20 @@ def _publication_identity(record: PublicationRecord) -> dict:
 
 def _canonical_primary(value: dict) -> str:
     return json.dumps(_safe_json(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+
+
+def _guard_publication_link(record, guard):
+    try:
+        link = guard.captured_link
+        if (
+            type(link) is not BotLink
+            or link.id != record.scope.link_id
+            or any(getattr(link, name) != getattr(record.scope, name) for name in ("owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "binding_generation"))
+        ):
+            raise ValueError
+        return link
+    except Exception:
+        raise ValueError("publication-source-conflict") from None
 
 
 def _prepare_publication_reply(record: PublicationRecord, output: RunOutputProjection | None, notice: PrimaryTurnNotice | None) -> tuple[dict, list[dict]]:
@@ -616,6 +726,9 @@ class Outbox:
                     raise ValueError("invalid-delivery-source")
             elif "assistant_message_id" in source:
                 if set(source) - {"assistant_message_id", "thread_id", "run_id", "range", "start", "end"}:
+                    raise ValueError("invalid-delivery-source")
+            elif "preview_sha256" in source:
+                if set(source) != {"preview_sha256", "thread_id", "run_id", "range", "slice"}:
                     raise ValueError("invalid-delivery-source")
             elif not {"space_id", "path"} <= set(source) or set(source) - {"space_id", "path", "sha256"}:
                 raise ValueError("invalid-delivery-source")
@@ -749,11 +862,34 @@ class Outbox:
         message_thread_id: int | None = None,
         session: AsyncSession | None = None,
     ) -> str:
+        return await self._plan_product_keyboard(
+            link, source_id=source_id, parts=parts, keyboard=keyboard, callbacks=callbacks, guard=guard, inbox_rows=inbox_rows, finish_route=finish_route, message_thread_id=message_thread_id, session=session
+        )
+
+    async def _plan_product_keyboard(
+        self,
+        link: BotLink,
+        *,
+        source_id: str,
+        parts: list[dict],
+        keyboard,
+        callbacks,
+        guard: PublicationGuard,
+        inbox_rows: Sequence = (),
+        finish_route: bool = False,
+        message_thread_id: int | None = None,
+        session: AsyncSession | None = None,
+        _extra=None,
+        _dedupe=None,
+        _attach=None,
+    ) -> str:
         """Commit fixed presentation and its random controls as one replayable plan."""
         from app.telegram_bots.callbacks import canonical_keyboard
         from app.telegram_bots.links import prepare_publication_guard
 
         controls = canonical_keyboard(keyboard)
+        dedupe = _dedupe or f"notice:{source_id}"
+        extra = _safe_json(_extra or {})
         if not isinstance(source_id, str) or not source_id or type(finish_route) is not bool or not isinstance(parts, list) or not parts:
             raise ValueError("invalid-product-source")
         parts = [_safe_json(part) for part in parts]
@@ -789,14 +925,15 @@ class Outbox:
                 current = await guard.check(writer)
                 if any(getattr(current, name) != getattr(link, name) for name in scope):
                     raise ValueError("product-source-conflict")
-                existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == f"notice:{source_id}").with_for_update())
+                existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == dedupe).with_for_update())
                 if existing is not None:
                     if (
                         existing.binding_generation != link.binding_generation
                         or existing.owner_user_id != link.owner_user_id
                         or existing.chat_id != link.chat_id
-                        or existing.payload.get("product_basis") != basis
-                        or existing.payload.get("product_keyboard_basis") != controls
+                        or _canonical_primary(existing.payload.get("product_basis")) != _canonical_primary(basis)
+                        or _canonical_primary({"keyboard": existing.payload.get("product_keyboard_basis")}) != _canonical_primary({"keyboard": controls})
+                        or any(_canonical_primary({"value": existing.payload.get(key)}) != _canonical_primary({"value": value}) for key, value in extra.items())
                     ):
                         raise ValueError("product-source-conflict")
                     identity = existing.id
@@ -805,9 +942,9 @@ class Outbox:
                     saved_parts[-1]["stored_keyboard"] = True
                     identity, _ = await self._add(
                         link,
-                        dedupe_key=f"notice:{source_id}",
+                        dedupe_key=dedupe,
                         class_="reply",
-                        payload={"product_basis": basis, "product_keyboard_basis": controls, "parts": saved_parts},
+                        payload={"product_basis": basis, "product_keyboard_basis": controls, **extra, "parts": saved_parts},
                         message_thread_id=topic,
                         session=writer,
                     )
@@ -828,6 +965,8 @@ class Outbox:
                         parent.parts = saved
                 if inbox_rows:
                     await self.inbox.register_delivery(inbox_rows, outbox_id=identity, finish=finish_route, session=writer)
+                if _attach is not None:
+                    await _attach(writer, identity)
                 await writer.flush()
                 # Original host/current-custody fence is the last await before
                 # owned commit; a borrowed caller retains its final guard too.
@@ -835,6 +974,165 @@ class Outbox:
                 return identity
 
         return await await_drained(save())
+
+    async def plan_input_outcome(self, link, *, source_id, source_ref, keyboard, callbacks, guard, inbox_rows=(), input_owner_callback_id=None):
+        if bool(inbox_rows) == (input_owner_callback_id is not None) or type(source_ref) is not dict or set(source_ref) != {"key", "values"} or source_ref["key"] not in INPUT_OUTCOME_KEYS:
+            raise ValueError("input-outcome-conflict") from None
+        if input_owner_callback_id is not None and (type(input_owner_callback_id) is not str or re.fullmatch(r"[0-9a-f]{32}", input_owner_callback_id) is None):
+            raise ValueError("input-outcome-conflict") from None
+        topic = None
+        if input_owner_callback_id is not None:
+            stage = await self.inbox.read_callback_input(link, input_owner_callback_id, guard=guard)
+            if stage.record is not None or not stage.origins:
+                raise ValueError("input-outcome-conflict") from None
+            topic = stage.origins[0].message_thread_id
+
+        async def attach(writer, identity):
+            if input_owner_callback_id is not None:
+                await self.inbox.attach_input_outcome(link, input_owner_callback_id, outbox_id=identity, session=writer)
+
+        return await self._plan_product_keyboard(
+            link,
+            source_id=source_id,
+            parts=[{"kind": "text", "source_ref": source_ref}],
+            keyboard=keyboard,
+            callbacks=callbacks,
+            guard=guard,
+            inbox_rows=inbox_rows,
+            finish_route=bool(inbox_rows),
+            message_thread_id=topic,
+            _extra={"input_owner_callback_id": input_owner_callback_id} if input_owner_callback_id is not None else {},
+            _attach=attach,
+        )
+
+    async def _locked_stream_placeholder(self, writer, link, outbox_id):
+        from app.telegram_bots.callbacks import CALLBACK_METADATA_KEYS
+
+        row = await writer.get(TelegramOutboxRow, outbox_id, with_for_update=True, populate_existing=True)
+        if (
+            row is None
+            or (row.link_id, row.owner_user_id, row.binding_generation, row.chat_id, row.class_) != (link.id, link.owner_user_id, link.binding_generation, link.chat_id, "reply")
+            or re.fullmatch(r"notice:chat-stream:[0-9a-f]{32}:[0-9]+", row.dedupe_key) is None
+        ):
+            raise ValueError("stream-placeholder-conflict") from None
+        basis = row.payload.get("product_basis")
+        controls = row.payload.get("product_keyboard_basis")
+        if type(basis) is not dict or basis.get("finish_route") is not False or type(basis.get("parts")) is not list or len(basis["parts"]) != 1:
+            raise ValueError("stream-placeholder-conflict") from None
+        initial = basis["parts"][0]
+        if initial.get("kind") != "text" or initial.get("source_ref") != {"key": "answer.thinking", "values": {}} or set(initial) - {"kind", "source_ref", "reply_to_message_id", "protect_content"}:
+            raise ValueError("stream-placeholder-conflict") from None
+        if "protect_content" in initial and type(initial["protect_content"]) is not bool:
+            raise ValueError("stream-placeholder-conflict") from None
+        if type(controls) is not list or len(controls) != 1 or type(controls[0]) is not list or len(controls[0]) != 1:
+            raise ValueError("stream-placeholder-conflict") from None
+        button = controls[0][0]
+        if (
+            type(button) is not dict
+            or set(button) != {"label", "kind", "target_kind", "target_id", "payload", "expires_at"}
+            or (button["label"], button["kind"], button["target_kind"], button["payload"], button["expires_at"]) != ("label.stop", "stop_answer", "draft", {}, None)
+        ):
+            raise ValueError("stream-placeholder-conflict") from None
+        version = row.payload.get("presentation_version")
+        active = [part for part in row.parts if part.get("presentation_version") == version]
+        if type(version) is not int or version < 0 or len(active) != 1 or active[0].get("stored_keyboard") is not True:
+            raise ValueError("stream-placeholder-conflict") from None
+        groups = {part.get("callback_group_id") for part in row.parts} - {None}
+        if len(groups) != 1:
+            raise ValueError("stream-placeholder-conflict") from None
+        buttons = list(await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id.in_(groups)).order_by(TelegramCallbackRow.id).with_for_update()))
+        if len(buttons) != 1:
+            raise ValueError("stream-placeholder-conflict") from None
+        saved = buttons[0]
+        if (
+            (saved.link_id, saved.chat_id, saved.binding_generation, saved.kind, saved.target_kind, saved.target_id) != (link.id, link.chat_id, link.binding_generation, "stop_answer", "draft", button["target_id"])
+            or saved.payload.get("anchor_outbox_id") != row.id
+            or {key: value for key, value in saved.payload.items() if key not in CALLBACK_METADATA_KEYS}
+        ):
+            raise ValueError("stream-placeholder-conflict") from None
+        return row, saved
+
+    async def retire_stream_placeholder(self, link, *, outbox_id, guard):
+        """Retire only an unclaimed exact Thinking plan; a live claim must settle."""
+        from app.telegram_bots.links import prepare_publication_guard
+
+        scope = ("id", "owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "binding_generation", "token_revision")
+        if type(link) is not BotLink or any(getattr(guard.captured_link, name) != getattr(link, name) for name in scope):
+            raise ValueError("stream-placeholder-conflict") from None
+
+        async def perform():
+            await prepare_publication_guard(guard)
+            async with self._writer(link.id) as (writer, _):
+                current = await guard.check(writer)
+                if any(getattr(current, name) != getattr(link, name) for name in scope):
+                    raise ValueError("stream-placeholder-conflict") from None
+                row, saved = await self._locked_stream_placeholder(writer, link, outbox_id)
+                if row.state == "sending" or row.claim_id is not None or row.claim_owner is not None:
+                    result = "sending"
+                elif row.state == "sent":
+                    result = "sent"
+                elif row.state == "pending" or row.state == "skipped" and row.skip_reason == "superseded":
+                    row.state, row.skip_reason, row.closed_at = "skipped", "superseded", self.clock()
+                    parts = deepcopy(row.parts)
+                    for part in parts:
+                        if part["state"] not in _FINAL_PARTS:
+                            part["state"] = "retired"
+                    row.parts = parts
+                    if saved.consumed_at is None:
+                        saved.consumed_at, saved.closed_reason = self.clock(), "superseded"
+                    result = "retired"
+                else:
+                    raise ValueError("stream-placeholder-conflict") from None
+                await writer.flush()
+                if result == "retired":
+                    await self.inbox.settle_deliveries(link_id=link.id, session=writer)
+                await guard.check(writer)
+                return result
+
+        return await await_drained(perform())
+
+    async def plan_publication_outcome(self, record, *, run=None, creation_refusal=None, source_ref, keyboard, callbacks, guard):
+        link = _guard_publication_link(record, guard)
+        basis = await await_drained(asyncio.to_thread(_prepare_publication_outcome, record, run=run, creation_refusal=creation_refusal, source_ref=source_ref))
+
+        async def attach(writer, identity):
+            await self.inbox.seal_publication_outcome(record, outbox_id=identity, session=writer)
+
+        return await self._plan_product_keyboard(
+            link,
+            source_id="turn-outcome:" + record.publication_id,
+            parts=[{"kind": "text", "source_ref": source_ref}],
+            keyboard=keyboard,
+            callbacks=callbacks,
+            guard=guard,
+            message_thread_id=record.scope.message_thread_id,
+            _extra={"turn_outcome_basis": basis},
+            _dedupe="reply:" + record.turn_id,
+            _attach=attach,
+        )
+
+    async def plan_cancelled_before_dispatch(self, record, *, stop_id, guard, callbacks, keyboard=()):
+        link = _guard_publication_link(record, guard)
+        if type(stop_id) is not str or not stop_id or len(stop_id) > 128 or not stop_id.isprintable() or record.run_id is not None:
+            raise ValueError("publication-outcome-conflict") from None
+        source = {"key": "busy.cancelled", "values": {}}
+        basis = _safe_json({"version": 1, "publication": _publication_identity(record), "proof": {"kind": "before_dispatch_stop", "stop_id": stop_id}, "source_ref": source, "finish_route": True})
+
+        async def attach(writer, identity):
+            await self.inbox.seal_cancelled_before_dispatch(record, stop_id=stop_id, outbox_id=identity, session=writer)
+
+        return await self._plan_product_keyboard(
+            link,
+            source_id="before-dispatch-stop:" + record.publication_id,
+            parts=[{"kind": "text", "source_ref": source}],
+            keyboard=keyboard,
+            callbacks=callbacks,
+            guard=guard,
+            message_thread_id=record.scope.message_thread_id,
+            _extra={"turn_outcome_basis": basis},
+            _dedupe="reply:" + record.turn_id,
+            _attach=attach,
+        )
 
     @staticmethod
     def _sending(binding: TelegramBotLinkRow | None, row: TelegramOutboxRow | None, *, link_id: str, part_id: str, claim_owner: str, claim_id: str, token_revision: int, preparing: bool = True) -> SendingPart:
@@ -1010,6 +1308,73 @@ class Outbox:
         basis, parts = await await_drained(asyncio.to_thread(prepare))
         return await await_drained(self._write_publication_primary(record, guard=guard, basis=basis, parts=parts))
 
+    async def plan_streamed_publication_reply(self, record, *, output, shown, guard):
+        return await self._plan_display(record, output=output, capability=shown, guard=guard, stopped=False, waiting=False)
+
+    async def plan_stopped_publication_reply(self, record, *, output, preview, guard, waiting=False):
+        return await self._plan_display(record, output=output, capability=preview, guard=guard, stopped=True, waiting=waiting)
+
+    async def read_display_primary(self, record, *, output, guard):
+        """Confirm an exact source without changing its primary or input."""
+        from app.telegram_bots.links import prepare_publication_guard
+        from app.telegram_bots.model_source import validate_model_reply_basis
+
+        if (
+            type(guard.captured_link) is not BotLink
+            or any(getattr(guard.captured_link, name) != getattr(record.scope, name) for name in ("owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "binding_generation"))
+            or guard.captured_link.id != record.scope.link_id
+        ):
+            raise ValueError("publication-source-conflict") from None
+
+        async def perform():
+            await prepare_publication_guard(guard)
+            async with self._writer(record.scope.link_id) as (writer, _):
+                await guard.check(writer)
+                existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == record.scope.link_id, TelegramOutboxRow.dedupe_key == "reply:" + record.turn_id).with_for_update())
+                if existing is None:
+                    await guard.check(writer)
+                    return None
+                fresh, _ = await self.inbox.lock_publication(record, session=writer)
+                proof = await await_drained(asyncio.to_thread(validate_model_reply_basis, _item(existing)))
+                if _canonical_primary(_publication_identity(proof.record)) != _canonical_primary(_publication_identity(fresh)) or _canonical_primary(proof.output.model_dump(mode="json")) != _canonical_primary(
+                    output.model_dump(mode="json")
+                ):
+                    raise ValueError("publication-source-conflict") from None
+                await guard.check(writer)
+                return existing.id
+
+        return await await_drained(perform())
+
+    async def _plan_display(self, record, *, output, capability, guard, stopped, waiting):
+        from app.telegram_bots.inbox import publication_identity
+        from app.telegram_bots.model_source import prepare_display_reply
+        from app.telegram_bots.stopped_preview import check_shown_preview, check_stopped_preview, take_shown_preview, take_stopped_preview
+
+        identity = publication_identity(record)
+        take = take_stopped_preview if stopped else take_shown_preview
+        check = check_stopped_preview if stopped else check_shown_preview
+        data = take(capability, publication_identity=identity, run_id=record.run_id)
+        display = {"kind": "stopped_preview" if stopped else "model_text", "stop_id": data.stop_id if stopped else None, "segments": [asdict(segment) for segment in data.segments], "waiting": waiting}
+        basis, parts = await await_drained(asyncio.to_thread(prepare_display_reply, record, output, display=display))
+
+        class DisplayGuard:
+            captured_link = guard.captured_link
+
+            async def prepare(self):
+                from app.telegram_bots.links import prepare_publication_guard
+
+                check(capability, publication_identity=identity, run_id=record.run_id)
+                await prepare_publication_guard(guard)
+                check(capability, publication_identity=identity, run_id=record.run_id)
+
+            async def check(self, writer):
+                check(capability, publication_identity=identity, run_id=record.run_id)
+                current = await guard.check(writer)
+                check(capability, publication_identity=identity, run_id=record.run_id)
+                return current
+
+        return await await_drained(self._write_publication_primary(record, guard=DisplayGuard(), basis=basis, parts=parts))
+
     async def _write_publication_primary(self, record: PublicationRecord, *, guard: PublicationGuard, basis: dict, parts: list[dict]) -> str:
         scope = basis["publication"]["scope"]
         link = guard.captured_link
@@ -1017,7 +1382,7 @@ class Outbox:
         if type(link) is not BotLink or link.id != scope["link_id"] or any(getattr(link, name) != scope[name] for name in fields):
             raise ValueError("publication-source-conflict")
         dedupe = f"reply:{basis['publication']['turn_id']}"
-        if basis["version"] == 2:
+        if basis["version"] in {2, 4}:
             from app.telegram_bots.links import prepare_publication_guard
 
             await prepare_publication_guard(guard)
@@ -1025,7 +1390,7 @@ class Outbox:
             await guard.check(writer)
             existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == dedupe).with_for_update().execution_options(populate_existing=True))
             fresh, rows = await self.inbox.lock_publication(record, session=writer)
-            if basis["version"] == 2:
+            if basis["version"] in {2, 4}:
                 # The host DTO sorts origin identities, not arrival order.
                 # Resolve the original reply anchor from the locked saved rows.
                 anchor = min(rows, key=lambda row: (row.accepted_at, row.update_id, row.message_id)).message_id
@@ -1035,7 +1400,7 @@ class Outbox:
                 raise ValueError("publication-source-conflict")
             outcome = basis["outcome"]
             projection = outcome["projection"]
-            if basis["version"] == 2:
+            if basis["version"] in {2, 4}:
                 projection = projection["output"]
             if fresh.dispatch_started is not True or fresh.run_id is None or fresh.run_id != projection["run_id"]:
                 raise ValueError("publication-source-conflict")
@@ -1055,6 +1420,13 @@ class Outbox:
                 identity, created = await self._add(link, dedupe_key=dedupe, class_="reply", payload={"source": outcome, "reply_basis": basis, "parts": parts}, session=writer, message_thread_id=scope["message_thread_id"])
                 if not created:
                     raise ValueError("publication-source-conflict")
+                if basis["version"] == 4:
+                    saved_row = await writer.get(TelegramOutboxRow, identity)
+                    saved_parts = deepcopy(saved_row.parts)
+                    for part in saved_parts:
+                        if "shown_message_id" in part:
+                            part.update(state="sent", message_ids=[part["shown_message_id"]], sent_at=self.clock().isoformat())
+                    saved_row.parts = saved_parts
             await self.inbox.seal_publication(fresh, outbox_id=identity, assistant_message_id=assistant, session=writer)
             await writer.flush()
             # The complete owning unit retains commit/session cleanup. No SQL
@@ -1470,6 +1842,9 @@ class OutboxSender:
                     raise PermanentDeliveryError()
             except asyncio.CancelledError:
                 raise
+            except PreviewExpired:
+                await self._expire_preview(link_id, row_id, generation, claim)
+                return
             except DeliveryClaimRetired:
                 return
             except Exception as error:
@@ -1500,13 +1875,36 @@ class OutboxSender:
                     await self._complete(session, saved)
                     return
 
+    async def _expire_preview(self, link_id, row_id, generation, claim):
+        async with self.outbox._writer(link_id) as (writer, binding):
+            row = await writer.get(TelegramOutboxRow, row_id, with_for_update=True)
+            if binding is None or not self.outbox._fenced(row, generation=generation, owner=self.run_id, claim=claim):
+                return
+            row, saved = await self.outbox._locked_stream_placeholder(writer, BotLink.from_row(binding), row_id)
+            row.state, row.skip_reason, row.closed_at = "skipped", "superseded", self.outbox.clock()
+            row.claim_owner = row.claim_id = row.claimed_at = None
+            parts = deepcopy(row.parts)
+            for part in parts:
+                if part["state"] not in _FINAL_PARTS:
+                    part["state"] = "retired"
+            row.parts = parts
+            if saved.consumed_at is None:
+                saved.consumed_at, saved.closed_reason = self.outbox.clock(), "superseded"
+            await writer.flush()
+            await self.outbox.inbox.settle_deliveries(link_id=link_id, session=writer)
+
     async def _replace(self, binding: BotLink, row: OutboxItem, claim: str, *, reason: str) -> None:
         version = row.payload.get("presentation_version", 0)
         parts = []
         for part in row.parts:
-            if part["presentation_version"] != version or part["kind"] in {"document", "photo", "album"} and part["state"] in {"sent", "unavailable"}:
+            display = type(row.payload.get("reply_basis")) is dict and row.payload["reply_basis"].get("version") == 4
+            if part["presentation_version"] != version or (display or part["kind"] in {"document", "photo", "album"}) and part["state"] in {"sent", "unavailable"}:
                 continue
-            replacement = {key: deepcopy(value) for key, value in part.items() if key not in {"part_id", "presentation_version", "ordinal", "state", "message_ids", "sent_at", "dispatched_at", "target_message_id", "target_protect_content"}}
+            replacement = {
+                key: deepcopy(value)
+                for key, value in part.items()
+                if key not in {"part_id", "presentation_version", "ordinal", "state", "message_ids", "sent_at", "dispatched_at", "target_message_id", "target_protect_content", "shown_message_id"}
+            }
             if replacement["kind"] == "edit":
                 replacement["kind"] = "text"
             parts.append(replacement)

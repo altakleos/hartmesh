@@ -14,7 +14,7 @@ STAGE_ONE_KEYS = frozenset(
     hello.account_taken hello.again stranger help.chat help.custom_agent privacy.full privacy.voice
     activity.read activity.write activity.edit activity.list activity.command activity.search activity.fetch
     activity.browser activity.image activity.subtask activity.present activity.work activity.other answer.thinking
-    busy.followup busy.followup_full busy.queued busy.cancelled busy.gave_up busy.thread error.generic
+    busy.followup busy.followup_full busy.queued busy.cancelled busy.gave_up busy.thread error.generic refused.interrupted
     chat.restarted chat.files_full run.cancelled stop.answer stop.nothing stop.failed file.saved_ask_plain file.too_large_in
     file.not_saved file.own_full file.own_preparing file.own_no_seat file.own_unchecked file.own_unavailable
     file.too_large_out file.out_failed voice.unavailable voice.too_long voice.daily_limit voice.first_notice

@@ -201,6 +201,10 @@ a pre-admission miss can become an exact hit.
 `RunManager.find_idempotent_run()` reads an indexed key without admission,
 validates thread/owner, and rechecks local identity after store I/O. Peer handles
 stay unregistered; filesystem preflight stays outside the manager lock.
+`lookup_idempotent_run()` instead drains a durable indexed read for an explicit
+raw owner and returns a detached snapshot without changing live reuse/task state.
+The strict thread-run key GET shares POST key normalization and rechecks human/thread
+authority before its v1-acknowledged result; failed reads never acknowledge absence.
 
 `RunManager.task_run_ids()` and `task_runs()` read synchronously on the owning
 loop without I/O or locks. Count live tasks with metadata keys regardless of

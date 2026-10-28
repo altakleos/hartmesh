@@ -115,6 +115,7 @@ class TelegramSupervisor:
         self.copy_guard = copy_guard
         self.thread_client, self.threads = thread_client, None
         self.publication_authority = self.publications = self.model_source = None
+        self.turns = None
         self.recovery = None
         self._recovery_epoch = self._recovery_phase = None
         self._recovery_started = False
@@ -300,6 +301,7 @@ class TelegramSupervisor:
             from app.telegram_bots.publication_authority import PublicationAttemptAuthority
             from app.telegram_bots.recovery import PublicationRecoveryService
             from app.telegram_bots.threads import ThreadCoordinator
+            from app.telegram_bots.turns import ChatTurns
 
             self.thread_client = self.thread_client or GatewayClientOwner(gateway_url=self.channel_service.manager.gateway_url, langgraph_url=self.channel_service.manager.langgraph_url, tls_context=self.tls_context)
             self.threads = ThreadCoordinator(links=self.links, authority=self.authority, client=self.thread_client, channel=self.channel, send_allowed=self.send_allowed, outbox=self.outbox, product_name=self.product_name)
@@ -307,6 +309,7 @@ class TelegramSupervisor:
             self.publications = PublicationCoordinator(inbox=self.outbox.inbox, outbox=self.outbox, bus=self.channel_service.bus, http_owner=self.thread_client, capture_attempt=self.publication_authority.capture)
             self.model_source = ModelSource(read_output=self.publications.read_output)
             self.recovery = PublicationRecoveryService(inbox=self.outbox.inbox, outbox=self.outbox, coordinator=self.publications, links=self.links, allowed=self.send_allowed)
+            self.turns = ChatTurns(self)
             await self.thread_client.start()
             if not await self._wait_health():
                 if not self._stopping:
@@ -413,6 +416,10 @@ class TelegramSupervisor:
             await self._latch_copy_conflict()
             return
         await self._recover_startup_publications()
+        if self._stopping or self._cause is not None:
+            return
+        if self.turns is not None:
+            await self.turns.recover_startup()
         if self._stopping or self._cause is not None:
             return
         # Transfer every suffix promptly; failed admission remains its poller's
@@ -937,8 +944,8 @@ class TelegramSupervisor:
         link = await self.links.update_if_current(channel.link.id, token_revision=channel.transport_revision)
         if link is None or self.channel(link.id) is not channel or msg.connection_id is not None and msg.connection_id != link.connection_id:
             return
-        # Current manager frames lack the authoritative final source introduced
-        # by PLAN1.14. The adapter rejects raw text, including inherited metadata.
+        # Frames are wakeups or opaque host outcomes. Exact run/output reads
+        # remain the only source of model final plans and qualified previews.
         await channel.send(msg)
 
     async def _tick_sender(self) -> None:
@@ -1397,6 +1404,11 @@ class TelegramSupervisor:
                 await asyncio.gather(*(poll.confirm_offset() for poll in tuple(self._polls.values())), return_exceptions=True)
         finally:
             publication_error = None
+            if self.turns is not None:
+                try:
+                    await self.turns.stop()
+                except Exception as error:
+                    publication_error = error
             if self.recovery is not None:
                 try:
                     await self.recovery.stop()
