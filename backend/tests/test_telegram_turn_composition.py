@@ -58,7 +58,7 @@ ANSWER = "**Durable answer**"
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", ["text", "custom_text", "produced_file", "custom_file", "produced_album", "phase_one", "no_user_text", "no_user_custom_text", "no_user_uncertain"])
-async def test_actual_managed_turn_creates_once_and_delivers_only_verified_output(capture_environment, monkeypatch, tmp_path, case, *, managed_ingress=False, dialogue=None, inbound_file=False):
+async def test_actual_managed_turn_creates_once_and_delivers_only_verified_output(capture_environment, monkeypatch, tmp_path, case, *, managed_ingress=False, dialogue=None, inbound_file=False, mixed_file=False):
     e = capture_environment
     async with e.engine.begin() as connection:
         if e.dialect == "sqlite":
@@ -72,7 +72,7 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
     live = await install_live_owner(db, monkeypatch, owner=OWNER)
     paths = await asyncio.to_thread(Paths, tmp_path / "data")
     with paths_scope(paths):
-        produced_file = case in {"produced_file", "custom_file", "produced_album"}
+        produced_file = mixed_file or case in {"produced_file", "custom_file", "produced_album"}
         album = case == "produced_album"
         if album:
             import base64
@@ -165,7 +165,15 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
         class RecordedASGI(httpx.ASGITransport):
             async def handle_async_request(self, request):
                 # Never retain authentication headers/cookies in diagnostics.
-                http_calls.append((request.method, request.url.path, json.loads(request.content) if request.content else None))
+                body = json.loads(request.content) if request.content else None
+                http_calls.append((request.method, request.url.path, body))
+                if mixed_file and request.method == "POST" and request.url.path.rstrip("/") == "/api/threads":
+                    # The offline graph has no sandbox startup. Prepare only
+                    # fixture roots for the actual saved thread-create intent;
+                    # Gateway authorization, binding and run capture stay real.
+                    assert isinstance(body, dict) and body.get("thread_id")
+                    assert request.headers["X-DeerFlow-Owner-User-Id"] == OWNER
+                    await asyncio.to_thread(paths.ensure_thread_dirs, body["thread_id"], user_id=OWNER)
                 response = await super().handle_async_request(request)
                 http_responses.append((request.method, request.url.path, response.status_code))
                 return response
@@ -296,7 +304,7 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
                     app.state.storage_spaces_enabled = False
             if case == "phase_one":
                 await model_release.wait()
-            if produced_file:
+            if produced_file and (not mixed_file or self.invocations == 0):
 
                 def generate_files():
                     for filename in output_names:
@@ -386,7 +394,21 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
             await asyncio.wait_for(final.wait(), 15)
             if dialogue is not None:
                 await _complete_actual_human_input_dialogue(
-                    SimpleNamespace(e=e, boot=boot, supervisor=supervisor, channel=channel, link=link, model=model, model_inputs=model_inputs, record=record, first=active_turn, http_calls=http_calls, http_responses=http_responses),
+                    SimpleNamespace(
+                        e=e,
+                        boot=boot,
+                        supervisor=supervisor,
+                        channel=channel,
+                        link=link,
+                        model=model,
+                        model_inputs=model_inputs,
+                        record=record,
+                        first=active_turn,
+                        http_calls=http_calls,
+                        http_responses=http_responses,
+                        mixed_file=mixed_file,
+                        uploaded_outputs=uploaded_outputs,
+                    ),
                     dialogue=dialogue,
                 )
                 return
@@ -528,13 +550,38 @@ async def _complete_actual_human_input_dialogue(env, *, dialogue):
     await asyncio.wait_for(env.first.done.wait(), 20)
     async with e.sf() as reader:
         primary = await reader.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == "reply:" + env.record.turn_id))
-    assert primary is not None and primary.payload["reply_basis"]["version"] == 5
+    mixed = getattr(env, "mixed_file", False)
+    assert primary is not None and primary.payload["reply_basis"]["version"] == (7 if mixed else 5)
     assert primary.payload["reply_basis"]["outcome"]["projection"]["output"]["reason"] == "human_input_required"
     request = primary.payload["reply_basis"]["outcome"]["request_basis"]["messages"][-1]["content"]["artifact"]["human_input"]
     boot.normal.enqueue("sendMessage", result=sent(501))
+    media_release = asyncio.Event()
+    media_reply = boot.normal.enqueue("sendDocument", result=sent(500), release=media_release) if mixed else None
     boot.clock.advance(2)
     await supervisor.sender.tick()
+    if mixed:
+        try:
+            await asyncio.wait_for(media_reply.started.wait(), 20)
+            assert not any(call.endpoint == "sendMessage" for call in boot.normal.calls)
+            async with e.sf() as reader:
+                controls = list(await reader.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.payload["anchor_outbox_id"].as_string() == primary.id)))
+            assert controls and all(row.message_id is None for row in controls)
+            assert await supervisor.prompts.current(channel.link, link.chat_id, None) is None
+            assert supervisor.file_bytes_budget.used == len(b"Actual generated file")
+            assert env.model.invocations == 1
+        finally:
+            media_release.set()
+        await supervisor.sender.drain()
+        boot.clock.advance(2)
+        await supervisor.sender.tick()
     await supervisor.sender.drain()
+    if mixed:
+        async with e.sf() as reader:
+            delivered = await reader.get(TelegramOutboxRow, primary.id)
+        assert [part["kind"] for part in delivered.parts] == ["document", "text"]
+        assert delivered.parts[0]["message_ids"] == [500] and delivered.parts[1]["message_ids"] == [501]
+        assert delivered.parts[0]["source_ref"]["output_files"][0]["sha256"] == env.uploaded_outputs[0]
+        assert delivered.state == "sent" and supervisor.file_bytes_budget.used == 0
     card = [call for call in boot.normal.calls if call.endpoint == "sendMessage"][-1]
     assert "value" in card.parameters["text"]
     if dialogue == "choice":
@@ -605,6 +652,9 @@ async def _complete_actual_human_input_dialogue(env, *, dialogue):
     await until(lambda: not supervisor.turns._turns)
     actual = env.model_inputs[-1]
     response = actual.additional_kwargs["human_input_response"]
+    if mixed:
+        assert actual.additional_kwargs.get("files", []) == []
+        assert len(env.uploaded_outputs) == 1
     assert restore_original_human_message(actual).content == expected
     assert response["value"] == expected and response["response_kind"] == expected_kind
     assert response["source"] == request["source"] == "ask_clarification" and response["request_id"] == request["request_id"]

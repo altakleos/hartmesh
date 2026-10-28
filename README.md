@@ -1413,6 +1413,10 @@ limit stay available on the web, and failed transfers offer delivery-only Retry
 without rerunning the AI agent. Retries refuse changed file contents. Uploads
 share the same bounded memory budget as downloads. This adds no schema change;
 managed-bot activation remains deferred until stage one is complete.
+When a turn produces files and a clarification, form or network-permission
+request, files are delivered before the question. Form fields become active
+only after their prompt appears. Retrying a file keeps the original question
+and its answer intact, including after that question has been answered.
 See [turn execution](backend/docs/TELEGRAM_TURN_EXECUTION.md) and
 [publication custody](backend/docs/TELEGRAM_PUBLICATION_CUSTODY.md).
 SQL-backed runs can explicitly request versioned output capture. The worker seals

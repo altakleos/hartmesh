@@ -1665,7 +1665,11 @@ class TelegramBotChannel(TelegramChannel):
                 refreshed = await self._services.model_source.read_part(latest_input)
                 if refreshed != model_part or stored_keyboard is not None and await self._services.callbacks.read_keyboard(latest_input) != stored_keyboard:
                     raise DeliveryClaimRetired()
-                if not await self._services.human_inputs.step_current(latest_input.item) or not self._callback_current(current.link):
+                if latest_input.item.payload.get("reply_basis", {}).get("version") == 7:
+                    step_current = await self._services.human_inputs.step_current(latest_input.item, part=latest_input.part)
+                else:
+                    step_current = await self._services.human_inputs.step_current(latest_input.item)
+                if not step_current or not self._callback_current(current.link):
                     raise DeliveryClaimRetired()
 
             preview_fence = LiveRequestFence(check_human_input)

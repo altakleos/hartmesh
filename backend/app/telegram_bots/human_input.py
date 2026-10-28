@@ -247,6 +247,27 @@ class HumanInputs:
             source_name = source.request.get("source")
             classification = source_name if source_name in ("ask_clarification", "sandbox_network") else "unsupported"
             logger.warning("telegram_bots human_input_invalid source=%s link=%s", classification, link.id)
+        file_plan = None
+        if source.basis["version"] == 2:
+            import asyncio
+
+            from app.telegram_bots.mixed_source import prepare_mixed_files
+            from app.telegram_bots.pages import page_address
+            from deerflow.utils.file_io import await_drained
+
+            guard.current()
+            conversation_url = await await_drained(asyncio.to_thread(page_address, "web.conversation", link, thread_id=record.scope.thread_id))
+            guard.current()
+            file_plan = await prepare_mixed_files(
+                record,
+                source,
+                http_owner=self.services.thread_client,
+                guard=guard,
+                capacity=self.services.file_bytes_budget.capacity,
+                max_bytes=self.services.config.files.max_outbound_bytes,
+                conversation_url=conversation_url,
+            )
+            guard.current()
         async with self.services.callbacks.writer(link, guard) as writer:
             # A lost result may be retried after the person already advanced a
             # form. The original primary wins before any UI state is rebuilt.
@@ -268,7 +289,8 @@ class HumanInputs:
                 view = present_form(request, form, thread_id=record.scope.thread_id, reply_to_message_id=anchor, locale=settings.locale, include_question=True)
             else:
                 view = present_request(source.request, thread_id=record.scope.thread_id, reply_to_message_id=anchor, locale=settings.locale)
-            identity = await self.services.outbox.plan_human_input_reply(record, source, parts=list(view.parts), keyboard=[list(row) for row in view.keyboard], callbacks=self.services.callbacks, guard=guard, session=writer)
+            extra = {"file_plan": file_plan} if file_plan is not None else {}
+            identity = await self.services.outbox.plan_human_input_reply(record, source, parts=list(view.parts), keyboard=[list(row) for row in view.keyboard], callbacks=self.services.callbacks, guard=guard, session=writer, **extra)
             if form is not None:
                 await self._field_prompt(link, source, form, identity, guard=guard, writer=writer)
             return identity
@@ -292,6 +314,7 @@ class HumanInputs:
             prompt_id=prompt_id,
             guard=guard,
             session=writer,
+            defer_visibility=source.basis["version"] == 2,
         )
         await self.services.prompts.attach(link, identity, outbox_id=outbox_id, guard=guard, session=writer)
 
@@ -430,13 +453,16 @@ class HumanInputs:
             prompt_id=identity,
             guard=guard,
             session=writer,
+            defer_visibility=source.basis["version"] == 2,
         )
         await self.services.prompts.attach(link, identity, outbox_id=outbox_id, guard=guard, session=writer)
         return identity
 
     async def _view(self, link, item, source, view, *, step_id, guard, writer, fallback_message_id=None):
+        from app.telegram_bots.mixed_source import human_input_parts
+
         parts = [dict(part) for part in view.parts]
-        old = [part for part in item.parts if part.get("state") == "sent" and part.get("message_ids")]
+        old = [part for part in human_input_parts(item) if part.get("state") == "sent" and part.get("message_ids")]
         # Edit complete canonical parts only when each has a proven actual ACK.
         # A changed split sends a complete replacement, never a clipped preview.
         if not any(part.get("force_reply") for part in parts) and len(old) == len(parts):
@@ -540,6 +566,10 @@ class HumanInputs:
         if quoted is not None:
             route = await self.services.callbacks.for_message(link.id, quoted, chat_id=message.chat_id, message_thread_id=topic, binding_generation=link.binding_generation)
             if route is not None:
+                # Delivery-only warnings do not own a human-input answer, even
+                # after their Send again control has been consumed.
+                if all(row.kind == "file_retry" for row in route.rows):
+                    return False
                 prompt = next((row for row in route.rows if row.kind == "prompt"), None)
                 retired = route.retired_presentation
                 if prompt is None:
@@ -551,7 +581,7 @@ class HumanInputs:
                     return True
         else:
             prompt = await self.services.prompts.current(link, message.chat_id, topic, guard=guard)
-        if prompt is None or prompt.consumed_at is None and prompt.payload.get("purpose") not in {"form_field", "clarify_other"}:
+        if prompt is None or not self.services.prompts.is_visible(prompt) or prompt.consumed_at is None and prompt.payload.get("purpose") not in {"form_field", "clarify_other"}:
             return False
         origin, _ = await self.services.outbox.inbox.accept(link, update, sanitized_input={"type": "text", "text": message.text})
         origin = await self.services.outbox.inbox.route(origin, kind="turn", target_id=link.agent_ref, basis={"input_profile": {"version": 1, "kind": "plain_text", "forwarded": False}}, operation_ids=[])
@@ -606,7 +636,7 @@ class HumanInputs:
         if item is None:
             raise ValueError("unresolved-quoted-presentation") from None
         purpose, payload = "retired_presentation", {}
-        if item.payload.get("reply_basis", {}).get("version") == 5 and any(row.consumed_at is None for row in rows):
+        if item.payload.get("reply_basis", {}).get("version") in {5, 7} and any(row.consumed_at is None for row in rows):
             source = await self._source_for(link, item)
             request = decode_request(source.request)
             payload = {"thread_id": source.record.scope.thread_id}
@@ -621,7 +651,18 @@ class HumanInputs:
                 purpose = "request_card"
         identity = sha256(f"retired:{selected.group_id}:{origin.message_id}".encode()).hexdigest()[:32]
         async with self.services.callbacks.writer(link, guard) as writer:
-            await self.services.prompts.open(link, purpose, payload, chat_id=link.chat_id, message_thread_id=origin.message_thread_id, message_id=None, prompt_id=identity, guard=guard, session=writer)
+            await self.services.prompts.open(
+                link,
+                purpose,
+                payload,
+                chat_id=link.chat_id,
+                message_thread_id=origin.message_thread_id,
+                message_id=None,
+                prompt_id=identity,
+                guard=guard,
+                session=writer,
+                defer_visibility=item.payload.get("reply_basis", {}).get("outcome", {}).get("request_basis", {}).get("version") == 2,
+            )
             await self.services.prompts.attach(link, identity, outbox_id=item.id, guard=guard, session=writer)
             await self.services.prompts.close(link, link.chat_id, origin.message_thread_id, reason="replaced", guard=guard, session=writer)
             prompt = await self.services.prompts.get(link, identity, guard=guard, session=writer)
@@ -845,7 +886,9 @@ class HumanInputs:
                     await self._view(link, item, source, view, step_id=f"closed:{reason}:{update_id}:{item.id}", guard=guard, writer=writer)
                 else:
                     saved = item.payload["reply_basis"]["parts"]
-                    old = [part for part in item.parts if part.get("state") == "sent" and part.get("message_ids")]
+                    from app.telegram_bots.mixed_source import human_input_parts
+
+                    old = [part for part in human_input_parts(item) if part.get("state") == "sent" and part.get("message_ids")]
                     if old:
                         last = saved[-1]
                         clean = {
@@ -863,13 +906,13 @@ class HumanInputs:
                 command_mark.route_basis = {**command_mark.route_basis, "human_input_ui": {"command_closed": command_word}}
                 await writer.flush()
 
-    async def step_current(self, item):
+    async def step_current(self, item, part=None):
         """Current durable UI revision; source qualification is a separate read."""
         from deerflow.utils.file_io import await_drained
 
-        return await await_drained(self._step_current(item))
+        return await await_drained(self._step_current(item, part=part))
 
-    async def _step_current(self, item):
+    async def _step_current(self, item, *, part=None):
         from datetime import UTC
 
         from sqlalchemy import select
@@ -877,8 +920,13 @@ class HumanInputs:
         from deerflow.persistence.telegram_bots.model import TelegramCallbackRow
 
         basis = item.payload.get("reply_basis", {})
-        if basis.get("version") != 5:
+        if basis.get("version") not in {5, 7}:
             return True
+        if part is not None:
+            from app.telegram_bots.mixed_source import is_human_input_part
+
+            if not is_human_input_part(item, part):
+                return True
         controls = basis.get("keyboard", [])
         async with self.services.callbacks.sessions() as reader:
             rows = list(
@@ -891,7 +939,8 @@ class HumanInputs:
                     )
                 )
             )
-            actionable = [row for row in rows if row.kind != "prompt"]
+            kinds = {button.get("kind") for line in controls for button in line if "url" not in button}
+            actionable = [row for row in rows if row.kind in kinds]
             if controls and (not actionable or all(row.consumed_at is not None for row in actionable)):
                 return False
             prompts = [row for row in rows if row.kind == "prompt"]

@@ -452,3 +452,13 @@ def file_warning_keyboard(part):
     if part.get("conversation_url") is not None:
         keyboard.append([{"label": "label.open_conversation", "url": part["conversation_url"]}])
     return canonical_keyboard(keyboard)
+
+
+def validate_media_reply_basis(item, part=None):
+    """Dispatch closed whole sources; never manufacture a V6 wrapper for V7."""
+    basis = item.payload.get("reply_basis", {})
+    if type(basis.get("version")) is int and basis["version"] == 7:
+        from app.telegram_bots.mixed_source import validate_mixed_reply_basis
+
+        return validate_mixed_reply_basis(item, part)
+    return validate_file_reply_basis(item, part)

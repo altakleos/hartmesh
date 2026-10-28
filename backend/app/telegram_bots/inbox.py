@@ -1102,7 +1102,7 @@ class InboxRepository:
             raise ValueError("submission-conflict") from None
         proof = await await_drained(asyncio.to_thread(validate_model_reply_basis, _item(parent)))
         basis = parent.payload.get("reply_basis")
-        if type(basis) is not dict or basis.get("version") != 5 or proof.kind not in {"human_input", "human_input_step"}:
+        if type(basis) is not dict or basis.get("version") not in {5, 7} or proof.kind not in {"human_input", "human_input_step", "human_input_files"}:
             raise ValueError("submission-conflict") from None
         record = proof.record
         request_basis = basis["outcome"]["request_basis"]
@@ -1116,6 +1116,12 @@ class InboxRepository:
             or _canonical(primary.payload["reply_basis"]["outcome"]["request_basis"]) != _canonical(request_basis)
         ):
             raise ValueError("submission-conflict") from None
+        if request_basis["version"] == 2:
+            from app.telegram_bots.mixed_source import human_input_visible, validate_mixed_reply_basis
+
+            await await_drained(asyncio.to_thread(validate_mixed_reply_basis, _item(primary)))
+            if not await await_drained(asyncio.to_thread(human_input_visible, _item(primary))) or not await await_drained(asyncio.to_thread(human_input_visible, _item(parent))):
+                raise ValueError("submission-conflict") from None
         return parent, record, request, request_basis, origins
 
     async def stage_prompt_message(self, link, *, callback_id, update_id, chat_id, message_id, message_thread_id, callbacks, guard, session=None):
@@ -1296,6 +1302,10 @@ class InboxRepository:
                     or (prompt.payload.get("purpose"), prompt.payload.get("thread_id"), prompt.payload.get("request_id"), prompt.payload.get("anchor_outbox_id"))
                     != ("clarify_other", source.scope.thread_id, request["request_id"], source_outbox_id)
                 ):
+                    raise ValueError("submission-conflict") from None
+                from app.telegram_bots.callbacks import Prompts
+
+                if not Prompts.is_visible(prompt):
                     raise ValueError("submission-conflict") from None
                 quoted = mark.sanitized_input.get("reply_to_message_id")
                 if quoted is not None:
@@ -2557,11 +2567,25 @@ class InboxRepository:
                 raise ValueError("publication-conflict") from None
             try:
                 basis = delivery.payload["reply_basis"]
-                if type(basis) is not dict or type(basis["version"]) is not int or basis["version"] not in {1, 2, 4, 5, 6} or basis["finish_route"] is not True or _canonical(basis["publication"]) != _canonical(_publication_identity(fresh)):
+                if (
+                    type(basis) is not dict
+                    or type(basis["version"]) is not int
+                    or basis["version"] not in {1, 2, 4, 5, 6, 7}
+                    or basis["finish_route"] is not True
+                    or _canonical(basis["publication"]) != _canonical(_publication_identity(fresh))
+                ):
                     raise ValueError
                 outcome = basis["outcome"]
                 kind = outcome["kind"]
-                if basis["version"] == 6:
+                if basis["version"] == 7:
+                    from app.telegram_bots.mixed_source import validate_mixed_reply_basis
+                    from app.telegram_bots.producer import _item
+
+                    proof = await await_drained(asyncio.to_thread(validate_mixed_reply_basis, _item(delivery)))
+                    projection = proof.output.output
+                    if not fresh.dispatch_started or fresh.run_id is None or projection.run_id != fresh.run_id or projection.state != "unavailable" or projection.reason != "human_input_required" or assistant_message_id is not None:
+                        raise ValueError
+                elif basis["version"] == 6:
                     from app.telegram_bots.model_source import validate_model_reply_basis
                     from app.telegram_bots.producer import _item
 
