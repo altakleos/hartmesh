@@ -492,6 +492,11 @@ class RunObserver:
         self._check(state)
         if existing is not None:
             return existing
+        if self.coordinator.file_output_planner is not None and output.inventory.state == "matched" and output.inventory.document.coverage == "complete" and output.inventory.document.items:
+            identity = await self.coordinator.file_output_planner(state.record, current_link, output, guard=guard, shown=self.freeze_shown(record, current_link))
+            self._check(state)
+            if identity is not None:
+                return identity
         if output.output.state == "complete":
             # A 202 Stop response is only a request. The normal terminal pair
             # may have won the backend race and remains the sole final source.

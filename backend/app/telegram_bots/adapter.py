@@ -734,7 +734,7 @@ class TelegramBotChannel(TelegramChannel):
         ):
             return await human_inputs.execute_callback(self, row, update_id=update_id, query_id=query_id)
         turns = getattr(self._services, "turns", None)
-        if turns is not None and row.kind in {"retry_message", "cancel_wait", "stop_answer"}:
+        if turns is not None and row.kind in {"retry_message", "file_retry", "cancel_wait", "stop_answer"}:
             return await turns.execute_callback(self, row, update_id=update_id, query_id=query_id)
         await self._services.commands.execute(self, row, query_id=query_id)
 
@@ -1523,6 +1523,10 @@ class TelegramBotChannel(TelegramChannel):
                 raise PermanentDeliveryError("invalid-verification-continuation")
             if pending["token_revision"] == self.transport_revision:
                 await self._resume_invalid_token(saved, pending)
+        if part["kind"] in {"document", "photo", "album"} and uses_model_source(saved.item):
+            from app.telegram_bots.outbound import send_file_part
+
+            return await send_file_part(self, saved, capture)
         model_part = None
         if uses_model_source(saved.item):
             # Validate model primaries before any legacy callback/media

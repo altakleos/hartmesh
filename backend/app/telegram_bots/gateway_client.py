@@ -3,23 +3,70 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import re
 from collections.abc import Mapping
 from contextvars import ContextVar
+from dataclasses import dataclass
 from hashlib import sha256
 from typing import TYPE_CHECKING, Literal
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 
 from app.channels.execution import BeforeDispatch, ChannelExecutionProtocolError, ChannelHttpError, ChannelJsonResponse, ChannelOperation, ChannelOwnedStream, JsonValue, QueryValue
 from deerflow.utils.file_io import await_drained
+from deerflow.utils.thread_id import validate_thread_id
 
 if TYPE_CHECKING:
     from ssl import SSLContext
 
 _BEFORE_DISPATCH = ContextVar("telegram_thread_before_dispatch", default=None)
+
+
+@dataclass(frozen=True)
+class ArtifactMetadata:
+    """Current source consistency data; never a grant to read the file."""
+
+    path: str
+    filename: str
+    size: int
+    mime_type: str
+
+
+def _artifact_reference(thread_id, path):
+    try:
+        validate_thread_id(thread_id)
+        if type(path) is not str or not path.startswith("/mnt/user-data/outputs/") or len(path) > 4096 or any(ord(char) < 32 or ord(char) == 127 or char == "\\" for char in path):
+            raise ValueError
+        parts = path[1:].split("/")
+        if any(not part or part in {".", ".."} for part in parts) or ".skill/" in path:
+            raise ValueError
+        return path, "/api/threads/" + quote(thread_id, safe="") + "/artifacts/" + "/".join(quote(part, safe="") for part in parts)
+    except (TypeError, ValueError):
+        raise ChannelExecutionProtocolError() from None
+
+
+def _artifact_length(response):
+    value = response.headers.get("content-length")
+    if value is None:
+        return None
+    if len(value) > 19 or not value.isascii() or not value.isdecimal() or int(value) > 2**63 - 1:
+        raise ChannelExecutionProtocolError()
+    return int(value)
+
+
+def _discard_error_frames(error):
+    """Converted transport failures cannot retain charged byte aliases."""
+    pending, seen = [error], set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        pending.extend(linked for linked in (current.__cause__, current.__context__) if linked is not None)
+        current.__traceback__ = None
 
 
 async def _before_request(request) -> None:
@@ -372,6 +419,110 @@ class GatewayClientOwner:
         except Exception:
             raise ChannelExecutionProtocolError() from None
 
+    async def describe_artifact(self, owner_user_id: str, thread_id: str, path: str, *, before_dispatch) -> ArtifactMetadata:
+        """Read only current authorized metadata, before allocating file bytes."""
+        return await self._artifact_request(owner_user_id, thread_id, path, before_dispatch=before_dispatch)
+
+    async def read_artifact_capped(self, owner_user_id: str, thread_id: str, path: str, *, ceiling: int, before_dispatch, on_failed_close=None) -> bytes:
+        """Read raw bytes through the same owned client after batch admission."""
+        if type(ceiling) is not int or not 0 <= ceiling <= 2**63 - 1 or on_failed_close is not None and not callable(on_failed_close):
+            raise ChannelExecutionProtocolError()
+        return await self._artifact_request(owner_user_id, thread_id, path, before_dispatch=before_dispatch, ceiling=ceiling, on_failed_close=on_failed_close)
+
+    def retains_failed_close(self, callback) -> bool:
+        return callback is not None and any(state["close_failed"] and state["on_failed_close"] is callback for state in self._responses.values())
+
+    async def _artifact_request(self, owner_user_id, thread_id, path, *, before_dispatch, ceiling=None, on_failed_close=None):
+        path, relative = _artifact_reference(thread_id, path)
+        if not callable(before_dispatch):
+            raise ChannelExecutionProtocolError()
+        url = _endpoint(self._gateway_url) + relative
+        handoff = []
+
+        async def admit():
+            await await_drained(before_dispatch())
+            self._check_operation("source_read")
+
+        async def run():
+            buffer = io.BytesIO()
+            response = request = chunk = None
+            try:
+                await admit()
+                await self.start()
+                headers = await self._headers_for(owner_user_id, None)
+                headers.update({"Accept": "application/octet-stream", "Accept-Encoding": "identity"})
+                headers.pop("Content-Type", None)
+                await admit()
+                context = _BEFORE_DISPATCH.set(self._dispatch_check("source_read", before_dispatch))
+                try:
+                    request = self._http_client.build_request("HEAD" if ceiling is None else "GET", url, params={"download": "true", **({"stream": "true"} if ceiling is not None else {})}, headers=headers, timeout=httpx.Timeout(30))
+                    response = await self._http_client.send(request, stream=True, follow_redirects=False)
+                except (httpx.HTTPError, OSError) as error:
+                    _discard_error_frames(error)
+                    raise ChannelExecutionProtocolError() from None
+                finally:
+                    _BEFORE_DISPATCH.reset(context)
+                self._remember_response(response, on_failed_close=on_failed_close)
+                try:
+                    await admit()
+                    if response.status_code != 200:
+                        raise ChannelHttpError(ChannelJsonResponse(response.status_code, _response_headers(response), None))
+                    if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
+                        raise ChannelExecutionProtocolError()
+                    length = _artifact_length(response)
+                    if ceiling is None:
+                        if length is None:
+                            raise ChannelExecutionProtocolError()
+                        mime = response.headers.get("content-type", "application/octet-stream").split(";", 1)[0].strip().lower()
+                        if len(mime) > 255 or re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", mime) is None:
+                            raise ChannelExecutionProtocolError()
+                        result = ArtifactMetadata(path, path.rsplit("/", 1)[1], length, mime)
+                    else:
+                        if length is not None and length > ceiling:
+                            raise ChannelExecutionProtocolError()
+                        size = 0
+                        failed = False
+                        try:
+                            # Public raw stream avoids decompression, a whole
+                            # HTTPX body cache and implicit aiter_raw close.
+                            async for chunk in response.stream:
+                                self._check_operation("source_read")
+                                size += len(chunk)
+                                if size > ceiling:
+                                    raise ChannelExecutionProtocolError()
+                                buffer.write(chunk)
+                        except (asyncio.CancelledError, ChannelExecutionProtocolError):
+                            raise
+                        except Exception as error:
+                            _discard_error_frames(error)
+                            failed = True
+                        if failed or length is not None and length != size:
+                            raise ChannelExecutionProtocolError()
+                finally:
+                    await self._close_response(response)
+                await admit()
+                # The retained task returns no payload: failed/cancelled public
+                # handoff can clear this cell even if its traceback is retained.
+                handoff.append(result if ceiling is None else buffer.getvalue())
+            finally:
+                response = request = chunk = None
+                buffer.close()
+
+        self._check_operation("source_read")
+        task = self._register(run(), "channel-artifact-read")
+        try:
+            await asyncio.shield(task)
+            await admit()
+            return handoff.pop()
+        except asyncio.CancelledError:
+            task.cancel()
+            await await_drained(self._join_retired(task))
+            if self._stopping:
+                await await_drained(self.stop())
+            raise
+        finally:
+            handoff.clear()
+
     def _check_operation(self, operation):
         if operation not in {"thread_read", "run_read", "source_read", "run_create", "run_cancel"} or self._stopping or operation == "run_create" and self._run_admission_closed:
             raise ChannelExecutionProtocolError()
@@ -394,8 +545,8 @@ class GatewayClientOwner:
             await await_drained(callback())
         self._check_operation("run_read" if operation == "run_create" else operation)
 
-    def _remember_response(self, response):
-        self._responses.setdefault(response, {"attempted": False, "confirmed": False, "task": None})
+    def _remember_response(self, response, *, on_failed_close=None):
+        self._responses.setdefault(response, {"attempted": False, "confirmed": False, "task": None, "stream_closed": False, "close_failed": False, "on_failed_close": on_failed_close})
 
     async def _response_content(self, response):
         value = await response.aread()
@@ -409,23 +560,26 @@ class GatewayClientOwner:
             return
 
         async def close():
-            if state["confirmed"]:
-                self._responses.pop(response, None)
-                return
-            if state["attempted"] or response.is_closed:
-                # Response.aclose marks itself closed before the underlying
-                # stream finishes. Retain and retry that public stream closer.
-                await response.stream.aclose()
-            else:
-                state["attempted"] = True
-                await response.aclose()
+            if not state["stream_closed"]:
+                if not state["confirmed"]:
+                    if state["attempted"] or response.is_closed:
+                        # HTTPX marks closed before its stream has drained.
+                        await response.stream.aclose()
+                    else:
+                        state["attempted"] = True
+                        await response.aclose()
+                state["stream_closed"] = True
+            if state["close_failed"] and state["on_failed_close"] is not None:
+                await state["on_failed_close"]()
             self._responses.pop(response, None)
 
         if state["task"] is None or state["task"].done():
             state["task"] = asyncio.create_task(close(), name="channel-response-cleanup")
         try:
             await await_drained(self._join(state["task"]))
-        except Exception:
+        except Exception as error:
+            state["close_failed"] = True
+            _discard_error_frames(error)
             raise ChannelExecutionProtocolError() from None
 
     async def _headers_for(self, owner, headers, *, streaming=False, replay=False):

@@ -220,6 +220,7 @@ class PublicationCoordinator:
         self._operations: set[asyncio.Task] = set()
         self._stop_task = None
         self.human_input_planner = None
+        self.file_output_planner = None
         self.file_preflight = None
 
     def _check_open(self, *, creating):
@@ -611,6 +612,19 @@ class PublicationCoordinator:
                         item = await self.outbox.get(current_link, identity)
                         proof = await await_drained(asyncio.to_thread(validate_model_reply_basis, item))
                         if proof.kind != "human_input" or proof.output != output or publication_identity(proof.record) != publication_identity(fresh) or item.payload["reply_basis"]["finish_route"] is not True:
+                            _refuse()
+                        return PublicationObservation("planned", fresh, outbox_id=identity)
+                if self.file_output_planner is not None and inventory.state == "matched" and inventory.document.coverage == "complete" and inventory.document.items:
+                    identity = await self.file_output_planner(fresh, current_link, output, guard=read_guard)
+                    control.check_budget()
+                    admission.check("source_read")
+                    if identity is not None:
+                        from app.telegram_bots.inbox import publication_identity
+                        from app.telegram_bots.model_source import validate_model_reply_basis
+
+                        item = await self.outbox.get(current_link, identity)
+                        proof = await await_drained(asyncio.to_thread(validate_model_reply_basis, item))
+                        if proof.kind != "file_outputs" or proof.output != output or publication_identity(proof.record) != publication_identity(fresh):
                             _refuse()
                         return PublicationObservation("planned", fresh, outbox_id=identity)
                 if inventory.state != "matched" or inventory.document.coverage != "complete" or inventory.document.items:

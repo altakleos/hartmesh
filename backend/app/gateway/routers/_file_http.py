@@ -78,12 +78,14 @@ class DescriptorFileResponse(FileResponse):
     from using a descriptor number that another request has since acquired.
     """
 
-    def __init__(self, path: Path, *, download: bool = False, hash_max_bytes: int | None = None) -> None:
+    def __init__(self, path: Path, *, download: bool = False, hash_max_bytes: int | None = None, stream: bool = False) -> None:
         super().__init__(path, media_type="application/octet-stream", headers={"X-Content-Type-Options": "nosniff"})
         self._download = download
         self._fd: int | None = None
         self._hash_max_bytes = hash_max_bytes
         self._content: bytes | None = None
+        self._stream = stream
+        self._metadata_only = False
 
     def _prepare(self) -> None:
         try:
@@ -98,7 +100,7 @@ class DescriptorFileResponse(FileResponse):
         # enclosing ASGI finally also closes after preparation failure.
         self.stat_result = os.fstat(self._fd)
         self.set_stat_headers(self.stat_result)
-        if self._hash_max_bytes is not None and self.stat_result.st_size <= self._hash_max_bytes:
+        if not self._metadata_only and not self._stream and self._hash_max_bytes is not None and self.stat_result.st_size <= self._hash_max_bytes:
             # An editable artifact's digest and ranges must describe the same
             # captured bytes even if its open inode is subsequently rewritten.
             with os.fdopen(self._fd, "rb", closefd=False) as source:
@@ -109,10 +111,11 @@ class DescriptorFileResponse(FileResponse):
             self.headers["etag"] = f'"{hashlib.sha256(self._content).hexdigest()}"'
         mime_type, _ = mimetypes.guess_type(self.path)
         force_download = self._download or _is_active_content_mime_type(mime_type)
-        os.lseek(self._fd, 0, os.SEEK_SET)
-        sample = self._content[:8192] if self._content is not None else os.read(self._fd, 8192)
-        if mime_type is None and not force_download and b"\x00" not in sample:
-            mime_type = "text/plain"
+        if not self._metadata_only and not self._stream:
+            os.lseek(self._fd, 0, os.SEEK_SET)
+            sample = self._content[:8192] if self._content is not None else os.read(self._fd, 8192)
+            if mime_type is None and not force_download and b"\x00" not in sample:
+                mime_type = "text/plain"
         self.media_type = mime_type or "application/octet-stream"
         self.headers["content-type"] = self.media_type + (f"; charset={self.charset}" if self.media_type.startswith("text/") else "")
         self.headers["content-disposition"] = _build_content_disposition("attachment" if force_download else "inline", Path(self.path).name)
@@ -126,6 +129,7 @@ class DescriptorFileResponse(FileResponse):
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
+            self._metadata_only = scope["method"] == "HEAD"
             # _prepare stores the fd itself: cancellation cannot discard an
             # acquired descriptor as an unobserved worker return value.
             await self._prepare_owned()

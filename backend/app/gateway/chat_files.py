@@ -257,9 +257,9 @@ async def prepare_chat_files(request, thread_id):
 class ChatFileResponse(DescriptorFileResponse):
     """Serve one pinned qualified inode after fresh owner-loop admission."""
 
-    def __init__(self, request, access, virtual_path, *, download=False, hash_max_bytes=None):
+    def __init__(self, request, access, virtual_path, *, download=False, hash_max_bytes=None, stream=False):
         access.source(virtual_path)
-        super().__init__(Path(virtual_path), download=download, hash_max_bytes=hash_max_bytes)
+        super().__init__(Path(virtual_path), download=download, hash_max_bytes=hash_max_bytes, stream=stream)
         self.headers["cache-control"] = "private, no-store"
         self._request, self._access, self._virtual_path = request, access, virtual_path
         self._filesystem = None

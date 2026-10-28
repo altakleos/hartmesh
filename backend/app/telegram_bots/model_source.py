@@ -85,6 +85,10 @@ def validate_model_reply_basis(item: OutboxItem, part: dict | None = None) -> Ve
     from app.telegram_bots.producer import FrozenReplyPresentation, OutboxItem, _canonical_primary
 
     try:
+        if type(item) is OutboxItem and type(item.payload) is dict and type(item.payload.get("reply_basis")) is dict and type(item.payload["reply_basis"].get("version")) is int and item.payload["reply_basis"]["version"] == 6:
+            from app.telegram_bots.file_source import validate_file_reply_basis
+
+            return validate_file_reply_basis(item, part)
         if type(item) is OutboxItem and type(item.payload) is dict and type(item.payload.get("reply_basis")) is dict and type(item.payload["reply_basis"].get("version")) is int and item.payload["reply_basis"]["version"] == 5:
             from app.telegram_bots.human_input_source import validate_human_input_reply_basis
 
@@ -159,7 +163,7 @@ def validate_model_reply_basis(item: OutboxItem, part: dict | None = None) -> Ve
         raise ValueError("publication-source-conflict") from None
 
 
-def prepare_display_reply(record, output, *, display, reply_to_message_id=None):
+def prepare_display_reply(record, output, *, display, reply_to_message_id=None, _file_output=False):
     """Recompute a closed source-slice presentation; no host authority is minted."""
     from html import escape
 
@@ -200,7 +204,12 @@ def prepare_display_reply(record, output, *, display, reply_to_message_id=None):
             if display["kind"] != "model_text" or display["stop_id"] is not None or display["waiting"]:
                 raise ValueError
             # Retain the exact complete-empty/no-admitted-view eligibility rules.
-            prepare_verified_reply(record, output)
+            if _file_output:
+                from app.telegram_bots.file_source import qualify_file_output
+
+                qualify_file_output(record, output)
+            else:
+                prepare_verified_reply(record, output)
         slices = []
         if stopped:
             for segment in segments:
@@ -337,11 +346,58 @@ def _prepare_part(captured):
 
 
 class ModelSource:
-    def __init__(self, *, read_output: ReadPublicationOutput, human_input_source=None):
+    def __init__(self, *, read_output: ReadPublicationOutput, human_input_source=None, outbox=None, http_owner=None, file_capacity=64 * 1024 * 1024, file_max_bytes=50_000_000, file_output_active=None):
         if not callable(read_output):
             raise TypeError("Model source requires its publication reader") from None
         self._read_output = read_output
         self._human_input_source = human_input_source
+        self._outbox, self._http_owner = outbox, http_owner
+        self._file_capacity, self._file_max_bytes = file_capacity, file_max_bytes
+        self._file_output_active = file_output_active
+
+    async def plan_file_reply(self, record, link, output, *, guard, shown=None):
+        from app.telegram_bots.file_source import plan_file_reply
+
+        return await plan_file_reply(self, record, link, output, guard=guard, shown=shown)
+
+    async def retry_file_callback(self, link, row, *, callbacks, guard):
+        from pathlib import PurePosixPath
+
+        from app.telegram_bots.links import prepare_publication_guard
+
+        saved = await self._outbox.read_file_retry(link, row.id, callbacks=callbacks, guard=guard)
+        if saved is None:
+            return False
+        record, file = saved
+
+        async def check():
+            await prepare_publication_guard(guard)
+
+        await check()
+        try:
+            metadata = await self._http_owner.describe_artifact(link.owner_user_id, record.scope.thread_id, file["path"], before_dispatch=check)
+            if metadata.path != file["path"]:
+                raise ValueError
+            descriptor = {"path": metadata.path, "filename": metadata.filename, "size": metadata.size, "mime_type": metadata.mime_type, "state": "ready"}
+        except Exception:
+            await check()
+            descriptor = {"path": file["path"], "filename": PurePosixPath(file["path"]).name, "size": None, "mime_type": "application/octet-stream", "state": "unavailable"}
+        return await self._outbox.retry_file_callback(link, row.id, metadata=descriptor, callbacks=callbacks, guard=guard)
+
+    async def read_file_part(self, captured):
+        from app.telegram_bots.file_source import PreparedFilePart
+        from app.telegram_bots.producer import DeliveryClaimRetired, _canonical_primary
+
+        try:
+            private, proof = await await_drained(asyncio.to_thread(_prepare_part, captured))
+            if proof.kind != "file_outputs" or private.part["kind"] not in {"document", "photo", "album"}:
+                raise ValueError
+            fresh = await self._read_output(proof.record, private.link)
+            if fresh is None or _canonical_primary(fresh.model_dump(mode="json")) != _canonical_primary(proof.output.model_dump(mode="json")):
+                raise ValueError
+            return PreparedFilePart(proof.record, tuple(deepcopy(private.part["files"])), private.part.get("caption_html"), private.part.get("caption_text"), private.part["unavailable"])
+        except Exception:
+            raise DeliveryClaimRetired() from None
 
     async def read_part(self, captured: SendingPart) -> PreparedModelPart:
         from app.telegram_bots.producer import DeliveryClaimRetired
@@ -365,6 +421,12 @@ class ModelSource:
 
                 if fresh is None:
                     raise ValueError
+                if proof.kind == "file_outputs":
+                    if _canonical_primary(fresh.model_dump(mode="json")) != _canonical_primary(proof.output.model_dump(mode="json")) or private.part["kind"] not in {"text", "edit"}:
+                        raise ValueError
+                    if "key" in private.part["source_ref"]:
+                        return None
+                    return PreparedModelPart(private.part["html"], private.part["visible_text"])
                 if private.item.payload["reply_basis"]["version"] == 4:
                     candidate, _ = prepare_display_reply(proof.record, fresh, display=private.item.payload["reply_basis"]["display"], reply_to_message_id=private.item.payload["reply_basis"]["parts"][0]["reply_to_message_id"])
                 else:

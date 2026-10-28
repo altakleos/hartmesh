@@ -2557,11 +2557,20 @@ class InboxRepository:
                 raise ValueError("publication-conflict") from None
             try:
                 basis = delivery.payload["reply_basis"]
-                if type(basis) is not dict or type(basis["version"]) is not int or basis["version"] not in {1, 2, 4, 5} or basis["finish_route"] is not True or _canonical(basis["publication"]) != _canonical(_publication_identity(fresh)):
+                if type(basis) is not dict or type(basis["version"]) is not int or basis["version"] not in {1, 2, 4, 5, 6} or basis["finish_route"] is not True or _canonical(basis["publication"]) != _canonical(_publication_identity(fresh)):
                     raise ValueError
                 outcome = basis["outcome"]
                 kind = outcome["kind"]
-                if basis["version"] == 5:
+                if basis["version"] == 6:
+                    from app.telegram_bots.model_source import validate_model_reply_basis
+                    from app.telegram_bots.producer import _item
+
+                    proof = await await_drained(asyncio.to_thread(validate_model_reply_basis, _item(delivery)))
+                    projection = proof.output.output
+                    expected_assistant = projection.output_evidence.assistant_message_id if projection.state == "complete" else None
+                    if proof.kind != "file_outputs" or not fresh.dispatch_started or fresh.run_id is None or projection.run_id != fresh.run_id or assistant_message_id != expected_assistant:
+                        raise ValueError
+                elif basis["version"] == 5:
                     from app.telegram_bots.model_source import validate_model_reply_basis
                     from app.telegram_bots.producer import _item
 

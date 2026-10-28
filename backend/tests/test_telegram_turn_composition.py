@@ -57,7 +57,7 @@ ANSWER = "**Durable answer**"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["text", "custom_text", "produced_file", "phase_one", "no_user_text", "no_user_custom_text", "no_user_uncertain"])
+@pytest.mark.parametrize("case", ["text", "custom_text", "produced_file", "custom_file", "produced_album", "phase_one", "no_user_text", "no_user_custom_text", "no_user_uncertain"])
 async def test_actual_managed_turn_creates_once_and_delivers_only_verified_output(capture_environment, monkeypatch, tmp_path, case, *, managed_ingress=False, dialogue=None, inbound_file=False):
     e = capture_environment
     async with e.engine.begin() as connection:
@@ -72,7 +72,16 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
     live = await install_live_owner(db, monkeypatch, owner=OWNER)
     paths = await asyncio.to_thread(Paths, tmp_path / "data")
     with paths_scope(paths):
-        custom = case in {"custom_text", "recovery_custom_text", "no_user_custom_text"}
+        produced_file = case in {"produced_file", "custom_file", "produced_album"}
+        album = case == "produced_album"
+        if album:
+            import base64
+
+            output_bytes = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aBz0AAAAASUVORK5CYII=")
+        else:
+            output_bytes = b"Actual generated file"
+        output_names = ("first.png", "second.png") if album else ("current.txt",)
+        custom = case in {"custom_file", "custom_text", "recovery_custom_text", "no_user_custom_text"}
         no_user = case.startswith("no_user_")
         target = "profile-agent" if custom else "lead_agent"
         if custom:
@@ -130,6 +139,10 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
         app.include_router(threads.router)
         app.include_router(thread_runs.router)
         app.include_router(run_output.router, prefix="/api/threads")
+        if produced_file:
+            from app.gateway.routers import artifacts
+
+            app.include_router(artifacts.router)
         feature_readers, file_downloads, charged_writes = [], [], []
         inbound_bytes = b"a,b\n1,2\n"
         if inbound_file:
@@ -160,6 +173,30 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
         owner = GatewayClientOwner(gateway_url="http://gateway.test", langgraph_url="http://gateway.test/api", transport=RecordedASGI(app=app))
         boot = build(db, monkeypatch)
         supervisor = boot.supervisor
+        uploaded_outputs = []
+        if produced_file:
+            original_request = boot.normal.do_request
+
+            async def observe_output_upload(url, method, request_data=None, **kwargs):
+                if url.rsplit("/", 1)[-1] in {"sendDocument", "sendMediaGroup"}:
+                    import hashlib
+
+                    uploads = tuple(request_data.multipart_data.values())
+                    try:
+                        assert tuple(upload[0] for upload in uploads) == output_names
+                        for _name, handle, _mime in uploads:
+                            # These synthetic fixtures fit one bounded chunk;
+                            # real HTTPX multipart streaming is tested separately.
+                            handle.seek(0)
+                            assert handle.read() == output_bytes
+                            handle.seek(0)
+                            uploaded_outputs.append(hashlib.sha256(output_bytes).hexdigest())
+                        assert supervisor.file_bytes_budget.used == len(output_names) * len(output_bytes)
+                    finally:
+                        uploads = None
+                return await original_request(url, method, request_data, **kwargs)
+
+            monkeypatch.setattr(boot.normal, "do_request", observe_output_upload)
         if inbound_file:
             from urllib.parse import parse_qs
 
@@ -214,7 +251,7 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
                 return actual_write(directory, filename, data)
 
             monkeypatch.setattr(upload_manager, "write_upload_file_no_symlink", write_actual_upload)
-        if dialogue is not None:
+        if dialogue is not None or produced_file:
             supervisor.outbox.clock = boot.clock.now
         supervisor.app, supervisor.authority, supervisor._app_config = app, live.authority, configured
         supervisor.thread_client = owner
@@ -259,8 +296,13 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
                     app.state.storage_spaces_enabled = False
             if case == "phase_one":
                 await model_release.wait()
-            if case == "produced_file":
-                await asyncio.to_thread(lambda: (paths.sandbox_outputs_dir(thread_id, user_id=OWNER) / "current.txt").write_text("Actual generated file", encoding="utf-8"))
+            if produced_file:
+
+                def generate_files():
+                    for filename in output_names:
+                        (paths.sandbox_outputs_dir(thread_id, user_id=OWNER) / filename).write_bytes(output_bytes)
+
+                await asyncio.to_thread(generate_files)
             return await original_generate(self, *args, **kwargs)
 
         monkeypatch.setattr(type(model), "_agenerate", generate)
@@ -401,7 +443,7 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
             creates = [body for method, path, body in http_calls if method == "POST" and path.endswith(("/runs/stream", "/runs/wait", "/runs"))]
             assert len(creates) == 1
             assert creates[0]["channel_execution"]["publication_id"] == record.publication_id
-            if case in {"produced_file", "no_user_uncertain"}:
+            if case == "no_user_uncertain":
                 assert observed.state == "held" and observed.reason == "inventory_unhandled"
                 assert not any(call.endpoint == "sendMessage" for call in boot.normal.calls)
             else:
@@ -409,24 +451,44 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
                 async with e.sf() as reader:
                     planned = await reader.get(TelegramOutboxRow, observed.outbox_id)
                 proof = planned.payload["reply_basis"]["outcome"]["projection"]
-                assert planned.payload["reply_basis"]["version"] in ({2, 4} if managed_ingress else {2})
-                assert proof["inventory"]["document"]["coverage"] == "complete" and proof["inventory"]["document"]["items"] == []
+                assert planned.payload["reply_basis"]["version"] in ({6} if produced_file else {2, 4} if managed_ingress else {2})
+                assert proof["inventory"]["document"]["coverage"] == "complete"
+                inventory_files = proof["inventory"]["document"]["items"]
+                assert len(inventory_files) == (len(output_names) if produced_file else 0)
                 assert proof["inventory"]["document"]["version"] == 2
                 assert proof["inventory"]["document"]["output_view"]["kind"] == ("no_admitted_output_view" if no_user else "managed_outputs")
                 if case == "phase_one":
                     assert not owner.closed and planned.state == "pending"
                     assert not any(call.endpoint == "sendMessage" for call in boot.normal.calls)
                 else:
-                    boot.normal.enqueue("sendMessage", result={"message_id": 501, "date": 1_893_456_000, "chat": {"id": link.chat_id, "type": "private"}, "text": "Durable answer"})
+                    boot.normal.enqueue("sendDocument" if produced_file and not album else "sendMessage", result={"message_id": 501, "date": 1_893_456_000, "chat": {"id": link.chat_id, "type": "private"}, "text": "Durable answer"})
+                    if album:
+                        boot.normal.enqueue("sendMediaGroup", result=[{"message_id": identity, "date": 1_893_456_000, "chat": {"id": link.chat_id, "type": "private"}} for identity in (502, 503)])
                     await supervisor.sender.tick()
                     await supervisor.sender.drain()
-                    sent = [call for call in boot.normal.calls if call.endpoint == "sendMessage"]
-                    assert len(sent) == 1 and sent[0].parameters["text"] == "<b>Durable answer</b>"
+                    if album:
+                        # The real sender persists a one-second destination
+                        # pacing floor after the text ACK. Advance the fixture
+                        # clock, then admit its next durable delivery attempt.
+                        boot.clock.advance(1)
+                        await supervisor.sender.tick()
+                        await supervisor.sender.drain()
+                    sent = [call for call in boot.normal.calls if call.endpoint == ("sendDocument" if produced_file and not album else "sendMessage")]
+                    assert len(sent) == 1 and sent[0].parameters["caption" if produced_file and not album else "text"] == "<b>Durable answer</b>"
+                    if produced_file:
+                        assert supervisor.file_bytes_budget.used == 0 and len(uploaded_outputs) == len(output_names)
+                        artifact_reads = [(method, path) for method, path, _body in http_calls if "/artifacts/" in path]
+                        assert any(method == "HEAD" for method, _path in artifact_reads)
+                        assert sum(method == "GET" for method, _path in artifact_reads) == len(output_names)
                     assert sent[0].parameters["reply_parameters"]["message_id"] == 711
                     async with e.sf() as reader:
                         completed = await reader.get(TelegramOutboxRow, observed.outbox_id)
                         saved = await reader.get(TelegramInboundMarkRow, (link.id, 711, link.chat_id))
                     assert completed.state == "sent" and completed.parts[0]["message_ids"] == [501]
+                    if produced_file:
+                        media = completed.parts[-1] if album else completed.parts[0]
+                        assert [file["sha256"] for file in media["source_ref"]["output_files"]] == uploaded_outputs
+                        assert media["message_ids"] == ([502, 503] if album else [501])
                     assert saved.state == "done" and saved.run_id == runs[0]["run_id"]
                     assert sum(method == "GET" and path.endswith("/output") for method, path, _body in http_calls) >= 2
         finally:
