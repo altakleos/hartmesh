@@ -1033,6 +1033,13 @@ class ChatTurns:
                     await self._stop_turn(turn, stop_id=f"native:{update.update_id}:{data['draft_id']}")
                     return
 
+    def owns_publication(self, record, link):
+        """Defer recovery presentation while this original live owner can freeze UI."""
+        for turn in self._turns.values():
+            if self._current(turn) and turn.record is not None and turn.record.scope == record.scope and turn.record.publication_id == record.publication_id and turn.link == link:
+                return True
+        return False
+
     async def execute_callback(self, channel, row, *, update_id, query_id):
         from app.telegram_bots.callbacks import CallbackRefused
 
@@ -1062,6 +1069,15 @@ class ChatTurns:
                 return not self._closed and channel not in self._retired and channel._callback_current(link)
 
             guard = _Guard(self.services, channel, link, current, repair=True)
+            from app.telegram_bots.callbacks import _RESERVED
+
+            business = {key: value for key, value in row.payload.items() if key not in _RESERVED}
+            if row.kind == "file_retry" and set(business) == {"thread_id", "path"}:
+                source = getattr(self.services, "model_source", None)
+                if source is None:
+                    raise CallbackRefused() from None
+                await source.retry_file_callback(link, row, callbacks=self.services.callbacks, guard=guard)
+                return
             stage = await self.services.outbox.inbox.stage_callback_input(
                 link,
                 callback_id=row.id,

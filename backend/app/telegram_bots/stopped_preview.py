@@ -145,6 +145,7 @@ def check_shown_preview(capability, *, publication_identity, run_id):
     if type(capability) is not ShownPreview:
         _refuse()
     _check(capability, publication_identity=publication_identity, run_id=run_id)
+    return capability._data
 
 
 def take_shown_preview(capability, *, publication_identity, run_id):

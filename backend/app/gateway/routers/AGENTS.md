@@ -66,9 +66,9 @@ opened descriptor. Preflight paths determine HTTP errors, never permission to
 reopen through symlinked parents. Use `deerflow.files.store.open_regular_source`,
 and retain ownership until every offloaded operation has drained on cancellation.
 Conversation keep/publish sources remain lexical paths within uploads/outputs.
-Artifact reads use `resolve_thread_read_path`; never resolve away link segments
-before no-follow opens. Small editable artifacts capture bounded immutable bytes
-for SHA-256/ranges; large artifacts stay descriptor-streamed without content hashing.
+Artifact reads preserve links until no-follow open. Default GET captures small
+editable files for SHA-256/ranges. HEAD and `stream=true` skip payload preparation;
+raw archive/projection/instance sources refuse. Owner/Space checks still apply.
 Skill archive detection/extraction shares one source descriptor and drains off-loop.
 `SafeFileAccessUnavailable` means HTTP 501 for descriptor reads and archives;
 never turn an unsupported host into a missing/invalid/changed file.

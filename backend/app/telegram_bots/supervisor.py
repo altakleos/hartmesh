@@ -264,7 +264,7 @@ class TelegramSupervisor:
                 from app.telegram_bots.authority import TelegramAuthority
 
                 self.authority = TelegramAuthority(links=self.links, connections=connections)
-            self.sender = OutboxSender(self.outbox, run_id=self.run_id, deliver_part=self.deliver_part, eligibility=self.eligibility)
+            self.sender = OutboxSender(self.outbox, run_id=self.run_id, deliver_part=self.deliver_part, eligibility=self.eligibility, cleanup_caption=self.cleanup_caption)
         except Exception as error:
             self._event("supervisor_check_failed", error=type(error).__name__, level=logging.ERROR)
             self._refuse("channel-service-failed")
@@ -320,7 +320,16 @@ class TelegramSupervisor:
 
             self.human_inputs = HumanInputs(self)
             self.publications.human_input_planner = self.human_inputs.plan_terminal
-            self.model_source = ModelSource(read_output=self.publications.read_output, human_input_source=self.human_inputs.source)
+            self.model_source = ModelSource(
+                read_output=self.publications.read_output,
+                human_input_source=self.human_inputs.source,
+                outbox=self.outbox,
+                http_owner=self.thread_client,
+                file_capacity=self.file_bytes_budget.capacity,
+                file_max_bytes=self.config.files.max_outbound_bytes,
+                file_output_active=lambda record, link: self.turns is not None and self.turns.owns_publication(record, link),
+            )
+            self.publications.file_output_planner = self.model_source.plan_file_reply
             self.outbox.inbox.on_callback_confirmed = lambda record, writer: self.acts.confirm_network_publication(record, session=writer)
             self.recovery = PublicationRecoveryService(inbox=self.outbox.inbox, outbox=self.outbox, coordinator=self.publications, links=self.links, allowed=self.send_allowed)
             self.turns = ChatTurns(self)
@@ -959,6 +968,16 @@ class TelegramSupervisor:
         if channel is None:
             raise DeliveryClaimRetired
         return await channel.send_part(outbox_id=outbox_id, part_id=part_id, claim_owner=claim_owner, claim_id=claim_id)
+
+    async def cleanup_caption(self, *, link_id: str, outbox_id: str, part_id: str, claim_owner: str, claim_id: str) -> bool | str:
+        if self._stopping or self._cause is not None or not self._send_ready:
+            raise DeliveryClaimRetired()
+        channel = self.channel(link_id)
+        if channel is None:
+            raise DeliveryClaimRetired()
+        from app.telegram_bots.outbound import cleanup_caption
+
+        return await cleanup_caption(channel, dict(link_id=link_id, outbox_id=outbox_id, part_id=part_id, claim_owner=claim_owner, claim_id=claim_id, token_revision=channel.transport_revision))
 
     async def dispatch_outbound(self, msg: OutboundMessage) -> None:
         if msg.channel_name != "telegram" or not isinstance(msg.metadata, dict):

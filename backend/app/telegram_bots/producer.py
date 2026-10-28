@@ -869,6 +869,12 @@ class Outbox:
             elif "assistant_message_id" in source:
                 if set(source) - {"assistant_message_id", "thread_id", "run_id", "range", "start", "end"}:
                     raise ValueError("invalid-delivery-source")
+            elif set(source) == {"output_files"}:
+                if part["kind"] not in {"document", "photo", "album"} or type(source["output_files"]) is not list or not source["output_files"]:
+                    raise ValueError("invalid-delivery-source")
+                for file in source["output_files"]:
+                    if type(file) is not dict or set(file) != {"path", "sha256"} or type(file["path"]) is not str or not file["path"].startswith("/mnt/user-data/outputs/") or file["sha256"] is not None and not _digest(file["sha256"]):
+                        raise ValueError("invalid-delivery-source")
             elif "preview_sha256" in source:
                 if set(source) != {"preview_sha256", "thread_id", "run_id", "range", "slice"}:
                     raise ValueError("invalid-delivery-source")
@@ -1354,6 +1360,182 @@ class Outbox:
             row = await session.get(TelegramOutboxRow, outbox_id, with_for_update=True)
             return self._sending(binding, row, link_id=link_id, part_id=part_id, claim_owner=claim_owner, claim_id=claim_id, token_revision=token_revision)
 
+    async def _file_retry_locked(self, link, callback_id, callbacks, writer):
+        from app.telegram_bots.callbacks import _RESERVED
+        from app.telegram_bots.file_source import validate_file_reply_basis
+
+        parent, rows, selected = await callbacks._locked(writer, link, callback_id)
+        proof = validate_file_reply_basis(_item(parent))
+        payload = {key: value for key, value in selected.payload.items() if key not in _RESERVED}
+        if (
+            selected.kind != "file_retry"
+            or type(payload) is not dict
+            or set(payload) != {"thread_id", "path"}
+            or payload["thread_id"] != proof.record.scope.thread_id
+            or selected.target_kind != "thread"
+            or selected.target_id != payload["thread_id"]
+        ):
+            raise ValueError("publication-source-conflict")
+        warning = next((part for part in parent.parts if part.get("callback_group_id") == selected.group_id and part.get("file_retry_source") == payload), None)
+        if warning is None:
+            raise ValueError("publication-source-conflict")
+        event = next((event for event in parent.payload["file_events"] if warning["part_id"] in event["new"] and event["reason"] == "unavailable"), None)
+        if event is None:
+            raise ValueError("publication-source-conflict")
+        original = next(part for part in parent.parts if part["part_id"] == event["old"])
+        file = next(file for file in original["files"] if file["path"] == payload["path"])
+        return parent, rows, selected, proof.record, original, deepcopy(file)
+
+    async def read_file_retry(self, link, callback_id, *, callbacks, guard):
+        async with callbacks.writer(link, guard) as writer:
+            parent, _rows, selected, record, _original, file = await self._file_retry_locked(link, callback_id, callbacks, writer)
+            if selected.consumed_at is not None:
+                return None
+            callbacks._usable(selected)
+            return record, file
+
+    async def retry_file_callback(self, link, callback_id, *, metadata, callbacks, guard):
+        """Append one delivery-only file attempt; never reserve a model input."""
+        from app.telegram_bots.file_source import clean_part, media_source, validate_file_reply_basis
+
+        async with callbacks.writer(link, guard) as writer:
+            parent, rows, selected, record, original, file = await self._file_retry_locked(link, callback_id, callbacks, writer)
+            if selected.consumed_at is not None:
+                return False
+            callbacks._usable(selected)
+            if parent.state == "sending":
+                return False
+            if type(metadata) is not dict or set(metadata) != {"path", "filename", "size", "mime_type", "state"} or metadata["path"] != file["path"]:
+                raise ValueError("publication-source-conflict")
+            from app.telegram_bots.files import plan_output_files
+
+            # Validate HEAD facts as presentation data, never authority.
+            retry_plan = plan_output_files([metadata], answer_visible="", capacity=parent.payload["reply_basis"]["capacity"], max_bytes=parent.payload["reply_basis"]["max_bytes"])
+            recipe = {key: value for key, value in clean_part(original).items() if key not in {"caption_html", "caption_text"}}
+            recipe.update(kind="document", files=[deepcopy(metadata)], unavailable=retry_plan.parts[0]["unavailable"], source_ref=media_source([metadata]))
+            digest = next(member["sha256"] for member in original["source_ref"]["output_files"] if member["path"] == file["path"])
+            recipe["source_ref"]["output_files"][0]["sha256"] = digest
+            fresh = self._parts([recipe], parent.payload.get("presentation_version", 0))
+            fresh[0]["ordinal"] = len(parent.parts)
+            parent.parts = [*deepcopy(parent.parts), *fresh]
+            parent.payload = {**parent.payload, "file_events": [*parent.payload["file_events"], {"old": original["part_id"], "new": [fresh[0]["part_id"]], "reason": "file-retry"}]}
+            validate_file_reply_basis(_item(parent))
+            parent.state, parent.not_before, parent.failed_reason, parent.closed_at = "pending", self.clock(), None, None
+            parent.claim_owner = parent.claim_id = parent.claimed_at = None
+            warning = next(
+                (part for part in parent.parts if part.get("callback_group_id") == selected.group_id and part["state"] == "sent" and part["message_ids"] and (selected.message_id is None or selected.message_id in part["message_ids"])), None
+            )
+            if warning is None:
+                raise ValueError("publication-source-conflict")
+            # Retire the visible controls in the same durable unit as the new
+            # delivery; the existing sender owns this metadata-only edit.
+            await self._add(
+                link,
+                dedupe_key="file-retry-cleanup:" + selected.id,
+                class_="reply",
+                payload={"kind": "keyboard_cleanup", "parts": [{"kind": "edit", "source_ref": warning["source_ref"], "remove_keyboard": True, "target_message_id": warning["message_ids"][-1]}]},
+                session=writer,
+                message_thread_id=parent.message_thread_id,
+            )
+            for row in rows:
+                if row.consumed_at is None:
+                    row.consumed_at, row.closed_reason = self.clock(), "done"
+            return True
+
+    async def capture_caption_cleanup(self, *, link_id, outbox_id, part_id, claim_owner, claim_id, token_revision):
+        """Capture ACK-owned preview cleanup without reopening media delivery."""
+        from app.telegram_bots.file_source import validate_file_reply_basis
+
+        async with self._writer(link_id) as (writer, binding):
+            row = await writer.get(TelegramOutboxRow, outbox_id, with_for_update=True)
+            if binding is None or not self._fenced(row, generation=binding.binding_generation, owner=claim_owner, claim=claim_id) or binding.token_revision != token_revision or binding.state != "connected" or binding.health != "ok":
+                raise DeliveryClaimRetired()
+            item = _item(row)
+            validate_file_reply_basis(item)
+            disposition = row.payload.get("caption_cleanup")
+            selected = next((part for part in item.parts if part["part_id"] == part_id), None)
+            display = item.payload["reply_basis"]["display"]
+            ids = sorted({segment["anchor_message_id"] for segment in (display or {}).get("segments", []) if segment["mode"] == "edit"})
+            if disposition != {"part_id": part_id, "message_ids": ids, "state": "pending"} or not ids or selected is None or selected["state"] != "sent" or not selected.get("caption_html") or not selected["message_ids"]:
+                raise DeliveryClaimRetired()
+            return SendingPart(BotLink.from_row(binding), item, deepcopy(selected), claim_owner, claim_id, token_revision)
+
+    async def record_file_hashes(self, captured: SendingPart, hashes: dict) -> bool:
+        """Bind first authorized bytes before API dispatch; never replace a hash."""
+        if type(hashes) is not dict or not hashes or any(type(path) is not str or not _digest(digest) for path, digest in hashes.items()):
+            raise ValueError("invalid-file-hashes")
+        async with self._writer(captured.link.id) as (writer, binding):
+            row = await writer.get(TelegramOutboxRow, captured.item.id, with_for_update=True)
+            try:
+                current = self._sending(binding, row, link_id=captured.link.id, part_id=captured.part["part_id"], claim_owner=captured.claim_owner, claim_id=captured.claim_id, token_revision=captured.token_revision)
+                from app.telegram_bots.file_source import validate_file_reply_basis
+
+                validate_file_reply_basis(current.item, current.part)
+            except (ValueError, DeliveryClaimRetired):
+                return False
+            if _canonical_primary(current.part) != _canonical_primary(captured.part):
+                return False
+            files = current.part["source_ref"]["output_files"]
+            if not set(hashes) <= {file["path"] for file in files} or any(file["sha256"] not in (None, hashes[file["path"]]) for file in files if file["path"] in hashes):
+                return False
+            parts = deepcopy(row.parts)
+            selected = next(value for value in parts if value["part_id"] == current.part["part_id"])
+            selected["source_ref"] = {"output_files": [{"path": file["path"], "sha256": hashes.get(file["path"], file["sha256"])} for file in files]}
+            row.parts = parts
+            return True
+
+    async def replace_output_parts(self, captured: SendingPart, templates, *, reason: str) -> bool:
+        """Retire one unsent source and persist explicit ordered same-file parts."""
+        from app.telegram_bots.file_source import clean_part, media_source, validate_file_reply_basis
+
+        if reason not in {"photo-classification", "photo-rejected", "capacity"} or type(templates) not in {list, tuple} or not templates:
+            raise ValueError("invalid-file-replacement")
+        templates = deepcopy(list(templates))
+        async with self._writer(captured.link.id) as (writer, binding):
+            row = await writer.get(TelegramOutboxRow, captured.item.id, with_for_update=True)
+            try:
+                current = self._sending(binding, row, link_id=captured.link.id, part_id=captured.part["part_id"], claim_owner=captured.claim_owner, claim_id=captured.claim_id, token_revision=captured.token_revision)
+                validate_file_reply_basis(current.item, current.part)
+            except (ValueError, DeliveryClaimRetired):
+                return False
+            if _canonical_primary(current.part) != _canonical_primary(captured.part):
+                return False
+            if any(
+                type(value) is not dict
+                or set(value) != {"kind", "files", "unavailable"}
+                or value["kind"] not in {"document", "photo", "album"}
+                or type(value["files"]) is not list
+                or not value["files"]
+                or value["unavailable"] != current.part["unavailable"]
+                for value in templates
+            ):
+                raise ValueError("invalid-file-replacement")
+            if _canonical_primary({"files": [file for value in templates for file in value["files"]]}) != _canonical_primary({"files": current.part["files"]}):
+                raise ValueError("invalid-file-replacement")
+            recipes = []
+            hashes = {file["path"]: file["sha256"] for file in current.part["source_ref"]["output_files"]}
+            for template in templates:
+                if template["kind"] in {"document", "photo"} and len(template["files"]) != 1 or template["kind"] == "album" and not 2 <= len(template["files"]) <= 10:
+                    raise ValueError("invalid-file-replacement")
+                recipe = {**clean_part(current.part), **template, "source_ref": media_source(template["files"])}
+                for file in recipe["source_ref"]["output_files"]:
+                    file["sha256"] = hashes[file["path"]]
+                recipes.append(recipe)
+            parts = deepcopy(row.parts)
+            position = next(index for index, value in enumerate(parts) if value["part_id"] == current.part["part_id"])
+            parts[position]["state"] = "retired"
+            fresh = self._parts(recipes, current.part["presentation_version"])
+            parts[position + 1 : position + 1] = fresh
+            for index, value in enumerate(parts):
+                value["ordinal"] = index
+            row.parts = parts
+            event = {"old": current.part["part_id"], "new": [value["part_id"] for value in fresh], "reason": reason}
+            row.payload = {**row.payload, "file_events": [*row.payload.get("file_events", []), event]}
+            validate_file_reply_basis(_item(row))
+            row.state, row.not_before = "pending", self.clock()
+            row.claim_owner = row.claim_id = row.claimed_at = None
+            return True
+
     async def fallback_to_plain(self, captured: SendingPart) -> bool:
         """Persist one same-source plain fallback; another worker must send it."""
         async with self._writer(captured.link.id) as (session, binding):
@@ -1362,7 +1544,22 @@ class Outbox:
                 current = self._sending(binding, row, link_id=captured.link.id, part_id=captured.part["part_id"], claim_owner=captured.claim_owner, claim_id=captured.claim_id, token_revision=captured.token_revision, preparing=False)
             except DeliveryClaimRetired:
                 return False
-            if current.part.get("plain_fallback") or current.part["kind"] not in {"text", "edit"} or current.part["presentation_version"] != captured.part["presentation_version"] or current.part["source_ref"] != captured.part["source_ref"]:
+            caption = False
+            if current.item.payload.get("reply_basis", {}).get("version") == 6 and current.part["kind"] == "document" and current.part.get("caption_html"):
+                from app.telegram_bots.file_source import validate_file_reply_basis
+
+                try:
+                    validate_file_reply_basis(current.item, current.part)
+                    caption = True
+                except ValueError:
+                    return False
+            if (
+                current.part.get("plain_fallback")
+                or current.part["kind"] not in {"text", "edit"}
+                and not caption
+                or current.part["presentation_version"] != captured.part["presentation_version"]
+                or current.part["source_ref"] != captured.part["source_ref"]
+            ):
                 return False
             parts = deepcopy(row.parts)
             selected = next(part for part in parts if part["part_id"] == current.part["part_id"])
@@ -1380,7 +1577,16 @@ class Outbox:
             except DeliveryClaimRetired:
                 return False
             stored_urls = False
-            if current.part.get("stored_keyboard") is True and set(current.part.get("source_ref", {})) == {"key", "values"} and not uses_model_source(current.item):
+            if current.part.get("stored_keyboard") is True and current.item.payload.get("reply_basis", {}).get("version") == 6:
+                from app.telegram_bots.file_source import file_warning_keyboard, validate_file_reply_basis
+
+                try:
+                    validate_file_reply_basis(current.item, current.part)
+                    keyboard = file_warning_keyboard(current.part)
+                    stored_urls = any("url" in button for line in keyboard for button in line)
+                except ValueError:
+                    return False
+            elif current.part.get("stored_keyboard") is True and set(current.part.get("source_ref", {})) == {"key", "values"} and not uses_model_source(current.item):
                 from app.telegram_bots.callbacks import canonical_keyboard
 
                 try:
@@ -1505,6 +1711,44 @@ class Outbox:
         basis, parts = await await_drained(asyncio.to_thread(prepare))
         return await await_drained(self._write_publication_primary(record, guard=guard, basis=basis, parts=parts))
 
+    async def plan_file_publication_reply(self, record, *, basis, parts, guard, shown=None):
+        from app.telegram_bots.links import prepare_publication_guard
+        from app.telegram_bots.stopped_preview import check_shown_preview
+
+        basis, parts = deepcopy(basis), deepcopy(parts)
+        if basis.get("display") is None:
+            if shown is not None:
+                raise ValueError("publication-source-conflict")
+            return await await_drained(self._write_publication_primary(record, guard=guard, basis=basis, parts=parts))
+        identity = _publication_identity(record)
+
+        def check():
+            try:
+                saved = check_shown_preview(shown, publication_identity=identity, run_id=record.run_id)
+                display = {"kind": "model_text", "stop_id": None, "segments": [asdict(segment) for segment in saved.segments], "waiting": False}
+                if _canonical_primary(display) != _canonical_primary(basis["display"]):
+                    raise ValueError
+            except Exception:
+                raise ValueError("publication-source-conflict") from None
+
+        check()
+
+        class ShownGuard:
+            captured_link = guard.captured_link
+
+            async def prepare(self):
+                check()
+                await prepare_publication_guard(guard)
+                check()
+
+            async def check(self, writer):
+                check()
+                current = await guard.check(writer)
+                check()
+                return current
+
+        return await await_drained(self._write_publication_primary(record, guard=ShownGuard(), basis=basis, parts=parts))
+
     async def plan_streamed_publication_reply(self, record, *, output, shown, guard):
         return await self._plan_display(record, output=output, capability=shown, guard=guard, stopped=False, waiting=False)
 
@@ -1579,7 +1823,7 @@ class Outbox:
         if type(link) is not BotLink or link.id != scope["link_id"] or any(getattr(link, name) != scope[name] for name in fields):
             raise ValueError("publication-source-conflict")
         dedupe = f"reply:{basis['publication']['turn_id']}"
-        if basis["version"] in {2, 4}:
+        if basis["version"] in {2, 4, 6}:
             from app.telegram_bots.links import prepare_publication_guard
 
             await prepare_publication_guard(guard)
@@ -1587,7 +1831,7 @@ class Outbox:
             await guard.check(writer)
             existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == dedupe).with_for_update().execution_options(populate_existing=True))
             fresh, rows = await self.inbox.lock_publication(record, session=writer)
-            if basis["version"] in {2, 4}:
+            if basis["version"] in {2, 4, 6}:
                 # The host DTO sorts origin identities, not arrival order.
                 # Resolve the original reply anchor from the locked saved rows.
                 anchor = min(rows, key=lambda row: (row.accepted_at, row.update_id, row.message_id)).message_id
@@ -1595,13 +1839,15 @@ class Outbox:
                 basis = {**basis, "parts": parts}
             if _canonical_primary(_publication_identity(fresh)) != _canonical_primary(basis["publication"]):
                 raise ValueError("publication-source-conflict")
+            if basis["version"] == 6:
+                basis = {**basis, "inputs": await self.inbox.snapshot_publication_inputs(fresh, session=writer)}
             outcome = basis["outcome"]
             projection = outcome["projection"]
-            if basis["version"] in {2, 4}:
+            if basis["version"] in {2, 4, 6}:
                 projection = projection["output"]
             if fresh.dispatch_started is not True or fresh.run_id is None or fresh.run_id != projection["run_id"]:
                 raise ValueError("publication-source-conflict")
-            assistant = projection["output_evidence"]["assistant_message_id"] if outcome["kind"] == "model_text" else None
+            assistant = projection["output_evidence"]["assistant_message_id"] if outcome["kind"] == "model_text" or basis["version"] == 6 and projection["state"] == "complete" else None
             if existing is not None:
                 if existing.owner_user_id != scope["owner_user_id"] or existing.binding_generation != scope["binding_generation"] or existing.chat_id != scope["chat_id"] or type(existing.payload) is not dict:
                     raise ValueError("publication-source-conflict")
@@ -1617,7 +1863,10 @@ class Outbox:
                 identity, created = await self._add(link, dedupe_key=dedupe, class_="reply", payload={"source": outcome, "reply_basis": basis, "parts": parts}, session=writer, message_thread_id=scope["message_thread_id"])
                 if not created:
                     raise ValueError("publication-source-conflict")
-                if basis["version"] == 4:
+                if basis["version"] == 6:
+                    saved_row = await writer.get(TelegramOutboxRow, identity)
+                    saved_row.payload = {**saved_row.payload, "file_initial_ids": [part["part_id"] for part in saved_row.parts], "file_events": []}
+                if basis["version"] in {4, 6}:
                     saved_row = await writer.get(TelegramOutboxRow, identity)
                     saved_parts = deepcopy(saved_row.parts)
                     for part in saved_parts:
@@ -1768,6 +2017,41 @@ class Outbox:
             row = await session.get(TelegramOutboxRow, outbox_id, with_for_update=True)
             if not self._binding(binding, link) or not self._fenced(row, generation=link.binding_generation, owner=claim_owner, claim=claim_id) or row.link_id != link.id or row.payload.get("presentation_version", 0) != expected_version:
                 return
+            if row.payload.get("reply_basis", {}).get("version") == 6:
+                from app.telegram_bots.file_source import validate_file_reply_basis
+
+                validate_file_reply_basis(_item(row))
+                previous = deepcopy(row.parts)
+                fresh, events = [], []
+                for original in previous:
+                    if original["state"] in _FINAL_PARTS:
+                        continue
+                    recipe = {key: deepcopy(value) for key, value in original.items() if key not in _TRANSPORT_RECEIPTS | _PART_IDENTITY | {"target_message_id", "target_protect_content", "shown_message_id"}}
+                    if recipe["kind"] == "edit":
+                        recipe["kind"] = "text"
+                    created = self._parts([recipe], expected_version)[0]
+                    original["state"] = "retired"
+                    fresh.append(created)
+                    events.append({"old": original["part_id"], "new": [created["part_id"]], "reason": reason})
+                if not fresh:
+                    return
+                row.parts = previous + fresh
+                for index, value in enumerate(row.parts):
+                    value["ordinal"] = index
+                row.payload = {**row.payload, "file_events": [*row.payload["file_events"], *events], "replacement_reason": reason}
+                row.message_thread_id, row.state, row.not_before = message_thread_id, "pending", self.clock()
+                row.claim_owner = row.claim_id = row.claimed_at = None
+                groups = {value.get("callback_group_id") for value in fresh} - {None}
+                callbacks = await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id.in_(groups)).order_by(TelegramCallbackRow.id).with_for_update())
+                for callback in callbacks:
+                    if callback.consumed_at is None:
+                        payload = deepcopy(callback.payload)
+                        if callback.message_id is not None:
+                            history = {"message_id": callback.message_id, "message_thread_id": callback.message_thread_id, "presentation_version": expected_version}
+                            payload["presentation_history"] = [*payload.get("presentation_history", []), history]
+                        callback.payload, callback.message_id, callback.message_thread_id = payload, None, message_thread_id
+                validate_file_reply_basis(_item(row))
+                return
             # The canonical sources and action groups are immutable across relocation.
             old_sources = [{key: value for key, value in part["source_ref"].items() if key not in {"range", "start", "end"}} for part in row.parts]
             groups = {part.get("callback_group_id") for part in row.parts}
@@ -1805,11 +2089,13 @@ class OutboxSender:
         eligibility: Callable[[BotLink, OutboxItem, dict | None], Awaitable[DeliveryEligibility]],
         concurrency: int = OUTBOX_SEND_CONCURRENCY,
         jitter: Callable[[], float] = random.random,
+        cleanup_caption=None,
     ) -> None:
         if not run_id or len(run_id) > 32 or not 1 <= concurrency <= OUTBOX_SEND_CONCURRENCY:
             raise ValueError("invalid-delivery-worker-settings")
         self.outbox, self.run_id, self.deliver_part, self.eligibility = outbox, run_id, deliver_part, eligibility
         self.concurrency, self.jitter = concurrency, jitter
+        self.cleanup_caption = cleanup_caption
         self._workers: dict[str, tuple[str, str, asyncio.Task]] = {}
         self._generations: dict[str, int] = {}
         self._callbacks: set[asyncio.Task] = set()
@@ -1989,6 +2275,9 @@ class OutboxSender:
             decision = await self._eligibility(binding, row, part)
             if self._stopping:
                 return
+            if decision.decision == "allow" and row.payload.get("caption_cleanup", {}).get("state") == "pending":
+                await self._cleanup_caption(link_id, row_id, generation, claim, row.payload["caption_cleanup"]["part_id"])
+                return
             if decision.decision == "allow" and part is not None and part["kind"] == "edit" and not part.get("remove_keyboard") and decision.protect_content and not part.get("target_protect_content", False):
                 await self._replace(binding, row, claim, reason="protection")
                 return
@@ -2068,9 +2357,43 @@ class OutboxSender:
                 acknowledged.pop("invalid_token_verification_pending", None)
                 acknowledged.update(state="sent", message_ids=message_ids, protect_content=required_protection, sent_at=self.outbox.clock().isoformat())
                 saved.parts = parts
+                if acknowledged.get("caption_html") and saved.payload.get("reply_basis", {}).get("version") == 6:
+                    display = saved.payload["reply_basis"]["display"]
+                    ids = sorted({segment["anchor_message_id"] for segment in (display or {}).get("segments", []) if segment["mode"] == "edit"})
+                    if ids:
+                        saved.payload = {**saved.payload, "caption_cleanup": {"part_id": acknowledged["part_id"], "message_ids": ids, "state": "pending"}}
                 if all(value["state"] in _FINAL_PARTS for value in parts if value["presentation_version"] == version):
                     await self._complete(session, saved)
                     return
+
+    async def _cleanup_caption(self, link_id, row_id, generation, claim, part_id):
+        done = False
+        unavailable = False
+        retry_after = timedelta(seconds=1)
+        if self.cleanup_caption is not None and not self._stopping:
+            try:
+                result = await self.cleanup_caption(link_id=link_id, outbox_id=row_id, part_id=part_id, claim_owner=self.run_id, claim_id=claim)
+                done = result is True
+                unavailable = type(result) is str and result == "unavailable"
+            except asyncio.CancelledError:
+                raise
+            except DeliveryRetry as error:
+                retry_after = timedelta(seconds=error.retry_after)
+            except Exception:
+                done = False
+        async with self.outbox._writer(link_id) as (writer, binding):
+            row = await writer.get(TelegramOutboxRow, row_id, with_for_update=True)
+            if binding is None or not self.outbox._fenced(row, generation=generation, owner=self.run_id, claim=claim):
+                return
+            disposition = row.payload.get("caption_cleanup")
+            if type(disposition) is not dict or disposition.get("part_id") != part_id or disposition.get("state") != "pending":
+                return
+            if done or unavailable:
+                row.payload = {**row.payload, "caption_cleanup": {**disposition, "state": "unavailable" if unavailable else "done"}}
+                await self._complete(writer, row)
+            else:
+                self._pending(row)
+                row.not_before = max(_aware(row.not_before), self.outbox.clock() + retry_after)
 
     async def _expire_preview(self, link_id, row_id, generation, claim):
         async with self.outbox._writer(link_id) as (writer, binding):
@@ -2122,6 +2445,33 @@ class OutboxSender:
                 raise ValueError("invalid-unavailable-source-part")
             unavailable = parts[position]
             unavailable.update(state="unavailable", unavailable_reason=error.reason)
+            if row.payload.get("reply_basis", {}).get("version") == 6:
+                from app.telegram_bots.callbacks import CallbackRepository
+                from app.telegram_bots.file_source import file_warning_keyboard, unavailable_parts, validate_file_reply_basis
+
+                # This source-specific disposition preserves a caption's text
+                # before the failure notices and binds every retry to its path.
+                unavailable["file_failure_key"] = error.source_ref["key"]
+                recipes = unavailable_parts(unavailable, row.payload["reply_basis"])
+                fresh = []
+                for recipe in recipes:
+                    fresh.extend(Outbox._parts([recipe], version))
+                parts[position + 1 : position + 1] = fresh
+                for index, value in enumerate(parts):
+                    value["ordinal"] = index
+                row.parts = parts
+                row.payload = {**row.payload, "file_events": [*row.payload.get("file_events", []), {"old": part_id, "new": [value["part_id"] for value in fresh], "reason": "unavailable"}]}
+                validate_file_reply_basis(_item(row))
+                callbacks = CallbackRepository(self.outbox.sessions, config=self.outbox.config, clock=self.outbox.clock)
+                for value in fresh:
+                    if value.get("stored_keyboard"):
+                        group = await callbacks.write_group(
+                            BotLink.from_row(binding), file_warning_keyboard(value), anchor_outbox_id=row.id, presentation_version=version, chat_id=row.chat_id, message_id=None, message_thread_id=row.message_thread_id, session=session
+                        )
+                        value["callback_group_id"] = group.group_id
+                row.parts = parts
+                self._pending(row)
+                return
             group = unavailable.get("callback_group_id")
             flags = {key: unavailable[key] for key in ("silent", "protect_content", "reply_to_message_id") if key in unavailable}
             replacement = Outbox._parts([{"kind": "text", "source_ref": error.source_ref, "replaces_part_id": part_id, "callback_group_id": group, **flags}], version)[0]
@@ -2138,6 +2488,9 @@ class OutboxSender:
             self._pending(row)
 
     async def _complete(self, session: AsyncSession, row: TelegramOutboxRow) -> None:
+        if row.payload.get("caption_cleanup", {}).get("state") == "pending":
+            self._pending(row)
+            return
         version = row.payload.get("presentation_version", 0)
         current_parts = [part for part in row.parts if part["presentation_version"] == version]
         if not current_parts or any(part["state"] not in _FINAL_PARTS for part in current_parts):
@@ -2158,6 +2511,12 @@ class OutboxSender:
             if callback.consumed_at is not None:
                 continue
             if callback.group_id in groups and row.message_id is not None:
+                anchor = row.message_id
+                if row.payload.get("reply_basis", {}).get("version") == 6:
+                    own = next((part for part in current_parts if part.get("callback_group_id") == callback.group_id and part["state"] == "sent" and part["message_ids"]), None)
+                    if own is None:
+                        continue
+                    anchor = own["message_ids"][-1]
                 payload = deepcopy(callback.payload)
                 if payload.get("presentation_pending"):
                     previous = {"message_id": callback.message_id, "message_thread_id": callback.message_thread_id, "presentation_version": version - 1}
@@ -2167,7 +2526,7 @@ class OutboxSender:
                         history.append(previous)
                     payload["presentation_history"] = history
                 payload.update(presentation_pending=False, presentation_version=version, anchor_outbox_id=row.id)
-                callback.payload, callback.message_id, callback.message_thread_id = payload, row.message_id, row.message_thread_id
+                callback.payload, callback.message_id, callback.message_thread_id = payload, anchor, row.message_thread_id
             if callback.kind == "delivery_retry" and callback.target_kind == "outbox" and callback.target_id == row.id:
                 callback.consumed_at, callback.closed_reason = now, "done"
                 if callback.message_id is not None:

@@ -347,6 +347,20 @@ its control is consumed only after actual enqueue/bind confirmation. Storage
 preflight uses the separately configured Gateway as the bound human; capacity
 is discovered only from an actual write failure.
 
+`file_source.py` qualifies V6 file replies from the same complete matched output
+inventory. Metadata is presentation data, never read authority. The existing
+artifact HEAD and explicit streaming GET retain owner/Space checks; the one
+Gateway client owns their responses. `outbound.py` reserves the whole batch
+before reading, records first-read SHA before upload and refuses changed retries.
+Every SDK dispatch rechecks the artifact door after limiter waits; thread/run
+rights alone do not cover independently revoked Space access. Classification and fallback replace saved unsent parts, preserving every ACK.
+`outbound_upload.py` uses distinct multipart attachments with bounded memory-only
+readers, emptied after SDK drain so retained request cycles keep no leased bytes.
+It returns closed failures; drain native users before releasing `OutputBatch`.
+Failed HTTP closes retain only member-close signals; the shared charge releases
+after both transport cleanup and the batch owner settle. File Retry repairs
+saved delivery in its original thread without publishing another model input.
+
 `polling.py` owns retained suffixes and startup-held batches. Serialize every
 getUpdates operation, including probes, drops and shutdown confirmation. A
 current-token 409 commits `record_conflict` before counters/callbacks/admission;

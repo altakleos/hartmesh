@@ -1372,8 +1372,8 @@ answered together in order. `/stop` and the current answer's Stop control stop
 that exact turn and discard its waiting messages. Transient execution-capacity
 refusals wait for up to two minutes; Cancel takes the input out of line, and
 Try again makes a new authorized attempt. Redelivering an update never retries
-the model. Files, voice notes, forwarded-input normalization and the connection
-UI remain reserved for subsequent stages.
+the model. Voice notes and the connection UI remain reserved for subsequent
+stages.
 
 Answers appear as temporary drafts by default, or as edited messages when
 `telegram_bots.streaming` is `edit`. Protected content always uses protected
@@ -1405,6 +1405,13 @@ material retain their original order. Downloads share a bounded process memory
 budget. Unavailable storage, oversized files and failed saves receive explicit
 notices; the message can continue without the file. Send again retries the
 original input in its original conversation. This adds no schema revision;
+managed-bot activation remains deferred until stage one is complete.
+Generated files can also be delivered in the original conversation. A short
+answer accompanies a single document; longer answers appear before their files.
+Suitable images appear as photos or albums. Files that exceed the configured
+limit stay available on the web, and failed transfers offer delivery-only Retry
+without rerunning the AI agent. Retries refuse changed file contents. Uploads
+share the same bounded memory budget as downloads. This adds no schema change;
 managed-bot activation remains deferred until stage one is complete.
 See [turn execution](backend/docs/TELEGRAM_TURN_EXECUTION.md) and
 [publication custody](backend/docs/TELEGRAM_PUBLICATION_CUSTODY.md).

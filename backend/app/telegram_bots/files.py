@@ -7,6 +7,7 @@ import errno
 import logging
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from app.channels.inbound_files import InboundFileLease
 from deerflow.utils.file_io import await_drained
@@ -249,3 +250,251 @@ class PendingFiles:
                 return result.rowcount
 
         return await await_drained(perform())
+
+
+@dataclass(frozen=True)
+class OutputPlan:
+    """Detached media presentation decisions; these grant no file access."""
+
+    caption: bool
+    parts: tuple[dict, ...]
+
+
+_PHOTO_MAX_BYTES = 10_000_000
+_PHOTO_SUFFIXES = (".jpg", ".jpeg", ".png")
+
+
+def _output_metadata(descriptors):
+    if not isinstance(descriptors, Sequence) or isinstance(descriptors, (str, bytes)):
+        raise ValueError("invalid-output-metadata") from None
+    result, paths = [], set()
+    for supplied in descriptors:
+        if type(supplied) is not dict or set(supplied) != {"path", "filename", "size", "mime_type", "state"}:
+            raise ValueError("invalid-output-metadata") from None
+        item = dict(supplied)
+        if any(type(item[key]) is not str or not item[key].strip() or any(ord(char) < 32 or ord(char) == 127 for char in item[key]) for key in ("path", "filename", "mime_type", "state")):
+            raise ValueError("invalid-output-metadata") from None
+        path, name, size = item["path"], item["filename"], item["size"]
+        if (
+            not path.startswith("/mnt/user-data/outputs/")
+            or any(piece in {"", ".", ".."} for piece in path[len("/mnt/user-data/outputs/") :].split("/"))
+            or "\\" in path
+            or path in paths
+            or name in {".", ".."}
+            or "/" in name
+            or "\\" in name
+            or item["state"] not in {"ready", "unavailable"}
+            or (size is None if item["state"] == "ready" else False)
+            or size is not None
+            and (type(size) is not int or size < 0)
+        ):
+            raise ValueError("invalid-output-metadata") from None
+        paths.add(path)
+        result.append(item)
+    return result
+
+
+def _photo_candidate(item):
+    return item["state"] == "ready" and item["filename"].lower().endswith(_PHOTO_SUFFIXES) and item["size"] <= _PHOTO_MAX_BYTES
+
+
+def _media_part(kind, members, unavailable=None):
+    return {"kind": kind, "files": [dict(item) for item in members], "unavailable": unavailable}
+
+
+def _partition_output_photos(members, capacity):
+    parts, group, used = [], [], 0
+    for item in members:
+        if item["size"] > capacity:
+            raise ValueError("output-member-exceeds-capacity") from None
+        if len(group) == 10 or used + item["size"] > capacity:
+            parts.append(_media_part("album" if len(group) > 1 else "photo", group))
+            group, used = [], 0
+        group.append(item)
+        used += item["size"]
+    if group:
+        parts.append(_media_part("album" if len(group) > 1 else "photo", group))
+    return tuple(parts)
+
+
+def plan_output_files(descriptors, *, answer_visible: str, capacity: int, max_bytes: int) -> OutputPlan:
+    """Partition authorized metadata before payload reads, never opening files."""
+    from app.telegram_bots.split import utf16_units
+
+    if type(answer_visible) is not str or type(capacity) is not int or type(max_bytes) is not int or not 0 < max_bytes <= min(capacity, 50_000_000):
+        raise ValueError("invalid-output-plan") from None
+    members = _output_metadata(descriptors)
+    caption = len(members) == 1 and members[0]["state"] == "ready" and members[0]["size"] <= max_bytes and utf16_units(answer_visible) <= 1024
+    if caption:
+        return OutputPlan(True, (_media_part("document", members),))
+    result, photos = [], []
+
+    def flush():
+        nonlocal photos
+        if photos:
+            result.extend(_partition_output_photos(photos, capacity))
+            photos = []
+
+    for item in members:
+        unavailable = "metadata" if item["state"] == "unavailable" else "oversize" if item["size"] > max_bytes else None
+        if unavailable is not None or not _photo_candidate(item):
+            flush()
+            result.append(_media_part("document", [item], unavailable))
+        else:
+            photos.append(item)
+    flush()
+    return OutputPlan(False, tuple(result))
+
+
+def classify_output_part(part, photos: Sequence[bool]) -> tuple[dict, ...]:
+    """Same-order explicit rewrite after headers, or document fallback."""
+    if type(part) is not dict or set(part) != {"kind", "files", "unavailable"}:
+        raise ValueError("invalid-output-part") from None
+    members = _output_metadata(part["files"])
+    if not isinstance(photos, Sequence) or len(photos) != len(members) or any(type(value) is not bool for value in photos):
+        raise ValueError("invalid-output-part") from None
+    kind, unavailable = part["kind"], part["unavailable"]
+    if kind not in {"document", "photo", "album"} or unavailable not in (None, "metadata", "oversize") or (len(members) != 1 if kind != "album" else not 2 <= len(members) <= 10):
+        raise ValueError("invalid-output-part") from None
+    if kind == "document":
+        return (_media_part(kind, members, unavailable),)
+    if unavailable is not None or any(not _photo_candidate(item) for item in members):
+        raise ValueError("invalid-output-part") from None
+    result, group = [], []
+
+    def flush():
+        nonlocal group
+        if group:
+            result.append(_media_part("album" if len(group) > 1 else "photo", group))
+            group = []
+
+    for item, photo in zip(members, photos):
+        if photo:
+            group.append(item)
+        else:
+            flush()
+            result.append(_media_part("document", [item]))
+    flush()
+    return tuple(result)
+
+
+def repartition_output_part(part, *, capacity: int) -> tuple[dict, ...]:
+    """Repartition an already saved photo group before reading any member."""
+    if type(capacity) is not int or capacity <= 0 or type(part) is not dict or type(part.get("kind")) is not str or part["kind"] not in {"photo", "album"}:
+        raise ValueError("invalid-output-capacity-part") from None
+    members = _output_metadata(part.get("files"))
+    classify_output_part(part, [True] * len(members))
+    return _partition_output_photos(members, capacity)
+
+
+async def classify_output_photo(filename: str, data: bytes) -> bool:
+    """Inspect a drained off-loop Pillow header, without pixel decoding."""
+    if type(filename) is not str or type(data) is not bytes:
+        raise ValueError("invalid-output-photo") from None
+    if not filename.lower().endswith(_PHOTO_SUFFIXES) or len(data) > _PHOTO_MAX_BYTES:
+        return False
+
+    def header():
+        nonlocal data
+        from PIL import Image
+
+        class HeaderReader:
+            # Header inspection must not duplicate an entire reserved body or
+            # admit arbitrary plugin formats through a renamed file.
+            def __init__(self):
+                self.position = self.read_bytes = 0
+
+            def tell(self):
+                return self.position
+
+            def seek(self, offset, whence=0):
+                target = offset if whence == 0 else self.position + offset if whence == 1 else len(data) + offset if whence == 2 else -1
+                if target < 0:
+                    raise OSError("invalid-header-seek")
+                self.position = target
+                return target
+
+            def read(self, size=-1):
+                size = len(data) - self.position if size < 0 else min(size, max(0, len(data) - self.position))
+                if size > 65_536 or self.read_bytes + size > 1_048_576:
+                    raise OSError("header-read-limit")
+                self.read_bytes += size
+                result = data[self.position : self.position + size]
+                self.position += size
+                return result
+
+        try:
+            with Image.open(HeaderReader(), formats=("JPEG", "PNG")) as image:
+                width, height = image.size
+                return image.format in {"JPEG", "PNG"} and min(width, height) > 0 and width + height <= 10_000 and max(width, height) <= 20 * min(width, height)
+        except Exception:
+            return False
+        finally:
+            data = None
+
+    return await await_drained(asyncio.to_thread(header))
+
+
+class OutputBatch:
+    """A shared reservation released after owner buffers AND transports drain."""
+
+    def __init__(self, reservation: FileBytesReservation):
+        if type(reservation) is not FileBytesReservation:
+            raise ValueError("invalid-output-batch") from None
+        self._reservation = reservation
+        self._buffers = [None] * len(reservation.ceilings)
+        self._started, self._pending, self._kept = set(), set(), set()
+        self._owner_drained = False
+
+    @property
+    def buffers(self):
+        return tuple(self._buffers)
+
+    def _member(self, index):
+        if type(index) is not int or not 0 <= index < len(self._buffers):
+            raise ValueError("invalid-output-member") from None
+
+    def begin_transport(self, index):
+        self._member(index)
+        if self._owner_drained or index in self._started or index in self._kept:
+            raise ValueError("invalid-output-transport") from None
+        self._started.add(index)
+        self._pending.add(index)
+
+        async def closed():
+            self._pending.discard(index)
+            await await_drained(self._release_if_ready())
+
+        return closed
+
+    async def keep(self, index, data):
+        try:
+            self._member(index)
+            if self._owner_drained or index in self._kept or type(data) is not bytes or len(data) > self._reservation.ceilings[index]:
+                raise ValueError("invalid-output-buffer") from None
+            self._buffers[index] = data
+            self._kept.add(index)
+            await self._reservation.shrink(index, len(data))
+            if self._owner_drained:
+                raise ValueError("closed-output-batch") from None
+        finally:
+            data = None
+
+    def data(self, index):
+        self._member(index)
+        value = self._buffers[index]
+        if self._owner_drained or value is None:
+            raise ValueError("missing-output-buffer") from None
+        return value
+
+    async def _release_if_ready(self):
+        if self._owner_drained and not self._pending:
+            await self._reservation.aclose()
+
+    async def aclose(self):
+        # The caller first drains actual SDK/hash/native users and clears its
+        # external aliases. Waiting for retained HTTP cleanup here could block
+        # the sender drain that precedes its client's shutdown retry.
+        self._buffers = [None] * len(self._buffers)
+        self._owner_drained = True
+        await await_drained(self._release_if_ready())

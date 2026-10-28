@@ -221,12 +221,24 @@ def _row(value):
     return CallbackRow(**values)
 
 
-def _validate_rows(parent, rows):
+def _validate_rows(parent, rows, *, part=None):
     """A stored row cannot change what its frozen keyboard offered."""
     version = parent.payload.get("presentation_version", 0)
     if type(version) is not int or version < 0:
         raise CallbackRefused() from None
-    descriptors = canonical_keyboard(parent.payload.get("product_keyboard_basis"))
+    if parent.payload.get("reply_basis", {}).get("version") == 6:
+        from app.telegram_bots.file_source import file_warning_keyboard, validate_file_reply_basis
+        from app.telegram_bots.producer import _item
+
+        try:
+            validate_file_reply_basis(_item(parent))
+            groups = {row.group_id for row in rows}
+            part = part if part is not None else next(value for value in parent.parts if value.get("callback_group_id") in groups)
+            descriptors = file_warning_keyboard(part)
+        except (StopIteration, ValueError):
+            raise CallbackRefused() from None
+    else:
+        descriptors = canonical_keyboard(parent.payload.get("product_keyboard_basis"))
     expected = {(line, column): spec for line, buttons in enumerate(descriptors) for column, spec in enumerate(buttons) if "url" not in spec}
     positions = {}
     for row in rows:
@@ -465,11 +477,22 @@ class CallbackRepository:
         await self._binding(session, link, healthy=healthy)
         parent = await session.get(TelegramOutboxRow, anchor_outbox_id, with_for_update=True, populate_existing=True)
         topic = _topic(message_thread_id)
+        file_keyboard = False
+        if parent is not None and parent.payload.get("reply_basis", {}).get("version") == 6:
+            from app.telegram_bots.file_source import file_warning_keyboard, validate_file_reply_basis
+            from app.telegram_bots.producer import _item
+
+            try:
+                validate_file_reply_basis(_item(parent))
+                file_keyboard = any(value.get("stored_keyboard") and file_warning_keyboard(value) == descriptors for value in parent.parts)
+            except ValueError:
+                raise CallbackRefused() from None
         if (
             parent is None
             or (parent.link_id, parent.owner_user_id, parent.chat_id, parent.binding_generation, parent.message_thread_id) != (link.id, link.owner_user_id, chat_id, link.binding_generation, topic)
             or parent.payload.get("presentation_version", 0) != presentation_version
-            or parent.payload.get("product_keyboard_basis") != descriptors
+            or not file_keyboard
+            and parent.payload.get("product_keyboard_basis") != descriptors
         ):
             raise CallbackRefused() from None
         group, ids = uuid4().hex, []
@@ -746,7 +769,7 @@ class CallbackRepository:
                 group = part.get("callback_group_id")
                 rows = list(await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group).order_by(TelegramCallbackRow.id)))
                 try:
-                    descriptors, positions = _validate_rows(parent, rows)
+                    descriptors, positions = _validate_rows(parent, rows, part=part)
                 except CallbackRefused:
                     raise DeliveryClaimRetired() from None
                 result = []
