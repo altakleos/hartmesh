@@ -1398,6 +1398,14 @@ controls retain the original conversation and cannot submit twice. Navigating
 away closes the current input scope; a reply to an old prompt requires an explicit
 choice before it can become new input. This adds no schema change and remains
 behind the unfinished managed-bot activation switch.
+Managed bots also accept photos and documents. A caption sends the file with
+the message; a file without a caption waits for the next message in the same
+chat and topic for up to 24 hours. Albums, split long messages and forwarded
+material retain their original order. Downloads share a bounded process memory
+budget. Unavailable storage, oversized files and failed saves receive explicit
+notices; the message can continue without the file. Send again retries the
+original input in its original conversation. This adds no schema revision;
+managed-bot activation remains deferred until stage one is complete.
 See [turn execution](backend/docs/TELEGRAM_TURN_EXECUTION.md) and
 [publication custody](backend/docs/TELEGRAM_PUBLICATION_CUSTODY.md).
 SQL-backed runs can explicitly request versioned output capture. The worker seals

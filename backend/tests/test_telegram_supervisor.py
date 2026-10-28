@@ -921,7 +921,7 @@ async def test_event_retention_deletes_only_before_400_day_boundary(db, monkeypa
         events[1].created_at = now - timedelta(days=400)
         old_id, boundary_id = events[0].id, events[1].id
     counts = await e.supervisor.sweep_retention(now)
-    assert counts == {"inbound": 0, "outbox": 0, "acts": 0, "events": 1}
+    assert counts == {"inbound": 0, "outbox": 0, "acts": 0, "events": 1, "pending_files": 0}
     async with db.sessions() as session:
         assert await session.get(TelegramBotLinkEventRow, old_id) is None
         assert await session.get(TelegramBotLinkEventRow, boundary_id) is not None

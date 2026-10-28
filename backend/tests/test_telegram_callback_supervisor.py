@@ -11,6 +11,7 @@ from app.channels.message_bus import MessageBus
 from app.telegram_bots.acts import Acts
 from app.telegram_bots.callbacks import CallbackRepository, Prompts
 from app.telegram_bots.commands import CallbackCommands
+from app.telegram_bots.files import FileBytesBudget, PendingFiles
 from app.telegram_bots.supervisor import TelegramSupervisor
 
 
@@ -31,11 +32,18 @@ async def test_default_repositories_are_wired_before_supervisor_check_returns(db
         assert isinstance(supervisor.prompts, Prompts)
         assert isinstance(supervisor.acts, Acts)
         assert isinstance(supervisor.commands, CallbackCommands)
+        assert isinstance(supervisor.file_bytes_budget, FileBytesBudget)
+        assert supervisor.file_bytes_budget.capacity == db.config.files.in_memory_max_bytes
+        assert isinstance(supervisor.pending_files, PendingFiles)
+        assert supervisor.pending_files.callbacks is supervisor.callbacks
+        assert supervisor.pending_files.inbox is supervisor.outbox.inbox
         assert supervisor.commands.services is supervisor
         assert supervisor.acts.settings is supervisor.settings
         assert supervisor.acts.outbox is supervisor.outbox
         callbacks = supervisor.callbacks
+        budget = supervisor.file_bytes_budget
         await supervisor.check()
         assert supervisor.callbacks is callbacks
+        assert supervisor.file_bytes_budget is budget
     finally:
         await supervisor.stop()

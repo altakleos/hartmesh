@@ -12,10 +12,12 @@ from dataclasses import dataclass, field, replace
 
 from app.channels.message_bus import InboundMessage
 from app.telegram_bots.queue import ChatQueue
+from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 _SOURCES = "telegram_source_message_ids"
+_ALL_TOPICS = object()
 
 
 class _Guard:
@@ -89,6 +91,41 @@ class _Turn:
         return self.origins[0].message_thread_id
 
 
+@dataclass(frozen=True)
+class FileInputContext:
+    """Finite captured view issued from one actual active turn."""
+
+    link: object
+    record: object
+    origins: tuple
+    _file: dict
+    text: str
+    _files: list
+    _turn: object = field(repr=False, compare=False)
+    _is_current: object = field(repr=False, compare=False)
+
+    def current(self):
+        return self._is_current() is True
+
+    @property
+    def file(self):
+        return deepcopy(self._file)
+
+    @property
+    def files(self):
+        return deepcopy(self._files)
+
+
+@dataclass(eq=False)
+class _JoinedInput:
+    channel: object
+    link: object
+    origins: list
+    kind: str
+    basis: tuple
+    task: asyncio.Task | None = None
+
+
 class ChatTurns:
     def __init__(self, services):
         self.services = services
@@ -98,6 +135,9 @@ class ChatTurns:
         self._tasks = set()
         self._task_channels = {}
         self._entries = {}
+        self._joins = {}
+        self._join_locks = AsyncKeyedLockTable()
+        self._join_busy = {}
         self._retired = weakref.WeakSet()
         self._retire_tasks = {}
         self._origin_channels = {}
@@ -160,6 +200,64 @@ class ChatTurns:
         task.add_done_callback(finished)
         return task
 
+    def _file_lifetime(self, turn, record, execution_context):
+        from app.channels.execution import ChannelExecutionContext
+        from app.telegram_bots.publication import channel_execution_scope
+
+        if not self._current(turn) or turn.record is None or turn.record.publication_id != record.publication_id or turn.record.scope != record.scope:
+            return False
+        if execution_context is None:
+            return True
+        return type(execution_context) is ChannelExecutionContext and execution_context.scope == channel_execution_scope(record) and execution_context.admission.current("run_create") is True
+
+    async def file_context(self, channel, file, *, execution_context=None):
+        """Resolve exact saved descriptor membership without a second registry."""
+        from app.telegram_bots.inbox import chat_input_parts, validate_chat_file
+
+        try:
+            file = validate_chat_file(file)
+        except ValueError:
+            return None
+        candidates = [
+            turn
+            for turn in self._turns.values()
+            if turn.channel is channel and turn.record is not None and self._file_lifetime(turn, turn.record, execution_context) and any(file == item for row in turn.origins for item in row.sanitized_input.get("files", []))
+        ]
+        if len(candidates) != 1:
+            return None
+        turn = candidates[0]
+        original = turn.record
+
+        def current():
+            return self._file_lifetime(turn, original, execution_context)
+
+        guard = _Guard(self.services, channel, turn.link, current, repair=True)
+        fresh, origins = await self.services.outbox.inbox.read_publication_input(original, guard=guard)
+        guard.current()
+        parts = [chat_input_parts(row, bot_id=turn.link.bot_id) for row in origins]
+        files = [item for _text, members in parts for item in members]
+        if file not in files or fresh.publication_id != turn.record.publication_id:
+            return None
+        text = "\n\n".join(value for value, _files in parts if value)
+        if fresh.owner_callback_id is not None or any("submission" in row.route_basis for row in origins):
+            text, _kwargs, files = await self.services.outbox.inbox.read_publication_message(fresh, guard=guard)
+        if file not in files:
+            return None
+        guard.current()
+        return FileInputContext(deepcopy(turn.link), fresh, origins, deepcopy(file), text, files, turn, current)
+
+    async def file_notice(self, channel, context, *, key, values, url_button=None, retry=False, execution_context=None):
+        if type(context) is not FileInputContext or context._turn.channel is not channel or not context.current() or context._turn.record is None or context._turn.record.publication_id != context.record.publication_id:
+            return None
+
+        def current():
+            return context.current() and self._file_lifetime(context._turn, context.record, execution_context)
+
+        if not current():
+            return None
+        guard = _Guard(self.services, channel, context.link, current, repair=True)
+        return await self.services.outbox.plan_inbound_file_notice(context.record, context.file, source_ref={"key": key, "values": values}, callbacks=self.services.callbacks, guard=guard, retry=retry, url_button=url_button)
+
     async def accept(self, channel, update):
         async with self._entry(channel):
             return await self._accept(channel, update)
@@ -210,56 +308,156 @@ class ChatTurns:
 
     async def _accept(self, channel, update):
         link, message = deepcopy(channel._admission(update).link), update.message
-        if self._closed or channel in self._retired or message is None or type(message.text) is not str or not message.text.strip():
+        if self._closed or channel in self._retired or message is None:
             return False
-        if not await channel._input_current(link):
+        files = channel._extract_inbound_files(message)
+        files = [{**value, "message_id": message.message_id, "telegram_bot_id": link.bot_id} for value in files]
+        text = message.text if type(message.text) is str else message.caption if type(message.caption) is str else ""
+        if not text.strip() and not files:
             return False
-        if self._closed or channel in self._retired or not channel._callback_current(link):
+        if not await channel._input_current(link) or self._closed or channel in self._retired or not channel._callback_current(link):
             return False
-        row, created = await await_drained(self.services.outbox.inbox.accept(link, update, sanitized_input={"type": "text", "text": message.text}))
-        if self._closed or channel in self._retired or not channel._callback_current(link):
-            channel._classified(update, remember=True)
-            return True
-        if not created:
-            # Recovery owns retained identities, including input saved before a
-            # dispatch. A repeated provider update never creates a new attempt.
+        value = {"type": "media" if files else "text", "text": text, **({"files": files} if files else {})}
+        row, created = await await_drained(self.services.outbox.inbox.accept(link, update, sanitized_input=value))
+        if not created or self._closed or channel in self._retired or not channel._callback_current(link):
             channel._classified(update, remember=True)
             return True
         forwarded = message.forward_origin is not None or message.is_automatic_forward is True or any(message.api_kwargs.get(key) is not None for key in ("forward_from", "forward_from_chat", "forward_sender_name", "forward_date"))
-        row = await await_drained(self.services.outbox.inbox.route(row, kind="turn", target_id=link.agent_ref, basis={"input_profile": {"version": 1, "kind": "plain_text", "forwarded": forwarded}}, operation_ids=[]))
+        origin = message.forward_origin
+        author = getattr(origin, "sender_user", None)
+        chat = getattr(origin, "sender_chat", None) or getattr(origin, "chat", None)
+        name = getattr(author, "first_name", None) or getattr(origin, "sender_user_name", None) or getattr(chat, "title", None) or "an unnamed sender"
+        profile = {"version": 2, "kind": "chat_input", "forwarded": forwarded, "origin": name if forwarded else None} if files or forwarded else {"version": 1, "kind": "plain_text", "forwarded": False}
+        row = await await_drained(self.services.outbox.inbox.route(row, kind="turn", target_id=link.agent_ref, basis={"input_profile": profile}, operation_ids=[]))
         if self._closed or channel in self._retired or not channel._callback_current(link):
             channel._classified(update, remember=True)
             return True
-        if forwarded:
-            await channel.send_text("media.unsupported", source_id=f"chat-forwarded:{row.chat_id}:{row.message_id}", reply_to=row.message_id, thread=row.message_thread_id, inbox_rows=[row], finish_route=True, _captured_link=link)
-            channel._classified(update, remember=True)
-            return True
-        inbound = InboundMessage(
-            channel_name="telegram",
-            chat_id=str(link.chat_id),
-            user_id=str(link.telegram_user_id),
-            text=message.text,
-            thread_ts=str(message.message_id),
-            topic_id=str(message.message_thread_id) if message.message_thread_id not in (None, 1) else None,
-            connection_id=link.connection_id,
-            owner_user_id=link.owner_user_id,
-            workspace_id=str(link.bot_id),
-            metadata={"message_id": message.message_id, "message_thread_id": row.message_thread_id, _SOURCES: [message.message_id]},
-        )
-        disposition = self.queue.admit_submission(link, inbound) if "reply_to_message_id" in row.sanitized_input else self.queue.admit(link, inbound)
-        if disposition == "full":
-            await channel.send_text("busy.followup_full", source_id=f"chat-full:{row.chat_id}:{row.message_id}", reply_to=row.message_id, thread=row.message_thread_id, inbox_rows=[row], finish_route=True, _captured_link=link)
-        else:
-            self._origins[(link.id, row.message_id)] = row
-            self._origin_channels[(link.id, row.message_id)] = channel
-            if disposition == "run":
-                self._start(channel, link, inbound)
-            elif disposition == "first-waiting":
-                await channel.send_text("busy.followup", source_id=f"chat-wait:{row.chat_id}:{row.message_id}", reply_to=row.message_id, thread=row.message_thread_id, inbox_rows=[row], _captured_link=link)
-            else:
-                self._spawn(channel.react_waiting(link, row), channel=channel)
+        key = (link.id, row.message_thread_id)
+        async with self._join_locks.hold(key):
+            self._join_busy[key] = channel
+            try:
+                await self._sequence_input(channel, link, row, files, forwarded, text)
+            finally:
+                self._join_busy.pop(key, None)
         channel._classified(update, remember=True)
         return True
+
+    async def _sequence_input(self, channel, link, row, files, forwarded, text):
+        from app.telegram_bots.inbox import _scope
+
+        key = (link.id, row.message_thread_id)
+        basis = _scope(row)
+        album = row.sanitized_input.get("media_group_id")
+        kind = "album" if album is not None else "forward" if forwarded else "longtext" if len(text.encode("utf-16-le")) // 2 >= 4000 else None
+        basis = (*basis, album if kind == "album" else None)
+        prior = self._joins.get(key)
+        compatible = prior is not None and prior.channel is channel and prior.basis == basis and (prior.kind == kind or prior.kind == "longtext" and kind is None) and len(prior.origins) < 64
+        if prior is not None and not compatible:
+            await self._flush_join_locked(key, prior)
+        if not files and not forwarded:
+            pending = getattr(self.services, "pending_files", None)
+            if pending is not None:
+                guard = _Guard(self.services, channel, link, lambda: not self._closed and channel not in self._retired and channel._callback_current(link), repair=True)
+                await pending.take(link, row, guard=guard)
+                await guard.prepare()
+                async with self.services.outbox.inbox._transaction() as writer:
+                    row, _taken = await self.services.outbox.inbox.pending_file_take(link, row, session=writer, guard=guard)
+        if compatible:
+            prior.origins.append(row)
+            if prior.task is not None:
+                prior.task.cancel()
+                await asyncio.gather(prior.task, return_exceptions=True)
+            self._arm_join(key, prior)
+        elif kind is not None:
+            joined = _JoinedInput(channel, link, [row], kind, basis)
+            self._joins[key] = joined
+            self._arm_join(key, joined)
+        else:
+            await self._admit_origins(channel, link, (row,))
+
+    def _arm_join(self, key, joined):
+        async def wait():
+            await asyncio.sleep(1.5 if joined.kind == "longtext" else 1.0)
+            await self._flush_join(key, joined)
+
+        joined.task = self._spawn(wait(), channel=joined.channel)
+
+    async def _flush_join(self, key, joined):
+        async with self._join_locks.hold(key):
+            self._join_busy[key] = joined.channel
+            try:
+                await self._flush_join_locked(key, joined)
+            finally:
+                self._join_busy.pop(key, None)
+
+    async def _flush_join_locked(self, key, joined):
+        if self._joins.get(key) is not joined:
+            return
+        self._joins.pop(key)
+        if joined.task is not None and joined.task is not asyncio.current_task():
+            joined.task.cancel()
+            await asyncio.gather(joined.task, return_exceptions=True)
+        if not self._closed and joined.channel not in self._retired and joined.channel._callback_current(joined.link):
+            await self._admit_origins(joined.channel, joined.link, tuple(joined.origins))
+
+    async def flush_inputs(self, channel, *, topic=_ALL_TOPICS):
+        """Flush earlier admitted pieces before an incompatible navigation input."""
+        keys = set(self._joins) | set(self._join_busy) if topic is _ALL_TOPICS else {(channel.link.id, topic)}
+        for key in sorted(keys, key=lambda value: (value[0], value[1] or 0)):
+            async with self._join_locks.hold(key):
+                joined = self._joins.get(key)
+                if joined is not None and joined.channel is channel:
+                    self._join_busy[key] = channel
+                    try:
+                        await self._flush_join_locked(key, joined)
+                    finally:
+                        self._join_busy.pop(key, None)
+
+    async def _admit_origins(self, channel, link, origins):
+        inbound = self._inbound(link, origins)
+        if not inbound.text.strip() and inbound.files:
+            pending = getattr(self.services, "pending_files", None)
+            if pending is None:
+                raise ValueError("pending-files-unavailable") from None
+            guard = _Guard(self.services, channel, link, lambda: not self._closed and channel not in self._retired and channel._callback_current(link), repair=True)
+            for row in origins:
+                for file in row.sanitized_input.get("files", []):
+                    admit = getattr(channel, "admit_file", None)
+                    allowed = True if admit is None else await admit(link, row, file)
+                    guard.current()
+                    if allowed:
+                        await pending.add(link, row, file, guard=guard)
+                        await channel.send_text(
+                            "file.saved_ask_plain",
+                            source_id=f"file-received:{row.chat_id}:{row.message_id}",
+                            reply_to=row.message_id,
+                            thread=row.message_thread_id,
+                            inbox_rows=[row],
+                            finish_route=True,
+                            _captured_link=link,
+                            file=file["filename"],
+                        )
+                    else:
+                        await guard.prepare()
+                        async with self.services.outbox.inbox._transaction() as writer:
+                            await self.services.outbox.inbox.finish_route(row, session=writer)
+                            await guard.check(writer)
+            return
+        disposition = self.queue.admit_submission(link, inbound) if "reply_to_message_id" in origins[0].sanitized_input else self.queue.admit(link, inbound)
+        if disposition == "full":
+            first = origins[0]
+            await channel.send_text("busy.followup_full", source_id=f"chat-full:{first.chat_id}:{first.message_id}", reply_to=first.message_id, thread=first.message_thread_id, inbox_rows=origins, finish_route=True, _captured_link=link)
+            return
+        for row in origins:
+            self._origins[(link.id, row.message_id)] = row
+            self._origin_channels[(link.id, row.message_id)] = channel
+        if disposition == "run":
+            self._start(channel, link, inbound)
+        elif disposition == "first-waiting":
+            first = origins[0]
+            await channel.send_text("busy.followup", source_id=f"chat-wait:{first.chat_id}:{first.message_id}", reply_to=first.message_id, thread=first.message_thread_id, inbox_rows=origins, _captured_link=link)
+        else:
+            self._spawn(channel.react_waiting(link, origins[0]), channel=channel)
 
     def _start(self, channel, link, inbound):
         topic = inbound.metadata.get("message_thread_id")
@@ -294,12 +492,16 @@ class ChatTurns:
 
     @staticmethod
     def _inbound(link, origins):
+        from app.telegram_bots.inbox import chat_input_parts
+
         first = origins[0]
+        parts = [chat_input_parts(row, bot_id=link.bot_id) for row in origins]
         return InboundMessage(
             channel_name="telegram",
             chat_id=str(link.chat_id),
             user_id=str(link.telegram_user_id),
-            text="\n\n".join(row.sanitized_input["text"] for row in origins),
+            text="\n\n".join(text for text, _files in parts if text),
+            files=[file for _text, files in parts for file in files],
             thread_ts=str(first.message_id),
             topic_id=str(first.message_thread_id) if first.message_thread_id is not None else None,
             connection_id=link.connection_id,
@@ -796,6 +998,7 @@ class ChatTurns:
         async with self._entry(channel):
             link = deepcopy(channel._admission(update).link)
             topic = None if update.message.message_thread_id in (None, 1) else update.message.message_thread_id
+            await self.flush_inputs(channel, topic=topic)
             original = self._turns.get((link.id, topic))
             if self._closed or channel in self._retired or not await channel._input_current(link) or not channel._callback_current(link):
                 return
@@ -852,7 +1055,7 @@ class ChatTurns:
                         raise CallbackRefused() from None
                 await self._stop_turn(turn, stop_id="callback:" + row.id)
                 return
-            if row.kind != "retry_message":
+            if row.kind not in {"retry_message", "file_retry"}:
                 raise CallbackRefused() from None
 
             def current():
@@ -1019,6 +1222,11 @@ class ChatTurns:
 
     def _retire_now(self, channel):
         self._retired.add(channel)
+        for key, joined in tuple(self._joins.items()):
+            if joined.channel is channel:
+                self._joins.pop(key)
+                if joined.task is not None:
+                    joined.task.cancel()
         retired = []
         for key, turn in tuple(self._turns.items()):
             if turn.channel is not channel:

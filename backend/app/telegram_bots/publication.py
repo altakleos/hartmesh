@@ -20,7 +20,7 @@ from app.channels.execution import ChannelExecutionContext, ChannelExecutionScop
 from app.channels.execution_client import ChannelExecutionFacade, ValidatedRun
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus
 from app.gateway.run_output import RunOutputProjectionV2
-from app.telegram_bots.inbox import InboxRepository, InboxRow, PublicationRecord, PublicationScope, is_plain_text_input
+from app.telegram_bots.inbox import InboxRepository, InboxRow, PublicationRecord, PublicationScope, chat_input_parts, validate_chat_file
 from app.telegram_bots.links import BotLink, prepare_publication_guard
 from app.telegram_bots.producer import Outbox, freeze_reply_presentation
 from deerflow.utils.file_io import await_drained
@@ -194,11 +194,9 @@ def _plain_origins(link, origins, *, thread_id, endpoint_id):
         identities.add(identity)
         if type(row.route_basis) is not dict:
             _refuse()
-        profile = row.route_basis.get("input_profile")
-        if type(profile) is not dict or set(profile) != {"version", "kind", "forwarded"} or type(profile["version"]) is not int or profile["version"] != 1 or profile["kind"] != "plain_text" or profile["forwarded"] is not False:
-            _refuse()
-        value = row.sanitized_input
-        if not is_plain_text_input(value):
+        try:
+            chat_input_parts(row, bot_id=link.bot_id)
+        except (KeyError, TypeError, ValueError):
             _refuse()
     return tuple(sorted(origins, key=lambda row: (row.accepted_at.astimezone(UTC), row.update_id, row.message_id)))
 
@@ -222,6 +220,7 @@ class PublicationCoordinator:
         self._operations: set[asyncio.Task] = set()
         self._stop_task = None
         self.human_input_planner = None
+        self.file_preflight = None
 
     def _check_open(self, *, creating):
         if not self._reading or creating and not self._creating:
@@ -351,10 +350,12 @@ class PublicationCoordinator:
             return record
         execution_scope = _channel_scope(record)
         facade = self._facade(record, admission)
-        text = "\n\n".join(row.sanitized_input["text"] for row in origins)
+        parts = [chat_input_parts(row, bot_id=link.bot_id) for row in origins]
+        text = "\n\n".join(value for value, _files in parts if value)
+        files = [file for _text, items in parts for file in items]
         human_kwargs = {}
         if record.owner_callback_id is not None or any("submission" in row.route_basis for row in origins):
-            text, human_kwargs = await self.inbox.read_publication_submission(record, guard=create_guard)
+            text, human_kwargs, files = await self.inbox.read_publication_message(record, guard=create_guard)
         message = InboundMessage(
             channel_name="telegram",
             chat_id=str(link.chat_id),
@@ -374,9 +375,24 @@ class PublicationCoordinator:
                 "channel_turn_id": record.publication_id,
                 "human_message_kwargs": {**human_kwargs, "channel_turn_id": record.publication_id},
             },
+            files=files,
             execution_required=True,
             execution_context=ChannelExecutionContext(execution_scope, facade, admission),
         )
+        if files and self.file_preflight is not None:
+            allowed = await self.file_preflight(link, record, [dict(file) for file in files], execution_context=message.execution_context)
+            await admission.authorize("run_create")
+            if type(allowed) is not list or any(type(file) is not dict for file in allowed):
+                _refuse()
+            allowed = [validate_chat_file(file) for file in allowed]
+            remaining = list(files)
+            for file in allowed:
+                if file not in remaining:
+                    _refuse()
+                remaining = remaining[remaining.index(file) + 1 :]
+            # The original accepted input remains immutable; only this actual
+            # transport can omit a refused attachment before its creating mark.
+            message.files = allowed
         await admission.authorize("run_create")
         reservation = self.bus.reserve_inbound(message)
         try:

@@ -18,14 +18,17 @@ from datetime import UTC, datetime
 from html import escape
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, Protocol
+from urllib.parse import unquote, urlsplit
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Update, User
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, InvalidToken, NetworkError, RetryAfter, TelegramError
 from telegram.ext import AIORateLimiter, Application, ApplicationHandlerStop, CallbackQueryHandler, ChatMemberHandler, CommandHandler, Defaults, ExtBot, ManagedBotUpdatedHandler, MessageHandler, TypeHandler, filters
-from telegram.request import HTTPXRequest
 
+from app.channels.execution import ChannelExecutionContext
+from app.channels.inbound_files import InboundFileLease
 from app.channels.telegram import TelegramChannel
+from app.telegram_bots.capped_download import ManagedHTTPXRequest
 from app.telegram_bots.render import render, render_plain
 from app.telegram_bots.settings import silent_now
 from app.telegram_bots.strangers import BAD_CODE_REPLIES_PER_SENDER_PER_HOUR as BAD_CODE_REPLIES_PER_SENDER_PER_HOUR
@@ -231,11 +234,12 @@ class TelegramBotChannel(TelegramChannel):
         self._stopping = False
         self._ingress_lock = asyncio.Lock()
         self._ingress_tasks: set[asyncio.Task] = set()
+        self._file_tasks: set[asyncio.Task] = set()
         self._edit_hashes: OrderedDict[tuple, bytes] = OrderedDict()
         self._unsupported_at: dict[tuple, float] = {}
         self._needs_success = True
         self._failure_serial = 0
-        factory = getattr(supervisor, "request_factory", HTTPXRequest)
+        factory = getattr(supervisor, "request_factory", ManagedHTTPXRequest)
         self._requests = (
             factory(connection_pool_size=8, httpx_kwargs={"verify": supervisor.tls_context}),
             factory(connection_pool_size=1, httpx_kwargs={"verify": supervisor.tls_context}),
@@ -407,6 +411,9 @@ class TelegramBotChannel(TelegramChannel):
 
     async def stop(self) -> None:
         self._stopping = True
+        for task in tuple(self._file_tasks):
+            task.cancel()
+        await await_drained(self._drain_file_reads())
         turns = getattr(self._services, "turns", None)
         if turns is not None:
             await turns.retire(self)
@@ -708,6 +715,10 @@ class TelegramBotChannel(TelegramChannel):
         query = update.callback_query
 
         async def execute(channel, row):
+            turns = getattr(self._services, "turns", None)
+            flush = getattr(turns, "flush_inputs", None)
+            if flush is not None:
+                await flush(channel, topic=row.message_thread_id)
             await channel.execute_callback(row, query_id=query.id, update_id=update.update_id)
 
         handler = CallbackHandler(repository, execute=execute)
@@ -883,10 +894,13 @@ class TelegramBotChannel(TelegramChannel):
 
     async def _on_command(self, update, context) -> None:
         word, arguments = self._command(update.message)
+        turns = getattr(self._services, "turns", None)
+        flush = getattr(turns, "flush_inputs", None)
+        if word != "stop" and flush is not None:
+            await flush(self, topic=update.message.message_thread_id)
         human_inputs = getattr(self._services, "human_inputs", None)
         if human_inputs is not None and word != "stop":
             await human_inputs.command(self, update, word, captured_link=self._admission(update).link)
-        turns = getattr(self._services, "turns", None)
         if word == "stop" and turns is not None:
             await turns.stop_chat(self, update)
             self._classified(update, remember=True)
@@ -920,11 +934,12 @@ class TelegramBotChannel(TelegramChannel):
             return
         turns = getattr(self._services, "turns", None)
         if turns is not None:
-            if type(update.message.text) is not str or not update.message.text.strip():
+            media = bool(update.message.photo or update.message.document)
+            if not media and (type(update.message.text) is not str or not update.message.text.strip()):
                 await self._on_unsupported(update, context)
                 return
             human_inputs = getattr(self._services, "human_inputs", None)
-            if human_inputs is not None and await human_inputs.handle_text(self, update, captured_link=self._admission(update).link):
+            if not media and human_inputs is not None and await human_inputs.handle_text(self, update, captured_link=self._admission(update).link):
                 self._classified(update)
                 return
             link = self._admission(update).link
@@ -1003,6 +1018,277 @@ class TelegramBotChannel(TelegramChannel):
 
     async def _get_download_bot(self):
         return self.bot
+
+    async def _drain_file_reads(self):
+        await asyncio.gather(*tuple(self._file_tasks), return_exceptions=True)
+
+    async def read_inbound_file(self, file, *, execution_context=None):
+        """Own the whole getFile/stream operation through adapter retirement."""
+        if self._stopping or not self.application.running or type(execution_context) is not ChannelExecutionContext:
+            return None
+        task = self.application.create_task(self._read_inbound_file(file, execution_context), name="telegram-file-read")
+        self._file_tasks.add(task)
+        delivered = False
+        try:
+            result = await asyncio.shield(task)
+            if isinstance(result, InboundFileLease):
+                fresh = await self._services.turns.file_context(self, file, execution_context=execution_context)
+                if fresh is None or not self._file_current(execution_context, fresh):
+                    await await_drained(result.aclose())
+                    result = None
+            delivered = True
+            return result
+        finally:
+            try:
+                if not delivered:
+                    task.cancel()
+                    await await_drained(self._join_file_read(task))
+            finally:
+                self._file_tasks.discard(task)
+
+    @staticmethod
+    async def _join_file_read(task):
+        results = await asyncio.gather(task, return_exceptions=True)
+        if isinstance(results[0], InboundFileLease):
+            await results[0].aclose()
+
+    async def _file_values(self, link, file, *, features=None):
+        from app.telegram_bots.authority import is_administrator
+        from app.telegram_bots.errors import STORAGE_REFERENCE_WORDS
+
+        administrator = await is_administrator(link.owner_user_id)
+        branding = (features or {}).get("branding")
+        provider = branding.get("provider") if type(branding) is dict else None
+        values = {"file": file["filename"], "product": self._services.product_name, "reader_is_administrator": administrator}
+        if type(provider) is dict and type(provider.get("display_name")) is str:
+            values["provider"] = provider["display_name"]
+        storage = (features or {}).get("storage_spaces")
+        reason = storage.get("reason") if type(storage) is dict else None
+        if type(reason) is str and reason in STORAGE_REFERENCE_WORDS:
+            values["code"] = STORAGE_REFERENCE_WORDS[reason]
+        return values
+
+    async def _file_preflight(self, link, file, check):
+        if type(file.get("size")) is int and file["size"] > self._services.config.files.max_inbound_bytes:
+            return "file.too_large_in", None
+        try:
+            features = await self._services.thread_client.get_features(link.owner_user_id, before_dispatch=check)
+        except Exception:
+            await check()
+            return "file.own_unavailable", None
+        await check()
+        storage = features.get("storage_spaces")
+        if type(storage) is not dict or storage.get("state") not in {"off", "ready", "incomplete", "unavailable"} or storage.get("own") not in {"ready", "not-assigned", "no-seat", "unverified"}:
+            return "file.own_unavailable", features
+        if storage["state"] == "unavailable":
+            return "file.own_unavailable", features
+        key = {"not-assigned": "file.own_preparing", "no-seat": "file.own_no_seat", "unverified": "file.own_unchecked"}.get(storage["own"])
+        return key, features
+
+    async def _file_button(self, link, *, thread_id):
+        from app.telegram_bots.pages import page_address
+
+        address = await await_drained(asyncio.to_thread(page_address, "web.conversation", link, thread_id=thread_id))
+        return {"page": "web.conversation", "url": address} if address else None
+
+    async def admit_file(self, link, row, file):
+        """Preflight a real captionless row without creating a conversation."""
+        from app.telegram_bots.producer import DeliveryClaimRetired
+
+        async def check():
+            if not await self._input_current(link):
+                raise DeliveryClaimRetired()
+
+        try:
+            await check()
+            key, features = await self._file_preflight(link, file, check)
+        except DeliveryClaimRetired:
+            raise
+        except Exception:
+            key, features = "file.own_unavailable", None
+        if key is None:
+            return True
+        values = await self._file_values(link, file, features=features)
+        button = None
+        if key == "file.too_large_in":
+            repository = self._services.channel_service.manager.connection_repo
+            topic = str(row.message_thread_id) if row.message_thread_id not in (None, 1) else None
+            thread_id = await await_drained(repository.get_thread_id(link.connection_id, str(row.chat_id), topic))
+            button = await self._file_button(link, thread_id=thread_id)
+        await check()
+        await self.send_text(
+            key,
+            source_id=f"file-admission:{link.binding_generation}:{row.chat_id}:{row.message_id}",
+            reply_to=file["message_id"],
+            thread=row.message_thread_id,
+            inbox_rows=[row],
+            _captured_link=link,
+            url_button=button,
+            **values,
+        )
+        return False
+
+    async def _file_notice(self, file, key, *, context=None, features=None, execution_context=None):
+        turns = getattr(self._services, "turns", None)
+        context = context or (await turns.file_context(self, file, execution_context=execution_context) if turns is not None else None)
+        if context is None:
+            return
+        values = await self._file_values(context.link, file, features=features)
+        button = await self._file_button(context.link, thread_id=context.record.scope.thread_id) if key == "file.too_large_in" else None
+        await turns.file_notice(self, context, key=key, values=values, url_button=button, retry=key == "file.not_saved", execution_context=execution_context)
+
+    def _file_current(self, execution_context, context):
+        if type(execution_context) is not ChannelExecutionContext:
+            return False
+        try:
+            scope = context.record.scope
+            expected = (context.record.publication_id, scope.owner_user_id, scope.connection_id, str(scope.chat_id), scope.thread_id, scope.endpoint_id, scope.assistant_id, scope.agent_name)
+            actual = execution_context.scope
+            return (
+                (actual.publication_id, actual.owner_user_id, actual.connection_id, actual.chat_id, actual.thread_id, actual.endpoint_id, actual.assistant_id, actual.agent_name) == expected
+                and context.current() is True
+                and self._callback_current(context.link)
+                and execution_context.admission.current("run_create") is True
+            )
+        except Exception:
+            return False
+
+    async def _file_write_notice(self, file, key, execution_context):
+        if type(execution_context) is not ChannelExecutionContext:
+            return
+        context = await self._services.turns.file_context(self, file, execution_context=execution_context)
+        if context is None or not self._file_current(execution_context, context):
+            return
+        await execution_context.admission.authorize("run_create")
+        if self._file_current(execution_context, context):
+            await self._file_notice(file, key, context=context, execution_context=execution_context)
+
+    async def file_not_saved(self, file, *, execution_context=None):
+        await self._file_write_notice(file, "file.not_saved", execution_context)
+
+    async def file_own_full(self, file, *, execution_context=None):
+        await self._file_write_notice(file, "file.own_full", execution_context)
+
+    async def file_too_large(self, file):
+        await self._file_notice(file, "file.too_large_in")
+
+    async def preflight_inbound_file(self, file, *, publication_id, execution_context):
+        from app.telegram_bots.producer import DeliveryClaimRetired
+
+        context = await self._services.turns.file_context(self, file, execution_context=execution_context)
+        if context is None or context.record.publication_id != publication_id or not self._file_current(execution_context, context):
+            raise DeliveryClaimRetired()
+
+        async def check():
+            await execution_context.admission.authorize("run_create")
+            if not await self._input_current(context.link):
+                raise DeliveryClaimRetired()
+            fresh = await self._services.turns.file_context(self, file, execution_context=execution_context)
+            if fresh is None or fresh.record.publication_id != publication_id or not self._file_current(execution_context, fresh):
+                raise DeliveryClaimRetired()
+
+        key, features = await self._file_preflight(context.link, file, check)
+        if key is not None:
+            await self._file_notice(file, key, context=context, features=features, execution_context=execution_context)
+            return False
+        return True
+
+    def _file_url(self, value):
+        """Only a current SDK getFile result below this bot's file endpoint."""
+        base = urlsplit(self.bot.base_file_url)
+        parsed = urlsplit(value) if type(value) is str else None
+        if (
+            parsed is None
+            or parsed.scheme != "https"
+            or (parsed.scheme, parsed.netloc) != (base.scheme, base.netloc)
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or not parsed.path.startswith(base.path.rstrip("/") + "/")
+            or any(not part or unquote(part) in {".", ".."} or any(c in unquote(part) for c in "/\\") or any(ord(c) <= 32 or ord(c) == 127 for c in unquote(part)) for part in parsed.path[len(base.path.rstrip("/")) + 1 :].split("/"))
+        ):
+            raise ValueError("invalid-file-location")
+        return value
+
+    async def _read_inbound_file(self, file, execution_context):
+        from app.telegram_bots.authority import require
+        from app.telegram_bots.capped_download import CappedDownloadError
+        from app.telegram_bots.producer import DeliveryClaimRetired
+
+        turns = getattr(self._services, "turns", None)
+        context = await turns.file_context(self, file, execution_context=execution_context) if turns is not None else None
+        if context is None or not self._file_current(execution_context, context):
+            return None
+        link = context.link
+        reservation = release = data = None
+        transferred = False
+        request = self._requests[0]
+
+        async def check():
+            if not self._file_current(execution_context, context):
+                raise DeliveryClaimRetired()
+            await execution_context.admission.authorize("run_create")
+            await require(link.owner_user_id, "threads:read", "threads:write")
+            if not await self._input_current(link):
+                raise DeliveryClaimRetired()
+            fresh = await turns.file_context(self, file, execution_context=execution_context)
+            if fresh is None or not self._file_current(execution_context, fresh):
+                raise DeliveryClaimRetired()
+
+        try:
+            await check()
+            key, features = await self._file_preflight(link, file, check)
+            if key is not None:
+                await self._file_notice(file, key, context=context, features=features, execution_context=execution_context)
+                return None
+            maximum = self._services.config.files.max_inbound_bytes
+            size = file.get("size")
+            ceiling = size if type(size) is int and size >= 0 else maximum
+            reservation = await self._services.file_bytes_budget.reserve_batch([ceiling], timeout=self._services.config.files.retry_max_seconds)
+            release = reservation.aclose
+            await check()
+            received = await self.bot.get_file(file["file_id"], rate_limit_args=LiveRequestFence(check))
+            await check()
+            if received.file_id != file["file_id"] or file.get("file_unique_id") is not None and received.file_unique_id != file["file_unique_id"]:
+                raise ValueError("invalid-file-identity")
+            if received.file_size is not None and received.file_size > maximum:
+                raise CappedDownloadError("too_large")
+            if received.file_size is not None and received.file_size > ceiling:
+                raise CappedDownloadError("overrun")
+            url = self._file_url(received.file_path)
+            data = await request.read_file_capped(url, ceiling=ceiling, max_bytes=maximum, before_dispatch=check, on_failed_close=release)
+            await check()
+            if not isinstance(data, bytes) or len(data) > ceiling:
+                raise ValueError("invalid-file-buffer")
+            await reservation.shrink(0, len(data))
+            await check()
+            lease = InboundFileLease(data, release)
+            data = None
+            transferred = True
+            return lease
+        except DeliveryClaimRetired:
+            return None
+        except CappedDownloadError as error:
+            if error.status in {401, 404}:
+                await self.verify_token(InvalidToken("Unauthorized" if error.status == 401 else "Not Found"))
+            await self._file_notice(file, "file.too_large_in" if error.reason == "too_large" else "file.not_saved", context=context, execution_context=execution_context)
+            return None
+        except InvalidToken as error:
+            await self.verify_token(error)
+            await self._file_notice(file, "file.not_saved", context=context, execution_context=execution_context)
+            return None
+        except BadRequest as error:
+            await self._file_notice(file, "file.too_large_in" if "file is too big" in str(error).casefold() else "file.not_saved", context=context, execution_context=execution_context)
+            return None
+        except Exception as error:
+            logger.warning("telegram_bots file_read_failed link=%s error=%s", link.id, type(error).__name__)
+            await self._file_notice(file, "file.not_saved", context=context, execution_context=execution_context)
+            return None
+        finally:
+            data = None
+            if reservation is not None and not transferred and not (hasattr(request, "retains_failed_close") and request.retains_failed_close(release)):
+                await await_drained(reservation.aclose())
 
     async def send(self, msg: OutboundMessage, _max_retries: int = 3) -> int | None:
         from app.telegram_bots.producer import PermanentDeliveryError

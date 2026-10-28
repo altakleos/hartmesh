@@ -338,6 +338,40 @@ class GatewayClientOwner:
 
         return await self._request(create, before_dispatch)
 
+    async def get_features(self, owner_user_id: str, *, before_dispatch) -> dict:
+        """Read storage availability from the separately configured Gateway.
+
+        Borrow this owner's HTTP client and cleanup, with fresh bound-human
+        headers. The fixed URL never comes from a Telegram file descriptor.
+        """
+
+        async def read(_client):
+            self._check_operation("thread_read")
+            headers = await self._headers_for(owner_user_id, None)
+            await before_dispatch()
+            self._check_operation("thread_read")
+            response = await self._http_client.send(self._http_client.build_request("GET", self._gateway_url + "/api/features", headers=headers, timeout=httpx.Timeout(30)), stream=True, follow_redirects=False)
+            self._remember_response(response)
+            try:
+                content = await self._response_content(response)
+                if response.status_code != 200:
+                    raise ChannelExecutionProtocolError()
+                result = await await_drained(asyncio.to_thread(_decode, content))
+                if type(result) is not dict:
+                    raise ChannelExecutionProtocolError()
+                await before_dispatch()
+                self._check_operation("thread_read")
+                return result
+            finally:
+                await self._close_response(response)
+
+        try:
+            return await self._request(read, None)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise ChannelExecutionProtocolError() from None
+
     def _check_operation(self, operation):
         if operation not in {"thread_read", "run_read", "source_read", "run_create", "run_cancel"} or self._stopping or operation == "run_create" and self._run_admission_closed:
             raise ChannelExecutionProtocolError()
