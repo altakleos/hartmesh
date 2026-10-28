@@ -85,6 +85,10 @@ def validate_model_reply_basis(item: OutboxItem, part: dict | None = None) -> Ve
     from app.telegram_bots.producer import FrozenReplyPresentation, OutboxItem, _canonical_primary
 
     try:
+        if type(item) is OutboxItem and type(item.payload) is dict and type(item.payload.get("reply_basis")) is dict and type(item.payload["reply_basis"].get("version")) is int and item.payload["reply_basis"]["version"] == 7:
+            from app.telegram_bots.mixed_source import validate_mixed_reply_basis
+
+            return validate_mixed_reply_basis(item, part)
         if type(item) is OutboxItem and type(item.payload) is dict and type(item.payload.get("reply_basis")) is dict and type(item.payload["reply_basis"].get("version")) is int and item.payload["reply_basis"]["version"] == 6:
             from app.telegram_bots.file_source import validate_file_reply_basis
 
@@ -390,7 +394,7 @@ class ModelSource:
 
         try:
             private, proof = await await_drained(asyncio.to_thread(_prepare_part, captured))
-            if proof.kind != "file_outputs" or private.part["kind"] not in {"document", "photo", "album"}:
+            if proof.kind not in {"file_outputs", "human_input_files"} or private.part["kind"] not in {"document", "photo", "album"}:
                 raise ValueError
             fresh = await self._read_output(proof.record, private.link)
             if fresh is None or _canonical_primary(fresh.model_dump(mode="json")) != _canonical_primary(proof.output.model_dump(mode="json")):
@@ -404,7 +408,16 @@ class ModelSource:
 
         try:
             private, proof = await await_drained(asyncio.to_thread(_prepare_part, captured))
-            if proof.kind == "human_input":
+            if proof.kind == "human_input_files" and private.part["source_ref"].get("key") != "human_input.presentation":
+                # File warnings retain their own source-verified controls;
+                # they do not acquire question/form authority or currency.
+                from app.telegram_bots.producer import _canonical_primary
+
+                fresh = await self._read_output(proof.record, private.link)
+                if fresh is None or _canonical_primary(fresh.model_dump(mode="json")) != _canonical_primary(proof.output.model_dump(mode="json")) or private.part["source_ref"].get("key") not in {"file.out_failed", "file.too_large_out"}:
+                    raise ValueError
+                return None
+            if proof.kind in {"human_input", "human_input_files"}:
                 from app.telegram_bots.human_input_source import check_qualified_request
                 from app.telegram_bots.producer import _canonical_primary
 

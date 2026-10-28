@@ -27,7 +27,9 @@ PRESS_TIMEOUT_SECONDS = 2.0
 _ID = re.compile(r"^[0-9a-f]{32}$")
 _TOKEN = re.compile(TOKEN_BODY)
 _SCOPE = ("id", "owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "binding_generation", "token_revision")
-_RESERVED = frozenset({"label", "label_values", "keyboard_row", "keyboard_column", "anchor_outbox_id", "presentation_version", "presentation_pending", "presentation_history", "message_adopted", "prompt_successor", "publication_owner"})
+_RESERVED = frozenset(
+    {"label", "label_values", "keyboard_row", "keyboard_column", "anchor_outbox_id", "presentation_version", "presentation_pending", "presentation_history", "message_adopted", "prompt_successor", "publication_owner", "prompt_visibility"}
+)
 CALLBACK_METADATA_KEYS = _RESERVED
 _SECRET = frozenset({"token", "bot_token", "access_token", "raw_update", "update", "audio", "audio_bytes", "download_url", "temporary_url", "bytes"})
 _KINDS = frozenset(
@@ -226,15 +228,18 @@ def _validate_rows(parent, rows, *, part=None):
     version = parent.payload.get("presentation_version", 0)
     if type(version) is not int or version < 0:
         raise CallbackRefused() from None
-    if parent.payload.get("reply_basis", {}).get("version") == 6:
-        from app.telegram_bots.file_source import file_warning_keyboard, validate_file_reply_basis
+    if parent.payload.get("reply_basis", {}).get("version") in {6, 7}:
+        from app.telegram_bots.file_source import file_warning_keyboard, validate_media_reply_basis
         from app.telegram_bots.producer import _item
 
         try:
-            validate_file_reply_basis(_item(parent))
+            validate_media_reply_basis(_item(parent))
             groups = {row.group_id for row in rows}
             part = part if part is not None else next(value for value in parent.parts if value.get("callback_group_id") in groups)
-            descriptors = file_warning_keyboard(part)
+            if part.get("source_ref", {}).get("key") == "human_input.presentation" and parent.payload["reply_basis"]["version"] == 7:
+                descriptors = canonical_keyboard(parent.payload.get("product_keyboard_basis"))
+            else:
+                descriptors = file_warning_keyboard(part)
         except (StopIteration, ValueError):
             raise CallbackRefused() from None
     else:
@@ -478,13 +483,13 @@ class CallbackRepository:
         parent = await session.get(TelegramOutboxRow, anchor_outbox_id, with_for_update=True, populate_existing=True)
         topic = _topic(message_thread_id)
         file_keyboard = False
-        if parent is not None and parent.payload.get("reply_basis", {}).get("version") == 6:
-            from app.telegram_bots.file_source import file_warning_keyboard, validate_file_reply_basis
+        if parent is not None and parent.payload.get("reply_basis", {}).get("version") in {6, 7}:
+            from app.telegram_bots.file_source import file_warning_keyboard, validate_media_reply_basis
             from app.telegram_bots.producer import _item
 
             try:
-                validate_file_reply_basis(_item(parent))
-                file_keyboard = any(value.get("stored_keyboard") and file_warning_keyboard(value) == descriptors for value in parent.parts)
+                validate_media_reply_basis(_item(parent))
+                file_keyboard = any(value.get("stored_keyboard") and value.get("source_ref", {}).get("key") in {"file.out_failed", "file.too_large_out"} and file_warning_keyboard(value) == descriptors for value in parent.parts)
             except ValueError:
                 raise CallbackRefused() from None
         if (
@@ -683,6 +688,8 @@ class CallbackRepository:
                 for row in rows:
                     if row.message_thread_id != topic:
                         continue
+                    if row.kind == "prompt" and "prompt_visibility" in row.payload and not Prompts.is_visible(_row(row)):
+                        continue
                     current = row.message_id == message_id
                     history = row.payload.get("presentation_history", [])
                     alias = any(type(item) is dict and item.get("message_id") == message_id and item.get("message_thread_id") == topic for item in history) if isinstance(history, list) else False
@@ -815,6 +822,8 @@ class CallbackRepository:
                     if row.group_id in pending_groups:
                         continue
                     age = _aware(now) - _aware(row.created_at)
+                    if row.kind == "prompt" and row.consumed_at is None and "prompt_visibility" in row.payload and _visibility(row.payload["prompt_visibility"])["state"] == "pending":
+                        continue
                     if row.kind == "prompt" and row.consumed_at is None and row.expires_at is not None and _aware(now) >= _aware(row.expires_at):
                         row.consumed_at, row.closed_reason = now, "expired"
                     anchor = await session.get(TelegramOutboxRow, row.payload.get("anchor_outbox_id")) if type(row.payload.get("anchor_outbox_id")) is str else None
@@ -827,6 +836,35 @@ class CallbackRepository:
                 return removed
 
         return await await_drained(perform())
+
+
+def _visibility(value):
+    value = _plain(value)
+    if (
+        type(value) is not dict
+        or set(value) != {"state", "part_id", "ttl_seconds"}
+        or value["state"] not in {"pending", "visible"}
+        or type(value["ttl_seconds"]) is not int
+        or value["ttl_seconds"] <= 0
+        or value["part_id"] is not None
+        and (type(value["part_id"]) is not str or _ID.fullmatch(value["part_id"]) is None)
+    ):
+        raise CallbackRefused() from None
+    return value
+
+
+def _arm_visible_prompt(row, part):
+    visibility = _visibility(row.payload["prompt_visibility"])
+    if row.consumed_at is not None or "prompt_successor" in row.payload or visibility["state"] != "pending" or visibility["part_id"] != part["part_id"] or part["state"] != "sent" or not part["message_ids"]:
+        return
+    try:
+        acknowledged_at = _aware(datetime.fromisoformat(part["sent_at"]))
+    except (KeyError, TypeError, ValueError):
+        raise CallbackRefused() from None
+    row.payload = {**row.payload, "prompt_visibility": {**visibility, "state": "visible"}}
+    row.message_id = part["message_ids"][-1]
+    row.created_at = acknowledged_at
+    row.expires_at = acknowledged_at + timedelta(seconds=visibility["ttl_seconds"])
 
 
 class Prompts:
@@ -864,8 +902,10 @@ class Prompts:
             )
         )
 
-    async def open(self, link, purpose, payload, *, chat_id, message_thread_id, message_id, prompt_id=None, guard=None, session=None):
+    async def open(self, link, purpose, payload, *, chat_id, message_thread_id, message_id, prompt_id=None, guard=None, session=None, defer_visibility=False):
         topic, supplied = _topic(message_thread_id), _plain(payload)
+        if type(defer_visibility) is not bool:
+            raise CallbackRefused() from None
         if type(purpose) is not str or not purpose or chat_id != link.chat_id or "purpose" in supplied or _RESERVED.intersection(supplied) or prompt_id is not None and (type(prompt_id) is not str or _ID.fullmatch(prompt_id) is None):
             raise CallbackRefused() from None
         if message_id is not None and (type(message_id) is not int or message_id <= 0):
@@ -877,7 +917,12 @@ class Prompts:
                 identity = prompt_id or uuid4().hex
                 existing = await writer.get(TelegramCallbackRow, identity, with_for_update=True)
                 if existing is not None:
-                    if existing not in rows or existing.message_id != message_id or {key: child for key, child in existing.payload.items() if key not in _RESERVED} != {"purpose": purpose, **supplied}:
+                    if (
+                        existing not in rows
+                        or (existing.message_id != message_id and not (defer_visibility and message_id is None and self.is_visible(_row(existing))))
+                        or ("prompt_visibility" in existing.payload) is not defer_visibility
+                        or {key: child for key, child in existing.payload.items() if key not in _RESERVED} != {"purpose": purpose, **supplied}
+                    ):
                         raise CallbackRefused() from None
                     return identity
                 for row in rows:
@@ -896,8 +941,8 @@ class Prompts:
                         kind="prompt",
                         target_kind="thread" if "thread_id" in supplied else None,
                         target_id=supplied.get("thread_id"),
-                        payload={"purpose": purpose, **supplied},
-                        expires_at=self.repository.clock() + timedelta(seconds=self.repository.config.prompts.ttl_seconds),
+                        payload={"purpose": purpose, **supplied, **({"prompt_visibility": {"state": "pending", "part_id": None, "ttl_seconds": self.repository.config.prompts.ttl_seconds}} if defer_visibility else {})},
+                        expires_at=None if defer_visibility else self.repository.clock() + timedelta(seconds=self.repository.config.prompts.ttl_seconds),
                         created_at=self.repository.clock(),
                     )
                 )
@@ -929,8 +974,74 @@ class Prompts:
             if type(version) is not int or version < 0 or row.payload.get("anchor_outbox_id", outbox_id) != outbox_id or row.payload.get("presentation_version", version) != version:
                 raise CallbackRefused() from None
             row.payload = {**row.payload, "anchor_outbox_id": outbox_id, "presentation_version": version, "presentation_pending": False}
+            if "prompt_visibility" in row.payload:
+                from app.telegram_bots.mixed_source import human_input_parts
+                from app.telegram_bots.producer import _item
+
+                basis = parent.payload.get("reply_basis", {})
+                if basis.get("version") != 7 and not (basis.get("version") == 5 and basis.get("step_id") is not None and basis.get("outcome", {}).get("request_basis", {}).get("version") == 2):
+                    raise CallbackRefused() from None
+                owned = await await_drained(asyncio.to_thread(human_input_parts, _item(parent)))
+                if not owned:
+                    raise CallbackRefused() from None
+                final = owned[-1]
+                visibility = _visibility(row.payload["prompt_visibility"])
+                if visibility["state"] == "pending":
+                    row.payload = {**row.payload, "prompt_visibility": {**visibility, "part_id": final["part_id"]}}
+                    _arm_visible_prompt(row, final)
+                elif visibility["part_id"] != final["part_id"]:
+                    raise CallbackRefused() from None
             await writer.flush()
             return _row(row)
+
+    @staticmethod
+    def is_visible(prompt):
+        if "prompt_visibility" not in prompt.payload:
+            return True
+        try:
+            visibility = _visibility(prompt.payload["prompt_visibility"])
+            return visibility["state"] == "visible" and type(prompt.message_id) is int and prompt.message_id > 0 and prompt.expires_at is not None
+        except CallbackRefused:
+            return False
+
+    async def acknowledge_part(self, parent, part, *, session):
+        """Arm only the originally attached deferred prompt in the ACK writer."""
+        from app.telegram_bots.mixed_source import human_input_parts
+        from app.telegram_bots.producer import _item
+
+        self.repository._borrow(session)
+        basis = parent.payload.get("reply_basis", {})
+        if basis.get("version") not in {5, 7}:
+            return
+        pending = list(
+            await session.scalars(
+                select(TelegramCallbackRow)
+                .where(
+                    TelegramCallbackRow.link_id == parent.link_id,
+                    TelegramCallbackRow.binding_generation == parent.binding_generation,
+                    TelegramCallbackRow.chat_id == parent.chat_id,
+                    TelegramCallbackRow.kind == "prompt",
+                    TelegramCallbackRow.payload["anchor_outbox_id"].as_string() == parent.id,
+                )
+                .with_for_update()
+            )
+        )
+        pending = [
+            row
+            for row in pending
+            if "prompt_visibility" in row.payload
+            and row.consumed_at is None
+            and "prompt_successor" not in row.payload
+            and _visibility(row.payload["prompt_visibility"])["state"] == "pending"
+            and _visibility(row.payload["prompt_visibility"])["part_id"] == part["part_id"]
+        ]
+        if not pending:
+            return
+        owned = await await_drained(asyncio.to_thread(human_input_parts, _item(parent)))
+        if not owned or owned[-1]["part_id"] != part["part_id"]:
+            raise CallbackRefused() from None
+        for row in pending:
+            _arm_visible_prompt(row, part)
 
     async def current(self, link, chat_id, message_thread_id, *, guard=None, session=None):
         topic = _topic(message_thread_id)
@@ -942,6 +1053,8 @@ class Prompts:
                 rows = await self._rows(writer, link, chat_id, topic)
                 tips = [row for row in rows if "prompt_successor" not in row.payload]
                 for row in tips or rows:
+                    if row.consumed_at is None and "prompt_visibility" in row.payload and _visibility(row.payload["prompt_visibility"])["state"] == "pending":
+                        return None
                     if row.consumed_at is None:
                         if row.expires_at is not None and self.repository.clock() >= _aware(row.expires_at):
                             row.consumed_at, row.closed_reason = self.repository.clock(), "expired"

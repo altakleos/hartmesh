@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import PurePosixPath
 
 from deerflow.utils.file_io import await_drained
 
@@ -138,7 +139,7 @@ def validate_request_basis(record, basis):
             type(basis) is not dict
             or set(basis) != {"version", "publication", "projection", "messages"}
             or type(basis["version"]) is not int
-            or basis["version"] != 1
+            or basis["version"] not in {1, 2}
             or json.dumps(basis["publication"], sort_keys=True) != json.dumps(publication_identity(record), sort_keys=True)
         ):
             _refuse()
@@ -157,7 +158,19 @@ def validate_request_basis(record, basis):
         ):
             _refuse()
         items = inventory.document.items
-        if len(items) != 1 or type(items[0]) is not StructuredInventoryDescriptor or items[0].carrier != "message_artifact":
+        if basis["version"] == 1:
+            if len(items) != 1:
+                _refuse()
+            structured = items[0]
+        else:
+            if type(inventory.document.version) is not int or inventory.document.version != 2:
+                _refuse()
+            _mixed_paths(items)
+            structured_items = [item for item in items if type(item) is StructuredInventoryDescriptor]
+            if len(structured_items) != 1:
+                _refuse()
+            structured = structured_items[0]
+        if type(structured) is not StructuredInventoryDescriptor or structured.carrier != "message_artifact":
             _refuse()
         rows = basis["messages"]
         if type(rows) is not list or not rows or len(rows) > MAX_SOURCE_MESSAGES:
@@ -184,7 +197,7 @@ def validate_request_basis(record, basis):
                     if not _text(identity) or identity in calls:
                         _refuse()
                     calls[identity] = (call, row["seq"])
-            if row.get("event_type") == "llm.tool.result" and content.get("type") == "tool" and isinstance(content.get("artifact"), dict) and presentation_fragment_digest(content["artifact"]) == items[0].value_sha256:
+            if row.get("event_type") == "llm.tool.result" and content.get("type") == "tool" and isinstance(content.get("artifact"), dict) and presentation_fragment_digest(content["artifact"]) == structured.value_sha256:
                 candidates.append(row)
         if len(candidates) != 1 or candidates[0]["seq"] != rows[-1]["seq"]:
             _refuse()
@@ -199,12 +212,54 @@ def validate_request_basis(record, basis):
             _refuse()
         if request.get("source") == "ask_clarification" and (tool["name"] != "ask_clarification" or tool.get("id") != request.get("request_id")):
             _refuse()
-        witness = items[0].witness
+        if basis["version"] == 2 and request.get("source") not in {"ask_clarification", "sandbox_network"}:
+            _refuse()
+        witness = structured.witness
+        if basis["version"] == 2 and witness.kind not in {"root_snapshot", "message_event"}:
+            _refuse()
         if witness.kind == "root_snapshot" and witness.message_id != tool.get("id") or witness.kind == "message_event" and (witness.message_id != tool.get("id") or witness.event_seq != row["seq"]):
             _refuse()
         return deepcopy(request)
     except Exception:
         _refuse()
+
+
+def _mixed_paths(items):
+    from deerflow.runtime.runs.output_inventory import FileInventoryDescriptor, StructuredInventoryDescriptor
+
+    paths = []
+    for item in items:
+        if type(item) is StructuredInventoryDescriptor:
+            continue
+        if type(item) is not FileInventoryDescriptor:
+            _refuse()
+        path = item.path
+        parsed = PurePosixPath(path)
+        if (
+            not path.startswith("/mnt/user-data/outputs/")
+            or str(parsed) != path
+            or "\\" in path
+            or any(ord(char) < 32 or ord(char) == 127 for char in path)
+            or any(part in {".", ".."} for part in parsed.parts)
+            or path in paths
+            or not item.surfaces
+            or not item.witnesses
+        ):
+            _refuse()
+        paths.append(path)
+    if not paths:
+        _refuse()
+    return tuple(paths)
+
+
+def mixed_file_paths(record, basis):
+    """Return ordered files only after qualifying the complete mixed proof."""
+    from app.gateway.run_output import RunOutputProjectionV2
+
+    validate_request_basis(record, basis)
+    if type(basis["version"]) is not int or basis["version"] != 2:
+        _refuse()
+    return _mixed_paths(RunOutputProjectionV2.model_validate(basis["projection"]).inventory.document.items)
 
 
 @dataclass(frozen=True, init=False)
@@ -243,18 +298,13 @@ def check_qualified_request(source, record):
     return source.basis
 
 
-def prepare_human_input_reply(record, source_basis, *, parts, keyboard, inputs, step_id=None):
-    """Freeze host-rendered UI under the exact private request's source basis."""
+def freeze_human_input_parts(record, request, *, parts, keyboard):
+    """Freeze presentation only; source and writer authority remain separate."""
     from app.telegram_bots.callbacks import canonical_keyboard
-    from app.telegram_bots.inbox import publication_identity, validate_publication_inputs
     from app.telegram_bots.producer import _canonical_primary, _safe_json
     from app.telegram_bots.split import utf16_units, visible_text
 
-    request = validate_request_basis(record, source_basis)
-    validate_publication_inputs(record, inputs)
     controls = canonical_keyboard(keyboard)
-    if step_id is not None and (not _text(step_id) or len(step_id) > 128 or not step_id.isprintable()):
-        _refuse()
     if type(parts) is not list or not parts:
         _refuse()
     frozen = []
@@ -298,6 +348,21 @@ def prepare_human_input_reply(record, source_basis, *, parts, keyboard, inputs, 
         if stored:
             part["stored_keyboard"] = True
         frozen.append(part)
+    return frozen, controls
+
+
+def prepare_human_input_reply(record, source_basis, *, parts, keyboard, inputs, step_id=None):
+    """Freeze host-rendered UI under the exact private request's source basis."""
+    from app.telegram_bots.inbox import publication_identity, validate_publication_inputs
+    from app.telegram_bots.producer import _safe_json
+
+    request = validate_request_basis(record, source_basis)
+    validate_publication_inputs(record, inputs)
+    if step_id is not None and (not _text(step_id) or len(step_id) > 128 or not step_id.isprintable()):
+        _refuse()
+    if source_basis["version"] == 2 and step_id is None:
+        _refuse()
+    frozen, controls = freeze_human_input_parts(record, request, parts=parts, keyboard=keyboard)
     outcome = {"kind": "human_input", "projection": deepcopy(source_basis["projection"]), "request_basis": deepcopy(source_basis)}
     basis = {"version": 5, "publication": publication_identity(record), "outcome": outcome, "presentation": None, "parts": frozen, "keyboard": controls, "inputs": deepcopy(inputs), "step_id": step_id, "finish_route": step_id is None}
     return _safe_json(basis), frozen
@@ -314,6 +379,10 @@ def validate_human_input_reply_basis(item, part=None):
         if type(item) is not OutboxItem or type(item.payload) is not dict or "product_basis" in item.payload or "delivery_kind" in item.payload or "turn_outcome_basis" in item.payload:
             _refuse()
         basis = item.payload["reply_basis"]
+        if type(basis) is dict and type(basis.get("version")) is int and basis["version"] == 7:
+            from app.telegram_bots.mixed_source import validate_mixed_reply_basis
+
+            return validate_mixed_reply_basis(item, part)
         if (
             type(basis) is not dict
             or set(basis) != {"version", "publication", "outcome", "presentation", "parts", "keyboard", "inputs", "step_id", "finish_route"}
@@ -466,7 +535,8 @@ class HumanInputSource:
         if fresh is None or fresh.model_dump(mode="json") != output.model_dump(mode="json"):
             _refuse()
         await admission.authorize("source_read")
-        basis = {"version": 1, "publication": publication_identity(record), "projection": fresh.model_dump(mode="json"), "messages": rows}
+        mixed = getattr(fresh.inventory.document, "version", None) == 2 and any(item.kind == "file" for item in getattr(fresh.inventory.document, "items", ()))
+        basis = {"version": 2 if mixed else 1, "publication": publication_identity(record), "projection": fresh.model_dump(mode="json"), "messages": rows}
         request = await await_drained(asyncio.to_thread(validate_request_basis, record, basis))
         if admission.current("source_read") is not True:
             _refuse()

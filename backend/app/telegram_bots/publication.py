@@ -611,7 +611,7 @@ class PublicationCoordinator:
 
                         item = await self.outbox.get(current_link, identity)
                         proof = await await_drained(asyncio.to_thread(validate_model_reply_basis, item))
-                        if proof.kind != "human_input" or proof.output != output or publication_identity(proof.record) != publication_identity(fresh) or item.payload["reply_basis"]["finish_route"] is not True:
+                        if proof.kind not in {"human_input", "human_input_files"} or proof.output != output or publication_identity(proof.record) != publication_identity(fresh) or item.payload["reply_basis"]["finish_route"] is not True:
                             _refuse()
                         return PublicationObservation("planned", fresh, outbox_id=identity)
                 if self.file_output_planner is not None and inventory.state == "matched" and inventory.document.coverage == "complete" and inventory.document.items:

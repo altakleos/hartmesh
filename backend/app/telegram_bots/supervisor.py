@@ -937,6 +937,15 @@ class TelegramSupervisor:
         verdict = await self.authority.delivery(link, item, part)
         if self._stopping or self._cause is not None or not self._send_ready:
             return DeliveryEligibility.wait()
+        if self.human_inputs is not None and item.payload.get("reply_basis", {}).get("version") == 7 and part is not None and isinstance(verdict, DeliveryEligibility) and verdict.decision == "allow":
+            from app.telegram_bots.mixed_source import is_human_input_part
+
+            # File retry and settlement are independent of an answered question.
+            # Only its actual owned UI requires current request/form state.
+            if await await_drained(asyncio.to_thread(is_human_input_part, item, part)) and not await self.human_inputs.step_current(item, part=part):
+                return DeliveryEligibility.skip("superseded")
+            if self._stopping or self._cause is not None or not self._send_ready:
+                return DeliveryEligibility.wait()
         return verdict
 
     async def protect_notice(self, context: SendContext) -> bool:

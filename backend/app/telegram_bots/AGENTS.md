@@ -49,6 +49,24 @@ inside the SDK limiter. Recovery passes its original read guard into the same
 planner. Fixed navigation can close scoped metadata without reading old private
 content; any private keyboard cleanup still needs fresh source qualification.
 
+`mixed_source.py` qualifies one supported human-input request plus ordered files
+from the same complete, unmodified output projection. Request basis 2 and reply
+basis 7 are closed variants; existing question-only V5 and file-only V6 identities
+remain strict. Metadata uses the original source/read guard before entering the
+existing primary/seal writer. Files precede the complete request UI without a
+caption. Every part retains its own source, acknowledgement and control group.
+Only owned request UI needs current question/form state; media, file warnings
+and delivery settlement remain independent after an answer. File Retry never
+stages another model input. HI views and cleanup select request-owned parts,
+never the outbox's most recent media acknowledgement.
+
+Mixed form/Other prompts are saved inactive in the same writer. The exact final
+request part's acknowledgement activates its saved anchor and starts its TTL;
+unseen prompts accept no field input. File retries cannot reanchor, reactivate
+or extend them. Mixed V5 steps require the original V7 parent, identical request
+and input snapshots, and its acknowledged request/prerequisite barrier. Media
+relocation/replacement preserves the separate request lineage and old receipts.
+
 `forms.py` stores bounded field values/revisions in existing callback rows. Saved
 option identities, required-checkbox truth, field-by-field prompts and the final
 review/Send determine the exact response; caller labels never select an action.

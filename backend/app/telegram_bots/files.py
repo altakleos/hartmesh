@@ -317,14 +317,14 @@ def _partition_output_photos(members, capacity):
     return tuple(parts)
 
 
-def plan_output_files(descriptors, *, answer_visible: str, capacity: int, max_bytes: int) -> OutputPlan:
+def plan_output_files(descriptors, *, answer_visible: str, capacity: int, max_bytes: int, caption_allowed: bool = True) -> OutputPlan:
     """Partition authorized metadata before payload reads, never opening files."""
     from app.telegram_bots.split import utf16_units
 
-    if type(answer_visible) is not str or type(capacity) is not int or type(max_bytes) is not int or not 0 < max_bytes <= min(capacity, 50_000_000):
+    if type(answer_visible) is not str or type(caption_allowed) is not bool or type(capacity) is not int or type(max_bytes) is not int or not 0 < max_bytes <= min(capacity, 50_000_000):
         raise ValueError("invalid-output-plan") from None
     members = _output_metadata(descriptors)
-    caption = len(members) == 1 and members[0]["state"] == "ready" and members[0]["size"] <= max_bytes and utf16_units(answer_visible) <= 1024
+    caption = caption_allowed and len(members) == 1 and members[0]["state"] == "ready" and members[0]["size"] <= max_bytes and utf16_units(answer_visible) <= 1024
     if caption:
         return OutputPlan(True, (_media_part("document", members),))
     result, photos = [], []
