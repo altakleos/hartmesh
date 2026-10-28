@@ -762,7 +762,9 @@ async def test_last_dispatch_reserve_rechecks_health_after_its_awaited_preparati
     task = None
     try:
         task = asyncio.create_task(e.threads.ensure_thread(e.link, inbound(e), origin=await origin(e)))
-        await asyncio.wait_for(entered.wait(), 3)
+        # Cold SQL/authority preparation is fixture arrival, not a product
+        # deadline. The health change below still happens at the exact barrier.
+        await asyncio.wait_for(entered.wait(), 15)
         await db.links.set_health(e.link.id, "secret_unreadable", holds=True, expected_token_revision=e.link.token_revision)
         release.set()
         with pytest.raises(ValueError):
