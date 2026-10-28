@@ -17,7 +17,7 @@ from uuid import UUID
 from langchain_core.messages import BaseMessage, HumanMessage
 
 from deerflow.runtime.runs.output import OutputEvidenceError, TextOutputReceipt, UnavailableOutputReceipt, canonical_text_digest
-from deerflow.runtime.runs.output_source import OutputMessageEvidence, audit_output_source_event, inspect_output_message
+from deerflow.runtime.runs.output_source import OutputMessageEvidence, audit_output_source_event, inspect_output_message, qualified_human_input_response
 from deerflow.runtime.runs.preview import PreviewSpan, text_digest
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.utils.messages import restore_original_human_message, strip_injected_user_message_id_suffix
@@ -185,7 +185,11 @@ class OutputCaptureObserver:
                     restored = _dump(restore_original_human_message(message))
                     facts = inspect_output_message(restored)
                     if facts.message_id == identity:
-                        if facts != initial or restored.get("additional_kwargs", {}).get("channel_turn_id") != expected.get("additional_kwargs", {}).get("channel_turn_id"):
+                        if (
+                            facts != initial
+                            or restored.get("additional_kwargs", {}).get("channel_turn_id") != expected.get("additional_kwargs", {}).get("channel_turn_id")
+                            or qualified_human_input_response(restored.get("additional_kwargs", {})) != qualified_human_input_response(expected.get("additional_kwargs", {}))
+                        ):
                             self.uncertain = True
                             return
                         matches.append(facts)

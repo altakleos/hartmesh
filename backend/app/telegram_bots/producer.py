@@ -683,6 +683,143 @@ class Outbox:
         self.config = config or TelegramBotsConfig()
         self.clock = clock
 
+    async def get(self, link, outbox_id, *, session=None):
+        async def read(reader):
+            row = await reader.get(TelegramOutboxRow, outbox_id, populate_existing=True)
+            if row is None or (row.link_id, row.owner_user_id, row.chat_id, row.binding_generation) != (link.id, link.owner_user_id, link.chat_id, link.binding_generation):
+                return None
+            return _item(row)
+
+        if session is not None:
+            return await read(session)
+        async with self.sessions() as reader:
+            return await read(reader)
+
+    async def list_human_inputs(self, link, *, topic, session=None):
+        topic = None if topic in (None, 1) else topic
+
+        async def read(reader):
+            active_control = (
+                select(TelegramCallbackRow.id)
+                .where(
+                    TelegramCallbackRow.payload["anchor_outbox_id"].as_string() == TelegramOutboxRow.id,
+                    TelegramCallbackRow.link_id == link.id,
+                    TelegramCallbackRow.chat_id == link.chat_id,
+                    TelegramCallbackRow.message_thread_id == topic,
+                    TelegramCallbackRow.binding_generation == link.binding_generation,
+                    TelegramCallbackRow.consumed_at.is_(None),
+                )
+                .exists()
+            )
+            rows = list(
+                await reader.scalars(
+                    select(TelegramOutboxRow)
+                    .where(
+                        TelegramOutboxRow.link_id == link.id,
+                        TelegramOutboxRow.owner_user_id == link.owner_user_id,
+                        TelegramOutboxRow.chat_id == link.chat_id,
+                        TelegramOutboxRow.binding_generation == link.binding_generation,
+                        TelegramOutboxRow.message_thread_id == topic,
+                        TelegramOutboxRow.payload["reply_basis"]["version"].as_integer() == 5,
+                        active_control,
+                    )
+                    .order_by(TelegramOutboxRow.created_at.desc(), TelegramOutboxRow.id.desc())
+                    .limit(32)
+                )
+            )
+            return tuple(_item(row) for row in rows)
+
+        if session is not None:
+            return await read(session)
+        async with self.sessions() as reader:
+            return await read(reader)
+
+    async def plan_human_input_reply(self, record, source, *, parts, keyboard, callbacks, guard, session=None):
+        return await self._plan_human_input(record, source, parts=parts, keyboard=keyboard, callbacks=callbacks, guard=guard, step_id=None, session=session)
+
+    async def plan_human_input_step(self, record, source, *, step_id, parts, keyboard, callbacks, guard, session=None):
+        return await self._plan_human_input(record, source, parts=parts, keyboard=keyboard, callbacks=callbacks, guard=guard, step_id=step_id, session=session)
+
+    async def _plan_human_input(self, record, source, *, parts, keyboard, callbacks, guard, step_id, session):
+        from app.telegram_bots.human_input_source import check_qualified_request, human_input_step_key, prepare_human_input_reply, validate_human_input_reply_basis
+        from app.telegram_bots.links import prepare_publication_guard
+
+        private_source = check_qualified_request(source, record)
+        record = source.record
+        link = _guard_publication_link(record, guard)
+        parts, keyboard = deepcopy(parts), deepcopy(keyboard)
+        dedupe = "reply:" + record.turn_id if step_id is None else human_input_step_key(record, step_id)
+
+        async def check(writer):
+            check_qualified_request(source, record)
+            await source._guard.check(writer)
+            result = await guard.check(writer)
+            check_qualified_request(source, record)
+            return result
+
+        async def save():
+            if session is None:
+                await prepare_publication_guard(guard)
+                await prepare_publication_guard(source._guard)
+            async with self._writer(link.id, session=session) as (writer, _):
+                await check(writer)
+                parent = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == "reply:" + record.turn_id).with_for_update().execution_options(populate_existing=True))
+                if parent is None and step_id is None:
+                    fresh, _rows = await self.inbox.lock_publication(record, session=writer)
+                    inputs = await self.inbox.snapshot_publication_inputs(fresh, session=writer)
+                else:
+                    if parent is None:
+                        raise ValueError("human-input-source-conflict") from None
+                    previous = await await_drained(asyncio.to_thread(validate_human_input_reply_basis, _item(parent)))
+                    if _canonical_primary(_publication_identity(previous.record)) != _canonical_primary(_publication_identity(record)) or _canonical_primary(parent.payload["reply_basis"]["outcome"]["request_basis"]) != _canonical_primary(
+                        private_source
+                    ):
+                        raise ValueError("human-input-source-conflict") from None
+                    fresh, inputs = record, deepcopy(parent.payload["reply_basis"]["inputs"])
+                basis, prepared = await await_drained(asyncio.to_thread(prepare_human_input_reply, fresh, private_source, parts=parts, keyboard=keyboard, inputs=inputs, step_id=step_id))
+                existing = (
+                    parent
+                    if step_id is None
+                    else await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == dedupe).with_for_update().execution_options(populate_existing=True))
+                )
+                if existing is not None:
+                    if _canonical_primary(existing.payload.get("reply_basis")) != _canonical_primary(basis):
+                        raise ValueError("human-input-source-conflict") from None
+                    identity = existing.id
+                else:
+                    identity, created = await self._add(
+                        link,
+                        dedupe_key=dedupe,
+                        class_="reply",
+                        payload={"source": basis["outcome"], "reply_basis": basis, "product_keyboard_basis": basis["keyboard"], "parts": prepared},
+                        session=writer,
+                        message_thread_id=record.scope.message_thread_id,
+                    )
+                    if not created:
+                        raise ValueError("human-input-source-conflict") from None
+                    if basis["keyboard"]:
+                        group = await callbacks.write_group(
+                            link,
+                            basis["keyboard"],
+                            anchor_outbox_id=identity,
+                            presentation_version=0,
+                            chat_id=link.chat_id,
+                            message_id=prepared[-1].get("target_message_id") if prepared[-1]["kind"] == "edit" else None,
+                            message_thread_id=record.scope.message_thread_id,
+                            session=writer,
+                        )
+                        saved = await writer.get(TelegramOutboxRow, identity)
+                        changed = deepcopy(saved.parts)
+                        changed[-1]["callback_group_id"] = group.group_id
+                        saved.parts = changed
+                if step_id is None and existing is None:
+                    await self.inbox.seal_publication(fresh, outbox_id=identity, assistant_message_id=None, session=writer)
+                await writer.flush()
+                await check(writer)
+                return identity
+
+        return await await_drained(save())
+
     @asynccontextmanager
     async def _writer(self, link_id: str, *, session: AsyncSession | None = None) -> AsyncIterator[tuple[AsyncSession, TelegramBotLinkRow | None]]:
         if session is not None:

@@ -24,6 +24,7 @@ class ReadPublicationOutput(Protocol):
 class PreparedModelPart:
     html: str
     plain_text: str
+    human_input: bool = False
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,10 @@ def validate_model_reply_basis(item: OutboxItem, part: dict | None = None) -> Ve
     from app.telegram_bots.producer import FrozenReplyPresentation, OutboxItem, _canonical_primary
 
     try:
+        if type(item) is OutboxItem and type(item.payload) is dict and type(item.payload.get("reply_basis")) is dict and type(item.payload["reply_basis"].get("version")) is int and item.payload["reply_basis"]["version"] == 5:
+            from app.telegram_bots.human_input_source import validate_human_input_reply_basis
+
+            return validate_human_input_reply_basis(item, part)
         if type(item) is OutboxItem and type(item.payload) is dict and type(item.payload.get("reply_basis")) is dict and type(item.payload["reply_basis"].get("version")) is int and item.payload["reply_basis"]["version"] == 4:
             return _validate_display_reply_basis(item, part)
         if type(item) is not OutboxItem or type(item.payload) is not dict or "delivery_kind" in item.payload:
@@ -332,16 +337,27 @@ def _prepare_part(captured):
 
 
 class ModelSource:
-    def __init__(self, *, read_output: ReadPublicationOutput):
+    def __init__(self, *, read_output: ReadPublicationOutput, human_input_source=None):
         if not callable(read_output):
             raise TypeError("Model source requires its publication reader") from None
         self._read_output = read_output
+        self._human_input_source = human_input_source
 
     async def read_part(self, captured: SendingPart) -> PreparedModelPart:
         from app.telegram_bots.producer import DeliveryClaimRetired
 
         try:
             private, proof = await await_drained(asyncio.to_thread(_prepare_part, captured))
+            if proof.kind == "human_input":
+                from app.telegram_bots.human_input_source import check_qualified_request
+                from app.telegram_bots.producer import _canonical_primary
+
+                if self._human_input_source is None:
+                    raise ValueError
+                qualified = await self._human_input_source.read_request(proof.record, private.link)
+                if qualified is None or _canonical_primary(check_qualified_request(qualified, proof.record)) != _canonical_primary(private.item.payload["reply_basis"]["outcome"]["request_basis"]):
+                    raise ValueError
+                return PreparedModelPart(private.part["html"], private.part["visible_text"], True)
             fresh = await self._read_output(proof.record, private.link)
 
             def compare():

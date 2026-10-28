@@ -100,6 +100,14 @@ Strict items cover the whole command/press lifetime and cold preference validati
 Default-supervisor tests omit injected repositories so wiring cannot be qualified
 only by richer test fixtures. Do not add routine local full-suite runs here.
 
+Human-input tests distinguish explicitly seeded request proofs from actual worker
+provenance. The recorded-SDK composition runs a real request, saved choice/form
+answer, second Gateway run and final output delivery. Network decision tests pass
+the saved response through the existing middleware and a real disk policy DB;
+the provider boundary is doubled and no host sandbox/network is opened. Hold
+the final SDK limiter fence, preserve command-replay scope, and verify that UI
+staging cannot consume a response control before actual publication confirmation.
+
 Durable inbox/outbox tests use the same real SQL matrix. Exercise borrowed
 rollback/autoflush, chat-scoped replay, publication/run fences, joined-input
 completion and existing welcome plans. Worker barriers cover delayed same-process

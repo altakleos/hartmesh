@@ -1390,6 +1390,14 @@ conversations. Memory navigation uses the configured public address when
 available. A deleted custom agent can produce a fixed repair notice with a
 Telegram-settings link. Delivery repair retries the saved message without
 rerunning the AI agent. This change adds no database schema revision.
+Managed bots also present source-verified clarification choices, typed alternatives,
+and forms with a review step before Send. Free-text questions accept an ordinary
+chat reply. A blocked-site request offers temporary permission or refusal; the
+saved answer returns through the normal run and network-policy checks. Answer
+controls retain the original conversation and cannot submit twice. Navigating
+away closes the current input scope; a reply to an old prompt requires an explicit
+choice before it can become new input. This adds no schema change and remains
+behind the unfinished managed-bot activation switch.
 See [turn execution](backend/docs/TELEGRAM_TURN_EXECUTION.md) and
 [publication custody](backend/docs/TELEGRAM_PUBLICATION_CUSTODY.md).
 SQL-backed runs can explicitly request versioned output capture. The worker seals

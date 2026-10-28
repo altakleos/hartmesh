@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.telegram_bots.callbacks import CALLBACK_METADATA_KEYS, CallbackRefused
 from app.telegram_bots.links import BotLink, prepare_publication_guard
 from app.telegram_bots.texts import KEYBOARDS
-from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramOutboxRow, TelegramPersonSettingsRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramOutboxRow, TelegramPersonSettingsRow
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.utils.file_io import await_drained
 
@@ -82,6 +82,18 @@ def _body(value):
     return dict(value)
 
 
+def _network_body(value):
+    keys = {"thread_id", "request_id", "option_id", "host", "port"}
+    if not isinstance(value, Mapping) or set(value) != keys or value["option_id"] not in {"allow_temporary", "deny"}:
+        raise ValueError("invalid-network-act") from None
+    for key in ("thread_id", "request_id", "host"):
+        if type(value[key]) is not str or not value[key].strip() or not value[key].isprintable():
+            raise ValueError("invalid-network-act") from None
+    if len(value["thread_id"]) > 64 or type(value["port"]) is not int or not 1 <= value["port"] <= 65535:
+        raise ValueError("invalid-network-act") from None
+    return dict(value)
+
+
 @dataclass
 class _AttemptGuard:
     actual: object
@@ -118,6 +130,75 @@ class Acts:
         bind = self.session_factory.kw.get("bind")
         if not isinstance(session, AsyncSession) or bind is None or not session.in_transaction() or not session.is_active or session.get_bind() is not getattr(bind, "sync_engine", bind):
             raise ValueError("act-writer-required") from None
+
+    async def write_network(self, link, *, callback_id, body, guard, session):
+        """Journal the actual card choice in its publication owner's writer."""
+        self._writer_required(session)
+        body = _network_body(body)
+        async with self.callbacks.writer(link, guard, session=session) as writer:
+            selected = await writer.get(TelegramCallbackRow, callback_id, with_for_update=True, populate_existing=True)
+            if (
+                selected is None
+                or selected.kind != "network"
+                or (selected.link_id, selected.chat_id, selected.binding_generation, selected.target_kind, selected.target_id) != (link.id, link.chat_id, link.binding_generation, "thread", body["thread_id"])
+            ):
+                raise CallbackRefused() from None
+            saved_body = {key: child for key, child in selected.payload.items() if key not in CALLBACK_METADATA_KEYS}
+            if _network_body(saved_body) != body:
+                raise CallbackRefused() from None
+            row = await writer.get(TelegramActRow, callback_id, with_for_update=True, populate_existing=True)
+            scope = dict(
+                link_id=link.id, bot_id=link.bot_id, owner_user_id=link.owner_user_id, binding_generation=link.binding_generation, telegram_user_id=link.telegram_user_id, chat_id=link.chat_id, message_id=selected.message_id, kind="network"
+            )
+            if row is not None:
+                if any(getattr(row, key) != value for key, value in scope.items()) or _network_body(row.body) != body:
+                    raise CallbackRefused() from None
+                return _snapshot(row)
+            await self.callbacks.lock_current(link, callback_id, chat_id=link.chat_id, message_id=selected.message_id, message_thread_id=selected.message_thread_id, guard=guard, session=writer)
+            now = datetime.now(UTC)
+            row = TelegramActRow(id=callback_id, **scope, body=body, state="pending", operation_ids=[], attempts=0, first_attempt_at=None, created_at=now, updated_at=now)
+            writer.add(row)
+            await writer.flush()
+            return _snapshot(row)
+
+    async def confirm_network_publication(self, record, *, session, guard=None):
+        """Record enqueue/bind evidence; this never applies a network grant."""
+        from app.telegram_bots.inbox import InboxRepository
+
+        self._writer_required(session)
+        if record.owner_callback_id is None:
+            return None
+        row = await session.get(TelegramActRow, record.owner_callback_id, with_for_update=True, populate_existing=True)
+        if row is None or row.kind != "network":
+            return None
+        fresh, _ = await InboxRepository(self.session_factory).lock_publication(record, session=session)
+        selected = await session.get(TelegramCallbackRow, record.owner_callback_id, populate_existing=True)
+        actual_link = await session.get(TelegramBotLinkRow, record.scope.link_id, populate_existing=True)
+        if selected is None or actual_link is None or selected.kind != "network":
+            raise CallbackRefused() from None
+        link = BotLink.from_row(actual_link)
+        body = _network_body({key: child for key, child in selected.payload.items() if key not in CALLBACK_METADATA_KEYS})
+        scope = dict(link_id=link.id, bot_id=link.bot_id, owner_user_id=link.owner_user_id, binding_generation=link.binding_generation, telegram_user_id=link.telegram_user_id, chat_id=link.chat_id, message_id=selected.message_id)
+        owner = selected.payload.get("publication_owner")
+        if any(getattr(row, key) != value for key, value in scope.items()) or _network_body(row.body) != body or body["thread_id"] != fresh.scope.thread_id or selected.message_thread_id != fresh.scope.message_thread_id:
+            raise CallbackRefused() from None
+        if not isinstance(owner, dict) or owner.get("confirmed_publication_id") != fresh.publication_id or not fresh.dispatch_started:
+            raise CallbackRefused() from None
+        if guard is not None:
+            await guard.check(session)
+        if row.state == "done":
+            if row.result.get("turn_id") != fresh.turn_id or row.result.get("publication_id") not in {entry["publication_id"] for entry in owner["publications"]}:
+                raise CallbackRefused() from None
+            return _snapshot(row)
+        if row.state != "pending":
+            raise CallbackRefused() from None
+        now = datetime.now(UTC)
+        row.state, row.attempts, row.first_attempt_at, row.updated_at = "done", 1, now, now
+        row.result = {"turn_id": fresh.turn_id, "publication_id": fresh.publication_id}
+        await session.flush()
+        if guard is not None:
+            await guard.check(session)
+        return _snapshot(row)
 
     async def write(self, link: BotLink, *, act_id: str, kind: str, body: dict, state: str = "pending", session: AsyncSession, **targets) -> ActRow:
         """Borrowed stage-one metadata only; the effect owner supplies custody."""

@@ -274,10 +274,44 @@ class ThreadCoordinator:
         await authorize()
         return stage.thread_id
 
-    async def _run(self, link, inbound, origin, purpose, *, reserve_only=False, callback_id=None):
+    async def _prepare_submission(self, attempt, stage):
+        from app.telegram_bots.inbox import InboxRepository
+
+        inbox = InboxRepository(self.links.session_factory)
+        if stage.callback_id is not None or stage.parent_publication["scope"]["endpoint_id"] != self.client.endpoint_id:
+            raise ValueError("thread-attempt-changed")
+
+        async def authorize():
+            await self._guard(attempt)
+            await self._permission(attempt, "threads:read")
+            owner = await self.authority.prepare_live_owner(attempt.link.owner_user_id)
+            await self._guard(attempt)
+            guard = self.links.publication_guard(attempt.link, check_live_owner=owner, check_attempt_current=lambda: self._current(attempt))
+            fresh = await inbox.read_submission(attempt.link, stage, guard=guard)
+            if fresh.thread_id != stage.thread_id or fresh.route_complete:
+                raise ValueError("thread-attempt-changed")
+            await self._target(attempt, fresh.origins[0])
+            self._check(attempt)
+
+        await authorize()
+        response = await self.client.get_thread(attempt.link.owner_user_id, stage.thread_id, before_dispatch=authorize)
+        if self._validate(response, attempt.link, stage.thread_id) != (attempt.link.agent_kind, attempt.link.agent_ref):
+            raise ValueError("invalid-thread-target")
+        await authorize()
+        return stage.thread_id
+
+    async def _run(self, link, inbound, origin, purpose, *, reserve_only=False, callback_id=None, submission=None):
         attempt = _Attempt(link, self._channel(link.id))
         self._check(attempt)
-        work = self._prepare_callback(attempt, callback_id) if callback_id is not None else self._reserve_new(attempt, origin) if reserve_only else self._prepare(attempt, inbound, origin, purpose)
+        work = (
+            self._prepare_submission(attempt, submission)
+            if submission is not None
+            else self._prepare_callback(attempt, callback_id)
+            if callback_id is not None
+            else self._reserve_new(attempt, origin)
+            if reserve_only
+            else self._prepare(attempt, inbound, origin, purpose)
+        )
         task = asyncio.create_task(work, name="telegram-thread-preparation")
         self._operations.add(task)
         task.add_done_callback(self._operations.discard)
@@ -311,6 +345,9 @@ class ThreadCoordinator:
 
     async def ensure_callback_thread(self, link, *, callback_id) -> str:
         return await self._run(link, None, None, "ensure", callback_id=callback_id)
+
+    async def ensure_submission_thread(self, link, stage) -> str:
+        return await self._run(link, None, None, "ensure", submission=stage)
 
     def begin_shutdown(self) -> None:
         self._stopping = True

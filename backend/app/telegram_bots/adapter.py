@@ -715,6 +715,13 @@ class TelegramBotChannel(TelegramChannel):
         self._classified(update)
 
     async def execute_callback(self, row, *, query_id=None, update_id=None):
+        human_inputs = getattr(self._services, "human_inputs", None)
+        if human_inputs is not None and (
+            row.kind in {"clarify_option", "clarify_other", "form_option", "form_next", "form_skip", "form_send", "form_change", "form_field", "network", "prompt_reopen", "prompt_send_new", "prompt_discard"}
+            or row.kind == "back"
+            and "form_id" in row.payload
+        ):
+            return await human_inputs.execute_callback(self, row, update_id=update_id, query_id=query_id)
         turns = getattr(self._services, "turns", None)
         if turns is not None and row.kind in {"retry_message", "cancel_wait", "stop_answer"}:
             return await turns.execute_callback(self, row, update_id=update_id, query_id=query_id)
@@ -865,7 +872,7 @@ class TelegramBotChannel(TelegramChannel):
         if not await self._input_current(link):
             return
         prompts = getattr(self._services, "prompts", None)
-        if prompts is not None:
+        if prompts is not None and basis.get("human_input_ui") != {"command_closed": word}:
             if not self._callback_current(link):
                 return
             await prompts.close(link, row.chat_id, row.message_thread_id, reason="command")
@@ -876,6 +883,9 @@ class TelegramBotChannel(TelegramChannel):
 
     async def _on_command(self, update, context) -> None:
         word, arguments = self._command(update.message)
+        human_inputs = getattr(self._services, "human_inputs", None)
+        if human_inputs is not None and word != "stop":
+            await human_inputs.command(self, update, word, captured_link=self._admission(update).link)
         turns = getattr(self._services, "turns", None)
         if word == "stop" and turns is not None:
             await turns.stop_chat(self, update)
@@ -912,6 +922,10 @@ class TelegramBotChannel(TelegramChannel):
         if turns is not None:
             if type(update.message.text) is not str or not update.message.text.strip():
                 await self._on_unsupported(update, context)
+                return
+            human_inputs = getattr(self._services, "human_inputs", None)
+            if human_inputs is not None and await human_inputs.handle_text(self, update, captured_link=self._admission(update).link):
+                self._classified(update)
                 return
             link = self._admission(update).link
             typing_allowed = getattr(turns, "typing_allowed", None)
@@ -1233,7 +1247,7 @@ class TelegramBotChannel(TelegramChannel):
             model_part = await reader.read_part(saved)
         stored_keyboard = None
         if part.get("stored_keyboard"):
-            if model_part is not None or getattr(self._services, "callbacks", None) is None:
+            if model_part is not None and not model_part.human_input or getattr(self._services, "callbacks", None) is None:
                 raise DeliveryClaimRetired()
             stored_keyboard = await self._services.callbacks.read_keyboard(saved)
         elif part.get("callback_group_id"):
@@ -1264,7 +1278,7 @@ class TelegramBotChannel(TelegramChannel):
             try:
                 rendered_rows = [
                     [
-                        InlineKeyboardButton(render_plain(button.label, settings.locale, **part["source_ref"].get("values", {})), callback_data=button.callback_data, url=button.url)
+                        InlineKeyboardButton(render_plain(button.label, settings.locale, **{**part["source_ref"].get("values", {}), **dict(button.label_values or {})}), callback_data=button.callback_data, url=button.url)
                         for button in line
                         if not (part.get("url_button_fallback") and button.url is not None)
                     ]
@@ -1283,6 +1297,14 @@ class TelegramBotChannel(TelegramChannel):
                 text += "\n" + (button["url"] if part.get("plain_fallback") else escape(button["url"]))
             else:
                 markup = InlineKeyboardMarkup([[InlineKeyboardButton(render_plain(button_label, settings.locale), url=button["url"])]])
+        if part.get("force_reply"):
+            from telegram import ForceReply
+
+            if model_part is None or not model_part.human_input or stored_keyboard is not None or button is not None or part["kind"] != "text":
+                raise PermanentDeliveryError("invalid-human-input-markup")
+            markup = ForceReply(selective=True)
+        elif model_part is not None and model_part.human_input and part["kind"] == "edit" and markup is None:
+            markup = {"inline_keyboard": []}
         silent = saved.item.silent or bool(part.get("silent", False)) or await asyncio.to_thread(silent_now, saved.link, settings, self._services.config, self._now())
         current = await self._services.outbox.capture_sending_part(**capture)
         if current.part != part or current.item.message_thread_id != saved.item.message_thread_id:
@@ -1339,15 +1361,33 @@ class TelegramBotChannel(TelegramChannel):
                     raise DeliveryClaimRetired()
 
             preview_fence = LiveRequestFence(check_preview)
+        elif model_part is not None and model_part.human_input:
+
+            async def check_human_input():
+                if not self._callback_current(current.link):
+                    raise DeliveryClaimRetired()
+                latest_input = await self._services.outbox.capture_sending_part(**capture)
+                if latest_input.part != part:
+                    raise DeliveryClaimRetired()
+                verdict = await self._services.eligibility(latest_input.link, latest_input.item, latest_input.part)
+                if verdict.decision != "allow" or verdict.protect_content and not part.get("protect_content"):
+                    raise DeliveryClaimRetired()
+                refreshed = await self._services.model_source.read_part(latest_input)
+                if refreshed != model_part or stored_keyboard is not None and await self._services.callbacks.read_keyboard(latest_input) != stored_keyboard:
+                    raise DeliveryClaimRetired()
+                if not await self._services.human_inputs.step_current(latest_input.item) or not self._callback_current(current.link):
+                    raise DeliveryClaimRetired()
+
+            preview_fence = LiveRequestFence(check_human_input)
         try:
             if part["kind"] == "edit":
                 target = part.get("target_message_id")
                 if type(target) is not int or target <= 0:
                     raise PermanentDeliveryError("missing-edit-anchor")
                 if part.get("remove_keyboard"):
-                    message = await self.bot.edit_message_reply_markup(chat_id=context.chat_id, message_id=target, reply_markup=None)
+                    message = await self.bot.edit_message_reply_markup(chat_id=context.chat_id, message_id=target, reply_markup={"inline_keyboard": []}, rate_limit_args=preview_fence)
                 else:
-                    message = await self.bot.edit_message_text(chat_id=context.chat_id, message_id=target, text=text, parse_mode=None if part.get("plain_fallback") else ParseMode.HTML, reply_markup=markup)
+                    message = await self.bot.edit_message_text(chat_id=context.chat_id, message_id=target, text=text, parse_mode=None if part.get("plain_fallback") else ParseMode.HTML, reply_markup=markup, rate_limit_args=preview_fence)
             else:
                 message = await self.bot.send_message(
                     chat_id=context.chat_id,

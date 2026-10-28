@@ -27,7 +27,7 @@ PRESS_TIMEOUT_SECONDS = 2.0
 _ID = re.compile(r"^[0-9a-f]{32}$")
 _TOKEN = re.compile(TOKEN_BODY)
 _SCOPE = ("id", "owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "binding_generation", "token_revision")
-_RESERVED = frozenset({"label", "keyboard_row", "keyboard_column", "anchor_outbox_id", "presentation_version", "presentation_pending", "presentation_history", "message_adopted", "prompt_successor", "publication_owner"})
+_RESERVED = frozenset({"label", "label_values", "keyboard_row", "keyboard_column", "anchor_outbox_id", "presentation_version", "presentation_pending", "presentation_history", "message_adopted", "prompt_successor", "publication_owner"})
 CALLBACK_METADATA_KEYS = _RESERVED
 _SECRET = frozenset({"token", "bot_token", "access_token", "raw_update", "update", "audio", "audio_bytes", "download_url", "temporary_url", "bytes"})
 _KINDS = frozenset(
@@ -72,6 +72,12 @@ def _now():
     return datetime.now(UTC)
 
 
+def form_submission_value(fields, values):
+    from app.telegram_bots.forms import form_submission_value as build
+
+    return build(fields, values)
+
+
 def _aware(value):
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
@@ -104,6 +110,18 @@ def _freeze(value):
     return tuple(_freeze(child) for child in value) if isinstance(value, list) else value
 
 
+def safe_callback_value(value):
+    return _plain(value)
+
+
+def freeze_callback_value(value):
+    return _freeze(value)
+
+
+def normalize_callback_topic(value):
+    return _topic(value)
+
+
 @dataclass(frozen=True)
 class CallbackSpec:
     label: str
@@ -113,6 +131,7 @@ class CallbackSpec:
     payload: Mapping = field(default_factory=dict)
     expires_at: datetime | None = None
     url: str | None = None
+    label_values: Mapping | None = None
 
 
 type Keyboard = Sequence[Sequence[CallbackSpec | Mapping]]
@@ -128,22 +147,27 @@ def canonical_keyboard(keyboard: Keyboard) -> list[list[dict]]:
         current = []
         for supplied in line:
             if isinstance(supplied, CallbackSpec):
+                label_values = supplied.label_values
                 supplied = (
                     {"label": supplied.label, "url": supplied.url}
                     if supplied.url is not None
                     else {"label": supplied.label, "kind": supplied.kind, "target_kind": supplied.target_kind, "target_id": supplied.target_id, "payload": supplied.payload, "expires_at": supplied.expires_at}
                 )
+                if label_values is not None:
+                    supplied["label_values"] = label_values
             if not isinstance(supplied, Mapping) or type(supplied.get("label")) is not str or not supplied["label"].startswith("label."):
                 raise CallbackRefused() from None
             if "url" in supplied:
                 from app.telegram_bots.producer import validate_url_button
 
-                if set(supplied) != {"label", "url"}:
+                if set(supplied) - {"label", "url", "label_values"}:
+                    raise CallbackRefused() from None
+                if "label_values" in supplied and not isinstance(supplied["label_values"], Mapping):
                     raise CallbackRefused() from None
                 validate_url_button({"page": "web.telegram", "url": supplied["url"]})
                 current.append(_plain(dict(supplied)))
                 continue
-            if set(supplied) - {"label", "kind", "target_kind", "target_id", "payload", "expires_at"} or supplied.get("kind") not in _KINDS:
+            if set(supplied) - {"label", "kind", "target_kind", "target_id", "payload", "expires_at", "label_values"} or supplied.get("kind") not in _KINDS:
                 raise CallbackRefused() from None
             payload = _plain(supplied.get("payload", {}))
             if not isinstance(payload, dict) or _RESERVED.intersection(payload):
@@ -159,7 +183,12 @@ def canonical_keyboard(keyboard: Keyboard) -> list[list[dict]]:
             target_kind, target = supplied.get("target_kind"), supplied.get("target_id")
             if target_kind not in {None, "request", "work", "attempt", "thread", "draft", "add_assistant", "link", "outbox", "act"} or target is not None and (type(target) is not str or not 1 <= len(target) <= 64):
                 raise CallbackRefused() from None
-            current.append({"label": supplied["label"], "kind": supplied["kind"], "target_kind": target_kind, "target_id": target, "payload": payload, "expires_at": _aware(expiry).isoformat() if expiry else None})
+            descriptor = {"label": supplied["label"], "kind": supplied["kind"], "target_kind": target_kind, "target_id": target, "payload": payload, "expires_at": _aware(expiry).isoformat() if expiry else None}
+            if "label_values" in supplied:
+                if not isinstance(supplied["label_values"], Mapping):
+                    raise CallbackRefused() from None
+                descriptor["label_values"] = _plain(supplied["label_values"])
+            current.append(descriptor)
         result.append(current)
     return result
 
@@ -215,6 +244,7 @@ def _validate_rows(parent, rows):
             or (row.link_id, row.chat_id, row.binding_generation, row.message_thread_id, row.payload.get("anchor_outbox_id")) != (parent.link_id, parent.chat_id, parent.binding_generation, parent.message_thread_id, parent.id)
             or (row.kind, row.target_kind, row.target_id, row.payload.get("label")) != (spec["kind"], spec["target_kind"], spec["target_id"], spec["label"])
             or json.dumps(payload, sort_keys=True) != json.dumps(spec["payload"], sort_keys=True)
+            or json.dumps(row.payload.get("label_values"), sort_keys=True) != json.dumps(spec.get("label_values"), sort_keys=True)
             or (_aware(row.expires_at).isoformat() if row.expires_at else None) != spec["expires_at"]
         ):
             raise CallbackRefused() from None
@@ -248,6 +278,7 @@ class StoredButton:
     label: str
     callback_data: str | None = None
     url: str | None = None
+    label_values: Mapping | None = None
 
 
 type StoredKeyboard = tuple[tuple[StoredButton, ...], ...]
@@ -288,6 +319,59 @@ class CallbackRepository:
             if session.get_bind().dialect.name == "sqlite":
                 await session.execute(text("BEGIN IMMEDIATE"))
             yield session
+
+    @asynccontextmanager
+    async def writer(self, link, guard, *, session=None):
+        """Share one guarded UI/input transaction; borrowed writers never commit."""
+        from app.telegram_bots.links import prepare_publication_guard
+
+        async def check(writer):
+            current = await guard.check(writer)
+            if type(current) is not BotLink or any(getattr(current, key) != getattr(link, key) for key in _SCOPE):
+                raise CallbackRefused() from None
+
+        if session is not None:
+            self._borrow(session)
+            await check(session)
+            yield session
+            await session.flush()
+            await check(session)
+        else:
+            await prepare_publication_guard(guard)
+            async with self._writer() as writer:
+                await check(writer)
+                yield writer
+                await writer.flush()
+                await check(writer)
+
+    async def rows_in_scope(self, link, *, kinds, message_thread_id=None, include_consumed=False, guard, session=None):
+        """Return detached locators only; a lookup does not authorize an action."""
+        topic = _topic(message_thread_id)
+        if not isinstance(kinds, (tuple, list, set, frozenset)) or not kinds or any(type(kind) is not str for kind in kinds) or type(include_consumed) is not bool:
+            raise CallbackRefused() from None
+        async with self.writer(link, guard, session=session) as writer:
+            statement = select(TelegramCallbackRow).where(
+                TelegramCallbackRow.link_id == link.id,
+                TelegramCallbackRow.chat_id == link.chat_id,
+                TelegramCallbackRow.binding_generation == link.binding_generation,
+                TelegramCallbackRow.message_thread_id == topic,
+                TelegramCallbackRow.kind.in_(kinds),
+            )
+            if not include_consumed:
+                statement = statement.where(TelegramCallbackRow.consumed_at.is_(None))
+            rows = list(await writer.scalars(statement.order_by(TelegramCallbackRow.id).with_for_update().execution_options(populate_existing=True)))
+            return tuple(_row(row) for row in rows)
+
+    async def consume_scope(self, link, *, kinds, reason, message_thread_id=None, guard, session):
+        """Close only captured scope metadata in the caller's guarded writer."""
+        if type(reason) is not str or not 1 <= len(reason) <= 16:
+            raise CallbackRefused() from None
+        rows = await self.rows_in_scope(link, kinds=kinds, message_thread_id=message_thread_id, guard=guard, session=session)
+        for captured in rows:
+            row = await session.get(TelegramCallbackRow, captured.id)
+            row.consumed_at, row.closed_reason = self.clock(), reason
+        await session.flush()
+        return rows
 
     async def _binding(self, session, captured, *, healthy=True):
         self._borrow(session)
@@ -407,7 +491,16 @@ class CallbackRepository:
                         kind=spec["kind"],
                         target_kind=spec["target_kind"],
                         target_id=spec["target_id"],
-                        payload={**spec["payload"], "label": spec["label"], "keyboard_row": line, "keyboard_column": column, "anchor_outbox_id": anchor_outbox_id, "presentation_version": presentation_version, "presentation_pending": False},
+                        payload={
+                            **spec["payload"],
+                            "label": spec["label"],
+                            **({"label_values": spec["label_values"]} if "label_values" in spec else {}),
+                            "keyboard_row": line,
+                            "keyboard_column": column,
+                            "anchor_outbox_id": anchor_outbox_id,
+                            "presentation_version": presentation_version,
+                            "presentation_pending": False,
+                        },
                         expires_at=datetime.fromisoformat(spec["expires_at"]) if spec["expires_at"] else None,
                         created_at=self.clock(),
                     )
@@ -514,7 +607,25 @@ class CallbackRepository:
             original_prompt_kind=original_prompt.payload.get("purpose") if original_prompt else None,
         )
 
-    async def consume_group(self, group, *, reason, session):
+    async def consume_group(self, group, *, reason="done", session=None, link=None, guard=None):
+        """Close one exact current group inside an optional UI transaction."""
+        if type(group) is CallbackGroup and session is not None and link is None and guard is None:
+            return await self._consume_group(group, reason=reason, session=session)
+        if type(group) is not str or _ID.fullmatch(group) is None or link is None or guard is None:
+            raise CallbackRefused() from None
+
+        async def perform():
+            async with self.writer(link, guard, session=session) as writer:
+                selected = await writer.scalar(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group).order_by(TelegramCallbackRow.id).limit(1))
+                if selected is None or (selected.link_id, selected.chat_id, selected.binding_generation) != (link.id, link.chat_id, link.binding_generation):
+                    raise CallbackRefused() from None
+                parent, rows, selected = await self._locked(writer, link, selected.id)
+                captured = CallbackGroup(_row(selected), tuple(_row(row) for row in rows), parent.id, parent.payload.get("presentation_version", 0))
+                await self._consume_group(captured, reason=reason, session=writer)
+
+        return await await_drained(perform())
+
+    async def _consume_group(self, group, *, reason, session):
         self._borrow(session)
         if type(group) is not CallbackGroup or type(reason) is not str or not 1 <= len(reason) <= 16:
             raise CallbackRefused() from None
@@ -552,7 +663,8 @@ class CallbackRepository:
                     current = row.message_id == message_id
                     history = row.payload.get("presentation_history", [])
                     alias = any(type(item) is dict and item.get("message_id") == message_id and item.get("message_thread_id") == topic for item in history) if isinstance(history, list) else False
-                    if not current and not alias:
+                    unbound_prompt = row.kind == "prompt" and row.message_id is None and type(row.payload.get("anchor_outbox_id")) is str
+                    if not current and not alias and not unbound_prompt:
                         continue
                     anchor = await session.get(TelegramOutboxRow, row.payload.get("anchor_outbox_id")) if type(row.payload.get("anchor_outbox_id")) is str else None
                     parent_scope = anchor is not None and (anchor.link_id, anchor.owner_user_id, anchor.chat_id, anchor.binding_generation, anchor.message_thread_id) == (
@@ -570,6 +682,10 @@ class CallbackRepository:
                     metadata_current = (
                         parent_scope and type(row.payload.get("presentation_version")) is int and row.payload.get("presentation_version") == anchor.payload.get("presentation_version", 0) and row.payload.get("presentation_pending") is False
                     )
+                    if unbound_prompt:
+                        if not acknowledged:
+                            continue
+                        current = True
                     if row.group_id not in checked_groups:
                         complete = list(await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == row.group_id).order_by(TelegramCallbackRow.id).execution_options(populate_existing=True)))
                         try:
@@ -579,7 +695,7 @@ class CallbackRepository:
                                 _validate_rows(anchor, complete)
                             for member in complete:
                                 self._usable(member)
-                                if member.message_id != message_id:
+                                if member.message_id != message_id and not (unbound_prompt and member.kind == "prompt" and member.message_id is None):
                                     raise CallbackRefused()
                             checked_groups[row.group_id] = True
                         except CallbackRefused:
@@ -587,13 +703,22 @@ class CallbackRepository:
                     snapshot = _row(row)
                     try:
                         self._usable(row)
-                        if current and checked_groups[row.group_id] and (row.kind == "prompt" or acknowledged and metadata_current):
+                        legacy_prompt = row.kind == "prompt" and "anchor_outbox_id" not in row.payload
+                        if current and checked_groups[row.group_id] and (legacy_prompt or acknowledged and metadata_current):
                             current_rows.append(snapshot)
                     except CallbackRefused:
                         pass
                     found.append(snapshot)
                 if current_rows and len({row.group_id for row in current_rows}) == 1:
                     return CallbackMessageRoute(tuple(current_rows), False)
+                prompts = [row for row in current_rows if row.kind == "prompt"]
+                controls = [row for row in current_rows if row.kind != "prompt"]
+                # A typed field can share its acknowledged presentation with
+                # a separately owned control group, such as its Skip button.
+                if len(prompts) == 1 and controls and len({row.group_id for row in controls}) == 1 and prompts[0].group_id != controls[0].group_id:
+                    presentation = (prompts[0].payload.get("anchor_outbox_id"), prompts[0].payload.get("presentation_version"))
+                    if type(presentation[0]) is str and all((row.payload.get("anchor_outbox_id"), row.payload.get("presentation_version")) == presentation for row in controls):
+                        return CallbackMessageRoute(tuple(current_rows), False)
                 return CallbackMessageRoute(tuple(found), True) if found else None
 
         return await await_drained(perform())
@@ -630,7 +755,7 @@ class CallbackRepository:
                     rendered = []
                     for column, spec in enumerate(buttons):
                         if "url" in spec:
-                            rendered.append(StoredButton(spec["label"], url=spec["url"]))
+                            rendered.append(StoredButton(spec["label"], url=spec["url"], label_values=_freeze(spec.get("label_values"))))
                             continue
                         expected += 1
                         row = positions.get((line, column))
@@ -649,7 +774,7 @@ class CallbackRepository:
                             self._usable(row)
                         except CallbackRefused:
                             return ()
-                        rendered.append(StoredButton(spec["label"], callback_data=CALLBACK_PREFIX + row.id))
+                        rendered.append(StoredButton(spec["label"], callback_data=CALLBACK_PREFIX + row.id, label_values=_freeze(spec.get("label_values"))))
                     result.append(tuple(rendered))
                 if len(rows) != expected:
                     raise DeliveryClaimRetired() from None
@@ -685,33 +810,58 @@ class Prompts:
     def __init__(self, repository):
         self.repository = repository
 
-    async def open(self, link, purpose, payload, *, chat_id, message_thread_id, message_id):
+    @asynccontextmanager
+    async def _unit(self, link, guard, session):
+        if guard is not None:
+            async with self.repository.writer(link, guard, session=session) as writer:
+                yield writer
+        elif session is not None:
+            self.repository._borrow(session)
+            await self.repository._binding(session, link)
+            yield session
+        else:
+            async with self.repository._writer() as writer:
+                await self.repository._binding(writer, link)
+                yield writer
+
+    async def _rows(self, writer, link, chat_id, topic):
+        return list(
+            await writer.scalars(
+                select(TelegramCallbackRow)
+                .where(
+                    TelegramCallbackRow.link_id == link.id,
+                    TelegramCallbackRow.chat_id == chat_id,
+                    TelegramCallbackRow.binding_generation == link.binding_generation,
+                    TelegramCallbackRow.kind == "prompt",
+                    TelegramCallbackRow.message_thread_id == topic,
+                )
+                .order_by(TelegramCallbackRow.created_at.desc(), TelegramCallbackRow.id.desc())
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+
+    async def open(self, link, purpose, payload, *, chat_id, message_thread_id, message_id, prompt_id=None, guard=None, session=None):
         topic, supplied = _topic(message_thread_id), _plain(payload)
-        if type(purpose) is not str or not purpose or chat_id != link.chat_id or "purpose" in supplied or _RESERVED.intersection(supplied):
+        if type(purpose) is not str or not purpose or chat_id != link.chat_id or "purpose" in supplied or _RESERVED.intersection(supplied) or prompt_id is not None and (type(prompt_id) is not str or _ID.fullmatch(prompt_id) is None):
+            raise CallbackRefused() from None
+        if message_id is not None and (type(message_id) is not int or message_id <= 0):
             raise CallbackRefused() from None
 
         async def perform():
-            async with self.repository._writer() as session:
-                await self.repository._binding(session, link)
-                rows = list(
-                    await session.scalars(
-                        select(TelegramCallbackRow)
-                        .where(
-                            TelegramCallbackRow.link_id == link.id,
-                            TelegramCallbackRow.chat_id == chat_id,
-                            TelegramCallbackRow.binding_generation == link.binding_generation,
-                            TelegramCallbackRow.kind == "prompt",
-                            TelegramCallbackRow.message_thread_id == topic,
-                        )
-                        .with_for_update()
-                    )
-                )
-                identity = uuid4().hex
+            async with self._unit(link, guard, session) as writer:
+                rows = await self._rows(writer, link, chat_id, topic)
+                identity = prompt_id or uuid4().hex
+                existing = await writer.get(TelegramCallbackRow, identity, with_for_update=True)
+                if existing is not None:
+                    if existing not in rows or existing.message_id != message_id or {key: child for key, child in existing.payload.items() if key not in _RESERVED} != {"purpose": purpose, **supplied}:
+                        raise CallbackRefused() from None
+                    return identity
                 for row in rows:
                     if row.consumed_at is None:
                         row.consumed_at, row.closed_reason = self.repository.clock(), "replaced"
                     row.payload = {**row.payload, "prompt_successor": identity}
-                session.add(
+                writer.add(
                     TelegramCallbackRow(
                         id=identity,
                         group_id=uuid4().hex,
@@ -728,30 +878,45 @@ class Prompts:
                         created_at=self.repository.clock(),
                     )
                 )
+                await writer.flush()
                 return identity
 
         return await await_drained(perform())
 
-    async def current(self, link, chat_id, message_thread_id):
+    async def get(self, link, prompt_id, *, guard, session=None):
+        async with self._unit(link, guard, session) as writer:
+            row = await writer.get(TelegramCallbackRow, prompt_id, with_for_update=True, populate_existing=True)
+            if row is None or row.kind != "prompt" or (row.link_id, row.chat_id, row.binding_generation) != (link.id, link.chat_id, link.binding_generation):
+                raise CallbackRefused() from None
+            return _row(row)
+
+    async def attach(self, link, prompt_id, *, outbox_id, guard, session):
+        async with self._unit(link, guard, session) as writer:
+            row = await writer.get(TelegramCallbackRow, prompt_id, with_for_update=True, populate_existing=True)
+            parent = await writer.get(TelegramOutboxRow, outbox_id, with_for_update=True, populate_existing=True)
+            if (
+                row is None
+                or row.kind != "prompt"
+                or parent is None
+                or (row.link_id, row.chat_id, row.binding_generation, row.message_thread_id) != (link.id, link.chat_id, link.binding_generation, parent.message_thread_id)
+                or (parent.link_id, parent.owner_user_id, parent.chat_id, parent.binding_generation) != (link.id, link.owner_user_id, link.chat_id, link.binding_generation)
+            ):
+                raise CallbackRefused() from None
+            version = parent.payload.get("presentation_version", 0)
+            if type(version) is not int or version < 0 or row.payload.get("anchor_outbox_id", outbox_id) != outbox_id or row.payload.get("presentation_version", version) != version:
+                raise CallbackRefused() from None
+            row.payload = {**row.payload, "anchor_outbox_id": outbox_id, "presentation_version": version, "presentation_pending": False}
+            await writer.flush()
+            return _row(row)
+
+    async def current(self, link, chat_id, message_thread_id, *, guard=None, session=None):
         topic = _topic(message_thread_id)
+        if chat_id != link.chat_id:
+            raise CallbackRefused() from None
 
         async def perform():
-            async with self.repository._writer() as session:
-                await self.repository._binding(session, link)
-                rows = list(
-                    await session.scalars(
-                        select(TelegramCallbackRow)
-                        .where(
-                            TelegramCallbackRow.link_id == link.id,
-                            TelegramCallbackRow.chat_id == chat_id,
-                            TelegramCallbackRow.message_thread_id == topic,
-                            TelegramCallbackRow.binding_generation == link.binding_generation,
-                            TelegramCallbackRow.kind == "prompt",
-                        )
-                        .order_by(TelegramCallbackRow.created_at.desc(), TelegramCallbackRow.id.desc())
-                        .with_for_update()
-                    )
-                )
+            async with self._unit(link, guard, session) as writer:
+                rows = await self._rows(writer, link, chat_id, topic)
                 tips = [row for row in rows if "prompt_successor" not in row.payload]
                 for row in tips or rows:
                     if row.consumed_at is None:
@@ -764,28 +929,14 @@ class Prompts:
 
         return await await_drained(perform())
 
-    async def close(self, link, chat_id, message_thread_id, *, reason):
+    async def close(self, link, chat_id, message_thread_id, *, reason, guard=None, session=None):
         topic = _topic(message_thread_id)
-        if reason not in {"command", "navigation", "discarded", "answered", "cancelled", "expired", "replaced"}:
+        if chat_id != link.chat_id or reason not in {"command", "navigation", "discarded", "answered", "cancelled", "expired", "replaced"}:
             raise CallbackRefused() from None
 
         async def perform():
-            async with self.repository._writer() as session:
-                await self.repository._binding(session, link)
-                rows = list(
-                    await session.scalars(
-                        select(TelegramCallbackRow)
-                        .where(
-                            TelegramCallbackRow.link_id == link.id,
-                            TelegramCallbackRow.chat_id == chat_id,
-                            TelegramCallbackRow.message_thread_id == topic,
-                            TelegramCallbackRow.binding_generation == link.binding_generation,
-                            TelegramCallbackRow.kind == "prompt",
-                        )
-                        .with_for_update()
-                    )
-                )
-                for row in rows:
+            async with self._unit(link, guard, session) as writer:
+                for row in await self._rows(writer, link, chat_id, topic):
                     if row.consumed_at is None or reason in {"command", "navigation", "discarded", "answered"}:
                         row.consumed_at, row.closed_reason = self.repository.clock(), reason
 

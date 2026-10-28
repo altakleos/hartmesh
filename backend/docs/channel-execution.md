@@ -1,8 +1,8 @@
 # Correlated channel execution
 
-This is an inactive generic foundation. Managed Telegram model runs, publication
-recovery and final-output completeness are separate stages. A server receipt or
-successful run status alone never proves a complete final answer.
+Managed Telegram model runs use this generic protocol. Publication recovery and
+final-output completeness have their own contracts. A server receipt or successful
+run status alone never proves a complete final answer.
 
 ## Host capability
 
@@ -45,8 +45,12 @@ requires an existing thread owned by that exact human and an actual configured
 `AgentConversations` authority proving no instance binding. Missing authority
 returns 503; an instance conversation returns 409 without preparing execution.
 
-Version 1 admits one genuine visible human message. Resume/checkpoint input,
-human-input-card responses, hidden/framework-only or ambiguous input, bootstrap,
+Version 1 admits one genuine visible human message, optionally carrying a closed
+canonical `human_input_response`. The shared strict output-source reader rejects
+unknown fields, coerced versions and malformed response data before stamping the
+new publication. Hidden responses remain unsupported; a valid response mark alone
+grants no action or network permission. The normal current owner/thread checks
+still apply. Resume/checkpoint input, hidden/framework-only or ambiguous input, bootstrap,
 Work activation, cancel-on-disconnect and non-reject concurrency are unsupported.
 These checks precede instance readiness or preparation effects. Ordinary callers
 retain their original ownership/validation order and defaults.

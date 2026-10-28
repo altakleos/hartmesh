@@ -41,6 +41,36 @@ async def test_receipt_and_actual_human_marker_derive_from_server_scope(gateway_
     assert record.user_id == e.owner_id
 
 
+def input_response(**changes):
+    return {"version": 1, "kind": "human_input_response", "source": "ask_clarification", "request_id": "request-choice", "response_kind": "option", "option_id": "first", "value": "First option", **changes}
+
+
+@pytest.mark.asyncio
+async def test_canonical_response_reaches_worker_with_the_new_publication(gateway_environment):
+    e = gateway_environment
+    response = input_response()
+    record = await launched(e, body(input={"messages": [{"role": "human", "content": response["value"], "additional_kwargs": {"human_input_response": response}}]}))
+    actual = e.worker_inputs[0]["graph_input"]["messages"][0]
+    assert actual.additional_kwargs == {"human_input_response": response, "channel_turn_id": PUBLICATION}
+    assert record.user_id == e.owner_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response,hidden,extra_human",
+    [(input_response(version=True), False, False), (input_response(unexpected="extra"), False, False), (input_response(option_id=""), False, False), (input_response(), True, False), (input_response(), False, True)],
+)
+async def test_noncanonical_or_hidden_response_is_refused_before_worker(gateway_environment, response, hidden, extra_human):
+    e = gateway_environment
+    messages = [{"role": "human", "content": "First option", "additional_kwargs": {"human_input_response": response, **({"hide_from_ui": True} if hidden else {})}}]
+    if extra_human:
+        messages.append({"role": "human", "content": "Unrelated input"})
+    with pytest.raises(HTTPException) as failure:
+        await launched(e, body(input={"messages": messages}))
+    assert failure.value.status_code == 422
+    assert not e.worker_inputs
+
+
 @pytest.mark.asyncio
 async def test_supplied_markers_are_scrubbed_and_only_admitted_human_is_stamped(gateway_environment):
     e = gateway_environment

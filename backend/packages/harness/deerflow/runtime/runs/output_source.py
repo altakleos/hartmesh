@@ -9,6 +9,7 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import Literal
 
+from deerflow.agents.human_input import read_human_input_response
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.output import OutputEvidenceError, OutputUnavailableReason, TextOutputReceipt, canonical_text_digest, validate_receipt
 from deerflow.utils.file_io import await_drained
@@ -35,6 +36,17 @@ class OutputMessageEvidence:
     message_id: str | None
     text: str | None
     unavailable_reason: OutputUnavailableReason | None
+
+
+def qualified_human_input_response(additional):
+    """Closed response data for input equality; never grants an action."""
+    if "human_input_response" not in additional:
+        return None
+    raw = additional["human_input_response"]
+    value = read_human_input_response(additional)
+    if not isinstance(raw, Mapping) or value is None or type(raw.get("version")) is not int or dict(raw) != value or set(raw) != set(value) or any(type(item) is not str for key, item in raw.items() if key != "version"):
+        raise OutputEvidenceError() from None
+    return dict(value)
 
 
 @dataclass(frozen=True)
@@ -131,10 +143,16 @@ def inspect_output_message(message: object) -> OutputMessageEvidence:
         if text is not None:
             canonical_text_digest(text)  # Reject invalid UTF-8, never normalize it.
         unavailable = None
+        invalid_response = False
+        if role == "human" and "human_input_response" in additional:
+            try:
+                qualified_human_input_response(additional)
+            except OutputEvidenceError:
+                invalid_response = True
         hidden = additional.get("hide_from_ui") or additional.get("dynamic_context_reminder") or bool(additional.get("deerflow_content_kind")) or name == "summary" or bool(name and name.startswith("__"))
         if control and role == "tool":
             unavailable = "human_input_required"
-        elif control or role == "other" or role == "tool" or hidden or tool or refusal or additional.get("deerflow_error_fallback") or text is None or role == "human" and "human_input_response" in additional:
+        elif control or role == "other" or role == "tool" or hidden or tool or refusal or additional.get("deerflow_error_fallback") or text is None or invalid_response:
             unavailable = "unsupported_input" if role == "human" else "unsupported_output"
         elif identity is None:
             unavailable = "missing_message_identity"
