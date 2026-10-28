@@ -125,6 +125,7 @@ from .output_inventory import inventory_evidence_from_kwargs, validate_inventory
 from .output_inventory_capture import OutputInventoryCapture, persist_output_inventory
 from .output_source import read_durable_output_source
 from .output_view import NoAdmittedOutputViewLease, OutputViewQualifier, OutputViewRequest
+from .preview import attach_preview_span
 from .schemas import RunStatus, ThreadOperationKind
 
 logger = logging.getLogger(__name__)
@@ -1456,7 +1457,9 @@ async def _run_agent(
                 if getattr(run_manager, "supports_output_inventory", False) is not True or getattr(event_store, "supports_durable_output_inventory", False) is not True:
                     raise OutputEvidenceError()
                 inventory_capture = OutputInventoryCapture(document_version=intent.document_version)
-            output_capture = OutputCaptureObserver(owner_user_id=record.user_id, thread_id=thread_id, run_id=run_id, **({"inventory": inventory_capture} if inventory_capture is not None else {}))
+            output_capture = OutputCaptureObserver(
+                owner_user_id=record.user_id, thread_id=thread_id, run_id=run_id, publication_id=_preview_publication_id(record), **({"inventory": inventory_capture} if inventory_capture is not None else {})
+            )
         normalized_stream_modes = normalize_stream_modes(stream_modes)
         requested_modes: set[str] = set(normalized_stream_modes)
         lg_modes = to_langgraph_stream_modes(normalized_stream_modes)
@@ -1912,7 +1915,7 @@ async def _run_agent(
                                     # subagent's messages; see the multi-mode branch below.
                                     llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
                                 sse_event = _lg_mode_to_sse_event(single_mode)
-                                single_payload = serialize(chunk, mode=single_mode)
+                                single_payload = _serialize_preview_chunk(chunk, mode=single_mode, output_capture=output_capture)
                                 if single_mode == "values" and seq_stamper is not None:
                                     single_payload = await seq_stamper.stamp(single_payload)
                                 await bridge.publish(run_id, sse_event, single_payload)
@@ -1973,6 +1976,7 @@ async def _run_agent(
                                 file_tool_chunk_batcher=file_tool_chunk_batcher,
                                 subagent_events=subagent_events,
                                 seq_stamper=seq_stamper,
+                                output_capture=output_capture,
                             )
                     finally:
                         close_error = sys.exception()
@@ -1998,7 +2002,7 @@ async def _run_agent(
                 if file_tool_chunk_batcher is not None:
                     try:
                         for publish_chunk in file_tool_chunk_batcher.finish():
-                            await bridge.publish(run_id, "messages", serialize(publish_chunk, mode="messages"))
+                            await bridge.publish(run_id, "messages", _serialize_preview_chunk(publish_chunk, mode="messages"))
                     except Exception:
                         if stream_error is None:
                             raise
@@ -3848,6 +3852,31 @@ def _build_seq_stamper(event_store: Any, thread_id: str, journal: Any) -> _Messa
     )
 
 
+def _preview_publication_id(record):
+    """A server-admitted channel receipt is required for transient previews."""
+    proof = record.kwargs.get("channel_execution") if isinstance(record.kwargs, Mapping) else None
+    if (
+        not isinstance(proof, Mapping)
+        or type(proof.get("version")) is not int
+        or proof["version"] != 1
+        or proof.get("owner_user_id") != record.user_id
+        or proof.get("thread_id") != record.thread_id
+        or not isinstance(record.metadata, Mapping)
+        or proof.get("publication_id") != record.metadata.get("channel_turn_id")
+    ):
+        return None
+    identity = proof.get("publication_id")
+    return identity if type(identity) is str and len(identity) == 32 and all(character in "0123456789abcdef" for character in identity) else None
+
+
+def _serialize_preview_chunk(chunk, *, mode, output_capture=None):
+    payload = serialize(chunk, mode=mode)
+    if mode == "messages":
+        stamp = output_capture.preview_span(chunk) if output_capture is not None else None
+        return attach_preview_span(payload, stamp)
+    return payload
+
+
 async def _publish_stream_item(
     *,
     bridge: Any,
@@ -3858,6 +3887,7 @@ async def _publish_stream_item(
     file_tool_chunk_batcher: Any,
     subagent_events: Any,
     seq_stamper: Any = None,
+    output_capture: Any = None,
 ) -> None:
     """Publish one stream frame, preserving the subgraph namespace.
 
@@ -3870,15 +3900,15 @@ async def _publish_stream_item(
     """
     sse_event = _compose_sse_event(_lg_mode_to_sse_event(mode), namespace)
     if namespace:
-        await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
+        await bridge.publish(run_id, sse_event, _serialize_preview_chunk(chunk, mode=mode))
         return
     if file_tool_chunk_batcher is not None and mode != "messages":
         pending_chunks = file_tool_chunk_batcher.finish() if mode == "values" else file_tool_chunk_batcher.flush()
         for publish_chunk in pending_chunks:
-            await bridge.publish(run_id, "messages", serialize(publish_chunk, mode="messages"))
+            await bridge.publish(run_id, "messages", _serialize_preview_chunk(publish_chunk, mode="messages"))
     chunks_to_publish = file_tool_chunk_batcher.push(chunk) if mode == "messages" and file_tool_chunk_batcher is not None else [chunk]
     for publish_chunk in chunks_to_publish:
-        payload = serialize(publish_chunk, mode=mode)
+        payload = _serialize_preview_chunk(publish_chunk, mode=mode, output_capture=output_capture)
         if mode == "values" and seq_stamper is not None:
             # Root frames only: a subagent's snapshot is not part of this
             # thread's feed ordering (the namespaced branch returned above).

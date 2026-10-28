@@ -30,7 +30,9 @@ class PreparedModelPart:
 class VerifiedModelReplyBasis:
     record: PublicationRecord
     output: RunOutputProjectionV2
-    presentation: FrozenReplyPresentation
+    presentation: FrozenReplyPresentation | None
+    kind: str = "model_text"
+    stop_id: str | None = None
 
 
 def prepare_verified_reply(record, output, *, reply_to_message_id=None):
@@ -82,6 +84,8 @@ def validate_model_reply_basis(item: OutboxItem, part: dict | None = None) -> Ve
     from app.telegram_bots.producer import FrozenReplyPresentation, OutboxItem, _canonical_primary
 
     try:
+        if type(item) is OutboxItem and type(item.payload) is dict and type(item.payload.get("reply_basis")) is dict and type(item.payload["reply_basis"].get("version")) is int and item.payload["reply_basis"]["version"] == 4:
+            return _validate_display_reply_basis(item, part)
         if type(item) is not OutboxItem or type(item.payload) is not dict or "delivery_kind" in item.payload:
             raise ValueError
         basis = item.payload["reply_basis"]
@@ -150,6 +154,165 @@ def validate_model_reply_basis(item: OutboxItem, part: dict | None = None) -> Ve
         raise ValueError("publication-source-conflict") from None
 
 
+def prepare_display_reply(record, output, *, display, reply_to_message_id=None):
+    """Recompute a closed source-slice presentation; no host authority is minted."""
+    from html import escape
+
+    from app.gateway.run_output import RunOutputProjectionV2
+    from app.telegram_bots.inbox import PublicationRecord, publication_identity
+    from app.telegram_bots.markdown import to_html
+    from app.telegram_bots.producer import _safe_json
+    from app.telegram_bots.split import visible_text
+    from app.telegram_bots.stopped_preview import StoppedSegment, preview_source_slices
+    from deerflow.runtime.runs.preview import text_digest
+
+    try:
+        if type(record) is not PublicationRecord or type(output) is not RunOutputProjectionV2 or type(display) is not dict or set(display) != {"kind", "stop_id", "segments", "waiting"}:
+            raise ValueError
+        output = RunOutputProjectionV2.model_validate(output.model_dump(mode="python"))
+        anchor = record.origins[0].message_id if reply_to_message_id is None else reply_to_message_id
+        if type(anchor) is not int or anchor not in {origin.message_id for origin in record.origins}:
+            raise ValueError
+        result = output.output
+        if (
+            (result.owner_user_id, result.thread_id, result.run_id, result.channel_execution.publication_id, result.channel_execution.assistant_id, result.channel_execution.agent_name)
+            != (record.scope.owner_user_id, record.scope.thread_id, record.run_id, record.publication_id, record.scope.assistant_id, record.scope.agent_name)
+            or type(display["segments"]) is not list
+            or type(display["waiting"]) is not bool
+        ):
+            raise ValueError
+        segments = tuple(StoppedSegment(**value) for value in display["segments"] if type(value) is dict)
+        if len(segments) != len(display["segments"]) or len({value.part_id for value in segments}) != len(segments):
+            raise ValueError
+        segments = tuple(sorted(segments, key=lambda value: value.part_index))
+        if len({value.part_index for value in segments}) != len(segments):
+            raise ValueError
+        stopped = display["kind"] == "stopped_preview"
+        if stopped:
+            if result.state != "unavailable" or result.reason != "cancelled" or type(display["stop_id"]) is not str or not display["stop_id"] or not display["stop_id"].isprintable():
+                raise ValueError
+        else:
+            if display["kind"] != "model_text" or display["stop_id"] is not None or display["waiting"]:
+                raise ValueError
+            # Retain the exact complete-empty/no-admitted-view eligibility rules.
+            prepare_verified_reply(record, output)
+        slices = []
+        if stopped:
+            for segment in segments:
+                slices.append((segment.source_start, segment.source_end, segment.text, segment, False))
+        else:
+            text = result.source.text
+            eligible = [segment for segment in segments if segment.message_id == result.output_evidence.assistant_message_id]
+            cursor = 0
+            for segment in eligible:
+                if segment.source_start != cursor or text[segment.source_start : segment.source_end] != segment.text:
+                    raise ValueError
+                cursor = segment.source_end
+            # Only the latest acknowledged edit is extended. Earlier acknowledged
+            # prefix parts are durable receipts, not work to resend on relocation.
+            retained = eligible[:-1] if eligible and eligible[-1].mode == "edit" else []
+            for segment in retained:
+                slices.append((segment.source_start, segment.source_end, segment.text, segment, True))
+            start = retained[-1].source_end if retained else 0
+            latest = eligible[-1] if eligible and eligible[-1].mode == "edit" else None
+            for index, (begin, end, raw) in enumerate(preview_source_slices(text, start=start)):
+                slices.append((begin, end, raw, latest if index == 0 else None, False))
+        parts = []
+        for index, (begin, end, raw, segment, retained) in enumerate(slices):
+            if not raw:
+                continue
+            rendered = None if stopped else to_html(raw, partial=True)
+            if rendered is not None and rendered.wide_tables:
+                raise ValueError
+            html = escape(raw) if stopped else rendered.html
+            source = {"preview_sha256": text_digest(raw), "thread_id": record.scope.thread_id, "run_id": record.run_id, "range": {"basis": "telegram-source-slices-v1", "start": begin, "end": end}, "slice": index}
+            value = {"kind": "edit" if segment is not None and segment.mode == "edit" else "text", "source_ref": source, "html": html, "visible_text": visible_text(html), "reply_to_message_id": anchor}
+            if segment is not None and segment.mode == "edit":
+                value.update(target_message_id=segment.anchor_message_id, target_protect_content=False)
+            if retained:
+                value["shown_message_id"] = segment.anchor_message_id
+            parts.append(value)
+        if stopped:
+            parts.append({"kind": "text", "source_ref": {"key": "stop.answer", "values": {"written": bool(parts), "waiting": display["waiting"]}}, "reply_to_message_id": anchor})
+        outcome = {"kind": display["kind"], "projection": output.model_dump(mode="json")}
+        basis = {"version": 4, "publication": publication_identity(record), "outcome": outcome, "presentation": None, "display": display, "parts": parts, "finish_route": True}
+        return _safe_json(basis), _safe_json({"parts": parts})["parts"]
+    except Exception:
+        raise ValueError("publication-source-conflict") from None
+
+
+def _validate_display_reply_basis(item, part):
+    from app.gateway.run_output import RunOutputProjectionV2
+    from app.telegram_bots.inbox import PublicationOrigin, PublicationRecord, PublicationScope
+    from app.telegram_bots.producer import _canonical_primary
+
+    basis = item.payload["reply_basis"]
+    if type(item.binding_generation) is not int or type(item.chat_id) is not int or "turn_outcome_basis" in item.payload or "input_owner_callback_id" in item.payload:
+        raise ValueError
+    if set(basis) != {"version", "publication", "outcome", "presentation", "display", "parts", "finish_route"} or basis["finish_route"] is not True or basis["presentation"] is not None or "delivery_kind" in item.payload:
+        raise ValueError
+    outcome = basis["outcome"]
+    if type(outcome) is not dict or set(outcome) != {"kind", "projection"} or outcome["kind"] != basis["display"]["kind"]:
+        raise ValueError
+    output = RunOutputProjectionV2.model_validate(outcome["projection"])
+    identity = basis["publication"]
+    scope = PublicationScope(**identity["scope"])
+    record = PublicationRecord(**{**identity, "scope": scope, "origins": tuple(PublicationOrigin(**origin) for origin in identity["origins"]), "dispatch_started": True, "run_id": output.output.run_id})
+    if (item.link_id, item.owner_user_id, item.binding_generation, item.chat_id, item.dedupe_key, item.class_) != (scope.link_id, scope.owner_user_id, scope.binding_generation, scope.chat_id, "reply:" + record.turn_id, "reply"):
+        raise ValueError
+    if item.message_thread_id is not None and (type(item.message_thread_id) is not int or item.message_thread_id != scope.message_thread_id):
+        raise ValueError
+    expected, _ = prepare_display_reply(record, output, display=basis["display"], reply_to_message_id=basis["parts"][0]["reply_to_message_id"])
+    if _canonical_primary(expected) != _canonical_primary(basis) or _canonical_primary(item.payload["source"]) != _canonical_primary(outcome):
+        raise ValueError
+    receipts = {
+        "part_id",
+        "presentation_version",
+        "ordinal",
+        "state",
+        "message_ids",
+        "sent_at",
+        "dispatched_at",
+        "protect_content",
+        "sent_protect_content",
+        "plain_fallback",
+        "invalid_token_verification_pending",
+        "callback_group_id",
+        "unavailable_reason",
+    }
+
+    def clean(value):
+        if type(value) is not dict or value.get("callback_group_id") is not None or any(type(value[key]) is not bool for key in ("plain_fallback", "protect_content", "sent_protect_content") if key in value):
+            raise ValueError
+        for key in ("presentation_version", "ordinal"):
+            if key in value and (type(value[key]) is not int or value[key] < 0):
+                raise ValueError
+        return {key: child for key, child in value.items() if key not in receipts}
+
+    allowed = {_canonical_primary(initial) for initial in basis["parts"]}
+    if item.payload.get("replacement_reason") in {"edit-anchor-missing", "protection", "topic-missing"}:
+        for initial in basis["parts"]:
+            relocated = {key: value for key, value in initial.items() if key not in {"target_message_id", "target_protect_content", "shown_message_id"}}
+            if relocated["kind"] == "edit":
+                relocated["kind"] = "text"
+            allowed.add(_canonical_primary(relocated))
+    for value in item.parts + ([part] if part is not None else []):
+        if _canonical_primary(clean(value)) not in allowed:
+            raise ValueError
+    version = item.payload.get("presentation_version")
+    if not item.parts or type(version) is not int or version < 0:
+        raise ValueError
+    active = [value for value in item.parts if value.get("presentation_version") == version]
+    active_sources = [_canonical_primary(value["source_ref"]) for value in active]
+    if len(active_sources) != len(set(active_sources)):
+        raise ValueError
+    acknowledged_sources = {_canonical_primary(value["source_ref"]) for value in item.parts if value.get("state") == "sent"}
+    required = {_canonical_primary(value["source_ref"]) for value in basis["parts"]}
+    if required != set(active_sources) | acknowledged_sources:
+        raise ValueError
+    return VerifiedModelReplyBasis(record, output, None, outcome["kind"], basis["display"]["stop_id"])
+
+
 def _prepare_part(captured):
     from app.telegram_bots.links import BotLink
     from app.telegram_bots.producer import SendingPart
@@ -186,9 +349,14 @@ class ModelSource:
 
                 if fresh is None:
                     raise ValueError
-                candidate, _ = prepare_verified_reply(proof.record, fresh, reply_to_message_id=private.part["reply_to_message_id"])
+                if private.item.payload["reply_basis"]["version"] == 4:
+                    candidate, _ = prepare_display_reply(proof.record, fresh, display=private.item.payload["reply_basis"]["display"], reply_to_message_id=private.item.payload["reply_basis"]["parts"][0]["reply_to_message_id"])
+                else:
+                    candidate, _ = prepare_verified_reply(proof.record, fresh, reply_to_message_id=private.part["reply_to_message_id"])
                 if _canonical_primary(candidate) != _canonical_primary(private.item.payload["reply_basis"]):
                     raise ValueError
+                if proof.kind == "stopped_preview" and private.part["source_ref"].get("key") == "stop.answer":
+                    return None
                 return PreparedModelPart(private.part["html"], private.part["visible_text"])
 
             return await await_drained(asyncio.to_thread(compare))

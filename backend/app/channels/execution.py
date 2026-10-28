@@ -15,7 +15,7 @@ from typing import Any, Literal, Protocol
 
 type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 type QueryValue = str | int | bool
-type ChannelOperation = Literal["thread_read", "run_create", "run_read", "source_read"]
+type ChannelOperation = Literal["thread_read", "run_create", "run_read", "source_read", "run_cancel"]
 type BeforeDispatch = Callable[[], Awaitable[None]]
 
 
@@ -167,6 +167,16 @@ class ChannelHttpOwner(Protocol):
         before_dispatch: BeforeDispatch,
         after_response: BeforeDispatch | None = None,
         headers: Mapping[str, str] | None = None,
+    ) -> ChannelOwnedStream: ...
+
+    def join_sse(
+        self,
+        *,
+        owner_user_id: str,
+        path: str,
+        before_dispatch: BeforeDispatch,
+        after_response: BeforeDispatch | None = None,
+        after_event_id: str | None = None,
     ) -> ChannelOwnedStream: ...
 
 

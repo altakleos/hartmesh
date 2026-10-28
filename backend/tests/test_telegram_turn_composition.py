@@ -58,7 +58,7 @@ ANSWER = "**Durable answer**"
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", ["text", "custom_text", "produced_file", "phase_one", "no_user_text", "no_user_custom_text", "no_user_uncertain"])
-async def test_actual_managed_turn_creates_once_and_delivers_only_verified_output(capture_environment, monkeypatch, tmp_path, case):
+async def test_actual_managed_turn_creates_once_and_delivers_only_verified_output(capture_environment, monkeypatch, tmp_path, case, *, managed_ingress=False):
     e = capture_environment
     async with e.engine.begin() as connection:
         if e.dialect == "sqlite":
@@ -153,8 +153,14 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
         thread_id = None
 
         async def generate(self, *args, **kwargs):
+            nonlocal thread_id
             messages = args[0] if args else kwargs["messages"]
             model_inputs.extend(message for message in messages if message.type == "human" and "channel_turn_id" in message.additional_kwargs)
+            if managed_ingress:
+                # The actual controller has reserved the original publication
+                # before its bus handoff can enter this real model callback.
+                active_turn = next(iter(supervisor.turns._turns.values()))
+                thread_id = active_turn.record.scope.thread_id
             model_entered.set()
             if no_user:
                 from deerflow.spaces.chat_paths import ChatStoragePaths
@@ -208,23 +214,36 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
             assert channel is not None
             origins = []
             inbox = supervisor.outbox.inbox
-            for message_id, update_id, content in [(711, 1701, "First accepted question"), (710, 1702, "Second accepted question")]:
+            for message_id, update_id, content in [] if managed_ingress else [(711, 1701, "First accepted question"), (710, 1702, "Second accepted question")]:
                 incoming = Update(update_id, message=Message(message_id, link.created_at, Chat(link.chat_id, "private"), from_user=User(link.telegram_user_id, "Fixture", False), text=content))
                 row, _ = await inbox.accept(link, incoming, sanitized_input={"text": content, "type": "text"})
                 origins.append(await inbox.route(row, kind="turn", target_id=target, basis={"input_profile": {"version": 1, "kind": "plain_text", "forwarded": False}}, operation_ids=[]))
-            inbound = InboundMessage(channel_name="telegram", chat_id=str(link.chat_id), user_id=str(link.telegram_user_id), text="First accepted question", connection_id=link.connection_id, owner_user_id=OWNER, workspace_id=str(bot))
-            thread_id = await supervisor.threads.ensure_thread(channel.link, inbound, origin=origins[0])
+            if not managed_ingress:
+                inbound = InboundMessage(channel_name="telegram", chat_id=str(link.chat_id), user_id=str(link.telegram_user_id), text="First accepted question", connection_id=link.connection_id, owner_user_id=OWNER, workspace_id=str(bot))
+                thread_id = await supervisor.threads.ensure_thread(channel.link, inbound, origin=origins[0])
             if not no_user:
                 await asyncio.to_thread(paths.ensure_thread_dirs, thread_id, user_id=OWNER)
             async with e.sf.begin() as writer:
                 for row in await writer.scalars(select(TelegramOutboxRow)):
                     row.state = "sent"  # Initial welcome is outside this model-delivery test.
             await manager.start()
-            record = await supervisor.publications.dispatch(channel.link, origins, thread_id=thread_id)
+            if managed_ingress:
+                from _telegram_bot_test_support import update_payload
+
+                boot.normal.enqueue("sendChatAction")
+                boot.normal.enqueue("sendMessageDraft")
+                incoming = Update.de_json(update_payload(1701, message_id=711, account=link.telegram_user_id, text="First accepted question"), channel.bot)
+                assert await channel.handle_update(incoming), "Actual SDK ingress must commit admission before advancing polling"
+                active_turn = next(iter(supervisor.turns._turns.values()))
+            else:
+                record = await supervisor.publications.dispatch(channel.link, origins, thread_id=thread_id)
             try:
                 await asyncio.wait_for(model_entered.wait(), 15)
             except TimeoutError:
                 pytest.fail(f"Model never entered; HTTP outcomes: {http_responses!r}")
+            if managed_ingress:
+                record = active_turn.record
+                assert record is not None and record.dispatch_started
             if case == "phase_one":
                 await supervisor.begin_shutdown()
                 assert not owner.closed and supervisor._subscribed
@@ -256,11 +275,17 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
                     recovered = await reader.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == "reply:" + record.turn_id))
                 assert recovered is not None, "The fresh recovery service did not plan the persisted completed publication"
                 observed = SimpleNamespace(state="planned", outbox_id=recovered.id)
+            elif managed_ingress:
+                await asyncio.wait_for(active_turn.done.wait(), 15)
+                async with e.sf() as reader:
+                    completed_primary = await reader.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == "reply:" + record.turn_id))
+                assert completed_primary is not None
+                observed = SimpleNamespace(state="planned", outbox_id=completed_primary.id)
             else:
                 observed = await supervisor.publications.observe(record, channel.link, max_pages=2)
             assert model.invocations == 1
             assert len(model_inputs) == 1
-            assert restore_original_human_message(model_inputs[0]).content == "First accepted question\n\nSecond accepted question"
+            assert restore_original_human_message(model_inputs[0]).content == ("First accepted question" if managed_ingress else "First accepted question\n\nSecond accepted question")
             assert model_inputs[0].additional_kwargs["channel_turn_id"] == record.publication_id
             runs = await e.repository.list_by_thread(thread_id, user_id=OWNER)
             assert len(runs) == 1 and runs[0]["kwargs"]["output_capture"] == {"version": 2, "inventory_document_version": 2}
@@ -278,7 +303,7 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
                 async with e.sf() as reader:
                     planned = await reader.get(TelegramOutboxRow, observed.outbox_id)
                 proof = planned.payload["reply_basis"]["outcome"]["projection"]
-                assert planned.payload["reply_basis"]["version"] == 2
+                assert planned.payload["reply_basis"]["version"] in ({2, 4} if managed_ingress else {2})
                 assert proof["inventory"]["document"]["coverage"] == "complete" and proof["inventory"]["document"]["items"] == []
                 assert proof["inventory"]["document"]["version"] == 2
                 assert proof["inventory"]["document"]["output_view"]["kind"] == ("no_admitted_output_view" if no_user else "managed_outputs")
@@ -308,3 +333,10 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
             await bridge.close()
             if storage_entered:
                 await storage_lifetime.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["no_user_text", "no_user_custom_text"])
+async def test_actual_sdk_ingress_controller_worker_and_sender_compose(capture_environment, monkeypatch, tmp_path, case):
+    """No scripted run/output proof or substituted controller/view/worker."""
+    await test_actual_managed_turn_creates_once_and_delivers_only_verified_output(capture_environment, monkeypatch, tmp_path, case, managed_ingress=True)

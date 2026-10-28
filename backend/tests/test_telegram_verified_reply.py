@@ -4,7 +4,7 @@ import asyncio
 import threading
 import warnings
 from copy import deepcopy
-from dataclasses import asdict, replace
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -31,11 +31,10 @@ def projection(record, *, text="**synthetic answer**", coverage="complete"):
 
 
 def synthetic_item(record, output):
+    from app.telegram_bots.inbox import publication_identity
+
     frozen = freeze_reply_presentation(output.output.source.text, text_sha256=output.output.output_evidence.text_sha256)
-    identity = asdict(record)
-    identity.pop("dispatch_started")
-    identity.pop("run_id")
-    identity["origins"] = [asdict(origin) for origin in record.origins]
+    identity = publication_identity(record)
     parts = [
         {
             "kind": "text",

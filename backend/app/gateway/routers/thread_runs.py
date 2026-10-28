@@ -1251,6 +1251,35 @@ async def list_runs_page(
     )
 
 
+@router.get("/{thread_id}/runs/by-idempotency-key", response_model=RunResponse)
+@require_permission("threads", "read", owner_check=True, require_existing=True)
+@require_permission("runs", "read")
+async def lookup_run_by_idempotency_key(thread_id: ThreadId, request: Request, idempotency_key: IdempotencyKeyHeader = None) -> Response:
+    """Resolve the original POST key without admission, paging or cache effects."""
+    if not strict_channel_read(request):
+        raise HTTPException(422, "Channel execution read version is required")
+    if len(request.headers.getlist("Idempotency-Key")) != 1 or idempotency_key is None:
+        raise HTTPException(422, "Exactly one Idempotency-Key is required")
+    key = _scope_http_run_idempotency_key(request, thread_id, idempotency_key)
+    async with channel_read_scope(request, thread_id) as owner:
+        try:
+            record = await get_run_manager(request).lookup_idempotent_run(thread_id, key, user_id=owner)
+            if record is None:
+                result = JSONResponse({"detail": "Run not found", "lookup": "idempotency-key"}, status_code=404, headers=channel_read_headers())
+            else:
+                validate_channel_record(record, owner=owner, thread_id=thread_id)
+                result = JSONResponse(_record_to_response(record).model_dump(mode="json"), headers=channel_read_headers())
+        except Exception:
+            # Backend HTTP errors cannot impersonate an acknowledged miss.
+            raise channel_lookup_unavailable() from None
+        # Authority may have changed while the indexed read or projection was
+        # settling. Recheck before either buffered data or absence leaves scope.
+        async with channel_read_scope(request, thread_id) as current_owner:
+            if current_owner != owner:
+                raise ChannelReadDenied()
+            return result
+
+
 @router.get("/{thread_id}/runs/{run_id}", response_model=RunResponse)
 @require_permission("runs", "read", owner_check=True)
 async def get_run(thread_id: ThreadId, run_id: str, request: Request) -> RunResponse | Response:

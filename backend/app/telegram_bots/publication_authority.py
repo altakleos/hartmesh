@@ -23,6 +23,7 @@ _PERMISSIONS = {
     "run_create": ("threads:read", "threads:write", "runs:create"),
     "run_read": ("threads:read", "runs:read"),
     "source_read": ("threads:read", "runs:read"),
+    "run_cancel": ("threads:read", "runs:cancel"),
 }
 
 
@@ -119,6 +120,7 @@ class PublicationAttempt:
     read_guard: PublicationGuard
     thread_id: str
     endpoint_id: str
+    cancel_guard: PublicationGuard | None = None
 
 
 class PublicationAttemptAuthority:
@@ -163,6 +165,7 @@ class PublicationAttemptAuthority:
                 read_guard=_Guard(admission, "source_read", self._links.publication_guard(captured, check_live_owner=owner, check_attempt_current=lambda: admission.current("source_read"))),
                 thread_id=thread_id,
                 endpoint_id=endpoint_id,
+                cancel_guard=_Guard(admission, "run_cancel", self._links.publication_guard(captured, check_live_owner=owner, check_attempt_current=lambda: admission.current("run_cancel"))),
             )
         except Exception:
             raise ChannelExecutionProtocolError() from None
