@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.telegram_bots.callbacks import CALLBACK_METADATA_KEYS, CallbackRefused
@@ -351,6 +351,8 @@ class Acts:
             preferences = await session.scalar(select(TelegramPersonSettingsRow).where(TelegramPersonSettingsRow.owner_user_id == link.owner_user_id).with_for_update().execution_options(populate_existing=True))
             if preferences is None:
                 raise CallbackRefused() from None
+            # Settings, then links in ID order: this writer marks them all owed.
+            await session.execute(select(TelegramBotLinkRow.id).where(TelegramBotLinkRow.owner_user_id == link.owner_user_id).order_by(TelegramBotLinkRow.id).with_for_update())
             # The owner lock serializes its Acts. Read without taking an Act
             # lock before link/anchor/group; an existing receipt causes no effect.
             existing = await session.get(TelegramActRow, identity, populate_existing=True)
@@ -383,6 +385,8 @@ class Acts:
                 row.attempts, row.first_attempt_at = 1, datetime.now(UTC)
                 guard.current()
                 await self.settings.update(link.owner_user_id, locale=body["new"], session=session)
+                # Every public text of the person's bots is written in this language.
+                await session.execute(update(TelegramBotLinkRow).where(TelegramBotLinkRow.owner_user_id == link.owner_user_id).values(profile_pending=True))
                 guard.current()
                 outbox_id = await self.outbox.plan_product_keyboard(
                     link,

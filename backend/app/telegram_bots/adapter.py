@@ -297,6 +297,10 @@ class TelegramBotChannel(TelegramChannel):
         self._needs_success = True
         self._failure_serial += 1
 
+    async def read_bot_flags(self) -> bool:
+        """What only getMe reports, stored for the token that asked."""
+        return await self._success(await self.bot.get_me())
+
     async def record_poll_success(self, *, recovered: bool = False) -> bool:
         if type(recovered) is not bool:
             raise ValueError("invalid-recovery-fact")

@@ -164,6 +164,20 @@ that page and wait for their press. In a live process `_give_up` answers any not
 a step could not finish, once; a spent press is the only silent outcome. A spoken
 leading slash is dropped, so a transcript can never select a skill.
 
+`profile.py` owns a bot's public name, descriptions, menu and picture. `ProfileSync`
+borrows each running client and owns no worker: the supervisor runs `push_owed` at
+start and hourly, `add` pushes a new bot, and a saved language marks the person's
+links owed in its settings writer, taking links in ID order right after settings.
+One keyed lock serializes pushes per link, and each waiter rereads what is owed.
+`finish_profile` compares the saved language in the owner writer, so a language
+chosen during a push keeps the link owed. The name goes last because Telegram
+rations it. A client replaced mid-push is no failure; its successor still owes the
+push. After `profile.retry_hours` of failures a link waits for the next start,
+because `_failing_since` is process memory, unless its owner acts. `avatar.py` is a
+pure drawing function, always called off-loop; it loads the two pinned `fonts/`
+files with `Layout.BASIC`, and initials are drawn only when every character has a
+glyph and is left to right. Keep the Python and web colour rule in step.
+
 `strangers.py` separates touch-only LRU recency from bounded unexpired reply
 charges. The supervisor owns one ledger through adapter/token replacement and
 bot removal/re-add. Forgetting recency never replenishes the 24-hour pair,

@@ -1374,6 +1374,11 @@ refusals wait for up to two minutes; Cancel takes the input out of line, and
 Try again makes a new authorized attempt. Redelivering an update never retries
 the model. The connection UI remains reserved for a subsequent stage.
 
+The service sets each bot's public name, descriptions, command menu and picture,
+in the language its owner chose, and retries for 24 hours if Telegram refuses.
+The ordinary chat's bot carries the product's name and a chat mark; a custom
+agent's bot carries that agent's name and initials.
+
 When a model offers a page of the web app, the answer carries up to three link
 buttons. Their addresses are built from the deployment's public address, never
 from the model's text. Without a public address the buttons are left out, and an

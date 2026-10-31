@@ -4,6 +4,7 @@ import asyncio
 import logging
 import secrets
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from _telegram_bot_test_support import ManualClock, RecordingRequest
@@ -86,10 +87,13 @@ class Health:
         return SimpleNamespace(status_code=200 if self.result else 503)
 
 
-def build(db, monkeypatch, *, health=None, clock=None, factory=None, environ=None):
+def build(db, monkeypatch, *, health=None, clock=None, factory=None, environ=None, profiles=False):
     from app.telegram_bots import supervisor as module
 
     monkeypatch.setattr(module, "static_cause", lambda *args: None)
+    if not profiles:
+        # These cases script exact SDK calls; profile pushes have their own tests.
+        monkeypatch.setattr(module.ProfileSync, "_attempt", AsyncMock(return_value=False))
     monkeypatch.setenv("PTB_TIMEDELTA", "true")
     clock = clock or ManualClock()
     normal, updates = RecordingRequest(), RecordingRequest()
@@ -315,14 +319,16 @@ async def test_cancelled_constructor_keeps_ownership_until_loop_cleanup(db, monk
         await asyncio.gather(adding, return_exceptions=True)
 
 
-async def running_one(db, monkeypatch, *, connected=False):
+async def running_one(db, monkeypatch, *, connected=False, profiles=False, prepare=None):
     from _telegram_repository_test_support import bind_link
 
-    e = build(db, monkeypatch)
+    e = build(db, monkeypatch, profiles=profiles)
     link, token = await credential(db, e.env)
     if connected:
         link = await bind_link(db, link)
     e.normal.enqueue_get_me(bot_id=link.bot_id)
+    if prepare is not None:
+        prepare(e, link)
     held = e.updates.enqueue("getUpdates", result=[], release=asyncio.Event())
     await e.supervisor.check()
     await e.supervisor.start()

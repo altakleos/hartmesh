@@ -706,6 +706,25 @@ class BotLinkRepository:
             await session.flush()
             return _snapshot(row)
 
+    async def finish_profile(self, link_id: str, *, token_revision: int, version: int, bot_name: str, locale: str, at: datetime) -> BotLink | None:
+        """Record a completed push, unless its token or language is no longer current.
+
+        A language saved during the push keeps the link owed. The owner writer
+        serializes this with the settings writer that marks links owed.
+        """
+        try:
+            owner = await self._owner_of(link_id)
+        except ValueError:
+            return None
+        async with self._owner_writer(owner) as session:
+            row = await session.scalar(select(TelegramBotLinkRow).where(TelegramBotLinkRow.id == link_id, TelegramBotLinkRow.owner_user_id == owner).with_for_update())
+            current = await session.scalar(select(TelegramPersonSettingsRow.locale).where(TelegramPersonSettingsRow.owner_user_id == owner))
+            if row is None or row.token_revision != token_revision or current != locale:
+                return None
+            row.profile_pending, row.profile_version, row.bot_name, row.profile_synced_at, row.updated_at = False, version, bot_name, at.astimezone(UTC), _now()
+            await session.flush()
+            return _snapshot(row)
+
     async def update_if_current(self, link_id: str, *, token_revision: int, **facts) -> BotLink | None:
         """Publish only captured transport status, or guard a result without a write."""
         if type(token_revision) is not int or token_revision < 0:

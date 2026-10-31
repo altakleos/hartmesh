@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 from _telegram_repository_test_support import db as db  # noqa: F401
-from sqlalchemy import select
+from sqlalchemy import select, update
 from telegram import Chat, Message, Update, User
 from test_telegram_callbacks import NOW
 from test_telegram_callbacks import callbacks_environment as callbacks_environment  # noqa: F401
@@ -20,7 +20,7 @@ from test_telegram_publication_custody import publication_environment as publica
 from app.telegram_bots.acts import Acts
 from app.telegram_bots.callbacks import CallbackRefused, Prompts
 from app.telegram_bots.threads import ThreadCoordinator
-from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
 
 
 @pytest_asyncio.fixture
@@ -127,6 +127,8 @@ async def test_web_list_callback_repeats_per_query_but_same_delivery_is_idempote
 @pytest.mark.asyncio
 async def test_settings_leaf_uses_saved_choice_and_actual_atomic_act(command_environment):
     e = command_environment
+    async with e.sessions.begin() as session:
+        await session.execute(update(TelegramBotLinkRow).values(profile_pending=False))
     await e.commands.handle(e.channel, e.incoming("settings"), "settings")
     async with e.sessions() as session:
         row = next(row for row in await session.scalars(select(TelegramCallbackRow)) if row.payload.get("value") == "zh-CN")
@@ -134,6 +136,7 @@ async def test_settings_leaf_uses_saved_choice_and_actual_atomic_act(command_env
     assert await e.callbacks.adopt(e.link, group, 501, chat_id=e.link.chat_id, message_thread_id=None, outbox_id=anchor, presentation_version=0, check_current=lambda: True)
     await e.commands.execute(e.channel, await e.callbacks.get(identity), query_id="settings-query")
     assert (await e.db.settings.get(e.link.owner_user_id)).locale == "zh-CN"
+    assert (await e.db.links.get(e.link.id)).profile_pending is True, "Every public text of the person's bots follows the language"
     async with e.sessions() as session:
         act = await session.get(TelegramActRow, identity)
         assert act.state == "done" and act.body == {"field": "locale", "old": "en-US", "new": "zh-CN"}
