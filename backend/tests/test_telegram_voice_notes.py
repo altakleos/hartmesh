@@ -315,7 +315,7 @@ async def test_the_audit_identity_follows_the_chat_as_the_inbox_does(db, monkeyp
 
 async def test_a_token_shaped_transcript_is_not_saved(db, monkeypatch):
     e = await environment(db, monkeypatch, agreed=True)
-    e.transcriber.text = "my bot is 123456789:AAHfiqksKZ8WmR2zSjiQ7_v4TMAKdiHm9T0"
+    e.transcriber.text = "my bot is " + ":".join(("123456789", "A" * 35))
     script_file(e, 3009)
     try:
         await arrive(e, 3009)
