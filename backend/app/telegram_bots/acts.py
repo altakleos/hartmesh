@@ -6,6 +6,7 @@ Later service actions and their retry workers are deliberately not installed.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -198,6 +199,48 @@ class Acts:
         await session.flush()
         if guard is not None:
             await guard.check(session)
+        return _snapshot(row)
+
+    async def voice_seconds_since(self, owner_user_id: str, since: datetime) -> int:
+        """Seconds of the person's finished transcriptions, on any of their bots."""
+
+        async def perform():
+            async with self.session_factory() as session:
+                rows = await session.scalars(select(TelegramActRow.body).where(TelegramActRow.owner_user_id == owner_user_id, TelegramActRow.kind == "voice_note", TelegramActRow.state == "done", TelegramActRow.created_at >= since))
+                return sum(body["duration"] for body in rows)
+
+        return await await_drained(perform())
+
+    async def write_voice_note(self, link: BotLink, *, message_id: int, duration: int, provider: str, used_as: str, session: AsyncSession) -> ActRow:
+        """A finished transcription, recorded once in the writer that saves its text.
+
+        The audit is terminal: no worker repeats it, and it holds no audio,
+        transcript or file id.
+        """
+        self._writer_required(session)
+        if provider not in {"openai", "gemini"} or used_as not in {"message", "answer"} or type(duration) is not int or duration < 0:
+            raise ValueError("invalid-voice-act") from None
+        now = datetime.now(UTC)
+        row = TelegramActRow(
+            id=hashlib.sha256(f"telegram:{link.id}:{link.chat_id}:{message_id}:voice_note".encode()).hexdigest()[:32],
+            link_id=link.id,
+            bot_id=link.bot_id,
+            owner_user_id=link.owner_user_id,
+            binding_generation=link.binding_generation,
+            telegram_user_id=link.telegram_user_id,
+            chat_id=link.chat_id,
+            message_id=message_id,
+            kind="voice_note",
+            body={"duration": duration, "provider": provider, "used_as": used_as},
+            state="done",
+            operation_ids=[],
+            attempts=1,
+            first_attempt_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(row)
+        await session.flush()
         return _snapshot(row)
 
     async def write(self, link: BotLink, *, act_id: str, kind: str, body: dict, state: str = "pending", session: AsyncSession, **targets) -> ActRow:

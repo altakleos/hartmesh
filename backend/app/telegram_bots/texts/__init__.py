@@ -22,11 +22,16 @@ def _help_keyboard(*, link):
     return [[{"label": "label.web_list", "kind": "web_list", "target_kind": "link", "target_id": link.id, "payload": {}}]]
 
 
+def _voice_keyboard(*, payload):
+    return [[{"label": label, "kind": kind, "target_kind": None, "target_id": None, "payload": payload}] for label, kind in (("label.use_voice", "voice_ok"), ("label.not_now", "voice_no"))]
+
+
 KEYBOARDS: dict[str, Callable] = {
     "settings.state_basic": _language_keyboard,
     "new.confirm_plain": _new_keyboard,
     "help.chat": _help_keyboard,
     "help.custom_agent": _help_keyboard,
+    "voice.first_notice": _voice_keyboard,
 }
 
 

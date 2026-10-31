@@ -12,6 +12,7 @@ from app.telegram_bots.callbacks import CallbackRefused, canonical_keyboard
 from app.telegram_bots.inbox import InboxRow
 from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.texts import KEYBOARDS
+from app.telegram_bots.voice import PROVIDER_NAMES
 from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
 
@@ -71,6 +72,10 @@ class CallbackCommands:
 
         return await await_drained(asyncio.to_thread(prepare))
 
+    async def _transcriber(self):
+        notes = getattr(self.services, "voice_notes", None)
+        return None if notes is None else await notes.transcriber()
+
     async def _presentation(self, word, link):
         values = await self.services.prepare_ingress_values(link)
         if link.agent_kind not in {"lead_agent", "custom_agent"}:
@@ -84,8 +89,8 @@ class CallbackCommands:
             return {"key": "settings.state_basic", "values": {"language": "中文" if settings.locale == "zh-CN" else "English"}, "keyboard": canonical_keyboard(KEYBOARDS["settings.state_basic"](link=link))}
         if word == "help":
             key = "help.chat" if link.agent_kind == "lead_agent" else "help.custom_agent"
-            # No voice consumer is exposed in this stage.
-            return {"key": key, "values": {"product": values["product"], "agent": values["agent"], "voice_enabled": False}, "keyboard": canonical_keyboard(KEYBOARDS[key](link=link))}
+            transcriber = await self._transcriber()
+            return {"key": key, "values": {"product": values["product"], "agent": values["agent"], "voice_enabled": transcriber is not None}, "keyboard": canonical_keyboard(KEYBOARDS[key](link=link))}
         if word == "web":
             return {"key": "web.list", "values": {"product": values["product"]}, "keyboard": canonical_keyboard(await self._web_keyboard(link))}
         if word == "privacy":
@@ -93,7 +98,9 @@ class CallbackCommands:
 
             address = await await_drained(asyncio.to_thread(page_address, "web.telegram", link))
             keyboard = [[{"label": "label.open_telegram", "url": address}]] if address else []
-            return {"key": "privacy.full", "values": {"product": values["product"]}, "keyboard": canonical_keyboard(keyboard)}
+            transcriber = await self._transcriber()
+            named = {} if transcriber is None else {"transcriber": PROVIDER_NAMES[transcriber.provider]}
+            return {"key": "privacy.full", "values": {"product": values["product"], **named}, "keyboard": canonical_keyboard(keyboard)}
         raise CallbackRefused() from None
 
     async def handle(self, channel, update, word):

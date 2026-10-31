@@ -13,6 +13,7 @@ from app.telegram_bots.callbacks import CallbackRepository, Prompts
 from app.telegram_bots.commands import CallbackCommands
 from app.telegram_bots.files import FileBytesBudget, PendingFiles
 from app.telegram_bots.supervisor import TelegramSupervisor
+from app.telegram_bots.voice import VoiceNotes
 
 
 @pytest.mark.asyncio
@@ -35,6 +36,7 @@ async def test_default_repositories_are_wired_before_supervisor_check_returns(db
         assert isinstance(supervisor.file_bytes_budget, FileBytesBudget)
         assert supervisor.file_bytes_budget.capacity == db.config.files.in_memory_max_bytes
         assert isinstance(supervisor.pending_files, PendingFiles)
+        assert isinstance(supervisor.voice_notes, VoiceNotes) and supervisor.voice_notes.services is supervisor
         assert supervisor.pending_files.callbacks is supervisor.callbacks
         assert supervisor.pending_files.inbox is supervisor.outbox.inbox
         assert supervisor.commands.services is supervisor

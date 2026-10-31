@@ -37,7 +37,7 @@ from app.telegram_bots.polling import CONFLICT_GRACE_SECONDS, TASK_DEATHS_BEFORE
 from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryEligibility, Outbox, OutboxSender
 from app.telegram_bots.render import render_plain
 from app.telegram_bots.settings import SettingsRepository, silent_now
-from app.telegram_bots.voice import resolve_transcriber
+from app.telegram_bots.voice import VoiceNotes, resolve_transcriber
 from deerflow.config.app_config import get_app_config
 from deerflow.config.ui_config import product_name
 from deerflow.persistence.engine import get_session_factory
@@ -117,7 +117,7 @@ class TelegramSupervisor:
         self.thread_client, self.threads = thread_client, None
         self.publication_authority = self.publications = self.model_source = None
         self.turns = None
-        self.forms = self.human_inputs = None
+        self.forms = self.human_inputs = self.voice_notes = None
         self.file_bytes_budget = FileBytesBudget(config.files.in_memory_max_bytes)
         self.pending_files = None
         self.recovery = None
@@ -259,6 +259,7 @@ class TelegramSupervisor:
             self.forms = Forms(self.callbacks)
             self.acts = Acts(self.session_factory, settings=self.settings, callbacks=self.callbacks, outbox=self.outbox)
             self.commands = CallbackCommands(self)
+            self.voice_notes = VoiceNotes(self)
             self.pending_files = PendingFiles(self.callbacks, self.outbox.inbox, guard_factory=self._pending_file_guard, config=self.config, clock=self._clock)
             if self.authority is None:
                 from app.telegram_bots.authority import TelegramAuthority

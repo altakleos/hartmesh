@@ -1372,8 +1372,17 @@ answered together in order. `/stop` and the current answer's Stop control stop
 that exact turn and discard its waiting messages. Transient execution-capacity
 refusals wait for up to two minutes; Cancel takes the input out of line, and
 Try again makes a new authorized attempt. Redelivering an update never retries
-the model. Voice notes and the connection UI remain reserved for subsequent
-stages.
+the model. The connection UI remains reserved for a subsequent stage.
+
+Voice notes work when the deployment already offers OpenAI or Gemini models at
+the provider's own address (`HARTMESH_TELEGRAM_VOICE` chooses or switches this
+off). A person agrees once to the named service, on any of their bots, and is
+asked again if the service changes. The recording is held in memory only and
+sent to that one service; the bot then shows what it heard and treats it as the
+person's typed message, including as the answer to an open question. Notes are
+limited to 5 minutes each and 30 minutes per person per local day, counted from
+successful transcriptions. A note interrupted by a restart is reported as failed
+and is never sent to the service again.
 
 Answers appear as temporary drafts by default, or as edited messages when
 `telegram_bots.streaming` is `edit`. Protected content always uses protected
