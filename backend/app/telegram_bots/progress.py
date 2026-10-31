@@ -12,6 +12,7 @@ from app.channels.execution import ChannelExecutionScope
 from app.channels.execution_client import ChannelExecutionFacade
 from app.telegram_bots.inbox import publication_identity
 from app.telegram_bots.stopped_preview import StoppedSegment, _issue_shown_preview, _issue_stopped_preview
+from deerflow.runtime.runs.output_inventory import content_items
 from deerflow.runtime.runs.preview import PREVIEW_SPAN_KEY, PreviewProtocolError, PreviewSpan, text_digest
 from deerflow.utils.file_io import await_drained
 
@@ -492,7 +493,7 @@ class RunObserver:
         self._check(state)
         if existing is not None:
             return existing
-        if self.coordinator.file_output_planner is not None and output.inventory.state == "matched" and output.inventory.document.coverage == "complete" and output.inventory.document.items:
+        if self.coordinator.file_output_planner is not None and output.inventory.state == "matched" and output.inventory.document.coverage == "complete" and content_items(output.inventory.document):
             identity = await self.coordinator.file_output_planner(state.record, current_link, output, guard=guard, shown=self.freeze_shown(record, current_link))
             self._check(state)
             if identity is not None:

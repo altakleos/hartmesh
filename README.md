@@ -1374,6 +1374,11 @@ refusals wait for up to two minutes; Cancel takes the input out of line, and
 Try again makes a new authorized attempt. Redelivering an update never retries
 the model. The connection UI remains reserved for a subsequent stage.
 
+When a model offers a page of the web app, the answer carries up to three link
+buttons. Their addresses are built from the deployment's public address, never
+from the model's text. Without a public address the buttons are left out, and an
+address Telegram refuses appears as the last line of the message.
+
 Voice notes work when the deployment already offers OpenAI or Gemini models at
 the provider's own address (`HARTMESH_TELEGRAM_VOICE` chooses or switches this
 off). A person agrees once to the named service, on any of their bots, and is

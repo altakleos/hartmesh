@@ -117,6 +117,16 @@ conversion; keep the real SDK serialization check when changing that boundary.
 Ambiguous details containers display literally. Impossible canonical
 split budgets raise `ValueError`; disposable drafts may clip their first part.
 
+A `show_web_page` result is a closed `page` entry in the run's inventory, set by
+the harness capture; any other artifact stays opaque `structured` output.
+`content_items` excludes pages, so every reply family keeps its proof of the whole
+inventory unfiltered and gains no new version. `ModelSource._page_keys` derives the
+offers from that saved proof for the last answer-bearing part of a primary, and
+`send_part` builds the buttons with `page_buttons` at each attempt. Beside
+ForceReply, or after Telegram refuses an address, the address becomes the
+message's last line; a file reply with offers keeps its answer as a text part,
+because one refused button would otherwise fail the whole upload.
+
 `pages.page_address` uses only the configured base, stored target and supplied
 identities. Restricted instance tabs need current grants; Memory also needs the
 `memory:read` ceiling, and adding an AI employee needs administrator authority.

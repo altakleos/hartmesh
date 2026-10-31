@@ -1586,7 +1586,7 @@ class Outbox:
             row.claim_owner = row.claim_id = row.claimed_at = None
             return True
 
-    async def fallback_url_button(self, captured: SendingPart) -> bool:
+    async def fallback_url_button(self, captured: SendingPart, *, pages: bool = False) -> bool:
         """Journal a refused address without replacing its source or sending again."""
         async with self._writer(captured.link.id) as (session, binding):
             row = await session.get(TelegramOutboxRow, captured.item.id, with_for_update=True)
@@ -1595,7 +1595,9 @@ class Outbox:
             except DeliveryClaimRetired:
                 return False
             stored_urls = False
-            if current.part.get("stored_keyboard") is True and current.item.payload.get("reply_basis", {}).get("version") in {6, 7}:
+            if pages:
+                pass  # The page offer itself is the refused address.
+            elif current.part.get("stored_keyboard") is True and current.item.payload.get("reply_basis", {}).get("version") in {6, 7}:
                 from app.telegram_bots.file_source import file_warning_keyboard, validate_media_reply_basis
 
                 try:
@@ -1616,8 +1618,8 @@ class Outbox:
             if (
                 current.part != captured.part
                 or current.part.get("url_button_fallback")
-                or current.part["kind"] != "text"
-                or not ("url_button" in current.part or stored_urls)
+                or current.part["kind"] not in ({"text", "edit"} if pages else {"text"})
+                or not ("url_button" in current.part or stored_urls or pages)
                 or current.item.message_thread_id != captured.item.message_thread_id
                 or any(getattr(current.link, field) != getattr(captured.link, field) for field in scope)
             ):

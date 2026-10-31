@@ -66,8 +66,11 @@ independent: file reoffers, artifacts and controls still count on a viewless run
 | `unsupported` | The profile or surface could not be qualified; observations remain a subset. |
 
 File descriptors carry exact virtual references, observed surfaces and witnesses.
-Structured descriptors carry a presentation-fragment digest and witness. Neither
-grants retrieval, action execution or immutable bytes. The claim excludes arbitrary
+Structured descriptors carry a presentation-fragment digest and witness. Page
+descriptors carry the closed key of an exact `show_web_page` result and a witness;
+they are navigation, so `content_items` leaves them out of what a run produced and
+`offered_pages` lists them. No descriptor grants retrieval, action execution or
+immutable bytes. The claim excludes arbitrary
 filesystem contents, remote effects, native containment and business completion.
 The whole canonical document is bounded to 256 KiB and 256 descriptors, including
 all witnesses. Fragment traversal also bounds depth to 12 and nodes to 8,192.

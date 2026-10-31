@@ -6,6 +6,7 @@ access, action permission, immutable bytes or arbitrary-effect containment.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 
@@ -44,6 +45,15 @@ def _paths(value):
     if not isinstance(value, (list, tuple)) or any(type(path) is not str or not path.startswith(_ROOT + "/") or any(part in {"", ".", ".."} for part in path[len(_ROOT) + 1 :].split("/")) for path in value):
         raise OutputEvidenceError()
     return tuple(dict.fromkeys(value))
+
+
+def _offered_page(message, artifact):
+    """The closed key of a show_web_page result; any other artifact stays opaque."""
+    offer = artifact.get("web_page") if isinstance(artifact, Mapping) and len(artifact) == 1 else None
+    if _field(message, "type") != "tool" or _field(message, "name") != "show_web_page" or not isinstance(offer, Mapping) or set(offer) != {"version", "kind", "key"}:
+        return None
+    usable = type(offer["version"]) is int and offer["version"] == 1 and offer["kind"] == "web_page" and type(offer["key"]) is str and re.fullmatch(r"[A-Za-z]{1,32}", offer["key"])
+    return offer["key"] if usable else None
 
 
 def inventory_scan(before, after):
@@ -464,6 +474,7 @@ class OutputInventoryCapture:
                     type=_field(message, "type"),
                     tool_call_id=_field(message, "tool_call_id"),
                     artifact_digest=self._fragment(artifact) if artifact else None,
+                    page=_offered_page(message, artifact),
                     presented_files=tuple(additional["presented_files"]) if isinstance(additional.get("presented_files"), (list, tuple)) else additional.get("presented_files"),
                     presented_by=additional.get("presented_by"),
                     has_presentation="presented_files" in additional,
@@ -551,7 +562,10 @@ class OutputInventoryCapture:
                 ]
                 if message["artifact_digest"] is not None and not message["hidden"] and (current or matches):
                     witness = matches[0][3] if len(matches) == 1 else dict(kind="root_snapshot", root_epoch=self._root, message_id=identity)
-                    structured.append(dict(kind="structured", carrier="message_artifact", value_sha256=message["artifact_digest"], witness=witness))
+                    if message["page"] is not None:
+                        structured.append(dict(kind="page", key=message["page"], witness=witness))
+                    else:
+                        structured.append(dict(kind="structured", carrier="message_artifact", value_sha256=message["artifact_digest"], witness=witness))
                 elif message["artifact_digest"] is not None and identity not in self._baseline and not message["hidden"]:
                     self._incomplete("terminal_membership_unknown")
                     structured.append(dict(kind="structured", carrier="terminal_field", value_sha256=message["artifact_digest"], witness=dict(kind="root_snapshot", root_epoch=self._root, message_id=identity)))

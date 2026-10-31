@@ -32,6 +32,7 @@ from app.channels.telegram import TelegramChannel
 from app.telegram_bots.capped_download import ManagedHTTPXRequest
 from app.telegram_bots.render import render, render_plain
 from app.telegram_bots.settings import silent_now
+from app.telegram_bots.split import utf16_units
 from app.telegram_bots.strangers import BAD_CODE_REPLIES_PER_SENDER_PER_HOUR as BAD_CODE_REPLIES_PER_SENDER_PER_HOUR
 from app.telegram_bots.strangers import STRANGER_MAP_MAX as STRANGER_MAP_MAX
 from app.telegram_bots.strangers import STRANGER_REPLIES_PER_BOT_PER_HOUR as STRANGER_REPLIES_PER_BOT_PER_HOUR
@@ -1025,6 +1026,13 @@ class TelegramBotChannel(TelegramChannel):
 
         return await self.live_request(link, "set_message_reaction", is_current=lambda: self._callback_current(link), message_id=row.message_id, reaction=[ReactionTypeEmoji("👀")])
 
+    async def _page_buttons(self, link, keys):
+        from app.telegram_bots.authority import is_administrator
+        from app.telegram_bots.pages import page_buttons
+
+        administrator = "addEmployee" in keys and await is_administrator(link.owner_user_id)
+        return await await_drained(asyncio.to_thread(page_buttons, keys, link, reader_is_administrator=administrator))
+
     async def _get_download_bot(self):
         return self.bot
 
@@ -1619,6 +1627,16 @@ class TelegramBotChannel(TelegramChannel):
                 raise PermanentDeliveryError("invalid-product-source") from None
             if part.get("url_button_fallback"):
                 text += "".join("\n" + (address if part.get("plain_fallback") else escape(address)) for address in stored_urls)
+        pages = await self._page_buttons(saved.link, model_part.page_keys) if model_part is not None and model_part.page_keys else []
+        if part.get("url_button_fallback") or part.get("force_reply"):
+            # Refused, or beside ForceReply, which cannot carry a link button:
+            # the address is the message's last line, when one message can hold it.
+            lines = "".join("\n" + address for _label, address in pages)
+            if lines and utf16_units(model_part.plain_text + lines) <= 4096:
+                text += lines if part.get("plain_fallback") else escape(lines)
+        elif pages:
+            shown = list(markup.inline_keyboard) if isinstance(markup, InlineKeyboardMarkup) else []
+            markup = InlineKeyboardMarkup([*shown, *([InlineKeyboardButton(render_plain(label, settings.locale, product=self._services.product_name), url=address)] for label, address in pages)])
         if button is not None:
             if part.get("url_button_fallback"):
                 text += "\n" + (button["url"] if part.get("plain_fallback") else escape(button["url"]))
@@ -1763,7 +1781,7 @@ class TelegramBotChannel(TelegramChannel):
             structural = (
                 "can't parse entities" in description
                 and not part.get("plain_fallback")
-                or (button is not None or stored_urls)
+                or (button is not None or stored_urls or pages)
                 and not part.get("url_button_fallback")
                 and "url" in description
                 and "invalid" in description
@@ -1773,8 +1791,8 @@ class TelegramBotChannel(TelegramChannel):
             if "can't parse entities" in description and not part.get("plain_fallback"):
                 await self._services.outbox.fallback_to_plain(current)
                 raise DeliveryClaimRetired() from None
-            if (button is not None or stored_urls) and not part.get("url_button_fallback") and "url" in description and "invalid" in description:
-                await self._services.outbox.fallback_url_button(current)
+            if (button is not None or stored_urls or pages) and not part.get("url_button_fallback") and "url" in description and "invalid" in description:
+                await self._services.outbox.fallback_url_button(current, pages=bool(pages))
                 raise DeliveryClaimRetired() from None
             raise
         except NetworkError as error:

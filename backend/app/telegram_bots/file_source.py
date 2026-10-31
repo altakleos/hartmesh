@@ -14,6 +14,7 @@ from pathlib import PurePosixPath
 def qualify_file_output(record, output):
     from app.gateway.run_output import RunOutputProjectionV2
     from app.telegram_bots.inbox import PublicationOrigin, PublicationRecord, PublicationScope, publication_identity
+    from deerflow.runtime.runs.output_inventory import content_items
 
     try:
         if type(record) is not PublicationRecord or type(output) is not RunOutputProjectionV2:
@@ -38,7 +39,7 @@ def qualify_file_output(record, output):
         if inventory.state != "matched" or inventory.document.coverage != "complete" or type(inventory.document.version) is not int or inventory.document.version != 2 or not inventory.document.items:
             raise ValueError
         paths = []
-        for item in inventory.document.items:
+        for item in content_items(inventory.document):
             if item.kind != "file":
                 raise ValueError
             path = item.path
@@ -55,6 +56,8 @@ def qualify_file_output(record, output):
             ):
                 raise ValueError
             paths.append(path)
+        if not paths:
+            raise ValueError
         return tuple(paths)
     except Exception:
         raise ValueError("publication-source-conflict") from None
@@ -78,6 +81,7 @@ def prepare_file_reply(record, output, *, files, capacity, max_bytes, display=No
     from app.telegram_bots.inbox import publication_identity
     from app.telegram_bots.model_source import prepare_display_reply
     from app.telegram_bots.producer import freeze_reply_presentation
+    from deerflow.runtime.runs.output_inventory import offered_pages
 
     paths = qualify_file_output(record, output)
     if type(files) is not list or tuple(file.get("path") for file in files) != paths:
@@ -97,7 +101,8 @@ def prepare_file_reply(record, output, *, files, capacity, max_bytes, display=No
         parsed = urlsplit(conversation_url)
         if not parsed.path.endswith(route) or parsed.query or parsed.fragment:
             raise ValueError("publication-source-conflict")
-    plan = plan_output_files(files, answer_visible=answer, capacity=capacity, max_bytes=max_bytes)
+    # A page offer needs a text part: Telegram refuses an upload for one bad button.
+    plan = plan_output_files(files, answer_visible=answer, capacity=capacity, max_bytes=max_bytes, caption_allowed=not offered_pages(output.inventory.document))
     parts = []
     anchor = record.origins[0].message_id
     if frozen is not None and not plan.caption:
@@ -153,6 +158,7 @@ _RECEIPTS = {
     "protect_content",
     "sent_protect_content",
     "plain_fallback",
+    "url_button_fallback",
     "invalid_token_verification_pending",
     "callback_group_id",
     "unavailable_reason",
