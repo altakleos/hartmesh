@@ -561,30 +561,65 @@ class HumanInputs:
                 return False
         topic = normalize_callback_topic(message.message_thread_id)
         quoted = message.reply_to_message.message_id if message.reply_to_message else None
-        prompt = None
-        retired = False
+        target = await self._text_target(link, guard, chat_id=message.chat_id, topic=topic, quoted=quoted)
+        if target is None:
+            return False
+        origin, _ = await self.services.outbox.inbox.accept(link, update, sanitized_input={"type": "text", "text": message.text})
+        origin = await self.services.outbox.inbox.route(origin, kind="turn", target_id=link.agent_ref, basis={"input_profile": {"version": 1, "kind": "plain_text", "forwarded": False}}, operation_ids=[])
+        return await self._apply_text(channel, link, guard, origin, target)
+
+    async def _text_target(self, link, guard, *, chat_id, topic, quoted, sent_at=None):
+        """What this text answers as (prompt, retired, rows); None leaves it ordinary.
+
+        ``sent_at`` is set for text that arrives late. A prompt that appeared
+        after the person spoke was not what they were answering.
+        """
+        prompt, rows, retired = None, (), False
         if quoted is not None:
-            route = await self.services.callbacks.for_message(link.id, quoted, chat_id=message.chat_id, message_thread_id=topic, binding_generation=link.binding_generation)
+            route = await self.services.callbacks.for_message(link.id, quoted, chat_id=chat_id, message_thread_id=topic, binding_generation=link.binding_generation)
             if route is not None:
                 # Delivery-only warnings do not own a human-input answer, even
                 # after their Send again control has been consumed.
                 if all(row.kind == "file_retry" for row in route.rows):
-                    return False
-                prompt = next((row for row in route.rows if row.kind == "prompt"), None)
-                retired = route.retired_presentation
+                    return None
+                rows, retired = route.rows, route.retired_presentation
+                prompt = next((row for row in rows if row.kind == "prompt"), None)
                 if prompt is None:
-                    if not retired:
-                        return False  # current quoted cards remain ordinary FIFO input
-                    origin, _ = await self.services.outbox.inbox.accept(link, update, sanitized_input={"type": "text", "text": message.text})
-                    origin = await self.services.outbox.inbox.route(origin, kind="turn", target_id=link.agent_ref, basis={"input_profile": {"version": 1, "kind": "plain_text", "forwarded": False}}, operation_ids=[])
-                    await self._retired_card_notice(link, origin, route.rows, guard=guard)
-                    return True
+                    return (None, True, rows) if retired else None  # current quoted cards remain ordinary FIFO input
         else:
-            prompt = await self.services.prompts.current(link, message.chat_id, topic, guard=guard)
+            prompt = await self.services.prompts.current(link, chat_id, topic, guard=guard)
+            if prompt is not None and sent_at is not None and prompt.created_at > sent_at:
+                return None
         if prompt is None or not self.services.prompts.is_visible(prompt) or prompt.consumed_at is None and prompt.payload.get("purpose") not in {"form_field", "clarify_other"}:
+            return None
+        return prompt, retired, rows
+
+    async def _transcript_target(self, link, row, guard):
+        return await self._text_target(link, guard, chat_id=row.chat_id, topic=row.message_thread_id, quoted=row.sanitized_input.get("reply_to_message_id"), sent_at=row.accepted_at)
+
+    async def answers_prompt(self, channel, link, row):
+        """Whether a transcript of this note would answer a prompt, for its audit."""
+        target = None if row.route_basis.get("forwarded") else await self._transcript_target(link, row, _InputGuard(self, channel, link))
+        return target is not None and target[0] is not None and not target[1] and target[0].consumed_at is None
+
+    async def handle_transcript(self, channel, link, row):
+        """A finished voice note answers exactly as the same typed text would."""
+        from deerflow.utils.file_io import await_drained
+
+        if row.route_basis["input_profile"]["forwarded"] or not self.current(channel, link):
             return False
-        origin, _ = await self.services.outbox.inbox.accept(link, update, sanitized_input={"type": "text", "text": message.text})
-        origin = await self.services.outbox.inbox.route(origin, kind="turn", target_id=link.agent_ref, basis={"input_profile": {"version": 1, "kind": "plain_text", "forwarded": False}}, operation_ids=[])
+        guard = _InputGuard(self, channel, link)
+        target = await await_drained(self._transcript_target(link, row, guard))
+        return False if target is None else await await_drained(self._apply_text(channel, link, guard, row, target))
+
+    async def _apply_text(self, channel, link, guard, origin, target):
+        from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow
+
+        prompt, retired, rows = target
+        text, topic = origin.sanitized_input["text"], origin.message_thread_id
+        if prompt is None:
+            await self._retired_card_notice(link, origin, rows, guard=guard)
+            return True
         if retired or prompt.consumed_at is not None:
             await self._closed_notice(link, origin, prompt, guard=guard)
             return True
@@ -602,15 +637,13 @@ class HumanInputs:
                 return True
             if fresh.payload["purpose"] == "clarify_other":
                 request = decode_request(source.request)
-                response = {"version": 1, "kind": "human_input_response", "source": request["source"], "request_id": request["request_id"], "response_kind": "text", "value": message.text}
+                response = {"version": 1, "kind": "human_input_response", "source": request["source"], "request_id": request["request_id"], "response_kind": "text", "value": text}
                 stage = await self.services.outbox.inbox.stage_submission(link, source_outbox_id=item.id, response=response, origin=origin, prompt_id=fresh.id, callbacks=self.services.callbacks, guard=guard, session=writer)
-                await self._receipt(link, item, source, "clarify.answer_line", {"label": message.text}, step_id="typed:" + str(origin.message_id), guard=guard, writer=writer, locale=settings.locale)
+                await self._receipt(link, item, source, "clarify.answer_line", {"label": text}, step_id="typed:" + str(origin.message_id), guard=guard, writer=writer, locale=settings.locale)
             elif fresh.payload["purpose"] == "form_field":
                 form = await self.services.forms.read(link, fresh.payload["form_id"], guard=guard, session=writer)
-                form = await self.services.forms.transition(
-                    link, form.id, expected_revision=fresh.payload["revision"], update_id=update.update_id, action="answer", field=fresh.payload["field"], value=message.text, guard=guard, session=writer
-                )
-                await self.services.prompts.close(link, message.chat_id, topic, reason="answered", guard=guard, session=writer)
+                form = await self.services.forms.transition(link, form.id, expected_revision=fresh.payload["revision"], update_id=origin.update_id, action="answer", field=fresh.payload["field"], value=text, guard=guard, session=writer)
+                await self.services.prompts.close(link, origin.chat_id, topic, reason="answered", guard=guard, session=writer)
                 view = "review" if form.state == "review" else "field"
                 presentation = present_form(source.request, form, thread_id=form.thread_id, reply_to_message_id=source.record.origins[0].message_id, locale=settings.locale, view=view)
                 identity = await self._view(link, item, source, presentation, step_id=f"form:{form.id}:{form.revision}:{view}", guard=guard, writer=writer)

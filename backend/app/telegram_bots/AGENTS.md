@@ -127,6 +127,32 @@ keys from environment variables. Capture one qualifying provider/key/model per
 note; requests use fixed official endpoints with no provider fallback. Keep SDK
 imports lazy and suppress SDK payload logging only inside the voice context.
 The package emits fixed qualification reasons, never keys, audio or transcripts.
+SDK imports, TLS client construction and sync closes run off-loop.
+
+`VoiceNotes` treats a voice note as typed text that arrives late. The inbox row
+is its only state: route `voice` with target `working` until it has an outcome,
+or `asked` while its consent question waits. There are no other phases, no
+worker and no provider retry. `complete_voice` rewrites the row as ordinary plain
+or forwarded input in the writer that saves the `voice_note` audit and the
+`voice.heard` echo, retaining the recording's descriptor in `voice_note` only to
+compare a redelivered update. Everything after that is the typed path: prompts,
+pending files, joins, queue, Stop, recovery and Try again need no voice branch.
+The per-owner lock spans bots, covers checks through the audit commit, and is
+released before the transcript is routed. Queued notes hold no audio; audio lives
+only inside `_transcribe`, charged to the shared byte budget through the provider
+call. `_download` is the one getFile/capped-stream leaf for model files and voice
+audio; voice uses no `FileInputContext`, storage preflight or upload.
+
+Late text is judged by when it was spoken: `_text_target` lets a prompt created
+after `accepted_at` claim nothing, matching the typed rule that admitted input
+stays ordinary. A consent press agrees only to its `offered_provider`, compared
+under the lock; a mismatch edits the same message into a fresh question. Decline
+never touches an existing agreement. The startup input page settles `working`
+notes as `voice.failed` because their provider call may have happened; no live
+note exists then, so no liveness registry is needed. `asked` notes stay out of
+that page and wait for their press. In a live process `_give_up` answers any note
+a step could not finish, once; a spent press is the only silent outcome. A spoken
+leading slash is dropped, so a transcript can never select a skill.
 
 `strangers.py` separates touch-only LRU recency from bounded unexpired reply
 charges. The supervisor owns one ledger through adapter/token replacement and
@@ -348,8 +374,8 @@ the library's swallowed exception path never proves admission. Fixed input
 routes and required reply plans commit before acknowledgment. Token-shaped
 content is refused before hashes/inbox/task payloads; disposable tasks retain
 safe identities only and drain before SDK teardown. Text/photos/documents use the
-managed turn controller. Voice receives the fixed unsupported notice until its
-consumer is complete; potential skill references stay held.
+managed turn controller. Voice notes use `VoiceNotes`; potential skill references
+stay held.
 
 `files.py` owns one Supervisor byte budget and pending attachment descriptors.
 Reserve whole batches before reads, shrink only, and retain each charge until

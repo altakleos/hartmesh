@@ -35,10 +35,11 @@ if TYPE_CHECKING:
     from app.telegram_bots.links import BotLink, PublicationGuard
 
 _TOKEN = re.compile(TOKEN_BODY)
-SERVER_BOOKKEEPING_KEYS = frozenset({"publications", "current_publication_id", "thread_preparation", "publication_recovery", "callback_choice", "prepublication_group", "human_input_ui", "pending_files"})
+SERVER_BOOKKEEPING_KEYS = frozenset({"publications", "current_publication_id", "thread_preparation", "publication_recovery", "callback_choice", "prepublication_group", "human_input_ui", "pending_files", "voice_note"})
 _INPUT_KEYS = {"text", "caption", "files", "voice", "command", "type", "reply_to_message_id", "prompt_id", "media_group_id"}
 _UNSAFE_KEYS = {"raw_update", "update", "token", "bot_token", "access_token", "download_url", "file_path", "audio_bytes", "bytes", "_content", "content_bytes"}
 _FILE_KEYS = {"type", "file_id", "file_unique_id", "filename", "mime_type", "size", "message_id", "telegram_bot_id", "duration", "width", "height"}
+VOICE_PHASES = ("working", "asked")
 _PUBLICATION_HEX = re.compile(r"[0-9a-f]{32}\Z")
 _PUBLICATION_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 CALLBACK_PUBLICATION_KEY = "publication_owner"
@@ -2717,7 +2718,7 @@ class InboxRepository:
             if saved:
                 if len(saved) != 1 or (saved[0].message_id, saved[0].update_id, saved[0].chat_id, saved[0].message_thread_id) != (message.message_id, update.update_id, message.chat_id, topic):
                     raise ValueError("inbox-identity-conflict")
-                receipt = _pending_receipt(saved[0])
+                receipt = saved[0].route_basis.get("voice_note") or _pending_receipt(saved[0])
                 if receipt is not None and _canonical(payload) != _canonical(receipt["original"]):
                     raise ValueError("inbox-identity-conflict") from None
                 return _snapshot(saved[0]), False
@@ -2905,6 +2906,66 @@ class InboxRepository:
         result = _snapshot(mark)
         await guard.check(session)
         return result
+
+    async def voice_note(self, link, message_id, *, session=None) -> InboxRow | None:
+        """A note still owned by the voice path, locked in a borrowed writer."""
+        from deerflow.utils.file_io import await_drained
+
+        async def read(reader, **options):
+            mark = await reader.get(TelegramInboundMarkRow, (link.id, message_id, link.chat_id), populate_existing=True, **options)
+            usable = mark is not None and mark.route_kind == "voice" and not mark.route_complete and mark.binding_generation == link.binding_generation
+            return _snapshot(mark) if usable else None
+
+        if type(message_id) is not int or message_id <= 0:
+            return None
+        if session is not None:
+            self._publication_borrow(session)
+            return await read(session, with_for_update=True)
+
+        async def perform():
+            async with self.session_factory() as reader:
+                return await read(reader)
+
+        return await await_drained(perform())
+
+    async def voice_phase(self, link, row, phase, *, session, guard) -> InboxRow:
+        """Move a note between working and asked; only these two names exist."""
+        self._publication_borrow(session)
+        self._publication_guard_matches(guard, link=link)
+        current = await self._link(session, link.id)
+        mark = (await self._rows(session, [row]))[0]
+        self._current(current, mark)
+        if phase not in VOICE_PHASES or mark.route_kind != "voice" or mark.route_complete:
+            raise ValueError("voice-note-conflict") from None
+        mark.route_target_id = phase
+        await session.flush()
+        await guard.check(session)
+        return _snapshot(mark)
+
+    async def complete_voice(self, link, row, *, text, session, guard) -> InboxRow:
+        """The transcript becomes this person's typed text on the same row.
+
+        From here on the row is ordinary plain or forwarded input, so pending
+        files, prompts, the queue, recovery and retry need no voice knowledge.
+        The recording's descriptor stays only to compare a redelivered update.
+        """
+        self._publication_borrow(session)
+        self._publication_guard_matches(guard, link=link)
+        current = await self._link(session, link.id)
+        mark = (await self._rows(session, [row]))[0]
+        self._current(current, mark)
+        original = _input(mark.sanitized_input)
+        forwarded, origin = mark.route_basis.get("forwarded"), mark.route_basis.get("origin")
+        if mark.route_kind != "voice" or mark.route_target_id != "working" or mark.route_complete or original.get("type") != "voice" or type(forwarded) is not bool or type(text) is not str or not text.strip():
+            raise ValueError("voice-note-conflict") from None
+        quoted = {"reply_to_message_id": original["reply_to_message_id"]} if "reply_to_message_id" in original else {}
+        profile = {"version": 2, "kind": "chat_input", "forwarded": True, "origin": origin} if forwarded else {"version": 1, "kind": "plain_text", "forwarded": False}
+        mark.sanitized_input = _input({"type": "text", "text": text, **quoted})
+        mark.route_kind, mark.route_target_id = "turn", link.agent_ref
+        mark.route_basis = {"input_profile": profile, "voice_note": {"version": 1, "original": original}}
+        await session.flush()
+        await guard.check(session)
+        return _snapshot(mark)
 
     async def route(self, row: InboxRow, *, kind: str, target_id: str | None, basis: dict, operation_ids: list[str]) -> InboxRow:
         _identifier(kind, 24, "invalid-inbox-route")
@@ -3188,7 +3249,7 @@ class InboxRepository:
                     TelegramInboundMarkRow.route_complete.is_(False),
                     TelegramInboundMarkRow.outbox_id.is_(None),
                     TelegramInboundMarkRow.state.in_(["accepted", "reply_pending"]),
-                    or_(TelegramInboundMarkRow.route_kind.is_(None), TelegramInboundMarkRow.route_kind == "turn"),
+                    or_(TelegramInboundMarkRow.route_kind.is_(None), TelegramInboundMarkRow.route_kind == "turn", and_(TelegramInboundMarkRow.route_kind == "voice", TelegramInboundMarkRow.route_target_id == "working")),
                 )
                 callback = select(TelegramCallbackRow).where(
                     TelegramCallbackRow.payload[CALLBACK_PUBLICATION_KEY].as_string().is_not(None),
@@ -3216,6 +3277,9 @@ class InboxRepository:
                             entries.append(PrepublicationEntry(key, stage.origins if reason is None else (), row.id, reason))
                         except ValueError:
                             entries.append(PrepublicationEntry(key, (), row.id, "invalid_group"))
+                        continue
+                    if row.route_kind == "voice":
+                        entries.append(PrepublicationEntry(key, (_snapshot(row),), hold_reason="voice_interrupted"))
                         continue
                     try:
                         ids = row.route_basis.get("prepublication_group", {}).get("message_ids", [row.message_id, *row.grouped_message_ids])

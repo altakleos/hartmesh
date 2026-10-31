@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import logging
 import re
+import secrets
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Sequence
 from contextvars import ContextVar
@@ -736,6 +737,9 @@ class TelegramBotChannel(TelegramChannel):
         turns = getattr(self._services, "turns", None)
         if turns is not None and row.kind in {"retry_message", "file_retry", "cancel_wait", "stop_answer"}:
             return await turns.execute_callback(self, row, update_id=update_id, query_id=query_id)
+        voice_notes = getattr(self._services, "voice_notes", None)
+        if voice_notes is not None and row.kind in {"voice_ok", "voice_no"}:
+            return await voice_notes.execute_callback(self, row)
         await self._services.commands.execute(self, row, query_id=query_id)
 
     async def _on_unknown_callback(self, update, context) -> None:
@@ -954,7 +958,10 @@ class TelegramBotChannel(TelegramChannel):
             await turns.accept(self, update)
 
     async def _on_voice(self, update, context) -> None:
-        if getattr(self._services, "turns", None) is not None:
+        voice_notes = getattr(self._services, "voice_notes", None)
+        if voice_notes is not None:
+            await voice_notes.accept(self, update)
+        elif getattr(self._services, "turns", None) is not None:
             await self._on_unsupported(update, context)
 
     async def _on_unsupported(self, update, context) -> None:
@@ -964,7 +971,9 @@ class TelegramBotChannel(TelegramChannel):
         if now - self._unsupported_at.get(key, float("-inf")) >= MEDIA_UNSUPPORTED_EVERY_SECONDS:
             if not await self._input_current(link):
                 return
-            await await_drained(self.send_text("media.unsupported", source_id=self._source(update, "unsupported"), reply_to=message.message_id, _captured_link=link))
+            voice_notes = getattr(self._services, "voice_notes", None)
+            voice = {} if voice_notes is None else {"voice_enabled": await voice_notes.transcriber() is not None}
+            await await_drained(self.send_text("media.unsupported", source_id=self._source(update, "unsupported"), reply_to=message.message_id, _captured_link=link, **voice))
             self._unsupported_at = {key: now}
         self._classified(update)
 
@@ -1213,7 +1222,6 @@ class TelegramBotChannel(TelegramChannel):
 
     async def _read_inbound_file(self, file, execution_context):
         from app.telegram_bots.authority import require
-        from app.telegram_bots.capped_download import CappedDownloadError
         from app.telegram_bots.producer import DeliveryClaimRetired
 
         turns = getattr(self._services, "turns", None)
@@ -1221,9 +1229,6 @@ class TelegramBotChannel(TelegramChannel):
         if context is None or not self._file_current(execution_context, context):
             return None
         link = context.link
-        reservation = release = data = None
-        transferred = False
-        request = self._requests[0]
 
         async def check():
             if not self._file_current(execution_context, context):
@@ -1242,6 +1247,27 @@ class TelegramBotChannel(TelegramChannel):
             if key is not None:
                 await self._file_notice(file, key, context=context, features=features, execution_context=execution_context)
                 return None
+            result = await self._download(link, file, check)
+            if isinstance(result, InboundFileLease):
+                return result
+            await self._file_notice(file, result, context=context, execution_context=execution_context)
+            return None
+        except DeliveryClaimRetired:
+            return None
+        except Exception as error:
+            logger.warning("telegram_bots file_read_failed link=%s error=%s", link.id, type(error).__name__)
+            await self._file_notice(file, "file.not_saved", context=context, execution_context=execution_context)
+            return None
+
+    async def _download(self, link, file, check):
+        """getFile and the capped stream: a lease, or the fixed key that failed it."""
+        from app.telegram_bots.capped_download import CappedDownloadError
+        from app.telegram_bots.producer import DeliveryClaimRetired
+
+        reservation = release = data = None
+        transferred = False
+        request = self._requests[0]
+        try:
             maximum = self._services.config.files.max_inbound_bytes
             size = file.get("size")
             ceiling = size if type(size) is int and size >= 0 else maximum
@@ -1268,27 +1294,38 @@ class TelegramBotChannel(TelegramChannel):
             transferred = True
             return lease
         except DeliveryClaimRetired:
-            return None
+            raise
         except CappedDownloadError as error:
             if error.status in {401, 404}:
                 await self.verify_token(InvalidToken("Unauthorized" if error.status == 401 else "Not Found"))
-            await self._file_notice(file, "file.too_large_in" if error.reason == "too_large" else "file.not_saved", context=context, execution_context=execution_context)
-            return None
+            return "file.too_large_in" if error.reason == "too_large" else "file.not_saved"
         except InvalidToken as error:
             await self.verify_token(error)
-            await self._file_notice(file, "file.not_saved", context=context, execution_context=execution_context)
-            return None
+            return "file.not_saved"
         except BadRequest as error:
-            await self._file_notice(file, "file.too_large_in" if "file is too big" in str(error).casefold() else "file.not_saved", context=context, execution_context=execution_context)
-            return None
+            return "file.too_large_in" if "file is too big" in str(error).casefold() else "file.not_saved"
         except Exception as error:
             logger.warning("telegram_bots file_read_failed link=%s error=%s", link.id, type(error).__name__)
-            await self._file_notice(file, "file.not_saved", context=context, execution_context=execution_context)
-            return None
+            return "file.not_saved"
         finally:
             data = None
             if reservation is not None and not transferred and not (hasattr(request, "retains_failed_close") and request.retains_failed_close(release)):
                 await await_drained(reservation.aclose())
+
+    async def read_voice_audio(self, link, voice, *, check):
+        """The recording in memory. It is never saved, uploaded or given to a model."""
+        return await self._download(link, voice, check)
+
+    async def show_voice_writing(self, link, topic):
+        """A disposable draft; delivering the transcript or a failure replaces it."""
+        turns = self._services.turns
+
+        def current():
+            return self._callback_current(link) and turns.typing_allowed(self, topic=topic)
+
+        if current():
+            text = await self._render_source(link, {"key": "voice.writing", "values": {}})
+            await self.live_request(link, "send_message_draft", is_current=current, draft_id=secrets.randbelow((1 << 63) - 1) + 1, text=text, parse_mode=ParseMode.HTML, message_thread_id=topic)
 
     async def send(self, msg: OutboundMessage, _max_retries: int = 3) -> int | None:
         from app.telegram_bots.producer import PermanentDeliveryError

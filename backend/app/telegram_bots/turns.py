@@ -20,6 +20,17 @@ _SOURCES = "telegram_source_message_ids"
 _ALL_TOPICS = object()
 
 
+def forward_origin(message):
+    """Whether an actual message is forwarded, and the name it came from."""
+    forwarded = message.forward_origin is not None or message.is_automatic_forward is True or any(message.api_kwargs.get(key) is not None for key in ("forward_from", "forward_from_chat", "forward_sender_name", "forward_date"))
+    if not forwarded:
+        return False, None
+    origin = message.forward_origin
+    author = getattr(origin, "sender_user", None)
+    chat = getattr(origin, "sender_chat", None) or getattr(origin, "chat", None)
+    return True, getattr(author, "first_name", None) or getattr(origin, "sender_user_name", None) or getattr(chat, "title", None) or "an unnamed sender"
+
+
 class _Guard:
     """Original host lifetime around the existing borrowed SQL custody guard."""
 
@@ -322,12 +333,8 @@ class ChatTurns:
         if not created or self._closed or channel in self._retired or not channel._callback_current(link):
             channel._classified(update, remember=True)
             return True
-        forwarded = message.forward_origin is not None or message.is_automatic_forward is True or any(message.api_kwargs.get(key) is not None for key in ("forward_from", "forward_from_chat", "forward_sender_name", "forward_date"))
-        origin = message.forward_origin
-        author = getattr(origin, "sender_user", None)
-        chat = getattr(origin, "sender_chat", None) or getattr(origin, "chat", None)
-        name = getattr(author, "first_name", None) or getattr(origin, "sender_user_name", None) or getattr(chat, "title", None) or "an unnamed sender"
-        profile = {"version": 2, "kind": "chat_input", "forwarded": forwarded, "origin": name if forwarded else None} if files or forwarded else {"version": 1, "kind": "plain_text", "forwarded": False}
+        forwarded, name = forward_origin(message)
+        profile = {"version": 2, "kind": "chat_input", "forwarded": forwarded, "origin": name} if files or forwarded else {"version": 1, "kind": "plain_text", "forwarded": False}
         row = await await_drained(self.services.outbox.inbox.route(row, kind="turn", target_id=link.agent_ref, basis={"input_profile": profile}, operation_ids=[]))
         if self._closed or channel in self._retired or not channel._callback_current(link):
             channel._classified(update, remember=True)
@@ -341,6 +348,23 @@ class ChatTurns:
                 self._join_busy.pop(key, None)
         channel._classified(update, remember=True)
         return True
+
+    async def accept_transcript(self, channel, link, row):
+        """A finished voice note takes the path of the same typed text."""
+        async with self._entry(channel):
+            if self._closed or channel in self._retired or not channel._callback_current(link):
+                return False
+            human_inputs = getattr(self.services, "human_inputs", None)
+            if human_inputs is not None and await human_inputs.handle_transcript(channel, link, row):
+                return True
+            key = (link.id, row.message_thread_id)
+            async with self._join_locks.hold(key):
+                self._join_busy[key] = channel
+                try:
+                    await self._sequence_input(channel, link, row, [], row.route_basis["input_profile"]["forwarded"], row.sanitized_input["text"])
+                finally:
+                    self._join_busy.pop(key, None)
+            return True
 
     async def _sequence_input(self, channel, link, row, files, forwarded, text):
         from app.telegram_bots.inbox import _scope
@@ -1152,7 +1176,7 @@ class ChatTurns:
         for entry in cohort:
             if not phase():
                 return
-            if entry.hold_reason is not None or not entry.origins:
+            if entry.hold_reason not in (None, "voice_interrupted") or not entry.origins:
                 continue
             try:
                 await self._recover_input(entry, phase)
@@ -1179,11 +1203,14 @@ class ChatTurns:
         guard = _Guard(host, channel, captured, current, repair=True)
         if not current():
             return
+        # A note interrupted while working may have reached its provider, so it
+        # is never transcribed again. Nothing else in the process owns it now.
+        interrupted = entry.hold_reason == "voice_interrupted"
         await host.outbox.plan_input_outcome(
             captured,
             source_id=f"chat-restart:{captured.chat_id}:{captured.binding_generation}:" + (entry.input_owner_callback_id or str(entry.origins[0].message_id)),
-            source_ref={"key": "chat.restarted", "values": {}},
-            keyboard=self._button("retry_message", entry.input_owner_callback_id or str(entry.origins[0].message_id), target_kind="request"),
+            source_ref={"key": "voice.failed" if interrupted else "chat.restarted", "values": {}},
+            keyboard=() if interrupted else self._button("retry_message", entry.input_owner_callback_id or str(entry.origins[0].message_id), target_kind="request"),
             callbacks=host.callbacks,
             guard=guard,
             inbox_rows=() if entry.input_owner_callback_id else entry.origins,

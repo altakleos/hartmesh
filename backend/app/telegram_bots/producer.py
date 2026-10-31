@@ -181,7 +181,7 @@ _TURN_OUTCOME_KEYS = frozenset(
         "busy.two_conversations",
     }
 )
-INPUT_OUTCOME_KEYS = (_TURN_OUTCOME_KEYS - {"busy.queued", "busy.thread", "busy.starting_elsewhere", "busy.two_conversations"}) | {"custom_agent.deleted", "busy.followup_full"}
+INPUT_OUTCOME_KEYS = (_TURN_OUTCOME_KEYS - {"busy.queued", "busy.thread", "busy.starting_elsewhere", "busy.two_conversations"}) | {"custom_agent.deleted", "busy.followup_full", "voice.failed"}
 
 
 @dataclass(frozen=True)
