@@ -340,8 +340,11 @@ def _page_keys(item, part, output):
     inventory = output.inventory
     if not item.dedupe_key.startswith("reply:") or inventory.state != "matched" or inventory.document.coverage != "complete":
         return ()
+    keys = offered_pages(inventory.document)
+    if not keys:
+        return ()
     answering = [value for value in item.parts if value["state"] != "retired" and value["kind"] in {"text", "edit"} and value["source_ref"].get("key") in (None, "human_input.presentation")]
-    return offered_pages(inventory.document) if answering and answering[-1]["part_id"] == part["part_id"] else ()
+    return keys if answering and answering[-1]["part_id"] == part["part_id"] else ()
 
 
 def _prepare_part(captured):
