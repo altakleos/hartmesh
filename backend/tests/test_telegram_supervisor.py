@@ -93,7 +93,7 @@ def build(db, monkeypatch, *, health=None, clock=None, factory=None, environ=Non
     monkeypatch.setattr(module, "static_cause", lambda *args: None)
     if not profiles:
         # These cases script exact SDK calls; profile pushes have their own tests.
-        monkeypatch.setattr(module.ProfileSync, "push", AsyncMock(return_value=False))
+        monkeypatch.setattr(module.ProfileSync, "_attempt", AsyncMock(return_value=False))
     monkeypatch.setenv("PTB_TIMEDELTA", "true")
     clock = clock or ManualClock()
     normal, updates = RecordingRequest(), RecordingRequest()
