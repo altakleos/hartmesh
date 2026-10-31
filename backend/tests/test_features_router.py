@@ -95,6 +95,7 @@ def test_features_reports_agents_api_enabled(monkeypatch) -> None:
         },
         "ui": _default_ui_payload(),
         "branding": NO_BRANDING,
+        "telegram": None,
     }
 
 
@@ -242,6 +243,7 @@ def test_features_reports_agents_api_disabled(monkeypatch) -> None:
         },
         "ui": _default_ui_payload(),
         "branding": NO_BRANDING,
+        "telegram": None,
     }
 
 

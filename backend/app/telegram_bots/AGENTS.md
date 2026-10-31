@@ -178,6 +178,16 @@ pure drawing function, always called off-loop; it loads the two pinned `fonts/`
 files with `Layout.BASIC`, and initials are drawn only when every character has a
 glyph and is left to right. Keep the Python and web colour rule in step.
 
+`router.py` is the browser's surface; every route needs a session and acts on the
+caller's own rows. Refusals go through `_RefusingRoute` and the closed `_REFUSALS`
+table, as `{detail, reason}` plus only the keys their row names. Routes 2 and 3
+read their own bodies, because a framework 422 would repeat the token. Routes that
+need Telegram refuse with the deployment's reason; list, disconnect, settings and
+remove are served whatever that reason is. Route 3 reads its receipt before it
+looks for the old link, so a replay never swaps twice; only after commit does
+`adopt_token` restart the client. `telegram_feature` fails closed to the model's
+defaults. Later-stage routes are not declared, so they answer 404 or 405.
+
 `strangers.py` separates touch-only LRU recency from bounded unexpired reply
 charges. The supervisor owns one ledger through adapter/token replacement and
 bot removal/re-add. Forgetting recency never replenishes the 24-hour pair,

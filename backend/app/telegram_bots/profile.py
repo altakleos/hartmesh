@@ -31,12 +31,18 @@ def display_name_of(name: str) -> str:
     return (head[: head.rindex(" ")] if " " in head else head) + "…"
 
 
-def suggested_username(name: str) -> str:
+def suggested_username(name: str, *, chat: bool = False) -> str:
     """``<slug>_<random>_bot``, from letters and digits of the target's name."""
+
+    def random(length):
+        return "".join(secrets.choice(_USERNAME_RANDOM) for _ in range(length))
+
+    if chat:
+        return f"chat_{random(6)}_bot"
     slug = "".join(character for character in name.lower() if character.isascii() and character.isalnum())[:20]
-    if not slug or not slug[0].isalpha():
-        slug = ("ai_" + slug).rstrip("_")
-    return f"{slug}_{''.join(secrets.choice(_USERNAME_RANDOM) for _ in range(4))}_bot"
+    if not slug:
+        return f"ai_{random(8)}_bot"
+    return f"{'' if slug[0].isalpha() else 'ai_'}{slug}_{random(4)}_bot"
 
 
 class _Retired(Exception):

@@ -14,18 +14,21 @@ from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 from uuid import uuid4
 from weakref import WeakKeyDictionary
 
 import httpx
 from sqlalchemy import delete
 from sqlalchemy.exc import SQLAlchemyError
+from telegram import Bot
 from telegram.error import RetryAfter, TelegramError
 
 from app.telegram_bots.acts import Acts
 from app.telegram_bots.adapter import LongRetryAfter, SendContext, StrangerLedger, TelegramBotChannel
 from app.telegram_bots.api_logging import call_failure_fields
 from app.telegram_bots.callbacks import CallbackRepository, Prompts
+from app.telegram_bots.capped_download import ManagedHTTPXRequest
 from app.telegram_bots.cipher import token_cipher, unwrap_token, wrap_token
 from app.telegram_bots.commands import CallbackCommands
 from app.telegram_bots.config import TelegramBotsConfig
@@ -43,6 +46,7 @@ from deerflow.config.app_config import get_app_config
 from deerflow.config.ui_config import product_name
 from deerflow.persistence.engine import get_session_factory
 from deerflow.persistence.telegram_bots.model import TelegramBotLinkEventRow
+from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
@@ -119,6 +123,7 @@ class TelegramSupervisor:
         self.publication_authority = self.publications = self.model_source = None
         self.turns = None
         self.forms = self.human_inputs = self.voice_notes = self.profile_sync = None
+        self._token_locks = AsyncKeyedLockTable()
         self.file_bytes_budget = FileBytesBudget(config.files.in_memory_max_bytes)
         self.pending_files = None
         self.recovery = None
@@ -1045,6 +1050,69 @@ class TelegramSupervisor:
 
     def channels(self) -> tuple[TelegramBotChannel, ...]:
         return tuple(self._channels.values())
+
+    def push_profiles(self, owner_user_id: str) -> None:
+        task = asyncio.create_task(self.profile_sync.push_owed(owner_user_id=owner_user_id), name="telegram-profile-owner")
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    def token_operation(self, link_id: str):
+        """One token change at a time per link, so a stale result installs nothing."""
+        return self._token_locks.hold(link_id)
+
+    def reconcile_soon(self) -> None:
+        """A person's change must not wait for, or fail on, every other bot's state."""
+        if self._cause is None and not self._stopping:
+            task = asyncio.create_task(self.reconcile(), name="telegram-reconcile-owner")
+            self._background.add(task)
+            task.add_done_callback(self._background.discard)
+
+    def is_running(self, link: BotLink) -> bool:
+        channel = self.channel(link.id)
+        return channel is not None and channel.transport_revision == link.token_revision
+
+    async def _token_client(self, token: str) -> Bot:
+        """A disposable client for a token no running adapter owns yet."""
+        if self.tls_context is None:
+            self.tls_context = await await_drained(asyncio.to_thread(httpx.create_ssl_context))
+        factory = getattr(self, "request_factory", ManagedHTTPXRequest)
+        return await await_drained(asyncio.to_thread(lambda: Bot(token, request=factory(connection_pool_size=1, httpx_kwargs={"verify": self.tls_context}))))
+
+    async def inspect_token(self, token: str) -> tuple[int, str, str | None]:
+        """Telegram's view of a token that is not stored: id, username, webhook host."""
+        async with await self._token_client(token) as bot:
+            info = await bot.get_webhook_info()
+            return bot.bot.id, bot.bot.username, urlsplit(info.url).hostname if info.url else None
+
+    async def clear_webhook(self, token: str) -> None:
+        """Before a client polls, so its first getUpdates cannot read as a conflict."""
+        async with await self._token_client(token) as bot:
+            await bot.delete_webhook()
+
+    async def encrypt_token(self, bot_id: int, token: str) -> str:
+        cipher = await await_drained(asyncio.to_thread(token_cipher, self._environ))
+        return await await_drained(asyncio.to_thread(wrap_token, cipher, bot_id, token))
+
+    async def token_matches(self, link: BotLink, token: str) -> bool | None:
+        """True or False against the stored token; None when it cannot be read."""
+        stored, _revision = await self.links.token(link.id)
+        cipher = await await_drained(asyncio.to_thread(token_cipher, self._environ))
+        try:
+            opened = await await_drained(asyncio.to_thread(unwrap_token, cipher, link.bot_id, stored))
+        except Exception:
+            return None
+        return opened.key == token
+
+    async def adopt_token(self, link: BotLink, token: str, *, old_link_id: str) -> None:
+        """After a committed replacement: stop the old client, run the saved link."""
+        if self.is_running(link):
+            return
+        await self._retire(old_link_id, reason="token-stored")
+        if old_link_id != link.id:
+            self._rows.pop(old_link_id, None)
+        self._rows[link.id] = link
+        if await self._available():
+            await self._launch(link, token)
 
     async def _retire(self, link_id: str, *, reason: str, close=True) -> TelegramBotChannel | None:
         previous = self._retire_by_link.get(link_id)

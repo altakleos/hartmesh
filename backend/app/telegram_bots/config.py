@@ -125,7 +125,7 @@ class TelegramBotsConfig(_StrictConfig):
 
 def section_present(app_config: AppConfig) -> bool:
     """Distinguish a missing section from an explicitly disabled or invalid one."""
-    return "telegram_bots" in (app_config.model_extra or {})
+    return "telegram_bots" in (getattr(app_config, "model_extra", None) or {})
 
 
 def load_config(app_config: AppConfig) -> TelegramBotsConfig:
