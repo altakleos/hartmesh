@@ -35,6 +35,7 @@ from app.telegram_bots.links import BotLink, BotLinkRepository
 from app.telegram_bots.log_filter import install_token_log_filter
 from app.telegram_bots.polling import CONFLICT_GRACE_SECONDS, TASK_DEATHS_BEFORE_STOP, TASK_DEATHS_WINDOW_SECONDS, TASK_RESTART_SECONDS, PollRecord, PollTask
 from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryEligibility, Outbox, OutboxSender
+from app.telegram_bots.profile import ProfileSync
 from app.telegram_bots.render import render_plain
 from app.telegram_bots.settings import SettingsRepository, silent_now
 from app.telegram_bots.voice import VoiceNotes, resolve_transcriber
@@ -117,7 +118,7 @@ class TelegramSupervisor:
         self.thread_client, self.threads = thread_client, None
         self.publication_authority = self.publications = self.model_source = None
         self.turns = None
-        self.forms = self.human_inputs = self.voice_notes = None
+        self.forms = self.human_inputs = self.voice_notes = self.profile_sync = None
         self.file_bytes_budget = FileBytesBudget(config.files.in_memory_max_bytes)
         self.pending_files = None
         self.recovery = None
@@ -260,6 +261,7 @@ class TelegramSupervisor:
             self.acts = Acts(self.session_factory, settings=self.settings, callbacks=self.callbacks, outbox=self.outbox)
             self.commands = CallbackCommands(self)
             self.voice_notes = VoiceNotes(self)
+            self.profile_sync = ProfileSync(self)
             self.pending_files = PendingFiles(self.callbacks, self.outbox.inbox, guard_factory=self._pending_file_guard, config=self.config, clock=self._clock)
             if self.authority is None:
                 from app.telegram_bots.authority import TelegramAuthority
@@ -474,6 +476,7 @@ class TelegramSupervisor:
         self._periodic(self.recovery.tick, self.config.reconcile_interval_seconds, "publication-recovery")
         self._periodic(self._refresh_flags, 3600, "bot-flags")
         self._periodic(self.sweep_retention, RETENTION_SWEEP_SECONDS, "retention")
+        self._periodic(self.profile_sync.push_owed, 3600, "profile", first_delay=0)
 
     async def _recover_startup_publications(self) -> None:
         """Capture one complete cohort before any held/create/send release.
@@ -568,10 +571,12 @@ class TelegramSupervisor:
                 self._latch_persisted = True
                 return
 
-    def _periodic(self, operation, seconds: float, name: str) -> None:
+    def _periodic(self, operation, seconds: float, name: str, *, first_delay: float | None = None) -> None:
         async def run():
+            delay = seconds if first_delay is None else first_delay
             while not self._stopping and self._cause is None:
-                await self._sleep(seconds)
+                await self._sleep(delay)
+                delay = seconds
                 if self._stopping or self._cause is not None:
                     return
                 try:
@@ -1034,6 +1039,12 @@ class TelegramSupervisor:
 
     async def add(self, link: BotLink, token: str) -> None:
         await self._launch(link, token)
+        task = asyncio.create_task(self.profile_sync.push(link), name=f"telegram-profile-{link.id}")
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    def channels(self) -> tuple[TelegramBotChannel, ...]:
+        return tuple(self._channels.values())
 
     async def _retire(self, link_id: str, *, reason: str, close=True) -> TelegramBotChannel | None:
         previous = self._retire_by_link.get(link_id)

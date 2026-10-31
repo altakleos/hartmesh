@@ -41,6 +41,7 @@ Makefile text eol=lf
 *.mov binary
 *.woff binary
 *.woff2 binary
+*.ttf binary
 
 # Binary test fixtures
 *.xls binary

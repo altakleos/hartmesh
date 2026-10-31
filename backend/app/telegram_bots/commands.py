@@ -222,7 +222,11 @@ class CallbackCommands:
         guard = self._guard(channel, link)
         guard.current()
         if row.kind == "settings_set":
-            return await self.services.acts.apply_settings(link, row.id, chat_id=row.chat_id, message_id=row.message_id, message_thread_id=row.message_thread_id, guard=guard)
+            result = await self.services.acts.apply_settings(link, row.id, chat_id=row.chat_id, message_id=row.message_id, message_thread_id=row.message_thread_id, guard=guard)
+            profiles = getattr(self.services, "profile_sync", None)
+            if profiles is not None:
+                channel._spawn_ingress(profiles.push_owed(owner_user_id=link.owner_user_id))
+            return result
         if row.kind in {"new_confirm", "new_keep"}:
             return await self._new(channel, link, row, guard)
         keyboard = await self._web_keyboard(link) if row.kind == "web_list" else []
