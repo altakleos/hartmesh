@@ -7,6 +7,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
+from deerflow.runtime.runs.output_inventory import content_items, offered_pages
 from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
@@ -25,6 +26,7 @@ class PreparedModelPart:
     html: str
     plain_text: str
     human_input: bool = False
+    page_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -51,7 +53,7 @@ def prepare_verified_reply(record, output, *, reply_to_message_id=None):
         record = PublicationRecord(**{**identity, "scope": scope, "origins": tuple(PublicationOrigin(**origin) for origin in identity["origins"]), "dispatch_started": record.dispatch_started, "run_id": record.run_id})
         output = RunOutputProjectionV2.model_validate(output.model_dump(mode="python"))
         result, inventory = output.output, output.inventory
-        if result.state != "complete" or inventory.state != "matched" or inventory.document.coverage != "complete" or inventory.document.items != ():
+        if result.state != "complete" or inventory.state != "matched" or inventory.document.coverage != "complete" or content_items(inventory.document) != ():
             raise ValueError
         channel = result.channel_execution
         if (result.owner_user_id, result.thread_id, channel.publication_id, channel.assistant_id, channel.agent_name) != (scope.owner_user_id, scope.thread_id, record.publication_id, scope.assistant_id, scope.agent_name):
@@ -133,6 +135,7 @@ def validate_model_reply_basis(item: OutboxItem, part: dict | None = None) -> Ve
             "protect_content",
             "sent_protect_content",
             "plain_fallback",
+            "url_button_fallback",
             "invalid_token_verification_pending",
             "callback_group_id",
             "unavailable_reason",
@@ -294,6 +297,7 @@ def _validate_display_reply_basis(item, part):
         "protect_content",
         "sent_protect_content",
         "plain_fallback",
+        "url_button_fallback",
         "invalid_token_verification_pending",
         "callback_group_id",
         "unavailable_reason",
@@ -329,6 +333,18 @@ def _validate_display_reply_basis(item, part):
     if required != set(active_sources) | acknowledged_sources:
         raise ValueError
     return VerifiedModelReplyBasis(record, output, None, outcome["kind"], basis["display"]["stop_id"])
+
+
+def _page_keys(item, part, output):
+    """A turn's page offers go under the last part that carries its answer."""
+    inventory = output.inventory
+    if not item.dedupe_key.startswith("reply:") or inventory.state != "matched" or inventory.document.coverage != "complete":
+        return ()
+    keys = offered_pages(inventory.document)
+    if not keys:
+        return ()
+    answering = [value for value in item.parts if value["state"] != "retired" and value["kind"] in {"text", "edit"} and value["source_ref"].get("key") in (None, "human_input.presentation")]
+    return keys if answering and answering[-1]["part_id"] == part["part_id"] else ()
 
 
 def _prepare_part(captured):
@@ -426,7 +442,7 @@ class ModelSource:
                 qualified = await self._human_input_source.read_request(proof.record, private.link)
                 if qualified is None or _canonical_primary(check_qualified_request(qualified, proof.record)) != _canonical_primary(private.item.payload["reply_basis"]["outcome"]["request_basis"]):
                     raise ValueError
-                return PreparedModelPart(private.part["html"], private.part["visible_text"], True)
+                return PreparedModelPart(private.part["html"], private.part["visible_text"], True, _page_keys(private.item, private.part, proof.output))
             fresh = await self._read_output(proof.record, private.link)
 
             def compare():
@@ -439,7 +455,7 @@ class ModelSource:
                         raise ValueError
                     if "key" in private.part["source_ref"]:
                         return None
-                    return PreparedModelPart(private.part["html"], private.part["visible_text"])
+                    return PreparedModelPart(private.part["html"], private.part["visible_text"], page_keys=_page_keys(private.item, private.part, proof.output))
                 if private.item.payload["reply_basis"]["version"] == 4:
                     candidate, _ = prepare_display_reply(proof.record, fresh, display=private.item.payload["reply_basis"]["display"], reply_to_message_id=private.item.payload["reply_basis"]["parts"][0]["reply_to_message_id"])
                 else:
@@ -448,7 +464,7 @@ class ModelSource:
                     raise ValueError
                 if proof.kind == "stopped_preview" and private.part["source_ref"].get("key") == "stop.answer":
                     return None
-                return PreparedModelPart(private.part["html"], private.part["visible_text"])
+                return PreparedModelPart(private.part["html"], private.part["visible_text"], page_keys=_page_keys(private.item, private.part, proof.output))
 
             return await await_drained(asyncio.to_thread(compare))
         except Exception:

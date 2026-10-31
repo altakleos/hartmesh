@@ -29,7 +29,7 @@ def record():
     return PublicationRecord(scope, "b" * 32, sha256(("b" * 32 + ":event").encode()).hexdigest()[:32], "event", (origin,), 1, "c" * 64, True, "run")
 
 
-def source_basis(original=None, *, payload=None):
+def source_basis(original=None, *, payload=None, pages=()):
     original = original or record()
     payload = request() if payload is None else payload
     ai = AIMessage("", id="actual-ai", tool_calls=[{"id": "call", "name": "ask_clarification", "args": {"question": "Which option?"}}])
@@ -37,6 +37,7 @@ def source_basis(original=None, *, payload=None):
     receipt = {"version": 1, "kind": "unavailable", "owner_user_id": original.scope.owner_user_id, "thread_id": original.scope.thread_id, "run_id": original.run_id, "input_message_id": "actual-human", "reason": "human_input_required"}
     document = inventory_document(owner_user_id=receipt["owner_user_id"], thread_id=receipt["thread_id"], run_id=receipt["run_id"], input_message_id=receipt["input_message_id"], output_receipt_sha256=output_receipt_digest(receipt))
     document["items"] = [{"kind": "structured", "carrier": "message_artifact", "value_sha256": presentation_fragment_digest(tool.artifact), "witness": {"kind": "root_snapshot", "root_epoch": ROOT_EPOCH, "message_id": tool.id}}]
+    document["items"] += [{"kind": "page", "key": key, "witness": {"kind": "root_snapshot", "root_epoch": ROOT_EPOCH, "message_id": f"page-{key}"}} for key in pages]
     evidence = build_event_inventory_evidence(receipt, status="success", inventory_event_seq=9, document=document)
     scope = original.scope
     output = {

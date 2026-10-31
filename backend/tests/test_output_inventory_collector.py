@@ -14,7 +14,7 @@ from langgraph.types import Command
 from test_output_inventory_profile import assemble_offline
 
 from deerflow.runtime.runs.output import TextOutputReceipt, UnavailableOutputReceipt
-from deerflow.runtime.runs.output_inventory import inventory_document_digest, presentation_fragment_digest
+from deerflow.runtime.runs.output_inventory import content_items, inventory_document_digest, offered_pages, presentation_fragment_digest
 from deerflow.runtime.runs.output_inventory_capture import OutputInventoryCapture
 from deerflow.workspace_changes.types import FileSnapshot, WorkspaceRootObservation, WorkspaceSnapshot
 
@@ -189,6 +189,38 @@ def test_current_human_input_fragment_is_retained_without_claiming_action_author
     document = trace.document()
     assert document.coverage == "complete" and len(document.items) == 1
     assert document.items[0].value_sha256 == presentation_fragment_digest(artifact)
+
+
+PAGE = {"web_page": {"version": 1, "kind": "web_page", "key": "memory"}}
+
+
+def test_a_page_offer_is_named_and_is_not_output_content(trace):
+    trace.model_call()
+    message = ToolMessage(id="unit-tool", name="show_web_page", content="A button is shown", tool_call_id="current-call", artifact=PAGE)
+    trace.tool(message)
+    trace.end(messages=[INPUT, message, AIMessage(id="unit-answer", content="answer")])
+    document = trace.document()
+    assert document.coverage == "complete" and offered_pages(document) == ("memory",) and content_items(document) == ()
+
+
+@pytest.mark.parametrize(
+    ("name", "artifact"),
+    [
+        ("other_tool", PAGE),
+        ("show_web_page", {**PAGE, "extra": True}),
+        ("show_web_page", {"web_page": {"version": 2, "kind": "web_page", "key": "memory"}}),
+        ("show_web_page", {"web_page": {"version": True, "kind": "web_page", "key": "memory"}}),
+        ("show_web_page", {"web_page": {"version": 1, "kind": "web_page", "key": "memory", "url": "https://elsewhere.example"}}),
+        ("show_web_page", {"web_page": {"version": 1, "kind": "web_page", "key": "https://elsewhere.example"}}),
+    ],
+)
+def test_anything_but_the_exact_page_result_stays_opaque_output(trace, name, artifact):
+    trace.model_call()
+    message = ToolMessage(id="unit-tool", name=name, content="unit result", tool_call_id="current-call", artifact=artifact)
+    trace.tool(message)
+    trace.end(messages=[INPUT, message, AIMessage(id="unit-answer", content="answer")])
+    document = trace.document()
+    assert offered_pages(document) == () and [item.kind for item in content_items(document)] == ["structured"]
 
 
 @pytest.mark.parametrize("disposition", ["removed", "hidden", "resolved-history"])

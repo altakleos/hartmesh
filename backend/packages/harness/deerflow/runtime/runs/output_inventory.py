@@ -272,7 +272,15 @@ class StructuredInventoryDescriptor(_Closed):
     witness: InventoryWitness
 
 
-type InventoryDescriptor = Annotated[FileInventoryDescriptor | StructuredInventoryDescriptor, Field(discriminator="kind")]
+class PageInventoryDescriptor(_Closed):
+    """A web page the model offered: a closed key, never an address or content."""
+
+    kind: Literal["page"]
+    key: str = Field(pattern=r"^[A-Za-z]{1,32}$")
+    witness: InventoryWitness
+
+
+type InventoryDescriptor = Annotated[FileInventoryDescriptor | StructuredInventoryDescriptor | PageInventoryDescriptor, Field(discriminator="kind")]
 
 
 class _Document(_Scoped):
@@ -385,6 +393,16 @@ type InventoryDocument2 = Annotated[CompleteInventoryDocument2 | IncompleteInven
 type InventoryDocument = InventoryDocument1 | InventoryDocument2
 _DOCUMENT1 = TypeAdapter(InventoryDocument1)
 _DOCUMENT2 = TypeAdapter(InventoryDocument2)
+
+
+def content_items(document) -> tuple:
+    """What the run produced. A page offer is navigation, so a reply loses nothing without it."""
+    return tuple(item for item in document.items if not isinstance(item, PageInventoryDescriptor))
+
+
+def offered_pages(document) -> tuple[str, ...]:
+    """Page keys in the order the model offered them, without repeats."""
+    return tuple(dict.fromkeys(item.key for item in document.items if isinstance(item, PageInventoryDescriptor)))
 
 
 def validate_inventory_evidence(value: object) -> InventoryEvidence:

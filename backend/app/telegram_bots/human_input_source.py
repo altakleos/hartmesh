@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import PurePosixPath
 
+from deerflow.runtime.runs.output_inventory import content_items
 from deerflow.utils.file_io import await_drained
 
 MAX_SOURCE_MESSAGES = 4096
@@ -157,7 +158,7 @@ def validate_request_basis(record, basis):
             or inventory.document.coverage != "complete"
         ):
             _refuse()
-        items = inventory.document.items
+        items = content_items(inventory.document)
         if basis["version"] == 1:
             if len(items) != 1:
                 _refuse()
@@ -259,7 +260,7 @@ def mixed_file_paths(record, basis):
     validate_request_basis(record, basis)
     if type(basis["version"]) is not int or basis["version"] != 2:
         _refuse()
-    return _mixed_paths(RunOutputProjectionV2.model_validate(basis["projection"]).inventory.document.items)
+    return _mixed_paths(content_items(RunOutputProjectionV2.model_validate(basis["projection"]).inventory.document))
 
 
 @dataclass(frozen=True, init=False)
@@ -430,6 +431,7 @@ def validate_human_input_reply_basis(item, part=None):
             "protect_content",
             "sent_protect_content",
             "plain_fallback",
+            "url_button_fallback",
             "invalid_token_verification_pending",
             "callback_group_id",
             "unavailable_reason",

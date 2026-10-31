@@ -61,11 +61,11 @@ async def ui(db, monkeypatch):
     e.services.eligibility = eligibility
     e.sender = OutboxSender(e.services.outbox, run_id="human-input-ui", deliver_part=lambda **kw: e.channel.send_part(**{key: value for key, value in kw.items() if key != "link_id"}), eligibility=eligibility)
 
-    async def offer(raw):
+    async def offer(raw, pages=()):
         origin, _ = await e.services.outbox.inbox.accept(e.link, message(e, 1401, content="Ask a question"), sanitized_input={"type": "text", "text": "Ask a question"})
         origin = await e.services.outbox.inbox.route(origin, kind="turn", target_id="lead_agent", basis={"input_profile": {"version": 1, "kind": "plain_text", "forwarded": False}}, operation_ids=[])
         e.record = await coordinator.dispatch(e.link, [origin], thread_id="request-thread")
-        e.seed = source_basis(replace(e.record, run_id="coordinator-run"), payload=raw)
+        e.seed = source_basis(replace(e.record, run_id="coordinator-run"), payload=raw, **({"pages": pages} if pages else {}))
         identity = await e.services.human_inputs.plan_terminal(e.record, e.link)
         assert identity is not None
         return identity

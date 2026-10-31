@@ -15,6 +15,18 @@ if TYPE_CHECKING:
 _KINDS = {"lead_agent", "custom_agent", "instance"}
 _TABS = {"web.access": "access", "web.files": "files", "web.memory": "memory", "web.conversations": "conversations", "web.work": "work", "web.agentSettings": "settings"}
 _MANAGE = {"web.access", "web.agentSettings"}
+WEB_PAGE_BUTTONS_MAX = 3
+_PAGE_BUTTONS = {
+    "files": ("web.files", "label.open_files"),
+    "memory": ("web.memory", "label.open_memory"),
+    "conversations": ("web.conversations", "label.open_conversations"),
+    "addAssistant": ("web.addAssistant", "label.add_assistant"),
+    "addEmployee": ("web.addEmployee", "label.add_employee"),
+    "telegram": ("web.telegram", "label.open_telegram"),
+    "timezone": ("web.timezone", "label.open_telegram"),
+    "scheduled": ("web.scheduled", "label.open_scheduled"),
+    "account": ("web.account", "label.open_product"),
+}
 _INSPECT = {"web.files", "web.work", "web.memory"}
 
 
@@ -112,3 +124,14 @@ def page_address(
     if key == "web.work" and work_id:
         return workspace("/instances", instance=link.agent_ref, work=work_id)
     return workspace("/instances", instance=link.agent_ref, tab=_TABS[key])
+
+
+def page_buttons(keys: tuple[str, ...], link: BotLink, *, reader_is_administrator: bool = False) -> list[tuple[str, str]]:
+    """(label, address) for a turn's first offers. The model only ever names a key."""
+    buttons = []
+    for key in keys[:WEB_PAGE_BUTTONS_MAX]:
+        page, label = _PAGE_BUTTONS.get(key, (None, None))
+        address = page_address(page, link, reader_is_administrator=reader_is_administrator) if page is not None else None
+        if address is not None:
+            buttons.append((label, address))
+    return buttons
