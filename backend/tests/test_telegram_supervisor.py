@@ -999,6 +999,7 @@ def per_link_factory(records, *, construction_gates=None, construction_entered=N
             send_allowed=supervisor.send_allowed,
             protect_notice=supervisor.protect_notice,
             channel=supervisor.channel,
+            product_name=supervisor.product_name,
             request_factory=lambda **kw: normal if kw["connection_pool_size"] == 8 else updates,
         )
         channel = TelegramBotChannel(link=link, token=token, supervisor=services, **kwargs)

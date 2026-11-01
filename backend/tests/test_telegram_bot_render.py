@@ -135,23 +135,107 @@ def test_table_of_three_columns_becomes_aligned_pre():
     assert html == "<pre>Name | N  | OK \nA    | 10 | yes\nLong | 2  | no </pre>"
 
 
-def test_table_of_four_columns_is_marked_for_a_file():
-    table = "| A | B | C | D |\n| --- | --- | --- | --- |\n| 1 | 2 | 3 | 4 |"
+def test_a_table_that_fits_a_phone_stays_a_table_at_any_number_of_columns():
+    html = to_html("| A | B | C | D |\n| --- | --- | --- | --- |\n| 1 | 2 | 3 | 4 |").html
+    assert html == "<pre>A | B | C | D\n1 | 2 | 3 | 4</pre>"
+
+
+def test_a_table_is_aligned_up_to_the_width_of_a_phone_and_no_further():
+    from app.telegram_bots.markdown import PHONE_WIDTH
+
+    fits = "A" * (PHONE_WIDTH - 4)
+    assert to_html(f"| {fits} | B |\n| --- | --- |\n| 1 | 2 |").html.startswith("<pre>")
+    assert not to_html(f"| {fits}A | B |\n| --- | --- |\n| 1 | 2 |").html.startswith("<pre>")
+
+
+def test_a_label_is_written_once_and_only_when_there_is_one():
+    long = "a value that is much too wide for one line on a phone"
+    assert to_html(f"| Total: | Note |\n| --- | --- |\n| 12 | {long} |").plain == f"Total: 12\nNote: {long}"
+    assert to_html(f"|  | Note |\n| --- | --- |\n| 12 | {long} |").plain == f"12\nNote: {long}"
+
+
+def test_a_picture_in_a_narrow_table_keeps_its_address():
+    html = to_html("| Chart |\n| --- |\n| ![Sales](https://example.test/s.png) |").html
+    assert '<a href="https://example.test/s.png">Sales</a>' in html
+
+
+def test_a_link_in_a_heading_keeps_its_address():
+    long = "a value that is much too wide for one line on a phone"
+    assert '<a href="https://example.test/h">Plan</a>' in to_html(f"| [Plan](https://example.test/h) | Note |\n| --- | --- |\n| 1 | {long} |").html
+    assert '<a href="https://example.test/h">Plan</a>' in to_html(f"| [Plan](https://example.test/h) | {long} |\n| --- | --- |").html
+
+
+def test_a_table_wider_than_a_phone_becomes_labelled_lines():
+    table = "| Customer | Contact | Note |\n| --- | --- | --- |\n| Acme Holdings | Jo | Renewal due at the end of the quarter |\n| Beta | Sam | |"
     rendered = to_html("Before\n\n" + table + "\n\nAfter")
-    assert rendered.wide_tables == [table]
-    assert rendered.plain == "Before\n\nAfter"
+    assert rendered.plain == "Before\n\nCustomer: Acme Holdings\nContact: Jo\nNote: Renewal due at the end of the quarter\n\nCustomer: Beta\nContact: Sam\n\nAfter"
     assert "<pre>" not in rendered.html
+
+
+def test_a_link_in_a_table_keeps_its_address():
+    html = to_html("| Invoice | Where |\n| --- | --- |\n| 12 | [open it](https://example.test/12) |").html
+    assert html == 'Invoice: 12\nWhere: <a href="https://example.test/12">open it</a>'
+
+
+@pytest.mark.parametrize("mark", ["<br>", "<br/>", "</br>", "<BR />"])
+def test_a_break_in_a_cell_is_a_space(mark):
+    assert to_html(f"| A | B |\n| --- | --- |\n| one{mark}two | three |").plain == "A       | B    \none two | three"
+
+
+def test_a_wide_table_with_no_rows_still_shows_its_heads():
+    plain = to_html(f"| {'long heading ' * 3} | {'another heading ' * 3} |\n| --- | --- |").plain
+    assert "long heading" in plain and "another heading" in plain and "```" not in plain
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ("Write to [the office](mailto:office@example.test) today.", "Write to the office (office@example.test) today."),
+        ("Call [us](tel:+15550100) before noon.", "Call us (+15550100) before noon."),
+        ("[office@example.test](mailto:office@example.test)", "office@example.test"),
+        ("<office@example.test>", "office@example.test"),
+        ("[a form](mailto:office@example.test?subject=Hello)", "a form (office@example.test)"),
+    ],
+)
+def test_a_mail_or_phone_link_keeps_what_it_points_at(source, expected):
+    assert to_html(source).plain == expected
+
+
+@pytest.mark.parametrize("source", ["[](mailto:office@example.test)", "| A | B |\n| --- | --- |\n| [](mailto:office@example.test) | 2 |"])
+def test_a_contact_link_with_no_label_still_shows_its_address(source):
+    assert "office@example.test" in to_html(source).plain
+
+
+def test_a_picture_with_no_description_shows_its_address():
+    assert to_html("![](https://example.test/chart.png)").html == '<a href="https://example.test/chart.png">https://example.test/chart.png</a>'
+    assert "https://example.test/a.png" in to_html("[![](https://example.test/a.png)](https://example.test/full)").plain
+
+
+@pytest.mark.parametrize(
+    "source, title",
+    [
+        ("[citation:City Report](https://example.test/a)", "City Report"),
+        ("[Citation: City Report](https://example.test/a)", "City Report"),
+        ("[**citation:City Report**](https://example.test/a)", "City Report"),
+        ("[citation:](https://example.test/a)", "citation:"),
+    ],
+)
+def test_a_citation_shows_its_title_as_the_web_does(source, title):
+    assert to_html(source).plain == title
+
+
+def test_the_word_citation_stays_outside_a_link():
+    assert to_html("the word citation:here stays").plain == "the word citation:here stays"
 
 
 def test_output_contains_only_allowed_tags():
     _Markup(to_html("# Title\n\n**bold *italic* ~~gone~~**\n\n> quote\n\n`code` [a](https://example.test)\n\n<div>raw</div>").html)
 
 
-def test_output_has_at_most_100_entities():
-    rendered = to_html(" ".join(f"**value{i}**" for i in range(110)))
-    assert len(_Markup(rendered.html).tags) == 100
-    assert rendered.html.endswith("value108 value109")
-    assert rendered.plain == " ".join(f"value{i}" for i in range(110))
+def test_a_long_answer_keeps_every_link_past_the_hundredth():
+    # Telegram ignores entities past 100 in one message, so any limit belongs to a message and not to an answer.
+    rendered = to_html("\n\n".join(f"[guide {i}](https://example.test/{i}) " + "word " * 12 for i in range(120)))
+    assert rendered.html.count("<a href=") == 120
 
 
 def test_plain_fallback_strips_tags_and_unescapes():
@@ -167,9 +251,8 @@ def test_status_line_is_italic_and_last():
 
 
 @pytest.mark.parametrize("source", ["**a `b` c** " * 110, "> a\n>\n> ```py\n> b\n> ```", "<details>\n> quoted\n</details>"])
-def test_complex_nesting_remains_valid_and_bounded(source):
-    markup = _Markup(to_html(source, partial=True).html)
-    assert len(markup.tags) <= 100
+def test_complex_nesting_remains_valid(source):
+    _Markup(to_html(source, partial=True).html)
 
 
 def test_code_block_separators_stay_outside_pre():

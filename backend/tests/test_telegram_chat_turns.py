@@ -621,7 +621,7 @@ async def test_a_finished_run_whose_reply_cannot_be_planned_ends_visibly(db, mon
 
         await past_the_bound(first)
         await asyncio.wait_for(first.done.wait(), 5)
-        assert outcomes == [("error.generic", True)]
+        assert outcomes == [("error.generic", True)], "This run wrote no answer, so there is nothing on the web to point at"
         logged = caplog.text
         chat = f"link={e.link.id} bot={e.link.bot_id} turn={first.record.publication_id} run=run-{first.record.publication_id}"
         assert f"chat_final_undeliverable {chat} output=unavailable:unsupported_output" in logged

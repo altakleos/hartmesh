@@ -1386,8 +1386,10 @@ lands on the page it named.
 A message that begins with `/` and names one of the person's skills runs that
 skill. It stands alone: it joins no earlier text and does not answer an open
 question. A skill that is off, or that a custom agent does not use, gets a plain
-answer instead. An answer a chat cannot carry ends after a minute with the ordinary
-failure message and **Try again**, so that one answer never stops the chat.
+answer instead. A table too wide for a phone arrives as labelled lines. An answer a
+chat cannot carry, such as one holding text shaped like a bot token, says so after two
+minutes and links to the conversation on the web, so that one answer never stops the
+chat.
 
 Telegram bookkeeping is kept for a limited time: incoming messages for 7 days,
 delivered messages for 30 days, and acts and bot history for 400 days. A delivered

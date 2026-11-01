@@ -65,6 +65,7 @@ async def test_actual_sender_rereads_each_model_part_and_preserves_prefix(public
         settings=e.db.settings,
         outbox=box,
         tls_context=object(),
+        product_name="HartMesh",
         request_factory=lambda **kwargs: request if kwargs["connection_pool_size"] == 8 else updates,
         protect_notice=protect_notice,
         eligibility=e.live.authority.delivery,
@@ -118,7 +119,7 @@ async def test_actual_sender_rereads_each_model_part_and_preserves_prefix(public
         elif mode == "claimed-media":
             assert not sent and not reads and len(saved.parts) == 1 and "unavailable_reason" not in saved.parts[0]
         elif mode in {"claimed-callback", "claimed-contradiction", "claimed-missing-basis"}:
-            assert not sent and not reads and saved.state != "failed"
+            assert not sent and not reads and saved.state == "failed", "A saved part that does not validate never will, so the person is told"
         elif mode == "part-fixed-injection":
             assert claimed == 0 and not sent and not reads
         elif mode == "valid":

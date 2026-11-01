@@ -222,10 +222,19 @@ A turn holds its chat only while its driver can still finish it. `_own` wraps
 and then lets the next message run, even when no plan could be written. One clock,
 `quiet_since` on `queue.max_wait_seconds`, bounds a turn that shows no life: a run first
 seen or still working resets it, and a read that keeps failing and a reply that cannot be
-planned run it out. Past it a successful run ends with `error.generic` under the closed
-proof `undeliverable`, and a run interrupted without proof of this chat's Stop ends as
-that interrupted run. The error plan is itself an attempt: it loses to a reply that did
-commit, which the next `plan_final` returns.
+planned run it out. Past it a successful run ends under the closed proof `undeliverable`:
+`answer.on_web` with a link and no Try again when the run's output is complete, since
+that answer exists, and otherwise `error.generic` with Try again. A run interrupted
+without proof of this chat's Stop ends as that interrupted run. The outcome plan is itself
+an attempt: it loses to a reply that did commit, which the next `plan_final` returns.
+
+A table's shape cannot stop an answer. It stays aligned while its line fits `PHONE_WIDTH`,
+an estimate, and it holds no address, and otherwise becomes labelled lines. A final answer
+is rendered once and then cut by `split_html`, so no block is broken at a raw offset; raw
+slices remain for previews and acknowledged edit parts, so `streaming: edit` can still
+show a torn block. Telegram ignores entities past 100 in a message, so nothing counts them
+over a whole answer. A saved part is recomputed before each send, so a render change
+strands unsent rows: `_saved_part` ends them as `SourceGone`.
 
 A message waiting for its run is not on that clock. The worker reports through
 `ChannelExecutionContext.progress`, so `worker_state` tells a wait for a worker, however
@@ -444,8 +453,9 @@ scope, origins, topic and completion intent. Strip supplied transport receipts
 before both basis and parts; regenerate part identities and reject extra controls.
 Only exact source/page pairs derive a server label: `web.memory`/`web.memory`
 uses `label.open_memory`, and `custom_agent.deleted`/`web.telegram` uses
-`label.open_telegram`, and `chat.restarted`/`web.conversation` uses
-`label.open_conversation` with the original saved thread. Validate the pair again at raw delivery. Deleted-custom
+`label.open_telegram`, and `chat.restarted`/`web.conversation` and
+`answer.on_web`/`web.conversation` use `label.open_conversation` with the original saved
+thread. Validate the pair again at raw delivery. Deleted-custom
 repair follows authoritative owner-scoped config absence, uses a safe captured
 label and an eligible configured public address; uncertainty never means deletion.
 The fixed repair may send during `agent_unavailable`, with no model/file privilege.

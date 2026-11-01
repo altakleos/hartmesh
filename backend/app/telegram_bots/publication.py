@@ -219,6 +219,14 @@ async def fixed_source(host, link, key):
     return {"key": key, "values": values}
 
 
+async def conversation_button(link, record):
+    """The way to this conversation on the web, when the web has an address."""
+    from app.telegram_bots.pages import page_address
+
+    address = await await_drained(asyncio.to_thread(page_address, "web.conversation", link, thread_id=record.scope.thread_id))
+    return {"page": "web.conversation", "url": address} if address else None
+
+
 def channel_execution_scope(record: PublicationRecord) -> ChannelExecutionScope:
     if type(record) is not PublicationRecord:
         _refuse()
@@ -610,14 +618,17 @@ class PublicationCoordinator:
 
         return await self._call(perform, timeout=OBSERVATION_TIMEOUT_SECONDS, expired=lambda: PublicationRunObservation("budget_exhausted", record, reason="budget_exhausted"), deadline=deadline)
 
-    async def _close_run(self, record, link, run, guard):
-        """A finished run that cannot be delivered ends in what it was, with a way to try again."""
+    async def _close_run(self, record, link, run, guard, *, answered):
+        """A finished run that cannot be delivered ends in what it was: its answer on the web, or a way to try again."""
         from app.telegram_bots.errors import classify_run
 
         failure = classify_run(run, channel_execution_scope(record))
-        key = "error.generic" if failure is None else "busy.gave_up" if failure.retry_later else failure.text_key
+        on_web = failure is None and answered
+        key = "answer.on_web" if on_web else "error.generic" if failure is None else "busy.gave_up" if failure.retry_later else failure.text_key
         source = await fixed_source(self.host, link, key)
-        identity = await self.outbox.plan_publication_outcome(record, run=run, source_ref=source, keyboard=_try_again(record), callbacks=self.host.callbacks, guard=guard, undeliverable=failure is None)
+        identity = await self.outbox.plan_publication_outcome(
+            record, run=run, source_ref=source, keyboard=() if on_web else _try_again(record), callbacks=self.host.callbacks, guard=guard, undeliverable=failure is None, url_button=await conversation_button(link, record) if on_web else None
+        )
         return PublicationObservation("planned", record, outbox_id=identity)
 
     async def observe(self, record: PublicationRecord, current_link: BotLink, *, max_pages: int, deadline: float | None = None, closing: str | None = None) -> PublicationObservation:
@@ -656,7 +667,7 @@ class PublicationCoordinator:
                 async def unfinished(reason):
                     if closing is None:
                         return PublicationObservation("held", fresh, reason=reason)
-                    return await self._close_run(fresh, current_link, located.run, read_guard)
+                    return await self._close_run(fresh, current_link, located.run, read_guard, answered=output.output.state == "complete")
 
                 output = await facade.get_run_output(fresh.run_id)
                 admission.check("source_read")
@@ -700,10 +711,10 @@ class PublicationCoordinator:
                 try:
                     control.check_budget()
                     await await_drained(asyncio.to_thread(freeze_reply_presentation, output.output.source.text, text_sha256=output.output.output_evidence.text_sha256))
+                    admission.check("source_read")
+                    identity = await self.outbox.plan_verified_publication_reply(fresh, output=output, guard=read_guard)
                 except ValueError:
                     return await unfinished("unsupported_presentation")
-                admission.check("source_read")
-                identity = await self.outbox.plan_verified_publication_reply(fresh, output=output, guard=read_guard)
                 return PublicationObservation("planned", fresh, outbox_id=identity)
             except asyncio.CancelledError:
                 raise

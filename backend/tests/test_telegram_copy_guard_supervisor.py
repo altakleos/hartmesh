@@ -35,6 +35,7 @@ class Channels:
             protect_notice=supervisor.protect_notice,
             channel=supervisor.channel,
             send_allowed=supervisor.send_allowed,
+            product_name=supervisor.product_name,
             request_factory=lambda **kw: normal if kw["connection_pool_size"] == 8 else updates,
         )
         channel = TelegramBotChannel(link=link, token=token, supervisor=services, **kwargs)

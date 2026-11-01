@@ -104,7 +104,7 @@ async def test_corrupt_saved_basis_refuses_before_source_read(publication_enviro
         calls.append(True)
         return output
 
-    with pytest.raises(DeliveryClaimRetired):
+    with pytest.raises(SourceGone):
         await source_api().ModelSource(read_output=read).read_part(replace(part, item=item, part=selected))
     assert calls == []
 

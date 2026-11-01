@@ -110,13 +110,12 @@ class LivePresentation:
 
     def _fit(self, start, end, raw):
         limit = 4096 - utf16_units(visible_text(self._activity)) - (1 if self._activity else 0)
-        rendered = to_html(raw, partial=True)
-        if rendered.wide_tables:
-            return None
-        while utf16_units(rendered.plain) > limit and raw:
-            raw = raw[: max(0, len(raw) * 3 // 4)]
+        units = utf16_units(to_html(raw, partial=True).plain)
+        while units > limit and raw:
+            # In proportion: a labelled table renders longer than its source, so a fixed step shows rows and takes them back.
+            raw = raw[: min(len(raw) - 1, len(raw) * limit // units)]
             end = start + len(raw)
-            rendered = to_html(raw, partial=True)
+            units = utf16_units(to_html(raw, partial=True).plain)
         return start, end, raw
 
     def _shown(self, preview, *, start, end, part_id, index, message_id=None):
@@ -150,10 +149,7 @@ class LivePresentation:
             raw = preview.text if preview is not None else ""
             slices = preview_source_slices(raw)
             start, end, raw = slices[0] if slices else (0, 0, "")
-            fitted = self._fit(start, end, raw)
-            if fitted is None:
-                return
-            start, end, raw = fitted
+            start, end, raw = self._fit(start, end, raw)
             html = self._render(raw)
             result = await self._call("send_message_draft", draft_id=self.draft_id, text=html, parse_mode=ParseMode.HTML, message_thread_id=self.topic, api_kwargs={"can_stop": True, "keep_on_stop": True})
             self._last_send = self.channel._time()
@@ -233,10 +229,7 @@ class LivePresentation:
         start = self._source_start
         slices = preview_source_slices(raw, start=start)
         begin, end, value = slices[0] if slices else (start, start, "")
-        fitted = self._fit(begin, end, value)
-        if fitted is None:
-            return
-        begin, end, value = fitted
+        begin, end, value = self._fit(begin, end, value)
         final_part = len(slices) > 1
         html = self._render(value) if not final_part else to_html(value, partial=True).html
         if not html:

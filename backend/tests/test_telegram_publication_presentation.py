@@ -23,7 +23,6 @@ from app.telegram_bots.split import split_html, utf16_units, visible_text
 )
 def test_current_renderer_visible_basis_is_lossless_and_split_units_are_utf16(source):
     rendered = to_html(source)
-    assert rendered.wide_tables == []
     chunks = split_html(rendered.html)
     assert chunks
     assert "".join(visible_text(chunk) for chunk in chunks) == rendered.plain
@@ -108,8 +107,8 @@ def test_frozen_presentation_refuses_noncanonical_source(text, digest):
         producer.freeze_reply_presentation(text, text_sha256=digest)
 
 
-def test_frozen_presentation_holds_wide_table_without_dropping_its_content():
-    source = "| first | second | third | fourth |\n| --- | --- | --- | --- |\n| one | two | three | four |"
-    assert to_html(source).wide_tables
-    with pytest.raises(ValueError, match="publication-presentation"):
-        _freeze(source)
+def test_frozen_presentation_keeps_a_wide_table_with_all_its_content():
+    source = "| first | second | third | fourth |\n| --- | --- | --- | --- |\n| one | two | three | " + "four " * 12 + "|"
+    frozen = _freeze(source)
+    assert "".join(chunk.visible_text for chunk in frozen.chunks) == to_html(source).plain
+    assert "fourth: four" in frozen.chunks[0].visible_text

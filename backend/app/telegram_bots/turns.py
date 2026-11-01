@@ -522,6 +522,7 @@ class ChatTurns:
             if pending is None:
                 raise ValueError("pending-files-unavailable") from None
             guard = _Guard(self.services, channel, link, lambda: self._open(channel, link), repair=True)
+            saved = []
             for row in origins:
                 for file in row.sanitized_input.get("files", []):
                     admit = getattr(channel, "admit_file", None)
@@ -529,23 +530,18 @@ class ChatTurns:
                     guard.current()
                     if allowed:
                         await pending.add(link, row, file, guard=guard)
-                        await await_drained(
-                            channel.send_text(
-                                "file.saved_ask_plain",
-                                source_id=f"file-received:{row.chat_id}:{row.message_id}",
-                                reply_to=row.message_id,
-                                thread=row.message_thread_id,
-                                inbox_rows=[row],
-                                finish_route=True,
-                                _captured_link=link,
-                                file=file["filename"],
-                            )
-                        )
+                        saved.append((row, file))
                     else:
                         await guard.prepare()
                         async with self.services.outbox.inbox._transaction() as writer:
                             await self.services.outbox.inbox.finish_route(row, session=writer)
                             await guard.check(writer)
+            if saved:
+                # An album is one message, so it gets one question. A photo's own name is made up, so it is not shown.
+                row, file = saved[0]
+                key, values = ("file.saved_ask_many", {"n": len(saved)}) if len(saved) > 1 else ("file.saved_ask_photo", {}) if file["type"] == "image" else ("file.saved_ask_plain", {"file": file["filename"]})
+                rows = [saved_row for saved_row, _file in saved]
+                await await_drained(channel.send_text(key, source_id=f"file-received:{row.chat_id}:{row.message_id}", reply_to=row.message_id, thread=row.message_thread_id, inbox_rows=rows, finish_route=True, _captured_link=link, **values))
             return
         disposition = self.queue.admit_submission(link, inbound) if separate or "reply_to_message_id" in origins[0].sanitized_input else self.queue.admit(link, inbound)
         if disposition == "full":
@@ -884,16 +880,21 @@ class ChatTurns:
         return now - turn.quiet_since >= (self.services.config.queue.max_wait_seconds if limit is None else limit)
 
     async def _publication_outcome(self, turn, key, *, run=None, refusal=None, undeliverable=False):
+        from app.telegram_bots.publication import conversation_button
+
         source = await self._source(turn, key)
+        on_web = key == "answer.on_web"
         return await self.services.outbox.plan_publication_outcome(
             turn.record,
             run=run,
             creation_refusal=refusal,
             source_ref=source,
-            keyboard=self._button("retry_message", turn.record.publication_id),
+            # The answer exists, so the way to it is the web. Running it again would end the same way.
+            keyboard=() if on_web else self._button("retry_message", turn.record.publication_id),
             callbacks=self.services.callbacks,
             guard=self._guard(turn),
             undeliverable=undeliverable,
+            url_button=await conversation_button(turn.link, turn.record) if on_web else None,
         )
 
     async def _settle_cancelled_inputs(self, turn):
@@ -1053,7 +1054,9 @@ class ChatTurns:
                             if overdue and failure is None:
                                 # This plan can lose to a reply that did commit, and
                                 # the next `plan_final` then returns that reply.
-                                if await self._try_final(turn, lambda: self._publication_outcome(turn, "error.generic", run=run, undeliverable=True)) is not None:
+                                # Only an answer that exists can be pointed at. A run that wrote none can still be tried again.
+                                key = "answer.on_web" if self.observer.final_read(record).get("output", "").startswith("complete:") else "error.generic"
+                                if await self._try_final(turn, lambda: self._publication_outcome(turn, key, run=run, undeliverable=True)) is not None:
                                     turn.held("chat_final_undeliverable", **self.observer.final_read(record))
                                     await self._observe(turn, lambda: self._complete(turn))
                                     return
