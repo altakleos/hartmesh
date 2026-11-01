@@ -384,6 +384,162 @@ async def test_fifth_unexpected_poll_death_stops_without_resetting_history(db, m
         await e.supervisor.stop()
 
 
+@pytest.mark.parametrize("error", [ConnectionRefusedError("refused"), TimeoutError("frozen"), RuntimeError("cannot switch to state 15")])
+async def test_a_raw_database_error_cannot_lose_a_dead_poller(db, monkeypatch, caplog, error):
+    e = build(db, monkeypatch)
+    finished = []
+
+    async def poll_done(_channel, _poll, _task):
+        if not finished:
+            finished.append("failed once")
+            raise error
+        finished.append("counted")
+
+    monkeypatch.setattr(e.supervisor, "_poll_done", poll_done)
+    monkeypatch.setattr(e.supervisor, "_sleep", AsyncMock())
+    channel = SimpleNamespace(link=SimpleNamespace(id="a" * 32, bot_id=9_000_000_001))
+    await asyncio.wait_for(e.supervisor._complete_poll(channel, None, None), 3)
+    assert finished == ["failed once", "counted"]
+    assert f"poll_death_write_failed link={channel.link.id}" in caplog.text
+    await e.supervisor.stop()
+
+
+async def test_one_failed_first_start_leaves_the_others_running(db, monkeypatch, caplog):
+    e = build(db, monkeypatch)
+    first, _token = await credential(db, e.env)
+    second, _token = await credential(db, e.env, bot=9_000_000_002)
+    started = []
+
+    async def launch(link, **_options):
+        if link.id == first.id:
+            raise ConnectionRefusedError("refused")
+        started.append(link.id)
+
+    monkeypatch.setattr(e.supervisor, "_launch", launch)
+    await e.supervisor.check()
+    await e.supervisor.start()
+    try:
+        assert started == [second.id]
+        assert e.supervisor.reason() is None, "One link cannot turn Telegram off for every bot"
+        assert f"bot_start_failed link={first.id} bot={first.bot_id} cause=ConnectionRefusedError:" in caplog.text
+    finally:
+        await e.supervisor.stop()
+
+
+async def test_a_link_that_cannot_start_does_not_stop_reconcile_reaching_the_next(db, monkeypatch):
+    e = build(db, monkeypatch)
+    first, _token = await credential(db, e.env)
+    second, _token = await credential(db, e.env, bot=9_000_000_002)
+    launched = []
+
+    async def launch(link, **_options):
+        launched.append(link.id)
+        raise ConnectionRefusedError("refused")
+
+    monkeypatch.setattr(e.supervisor, "_launch", launch)
+    await e.supervisor.check()
+    await e.supervisor.start()
+    try:
+        launched.clear()
+        await e.supervisor.reconcile()
+        assert set(launched) == {first.id, second.id}
+    finally:
+        await e.supervisor.stop()
+
+
+async def test_a_raw_error_recovering_claims_is_retried(db, monkeypatch):
+    answers = iter([ConnectionRefusedError("refused"), 0])
+
+    async def recover(_sender):
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr("app.telegram_bots.producer.OutboxSender.recover_prior_claims", recover)
+    e = build(db, monkeypatch)
+    await e.supervisor.check()
+    starting = asyncio.create_task(e.supervisor.start())
+    try:
+        async with asyncio.timeout(3):
+            while not starting.done():
+                e.clock.advance(1)
+                await asyncio.sleep(0.01)
+        await starting
+        assert e.supervisor.send_allowed() and e.supervisor.reason() is None
+    finally:
+        await e.supervisor.stop()
+
+
+async def test_a_fault_recovering_claims_that_never_clears_ends_in_a_refusal(db, monkeypatch):
+    async def recover(_sender):
+        raise ValueError("malformed-parts")
+
+    monkeypatch.setattr("app.telegram_bots.producer.OutboxSender.recover_prior_claims", recover)
+    monkeypatch.setattr("app.telegram_bots.supervisor.CLAIM_RECOVERY_ATTEMPTS", 1)
+    e = build(db, monkeypatch)
+    await e.supervisor.check()
+    await e.supervisor.start()
+    try:
+        assert e.supervisor.reason() is not None and not e.supervisor.send_allowed()
+    finally:
+        await e.supervisor.stop()
+
+
+async def test_an_uncertain_answer_at_start_does_not_call_a_live_agent_gone(db, monkeypatch):
+    def uncertain(e, _link):
+        e.supervisor.authority.target = AsyncMock(side_effect=RuntimeError("authority blip"))
+
+    e, link, _held = await running_one(db, monkeypatch, connected=True, prepare=uncertain)
+    try:
+        assert (await db.links.get(link.id)).health == "ok"
+    finally:
+        await e.supervisor.stop()
+
+
+async def test_a_long_stop_of_the_gateway_is_told_after_the_first_good_poll(db, monkeypatch):
+    from datetime import timedelta
+
+    from _telegram_repository_test_support import bind_link
+    from sqlalchemy import update
+
+    from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow
+
+    e = build(db, monkeypatch)
+    link, _token = await credential(db, e.env)
+    link = await bind_link(db, link)
+    async with db.sessions.begin() as session:
+        await session.execute(update(TelegramBotLinkRow).where(TelegramBotLinkRow.id == link.id).values(last_ok_at=e.clock.now() - timedelta(hours=30)))
+    e.normal.enqueue_get_me(bot_id=link.bot_id)
+    e.updates.enqueue("getUpdates", result=[])
+    held = e.updates.enqueue("getUpdates", result=[], release=asyncio.Event())
+    scheduled = []
+    monkeypatch.setattr(e.supervisor, "_schedule_notice", lambda _channel, key, **_options: scheduled.append(key))
+    await e.supervisor.check()
+    await e.supervisor.start()
+    try:
+        await asyncio.wait_for(held.started.wait(), 3)
+        assert scheduled == ["link.back_online"], "The start wrote `last_ok_at` first, so the saved value has to survive it"
+    finally:
+        await e.supervisor.stop()
+
+
+async def test_a_deleted_agents_name_falls_back_to_what_is_stored(db, monkeypatch):
+    e = build(db, monkeypatch)
+    e.supervisor._app_config = SimpleNamespace()
+    monkeypatch.setattr("app.telegram_bots.supervisor.product_name", lambda _config: "HartMesh")
+
+    def missing(*_args, **_kwargs):
+        raise FileNotFoundError("gone")
+
+    monkeypatch.setattr("deerflow.config.agents_config.load_agent_config", missing)
+    monkeypatch.setattr("app.telegram_bots.pages.page_address", lambda *_args: None)
+    link = SimpleNamespace(agent_kind="custom_agent", agent_ref="reader", bot_name=None, owner_user_id="owner-a")
+    assert (await e.supervisor.prepare_ingress_values(link))["name"] == "reader"
+    assert (await e.supervisor.prepare_ingress_values(SimpleNamespace(**{**vars(link), "bot_name": "Reader bot"})))["name"] == "Reader bot"
+    await e.supervisor.stop()
+
+
 async def test_missing_row_reconcile_forgets_client_without_remote_notice(db, monkeypatch):
     e, link, held = await running_one(db, monkeypatch)
     try:

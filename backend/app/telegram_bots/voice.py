@@ -22,7 +22,7 @@ from pydantic import SecretStr
 from app.telegram_bots.config import TelegramBotsConfig
 from app.telegram_bots.settings import local_now
 from app.telegram_bots.texts import KEYBOARDS
-from app.telegram_bots.token_pattern import TOKEN_BODY
+from app.telegram_bots.token_pattern import TOKEN_IN_TEXT
 from deerflow.config import get_app_config
 from deerflow.config.model_config import ModelConfig
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
@@ -35,7 +35,7 @@ _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/"
 _TRANSCRIPTION_PROMPT = "Transcribe this audio word for word. Output only the transcript."
 PROVIDER_NAMES = {"openai": "OpenAI", "gemini": "Google"}
 _ECHO_UTF16_MAX = 3900
-_TOKEN = re.compile(TOKEN_BODY)
+_TOKEN = re.compile(TOKEN_IN_TEXT)
 _unqualified_reasons: set[str] = set()
 _reason_lock = threading.Lock()
 _voice_sdk_call: ContextVar[bool] = ContextVar("telegram_voice_sdk_call", default=False)

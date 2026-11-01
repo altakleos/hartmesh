@@ -27,10 +27,10 @@ from sqlalchemy import or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 
-from app.telegram_bots.adapter import TOKEN_BODY
 from app.telegram_bots.api_logging import log_call_failure
 from app.telegram_bots.config import TelegramBotsConfig
 from app.telegram_bots.links import BotLink
+from app.telegram_bots.token_pattern import TOKEN_IN_TEXT
 from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
 from deerflow.runtime.runs.terminal import failure_chain
 from deerflow.utils.file_io import await_drained
@@ -58,7 +58,7 @@ _TRANSPORT_RECEIPTS = frozenset({"sent_at", "dispatched_at", "unavailable_reason
 _PART_IDENTITY = frozenset({"part_id", "presentation_version", "ordinal", "state", "message_ids"})
 _SKIP_REASONS = frozenset({"no-access", "superseded", "link-not-connected", "disabled", "policy-off", "expired"})
 _LIVE_CLAIMS: set[tuple[int, str, str]] = set()
-_TOKEN = re.compile(TOKEN_BODY)
+_TOKEN = re.compile(TOKEN_IN_TEXT)
 _FORBIDDEN_KEYS = frozenset({"token", "bot_token", "access_token", "raw_update", "update", "audio", "audio_bytes", "download_url", "temporary_url", "bytes"})
 
 

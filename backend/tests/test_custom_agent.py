@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -833,6 +833,17 @@ class TestAgentsAPI:
         # Verify it's gone
         response = agent_client.get("/api/agents/del-me")
         assert response.status_code == 404
+
+    def test_deleting_an_agent_tells_the_bots_at_once(self, agent_client):
+        agent_client.post("/api/agents", json={"name": "del-me", "soul": "bye"})
+        bots = MagicMock()
+        agent_client.app.state.telegram_bots = bots
+
+        assert agent_client.delete("/api/agents/del-me").status_code == 204
+        bots.reconcile_soon.assert_called_once_with()
+
+        assert agent_client.delete("/api/agents/del-me").status_code == 404
+        bots.reconcile_soon.assert_called_once_with()
 
     def test_delete_missing_agent_404(self, agent_client):
         response = agent_client.delete("/api/agents/does-not-exist")

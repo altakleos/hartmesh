@@ -28,7 +28,7 @@ from app.gateway.authz import get_auth_context, resolve_route_permissions_for_re
 from app.gateway.deps import get_current_user_from_request, require_admin_user
 from app.telegram_bots.config import load_config, section_present
 from app.telegram_bots.links import CONNECT_CODES_MAX, AgentLinked, BotLinked, BotLinkRepository, LimitDeployment, LimitPerson, TooManyCodes
-from app.telegram_bots.token_pattern import TOKEN_BODY
+from app.telegram_bots.token_pattern import TOKEN_IN_TEXT
 from app.telegram_bots.voice import resolve_transcriber
 from deerflow.config import get_app_config
 from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
@@ -36,7 +36,7 @@ from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 _BODY_MAX_BYTES = 16384
-_TOKEN = re.compile(r"(?<![0-9])" + TOKEN_BODY)
+_TOKEN = re.compile(TOKEN_IN_TEXT)
 _OPERATION = re.compile(r"[0-9a-f]{32}\Z")
 _TIME = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]\Z")
 _REFUSALS = {

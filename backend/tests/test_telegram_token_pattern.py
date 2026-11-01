@@ -23,6 +23,13 @@ def _synthetic_token(digits: int = 9, secret_chars: int = 36) -> str:
     return "1" * digits + ":" + "A" * secret_chars
 
 
+def test_what_a_person_typed_is_searched_the_same_way_everywhere():
+    from app.telegram_bots import adapter, callbacks, inbox, producer, router, voice
+    from app.telegram_bots.token_pattern import TOKEN_IN_TEXT
+
+    assert {adapter._TOKEN_PASTED.pattern, callbacks._TOKEN.pattern, inbox._TOKEN.pattern, producer._TOKEN.pattern, router._TOKEN.pattern, voice._TOKEN.pattern} == {TOKEN_IN_TEXT}
+
+
 def _tracked_token_locations(root: Path) -> list[tuple[str, int]]:
     names = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True, check=True).stdout.split(b"\0")
     pattern = re.compile(r"(?<![0-9])" + TOKEN_BODY)

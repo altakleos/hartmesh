@@ -1327,6 +1327,10 @@ class ChatTurns:
             if turn.channel is channel and self._current(turn) and turn.presentation is not None:
                 turn.presentation.message_sent(chat_id=chat_id, topic=topic)
 
+    def has_turn(self, channel, *, topic):
+        turn = self._turns.get((channel.link.id, None if topic in (None, 1) else topic))
+        return turn is not None and turn.channel is channel and self._current(turn)
+
     def typing_allowed(self, channel, *, topic):
         topic = None if topic in (None, 1) else topic
         turn = self._turns.get((channel.link.id, topic))
