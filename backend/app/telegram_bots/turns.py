@@ -9,6 +9,7 @@ import weakref
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 
 from app.channels.message_bus import InboundMessage
 from app.telegram_bots.queue import ChatQueue
@@ -19,6 +20,7 @@ from deerflow.utils.file_io import await_drained
 logger = logging.getLogger(__name__)
 TURN_WAIT_REPORT_SECONDS = 600
 RUN_SHOWS_SECONDS = 5
+LEFT_INPUTS_SECONDS = 30
 _RUN_ENDED = frozenset({"success", "error", "timeout", "interrupted"})
 _SOURCES = "telegram_source_message_ids"
 _ALL_TOPICS = object()
@@ -179,6 +181,7 @@ class ChatTurns:
         self._closed = False
         self._observer = None
         self._stop_task = None
+        self._started_at = datetime.now(UTC)
 
     def _current(self, turn):
         channel, link = turn.channel, turn.link
@@ -199,6 +202,9 @@ class ChatTurns:
 
     def _creating(self, turn):
         return self._current(turn) and turn.channel._callback_current(turn.link)
+
+    def _open(self, channel, link):
+        return not self._closed and channel not in self._retired and channel._callback_current(link)
 
     @asynccontextmanager
     async def _entry(self, channel):
@@ -301,6 +307,19 @@ class ChatTurns:
         async with self._entry(channel):
             return await self._accept(channel, update, separate=separate)
 
+    def unfinished(self, link, row):
+        """Whether a saved message's admission still has to happen, so that its replay goes on with it.
+
+        Nothing holds the row and no turn took it. A routed row from before this process belongs
+        to recovery: an ordinary message cut off by a restart does not start again by itself.
+        A row with no route never started anything, and recovery cannot read it.
+        """
+        key = (link.id, row.message_thread_id)
+        joined, turn = self._joins.get(key), self._turns.get(key)
+        kept = (*(joined.origins if joined is not None else ()), *(turn.stop_commands if turn is not None else ()))
+        held = (link.id, row.message_id) in self._origins or any(saved.message_id == row.message_id for saved in kept)
+        return not held and not row.route_complete and row.turn_id is None and row.outbox_id is None and (row.route_kind is None or row.accepted_at >= self._started_at)
+
     async def accept_staged(self, channel, stage):
         """Admit one actual durable answer as an indivisible FIFO input."""
         async with self._entry(channel):
@@ -358,15 +377,17 @@ class ChatTurns:
             return False
         value = {"type": "media" if files else "text", "text": text, **({"files": files} if files else {})}
         row, created = await await_drained(self.services.outbox.inbox.accept(link, update, sanitized_input=value))
-        if not created or self._closed or channel in self._retired or not channel._callback_current(link):
+        if not created and not self.unfinished(link, row):
             channel._classified(update, remember=True)
             return True
+        # From here a channel going away leaves the update unacknowledged, so the row is not stranded.
+        if not self._open(channel, link):
+            return False
         forwarded, name = forward_origin(message)
         profile = {"version": 2, "kind": "chat_input", "forwarded": forwarded, "origin": name} if files or forwarded else {"version": 1, "kind": "plain_text", "forwarded": False}
         row = await await_drained(self.services.outbox.inbox.route(row, kind="turn", target_id=link.agent_ref, basis={"input_profile": profile}, operation_ids=[]))
-        if self._closed or channel in self._retired or not channel._callback_current(link):
-            channel._classified(update, remember=True)
-            return True
+        if not self._open(channel, link):
+            return False
         key = (link.id, row.message_thread_id)
         async with self._join_locks.hold(key):
             self._join_busy[key] = channel
@@ -380,7 +401,7 @@ class ChatTurns:
     async def accept_transcript(self, channel, link, row):
         """A finished voice note takes the path of the same typed text."""
         async with self._entry(channel):
-            if self._closed or channel in self._retired or not channel._callback_current(link):
+            if not self._open(channel, link):
                 return False
             human_inputs = getattr(self.services, "human_inputs", None)
             if human_inputs is not None and await human_inputs.handle_transcript(channel, link, row):
@@ -409,7 +430,7 @@ class ChatTurns:
         if not files and not forwarded:
             pending = getattr(self.services, "pending_files", None)
             if pending is not None:
-                guard = _Guard(self.services, channel, link, lambda: not self._closed and channel not in self._retired and channel._callback_current(link), repair=True)
+                guard = _Guard(self.services, channel, link, lambda: self._open(channel, link), repair=True)
                 await pending.take(link, row, guard=guard)
                 await guard.prepare()
                 async with self.services.outbox.inbox._transaction() as writer:
@@ -449,8 +470,37 @@ class ChatTurns:
         if joined.task is not None and joined.task is not asyncio.current_task():
             joined.task.cancel()
             await asyncio.gather(joined.task, return_exceptions=True)
-        if not self._closed and joined.channel not in self._retired and joined.channel._callback_current(joined.link):
-            await self._admit_origins(joined.channel, joined.link, tuple(joined.origins))
+        if self._open(joined.channel, joined.link):
+            try:
+                await self._admit_origins(joined.channel, joined.link, tuple(joined.origins))
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                await self._flush_failed(joined, error)
+
+    async def _flush_failed(self, joined, error):
+        """A join's updates were acknowledged when they joined, so no replay will bring these back."""
+        channel, link, first = joined.channel, joined.link, joined.origins[0]
+        _chat_line("chat_join_held", chat=link, error=error)
+        if (link.id, first.message_id) in self._origins:
+            return  # In line, and only its notice failed.
+        try:
+            from app.telegram_bots.publication import fixed_source
+
+            await self.services.outbox.plan_input_outcome(
+                link,
+                source_id=f"chat-input:{link.chat_id}:{link.binding_generation}:{first.message_id}",
+                source_ref=await fixed_source(self.services, link, "error.generic"),
+                keyboard=self._button("retry_message", str(first.message_id), target_kind="request"),
+                callbacks=self.services.callbacks,
+                guard=_Guard(self.services, channel, link, lambda: self._open(channel, link), repair=True),
+                inbox_rows=tuple(joined.origins),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as failure:
+            # Unanswered for now. The next start of this channel or process closes it.
+            _chat_line("chat_join_held", chat=link, error=failure)
 
     async def flush_inputs(self, channel, *, topic=_ALL_TOPICS):
         """Flush earlier admitted pieces before an incompatible navigation input."""
@@ -471,7 +521,7 @@ class ChatTurns:
             pending = getattr(self.services, "pending_files", None)
             if pending is None:
                 raise ValueError("pending-files-unavailable") from None
-            guard = _Guard(self.services, channel, link, lambda: not self._closed and channel not in self._retired and channel._callback_current(link), repair=True)
+            guard = _Guard(self.services, channel, link, lambda: self._open(channel, link), repair=True)
             for row in origins:
                 for file in row.sanitized_input.get("files", []):
                     admit = getattr(channel, "admit_file", None)
@@ -479,15 +529,17 @@ class ChatTurns:
                     guard.current()
                     if allowed:
                         await pending.add(link, row, file, guard=guard)
-                        await channel.send_text(
-                            "file.saved_ask_plain",
-                            source_id=f"file-received:{row.chat_id}:{row.message_id}",
-                            reply_to=row.message_id,
-                            thread=row.message_thread_id,
-                            inbox_rows=[row],
-                            finish_route=True,
-                            _captured_link=link,
-                            file=file["filename"],
+                        await await_drained(
+                            channel.send_text(
+                                "file.saved_ask_plain",
+                                source_id=f"file-received:{row.chat_id}:{row.message_id}",
+                                reply_to=row.message_id,
+                                thread=row.message_thread_id,
+                                inbox_rows=[row],
+                                finish_route=True,
+                                _captured_link=link,
+                                file=file["filename"],
+                            )
                         )
                     else:
                         await guard.prepare()
@@ -498,7 +550,9 @@ class ChatTurns:
         disposition = self.queue.admit_submission(link, inbound) if separate or "reply_to_message_id" in origins[0].sanitized_input else self.queue.admit(link, inbound)
         if disposition == "full":
             first = origins[0]
-            await channel.send_text("busy.followup_full", source_id=f"chat-full:{first.chat_id}:{first.message_id}", reply_to=first.message_id, thread=first.message_thread_id, inbox_rows=origins, finish_route=True, _captured_link=link)
+            await await_drained(
+                channel.send_text("busy.followup_full", source_id=f"chat-full:{first.chat_id}:{first.message_id}", reply_to=first.message_id, thread=first.message_thread_id, inbox_rows=origins, finish_route=True, _captured_link=link)
+            )
             return
         for row in origins:
             self._origins[(link.id, row.message_id)] = row
@@ -507,7 +561,7 @@ class ChatTurns:
             self._start(channel, link, inbound)
         elif disposition == "first-waiting":
             first = origins[0]
-            await channel.send_text("busy.followup", source_id=f"chat-wait:{first.chat_id}:{first.message_id}", reply_to=first.message_id, thread=first.message_thread_id, inbox_rows=origins, _captured_link=link)
+            await await_drained(channel.send_text("busy.followup", source_id=f"chat-wait:{first.chat_id}:{first.message_id}", reply_to=first.message_id, thread=first.message_thread_id, inbox_rows=origins, _captured_link=link))
         else:
             self._spawn(channel.react_waiting(link, origins[0]), channel=channel)
 
@@ -584,9 +638,20 @@ class ChatTurns:
         turn.done.set()
         if turn.record is not None and self._observer is not None:
             self.observer.retire(turn.record)
+        self._let_go(turn.link, [row.message_id for row in turn.origins])
+        for entry in self.queue.waiting_inputs(turn.link, turn.topic):
+            if entry.callback_id is not None:
+                self._callback_origins.pop((turn.link.id, entry.callback_id), None)
+            else:
+                self._let_go(turn.link, entry.inbound.metadata[_SOURCES])
         self.queue.cancel_wait(turn.link, turn.topic)
         self.queue.turn_ended(turn.link, turn.topic)
         self._turns.pop((turn.link.id, turn.topic), None)
+
+    def _let_go(self, link, message_ids):
+        for identity in message_ids:
+            self._origins.pop((link.id, identity), None)
+            self._origin_channels.pop((link.id, identity), None)
 
     def _finish(self, turn):
         if not self._current(turn) or turn.done.is_set():
@@ -595,9 +660,7 @@ class ChatTurns:
         if turn.record is not None and self._observer is not None:
             self.observer.retire(turn.record)
         if turn.callback_id is None:
-            for row in turn.origins:
-                self._origins.pop((turn.link.id, row.message_id), None)
-                self._origin_channels.pop((turn.link.id, row.message_id), None)
+            self._let_go(turn.link, [row.message_id for row in turn.origins])
         next_input = self.queue.turn_ended(turn.link, turn.topic)
         self._turns.pop((turn.link.id, turn.topic), None)
         if next_input is not None:
@@ -856,9 +919,7 @@ class ChatTurns:
             if entry.callback_id is not None:
                 self._callback_origins.pop((turn.link.id, entry.callback_id), None)
             else:
-                for origin in origins:
-                    self._origins.pop((turn.link.id, origin.message_id), None)
-                    self._origin_channels.pop((turn.link.id, origin.message_id), None)
+                self._let_go(turn.link, [origin.message_id for origin in origins])
             turn.cancelled_waiting = turn.cancelled_waiting[1:]
         for row in turn.stop_commands:
             guard = self._guard(turn, repair=True)
@@ -1110,7 +1171,7 @@ class ChatTurns:
         async with turn.stop_lock:
             if not self._current(turn) or turn.record is None or turn.stop_id is None:
                 return
-            if turn.stop_status is None:
+            if turn.stop_status in {None, "unknown"}:
                 await self._pause_ui(turn)
                 if not self._current(turn):
                     return
@@ -1206,14 +1267,15 @@ class ChatTurns:
             if self._closed or channel in self._retired or not await channel._input_current(link) or not channel._callback_current(link):
                 return
             row, created = await await_drained(self.services.outbox.inbox.accept(link, update, sanitized_input={"command": "stop"}))
-            if self._closed or channel in self._retired or not channel._callback_current(link):
+            if not created and not self.unfinished(link, row):
+                channel._classified(update, remember=True)
                 return
-            if row.route_complete or not created:
+            if not self._open(channel, link):
                 return
             human_inputs = getattr(self.services, "human_inputs", None)
             if human_inputs is not None:
                 await human_inputs.command(channel, update, "stop", captured_link=link)
-            if self._closed or channel in self._retired or not channel._callback_current(link):
+            if not self._open(channel, link):
                 return
             row = await await_drained(self.services.outbox.inbox.route(row, kind="command", target_id="stop", basis={}, operation_ids=[]))
             if not channel._callback_current(link):
@@ -1270,10 +1332,7 @@ class ChatTurns:
             if row.kind not in {"retry_message", "file_retry"}:
                 raise CallbackRefused() from None
 
-            def current():
-                return not self._closed and channel not in self._retired and channel._callback_current(link)
-
-            guard = _Guard(self.services, channel, link, current, repair=True)
+            guard = _Guard(self.services, channel, link, lambda: self._open(channel, link), repair=True)
             from app.telegram_bots.callbacks import _RESERVED
 
             business = {key: value for key, value in row.payload.items() if key not in _RESERVED}
@@ -1318,13 +1377,13 @@ class ChatTurns:
                 self._start(channel, link, inbound)
 
     async def recover_startup(self):
-        """One bounded frozen input cohort while the host still holds ingress.
+        """Every input the last process left open, while the host still holds ingress.
 
         This is a fixed restart disposition, never model retry or a fabricated
         publication. Unknown/unrouted/incomplete groups stay retained.
         """
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + 30
+        deadline = loop.time() + LEFT_INPUTS_SECONDS
         host = self.services
 
         def phase():
@@ -1341,32 +1400,45 @@ class ChatTurns:
                 and host._cause is None
             )
 
-        if not phase():
-            return
-        # Retained SQL may settle after D. Its result never re-arms the phase.
-        try:
-            page = await await_drained(host.outbox.inbox.prepublication_page(limit=32, max_origins=64))
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            _chat_line("chat_startup_page_held", error=error)
-            return
-        if not phase():
-            return
-        cohort = tuple(page.entries)
-        for entry in cohort:
-            if not phase():
-                return
-            if entry.hold_reason not in (None, "voice_interrupted") or not entry.origins:
-                continue
+        await self._close_left_inputs(phase)
+
+    async def recover_link(self, channel):
+        """A starting channel owns nothing yet, so what its link saved was left by the one before it.
+
+        The caller holds this channel's polling back until this returns.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + LEFT_INPUTS_SECONDS
+        link_id = channel.link.id
+        await self._close_left_inputs(lambda: not self._closed and loop.time() < deadline and self.services.channel(link_id) is channel, link_id=link_id)
+
+    async def _close_left_inputs(self, phase, *, link_id=None):
+        after = None
+        while phase():
+            # Retained SQL may settle after D. Its result never re-arms the phase.
             try:
-                await self._recover_input(entry, phase)
+                page = await await_drained(self.services.outbox.inbox.prepublication_page(after=after, limit=32, max_origins=64, link_id=link_id))
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                # A stale or unreadable cohort member cannot admit itself, and
-                # cannot suppress another independent frozen input's outcome.
-                _chat_line("chat_startup_input_held", error=error, link=entry.key.link_id)
+                _chat_line("chat_startup_page_held", error=error)
+                return
+            for entry in page.entries:
+                if not phase():
+                    return
+                if entry.hold_reason not in (None, "voice_interrupted") or not entry.origins:
+                    continue
+                try:
+                    await self._recover_input(entry, phase)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    # A stale or unreadable member cannot admit itself, and
+                    # cannot suppress another independent input's outcome.
+                    _chat_line("chat_startup_input_held", error=error, link=entry.key.link_id)
+            if not page.has_more:
+                return
+            after = page.next_after
 
     async def _recover_input(self, entry, phase):
         host = self.services
@@ -1379,7 +1451,8 @@ class ChatTurns:
         captured = deepcopy(link)
 
         def current():
-            return phase() and host.channel(link.id) is channel and channel._same_scope(captured, channel.link) and channel.transport_revision == captured.token_revision and channel.application.running and not channel._stopping
+            # A channel whose first start failed is still this link's, and this only writes a plan.
+            return phase() and host.channel(link.id) is channel and channel._same_scope(captured, channel.link) and channel.transport_revision == captured.token_revision and not channel._stopping
 
         guard = _Guard(host, channel, captured, current, repair=True)
         if not current():

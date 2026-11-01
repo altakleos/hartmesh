@@ -1775,6 +1775,27 @@ class BotLinkRepository:
         for cls in (TelegramPendingFileRow, TelegramWorkTopicRow):
             await session.execute(delete(cls).where(cls.link_id == link_id, cls.binding_generation != row.binding_generation))
         await self._close_deliveries(session, link_id)
+        await self._close_ended_inputs(session, row)
+
+    @staticmethod
+    async def _close_ended_inputs(session: AsyncSession, row: TelegramBotLinkRow) -> None:
+        """Nothing can answer an input of an ended binding, and retention waits for it to be done."""
+        from app.telegram_bots.inbox import CALLBACK_PUBLICATION_KEY
+
+        ended = _now()
+        await session.execute(
+            update(TelegramInboundMarkRow)
+            .where(TelegramInboundMarkRow.link_id == row.id, TelegramInboundMarkRow.binding_generation != row.binding_generation, TelegramInboundMarkRow.state != "done")
+            .values(route_complete=True, state="done", closed_at=ended)
+        )
+        retried = await session.scalars(
+            select(TelegramCallbackRow)
+            .where(TelegramCallbackRow.link_id == row.id, TelegramCallbackRow.binding_generation != row.binding_generation, TelegramCallbackRow.payload[CALLBACK_PUBLICATION_KEY]["route_complete"].as_boolean().is_(False))
+            .with_for_update()
+        )
+        for callback in retried:
+            saved = callback.payload[CALLBACK_PUBLICATION_KEY]
+            callback.payload = {**callback.payload, CALLBACK_PUBLICATION_KEY: {**saved, "route_complete": True, "state": "done", "closed_at": ended.isoformat()}}
 
     async def _unbind(self, session: AsyncSession, row: TelegramBotLinkRow) -> BotLink:
         owner, account = row.owner_user_id, row.telegram_user_id

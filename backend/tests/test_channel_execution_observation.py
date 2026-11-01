@@ -38,6 +38,24 @@ async def test_cancel_borrows_original_owner_and_needs_no_create_permission():
         await owner.stop()
 
 
+@pytest.mark.parametrize("stop_reason, outcome", [(None, "requested"), ("gateway_stopped", "terminal")])
+async def test_cancel_of_a_run_already_interrupted_says_whether_it_was_cancelled_and_posts_nothing(stop_reason, outcome):
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(200, json={**run_row(), "status": "interrupted", "stop_reason": stop_reason}, headers=ACK)
+
+    client, owner, admission, _ = facade(respond)
+    admission.permitted.discard("run_create")
+    admission.permitted.add("run_cancel")
+    try:
+        assert await client.cancel_run("run") == outcome
+        assert not any(call.method == "POST" for call in calls)
+    finally:
+        await owner.stop()
+
+
 @pytest.mark.parametrize("change", ["publication", "metadata", "missing_ack", "cancel_permission", "read_permission"])
 async def test_cancel_refuses_unproved_or_unauthorized_run_without_post(change):
     calls = []

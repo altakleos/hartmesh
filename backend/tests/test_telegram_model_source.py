@@ -12,7 +12,7 @@ from test_telegram_publication_custody import publication_environment as publica
 from test_telegram_publication_primary import _managed_turn
 from test_telegram_verified_reply import projection, synthetic_item
 
-from app.telegram_bots.producer import DeliveryClaimRetired, SendingPart
+from app.telegram_bots.producer import DeliveryClaimRetired, SendingPart, SourceGone, SourceNotRead
 
 
 def source_api():
@@ -67,6 +67,7 @@ async def test_source_uncertainty_retires_without_cached_or_fixed_substitution(p
     import traceback
 
     assert "private-diagnostic-marker" not in "".join(traceback.format_exception(error.value))
+    assert type(error.value) is (SourceNotRead if change == "private-error" else SourceGone), "A failed read may pass. A changed answer will not."
 
 
 @pytest.mark.asyncio

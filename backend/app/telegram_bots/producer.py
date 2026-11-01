@@ -437,6 +437,14 @@ class PreviewExpired(DeliveryClaimRetired):
     """An actual host view ended; only its strict temporary plan may retire."""
 
 
+class SourceGone(DeliveryClaimRetired):
+    """A saved reply's source no longer exists or no longer matches, so no retry can send it."""
+
+
+class SourceNotRead(DeliveryClaimRetired):
+    """A saved reply's source could not be read just now."""
+
+
 @dataclass(frozen=True)
 class DeliveryEligibility:
     decision: str
@@ -2429,6 +2437,17 @@ class OutboxSender:
             except PreviewExpired:
                 await self._expire_preview(link_id, row_id, generation, claim)
                 return
+            except SourceGone:
+                # With no outcome this oldest row would be claimed again every second, and nothing after it would send.
+                logger.warning("telegram_bots delivery_source_gone link=%s delivery=%s", link_id, row_id)
+                error = PermanentDeliveryError()
+                error._hartmesh_telegram_failure_logged = True
+                await self._failure(link_id, row_id, generation, claim, error)
+                return
+            except SourceNotRead as error:
+                logger.warning("telegram_bots delivery_source_unread link=%s delivery=%s attempts=%s", link_id, row_id, row.attempts + 1)
+                await self._failure(link_id, row_id, generation, claim, error)
+                return
             except DeliveryClaimRetired:
                 return
             except Exception as error:
@@ -2481,6 +2500,10 @@ class OutboxSender:
                 raise
             except DeliveryRetry as error:
                 retry_after = timedelta(seconds=error.retry_after)
+            except SourceGone:
+                unavailable = True
+            except SourceNotRead:
+                retry_after = timedelta(seconds=DELIVERY_RETRY_CAP_SECONDS)  # Each second here would hold back the next delivery.
             except Exception:
                 done = False
         async with self.outbox._writer(link_id) as (writer, binding):

@@ -456,7 +456,7 @@ async def deleted_agents_bot(db):
     e = await ingress(db)
     e.now = [1000.0]
     e.channel._time = lambda: e.now[0]
-    e.stopped = AsyncMock()
+    e.stopped = AsyncMock(side_effect=lambda channel, update: channel._classified(update, remember=True))
     e.running = False
     e.services.turns = SimpleNamespace(stop_chat=e.stopped, retire=AsyncMock(), message_sent=lambda *_args, **_kwargs: None, has_turn=lambda _channel, *, topic: e.running)
     await db.links.set_health(e.link.id, "agent_unavailable", holds=True, expected_token_revision=e.link.token_revision)

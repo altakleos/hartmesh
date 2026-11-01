@@ -181,7 +181,7 @@ async def test_old_replay_returns_original_basis_without_reviving_an_ended_gener
     mark = await routed(repo, link)
     await db.links.unbind(link, actor_id=link.owner_user_id)
     replay, created = await repo.accept(link, incoming(), sanitized_input={"text": "new request"})
-    assert replay == mark and created is False
+    assert replay == dataclasses.replace(mark, route_complete=True, state="done", closed_at=replay.closed_at) and created is False
     with pytest.raises(ValueError, match="link-changed"):
         await repo.bind_turn([replay], turn_id="a" * 32, thread_id="new-thread")
 
@@ -194,7 +194,7 @@ async def test_same_message_id_in_a_new_chat_preserves_both_tombstones(db):
     mark = await accepted(repo, new, account=ACCOUNT + 1, update_id=302)
     assert mark.message_id == old.message_id and mark.chat_id != old.chat_id
     replay, created = await repo.accept(new, incoming(), sanitized_input={"text": "ignored"})
-    assert replay == old and not created
+    assert replay == dataclasses.replace(old, route_complete=True, state="done", closed_at=replay.closed_at) and not created
     assert len(await rows(db, TelegramInboundMarkRow)) == 4
 
 

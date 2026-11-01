@@ -557,11 +557,11 @@ class HumanInputs:
                 return True
             # An already admitted ordinary input remains ordinary even if a
             # different prompt appeared while it waited in the FIFO queue.
-            if existing.route_kind is not None:
+            if existing.route_kind is not None and not self.services.turns.unfinished(link, existing):
                 return False
         topic = normalize_callback_topic(message.message_thread_id)
         quoted = message.reply_to_message.message_id if message.reply_to_message else None
-        target = await self._text_target(link, guard, chat_id=message.chat_id, topic=topic, quoted=quoted)
+        target = await self._text_target(link, guard, chat_id=message.chat_id, topic=topic, quoted=quoted, sent_at=None if existing is None else existing.accepted_at)
         if target is None:
             return False
         origin, _ = await self.services.outbox.inbox.accept(link, update, sanitized_input={"type": "text", "text": message.text})

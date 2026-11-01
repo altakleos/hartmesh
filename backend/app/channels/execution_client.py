@@ -504,6 +504,8 @@ class ChannelExecutionFacade:
         run_id = _identity(run_id)
         await self._authorize("run_cancel")
         run = await self._require_publication_run(run_id)
+        if run.row["status"] == "interrupted" and run.row.get("stop_reason") is None:
+            return "requested"  # Already cancelled, and only the answer to that request was lost.
         if run.row["status"] in {"success", "error", "timeout", "interrupted"}:
             return "terminal"
         response = await self._owner.request_json(
