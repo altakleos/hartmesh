@@ -18,7 +18,8 @@ jobs:
   bundle-instances:
     name: Storage and agents in the Compose bundle (Linux Docker)
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    # Pinned: on ubuntu-26.04, where ubuntu-latest is moving, this push to localhost goes over https and fails.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       C: docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env

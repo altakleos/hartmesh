@@ -196,7 +196,7 @@ def test_bundle_acceptance_is_opt_in_and_keeps_the_prescribed_file_order():
 def test_bundle_gate_requires_disk_backed_fixtures_and_exact_named_cases():
     document = yaml.safe_load((ROOT / ".github/workflows/compose-instances.yml").read_text(encoding="utf-8"))
     job = document["jobs"]["bundle-instances"]
-    assert job["runs-on"] == "ubuntu-latest"
+    assert job["runs-on"] == "ubuntu-24.04"
     # Runner context is unavailable in job-level env; use the step environment.
     assert "TMPDIR" not in job["env"]
     steps = {step.get("name"): step.get("run", "") for step in job["steps"]}
