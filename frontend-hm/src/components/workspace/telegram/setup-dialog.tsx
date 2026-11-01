@@ -41,10 +41,14 @@ import {
   useRefreshTelegramBots,
   useTelegramBots,
   useTelegramClock,
+  useTelegramReader,
 } from "@/core/telegram-bots/hooks";
 import {
+  type RowLine,
+  rowOf,
   sectionNoticeOf,
   setupStageOf,
+  stopsSetup,
   targetRowsOf,
 } from "@/core/telegram-bots/rows";
 import { telegramText, type TelegramKey } from "@/core/telegram-bots/text";
@@ -79,6 +83,8 @@ import {
 const BOT_FATHER = "https://t.me/BotFather";
 const WAIT_POLL_MS = 2000;
 const HINT_AFTER_MS = 60_000;
+/** A name can be one long word, which a button would hold on one line past the dialog. */
+const WRAPS = "h-auto max-w-full whitespace-normal [overflow-wrap:anywhere]";
 
 function browserTimeZone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone ?? "";
@@ -441,7 +447,7 @@ function StepThree({
       ) : (
         <>
           {connect ? (
-            <Button asChild>
+            <Button asChild className={WRAPS}>
               <a href={connect.url} target="_blank" rel="noopener noreferrer">
                 {strings.action.openChat({ name })}
               </a>
@@ -449,6 +455,7 @@ function StepThree({
           ) : (
             <Button
               type="button"
+              className={WRAPS}
               onClick={() => void fresh(prepareConnectWindow(), true)}
             >
               {strings.action.openChat({ name })}
@@ -476,6 +483,30 @@ function StepThree({
           {telegramText(strings, line, values)}
         </p>
       ) : null}
+    </section>
+  );
+}
+
+/** A bot that cannot hear Start: the row's sentences, and its buttons one page on. */
+function SetupFault({ lines }: { lines: RowLine[] }) {
+  const { t } = useI18n();
+  const strings = t.telegramBots;
+  return (
+    <section className="space-y-2">
+      {lines.map((line) => (
+        <p key={line.key} className="text-sm">
+          {telegramText(strings, line.key, line.values)}
+        </p>
+      ))}
+      <Button
+        type="button"
+        onClick={() => {
+          closeTelegramSetup();
+          openSettingsDialog("channels");
+        }}
+      >
+        {strings.webPage.telegram}
+      </Button>
     </section>
   );
 }
@@ -570,6 +601,7 @@ function DoneScreen({
           <Button
             type="button"
             variant="outline"
+            className={WRAPS}
             onClick={() => openTelegramSetup(next.target)}
           >
             {strings.setup.done.next({ nextName: next.name })}
@@ -587,6 +619,8 @@ export function TelegramSetupDialog({ target }: { target: AgentTarget }) {
   const { t } = useI18n();
   const strings = t.telegramBots;
   const isMobile = useIsMobile();
+  const feature = useTelegram();
+  const reader = useTelegramReader();
   const { connects } = useTelegramPageState();
   const [firstBot, setFirstBot] = useState(false);
   const [phoneCode, setPhoneCode] = useState(false);
@@ -602,6 +636,7 @@ export function TelegramSetupDialog({ target }: { target: AgentTarget }) {
   const now = useTelegramClock();
   const bot = botOf(data?.bots, target);
   const stage = setupStageOf(bot, now);
+  const view = bot ? rowOf({ name, bot, feature, reader, now }) : null;
   const held = bot ? connects.get(bot.id) : undefined;
   const connect = held && Date.parse(held.expires_at) > now ? held : undefined;
   const ownAddress = useMemo(
@@ -623,6 +658,8 @@ export function TelegramSetupDialog({ target }: { target: AgentTarget }) {
           <p className="text-muted-foreground text-sm">{t.common.loading}</p>
         ) : stage === "done" && bot ? (
           <DoneScreen bot={bot} name={name} firstBot={firstBot} />
+        ) : stage !== "steps" && view && stopsSetup(view.row) ? (
+          <SetupFault lines={view.lines} />
         ) : stage !== "steps" && bot ? (
           <StepThree
             key={stage}

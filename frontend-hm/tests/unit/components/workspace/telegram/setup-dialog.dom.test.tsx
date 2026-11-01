@@ -402,6 +402,36 @@ describe("the set-up dialog", () => {
     screen.getByText(/Connected as Rosa/);
   });
 
+  it.each([
+    [
+      "a conflict",
+      { health: "conflict", connect_expires_at: null },
+      /Another program is using this bot's token/,
+    ],
+    [
+      "a stop",
+      { health: "stopped" },
+      /This bot stopped after an internal error/,
+    ],
+    [
+      "a refused token",
+      { health: "token_rejected" },
+      /Telegram no longer accepts this bot's token/,
+    ],
+  ])(
+    "says why a bot cannot hear Start after %s",
+    async (_name, fault, sentence) => {
+      start({ list: () => listOf([waiting(fault)]) });
+      await screen.findByText(sentence);
+      expect(screen.queryByText(/Waiting for you to press Start/)).toBeNull();
+      expect(screen.queryByTestId("qr")).toBeNull();
+      fireEvent.click(
+        screen.getByRole("button", { name: "Open Telegram settings" }),
+      );
+      expect(settingsDialog.open).toHaveBeenCalledWith("channels");
+    },
+  );
+
   it("offers Open chat for a waiting bot with no address in this page", async () => {
     const opened = {
       closed: false,

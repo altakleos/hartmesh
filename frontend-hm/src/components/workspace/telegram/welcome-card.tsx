@@ -1,5 +1,7 @@
 "use client";
 
+import { useSearchParams } from "next/navigation";
+
 import { Button } from "@/components/ui/button";
 import { useTelegram } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
@@ -18,6 +20,7 @@ export function TelegramWelcomeCard() {
   const reader = useTelegramReader();
   const { data } = useTelegramBots();
   const [settings, setSettings] = useLocalSettings();
+  const isSkillMode = useSearchParams().get("mode") === "skill";
 
   const hasChatBot = data?.bots.some((bot) => bot.agent_kind === "lead_agent");
   if (
@@ -25,7 +28,8 @@ export function TelegramWelcomeCard() {
     !feature.enabled ||
     data === undefined ||
     hasChatBot ||
-    settings.telegram.offerDismissed
+    settings.telegram.offerDismissed ||
+    isSkillMode
   ) {
     return null;
   }
