@@ -297,8 +297,9 @@ def test_present_malformed_middleware_tools_are_unsupported(monkeypatch, malform
     )
 
 
-@pytest.mark.parametrize("field", ["middleware_contributors", "plugins"])
-def test_extension_contributor_presence_cannot_assert_a_profile(monkeypatch, field):
+@pytest.mark.parametrize(("field", "qualifies"), [("middleware_contributors", False), ("plugins", True)])
+def test_only_a_middleware_contributor_refuses_a_profile(monkeypatch, field, qualifies):
+    """A plugin's tools and presentations are covered where they are used; Compose always loads plugins."""
     from dataclasses import replace
 
     from deerflow.agents.lead_agent.agent import _qualify_inventory_profile
@@ -306,14 +307,12 @@ def test_extension_contributor_presence_cannot_assert_a_profile(monkeypatch, fie
 
     assembly, built, _model = assemble_offline(monkeypatch)
     extensions = replace(ExtensionRegistry().build(), **{field: (("claimed_first_party", object()),)})
-    assert (
-        _qualify_inventory_profile(
-            assembly.graph,
-            state_schema=built["state_schema"],
-            middlewares=built["middleware"],
-            tools=built["tools"],
-            mode="full",
-            extensions=extensions,
-        )
-        is None
+    profile = _qualify_inventory_profile(
+        assembly.graph,
+        state_schema=built["state_schema"],
+        middlewares=built["middleware"],
+        tools=built["tools"],
+        mode="full",
+        extensions=extensions,
     )
+    assert (profile is not None) is qualifies

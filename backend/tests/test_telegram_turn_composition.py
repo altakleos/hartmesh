@@ -359,8 +359,6 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
             if not managed_ingress:
                 inbound = InboundMessage(channel_name="telegram", chat_id=str(link.chat_id), user_id=str(link.telegram_user_id), text="First accepted question", connection_id=link.connection_id, owner_user_id=OWNER, workspace_id=str(bot))
                 thread_id = await supervisor.threads.ensure_thread(channel.link, inbound, origin=origins[0])
-            if not no_user and thread_id is not None:
-                await asyncio.to_thread(paths.ensure_thread_dirs, thread_id, user_id=OWNER)
             async with e.sf.begin() as writer:
                 for row in await writer.scalars(select(TelegramOutboxRow)):
                     row.state = "sent"  # Initial welcome is outside this model-delivery test.

@@ -100,6 +100,55 @@ async def test_exact_scoped_preview_is_an_opaque_object_not_raw_bus_text(coordin
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param([{"type": "text", "text": "Prefix", "index": 1}], id="claude"),
+        pytest.param([{"type": "thinking", "thinking": "PRIVATE", "index": 0}, {"type": "text", "text": "Prefix", "index": 1}], id="claude-thinking"),
+        pytest.param([{"type": "reasoning", "summary": ["PRIVATE"], "index": 0}, {"type": "text", "text": "Prefix", "annotations": [], "id": "msg_1", "index": 1}], id="responses"),
+    ],
+)
+async def test_provider_block_chunks_preview_only_their_text_and_leave_the_watch_running(coordinator_environment, content):
+    from dataclasses import asdict
+
+    from app.telegram_bots.progress import RunObserver
+    from deerflow.runtime.runs.preview import PreviewSpan, text_digest
+
+    e = coordinator_environment
+    record = await e.coordinator.dispatch(e.link, e.origins, thread_id=e.thread_id)
+    exact = run_row(record)
+    exact["metadata"] = {"channel_turn_id": record.publication_id}
+    span = PreviewSpan(1, record.scope.owner_user_id, record.scope.thread_id, "coordinator-run", record.publication_id, "invocation", "model", "message", 1, 0, text_digest("Prefix"), text_digest("Prefix"))
+    text = [{"type": "AIMessageChunk", "id": "message", "content": content}, {"deerflow_preview_span": asdict(span)}]
+    tool = [{"type": "AIMessageChunk", "id": "message", "content": "", "tool_calls": [{"id": "call-1", "name": "web_search", "args": {"query": "PRIVATE"}}]}, {}]
+    frames = "".join(f"event: messages\ndata: {json.dumps(frame)}\n\n" for frame in (text, tool))
+
+    async def respond(request):
+        if request.url.path.endswith("/runs/page"):
+            return httpx.Response(200, headers=ACK, json={"data": [exact], "has_more": False, "next_before_created_at": None, "next_before_run_id": None})
+        if request.url.path.endswith("/join"):
+            return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, content=frames.encode())
+        return httpx.Response(200, headers=ACK, json=exact)
+
+    e.responder = respond
+    observer = RunObserver(coordinator=e.coordinator, http_owner=e.http, capture_attempt=e.host.capture, is_current=lambda _record: True)
+    previews, lines = [], []
+
+    async def preview(value):
+        previews.append(value.text)
+
+    async def line(key, values):
+        lines.append((key, values))
+
+    try:
+        await observer.watch(record, e.link, on_preview=preview, on_line=line, turn_done=asyncio.Event())
+        assert previews == ["Prefix"]
+        assert ("activity.search", {}) in lines, "A tool line after block text must still be seen"
+    finally:
+        await observer.drain()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("network_unknown", [False, True])
 async def test_only_definite_cancel_refusal_clears_original_stop_barrier(coordinator_environment, network_unknown):
     from app.telegram_bots.progress import RunObserver

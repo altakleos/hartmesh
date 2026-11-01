@@ -33,7 +33,8 @@ changes. An unchanged old path explicitly offered again counts. Inherited
 artifact lists and old controls alone do not become new offers. Runtime file
 presentation can update an existing AI-message ID; that witness remains separate
 from the original canonical model event. Provider tags alone establish no host
-handover. Auxiliary reasoning, usage and telemetry stay outside fragment hashes.
+handover. Auxiliary reasoning, usage and telemetry stay outside fragment hashes,
+and so does a model's tool request that names one of its own `tool_calls`.
 
 Scans cover created or modified regular files under `/mnt/user-data/outputs`,
 using actual frozen internal/spill exclusions. The same bounded confined walk

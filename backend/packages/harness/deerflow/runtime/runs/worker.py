@@ -1631,6 +1631,13 @@ async def _run_agent(
             workspace_changes_user_id = get_effective_user_id()
             workspace_excluded_dir_names = _workspace_excluded_dir_names(ctx.app_config)
             try:
+                if inventory_capture is not None:
+                    # Thread directories otherwise appear lazily during the run,
+                    # and a scan proves nothing about a root that is not there.
+                    from deerflow.config.paths import get_paths
+                    from deerflow.utils.file_io import run_file_io
+
+                    await run_capture_io(lambda: run_file_io(get_paths().ensure_thread_dirs, thread_id, user_id=workspace_changes_user_id))
                 pre_run_output_snapshot = await run_capture_io(
                     lambda: capture_output_snapshot(thread_id, user_id=workspace_changes_user_id, extra_excluded_dir_names=workspace_excluded_dir_names, **({"observe_roots": True} if inventory_capture is not None else {}))
                 )

@@ -927,7 +927,7 @@ def _qualify_inventory_profile(graph, *, state_schema, middlewares, tools, mode,
 
     if type(graph) is not CompiledStateGraph or state_schema is not get_thread_state_schema(mode):
         return None
-    if extensions.middleware_contributors or extensions.plugins:
+    if extensions.middleware_contributors:
         return None
     if any(type(tool) is not StructuredTool for tool in tools):
         return None
