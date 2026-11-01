@@ -160,7 +160,7 @@ async def controlled_execution(e, monkeypatch):
 
     e.services.threads = SimpleNamespace(ensure_thread=ensure)
     e.services.publication_authority = SimpleNamespace(capture=capture)
-    e.services.publications = SimpleNamespace(dispatch=dispatch, dispatch_record=dispatch_record, retry=retry)
+    e.services.publications = SimpleNamespace(dispatch=dispatch, dispatch_record=dispatch_record, retry=retry, fence=lambda record: None, worker_state=lambda record: "taken")
     final_read = lambda record: {"output": "unavailable:unsupported_output"}  # noqa: E731
     turns._observer = SimpleNamespace(watch=watch, read_run=read_run, plan_final=plan_final, final_read=final_read, request_stop=request_stop, stop_outcome=lambda *args, **kwargs: None, retire=lambda record: None, drain=drain)
     return turns, state, reached
@@ -592,8 +592,8 @@ async def finished_turn(e, turns, state, reached, *, status="success"):
 
 
 async def past_the_bound(turn):
-    await until(lambda: turn.final_since is not None)
-    turn.final_since -= 61
+    await until(lambda: turn.run_id is not None and turn.quiet_since is not None)
+    turn.quiet_since -= 1000
     turn.wake.set()
 
 
@@ -616,7 +616,7 @@ async def test_a_finished_run_whose_reply_cannot_be_planned_ends_visibly(db, mon
     monkeypatch.setattr(turns, "_publication_outcome", outcome)
     try:
         first = await finished_turn(e, turns, state, reached)
-        await until(lambda: first.final_since is not None)
+        await until(lambda: first.run_id is not None and first.quiet_since is not None)
         assert not first.done.is_set() and outcomes == [], "a short wait is an ordinary one"
 
         await past_the_bound(first)
@@ -650,7 +650,7 @@ async def test_a_turn_that_goes_on_says_so_from_the_driver(db, monkeypatch, capl
         clock["now"] += TURN_WAIT_REPORT_SECONDS
         first.wake.set()
         await until(lambda: first.wait_reported)
-        assert f"chat_turn_waiting link={e.link.id} bot={e.link.bot_id} turn={first.record.publication_id} waited_s={TURN_WAIT_REPORT_SECONDS}" in caplog.text
+        assert f"chat_turn_waiting link={e.link.id} bot={e.link.bot_id} turn={first.record.publication_id} worker=taken waited_s={TURN_WAIT_REPORT_SECONDS}" in caplog.text
     finally:
         await turns.stop()
         await e.channel.stop()
@@ -730,7 +730,7 @@ async def test_a_stop_that_never_got_an_answer_cannot_hold_an_interrupted_run_fo
         first.stop_requested = True
         state.terminal = terminal(first.record, status="interrupted")
         first.wake.set()
-        await until(lambda: first.final_since is not None)
+        await until(lambda: first.run_id is not None and first.quiet_since is not None)
         assert not first.done.is_set() and outcomes == [], "An accepted Stop's proof is still worth a short wait"
 
         await past_the_bound(first)
@@ -1424,8 +1424,7 @@ async def test_terminal_stop_cancels_only_a_proven_capacity_wait_otherwise_relea
 
 
 @pytest.mark.asyncio
-async def test_stop_after_actual_thread_http_failure_closes_input_without_retrying_creation(db, monkeypatch):
-    from app.channels.execution import ChannelExecutionProtocolError
+async def test_a_failed_thread_request_ends_the_turn_and_creates_nothing_more(db, monkeypatch):
     from app.telegram_bots.gateway_client import GatewayClientOwner
     from app.telegram_bots.threads import ThreadCoordinator
 
@@ -1443,12 +1442,9 @@ async def test_stop_after_actual_thread_http_failure_closes_input_without_retryi
     try:
         await e.channel.handle_update(message(e, 1171, content="Keep failed thread input"))
         first = next(iter(turns._turns.values()))
-        with pytest.raises((httpx.HTTPStatusError, ChannelExecutionProtocolError)):
-            await asyncio.wait_for(asyncio.shield(first.task), 8)
+        await asyncio.wait_for(first.done.wait(), 8)
         assert any(method == "POST" and path.endswith("/threads") for method, path in calls)
-        before = tuple(calls)
-        await e.channel.handle_update(message(e, 1172, content="/stop"))
-        assert first.done.is_set() and state.posts == 0 and tuple(calls) == before
+        assert state.posts == 0 and not turns._turns
         async with db.sessions() as session:
             saved = await session.get(TelegramInboundMarkRow, (e.link.id, 1171, e.link.chat_id))
             assert saved.route_complete and saved.turn_id is None and saved.run_id is None

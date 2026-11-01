@@ -17,10 +17,15 @@ from deerflow.runtime.runs.terminal import failure_chain
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
-FINAL_PLAN_SECONDS = 60
 TURN_WAIT_REPORT_SECONDS = 600
+RUN_SHOWS_SECONDS = 5
+_RUN_ENDED = frozenset({"success", "error", "timeout", "interrupted"})
 _SOURCES = "telegram_source_message_ids"
 _ALL_TOPICS = object()
+
+
+class _TurnStalled(Exception):
+    """A turn showed no life for longer than it may hold its chat."""
 
 
 def _chat_line(event, *, chat=None, error=None, **facts):
@@ -105,10 +110,12 @@ class _Turn:
     capacity_notice_sent: bool = False
     stop_marker_checked: bool = False
     submission: object = None
-    final_since: float | None = None
+    quiet_since: float | None = None
     observed_since: float | None = None
     wait_reported: bool = False
     run_id: str | None = None
+    closing: bool = False
+    error_plan_refused: bool = False
 
     @property
     def topic(self):
@@ -514,7 +521,72 @@ class ChatTurns:
             turn.submission = self.services.outbox.inbox.typed_submission_stage(origins[0])
         self._turns[(link.id, turn.topic)] = turn
         if self._creating(turn):
-            turn.task = self._spawn(self._drive(turn), channel=channel, turn=turn)
+            turn.task = self._spawn(self._own(turn), channel=channel, turn=turn)
+
+    async def _own(self, turn):
+        """Every way out of the driver ends the turn, or it would hold its chat for good."""
+        try:
+            await self._drive(turn)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            turn.held("chat_turn_held", error)
+        key = (turn.link.id, turn.topic)
+        if turn.done.is_set() or self._turns.get(key) is not turn:
+            return
+        if self._current(turn):
+            try:
+                await self._close(turn)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                # Without a plan the person hears nothing, but the next message can still run.
+                turn.held("chat_close_held", error)
+        if turn.done.is_set() or self._turns.get(key) is not turn:
+            return
+        if self._current(turn):
+            self._finish(turn)
+        else:
+            self._forget(turn)
+
+    async def _close(self, turn):
+        """The ending of a turn its driver could not finish."""
+        from app.telegram_bots.publication import MAX_OBSERVATION_PAGES
+
+        stopping = turn.stop_requested
+        key = "busy.cancelled" if stopping else "error.generic"
+        turn.closing = True
+        if turn.record is None:
+            await self._input_outcome(turn, key, keyboard=() if stopping else self._button("retry_message", turn.callback_id or str(turn.origins[0].message_id), target_kind="request"))
+        else:
+            record = turn.record
+            attempt = await self.services.publication_authority.capture(turn.link, thread_id=record.scope.thread_id, endpoint_id=record.scope.endpoint_id)
+            guard = self._guard(turn, borrowed=attempt.cancel_guard)
+            fresh, _ = await self.services.outbox.inbox.read_publication_input(record, guard=guard)
+            stop_id = turn.stop_id or "closed:" + fresh.publication_id
+            if not fresh.dispatch_started:
+                fresh = await self.services.outbox.inbox.request_publication_stop(fresh, stop_id=stop_id, guard=guard)
+            if fresh.dispatch_started:
+                # Not planned means a run is still going or could not be read. Recovery owns it from here.
+                result = await self.services.publications.observe(fresh, turn.link, max_pages=MAX_OBSERVATION_PAGES, closing=key)
+                if result.state != "planned":
+                    turn.held("chat_close_held", state=result.state, reason=result.reason)
+            else:
+                keyboard = () if stopping else self._button("retry_message", fresh.publication_id)
+                await self.services.outbox.plan_cancelled_before_dispatch(fresh, stop_id=stop_id, guard=guard, callbacks=self.services.callbacks, keyboard=keyboard, key=key)
+        if stopping:
+            self._drop_waiting(turn)
+        await self._complete(turn)
+
+    def _forget(self, turn):
+        """Let go of a turn with no way to answer, as a retired channel does for all of its own."""
+        turn.active = False
+        turn.done.set()
+        if turn.record is not None and self._observer is not None:
+            self.observer.retire(turn.record)
+        self.queue.cancel_wait(turn.link, turn.topic)
+        self.queue.turn_ended(turn.link, turn.topic)
+        self._turns.pop((turn.link.id, turn.topic), None)
 
     def _finish(self, turn):
         if not self._current(turn) or turn.done.is_set():
@@ -561,17 +633,12 @@ class ChatTurns:
         return [[{"label": label, "kind": kind, "target_kind": target_kind, "target_id": target}]]
 
     async def _source(self, turn, key):
-        values = {}
-        if key == "custom_agent.deleted":
-            values = {"product": self.services.product_name, "agent": turn.link.bot_username or self.services.product_name}
-        elif key == "chat.files_full":
-            values = {"product": self.services.product_name, "support": "an administrator"}
-        elif key == "refused.interrupted":
-            original = await self.services.prepare_ingress_values(turn.link)
-            if not self._current(turn):
-                raise ValueError("chat-turn-retired") from None
-            values = {"name": original["name"]}
-        return {"key": key, "values": values}
+        from app.telegram_bots.publication import fixed_source
+
+        source = await fixed_source(self.services, turn.link, key)
+        if not self._current(turn):
+            raise ValueError("chat-turn-retired") from None
+        return source
 
     async def _input_outcome(self, turn, key, *, keyboard=()):
         if not self._current(turn):
@@ -728,18 +795,30 @@ class ChatTurns:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            if turn.final_since is None:
+            if turn.quiet_since is None:
                 turn.held("chat_final_unplanned", error)
             if turn.presentation is not None:
                 await turn.presentation.close()
             return None
 
-    def _final_overdue(self, turn):
-        """The clock starts when an attempt ends, so a slow first one is still retried."""
+    def _run_is_not_coming(self, turn, record):
+        """A worker that has the message starts its run, however long a queue or a file takes.
+
+        Once it lets go a run shows at once or never will. Stop fences a message still queued, so
+        that one is not waited for, but only its worker can prove one it has taken will not start.
+        """
+        worker = self.services.publications.worker_state(record)
+        if worker == "taken" or worker == "queued" and not turn.stop_requested:
+            turn.quiet_since = None
+            return False
+        return self._overdue(turn, limit=RUN_SHOWS_SECONDS)
+
+    def _overdue(self, turn, *, limit=None):
+        """A turn holds its chat only while it shows life. The clock starts at its first quiet moment."""
         now = turn.channel._time()
-        if turn.final_since is None:
-            turn.final_since = now
-        return now - turn.final_since >= FINAL_PLAN_SECONDS
+        if turn.quiet_since is None:
+            turn.quiet_since = now
+        return now - turn.quiet_since >= (self.services.config.queue.max_wait_seconds if limit is None else limit)
 
     async def _publication_outcome(self, turn, key, *, run=None, refusal=None, undeliverable=False):
         source = await self._source(turn, key)
@@ -790,14 +869,14 @@ class ChatTurns:
         turn.stop_commands.clear()
 
     @staticmethod
-    def _report_wait(turn, run):
-        """A run that never ends writes nothing else, and it holds the whole chat."""
+    def _report_wait(turn, run, worker=None):
+        """A run that never ends, or a queue that never drains, writes nothing else, and it holds the whole chat."""
         now = turn.channel._time()
         if turn.observed_since is None:
             turn.observed_since = now
         if not turn.wait_reported and now - turn.observed_since >= TURN_WAIT_REPORT_SECONDS:
             turn.wait_reported = True
-            turn.held("chat_turn_waiting", status=run.row.get("status") if run is not None else None, waited_s=int(now - turn.observed_since))
+            turn.held("chat_turn_waiting", status=run.row.get("status") if run is not None else None, worker=worker, waited_s=int(now - turn.observed_since))
 
     async def _complete(self, turn):
         if not self._current(turn):
@@ -819,6 +898,8 @@ class ChatTurns:
                 if not reported:
                     turn.held("chat_observation_held", error)
                     reported = True
+                if self._overdue(turn):
+                    raise _TurnStalled() from error
                 if turn.presentation is not None:
                     await turn.presentation.close()
                 turn.wake.clear()
@@ -881,9 +962,12 @@ class ChatTurns:
                 if not self._current(turn):
                     return
                 if run is not None:
+                    # A run first seen, or one still working, is life. A run that has ended is not.
+                    if run.row.get("run_id") != turn.run_id or run.row.get("status") not in _RUN_ENDED:
+                        turn.quiet_since = None
                     turn.run_id = run.row.get("run_id")
                 failure = classify_creation_refusal(turn.refusal, channel_execution_scope(record)) if turn.refusal is not None else None
-                if run is not None and run.row.get("status") in {"success", "error", "timeout", "interrupted"}:
+                if run is not None and run.row.get("status") in _RUN_ENDED:
                     failure = classify_run(run, channel_execution_scope(record))
                     stopped = turn.stop_requested and run.row.get("status") == "interrupted"
                     overdue = False
@@ -904,7 +988,7 @@ class ChatTurns:
                                 return
                             # A held turn stops this whole chat, so the wait for a
                             # finished run's reply has a bound.
-                            overdue = self._final_overdue(turn)
+                            overdue = self._overdue(turn)
                             if overdue and failure is None:
                                 # This plan can lose to a reply that did commit, and
                                 # the next `plan_final` then returns that reply.
@@ -912,6 +996,11 @@ class ChatTurns:
                                     turn.held("chat_final_undeliverable", **self.observer.final_read(record))
                                     await self._observe(turn, lambda: self._complete(turn))
                                     return
+                                if turn.error_plan_refused:
+                                    raise _TurnStalled()
+                                turn.error_plan_refused = True
+                        elif self._overdue(turn):
+                            raise _TurnStalled()
                         # A stopped stream still requires acknowledged exact
                         # cancellation and unavailable(cancelled) source proof.
                         # Past the bound it ends as the interrupted run it is.
@@ -964,12 +1053,17 @@ class ChatTurns:
                             except asyncio.CancelledError:
                                 raise
                             except Exception as error:
-                                if not self._current(turn) or turn.record.publication_id == old.publication_id:
+                                if not self._current(turn):
                                     raise
+                                turn.held("chat_retry_result_held", error)
+                                if turn.record.publication_id == old.publication_id:
+                                    # Nothing replaced it, so the same wait goes on: `retry_at`
+                                    # paces it and the deadline above ends it.
+                                    turn.retry_at = now + self.services.config.queue.retry_seconds
+                                    continue
                                 # The successor was positively handed off before
                                 # its creating result became uncertain. Observe
                                 # only that identity; never redispatch it.
-                                turn.held("chat_retry_result_held", error)
                             self.observer.retire(old)
                             if watcher is not None and not watcher.done():
                                 watcher.cancel()
@@ -987,7 +1081,15 @@ class ChatTurns:
                             await self._observe(turn, lambda: self._publication_outcome(turn, failure.text_key, run=run, refusal=turn.refusal if run is None else None))
                             await self._observe(turn, lambda: self._complete(turn))
                             return
-                self._report_wait(turn, run)
+                        elif self._overdue(turn):
+                            raise _TurnStalled()
+                self._report_wait(turn, run, self.services.publications.worker_state(record) if run is None else None)
+                if run is None and failure is None and self._run_is_not_coming(turn, record):
+                    # The watcher polls for the run, so look once more before calling it gone.
+                    located = await self._observe(turn, lambda: self.services.publications.locate_run(record, turn.link, max_pages=8))
+                    if located is None or located.state != "matched":
+                        raise _TurnStalled()
+                    turn.quiet_since = None
                 turn.wake.clear()
                 try:
                     await asyncio.wait_for(turn.wake.wait(), 1)
@@ -1059,6 +1161,10 @@ class ChatTurns:
             return
         turn.stop_requested = True
         turn.cancel_future = True
+        turn.quiet_since = None
+        if turn.record is not None and turn.run_id is None:
+            # A message a worker has not started must not start now. A POST already sent shows as a run.
+            self.services.publications.fence(turn.record)
         if turn.stop_id is None:
             turn.stop_id = stop_id
             turn.stop_status = None
@@ -1133,7 +1239,9 @@ class ChatTurns:
     def owns_publication(self, record, link):
         """Defer recovery presentation while this original live owner can freeze UI."""
         for turn in self._turns.values():
-            if self._current(turn) and turn.record is not None and turn.record.scope == record.scope and turn.record.publication_id == record.publication_id and turn.link == link:
+            # The identity only: a poll rewrites the link's stamps, and a whole-row compare would lapse after a minute.
+            # A closing turn has let go, so what it plans is not held back for it.
+            if self._current(turn) and not turn.closing and turn.record is not None and turn.record.scope == record.scope and turn.record.publication_id == record.publication_id and turn.link.id == link.id:
                 return True
         return False
 
@@ -1348,16 +1456,10 @@ class ChatTurns:
                 if joined.task is not None:
                     joined.task.cancel()
         retired = []
-        for key, turn in tuple(self._turns.items()):
+        for turn in tuple(self._turns.values()):
             if turn.channel is not channel:
                 continue
-            turn.active = False
-            turn.done.set()
-            if turn.record is not None and self._observer is not None:
-                self.observer.retire(turn.record)
-            self.queue.cancel_wait(turn.link, turn.topic)
-            self.queue.turn_ended(turn.link, turn.topic)
-            self._turns.pop(key, None)
+            self._forget(turn)
             retired.append(turn)
         for key, owner in tuple(self._origin_channels.items()):
             if owner is channel:

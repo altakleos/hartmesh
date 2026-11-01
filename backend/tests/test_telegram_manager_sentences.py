@@ -45,6 +45,7 @@ def scoped_run(*, status="error", reason=None, custom=False):
         ("sandbox_capacity_exceeded", "busy.queued", True),
         ("files-full", "chat.files_full", False),
         ("orphan_recovered", "refused.interrupted", False),
+        ("gateway_stopped", "chat.restarted", False),
         (None, "error.generic", False),
         ("unknown-host-code", "error.generic", False),
         ("busy", "error.generic", False),

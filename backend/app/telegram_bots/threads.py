@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
+import httpx
+
 from app.telegram_bots.authority import require
 from app.telegram_bots.inbox import InboxRow
 from app.telegram_bots.links import ThreadPreparation
@@ -193,8 +195,13 @@ class ThreadCoordinator:
             identity = None
             needed = {"threads:read"}
             if purpose == "ensure" and preparation.expected_thread_id is not None:
-                if await self._read(attempt, preparation.expected_thread_id, preparation) == target:
-                    identity = preparation.expected_thread_id
+                try:
+                    if await self._read(attempt, preparation.expected_thread_id, preparation) == target:
+                        identity = preparation.expected_thread_id
+                except httpx.HTTPStatusError as error:
+                    # The conversation was deleted on the web, so this chat goes on in a new one.
+                    if error.response.status_code != 404:
+                        raise
             if identity is None:
                 await self._permission(attempt, "threads:write")
                 needed.add("threads:write")
@@ -202,8 +209,6 @@ class ThreadCoordinator:
                 metadata = {"channel_agent_name": link.agent_ref, "channel_source": {"type": "im_channel", "provider": "telegram", "chat_id": str(link.chat_id), "connection_id": link.connection_id}}
                 if link.agent_kind == "custom_agent":
                     metadata["agent_name"] = link.agent_ref
-                import httpx
-
                 try:
                     response = await self.client.create_thread(link.owner_user_id, thread_id=identity, metadata=metadata, before_dispatch=lambda: self._dispatch(attempt, preparation, "threads:write"))
                 except httpx.HTTPStatusError as error:

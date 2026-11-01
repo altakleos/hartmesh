@@ -217,12 +217,34 @@ moves a token that will not start, held or stopped, to the current secret, so
 gave up on a 429 once another gives up `LIMITED_AFTER_SECONDS` later, and the next
 accepted send clears it; the bookkeeping never changes a send's own result.
 
-A finished run's reply gets `FINAL_PLAN_SECONDS` after the first attempt ends, because
-a held turn stops the whole chat. Past that a successful run ends with `error.generic`
-under the closed proof `undeliverable`, and a run interrupted without proof of this
-chat's Stop ends as that interrupted run. The error plan is itself an attempt: it
-loses to a reply that did commit, which the next `plan_final` returns. A restart has
-no turn, so recovery keeps such a message held. `delivery_items` is what a reply must
+A turn holds its chat only while its driver can still finish it. `_own` wraps
+`_drive`, so every way out, by return, raise or running out of time, reaches `_close`
+and then lets the next message run, even when no plan could be written. One clock,
+`quiet_since` on `queue.max_wait_seconds`, bounds a turn that shows no life: a run first
+seen or still working resets it, and a read that keeps failing and a reply that cannot be
+planned run it out. Past it a successful run ends with `error.generic` under the closed
+proof `undeliverable`, and a run interrupted without proof of this chat's Stop ends as
+that interrupted run. The error plan is itself an attempt: it loses to a reply that did
+commit, which the next `plan_final` returns.
+
+A message waiting for its run is not on that clock. The worker reports through
+`ChannelExecutionContext.progress`, so `worker_state` tells a wait for a worker, however
+long, from a message nobody holds. Once a worker lets go a run shows within
+`RUN_SHOWS_SECONDS` or never will, and it ends under the closed proof `no_run`. Stop
+fences the message, retiring the admission a worker checks, so a message still `queued`
+gets the same short limit. A fence cannot recall a POST already sent, so a message
+`taken` is waited for even after Stop, and `observe(closing=)` answers pending, not
+`no_run`, until its worker lets go. A chat starved of workers therefore has no limit:
+`chat_turn_waiting` says `worker=queued`, and `/stop` ends it.
+
+`observe(closing=)` is the durable twin: a marked publication with no live owner ends in
+a plan. Only a caller that knows no turn owns it may pass `closing`; recovery asks
+`owns_publication`, which compares the publication and not the link row, since a poll
+rewrites that row's stamps, and which lets go of a turn that is closing. A publication
+stays held only while its proof cannot be read, such as a conversation deleted under it.
+`orphan_recovered` keeps the design's `refused.interrupted`; `gateway_stopped` is
+`chat.restarted`.
+`delivery_items` is what a reply must
 carry: a tool's own artifact is not in it, since the model read that and its answer is
 the reply, while `content_items` keeps it for human-input requests.
 

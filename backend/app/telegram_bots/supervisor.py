@@ -341,7 +341,15 @@ class TelegramSupervisor:
             )
             self.publications.file_output_planner = self.model_source.plan_file_reply
             self.outbox.inbox.on_callback_confirmed = lambda record, writer: self.acts.confirm_network_publication(record, session=writer)
-            self.recovery = PublicationRecoveryService(inbox=self.outbox.inbox, outbox=self.outbox, coordinator=self.publications, links=self.links, allowed=self.send_allowed)
+            self.publications.host = self
+            self.recovery = PublicationRecoveryService(
+                inbox=self.outbox.inbox,
+                outbox=self.outbox,
+                coordinator=self.publications,
+                links=self.links,
+                allowed=self.send_allowed,
+                owned=lambda record, link: self.turns is not None and self.turns.owns_publication(record, link),
+            )
             self.turns = ChatTurns(self)
             await self.thread_client.start()
             if not await self._wait_health():

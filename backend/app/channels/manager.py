@@ -12,6 +12,7 @@ import stat
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from html import escape
@@ -970,6 +971,20 @@ def _capture_execution(msg: InboundMessage) -> ChannelExecutionContext | None:
     except Exception:
         raise ChannelExecutionProtocolError() from None
     return context
+
+
+@contextmanager
+def _held_by_worker(msg: InboundMessage):
+    """Tell a managed message's owner when a worker has it, and when it has let go."""
+    context = msg.execution_context
+    progress = context.progress if type(context) is ChannelExecutionContext else None
+    if progress is not None:
+        progress.taken = True
+    try:
+        yield
+    finally:
+        if progress is not None:
+            progress.released = True
 
 
 def _execution_message(msg: InboundMessage, context: ChannelExecutionContext) -> InboundMessage:
@@ -2132,7 +2147,7 @@ class ChannelManager:
             # for them. Scope one trace id per message here -- the worker task
             # is long-lived and reused, so the scope must close with the
             # message rather than leak into the next one.
-            with ensure_trace_context():
+            with _held_by_worker(msg), ensure_trace_context():
                 dedupe_recorded = False
                 try:
                     # Capture before the dedupe store can yield. A queued host
