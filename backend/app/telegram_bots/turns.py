@@ -16,6 +16,7 @@ from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
+FINAL_PLAN_SECONDS = 60
 _SOURCES = "telegram_source_message_ids"
 _ALL_TOPICS = object()
 
@@ -96,6 +97,7 @@ class _Turn:
     capacity_notice_sent: bool = False
     stop_marker_checked: bool = False
     submission: object = None
+    final_since: float | None = None
 
     @property
     def topic(self):
@@ -269,9 +271,10 @@ class ChatTurns:
         guard = _Guard(self.services, channel, context.link, current, repair=True)
         return await self.services.outbox.plan_inbound_file_notice(context.record, context.file, source_ref={"key": key, "values": values}, callbacks=self.services.callbacks, guard=guard, retry=retry, url_button=url_button)
 
-    async def accept(self, channel, update):
+    async def accept(self, channel, update, *, separate=False):
+        """``separate`` is one indivisible input: a skill's word joins nothing."""
         async with self._entry(channel):
-            return await self._accept(channel, update)
+            return await self._accept(channel, update, separate=separate)
 
     async def accept_staged(self, channel, stage):
         """Admit one actual durable answer as an indivisible FIFO input."""
@@ -317,7 +320,7 @@ class ChatTurns:
                 self._start(channel, link, inbound)
             return True
 
-    async def _accept(self, channel, update):
+    async def _accept(self, channel, update, *, separate=False):
         link, message = deepcopy(channel._admission(update).link), update.message
         if self._closed or channel in self._retired or message is None:
             return False
@@ -343,7 +346,7 @@ class ChatTurns:
         async with self._join_locks.hold(key):
             self._join_busy[key] = channel
             try:
-                await self._sequence_input(channel, link, row, files, forwarded, text)
+                await self._sequence_input(channel, link, row, files, forwarded, text, separate=separate)
             finally:
                 self._join_busy.pop(key, None)
         channel._classified(update, remember=True)
@@ -366,7 +369,7 @@ class ChatTurns:
                     self._join_busy.pop(key, None)
             return True
 
-    async def _sequence_input(self, channel, link, row, files, forwarded, text):
+    async def _sequence_input(self, channel, link, row, files, forwarded, text, *, separate=False):
         from app.telegram_bots.inbox import _scope
 
         key = (link.id, row.message_thread_id)
@@ -375,7 +378,7 @@ class ChatTurns:
         kind = "album" if album is not None else "forward" if forwarded else "longtext" if len(text.encode("utf-16-le")) // 2 >= 4000 else None
         basis = (*basis, album if kind == "album" else None)
         prior = self._joins.get(key)
-        compatible = prior is not None and prior.channel is channel and prior.basis == basis and (prior.kind == kind or prior.kind == "longtext" and kind is None) and len(prior.origins) < 64
+        compatible = not separate and prior is not None and prior.channel is channel and prior.basis == basis and (prior.kind == kind or prior.kind == "longtext" and kind is None) and len(prior.origins) < 64
         if prior is not None and not compatible:
             await self._flush_join_locked(key, prior)
         if not files and not forwarded:
@@ -392,12 +395,12 @@ class ChatTurns:
                 prior.task.cancel()
                 await asyncio.gather(prior.task, return_exceptions=True)
             self._arm_join(key, prior)
-        elif kind is not None:
+        elif kind is not None and not separate:
             joined = _JoinedInput(channel, link, [row], kind, basis)
             self._joins[key] = joined
             self._arm_join(key, joined)
         else:
-            await self._admit_origins(channel, link, (row,))
+            await self._admit_origins(channel, link, (row,), separate=separate)
 
     def _arm_join(self, key, joined):
         async def wait():
@@ -437,7 +440,7 @@ class ChatTurns:
                     finally:
                         self._join_busy.pop(key, None)
 
-    async def _admit_origins(self, channel, link, origins):
+    async def _admit_origins(self, channel, link, origins, *, separate=False):
         inbound = self._inbound(link, origins)
         if not inbound.text.strip() and inbound.files:
             pending = getattr(self.services, "pending_files", None)
@@ -467,7 +470,7 @@ class ChatTurns:
                             await self.services.outbox.inbox.finish_route(row, session=writer)
                             await guard.check(writer)
             return
-        disposition = self.queue.admit_submission(link, inbound) if "reply_to_message_id" in origins[0].sanitized_input else self.queue.admit(link, inbound)
+        disposition = self.queue.admit_submission(link, inbound) if separate or "reply_to_message_id" in origins[0].sanitized_input else self.queue.admit(link, inbound)
         if disposition == "full":
             first = origins[0]
             await channel.send_text("busy.followup_full", source_id=f"chat-full:{first.chat_id}:{first.message_id}", reply_to=first.message_id, thread=first.message_thread_id, inbox_rows=origins, finish_route=True, _captured_link=link)
@@ -700,7 +703,27 @@ class ChatTurns:
         )
         turn.capacity_notice_sent = True
 
-    async def _publication_outcome(self, turn, key, *, run=None, refusal=None):
+    async def _try_final(self, turn, operation):
+        """One attempt at a finished run's reply. `_drive` repeats it, within a bound."""
+        try:
+            return await operation()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if turn.final_since is None:
+                logger.warning("telegram_bots chat_final_unplanned")
+            if turn.presentation is not None:
+                await turn.presentation.close()
+            return None
+
+    def _final_overdue(self, turn):
+        """The clock starts when an attempt ends, so a slow first one is still retried."""
+        now = turn.channel._time()
+        if turn.final_since is None:
+            turn.final_since = now
+        return now - turn.final_since >= FINAL_PLAN_SECONDS
+
+    async def _publication_outcome(self, turn, key, *, run=None, refusal=None, undeliverable=False):
         source = await self._source(turn, key)
         return await self.services.outbox.plan_publication_outcome(
             turn.record,
@@ -710,6 +733,7 @@ class ChatTurns:
             keyboard=self._button("retry_message", turn.record.publication_id),
             callbacks=self.services.callbacks,
             guard=self._guard(turn),
+            undeliverable=undeliverable,
         )
 
     async def _settle_cancelled_inputs(self, turn):
@@ -828,24 +852,36 @@ class ChatTurns:
                 if run is not None and run.row.get("status") in {"success", "error", "timeout", "interrupted"}:
                     failure = classify_run(run, channel_execution_scope(record))
                     stopped = turn.stop_requested and run.row.get("status") == "interrupted"
+                    overdue = False
                     if stopped or failure is None:
                         if await self._observe(turn, lambda: self._pause_ui(turn, final=True)):
                             inputs = getattr(self.services, "human_inputs", None)
                             if not stopped and inputs is not None:
-                                planned = await self._observe(turn, lambda: inputs.plan_terminal(record, turn.link))
+                                planned = await self._try_final(turn, lambda: inputs.plan_terminal(record, turn.link))
                                 if planned is not None:
                                     await self._observe(turn, lambda: self._complete(turn))
                                     return
                             waiting = bool(turn.cancelled_waiting) if turn.waiting_dropped else bool(self.queue.waiting_count(turn.link, turn.topic))
-                            identity = await self._observe(turn, lambda: self.observer.plan_final(record, turn.link, stopped=stopped, waiting=waiting))
+                            identity = await self._try_final(turn, lambda: self.observer.plan_final(record, turn.link, stopped=stopped, waiting=waiting))
                             if identity is not None:
                                 if stopped:
                                     self._drop_waiting(turn)
                                 await self._observe(turn, lambda: self._complete(turn))
                                 return
+                            # A held turn stops this whole chat, so the wait for a
+                            # finished run's reply has a bound.
+                            overdue = self._final_overdue(turn)
+                            if overdue and failure is None:
+                                # This plan can lose to a reply that did commit, and
+                                # the next `plan_final` then returns that reply.
+                                if await self._try_final(turn, lambda: self._publication_outcome(turn, "error.generic", run=run, undeliverable=True)) is not None:
+                                    logger.warning("telegram_bots chat_final_undeliverable")
+                                    await self._observe(turn, lambda: self._complete(turn))
+                                    return
                         # A stopped stream still requires acknowledged exact
                         # cancellation and unavailable(cancelled) source proof.
-                        if stopped:
+                        # Past the bound it ends as the interrupted run it is.
+                        if stopped and not overdue:
                             failure = None
                 if failure is not None:
                     if failure.retry_later:

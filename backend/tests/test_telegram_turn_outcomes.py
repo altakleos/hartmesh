@@ -49,6 +49,45 @@ async def test_terminal_outcome_is_one_exact_current_primary_with_no_fake_receip
 
 
 @pytest.mark.asyncio
+async def test_a_successful_run_that_cannot_be_delivered_keeps_its_own_proof(publication_environment):
+    e = publication_environment
+    record = replace(await _managed_turn(e), dispatch_started=True, run_id="managed-primary-run")
+    row = run_row(record, run_id=record.run_id)
+    row.update(status="success", stop_reason=None, metadata={"channel_turn_id": record.publication_id})
+    run = ValidatedRun(MappingProxyType(row), receipt_from_run_kwargs(row["kwargs"]))
+    box, callbacks = Outbox(e.sessions), CallbackRepository(e.sessions)
+
+    def plan(key, **kwargs):
+        return box.plan_publication_outcome(record, run=run, source_ref={"key": key, "values": {}}, keyboard=[], callbacks=callbacks, guard=e.guard_factory(), **kwargs)
+
+    with pytest.raises(ValueError):
+        await plan("error.generic")
+    with pytest.raises(ValueError):
+        await plan("busy.gave_up", undeliverable=True)
+
+    identity = await plan("error.generic", undeliverable=True)
+    item = _item(await _primary(e.db, identity))
+    proof = validate_publication_outcome(item)
+    assert proof.kind == "undeliverable" and proof.run_id == record.run_id
+    assert await plan("error.generic", undeliverable=True) == identity
+
+    item.payload["turn_outcome_basis"]["proof"]["row"]["status"] = "error"
+    with pytest.raises(ValueError):
+        validate_publication_outcome(item)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_run_is_never_called_undeliverable(publication_environment):
+    e = publication_environment
+    record = replace(await _managed_turn(e), dispatch_started=True, run_id="managed-primary-run")
+    row = run_row(record, run_id=record.run_id)
+    row.update(status="error", stop_reason=None, metadata={"channel_turn_id": record.publication_id})
+    run = ValidatedRun(MappingProxyType(row), receipt_from_run_kwargs(row["kwargs"]))
+    with pytest.raises(ValueError):
+        await Outbox(e.sessions).plan_publication_outcome(record, run=run, source_ref={"key": "error.generic", "values": {}}, keyboard=[], callbacks=CallbackRepository(e.sessions), guard=e.guard_factory(), undeliverable=True)
+
+
+@pytest.mark.asyncio
 async def test_waiting_auxiliary_cannot_close_unpublished_input(publication_environment):
     e = publication_environment
     with pytest.raises(ValueError):

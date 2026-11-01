@@ -14,7 +14,7 @@ async def test_saved_human_input_run_plans_via_optional_source_reader_without_li
     e.bus.get_inbound_nowait()
     e.bus.inbound_task_done()
     original = qualified.record
-    assert (await e.coordinator.observe(original, e.link, max_pages=1)).reason == "inventory_unhandled"
+    assert (await e.coordinator.observe(original, e.link, max_pages=1)).reason == "source_unavailable", "Waiting on a person, the run has no answer to publish"
     calls = []
 
     async def plan(record, link, *, guard=None):

@@ -23,7 +23,7 @@ from app.gateway.run_output import RunOutputProjectionV2
 from app.telegram_bots.inbox import InboxRepository, InboxRow, PublicationRecord, PublicationScope, chat_input_parts, validate_chat_file
 from app.telegram_bots.links import BotLink, prepare_publication_guard
 from app.telegram_bots.producer import Outbox, freeze_reply_presentation
-from deerflow.runtime.runs.output_inventory import content_items
+from deerflow.runtime.runs.output_inventory import delivery_items
 from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
@@ -615,7 +615,7 @@ class PublicationCoordinator:
                         if proof.kind not in {"human_input", "human_input_files"} or proof.output != output or publication_identity(proof.record) != publication_identity(fresh) or item.payload["reply_basis"]["finish_route"] is not True:
                             _refuse()
                         return PublicationObservation("planned", fresh, outbox_id=identity)
-                if self.file_output_planner is not None and inventory.state == "matched" and inventory.document.coverage == "complete" and content_items(inventory.document):
+                if self.file_output_planner is not None and inventory.state == "matched" and inventory.document.coverage == "complete" and delivery_items(inventory.document):
                     identity = await self.file_output_planner(fresh, current_link, output, guard=read_guard)
                     control.check_budget()
                     admission.check("source_read")
@@ -628,7 +628,7 @@ class PublicationCoordinator:
                         if proof.kind != "file_outputs" or proof.output != output or publication_identity(proof.record) != publication_identity(fresh):
                             _refuse()
                         return PublicationObservation("planned", fresh, outbox_id=identity)
-                if inventory.state != "matched" or inventory.document.coverage != "complete" or content_items(inventory.document):
+                if inventory.state != "matched" or inventory.document.coverage != "complete" or delivery_items(inventory.document):
                     return PublicationObservation("held", fresh, reason="inventory_unhandled")
                 if output.output.state != "complete":
                     return PublicationObservation("held", fresh, reason="source_unavailable")

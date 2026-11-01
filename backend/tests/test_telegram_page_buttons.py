@@ -34,7 +34,7 @@ from app.telegram_bots.model_source import ModelSource, prepare_verified_reply
 from app.telegram_bots.pages import page_buttons
 from app.telegram_bots.producer import Outbox, OutboxSender, SendingPart, _item
 from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
-from deerflow.runtime.runs.output_inventory import PageInventoryDescriptor, build_event_inventory_evidence, offered_pages, output_receipt_digest
+from deerflow.runtime.runs.output_inventory import PageInventoryDescriptor, StructuredInventoryDescriptor, build_event_inventory_evidence, content_items, delivery_items, offered_pages, output_receipt_digest
 
 BASE = "https://hartmesh.example"
 MEMORY = BASE + "/workspace?settings=memory"
@@ -50,7 +50,11 @@ def page_item(key, index=0):
     return {"kind": "page", "key": key, "witness": {"kind": "root_snapshot", "root_epoch": ROOT_EPOCH, "message_id": f"tool-{index}"}}
 
 
-def projection(record, *, keys=(), text="**synthetic answer**", file=None):
+def artifact_item(carrier="message_artifact"):
+    return {"kind": "structured", "carrier": carrier, "value_sha256": "a" * 64, "witness": {"kind": "root_snapshot", "root_epoch": ROOT_EPOCH, "message_id": "tool-9"}}
+
+
+def projection(record, *, keys=(), text="**synthetic answer**", file=None, structured=()):
     output = _output(record, text=text)
     receipt = output.output_evidence
     document = inventory_document(version=2, owner_user_id=receipt.owner_user_id, thread_id=receipt.thread_id, run_id=receipt.run_id, input_message_id=receipt.input_message_id, output_receipt_sha256=output_receipt_digest(receipt))
@@ -59,6 +63,7 @@ def projection(record, *, keys=(), text="**synthetic answer**", file=None):
     document["items"] = [page_item(key, index) for index, key in enumerate(keys)]
     if file is not None:
         document["items"].append({"kind": "file", "path": file, "surfaces": ["presentation_reference"], "witnesses": [{"kind": "root_snapshot", "root_epoch": ROOT_EPOCH, "message_id": "file-tool"}]})
+    document["items"].extend(artifact_item(carrier) for carrier in structured)
     evidence = build_event_inventory_evidence(receipt, status=output.run_status, inventory_event_seq=9, document=document)
     return RunOutputProjectionV2.model_validate({"version": 2, "output": output, "inventory": {"state": "matched", "evidence": evidence, "document": document, "reason": None}})
 
@@ -270,3 +275,41 @@ async def test_a_stopped_answer_has_no_inventory_to_read_and_still_sends(publica
     output = cancelled(record)
     assert output.inventory.state != "matched" or output.inventory.document.coverage != "complete"
     await streamed_part(e, record, output, plan=lambda box: box.plan_stopped_publication_reply(record, output=output, preview=shown(record, stopped=True), guard=e.guard_factory()))
+
+
+def test_a_tools_artifact_leaves_nothing_a_reply_must_carry():
+    document = SimpleNamespace(
+        items=(
+            PageInventoryDescriptor.model_validate(page_item("memory")),
+            StructuredInventoryDescriptor.model_validate(artifact_item()),
+            StructuredInventoryDescriptor.model_validate(artifact_item("terminal_field")),
+        )
+    )
+    assert [item.carrier for item in content_items(document)] == ["message_artifact", "terminal_field"]
+    assert [item.carrier for item in delivery_items(document)] == ["terminal_field"]
+
+
+@pytest.mark.asyncio
+async def test_a_tools_artifact_does_not_stand_between_the_model_and_its_reply(publication_environment):
+    e = publication_environment
+    record = await _managed_turn(e)
+    output = projection(record, structured=("message_artifact",))
+    basis, parts = prepare_verified_reply(record, output)
+    assert basis["outcome"]["projection"]["inventory"]["document"]["items"][0]["carrier"] == "message_artifact", "The saved proof keeps the whole inventory"
+    assert len(parts) == 1 and parts[0]["kind"] == "text"
+    with pytest.raises(ValueError):
+        qualify_file_output(record, output)
+
+
+def test_a_tools_artifact_beside_a_file_is_still_a_file_reply():
+    record = file_record()
+    path = "/mnt/user-data/outputs/report.txt"
+    assert qualify_file_output(record, projection(record, file=path, structured=("message_artifact",)))
+
+
+@pytest.mark.asyncio
+async def test_a_result_the_model_never_read_is_still_output_the_reply_must_carry(publication_environment):
+    e = publication_environment
+    record = await _managed_turn(e)
+    with pytest.raises(ValueError):
+        prepare_verified_reply(record, projection(record, structured=("terminal_field",)))

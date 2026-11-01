@@ -227,6 +227,7 @@ async def send_file_part(channel, saved, capture) -> list[int]:
     channel._log_part_failure(method, diagnostic, expected)
     context = SendContext(original_link.id, saved.item.chat_id, original_link.binding_generation, channel.transport_revision, "bound_message")
     if outcome.failure == "retry":
+        await channel._send_refused_by_limit()
         raise DeliveryRetry(outcome.retry_after)
     if outcome.failure == "forbidden":
         await channel._forbidden(context)

@@ -14,7 +14,7 @@ from pathlib import PurePosixPath
 def qualify_file_output(record, output):
     from app.gateway.run_output import RunOutputProjectionV2
     from app.telegram_bots.inbox import PublicationOrigin, PublicationRecord, PublicationScope, publication_identity
-    from deerflow.runtime.runs.output_inventory import content_items
+    from deerflow.runtime.runs.output_inventory import delivery_items
 
     try:
         if type(record) is not PublicationRecord or type(output) is not RunOutputProjectionV2:
@@ -39,7 +39,7 @@ def qualify_file_output(record, output):
         if inventory.state != "matched" or inventory.document.coverage != "complete" or type(inventory.document.version) is not int or inventory.document.version != 2 or not inventory.document.items:
             raise ValueError
         paths = []
-        for item in content_items(inventory.document):
+        for item in delivery_items(inventory.document):
             if item.kind != "file":
                 raise ValueError
             path = item.path

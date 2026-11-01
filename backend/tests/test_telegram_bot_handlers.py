@@ -1,6 +1,7 @@
 """Managed ingress runs the real pinned Application over SQL and recorded SDK."""
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from _telegram_bot_test_support import update_payload
@@ -255,9 +256,109 @@ async def test_all_fixed_words_are_durable_and_literal_hyphenated_words_remain_u
         assert len(plans) == len(FIXED_COMMANDS)
         assert {row.parts[0]["source_ref"]["key"] for row in plans} == {"cmd.agent", "cmd.unknown"}
         for identity, word in enumerate(["/start-up words", "/web-research words", "/agent@another_bot", "/agent@fixture_bot"], start=450):
-            result = await e.channel.handle_update(message(e, identity, content=word))
-            assert result is (False if "-" in word else True)
+            assert await e.channel.handle_update(message(e, identity, content=word)) is True
         assert all(row.route_kind == "command" for row in await rows(db, TelegramInboundMarkRow))
+    finally:
+        await e.channel.stop()
+
+
+def _skill_turns(accept):
+    async def retire(*args, **kwargs):
+        return None
+
+    return SimpleNamespace(accept=accept, retire=retire)
+
+
+def _skill_replies(plans):
+    return [(row.parts[0]["source_ref"]["key"], row.parts[0]["source_ref"]["values"]) for row in plans if row.payload.get("product_basis")]
+
+
+async def test_resolved_skill_word_is_published_as_chat_with_text_unchanged(db, monkeypatch):
+    import app.telegram_bots.adapter as adapter
+
+    seen = []
+    monkeypatch.setattr(adapter, "slash_skill_outcome", lambda link, text: seen.append((link.id, text)) or "run")
+    e = await ingress(db)
+    accepted = []
+
+    async def accept(channel, update, *, separate=False):
+        accepted.append((update.message.text, separate))
+        channel._classified(update)
+
+    e.services.turns = _skill_turns(accept)
+    try:
+        before = len(await rows(db, TelegramOutboxRow))
+        assert await e.channel.handle_update(message(e, 470, content="/weekly-report for March")) is True
+        assert accepted == [("/weekly-report for March", True)]
+        assert seen == [(e.link.id, "/weekly-report for March")]
+        assert len(await rows(db, TelegramOutboxRow)) == before
+    finally:
+        await e.channel.stop()
+
+
+async def test_a_skill_word_that_begins_like_a_command_is_a_skill(db, monkeypatch):
+    import app.telegram_bots.adapter as adapter
+
+    monkeypatch.setattr(adapter, "slash_skill_outcome", lambda link, text: "run")
+    e = await ingress(db)
+    accepted, closed = [], []
+
+    async def accept(channel, update, *, separate=False):
+        accepted.append(update.message.text)
+        channel._classified(update)
+
+    async def command(*args, **kwargs):
+        closed.append("command")
+
+    async def handle_text(*args, **kwargs):
+        closed.append("text")
+        return True
+
+    e.services.turns = _skill_turns(accept)
+    e.services.human_inputs = SimpleNamespace(command=command, handle_text=handle_text)
+    try:
+        assert await e.channel.handle_update(message(e, 473, content="/web-design-guidelines review this")) is True
+        assert accepted == ["/web-design-guidelines review this"]
+        assert closed == [], "a skill word neither closes nor answers an open prompt"
+    finally:
+        await e.channel.stop()
+
+
+@pytest.mark.parametrize(("outcome", "key", "values"), [("off", "cmd.skill_off", {"skill": "weekly-report"}), ("unavailable", "cmd.skill_unavailable", {"skill": "weekly-report"}), ("failed", "error.generic", {})])
+async def test_skill_that_cannot_run_says_why_and_is_not_published(db, monkeypatch, outcome, key, values):
+    import app.telegram_bots.adapter as adapter
+
+    monkeypatch.setattr(adapter, "slash_skill_outcome", lambda link, text: outcome)
+    e = await ingress(db)
+    accepted = []
+
+    async def accept(channel, update, *, separate=False):
+        accepted.append(update.message.text)
+
+    e.services.turns = _skill_turns(accept)
+    try:
+        assert await e.channel.handle_update(message(e, 471, content="/weekly-report for March")) is True
+        assert accepted == []
+        assert _skill_replies(await rows(db, TelegramOutboxRow)) == [(key, values)]
+    finally:
+        await e.channel.stop()
+
+
+async def test_unknown_or_reserved_slash_word_gets_cmd_unknown_and_is_not_published(db, monkeypatch):
+    import app.telegram_bots.adapter as adapter
+
+    monkeypatch.setattr(adapter, "slash_skill_outcome", lambda link, text: None)
+    e = await ingress(db)
+    accepted = []
+
+    async def accept(channel, update, *, separate=False):
+        accepted.append(update.message.text)
+
+    e.services.turns = _skill_turns(accept)
+    try:
+        assert await e.channel.handle_update(message(e, 472, content="/no-such-skill words")) is True
+        assert accepted == []
+        assert _skill_replies(await rows(db, TelegramOutboxRow)) == [("cmd.unknown", {"command": "no-such-skill"})]
     finally:
         await e.channel.stop()
 
@@ -824,5 +925,50 @@ async def test_edited_update_scans_text_and_caption_independently(db, token_fiel
         assert not e.channel._edit_hashes
         assert len(await rows(db, TelegramInboundMarkRow)) == before
         assert all(token not in str(call.parameters) for call in e.request.calls)
+    finally:
+        await e.channel.stop()
+
+
+async def test_ten_minutes_of_refused_sends_mark_the_bot_and_an_accepted_send_clears_it(db):
+    from datetime import UTC, datetime, timedelta
+
+    e = await ingress(db)
+    moment = [datetime(2030, 1, 1, 12, tzinfo=UTC)]
+    e.channel._now = lambda: moment[0]
+    first = moment[0]
+    try:
+        await e.channel._send_refused_by_limit()
+        moment[0] = first + timedelta(seconds=599)
+        await e.channel._send_refused_by_limit()
+        assert (await db.links.get(e.link.id)).limited_since is None
+
+        moment[0] = first + timedelta(seconds=600)
+        await e.channel._send_refused_by_limit()
+        assert (await db.links.get(e.link.id)).limited_since == first
+
+        await e.channel._after_send_success(counts=False)
+        assert (await db.links.get(e.link.id)).limited_since == first, "a draft or a preview does not end it"
+
+        await e.channel._after_send_success()
+        assert (await db.links.get(e.link.id)).limited_since is None
+        assert e.channel._refused_since is None
+    finally:
+        await e.channel.stop()
+
+
+async def test_a_removed_link_cannot_turn_an_accepted_send_into_a_failure(db, monkeypatch):
+    from dataclasses import replace
+    from datetime import UTC, datetime
+
+    e = await ingress(db)
+    moment = datetime(2030, 1, 1, 12, tzinfo=UTC)
+
+    async def removed(*args, **kwargs):
+        raise ValueError("link-not-found")
+
+    try:
+        e.channel.link = replace(e.channel.link, limited_since=moment)
+        monkeypatch.setattr(e.services.links, "update", removed)
+        await e.channel._after_send_success()
     finally:
         await e.channel.stop()
