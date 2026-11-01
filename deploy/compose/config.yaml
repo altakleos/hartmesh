@@ -254,8 +254,7 @@ ui:
         Look at the spreadsheet I am about to attach and answer questions about
         it. Start by telling me what is in it.
 
-# Reserved until Telegram bot setup ships; the renderer omits this section
-# while HARTMESH_TELEGRAM is absent. Renderer-owned values stay out of here.
+# Telegram bots (README, "Telegram bots"). Renderer-owned values stay out of here.
 telegram_bots:
   reconcile_interval_seconds: 30
   conflict_probe_seconds: 30

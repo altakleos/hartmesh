@@ -2563,7 +2563,7 @@ export function createZhCN(product: string): Translations {
         onPhoneQr: "用手机相机扫描并登录，此设置会在手机上打开。",
         before: {
           title: "连接之前",
-          body: `这些聊天由 Telegram 传输。您、${product} 以及您的 AI 助理和 AI 员工在那里发送的所有内容，包括文件和语音消息，都会经过 Telegram 的服务器，并保留在您的 Telegram 账号中，直到您删除。机器人聊天并非端到端加密，因此 Telegram 可以读取内容，${product} 无法代您删除。锁屏通知可能显示消息开头；Telegram 和手机都可以隐藏预览。任何能打开您的 Telegram 的人都可以以您的身份给机器人发消息。请使用屏幕锁。如果手机丢失，请在其他设备上结束该会话（Telegram、设置、设备），并在这里断开机器人的连接。`,
+          body: `这些聊天由 Telegram 传输。您和 ${product} 在那里发送的所有内容，包括文件和语音消息，都会经过 Telegram 的服务器，并保留在您的 Telegram 账号中，直到您删除。机器人聊天并非端到端加密，因此 Telegram 可以读取内容，${product} 无法代您删除。锁屏通知可能显示消息开头；Telegram 和手机都可以隐藏预览。任何能打开您的 Telegram 的人都可以以您的身份给机器人发消息。请使用屏幕锁。如果手机丢失，请在其他设备上结束该会话（Telegram、设置、设备），并在这里断开机器人的连接。`,
           voice: ({ transcriber }) =>
             `语音消息由 ${transcriber} 转换为文字，您需要先在聊天中同意使用该服务。如果服务更换，会再次询问您。${product} 不保留录音。`,
           again: "Telegram 能读取哪些内容，请参阅“连接之前”。",

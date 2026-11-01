@@ -94,14 +94,14 @@ get explicit `environment:` entries and never see a provider key.
 | `HARTMESH_AI_EMPLOYEES` | AI employee slots, 0–100; absent 10. (§ "Storage and agents"). |
 | `HARTMESH_AI_EMPLOYEE_STORAGE_GIB` | AI employee capacity, 1–1024 GiB; absent 1. (§ "Storage and agents"). |
 | `HARTMESH_COMPANY_STORAGE_GIB` | Company capacity, 1–1024 GiB; absent 1. (§ "Storage and agents"). |
-| `HARTMESH_TELEGRAM` | Reserved: `on` or `off`; absent means off until the unfinished feature is offered. (§ "Telegram bots"). |
-| `HARTMESH_TELEGRAM_VOICE` | Reserved voice provider: `auto`, `openai`, `gemini` or `off`; absent `auto`. (§ "Telegram bots"). |
-| `HARTMESH_TELEGRAM_MAX_BOTS` | Reserved deployment bot-link limit, 1–500; absent 100. (§ "Telegram bots"). |
-| `HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON` | Reserved per-person bot-link limit, 1–40; absent 10. (§ "Telegram bots"). |
+| `HARTMESH_TELEGRAM` | Whether this deployment has Telegram bots: `on` or `off`. Absent, `on`. `off` renders `telegram_bots.enabled: false`: no bot is polled, nothing is sent to any chat, the web app shows Telegram as switched off, and every bot link, token and setting is kept, so `on` brings every bot back without a new set-up. Any other value refuses to render: ``render_config: refusing to render: HARTMESH_TELEGRAM must be `on` or `off` ``. Write `off` before the first start of a copy that will run beside its original (§ "A copy of a deployment"). (§ "Telegram bots"). |
+| `HARTMESH_TELEGRAM_VOICE` | Which service turns a voice note into text: `auto`, `openai`, `gemini` or `off`. Absent, `auto`. A service is used only when the model list of this deployment already holds one of that provider's models at the provider's own address; `auto` takes OpenAI, else Gemini, else none. With none, a bot answers a voice note with one sentence that says voice notes are not switched on. Change it to `off` when recordings must never leave the deployment, or to one provider when both are listed and one is preferred. Any other value refuses to render: `render_config: refusing to render: HARTMESH_TELEGRAM_VOICE must be one of auto, openai, gemini, off`. (§ "Telegram bots"). |
+| `HARTMESH_TELEGRAM_MAX_BOTS` | How many bot links the deployment may hold: a whole number from 1 to 500. Absent, 100. A link in any state counts, including one whose person's access is turned off. Lowering it removes nothing: a deployment over the limit keeps its bots and cannot add another. Raise it only with the Gateway's memory in view (§ "Memory budget"): every bot is one more polling connection in the Gateway process. Any other value refuses to render: `render_config: refusing to render: HARTMESH_TELEGRAM_MAX_BOTS must be a whole number from 1 to 500`. (§ "Telegram bots"). |
+| `HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON` | How many bot links one person may hold: a whole number from 1 to 40. Absent, 10. Telegram itself allows an account 20 bots, 40 with Telegram Premium, counting every bot that person owns anywhere. Lowering it removes nothing. Any other value refuses to render: `render_config: refusing to render: HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON must be a whole number from 1 to 40`. (§ "Telegram bots"). |
 | `HARTMESH_APP_SUBNET` | The `app` bridge's IPAM subnet **and** the Gateway's `AUTH_TRUSTED_PROXIES`, which are the same reference. Absent -- which is what every existing tenant `.env` is -- both take the shipped default, `10.201.26.0/24`. Set it only when that range collides with something the guest must still reach (§ "Network model"). |
 | `HARTMESH_PRODUCT_NAME` | What the product is called: the heading on the sign-in and setup pages, the browser tab, the workspace when the tenant bundle names no company, the assistant's own name, and DingTalk's message title. Rendered into `ui.product_name` (the template must not carry it); one line of at most 40 characters, surrounding spaces trimmed. Absent -- which is what every existing tenant `.env` is -- `HartMesh`. A name the Gateway would refuse (a control or reordering character, over 40 characters), or one beginning with `$` (the Gateway would read it as an environment variable), refuses to render. It is read at Gateway start: a new name takes a restart. Quote a name containing `#` (`HARTMESH_PRODUCT_NAME="Acme #1"`), or `.env` reads the rest as a comment. A company name from the tenant bundle still wins inside the workspace after sign-in (§ "Tenant bundle"). |
 | `HARTMESH_MODELS_FILE` | The path of the operator's own model file, read by `gateway/render_config.py` at every Gateway start. Absent -- which is what every existing tenant `.env` is -- the rendered `models:` section comes from the bundled provider catalog exactly as before. Set, that one file is the whole model list (§ "Operator-managed models"). |
-| `HARTMESH_PROVIDER_KEYS_SECRET` | The wrapping key for provider keys an administrator sets in the product, at least 32 characters (`openssl rand -base64 32`). Absent -- which is what every existing tenant `.env` is -- nothing changes and the product refuses to store a key, saying why. Best supplied from the environment of the `docker compose` command rather than this file, which shares a disk with the database it protects (§ "Provider keys in the product"). |
+| `HARTMESH_PROVIDER_KEYS_SECRET` | The wrapping key for provider keys an administrator sets in the product and for the tokens of Telegram bots people connect, at least 32 characters (`openssl rand -base64 32`). Absent -- which is what every existing tenant `.env` is -- nothing changes and the product refuses to store a key, saying why, and no Telegram bot can be added or polled (§ "Telegram bots"). Best supplied from the environment of the `docker compose` command rather than this file, which shares a disk with the database it protects (§ "Provider keys in the product"). |
 | `HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS` | Only while rotating that key: the old value, so keys wrapped under it are read and rewrapped under the new one at the next start (§ "Provider keys in the product"). |
 | `SANDBOX_READY_TIMEOUT` | The cold-start readiness budget, `sandbox.ready_timeout` in the rendered `config.yaml`: whole seconds from 60 to 600. Absent -- which is what every existing tenant `.env` is -- the template's 120 applies. Anything else (zero, a negative or fractional number, text, a value outside the range) refuses to render and the Gateway does not start, so no value can turn the deadline off (§ "Sandbox readiness budget"). |
 | `SANDBOX_CAPACITY_WAIT_TIMEOUT` | How long an acquisition waits for one of the two sandbox slots when both are in active use and nothing is parked to evict, `sandbox.capacity_wait_timeout` in the rendered `config.yaml`: whole seconds from 0 to 60, where 0 refuses at once. Absent, the template's 5 applies. Anything else refuses to render, so no value makes the wait unbounded (§ "Memory budget"). |
@@ -142,6 +142,8 @@ interpolation, so validation reads the file Docker will bind into the sandbox.
 come from the environment of the `docker compose` command itself: the shell's
 value wins over the `--env-file` one, and absent from both they are simply
 unset.
+The four Telegram keys are not interpolated by `compose.yaml`: they reach the
+Gateway through `env_file` and are read by `gateway/render_config.py`.
 
 ## Sign-in
 
@@ -480,7 +482,10 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   active schedules (paused) and connected channel bindings (a held binding
   starts nothing: while the person is off, a message through it gets the
   same "access turned off" answer, and the web app shows it as not
-  connected), and names them under `held` (`schedules`, `channel_bindings`:
+  connected. A held binding that is a Telegram bot of the person's own also
+  stops listening: within 30 seconds the bot tells its chat once that access
+  is off, and nothing sent afterwards is fetched (§ "Telegram bots")), and
+  names them under `held` (`schedules`, `channel_bindings`:
   ids). It forgets the connect codes the person had not used yet
   (`channel_bindings.connect_codes_ended`), so none can bind a chat account
   or turn a held binding back on. It records what it held for the identity
@@ -573,9 +578,10 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   counting what this command ended), each reported when the command's writes
   were done and looked at again once the runs are over, and
   `channel_ingress` (the person's live channel bindings when the refusal
-  committed; `refused_at_next_use`: a channel message from them is answered
-  with the words the web app gives the same refusal, before any thread is
-  created). Each held or ended surface carries `not_ended`: for a held
+  committed; `refused_at_next_use`: a message from them through a Telegram
+  bot of their own is answered once with the words the web app gives the
+  same refusal; through any other channel it is refused before any thread is
+  created, with that channel's own connect or error sentence). Each held or ended surface carries `not_ended`: for a held
   surface, what could not be held; for the waiting work, what a Gateway
   still had in hand at the last look (a launch in flight), which its own
   path ends once it reads the refusal. Any `not_ended`, or a queue that
@@ -722,7 +728,7 @@ Sample output of `disable` on an account with two tokens and one schedule,
 with no run in flight:
 
 ```json
-{"account": {"disabled": true, "disabled_at": "2026-10-01T23:58:06.920848+00:00", "email": "pat@example.com", "id": "…", "issuer": "https://login.example.com/realms/tenant", "last_sign_in_at": "2026-10-01T23:58:06.848332+00:00", "provider": "sso", "released": false, "released_from": null, "role": "user", "role_limit": null, "subject": "sub-pat"}, "command": "disable", "elapsed_ms": 74, "held": {"channel_bindings": [], "schedules": ["…"]}, "identity": {"issuer": "https://login.example.com/realms/tenant", "subject": "sub-pat"}, "note": "sessions are refused at their next request; every run this identity had executing was cancelled and its stream ended with it; no new run starts", "returncode": 0, "runs_cancelled": 0, "runs_finished_first": [], "runs_found": 0, "runs_unconfirmed": [], "schedules_held": 1, "sessions_ended": true, "started_at": "2026-10-01T23:58:06.913819+00:00", "surfaces": {"channel_bindings": {"action": "held", "connect_codes_ended": 0, "count": 0, "not_ended": 0, "stopped_after_ms": 59, "stopped_at": "2026-10-01T23:58:06.972819+00:00"}, "channel_ingress": {"action": "refused_at_next_use", "count": 0, "stopped_after_ms": 8, "stopped_at": "2026-10-01T23:58:06.921819+00:00"}, "internal_launches": {"action": "refused_at_next_use", "count": 1, "stopped_after_ms": 8, "stopped_at": "2026-10-01T23:58:06.921819+00:00"}, "personal_access_tokens": {"action": "revoked", "count": 2, "stopped_after_ms": 8, "stopped_at": "2026-10-01T23:58:06.921819+00:00"}, "running_work": {"action": "ended", "confirmed_by": "run_status", "count": 0, "stopped_after_ms": 63, "stopped_at": "2026-10-01T23:58:06.976819+00:00"}, "scheduled_occurrences": {"action": "ended", "count": 0, "not_ended": 0, "stopped_after_ms": 59, "stopped_at": "2026-10-01T23:58:06.972819+00:00"}, "schedules": {"action": "held", "count": 1, "not_ended": 0, "stopped_after_ms": 59, "stopped_at": "2026-10-01T23:58:06.972819+00:00"}, "sessions": {"action": "ended", "count": 1, "stopped_after_ms": 8, "stopped_at": "2026-10-01T23:58:06.921819+00:00"}, "sign_in": {"action": "refused_at_next_use", "count": 1, "stopped_after_ms": 8, "stopped_at": "2026-10-01T23:58:06.921819+00:00"}}, "surfaces_not_reached": [], "surfaces_unconfirmed": [], "tokens_revoked": 2, "verdict": "disabled"}
+{"account": {"disabled": true, "disabled_at": "2026-10-01T23:58:06.920848+00:00", "email": "pat@example.com", "id": "…", "issuer": "https://login.example.com/realms/tenant", "last_sign_in_at": "2026-10-01T23:58:06.848332+00:00", "provider": "sso", "released": false, "released_from": null, "role": "user", "role_limit": null, "subject": "sub-pat"}, "command": "disable", "elapsed_ms": 74, "held": {"channel_bindings": [], "schedules": ["…"]}, "identity": {"issuer": "https://login.example.com/realms/tenant", "subject": "sub-pat"}, "note": "sessions are refused at their next request; every run this identity had executing was cancelled and its stream ended with it; no new run starts", "returncode": 0, "runs_cancelled": 0, "runs_finished_first": [], "runs_found": 0, "runs_unconfirmed": [], "schedules_held": 1, "sessions_ended": true, "started_at": "2026-10-01T23:58:06.913819+00:00", "surfaces": {"channel_bindings": {"action": "held", "connect_codes_ended": 0, "count": 0, "not_ended": 0, "stopped_after_ms": 59, "stopped_at": "2026-10-01T23:58:06.972819+00:00", "telegram_bots": 0}, "channel_ingress": {"action": "refused_at_next_use", "count": 0, "stopped_after_ms": 8, "stopped_at": "2026-10-01T23:58:06.921819+00:00"}, "internal_launches": {"action": "refused_at_next_use", "count": 1, "stopped_after_ms": 8, "stopped_at": "2026-10-01T23:58:06.921819+00:00"}, "personal_access_tokens": {"action": "revoked", "count": 2, "stopped_after_ms": 8, "stopped_at": "2026-10-01T23:58:06.921819+00:00"}, "running_work": {"action": "ended", "confirmed_by": "run_status", "count": 0, "stopped_after_ms": 63, "stopped_at": "2026-10-01T23:58:06.976819+00:00"}, "scheduled_occurrences": {"action": "ended", "count": 0, "not_ended": 0, "stopped_after_ms": 59, "stopped_at": "2026-10-01T23:58:06.972819+00:00"}, "schedules": {"action": "held", "count": 1, "not_ended": 0, "stopped_after_ms": 59, "stopped_at": "2026-10-01T23:58:06.972819+00:00"}, "sessions": {"action": "ended", "count": 1, "stopped_after_ms": 8, "stopped_at": "2026-10-01T23:58:06.921819+00:00"}, "sign_in": {"action": "refused_at_next_use", "count": 1, "stopped_after_ms": 8, "stopped_at": "2026-10-01T23:58:06.921819+00:00"}}, "surfaces_not_reached": [], "surfaces_unconfirmed": [], "tokens_revoked": 2, "verdict": "disabled"}
 ```
 
 and of `release-email` on that account, then of running it a second time:
@@ -744,8 +750,11 @@ turned off, with a recurring schedule and a Slack binding held, once the
 suspension is lifted:
 
 ```json
-{"account": {"disabled": false, "…": "…"}, "command": "enable", "held": {"channel_bindings": ["…"], "schedules": ["…"]}, "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "note": "…", "restore_held": true, "restored": {"channel_bindings": ["…"], "schedules": ["…"]}, "returncode": 0, "stayed_off": [], "verdict": "enabled"}
+{"account": {"disabled": false, "…": "…"}, "command": "enable", "held": {"channel_bindings": ["…"], "schedules": ["…"]}, "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "note": "…", "restore_held": true, "restored": {"channel_bindings": ["…"], "schedules": ["…"], "telegram_bots": 0}, "returncode": 0, "stayed_off": [], "verdict": "enabled"}
 ```
+
+`telegram_bots` counts the held bindings that are Telegram bots; each stops
+listening within 30 seconds and tells its chat once that access is off.
 
 and of `disable --subjects` on three people -- one done, one whose run had
 not stopped when the wait ran out, one whose subject names two accounts --
@@ -1342,6 +1351,10 @@ operator accepts for a tenant that chooses `open`:
 PostgreSQL and Redis remain unreachable from the `sandbox` network in both
 modes: they live only on `app`, and Docker isolates user-defined bridges from
 each other.
+
+The Gateway opens outgoing HTTPS connections to `api.telegram.org`, one
+long-lived request per connected bot. Sandboxes do not: a bot's traffic never
+passes through a sandbox or its relay.
 
 ## Sandbox hardening
 
@@ -2026,6 +2039,12 @@ download and the Python step, and **20 of 20 survived**: `memory.peak` between
 inside the image reaching for Google, recorded on each run as an
 `egress.blocked` diagnostic; that is the standing list doing its job.
 
+Every Telegram bot is polled inside the Gateway's own limit; the default of 100
+bots fits it, and raising `HARTMESH_TELEGRAM_MAX_BOTS` spends the Gateway's
+margin. Files that bots receive and send pass through the Gateway's memory, at
+most 200 MB at once over every bot (`telegram_bots.files.in_memory_max_bytes` in
+the bundle's `config.yaml`); a file that does not fit waits.
+
 
 
 ## Download all my data
@@ -2035,7 +2054,9 @@ account menu, _Settings and more_ → _Download all my data_
 (`POST /api/account/export`). The dialog follows it while it is prepared and
 links each part. The download covers every conversation as the
 page shows it, every file in its uploads, outputs and workspace, their own
-files and skills, their memory, their schedules and their custom agents.
+files and skills, their memory, their schedules and their custom agents, and
+their Telegram settings, their bots without tokens and what they did from
+Telegram (`telegram.json`).
 Nobody can export someone else's: the routes act only for the session that
 calls them, so neither an administrator nor a personal access token can reach
 another person's.
@@ -2061,42 +2082,6 @@ An export needs as much free space as the person's data until it is
 downloaded or expires, so an account larger than the free space minus 1 GiB
 cannot be exported until the data disk grows. The logs say when one starts and
 finishes, with its counts and size, and never a title or a file name.
-
-## Telegram bots
-
-Telegram bots are not offered in this release. The key `HARTMESH_TELEGRAM` is
-reserved for them. While it is absent, the renderer writes no `telegram_bots`,
-`channel_connections` or `channels` section and removes `show_web_page` from
-the tool list. `on` is for qualification of the unfinished feature and is not
-supported in this release. No managed bot supervisor runs yet.
-
-Configuration version 55 reserves all managed-bot settings. Explicit `on` or
-`off` renders the section with its corresponding `enabled` value, the public
-URL from `HARTMESH_PUBLIC_HOST` when it passes the renderer's hostname check,
-and the voice provider and bot limits above. Empty environment values use the
-absent defaults. Invalid values refuse rendering with the key's name. The
-template must omit `telegram_bots.enabled`, `telegram_bots.public_base_url`,
-`channel_connections` and `channels.telegram`; the renderer owns them.
-The rendered bound-identity configuration disables deployment-wide Telegram
-setup through both existing token routes. It does not migrate an existing bot.
-
-The render/check summary follows the storage/agents fragment with `telegram=off`
-when absent or explicitly off. For explicit `on`, its first applicable message is:
-
-| Fragment | Meaning |
-| --- | --- |
-| `telegram=on, bots cannot be added (HARTMESH_PROVIDER_KEYS_SECRET not set)` | No wrapping secret was supplied. |
-| `telegram=on, bots cannot be read (HARTMESH_PROVIDER_KEYS_SECRET is shorter than 32 characters)` | The supplied wrapping secret is too short. |
-| `telegram=on, no link buttons (HARTMESH_PUBLIC_HOST is not a hostname)` | No valid public hostname; the rendered public URL is null. |
-| `telegram=on` | These prerequisites are present. This does not enable the unfinished connection flow. |
-
-Neither a missing secret nor a non-hostname public host refuses a render.
-The secret value is never written into the rendered section or printed in the
-summary. Revision `0042_telegram_bots` adds the schema foundation, and
-`0043_telegram_inbox_chat_scope` scopes retained inbox message identities to
-their chat. Startup upgrades through the current head on SQLite or PostgreSQL.
-The latter preserves prior records; downgrade refuses if different chats have
-retained the same link/message pair, because the older key cannot represent both.
 
 ## Scheduled tasks
 
@@ -3443,6 +3428,627 @@ Offline SQL/contract tests, strict blocking-I/O checks and browser suites qualif
 additional functional boundaries. More than one Gateway worker and data disks
 outside the supported ext4 host model are not qualified by these results.
 
+Bots of a moved tenant need a statement of their own (§ "Telegram bots", "A copy
+of a deployment").
+
+## Telegram bots
+
+A person can connect one Telegram bot of their own to the ordinary chat and to each custom agent they own, and then works with it in a private Telegram chat. The person creates each bot and manages its token in the web app; the provider supplies the secret that protects the tokens (§ "The secret that protects bot tokens") and may set four optional keys.
+
+Four words are used here. A **bot link** is the product's record that joins one person, one Telegram bot and what that bot is connected to: the ordinary chat or a custom agent. The **bound account** is the one Telegram account a bot answers. **Polling** is how the Gateway receives messages: it asks Telegram for each bot's updates over an outgoing HTTPS connection to `api.telegram.org`, so no public port, no webhook and no extra container are needed. **The pause** is a mark the product puts on one bot after another program used its token (§ "A second program uses one bot's token").
+
+Every bot runs inside the one Gateway process. A VM that cannot reach `api.telegram.org` on port 443 starts normally, and every bot reads as unreachable.
+
+The command lines of this section use two shell functions. Each is the full command with nothing hidden; define them once in the shell that runs the rest:
+
+```bash
+hm() { docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env "$@"; }
+tb() { hm exec -T gateway sh -c 'cd /app/backend && exec setpriv --reuid=1000 --regid=1000 --groups="$(stat -c %g /var/run/docker.sock)" --inh-caps=-all --no-new-privs env HOME=/tmp/gateway-home DOCKER_CONFIG=/tmp/gateway-home/.docker PYTHONPATH=. uv run --no-sync python -m app.telegram_bots.cli "$@"' telegram_bots "$@"; }
+```
+
+`tb` enters the Gateway container the way `ai` does (§ "Storage and agents") and for the same reason: the tool reads the Docker engine's ID through the Docker socket, which a process started with `exec --user 1000` cannot open.
+
+### The keys
+
+Four optional keys in the tenant `.env` govern Telegram bots. All four are read by `gateway/render_config.py` at every Gateway start. A value outside the stated range refuses to render, so the Gateway does not start and the journal names the key. An empty value is the same as an absent key. A change takes `hm up -d gateway`.
+
+| Key | Consumed by |
+| --- | --- |
+| `HARTMESH_TELEGRAM` | Whether this deployment has Telegram bots: `on` or `off`. Absent, `on`. `off` renders `telegram_bots.enabled: false`: no bot is polled, nothing is sent to any chat, the web app shows Telegram as switched off, and every bot link, token and setting is kept, so `on` brings every bot back without a new set-up. Any other value refuses to render: ``render_config: refusing to render: HARTMESH_TELEGRAM must be `on` or `off` ``. Write `off` before the first start of a copy that will run beside its original (§ "A copy of a deployment"). |
+| `HARTMESH_TELEGRAM_VOICE` | Which service turns a voice note into text: `auto`, `openai`, `gemini` or `off`. Absent, `auto`. A service is used only when the model list of this deployment already holds one of that provider's models at the provider's own address; `auto` takes OpenAI, else Gemini, else none. With none, a bot answers a voice note with one sentence that says voice notes are not switched on. Change it to `off` when recordings must never leave the deployment, or to one provider when both are listed and one is preferred. Any other value refuses to render: `render_config: refusing to render: HARTMESH_TELEGRAM_VOICE must be one of auto, openai, gemini, off`. |
+| `HARTMESH_TELEGRAM_MAX_BOTS` | How many bot links the deployment may hold: a whole number from 1 to 500. Absent, 100. A link in any state counts, including one whose person's access is turned off. Lowering it removes nothing: a deployment over the limit keeps its bots and cannot add another. Raise it only with the Gateway's memory in view (§ "Memory budget"): every bot is one more polling connection in the Gateway process. Any other value refuses to render: `render_config: refusing to render: HARTMESH_TELEGRAM_MAX_BOTS must be a whole number from 1 to 500`. |
+| `HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON` | How many bot links one person may hold: a whole number from 1 to 40. Absent, 10. Telegram itself allows an account 20 bots, 40 with Telegram Premium, counting every bot that person owns anywhere. Lowering it removes nothing. Any other value refuses to render: `render_config: refusing to render: HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON must be a whole number from 1 to 40`. |
+
+The deployment limit covers concurrent additions by different people, including bots created through another bot. When only one place remains, one addition can take it. Replacing a saved bot for the same target keeps its existing place, including after the provider lowered a limit below the number already kept.
+
+Voice consent names the service that will receive the recording. After a service change, a person must agree to the newly named service before a recording is fetched or sent to it. An unused **Use voice notes** button from the previous service shows a fresh question; **Not now** still declines that recording. A note already admitted keeps its selected service for that transcription. If that service can no longer be used, the note fails and a later attempt asks again where necessary; it is never silently sent to another service.
+
+The template must not carry what the renderer writes. One that does refuses with ``render_config: refusing to render: template `telegram_bots.enabled`, `telegram_bots.public_base_url`, `channel_connections` and `channels.telegram` must be absent; HARTMESH_TELEGRAM and HARTMESH_PUBLIC_HOST select them``.
+
+No key holds a bot's token, and none ever will: a token is entered by its owner in the web app and is stored encrypted in the database (§ "The secret that protects bot tokens"). The deployment-wide Telegram bot of the upstream channel configuration stays closed in this profile: the renderer writes `channel_connections.telegram.enabled: false`, so the upstream route that connects such a bot answers 400, and the upstream route that would store its token in the configuration answers 403 to a person who is not an administrator and 400 to an administrator.
+
+**When storage is not available.** The bot of the ordinary chat and the bot of a custom agent follow the storage as the chat in the web app does: while storage is unavailable, or while the person's own files are full, are being prepared or did not pass the safety check, they keep answering. A file that is sent in one of these states is not saved, and the bot says so and answers the message without the file; while the person's own files are full, a new conversation is not started, and the bot says so (§ "Storage and agents", "Full Spaces, the data disk, and unverified Spaces").
+
+**Link buttons and the public host name.** A bot hands a person over to a page of the web app with a button that opens `https://<HARTMESH_PUBLIC_HOST>/…`. The renderer writes that address into `telegram_bots.public_base_url` when `HARTMESH_PUBLIC_HOST` is a hostname (letters, digits, dots, hyphens). If `HARTMESH_PUBLIC_HOST` is not a hostname, for example an address with a port, the nginx container exits (`nginx/render.sh` exits 1) and nobody reaches the web app. The renderer adds no refusal of its own and writes `public_base_url` as `null`, so the bots that already exist send each hand-over sentence without a button. No link signs anybody in; a person who follows one signs in as usual and arrives on the page.
+
+### The secret that protects bot tokens
+
+A bot's token is a password for that bot. It is stored in PostgreSQL (`telegram_bot_links.encrypted_token`), Fernet-encrypted under a key derived from `HARTMESH_PROVIDER_KEYS_SECRET`, the secret that also protects provider keys set in the product (§ "Provider keys in the product"), with a derivation label of its own, so that neither kind of ciphertext opens as the other, and bound to its bot's id, so that a row copied onto another bot does not become its token. A database backup therefore holds only ciphertext. Everything that section says about the secret holds here: it is at least 32 characters, it is best supplied from the environment of the `docker compose` command and not from `.env`, every later `up` must carry it, and it must be kept durably somewhere other than the data disk.
+
+| The Gateway starts with | Bots |
+| --- | --- |
+| the secret the tokens were stored under | Work. |
+| no secret | Nothing polls and no bot can be added. Every link and token is kept. The start-up line reads `telegram: not started (HARTMESH_PROVIDER_KEYS_SECRET is not set)`. People read that bots cannot be added because the setting that encrypts their tokens is missing; a person who has a bot reads that it is kept. Start again with the secret, and every bot works as before. |
+| a secret shorter than 32 characters | The same, with the line `telegram: not started (HARTMESH_PROVIDER_KEYS_SECRET is shorter than 32 characters)`. |
+| another secret | The Gateway starts and each stored token is unreadable: its link is kept, is not polled, and is listed by `tb status` under `tokens.unreadable`. Bots added from then on work. Start again with the right secret, or with the new one and the old one in `HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS` (§ "Rotating the secret"). If the old secret is lost, each person pastes their bot's token again in the web app, which stores it under the new secret. |
+
+A tenant that has not set the secret starts as the second row says. Supplying it is the one step a provider takes before a person can connect a first bot.
+
+### Reading the start-up lines
+
+Three places say what the start did.
+
+```bash
+hm logs --no-log-prefix gateway | grep 'render_config: wrote'
+hm logs --no-log-prefix gateway | grep 'telegram: '
+tb status
+```
+
+The first is the renderer's summary. After the fragment of the storage and the agents, `spaces: …; agents=on`, it carries one of five fragments, the first that applies:
+
+| Fragment | Meaning |
+| --- | --- |
+| `telegram=off` | `HARTMESH_TELEGRAM=off`. |
+| `telegram=on, bots cannot be added (HARTMESH_PROVIDER_KEYS_SECRET not set)` | On, and the Gateway's environment holds no secret. |
+| `telegram=on, bots cannot be read (HARTMESH_PROVIDER_KEYS_SECRET is shorter than 32 characters)` | On, and the secret is too short to be used. |
+| `telegram=on, no link buttons (HARTMESH_PUBLIC_HOST is not a hostname)` | On, and hand-over sentences are sent without a button. |
+| `telegram=on` | On, with link buttons. |
+
+The second is the supervisor's own line, written once at each Gateway start, after the prefix `<date> <time> - app.telegram_bots.supervisor - INFO - ` that every Gateway line carries and that the lines below leave out. A line that says nothing polls is written while the Gateway starts, before it is healthy; only the line for the health check comes later, after 60 seconds without an answer. The `on` line is written when every bot has finished its first attempt, normally within a few seconds of the Gateway becoming healthy. A deployment that then meets the broad-conflict condition writes the `paused (polled-elsewhere)` line as a second line, 60 seconds after its first poll. Bots answer, and send what they send first, after the first poll answers of a start, normally within a few seconds; up to 60 seconds (`CONFLICT_GRACE_SECONDS`) only while most bots are refused as polled elsewhere. In a count the noun is singular when the count is 1.
+
+| The line | `reason` | Meaning | What to do |
+| --- | --- | --- | --- |
+| `telegram: on, 12 bots for 7 people, 11 polling, 1 failing, 0 held; voice openai` | none | Bots work. `polling` is the healthy, non-held link count when Telegram is enabled; it is not a count of live HTTP requests. Some failing links still poll or probe to recover or explain an unavailable target. `failing` counts non-held links with a health cause, which `tb status` lists; `held` the links of people whose access is turned off. After `voice` stands `openai`, `gemini`, `unavailable` (no listed provider qualifies) or `off`. | Nothing, or `tb status` for the failing ones. |
+| `telegram: off (HARTMESH_TELEGRAM=off)` | `off` | The provider switched Telegram off. | Nothing. `on` brings every bot back. |
+| `telegram: not started (authentication is disabled)` | `misconfigured` | The rendered configuration has authentication off. Bots never run without it. | A profile fault: compare the bundle with the release. |
+| `telegram: not started (channel_connections.enabled and channel_connections.require_bound_identity must both be true)` | `misconfigured` | The rendered configuration would let an unbound chat account start work. | The same. |
+| `telegram: not started (HARTMESH_PROVIDER_KEYS_SECRET is not set)` | `secret-missing` | § "The secret that protects bot tokens". | Start with the secret. |
+| `telegram: not started (HARTMESH_PROVIDER_KEYS_SECRET is shorter than 32 characters)` | `secret-invalid` | The same. When `HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS` is the short one, the line names that variable. | Start with a valid secret. |
+| `telegram: paused (host-changed); run python -m app.telegram_bots.cli adopt` | `host-changed` | The database was started on a Docker engine other than the one recorded. No bot is polled on this known different host until the operator confirms the move. A full VM clone can preserve the host id and pass this check. | § "A copy of a deployment". |
+| `telegram: paused (polled-elsewhere); run python -m app.telegram_bots.cli resume` | `polled-elsewhere` | 60 seconds after its first poll this Gateway found that another program already polls most of its bots, stopped every poller and wrote to no chat; or an earlier start found it, and `resume` has not been run since. | § "Another deployment polls the same bots". |
+| `telegram: not started (the channel service failed to start)` | `misconfigured` | The channel service that carries messages into the Gateway raised at start. | The traceback above the line; `hm restart gateway`. |
+| `telegram: not started (the Gateway did not answer its own health check in 60 s)` | `misconfigured` | The supervisor waits for the Gateway to serve requests before the first poll, and it did not. | Read the Gateway's journal for the cause; `hm restart gateway`. |
+
+When more than one cause holds, the line is the first of the table that applies. `reason` is the value `/api/features` carries under `telegram.reason`, which `tb status` repeats and which is the word to ask a caller for. In every row but the first, polling is stopped and no chat message or link lifecycle change is caused by that stop. A broad-conflict stop retains the security guards and connect-code invalidations its preceding polling conflicts already recorded.
+
+**What people read.** The web app shows Telegram under Settings, Telegram. A control that cannot work is shown disabled with one sentence, never hidden. For `off` the sentence is "Telegram is switched off for your company. Ask {support} to switch Telegram on.", and for a person who has a bot "Telegram is switched off for your company. Your bots are kept and answer again when Telegram is switched on. Ask {support} to switch Telegram on." For `host-changed` it is "Telegram is paused: the service moved to a new server, and {provider} has to confirm the move. Your bots are kept." For `polled-elsewhere` it is "Telegram is paused here because several bots conflict with another program. Your bots are kept." For `misconfigured` it is "Telegram is not available right now." `{support}` stands for whoever the reader asks for what only the provider can give, as in § "Storage and agents": the words "an administrator" for a user, which is every account that is not an administrator, and the provider's name for an administrator. After each sentence but those of `off`, a user reads "Ask an administrator." and no reference. An administrator reads "Ask {provider} to fix this." after the sentences of `polled-elsewhere` and `misconfigured`, and "Reference for support: " with the reason, which is the word of the table above, after each sentence but those of `off`. In a chat, a bot that is not polled answers nothing; Telegram shows the person's messages as sent.
+
+### Commands
+
+One tool serves the operator: `python -m app.telegram_bots.cli`, called through `tb`. It runs inside the Gateway container with the Gateway's own authority and never as root. It is not a network route: nothing reachable over HTTP adopts a host, resumes polling or removes another person's bots. It follows the account commands (§ "Sign-in") and the commands of § "Storage and agents": every invocation prints exactly one JSON document on stdout, on one line, and every verb is idempotent.
+
+| `tb` verb | Does |
+| --- | --- |
+| `status [--owner <account id>]` | The deployment's state, counts of bot links by state, and every link that needs attention. With `--owner`, every link of one person. Changes nothing. |
+| `adopt` | Records that this Docker engine is now the host of this deployment's bots, after the line `telegram: paused (host-changed)`. |
+| `resume` | Records that no other deployment polls these bots any more, after the line `telegram: paused (polled-elsewhere)`. |
+| `remove --owner <account id>` | Removes every bot link of one person whose access is turned off. |
+| `remove --local-account <email>` | The same for a local-password account, which no command turns off (§ "Removing the bots of a person who left"). |
+
+The tool never prints a token, a bot's username, a person's Telegram name or id, or a chat id. A bot is named by its Telegram bot id, a person by their account id, the `id` the account commands print.
+
+The reference for each verb follows: its invocation, what it does in order, its document, an example, and every refusal.
+
+#### Output and exit codes
+
+The tool prints exactly one JSON document on stdout for every invocation, on one line, produced by `json.dumps(document, sort_keys=True)`, which is what the account commands do. There is no other output format. Anything else it writes goes to stderr.
+
+Every document has these fields.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `command` | string or null | The verb. Null only in the refusal of a command line that named no verb. |
+| `returncode` | integer | 0 or 1. It equals the process's exit status. |
+| `note` | string | One sentence that says what happened, for a person. |
+| `error` | string | Present only when `returncode` is 1: the refusal, one of the texts listed for the verb. |
+
+A document whose `returncode` is 0 carries every field of its verb's table; a field that does not apply is null, 0 or empty, as its type allows. A refusal carries `command`, `returncode` 1, `error` and the note `refused; nothing was changed`.
+
+Exit status 0: the verb did what was asked, or found it already done. Exit status 1: the verb refused or failed and changed nothing. No verb of this tool returns 2. A malformed command line, an unknown verb or a missing argument is a refusal like any other: one document, exit 1, with the argument parser's own message as `error`. A failure the tool did not foresee is reported the same way and never as a traceback on stdout: `error` reads `<exception class>: <its text>` and the note reads `failed; run the verb again`.
+
+The tool runs in the Gateway container as uid 1000, gid 1000, with the Docker socket's group and no capability. It loads `home/config.yaml`, reaches the database and the Docker daemon, and never the Gateway process, Telegram or any chat. What `adopt` and `resume` record, the Gateway reads at its next start. What `remove` deletes, the Gateway notices at the next pass of its 30-second task.
+
+Every verb can return these refusals:
+
+- `the configuration /srv/hartmesh/home/config.yaml cannot be loaded: <text>`
+- `the database cannot be reached: <text>`
+- `the database has no Telegram tables; this release has not started on it yet`
+
+##### `status`
+
+```bash
+tb status
+tb status --owner 1f9b6a2c-4d3e-4f5a-8b7c-9d0e1f2a3b4c
+```
+
+It reads the rendered configuration, the row of `telegram_deployment`, the Docker engine's ID and every bot link, and tries to open each stored token with the secrets in its environment, without keeping or printing any. It changes nothing. Its exit status is 0 whenever it can answer, whatever the state is: the document is the answer.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `enabled` | boolean | Whether `HARTMESH_TELEGRAM` is on in the rendered configuration. |
+| `bots` | string | `ready` or `unavailable`, as `/api/features` reports it. |
+| `reason` | string or null | With `unavailable`: `off`, `secret-missing`, `secret-invalid`, `host-changed`, `polled-elsewhere` or `misconfigured`. The two causes of `misconfigured` that exist only inside a running Gateway (its own health check, the channel service) are in its journal and not here. |
+| `polling_state` | string | `running`, `host_changed` or `polled_elsewhere`: what the next start would find, which is `host_changed` when the recorded Docker engine ID is not this VM's, and otherwise what the database records (`running` when it records nothing yet). |
+| `host_id` | string or null | The Docker engine ID the database records; null until a start in which nothing else kept Telegram from running. |
+| `this_host_id` | string or null | This VM's Docker engine ID; null when the daemon did not answer. |
+| `secret` | string | `set`, `absent` or `invalid` (it, or `HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS`, is shorter than 32 characters): the secret in this container's environment. |
+| `public_base_url` | string or null | The address link buttons open; null means hand-over sentences carry no button. |
+| `voice` | string | `openai`, `gemini`, `unavailable` or `off`, as `.env` alone renders it; a provider whose key was set in the product is not seen here, and the start-up line is the Gateway's own answer. |
+| `limits` | object | `deployment` and `per_person` (integers): the two limits as rendered. |
+| `links` | integer, or array with `--owner` | Without `--owner`, the number of bot links. With it, every link of that person, each an object of the fields of `attention[]`. |
+| `people` | integer | People who own at least one link. |
+| `by_state` | object | Counts for `waiting_connect`, `connected`, `held` and `blocked`. |
+| `by_health` | object | Counts for `ok`, `token_rejected`, `conflict`, `unreachable`, `secret_unreadable`, `agent_unavailable`, `stopped` and `policy_off`. |
+| `by_kind` | object | Counts for `lead_agent`, which is the ordinary chat, and `custom_agent`. `instance` is always 0 in this release. |
+| `acts_paused` | integer | Links under the pause. |
+| `limited` | integer | Links Telegram is limiting. |
+| `tokens` | object | `current`: tokens that open under the secret; `previous`: tokens that open only under `HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS`; `unreadable`: tokens that open under neither. All three are null when `secret` is not `set`. |
+| `attention` | array of objects | Every link whose `health` is not `ok`, whose `state` is `blocked`, that is paused/limited, or that has degraded or permanently failed delivery; at most 200, oldest change first. Empty with `--owner`. |
+| `attention[].delivery_pending` | integer | Number of pending/sending saved delivery rows in the current binding generation. |
+| `attention[].delivery_degraded` | boolean | A pending delivery exceeded its short failure threshold and continues automatic retry. |
+| `attention[].delivery_failed` | integer | Permanently failed saved deliveries in the current binding generation needing repair. |
+| `attention[].link` | string | The bot link's id. |
+| `attention[].bot_id` | integer | The Telegram bot id. |
+| `attention[].owner` | string | The owner's account id. |
+| `attention[].agent_kind` | string | `lead_agent`, `custom_agent` or `instance`. |
+| `attention[].agent_ref` | string | `lead_agent`, or the custom agent's name. |
+| `attention[].origin` | string | `pasted` or `managed`. |
+| `attention[].state` | string | The link's `state`. |
+| `attention[].health` | string | The link's `health`. |
+| `attention[].conflict_since` | string or null | ISO 8601. |
+| `attention[].probe_until` | string or null | ISO 8601: when probing ends or ended. |
+| `attention[].webhook` | boolean | Whether the conflict is a webhook. The webhook's host is not printed. |
+| `attention[].acts_paused_since` | string or null | ISO 8601. |
+| `attention[].limited_since` | string or null | ISO 8601. |
+| `attention[].last_ok_at` | string or null | The last successful call to Telegram for this bot. |
+| `attention[].last_error` | string or null | The class of the last error when it is a known one, else null; never the error's text. |
+| `attention[].token` | string or null | `current`, `previous` or `unreadable`; null when `secret` is not `set`. |
+
+Example:
+
+```json
+{"acts_paused": 1, "attention": [{"acts_paused_since": "2026-11-03T09:14:02+00:00", "agent_kind": "custom_agent", "agent_ref": "reader", "bot_id": 7512345678, "conflict_since": "2026-11-03T09:14:02+00:00", "health": "conflict", "last_error": "Conflict", "last_ok_at": "2026-11-03T09:12:58+00:00", "limited_since": null, "delivery_pending": 0, "delivery_degraded": false, "delivery_failed": 0, "link": "4c1f0a9e2b7d4e6f8a1c3d5e7f9b0a2c", "origin": "pasted", "owner": "1f9b6a2c-4d3e-4f5a-8b7c-9d0e1f2a3b4c", "probe_until": "2026-11-04T09:14:02+00:00", "state": "connected", "token": "current", "webhook": false}], "bots": "ready", "by_health": {"agent_unavailable": 0, "conflict": 1, "ok": 11, "policy_off": 0, "secret_unreadable": 0, "stopped": 0, "token_rejected": 0, "unreachable": 0}, "by_kind": {"custom_agent": 7, "instance": 0, "lead_agent": 5}, "by_state": {"blocked": 0, "connected": 11, "held": 0, "waiting_connect": 1}, "command": "status", "enabled": true, "host_id": "7b9c1e6f-4d2a-4c5e-9f0a-1b2c3d4e5f60", "limited": 0, "limits": {"deployment": 100, "per_person": 10}, "links": 12, "note": "telegram on: 12 bot links of 7 people; 1 needs attention; polling running on this host", "people": 7, "polling_state": "running", "public_base_url": "https://acme.example.com", "reason": null, "returncode": 0, "secret": "set", "this_host_id": "7b9c1e6f-4d2a-4c5e-9f0a-1b2c3d4e5f60", "tokens": {"current": 12, "previous": 0, "unreadable": 0}, "voice": "openai"}
+```
+
+Refusal, exit 1, beside the common ones: `no account has id <value>`, with `--owner`.
+
+##### `adopt`
+
+```bash
+tb adopt
+```
+
+It records the operator's statement that this Docker engine is now the one host of this deployment's bots. It is used after a restore or a move onto a VM whose Docker engine has another ID, when the Gateway's line asks for it (§ "A copy of a deployment"). In order:
+
+1. It reads this VM's Docker engine ID and the row of `telegram_deployment`.
+2. When the recorded ID equals this one and `polling_state` is `running`, it changes nothing and answers `already_adopted`.
+3. Otherwise it writes this ID as `host_id`, sets `polling_state` to `running` and `adopted_at` to now, in one statement.
+
+It starts nothing and contacts nobody. The Gateway reads the row at its next start: run `hm restart gateway` after it. It does not end any bot's pause.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `from` | string or null | The Docker engine ID recorded before; null when none was. |
+| `host_id` | string | This VM's Docker engine ID. |
+| `links` | integer | Bot links the next start will poll. |
+| `verdict` | string | `adopted` or `already_adopted`. |
+
+Example:
+
+```json
+{"command": "adopt", "from": "0d6c2b1e-8f3a-4c7d-9e5b-2a1f0c3d4e6f", "host_id": "7b9c1e6f-4d2a-4c5e-9f0a-1b2c3d4e5f60", "links": 12, "note": "Docker host 0d6c2b1e-8f3a-4c7d-9e5b-2a1f0c3d4e6f replaced by 7b9c1e6f-4d2a-4c5e-9f0a-1b2c3d4e5f60 for 12 bot links; restart the Gateway to start polling", "returncode": 0, "verdict": "adopted"}
+```
+
+Refusals, exit 1, beside the common ones:
+
+- `the Docker daemon did not answer, so this host cannot be named: host-unreadable`
+- `polling is paused because another deployment polls the same bots; stop that deployment's polling, then run resume`, when `polling_state` is `polled_elsewhere` and the recorded ID equals this one
+
+##### `resume`
+
+```bash
+tb resume
+```
+
+It records the operator's statement that no other deployment polls these bots any more. It is used when the Gateway's line reads `telegram: paused (polled-elsewhere)` (§ "Another deployment polls the same bots"). It sets `polling_state` from `polled_elsewhere` to `running`; when it is `running` already it changes nothing and answers `already_running`. It starts nothing: run `hm restart gateway` after it. If another deployment still polls, the next start records `polled_elsewhere` again, 60 seconds after its first poll, and writes the paused line as a second line. It does not end any bot's pause.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `links` | integer | Bot links the next start will poll. |
+| `verdict` | string | `resumed` or `already_running`. |
+
+Example:
+
+```json
+{"command": "resume", "links": 12, "note": "polling is allowed again; restart the Gateway to start polling", "returncode": 0, "verdict": "resumed"}
+```
+
+Refusal, exit 1, beside the common ones: `polling is paused because the Docker host changed; run adopt`, when `polling_state` is `host_changed`.
+
+##### `remove`
+
+```bash
+tb remove --owner 1f9b6a2c-4d3e-4f5a-8b7c-9d0e1f2a3b4c
+tb remove --local-account pat@example.com
+```
+
+It takes exactly one of the two flags. With `--owner` it removes every bot link of one person whose access is turned off (§ "Removing the bots of a person who left"). With `--local-account` it does the same for an account that has no identity-provider identity, on a deployment with local passwords, where `accounts disable` addresses no account; that form needs no earlier `disable`. In order, in one transaction:
+
+1. With `--owner` it reads the account by its id and refuses unless its access is turned off, as `accounts list` shows it. With `--local-account` it reads the account by its email and refuses, with the reason `not-local-account`, when the account has an identity-provider identity; it does not look at whether the access is on.
+2. For each of the person's links it writes one `telegram_bot_link_events` row with the action `remove`, the actor `host` and the detail `{"by": "operator"}`, revokes the link's binding as the person's own **Remove bot** does, and deletes the link with its buttons, queued messages, marks, pending files and topics, and with the record that ties its chat to a conversation, so that the same bot added again later starts a new conversation.
+3. It deletes the record that ties the person's Telegram account to their account here.
+
+It opens no token, calls no Telegram method and writes to no chat, so a bot created through another bot does not have its token replaced at Telegram. It keeps the person's Telegram settings, the record of what the person did from Telegram and the events. A second run finds nothing and answers 0.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `owner` | string | The account id, with either flag. |
+| `local_account` | boolean | Whether the run was made with `--local-account`. |
+| `removed` | integer | Links removed by this run. |
+| `bots` | array of objects | One per removed link: `link` (string), `bot_id` (integer), `agent_kind`, `agent_ref` and `origin` (strings). |
+
+Example:
+
+```json
+{"bots": [{"agent_kind": "lead_agent", "agent_ref": "lead_agent", "bot_id": 7512345678, "link": "4c1f0a9e2b7d4e6f8a1c3d5e7f9b0a2c", "origin": "pasted"}, {"agent_kind": "custom_agent", "agent_ref": "reader", "bot_id": 7698765432, "link": "9d2e4f6a8b0c4d1e9f3a5b7c1d2e3f40", "origin": "pasted"}], "command": "remove", "local_account": false, "note": "2 bot links of account 1f9b6a2c-4d3e-4f5a-8b7c-9d0e1f2a3b4c removed; the bots stay in that person's Telegram account and their tokens were not revoked", "owner": "1f9b6a2c-4d3e-4f5a-8b7c-9d0e1f2a3b4c", "removed": 2, "returncode": 0}
+```
+
+With `--local-account` the document has `"local_account": true` and the same fields, and its note puts first what the operator must know before anything else: `the account itself stays usable for whoever holds its password; 2 bot links of account 1f9b6a2c-4d3e-4f5a-8b7c-9d0e1f2a3b4c removed; the bots stay in that person's Telegram account and their tokens were not revoked`. The first clause is printed whatever the count is, also when the run removed nothing.
+
+Refusals, exit 1, beside the common ones:
+
+- `give exactly one of --owner <account id> and --local-account <email>`, when neither flag or both are given
+- `no account has id <value>`, with `--owner`
+- `no account has the email <value>`, with `--local-account`
+- ``not-local-account: This account signs in through an identity provider; turn its access off with `accounts disable` first``, with `--local-account`, for an account that has an identity-provider identity.
+- `the access of account <id> is not turned off; removing bots here is for a person who has left, so turn the account off first with accounts disable, or let the person remove their own bots in the web app`
+
+### Turning a person's access off and on
+
+`accounts disable` (§ "Sign-in") ends a person's access everywhere, and that includes every bot of theirs. It holds each of the person's channel bindings, and within 30 seconds the Gateway does this for each held binding that is a Telegram bot: the bot tells its chat once that access is off, its polling stops, the messages it had still to send are dropped, and its buttons stop working. The message reads:
+
+```
+Your access to {product} has been turned off.
+This chat will not answer. Ask your administrator. If the chat stays silent after your access is back, open {product} on the web and press Reconnect for this bot.
+```
+A person with several bots hears it once: one bot sends it with sound and the others without. Nothing the person sends afterwards is fetched from Telegram. The bot link and its token are kept, and the link still counts toward the two limits.
+
+The command's document counts the bots in its `surfaces.channel_bindings` entry, and `enable --restore-held` under `restored`. `telegram_bots` counts the held bindings that are Telegram bots; each stops listening within 30 seconds and tells its chat once that access is off. The count is taken from the stored record of what was held, so a second run of `disable` prints the same number. For a person with two bots and one unused connect link:
+
+```json
+"channel_bindings": {"action": "held", "connect_codes_ended": 1, "count": 2, "not_ended": 0, "stopped_after_ms": 59, "stopped_at": "2026-10-01T23:58:06.972819+00:00", "telegram_bots": 2}
+```
+
+`enable --restore-held` gives the bots back: each starts polling again, drops whatever Telegram still held for it, and tells its chat once:
+
+```
+Your access to {product} is back.
+Messages sent while it was off were not received. Send them again.
+```
+
+Its document carries `"restored": {"channel_bindings": ["…", "…"], "schedules": [], "telegram_bots": 2}`. A plain `enable` restarts nothing, as for every held binding: each bot stays held and silent, and `tb status` keeps counting it under `held`. The person signs in and presses **Reconnect** on each bot's row, which needs no new token. The press ends the held connection, starts the bot's polling again, drops whatever Telegram still held for it, and shows a new connect link; the person opens the link and presses Start in Telegram, as at the first connection. Between the two steps `tb status` counts the bot under `waiting_connect`.
+
+The pause after another program used a bot's token survives both commands (§ "A second program uses one bot's token").
+
+**A deployment with local passwords.** On a tenant with `HARTMESH_LOCAL_PASSWORDS=allowed`, `accounts disable` addresses no account: it answers that the account "has no identity-provider identity (a local-password account); this command addresses provider accounts" and exits 1. Nothing in this section applies there. There is no command that turns a local-password account off. The one thing it offers is `reset_admin --email <address>`, which gives the account a new one-time password and ends its web sessions; the account's personal access tokens, channels and scheduled tasks keep working (§ "Sign-in"). So on such a tenant a person's bots stop only when that person presses **Disconnect all bots** or removes them, when the operator removes the links (§ "Removing the bots of a person who left"), or when `HARTMESH_TELEGRAM=off` stops every bot.
+
+### Turning Telegram off and on
+
+1. Write the key and restart the Gateway, when `ai status` shows `"runs_in_flight": 0`:
+
+   ```bash
+   sed -i '/^HARTMESH_TELEGRAM=/d' /srv/hartmesh/.env
+   echo 'HARTMESH_TELEGRAM=off' >> /srv/hartmesh/.env
+   since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+   hm up -d --wait gateway
+   hm logs --no-log-prefix --since "$since" gateway | grep 'telegram: '
+   # … telegram: off (HARTMESH_TELEGRAM=off)
+   ```
+
+   The `sed` pattern ends at the `=`, so it leaves the three other Telegram keys alone. `--wait` returns when the Gateway is healthy, by which time the line is written, and `--since` leaves out the lines of earlier starts.
+2. `tb status` prints `"enabled": false, "reason": "off"` and the same counts of links as before: nothing was removed.
+3. To turn it on again, delete the line or write `on`, and `hm up -d --wait gateway`, with the secret in the command's environment, as every `up`. A few seconds after the command returns, the line reads `telegram: on, …`. Each bot starts polling and first receives what Telegram kept for it: Telegram keeps a bot's unread updates for at most 24 hours, so a message written during a short stop is answered after it if Telegram still holds it, and one written more than 24 hours before the start is lost.
+
+While Telegram is off, bots say nothing, not even that they are off, because a bot that is not polled cannot answer. Tell the administrators of the deployment before a planned stop.
+
+### Rotating the secret
+
+Bot tokens are rewrapped with provider keys, in one rotation (§ "Provider keys in the product", "Rotating the secret").
+
+1. Start the stack with the new value in `HARTMESH_PROVIDER_KEYS_SECRET` and the old one in `HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS`. At start the Gateway opens each token under either and stores it again under the new one.
+2. `tb status` must print `"tokens": {"current": 12, "previous": 0, "unreadable": 0}` and the provider-keys command `wrapped_with: current` for every stored key.
+3. Only then start again without the previous value.
+
+A start with the new value and without the previous one leaves every token unreadable (`"unreadable": 12`) and nothing lost: start again with both. Bot tokens are rewrapped only by a start whose line reads `telegram: on`. While Telegram is off or paused, `tokens.previous` stays above 0: keep `HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS` until a start with Telegram on has brought it to 0. Rotating this secret does not replace any bot's token at Telegram; only a bot's owner can do that.
+
+### A copy of a deployment
+
+Two Gateways using the same bot tokens can receive different parts of a person's messages and answer from different copies of the data. A concurrent copy must have Telegram off **before its first boot**, whether it holds one bot or hundreds. A copy includes a snapshot restored onto another VM, a full VM clone and a second stack made from the same data disk. Neither Docker identity nor Telegram polling chooses the intended deployment for the operator.
+
+1. Before a copy that will coexist with its original can start its Gateway, write `HARTMESH_TELEGRAM=off` into the copy's `.env`. For a full VM clone whose containers restart automatically, prevent Docker/container autostart on its first boot, or isolate that guest's outbound network before booting it; keep the isolation until the setting has been written and rendered. Editing `.env` after a normally networked first boot is too late. Start the copy with the setting off and verify `tb status` reports `"reason": "off"`. Its Gateway makes no Telegram call and sends no pending reply or question. The original's `.env` is not changed for this rehearsal.
+2. For a move or disaster recovery in which the copy will replace the original, stop the original's polling first: power it off, or write `HARTMESH_TELEGRAM=off` there and run `hm up -d gateway`. Confirm that it is stopped before enabling Telegram on the replacement. If the old VM's state cannot be established, keep the replacement off while the operator contains the old VM or revokes the affected tokens. A successful poll by the replacement is not confirmation that the original stopped.
+3. If the replacement's Docker engine has another known ID than the one the database recorded, it polls nothing and logs:
+
+   ```
+   telegram: paused (host-changed); run python -m app.telegram_bots.cli adopt
+   ```
+
+   After confirming the original no longer polls, run:
+
+   ```bash
+   tb adopt
+   since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+   hm restart gateway
+   sleep 120
+   hm logs --no-log-prefix --since "$since" gateway | grep 'telegram: '
+   ```
+
+   `adopt` records the operator's statement and takes effect at the restart. It proves neither that the original was stopped nor that another deployment lacks the same tokens.
+4. A full VM clone can preserve the Docker engine ID, secret and database. An unreadable engine ID also leaves the host check unapplied, as `host_unreadable` reports. The broad-conflict latch below is a best-effort response to observed 409s, not a guarantee that the copy stays silent or the original keeps answering. Both may send before it triggers, either may pause, and interleaved successful polls may prevent it from triggering at all. The required protection for concurrent copies is step 1, not a bot-count threshold.
+
+This is the second operator statement required for a move, beside `ai adopt-host` (§ "Storage and agents", "Backup and restore"). One concerns workspaces and the other bots.
+
+### Another deployment polls the same bots
+
+A process can latch `polled-elsewhere` when, during its first 60 seconds, at least two eligible bots have answered only 409 and form more than half of the links polled, spanning two owners or the one owner of every link. Existing conflicts and webhooks are set aside. It describes that process's observations; it does not identify a copy or elect an original.
+
+Until the startup rule answers, the process holds at most ten updates per link without handling or acknowledging them, and its senders wait. A false answer releases them, normally after the first poll results. A true answer cancels the pollers and drops its locally held updates without acknowledging them, writing `updates_dropped`; it retains each connect-code security guard already committed for a polling conflict. It causes no new link lifecycle, pause, binding, action or chat state. An early success can permit a clone's senders to start; alternating successful polls can evade the latch. A one-bot deployment uses its individual conflict rule. Inspect both deployments after any collision, even when one has the line below.
+
+1. The line and persistent state are:
+
+   ```
+   telegram: paused (polled-elsewhere); run python -m app.telegram_bots.cli resume
+   ```
+
+   A latched process stays paused across restarts. The original can be that process too.
+2. Identify the intended deployment from the operator's inventory and current data. Stop every unintended deployment's polling with `HARTMESH_TELEGRAM=off`, or power it off. Do not repeatedly resume both. If the cause may be token theft rather than the operator's own copy, replace the affected tokens (§ "A leaked token").
+3. Once unintended polling is stopped, on the intended deployment run:
+
+   ```bash
+   tb resume
+   since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+   hm restart gateway
+   sleep 120
+   hm logs --no-log-prefix --since "$since" gateway | grep 'telegram: '
+   ```
+
+   `resume` records that polling is allowed and requires the restart. An `on` line followed by `paused (polled-elsewhere)` means broad conflict was observed again. An `on` line alone is not proof of exclusive polling: verify the other deployment remains off, and check the intended deployment's per-link states and a test chat. Both deployments may already have sent messages, and a duplicate or unfamiliar button may need explaining to the affected person.
+4. On the intended deployment, `tb status` reports `acts_paused` and each affected bot's `acts_paused_since`. After the other program is confirmed stopped, each owner settles that bot's pause on the web with **That was me**, or replaces its token. Neither `adopt` nor `resume` ends the pause. Review the affected conversations before resuming; the detector cannot merge actions made in divergent databases.
+
+### A second program uses one bot's token
+
+When one bot is polled by another program for 60 seconds without a single successful poll here, or has a webhook set, the product treats it as proof that somebody else holds that bot's token. It stops serving that bot, tells its chat once that another program is using the bot, and probes every 30 seconds for 24 hours. When the other program stops, the bot answers again by itself. From the first moment, and until its owner acts on the web, the bot stands under the pause. In this release the pause changes no answer in a chat: it records that somebody else held the token, and the owner settles it.
+
+For a bot still being connected, the first observed polling conflict also invalidates connect links issued before that conflict, without waiting for the 60-second health threshold. The product records this guard durably, and it survives Gateway restarts. Replacing the token invalidates earlier connect links too. The person obtains a fresh link in the web app after the other program has stopped. This guard does not detect a token holder whose polling never causes an observed conflict; after a suspected leak the owner replaces the token and verifies the account shown on the web.
+
+The owner ends the pause in the web app, never in the chat: by pasting a new token for that bot, or by confirming **That was me** once the other program has stopped. The operator cannot end it and does not need to: no restart, no `enable`, no `adopt` and no `resume` ends it.
+
+What the operator sees: `tb status` lists the link under `attention` with `"health": "conflict"`, or with `"health": "ok"` and `acts_paused_since` set; the log has `telegram_bots health … to=conflict reason=second-poller` or `reason=webhook`.
+
+**A conflict that does not end.** After 24 hours the product stops probing; the row in the web app then offers **Try now**.
+
+1. `tb status --owner <account id>` shows `conflict_since`, `probe_until` and `webhook`. `"webhook": true` means the bot is connected to another service by a webhook; `false` means another program polls it.
+2. Tell the owner what the web app tells them. For a webhook: press **Use it here**, which disconnects the bot from the other service. For another poller the owner knows: stop that program, then **Try now**. For one the owner does not know: replace the token in BotFather and paste the new one, which also ends the pause.
+3. The row and `tb status` then read `connected` and `ok`. Nothing is asked of the operator.
+
+### A leaked token
+
+A bot's token gives no way into the deployment: only the Gateway fetches a bot's updates, only the bound account's messages are acted on, and a button does what the stored record says, not what the message above it says. Whoever holds a token can read what is sent to that bot from then on and can write and edit in the bot's name, so a token that may have leaked is replaced.
+
+1. Only the bot's owner can replace it: in BotFather, which issues a new token, and then by **Paste a new token** on the bot's row in the web app.
+2. The old token stops working at Telegram at once. Between the two steps the bot is rejected: `tb status` lists it with `"health": "token_rejected"`, and the row in the web app asks for the new token. The product counts a token as rejected only when Telegram has refused it twice, 30 seconds apart, so the state shows about half a minute after the old token stopped working; one refused call, or a "not found" answer to one call, never marks a bot rejected.
+3. A leak of the secret together with a database backup exposes every token of the deployment. Rotate the secret (§ "Rotating the secret") and ask every person to replace each bot's token; `tb status` gives the number of links and people.
+
+The Gateway never logs a token, and `tb` never prints one. If a token is found in a file or a ticket, treat it as leaked.
+
+### Replacing a bot
+
+Pasting the token of another bot requests a replacement under a required `operation_id`, reused for an HTTP retry of that paste. Token validation with Telegram precedes the local transaction. One SQL transaction validates the successor and connect-code allowance, revokes the old binding, removes its mapping, replaces the link, stores the encrypted successor and its code, and writes the receipt event with its `operation_id` column and `detail.old_link_id`/`detail.new_link_id`. A precommit refusal keeps the old link; no poller is stopped first. A lost HTTP response resolves the same receipt rather than deleting another bot. After commit the supervisor fences the old generation and starts the saved successor. A Telegram startup or webhook-takeover failure then appears as **saved, not available yet** on that successor, not as an unchanged old bot or a rollback. The operator checks the saved bot's state and helps the person complete its connection; no raw token belongs in a support message.
+
+### A bot that Telegram limits
+
+Telegram answers 429 when a bot sends too much. The product respects `retry_after`. A durable final answer, file or question remains pending after the immediate attempts are exhausted; it is retried automatically with delivery-only backoff from 5 seconds to a 300-second cap, or at Telegram's longer requested wait. No new user message, Gateway restart or model run is needed. A deferred send releases its worker so another bot can deliver. There are at most eight delivery workers across the deployment and one per link.
+
+Each final message/file part has its own acknowledgement. Acknowledged parts are not sent again; if Telegram accepted a part but its acknowledgement was lost, that part can arrive twice. The journal cannot promise exactly-once delivery by Telegram. The row in the web app explains delayed delivery, and the full answer remains in the conversation. When sends have been refused for ten minutes, `tb status` reports `limited_since`; the mark clears after the next accepted final send.
+
+1. Leave the persisted delivery queued while Telegram is reachable but rate limiting. It retries without another press from the person.
+2. If the delay persists, check the VM's clock, network and the log's `retry_after`/`send_failed` events. A rejected token, blocked chat or disabled owner has its own repair path; restarting alone does not repair those causes.
+
+
+### Backup and restore
+
+The backup of record is the platform's snapshot of the data disk (§ "Storage and agents", "Backup and restore"). Bot links, encrypted tokens, bindings, buttons and the record of what was done from Telegram are rows of the same database, so the snapshot covers them, and no step on the guest is needed. The secret is not on the data disk and must be supplied to the restored stack.
+
+**Restoring on the same VM** follows the five steps of that section unchanged. After step 5:
+
+```bash
+hm logs --no-log-prefix gateway | grep 'telegram: ' | tail -n 2
+tb status
+```
+
+The last line that begins `telegram: ` is the state; after `telegram: on, …` wait 60 seconds more for a second line (§ "Another deployment polls the same bots").
+
+**Restoring onto another VM** adds § "A copy of a deployment": `HARTMESH_TELEGRAM=off` first when the original still runs; `tb adopt` when the line asks for it.
+
+What a restore does to chats. Telegram keeps its own copy of every chat, and the restored database is older than it:
+
+| In the chat | After the restore |
+| --- | --- |
+| A question, a result or a notice that was waiting to be sent when the snapshot was taken | It is sent again, so a person can receive it a second time. |
+| A message the bot sent after the snapshot | It stays in the chat. Its buttons answer "Nothing is waiting on this any more." and change nothing. |
+| A token replaced after the snapshot | The database holds the old one, which Telegram rejects: `"health": "token_rejected"`. The owner pastes the current token again. |
+| A bot connected after the snapshot | The link exists without its binding, or not at all. The bot answers the person as it answers a stranger, or not at all. The person connects it again in the web app. |
+| A bot removed after the snapshot | The link is back. If the person deleted the bot in BotFather, it reads `token_rejected`; the person removes it again. |
+| A reply, a decision or an acceptance made after the snapshot | It is gone with everything else the deployment did since, as with any restore. Nothing is replayed from Telegram: the record of events and the record of what was sent share the one database and are restored together. |
+| A message a person sent while the stack was down | It is answered after the start if Telegram still holds it; Telegram keeps an update for at most 24 hours. |
+| A person whose access was turned off after the snapshot | Their access is on again and their bots answer. Run `accounts disable` again before telling people that the service is back. |
+| Bots removed with `tb remove` after the snapshot | The links are back, held or working. Run it again. |
+
+Tell the administrators of the deployment that people may see a question twice and may have to answer again what they answered after the snapshot.
+
+### Upgrading and rolling back
+
+**Upgrading** to the first release that carries Telegram bots needs nothing in `.env`. Telegram is on after it unless `HARTMESH_TELEGRAM=off` is written first, and no bot can be added until the Gateway is started with `HARTMESH_PROVIDER_KEYS_SECRET`.
+
+1. Snapshot the data disk at the platform. It is the only way back to the earlier release.
+2. Replace `/opt/hartmesh` with the new bundle and `hm up -d --wait`, as for every upgrade.
+3. Read the lines:
+
+   | Where | Expected |
+   | --- | --- |
+   | `render_config: wrote` | `…; telegram=on; …`, or `telegram=on, bots cannot be added (HARTMESH_PROVIDER_KEYS_SECRET not set)` |
+   | `telegram: ` | `telegram: on, 0 bots for 0 people, 0 polling, 0 failing, 0 held; voice openai`, or `telegram: not started (HARTMESH_PROVIDER_KEYS_SECRET is not set)` |
+   | `tb status` | `"links": 0`, `"polling_state": "running"`, `"host_id"` equal to `"this_host_id"` once the line reads `telegram: on`, and null until then |
+
+What the upgrade changes on the VM: the configuration format, 54 to 55, which the bundle's template carries and the Gateway renders by itself; and the database head, `0041_storage_host_replacements` to `0044_telegram_assistant_ids`, three additive migrations that the Gateway applies at its start: `0042_telegram_bots` adds fifteen new tables, `0043_telegram_inbox_chat_scope` scopes retained inbox message identities to their chat, and `0044_telegram_assistant_ids` retains opaque assistant-message ids. No existing table or column changes. The Gateway opens outgoing connections to `api.telegram.org:443`, one long-lived request per bot; a front door or firewall that filters outgoing traffic must admit it.
+
+**Rolling back** has two ways, and the first is nearly always the right one.
+
+*Turning the feature off* keeps the release and removes nothing (§ "Turning Telegram off and on").
+
+*Returning to the earlier release* is a restore of the snapshot taken before the upgrade. An earlier Gateway does not start on a database whose head it does not know, which is this README's rule for every release that added a migration. Everything the deployment did since the upgrade is lost. The migration's own downgrade is not a way back on a tenant that used the feature: it refuses with `Refusing to erase Telegram bot links, tokens or history` while any bot link, bot event, act from a chat or queued message is on record, and drops the fifteen tables only on a database that holds none.
+
+*Returning to an earlier release that already carried Telegram bots*, from one that carries more of the feature, needs no restore, because the database head is the same. The earlier Gateway does not know the records the later one wrote, so it may run on that database only with `HARTMESH_TELEGRAM=off`. Write the key before starting the earlier bundle, and turn Telegram on again only with the later release, or restore the snapshot taken before that upgrade.
+
+After a rollback by restore every bot stays in its owner's Telegram account and answers nothing. Tell people so; the bots work again, with a new set-up, when the tenant is upgraded again.
+
+### Removing the bots of a person who left
+
+Turning a person's access off stops their bots and keeps their links, which still count toward the deployment's limit. Each bot itself belongs to the person's Telegram account, not to the deployment, and stays there.
+
+1. Turn the access off, if it is not: `accounts disable` (§ "Sign-in"). Its document prints `"telegram_bots": 2` and, under `account`, the account's `id`.
+2. Remove the links:
+
+   ```bash
+   tb remove --owner 1f9b6a2c-4d3e-4f5a-8b7c-9d0e1f2a3b4c
+   ```
+
+   It prints `"removed": 2` and the note `2 bot links of account 1f9b6a2c-4d3e-4f5a-8b7c-9d0e1f2a3b4c removed; the bots stay in that person's Telegram account and their tokens were not revoked`. The Gateway forgets the bots within 30 seconds. Nothing is written to any chat: each chat was already told that access is off.
+3. `tb status --owner 1f9b6a2c-4d3e-4f5a-8b7c-9d0e1f2a3b4c` prints `"links": []`.
+
+The command refuses for an account whose access is on: a person who is still there removes their own bots in the web app, which also says goodbye in each chat. It deletes the encrypted tokens with the links, so nothing here can use those bots again; the copies in earlier snapshots follow the platform's retention. The person's conversations, settings and the record of what they did from Telegram are kept. If the person later returns and is enabled, they connect their bots again with the tokens BotFather shows them.
+
+**On a deployment with local passwords** step 1 does not exist. In this order: first end the person's sign-in with `reset_admin --email <address>`, which gives the account a new one-time password that only the operator holds and ends its sessions; then run
+
+```bash
+tb remove --local-account pat@example.com
+```
+
+This form accepts only an account that has no identity-provider identity and needs no prior `disable`. It removes every bot link of that person exactly as `tb remove --owner` does, and its note begins `the account itself stays usable for whoever holds its password`. For an account that signs in through an identity provider it refuses with the reason `not-local-account`: "This account signs in through an identity provider; turn its access off with `accounts disable` first". The Gateway forgets the bots within 30 seconds and calls no Telegram method for them, so their chats are told nothing: tell the person, or the administrators of the deployment, that the bots no longer answer.
+
+The bot links of a person who is leaving are removed with `tb remove --owner`, which is run before the seat is released (§ "Storage and agents", "Seats, and the account of a person who has left").
+
+### The log
+
+The Gateway writes one line per event about bots, each beginning with the word `telegram_bots` and the event's name, followed by `key=value` pairs. Every line of the Gateway begins with its own prefix, `<date> <time> - <logger> - <LEVEL> - `, for example `2026-11-03 09:14:02 - app.telegram_bots.polling - WARNING - telegram_bots poll_error …`; the examples here leave the prefix out, and the `grep` below matches the text after it.
+
+```
+telegram_bots poll_error link=4c1f0a9e2b7d4e6f8a1c3d5e7f9b0a2c bot=7512345678 error=Conflict http=409 streak=1 retry_in=1.0 desc=other-poller
+telegram_bots health link=4c1f0a9e2b7d4e6f8a1c3d5e7f9b0a2c bot=7512345678 from=ok to=conflict reason=second-poller
+```
+
+`link` is a bot link's id and `bot` the Telegram bot id; with these two, `tb status --owner` and the queries of § "What is kept" tie a line to a person. One `grep` finds them all:
+
+```bash
+hm logs --no-log-prefix gateway | grep ' - telegram_bots '
+```
+
+| Event | It means | What to do |
+| --- | --- | --- |
+| `supervisor_start`, `supervisor_ready`, `supervisor_stop` | The supervisor read the links, finished the first attempt for each, or stopped. `supervisor_ready` carries `links`, `ok` and `failing`. | Nothing. |
+| `polling_refused` | Nothing polls, for the `reason` printed: `off`, `auth-disabled`, `unbound-allowed`, `channel-service-failed`, `gateway-not-ready`, `secret-missing`, `secret-invalid`, `host-changed` or `polled-elsewhere`. It is an error line for every reason but `off`, which is written at INFO. For `polled-elsewhere` it carries how many links were polled, how many answered only 409, and how many people own those. | The row of the same cause in § "Reading the start-up lines". |
+| `bot_start`, `poll_first_ok`, `bot_stop` | One bot started, received its first answer from Telegram, or stopped, with the reason (`removed`, `held`, `token-stored`, `deployment`). | Nothing. |
+| `bot_start_failed` | Telegram could not be asked about one bot, for a cause other than a rejected token. It is tried again, after `retry_in` seconds when Telegram asked for a wait. A token counts as rejected only after Telegram refused it twice, 30 seconds apart. | If every bot fails: the VM's route to `api.telegram.org`. |
+| `poll_error`, `poll_recovered` | A poll failed; the first of a run is a warning and the rest are written at DEBUG. `poll_recovered` gives how long the run lasted. | A run on one bot with `http=409`: § "A second program uses one bot's token". Runs on every bot with `error=NetworkError`: the network. |
+| `health` | One bot's health changed, `from` one value `to` another, with the reason: `second-poller`, `webhook`, `network`, `invalid-token`, `task-died`, `secret`, `agent`, `probe-ok`, `recovered`. | `to=conflict`: § "A second program uses one bot's token". `to=token_rejected`: the owner pastes a new token. `to=unreachable`: the network; it recovers by itself. `to=stopped`: the next row. `to=secret_unreadable`: § "The secret that protects bot tokens". `to=agent_unavailable`: nothing; what the bot is connected to cannot serve that person now. |
+| `poll_task_died` | A bot's poller ended on an error the product did not foresee; the traceback follows. After five in ten minutes the bot is `stopped`. | Report the traceback to the product's maintainers. The owner's **Try now**, or `hm restart gateway`, starts the bot again. |
+| `state` | A link's state changed: `held`, `restored`, `forbidden` on a current-token/current-binding send to the bound private chat, or `inbound` when a message from that chat shows it was unblocked. Only a refusal involving the bound chat can mark its link blocked; failures of stranger notices, group/profile operations and callback acknowledgements remain local to those operations. | Nothing. |
+| `conflict_probing_ended` | 24 hours of probing passed without the conflict ending. | § "A conflict that does not end". |
+| `notice` | The bot told its chat one of the once-only sentences, failed to, or held it back because the chat had it within 24 hours; `key` names it. | Nothing. |
+| `webhook` | A bot's owner removed its webhook with **Use it here** (`deleted`). | Nothing. |
+| `pending_dropped` | A bot dropped what Telegram held for it, after `enable --restore-held`. | Nothing. |
+| `retry_after`, `send_failed` | Telegram slowed a bot down beyond the built-in waits, or a send gave up. | § "A bot that Telegram limits". |
+| `retention_sweep` | The daily sweep ran, with the number of rows it deleted (§ "What is kept"). | Nothing. |
+| `updates_dropped` | This process met the broad-conflict condition and dropped the `n` updates held during startup without acknowledging them. It may be the original or a copy. | § "Another deployment polls the same bots". |
+| `host_unreadable` | The Docker engine's ID could not be read within two seconds at a start, so the check for a changed host was skipped and polling began. | `docker info` on the VM; if this VM is a copy, § "A copy of a deployment". |
+| `voice_unqualified` | A listed provider does not qualify for voice notes; `reason` names the provider and the field or variable. Written once per process for each value. | § "The keys", `HARTMESH_TELEGRAM_VOICE`. |
+
+Lines at DEBUG (`poll`, `conflict_probe`, `offset_confirmed`) appear only when the Gateway's log level is lowered.
+
+**Never logged** by the code of the Telegram bots, at any level: a token or any part of one; a connect code; the id behind a button; a message's text, caption or file name; a voice note or its transcript; a webhook's address; a person's Telegram id, name or username; a chat id. An error from Telegram is logged by its class and one word for the description, from a closed list, never Telegram's own text; a network error by its class alone, because its text can hold a request address. The Telegram library's own logger is held at INFO, because at DEBUG it would print the answers of calls, which can include a token. A log level alone does not keep a token out, so two controls do, at every level: the Gateway logs only the class of an error the Telegram library raised and never its text, which can contain the whole token; and one log filter, `BotTokenLogFilter`, installed before the first bot is built on every handler of the root logger and of every logger that does not propagate to it, such as uvicorn's, replaces anything of a token's shape with `<bot token>` in every record of every logger and drops the library's record that carries raw updates. `<bot token>` in a line is that filter's mark. The supervisor sets the HTTP client's loggers `httpx` and `httpcore` to WARNING, so that a poll leaves no line. The channel manager and its retry helper of release 47 log a chat id, which is the person's Telegram id, and the text of a failed send's exception; the filter removes a token from both, and the chat id stays in those lines.
+
+### What is kept
+
+| Record | Kept for |
+| --- | --- |
+| Bot links with their encrypted tokens | Until the person removes the bot or replaces it by the token of another bot, or `tb remove`. The deletion of a custom agent keeps the link. |
+| What was done from a chat: every reply, stop, file, voice note and setting, with who did it and through which bot (`telegram_acts`) | 400 days (`ACT_RETENTION_DAYS`). An unresolved act is kept until settled. |
+| What happened to each bot link: added, connected, token replaced, held, conflict, removed (`telegram_bot_link_events`) | 400 days (`LINK_EVENT_RETENTION_DAYS`); kept after the link is gone. |
+| Durable replies (`telegram_outbox`), with ordered part/source references, acknowledgements, binding generation and claim ownership | At least 30 days after a row was sent, skipped or terminally failed (`OUTBOX_RETENTION_DAYS`), and longer while live callback dependencies, unfinished inputs or an unresolved attempt need it. Recoverable pending delivery is kept until settled; an immediate retry limit does not discard it. |
+| Durable inbound classification, stable action ids, exact conversation/run/output references and joined-message membership (`telegram_inbound_marks`) | Pending until settled, then seven days (`INBOUND_RETENTION_DAYS`). The row holds the person's text so that **Try again** can resend it, so that button stops working after those seven days. No raw voice audio is stored. |
+| Buttons (`telegram_callbacks`) | Seven days after use, and a question's own buttons at 180 days; authorization ends at 180 days or an earlier expiry. Unfinished delivery may retain bookkeeping longer without extending authority. |
+| A voice note's audio | Never stored. |
+| A person's Telegram settings (`telegram_person_settings`) | Kept; nothing deletes them. |
+| The Telegram account a person connected: id, first name, username (`telegram_accounts`) | Until that binding ends, or `tb remove`. |
+| The Telegram id and chat id on each act (`telegram_acts`) | 400 days, also after the bot is removed. |
+| A file sent without a caption, by name and Telegram file id (`telegram_pending_files`) | Swept after 24 hours (`files.pending_ttl_hours`). |
+
+Disconnect all on the web also revokes held bindings and old waiting codes; a later restore-held cannot undo it.
+
+One sweep a day in the Gateway (`sweep_retention`, first one hour after a start) deletes what is past its time and writes one `telegram_bots retention_sweep` line with the four counts: inbound tombstones, outbox rows, acts and events. A conversation held in Telegram is an ordinary conversation of the product and is kept as every conversation is.
+
+**Download all my data** (§ "Download all my data") gains one file, `telegram.json`, with three parts: `settings` (time zone, language, notification settings and the agreement to voice notes); `bots` (each bot's id, what it is connected to, username, origin, state, health, the Telegram name it is connected as, and its dates; never a token); and `acts` (each act's id, kind, state, reason, bot id, targets and date; never its content). The file is left out for a person who has neither settings nor a bot.
+
+**What was done from Telegram, by whom and on which bot.** No screen shows this record; the database answers. Run a query with:
+
+```bash
+hm exec -T postgres psql -U deerflow -d deerflow -c "<query>"
+```
+
+Everything done from Telegram in the last seven days:
+
+```sql
+SELECT a.created_at, a.kind, a.state, a.reason, u.email AS person, a.owner_user_id,
+       a.bot_id, a.request_id, a.id AS operation_id
+FROM telegram_acts a LEFT JOIN users u ON u.id = a.owner_user_id
+WHERE a.created_at >= now() - interval '7 days'
+ORDER BY a.created_at;
+```
+
+`kind` is what was done, such as `voice_note` or `settings`. `state` `done` means the product recorded it; `refused` and `conflict` mean it did not, with `reason`; `uncertain` means the product got no answer and the person was told so. The history of one bot, by its `bot_id`, is in `telegram_bot_link_events` (`action`, `actor_id`, `created_at`), where the actor `host` is the Gateway or an operator command.
+
+### What people should know about Telegram
+
+Telegram is a service of its own, and some of what it does no setting of this product changes. The eleven sentences below are the statement a provider gives the people who use the bots. `{product}` stands for the product's name (`HARTMESH_PRODUCT_NAME`).
+
+1. Telegram is a separate service. What a person exchanges with a bot, including files and voice notes, passes through Telegram's servers and is kept by Telegram in that person's account until the person deletes it there. Bot chats are not end-to-end encrypted. {product} cannot read or delete Telegram's copy.
+2. Each bot belongs to the Telegram account of the person who created it. After it is removed from {product} it stays in that account until the person deletes it in BotFather.
+3. A bot answers only the one Telegram account its owner connected, and only in a private chat. Anyone else gets, now and then, a fixed sentence that names no owner and no agent, and nothing more. The bot's name and picture are visible to anyone on Telegram who finds it.
+4. A bot's token is a password for that bot. It is entered only in the web app, stored encrypted under the deployment's key secret, and never shown again. Whoever holds a token can read what is sent to that bot and write in its name, so a token that may have leaked is replaced.
+5. Whoever can open a person's Telegram can write to that person's bots as that person. A lost phone is handled by ending its Telegram session from another device and pressing Disconnect all bots in the web app. From a chat nobody can change who has access or add a bot's token.
+6. A notification can show the first lines of a message on a locked phone. Telegram and the phone can hide previews.
+7. On a deployment that signs people in through an identity provider, when a person's access is turned off, their bots say so once and stop. On a deployment with local passwords the provider cannot turn one person's access off; it can remove that person's bots. What the person sends afterwards is not received.
+8. Voice notes are turned into text by OpenAI or Google, and only when the deployment already offers that provider's models at the provider's own address, after the person agrees once. {product} does not store the recording; the provider's own terms govern what it keeps. Otherwise voice notes are not accepted.
+9. Link previews are switched off on every message, so that Telegram does not fetch an address that appears in an answer.
+10. A copy must have `HARTMESH_TELEGRAM=off` before its first boot while the original runs; cloned guests must not autostart a networked Gateway before that setting is applied. A full clone can pass the host check. The broad-conflict latch can pause either deployment and can miss interleaved successful polls, so it guarantees neither a silent copy nor an uninterrupted original. The operator keeps the unintended deployment off and checks both after a collision.
+11. The operator's tool shows counts of bots and their states, never a token and never a bot's username. The log holds no token and no message text; it names a bot by its Telegram bot id and a link by its id, and where the product's channel code logs a dropped or a failed message it holds a chat id, which in a private chat is the person's Telegram id. The database holds each bot's username and the Telegram name and id it is connected as; the conversations held in Telegram, which are ordinary conversations of {product}; the content of what was done from a chat, such as the text of an answer; the text of a message kept for one tap of Try again; and a voice note's transcript while it waits for a choice. The provider that runs the deployment holds the secret that opens the tokens.
+
+### What is not covered
+
+- Files larger than 20 MB coming in and 50 MB going out are Telegram's limits for bots; the bot hands the person over to the web app for them.
+- The other channels of this profile have no words for a person whose access is turned off (§ "Sign-in").
+- On a deployment with local passwords no command turns one person's access off, so that person's bots are stopped only by removing them (§ "Removing the bots of a person who left").
+
 ## Durability
 
 Deliberately relaxed, because the guest's disks sit on a replicated tier that
@@ -4043,8 +4649,9 @@ the product for ...`, and this command give what the Gateway actually uses.
 (`provider_keys`), Fernet-encrypted (AES-128-CBC with HMAC-SHA256) under a
 key derived (HKDF-SHA256) from `HARTMESH_PROVIDER_KEYS_SECRET`, together with its
 variable name, so a row copied onto another provider does not become its
-key. A database backup therefore holds only ciphertext. Without the secret
-the product refuses to store a key and says why; with one shorter than 32
+key. A database backup therefore holds only ciphertext. The same secret,
+under a label of its own, protects the tokens of Telegram bots (§ "Telegram
+bots"). Without the secret the product refuses to store a key and says why; with one shorter than 32
 characters it refuses too. The secret must not live on the disk the
 database does: `/srv/hartmesh/.env` shares the data disk with
 `/srv/hartmesh/postgres`, so a snapshot of that disk would carry both the
@@ -4067,7 +4674,12 @@ every stored key, and the only remedy is setting each key again.
 rewraps every stored key under the new one at start; when the command shows
 `wrapped_with: current` for every stored key, drop the previous value. A
 start with the new value and without the previous one leaves every stored
-key `unreadable` with `wrapping_key: "set"`; start again with both.
+key `unreadable` with `wrapping_key: "set"`; start again with both. Bot
+tokens are rewrapped at the same start, when its line reads `telegram: on`;
+`python -m app.telegram_bots.cli status` shows `tokens.previous` 0 when they
+are. A start with Telegram off or paused rewraps none: keep
+`HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS` until a start with Telegram on has
+brought `tokens.previous` to 0.
 
 **The record.** Every add, replace and remove is kept in
 `provider_key_events` -- which provider, which action, the administrator's
@@ -4092,7 +4704,7 @@ that no longer renders at start takes a release that changed the catalog;
 the Gateway then logs the refusal and does not start. Start it once without
 `HARTMESH_PROVIDER_KEYS_SECRET` -- the stored keys are then unreadable and
 not rendered -- remove the key in the product, and start it again with the
-secret.
+secret. No Telegram bot is polled during that start.
 
 ### Login lockout
 
@@ -4329,7 +4941,8 @@ all three together; `images.txt` still has eight images.
 
 TLS, the front door (Traefik on the platform cluster, forwarding plain HTTP
 with `X-Forwarded-For` / `X-Forwarded-Proto`), backups, and the host firewall
-are all outside the VM and outside this profile.
+are all outside the VM and outside this profile. What a restore does to
+Telegram chats is in § "Telegram bots", "Backup and restore".
 
 ## What has been verified
 

@@ -89,7 +89,7 @@ TEXTS: dict[str, str] = {
     "new.done": "已开始新对话。",
     "new.kept": "已保留。继续此对话。",
     "cmd.unknown": "/{command} 不是此聊天的命令。请点菜单按钮查看命令。",
-    "cmd.agent": "此聊天始终是 {name}。每个 AI 助手、AI 员工和自定义智能体都有独立的聊天。",
+    "cmd.agent": "此聊天始终是 {name}。每个自定义智能体都有独立的聊天。",
     "cmd.skill_off": "技能 /{skill} 已关闭。",
     "cmd.skill_unavailable": "此聊天无法使用技能 /{skill}。",
     "settings.state_basic": "此聊天固定文字的语言：{language}。回答会使用你输入的语言。",

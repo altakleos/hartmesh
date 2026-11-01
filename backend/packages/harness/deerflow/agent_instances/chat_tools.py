@@ -12,12 +12,13 @@ WebPageKey = Literal["access", "files", "memory", "conversations", "work", "agen
 
 @tool
 def show_web_page(page: WebPageKey, runtime: ToolRuntime[dict | None]) -> ToolMessage:
-    """Offer the person a button that opens one page of the web app.
+    """Offer the person a link that opens one page of the web app.
 
-    Use it when the person asks for something that is done on the web: who has
+    Use it when the person asks for something that is done on a page: who has
     access, the files, what is remembered, earlier conversations, assignment
     history, settings, adding an AI assistant or an AI employee, Telegram bots,
-    scheduled tasks, the account. Name the page; never write an address.
+    scheduled tasks, the account. Answer what you can answer yourself. Name the
+    page; never write an address.
     """
     context = runtime.context or {}
     is_instance = isinstance(context.get(AGENT_EXECUTION_CONTEXT_KEY), AgentExecution)
@@ -26,6 +27,6 @@ def show_web_page(page: WebPageKey, runtime: ToolRuntime[dict | None]) -> ToolMe
     return ToolMessage(
         name="show_web_page",
         tool_call_id=runtime.tool_call_id,
-        content="A button that opens this page is shown under your reply. Say in one sentence that this is done on the web. Do not write an address.",
+        content="A link to this page is shown with your reply where this chat can show one. Say in one sentence what the page is for. Do not write an address.",
         artifact={"web_page": {"version": 1, "kind": "web_page", "key": page}},
     )
