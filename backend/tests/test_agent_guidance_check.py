@@ -51,6 +51,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "frontend/src/AGENTS.md",
     "frontend-hm/AGENTS.md",
     "frontend-hm/src/AGENTS.md",
+    "frontend-hm/src/core/telegram-bots/AGENTS.md",
     "scripts/AGENTS.md",
     "skills/public/business-report/AGENTS.md",
 }
