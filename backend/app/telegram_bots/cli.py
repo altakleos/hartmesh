@@ -10,7 +10,7 @@ import re
 import sys
 from collections import Counter
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from pydantic import ValidationError
 from sqlalchemy import case, func, inspect, select, text
@@ -24,10 +24,11 @@ from app.telegram_bots.config import load_config
 from app.telegram_bots.deployment import CopyGuard, GuardRefused, feature_reason, static_cause
 from deerflow.config.app_config import AppConfig
 from deerflow.persistence.telegram_bots import model
-from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramDeploymentRow, TelegramOutboxRow
+from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramDeploymentRow, TelegramInboundMarkRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
 
 COMMANDS = ("status", "adopt", "resume", "remove")
+POLLING_STALE_AFTER = timedelta(minutes=5)
 _STATES = ("waiting_connect", "connected", "held", "blocked")
 _HEALTH = ("ok", "token_rejected", "conflict", "unreachable", "secret_unreadable", "agent_unavailable", "stopped", "policy_off")
 _KINDS = ("lead_agent", "custom_agent", "instance")
@@ -110,8 +111,17 @@ def _classification(cipher, row) -> str | None:
         del opened
 
 
-def _link_document(row, token, delivery) -> dict:
+def _polling_stale(row, now: datetime) -> bool:
+    """A poll stamps `last_ok_at` once a minute, so an older stamp means no poller is working."""
+    stamp = row.last_ok_at
+    if row.state != "connected" or row.health != "ok" or stamp is None:
+        return False
+    return now - (stamp.replace(tzinfo=UTC) if stamp.tzinfo is None else stamp) > POLLING_STALE_AFTER
+
+
+def _link_document(row, token, delivery, inputs, *, polling_stale=False) -> dict:
     pending, degraded, failed = delivery
+    open_inputs, oldest_input = inputs
     # Explicit projection: do not serialize an ORM row or a bot-link dataclass.
     error = (row.last_error or "").split(":", 1)[0].strip()
     return {
@@ -134,6 +144,9 @@ def _link_document(row, token, delivery) -> dict:
         "delivery_pending": pending,
         "delivery_degraded": degraded,
         "delivery_failed": failed,
+        "open_inputs": open_inputs,
+        "oldest_open_input_at": _iso(oldest_input),
+        "polling_stale": polling_stale,
     }
 
 
@@ -166,8 +179,19 @@ async def status(session_factory, *, config: AppConfig, guard: CopyGuard, owner:
         if owner is not None:
             aggregates = aggregates.where(TelegramBotLinkRow.owner_user_id == owner)
         delivery = {key: (int(pending), bool(degraded), int(failed)) for key, pending, degraded, failed in await session.execute(aggregates.group_by(outbox.link_id))}
+        mark = TelegramInboundMarkRow
+        open_marks = (
+            select(mark.link_id, func.count(), func.min(mark.accepted_at)).join(TelegramBotLinkRow, (TelegramBotLinkRow.id == mark.link_id) & (TelegramBotLinkRow.binding_generation == mark.binding_generation)).where(mark.state != "done")
+        )
+        if owner is not None:
+            open_marks = open_marks.where(TelegramBotLinkRow.owner_user_id == owner)
+        inputs = {key: (int(count), oldest) for key, count, oldest in await session.execute(open_marks.group_by(mark.link_id))}
         classifications = [_classification(cipher, row) for row in links]
-        documents = [_link_document(row, token, delivery.get(row.id, (0, False, 0))) for row, token in zip(links, classifications, strict=True)]
+        now = datetime.now(UTC)
+        documents = [
+            _link_document(row, token, delivery.get(row.id, (0, False, 0)), inputs.get(row.id, (0, None)), polling_stale=cause is None and polling_state == "running" and _polling_stale(row, now))
+            for row, token in zip(links, classifications, strict=True)
+        ]
         host_id = deployment.host_id if deployment else None
         totals = {
             "people": len({row.owner_user_id for row in links}),
@@ -180,11 +204,11 @@ async def status(session_factory, *, config: AppConfig, guard: CopyGuard, owner:
     if cause is None and polling_state != "running":
         cause = polling_state.replace("_", "-")
     reason = feature_reason(cause)
-    attention = [item for item in documents if item["health"] != "ok" or item["state"] == "blocked" or item["acts_paused_since"] or item["limited_since"] or item["delivery_degraded"] or item["delivery_failed"]]
+    attention = [item for item in documents if item["health"] != "ok" or item["state"] == "blocked" or item["acts_paused_since"] or item["limited_since"] or item["delivery_degraded"] or item["delivery_failed"] or item["polling_stale"]]
     transcriber = resolve_transcriber(telegram, models=config.models)
     voice = transcriber.provider if transcriber else ("off" if telegram.voice.provider == "off" else "unavailable")
     counts = Counter(classifications)
-    note = f"telegram {'on' if telegram.enabled else 'off'}: {len(documents)} bot links of {totals['people']} people; {len(attention)} needs attention; polling {polling_state} on this host"
+    note = f"telegram {'on' if telegram.enabled else 'off'}: {len(documents)} bot links of {totals['people']} people; {len(attention)} needs attention; the next start would find polling {polling_state}"
     return _success(
         "status",
         note,

@@ -51,6 +51,19 @@ class _State:
     tool_chunks: dict = field(default_factory=dict)
     activities: dict = field(default_factory=dict)
     cursor: str | None = None
+    final_read: dict = field(default_factory=dict)
+
+
+def _final_read(output):
+    """Closed words from a finished run's proof, for the line that says why it cannot be delivered."""
+    if output is None:
+        return {"output": "absent"}
+    document = output.inventory.document
+    reason = document.reason if document is not None else None
+    return {
+        "output": f"{output.output.state}:{output.output.reason}",
+        "inventory": f"{output.inventory.state}:{document.coverage if document is not None else None}:{reason or output.inventory.reason}",
+    }
 
 
 @dataclass(frozen=True)
@@ -487,6 +500,7 @@ class RunObserver:
         facade = await self._facade(state)
         output = await facade.get_run_output(state.record.run_id)
         self._check(state)
+        state.final_read = _final_read(output)
         if output is None or output.output.state == "pending":
             return None
         guard = _Guard(self, state, state.attempt.read_guard)
@@ -511,6 +525,10 @@ class RunObserver:
             )
             return await self.coordinator.outbox.plan_stopped_publication_reply(state.record, output=output, preview=preview, guard=guard, waiting=waiting)
         return None
+
+    def final_read(self, record):
+        state = self._states.get(_identity(record))
+        return state.final_read if state is not None else {}
 
     def retire(self, record):
         state = self._states.get(_identity(record))

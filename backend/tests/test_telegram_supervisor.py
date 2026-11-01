@@ -977,6 +977,7 @@ async def test_retention_runs_daily_after_an_hour_and_the_smaller_sweeps_hourly(
     monkeypatch.setattr(e.supervisor, "_periodic", lambda operation, seconds, name, *, first_delay=None: periodic.__setitem__(name, (operation, seconds, first_delay)))
     await e.supervisor.start()
     try:
+        assert periodic["publication-recovery"][0] == e.supervisor._tick_recovery
         assert periodic["retention"][1:] == (86400, 3600)
         assert periodic["callback-sweep"][1:] == (3600, None) and periodic["pending-file-sweep"][1:] == (3600, None)
         assert await periodic["callback-sweep"][0]() == 0
@@ -992,6 +993,37 @@ async def test_retention_logs_one_line_of_counts(db, monkeypatch, caplog):
         await e.supervisor.sweep_retention()
     lines = [record.getMessage() for record in caplog.records if "retention_sweep" in record.getMessage()]
     assert len(lines) == 1 and all(f" {key}=" in lines[0] for key in ("inbound", "outbox", "acts", "events"))
+    await e.supervisor.stop()
+
+
+async def test_a_failed_job_says_which_job_and_why(db, monkeypatch, caplog):
+    e = build(db, monkeypatch)
+    failed = asyncio.Event()
+
+    async def fail():
+        failed.set()
+        raise ValueError("private text")
+
+    e.supervisor._periodic(fail, 3600, "sender", first_delay=0)
+    await asyncio.wait_for(failed.wait(), 3)
+    await asyncio.sleep(0)
+    lines = [record.getMessage() for record in caplog.records if "maintenance_failed" in record.getMessage()]
+    assert len(lines) == 1 and lines[0].startswith("telegram_bots maintenance_failed job=sender cause=ValueError:test_telegram_supervisor.py:")
+    assert "private text" not in caplog.text
+    await e.supervisor.stop()
+
+
+async def test_recovery_says_when_its_held_count_moves(db, monkeypatch, caplog):
+    from app.telegram_bots.recovery import RecoveryPass
+
+    e = build(db, monkeypatch)
+    e.supervisor.recovery = SimpleNamespace(tick=AsyncMock(side_effect=[RecoveryPass(scanned=3, held=2), RecoveryPass(scanned=3, held=2), RecoveryPass(scanned=1)]))
+    with caplog.at_level("INFO", logger="app.telegram_bots.supervisor"):
+        for _ in range(3):
+            await e.supervisor._tick_recovery()
+    lines = [(record.levelname, record.getMessage()) for record in caplog.records if "publication_recovery_pass" in record.getMessage()]
+    assert lines == [("WARNING", "telegram_bots publication_recovery_pass held=2 scanned=3"), ("INFO", "telegram_bots publication_recovery_pass held=0 scanned=1")]
+    e.supervisor.recovery = None
     await e.supervisor.stop()
 
 

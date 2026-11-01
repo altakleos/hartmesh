@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import random
 import re
@@ -31,6 +32,7 @@ from app.telegram_bots.api_logging import log_call_failure
 from app.telegram_bots.config import TelegramBotsConfig
 from app.telegram_bots.links import BotLink
 from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
+from deerflow.runtime.runs.terminal import failure_chain
 from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
@@ -38,6 +40,7 @@ if TYPE_CHECKING:
     from app.telegram_bots.inbox import PublicationRecord, RestartClosure
     from app.telegram_bots.links import PublicationGuard
 
+logger = logging.getLogger(__name__)
 OUTBOX_SEND_CONCURRENCY = 8
 DELIVERY_RETRY_FIRST_SECONDS = 5
 DELIVERY_RETRY_CAP_SECONDS = 300
@@ -2740,8 +2743,8 @@ class OutboxSender:
                 row.degraded_at = now
 
     def _worker_done(self, link_id: str, row_id: str, generation: int, claim: str, task: asyncio.Task) -> None:
-        if not task.cancelled():
-            task.exception()  # retrieve unexpected exceptions; never log payloads
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning("telegram_bots sender_worker_failed link=%s delivery=%s cause=%s", link_id, row_id, failure_chain(task.exception()))
         callback = asyncio.create_task(self._release(link_id, row_id, generation, claim, task))
         self._callbacks.add(callback)
         self._release_tasks[claim] = callback

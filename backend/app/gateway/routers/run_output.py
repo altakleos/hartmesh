@@ -1,5 +1,7 @@
 """Read exact admitted output evidence without creating or replaying execution."""
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
@@ -12,9 +14,11 @@ from deerflow.runtime.runs.output import OutputEvidenceError, OutputEvidenceScop
 from deerflow.runtime.runs.output_inventory import EventInventoryEvidence, inventory_evidence_from_kwargs, validate_inventory_pair
 from deerflow.runtime.runs.output_inventory_source import read_durable_inventory_source
 from deerflow.runtime.runs.output_source import read_durable_output_source
+from deerflow.runtime.runs.terminal import failure_chain
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.thread_id import ThreadId
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["runs"])
 
 
@@ -161,6 +165,8 @@ async def get_run_output(thread_id: ThreadId, run_id: str, request: Request):
         # Scope/auth denials never borrow a backend's acknowledgement or details.
         if error.status_code in {401, 403, 404}:
             raise HTTPException(error.status_code, "Run output is unavailable") from None
+        logger.warning("Run output read failed run_id=%s cause=%s", run_id, failure_chain(error))
         raise _unavailable() from None
-    except Exception:
+    except Exception as error:
+        logger.warning("Run output read failed run_id=%s cause=%s", run_id, failure_chain(error))
         raise _unavailable() from None

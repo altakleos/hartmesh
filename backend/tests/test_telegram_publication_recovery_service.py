@@ -275,6 +275,19 @@ async def test_controlled_same_link_waits_without_overlapping_or_reclaiming_live
         await service.stop()
 
 
+async def test_a_failed_pass_counts_as_held_and_leaves_its_cause(recovery_environment, caplog):
+    from app.telegram_bots.recovery import PublicationRecoveryService
+
+    e = recovery_environment
+
+    async def page(*, after, limit, max_origins):
+        raise KeyError("private text")
+
+    service = PublicationRecoveryService(SimpleNamespace(recovery_page=page), e.outbox, SimpleNamespace(), e.db.links, lambda: True)
+    assert (await service.tick()).held == 1
+    assert "telegram_bots publication_recovery_failed cause=KeyError:test_telegram_publication_recovery_service.py:" in caplog.text and "private text" not in caplog.text
+
+
 async def test_controlled_cursor_advances_at_most_two_pages_and_wraps(recovery_environment):
     from app.telegram_bots.inbox import RecoveryCursor, RecoveryEntry, RecoveryPage
     from app.telegram_bots.recovery import PublicationRecoveryService

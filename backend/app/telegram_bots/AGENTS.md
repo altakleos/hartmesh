@@ -528,6 +528,10 @@ supervisor constructor, never imports.
 `api_logging.py` supplies closed error classifications and exact event fields.
 Native call failures have one logging owner; a translated permanent failure
 retains that fact so durable recovery does not log the same attempt twice.
+Every turn line goes through `turns._chat_line`, which names the link, bot, turn
+and run. A cause prints through `deerflow.runtime.runs.terminal.failure_chain`:
+`raise ... from None` keeps `__context__`, so class, fixed slug and raising line
+survive to the report while exception text stays out of the log.
 
 `supervisor.py` owns the one Gateway-loop runtime. Await `check` before serving,
 retain `start` as a task, and use the shared health barrier and ten-start permit

@@ -105,8 +105,19 @@ async def test_invalid_or_absent_version_never_acknowledges(route_environment, h
 
 
 @pytest.mark.asyncio
+async def test_a_failed_read_leaves_its_cause_and_not_its_text(route_environment, monkeypatch, caplog):
+    async def fail(**_kwargs):
+        raise KeyError("private text")
+
+    monkeypatch.setattr("app.gateway.routers.run_output._read_owned", fail)
+    response = await get(route_environment, "missing")
+    assert response.status_code == 503 and ACK not in response.headers
+    assert "Run output read failed run_id=missing cause=KeyError:test_run_output_route.py:" in caplog.text and "private text" not in caplog.text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("authority", ["run", "event"])
-async def test_capability_is_required_before_missing_ack(route_environment, authority):
+async def test_capability_is_required_before_missing_ack(route_environment, authority, caplog):
     from deerflow.runtime.events.store.memory import MemoryRunEventStore
     from deerflow.runtime.runs.manager import RunManager
     from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -118,6 +129,7 @@ async def test_capability_is_required_before_missing_ack(route_environment, auth
         e.app.state.run_event_store = MemoryRunEventStore()
     response = await get(e, "missing")
     assert response.status_code == 503 and ACK not in response.headers
+    assert "Run output read failed run_id=missing cause=" in caplog.text
 
 
 @pytest.mark.asyncio

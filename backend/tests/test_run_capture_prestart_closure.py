@@ -9,7 +9,7 @@ from _run_output_store_test_support import RAW_OWNER
 from _run_output_store_test_support import output_store as output_store
 
 from deerflow.runtime.runs.manager import CancelOutcome, RunManager, RunStartOutcome, RunStartupPhase
-from deerflow.runtime.runs.output import UnavailableOutputReceipt, receipt_from_kwargs, validate_receipt_status
+from deerflow.runtime.runs.output import OutputEvidenceError, UnavailableOutputReceipt, receipt_from_kwargs, validate_receipt_status
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -62,6 +62,20 @@ async def test_task_attachment_failure_seals_failed_without_reclassifying_abort(
         assert_seal(row, record, status="error", reason="failed")
     else:
         assert "output_evidence" not in row["kwargs"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_prestart_seal_leaves_its_cause_before_the_fence(output_store, monkeypatch, caplog):
+    manager, record = await pending(output_store)
+
+    async def fail(*_args, **_kwargs):
+        raise KeyError("private text")
+
+    monkeypatch.setattr(manager, "finalize_output", fail)
+    with pytest.raises(OutputEvidenceError):
+        await manager._close_cancelled_admission(record)
+    assert f"Run {record.run_id} prestart output could not be confirmed: KeyError:test_run_capture_prestart_closure.py:" in caplog.text
+    assert f"Run {record.run_id} was fenced" in caplog.text and "private text" not in caplog.text
 
 
 @pytest.mark.asyncio

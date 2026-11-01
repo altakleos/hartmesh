@@ -198,13 +198,30 @@ async def test_every_explicit_target_or_publication_conflict_refuses_before_http
 
 
 @pytest.mark.asyncio
-async def test_required_command_context_cannot_escape_to_ordinary_command_handler(setup, monkeypatch):
+async def test_required_command_context_cannot_escape_to_ordinary_command_handler(setup, monkeypatch, caplog):
     e = setup
     e.message.msg_type = InboundMessageType.COMMAND
     e.message.text = "/new"
     await e.manager._handle_message(e.message)
     e.ordinary.assert_not_called()
     assert e.outbounds[-1].text == "Channel execution protocol refused"
+    assert f"Channel execution refused channel={e.message.channel_name} publication={e.message.execution_context.publication_id} cause=ChannelExecutionProtocolError:" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_for_a_malformed_context_still_answers_and_releases_the_message(setup, monkeypatch, caplog):
+    e = setup
+    released = []
+
+    async def release(message):
+        released.append(message)
+
+    monkeypatch.setattr(e.manager, "_release_inbound_dedupe_key", release)
+    e.message.execution_context = object()
+    await e.manager._handle_message(e.message)
+    assert released == [e.message]
+    assert e.outbounds[-1].text == "Channel execution protocol refused"
+    assert "publication=None cause=ChannelExecutionProtocolError:" in caplog.text
 
 
 @pytest.mark.asyncio

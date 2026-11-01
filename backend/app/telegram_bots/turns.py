@@ -13,12 +13,20 @@ from dataclasses import dataclass, field, replace
 from app.channels.message_bus import InboundMessage
 from app.telegram_bots.queue import ChatQueue
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+from deerflow.runtime.runs.terminal import failure_chain
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 FINAL_PLAN_SECONDS = 60
+TURN_WAIT_REPORT_SECONDS = 600
 _SOURCES = "telegram_source_message_ids"
 _ALL_TOPICS = object()
+
+
+def _chat_line(event, *, chat=None, error=None, **facts):
+    """One line an operator can act on: whose chat, and why it stopped."""
+    known = {"link": chat.id if chat is not None else None, "bot": chat.bot_id if chat is not None else None, **facts, "cause": failure_chain(error) or None}
+    logger.warning("telegram_bots %s %s", event, " ".join(f"{key}={value}" for key, value in known.items() if value is not None))
 
 
 def forward_origin(message):
@@ -98,10 +106,17 @@ class _Turn:
     stop_marker_checked: bool = False
     submission: object = None
     final_since: float | None = None
+    observed_since: float | None = None
+    wait_reported: bool = False
+    run_id: str | None = None
 
     @property
     def topic(self):
         return self.origins[0].message_thread_id
+
+    def held(self, event, error=None, **facts):
+        """`record.run_id` stays empty on a live turn: the observer binds the run to its own copy."""
+        _chat_line(event, chat=self.link, error=error, turn=self.record.publication_id if self.record is not None else None, run=self.run_id, **facts)
 
 
 @dataclass(frozen=True)
@@ -199,7 +214,7 @@ class ChatTurns:
             self._observer = RunObserver(coordinator=self.services.publications, http_owner=self.services.thread_client, capture_attempt=self.services.publication_authority.capture, is_current=self._publication_current)
         return self._observer
 
-    def _spawn(self, coroutine, *, channel=None):
+    def _spawn(self, coroutine, *, channel, turn=None):
         task = asyncio.create_task(coroutine, name="telegram-chat-turn")
         self._tasks.add(task)
         self._task_channels[task] = channel
@@ -208,7 +223,10 @@ class ChatTurns:
             self._tasks.discard(done)
             self._task_channels.pop(done, None)
             if not done.cancelled() and done.exception() is not None:
-                logger.warning("telegram_bots chat_turn_held error=%s", type(done.exception()).__name__)
+                if turn is not None:
+                    turn.held("chat_turn_held", done.exception())
+                else:
+                    _chat_line("chat_turn_held", chat=channel.link, error=done.exception())
 
         task.add_done_callback(finished)
         return task
@@ -496,7 +514,7 @@ class ChatTurns:
             turn.submission = self.services.outbox.inbox.typed_submission_stage(origins[0])
         self._turns[(link.id, turn.topic)] = turn
         if self._creating(turn):
-            turn.task = self._spawn(self._drive(turn), channel=channel)
+            turn.task = self._spawn(self._drive(turn), channel=channel, turn=turn)
 
     def _finish(self, turn):
         if not self._current(turn) or turn.done.is_set():
@@ -672,8 +690,8 @@ class ChatTurns:
                 await view.flush()
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                logger.warning("telegram_bots chat_preview_held")
+            except Exception as error:
+                turn.held("chat_preview_held", error)
             await asyncio.sleep(1)
 
     async def _pause_ui(self, turn, *, final=False):
@@ -709,9 +727,9 @@ class ChatTurns:
             return await operation()
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
             if turn.final_since is None:
-                logger.warning("telegram_bots chat_final_unplanned")
+                turn.held("chat_final_unplanned", error)
             if turn.presentation is not None:
                 await turn.presentation.close()
             return None
@@ -771,6 +789,16 @@ class ChatTurns:
             guard.current()
         turn.stop_commands.clear()
 
+    @staticmethod
+    def _report_wait(turn, run):
+        """A run that never ends writes nothing else, and it holds the whole chat."""
+        now = turn.channel._time()
+        if turn.observed_since is None:
+            turn.observed_since = now
+        if not turn.wait_reported and now - turn.observed_since >= TURN_WAIT_REPORT_SECONDS:
+            turn.wait_reported = True
+            turn.held("chat_turn_waiting", status=run.row.get("status") if run is not None else None, waited_s=int(now - turn.observed_since))
+
     async def _complete(self, turn):
         if not self._current(turn):
             return
@@ -787,9 +815,9 @@ class ChatTurns:
                 return await operation()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
                 if not reported:
-                    logger.warning("telegram_bots chat_observation_held")
+                    turn.held("chat_observation_held", error)
                     reported = True
                 if turn.presentation is not None:
                     await turn.presentation.close()
@@ -810,7 +838,7 @@ class ChatTurns:
             prepared = await self._prepare(turn)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
             if turn.record is None and turn.stop_requested and self._current(turn):
                 # Preparation has settled after Stop withdrew its creating
                 # guard. This writer proves there is still no publication;
@@ -823,7 +851,7 @@ class ChatTurns:
                 raise
             # A lost creating result cannot authorize a second dispatch. The
             # pinned immutable publication still owns read-only discovery/Stop.
-            logger.warning("telegram_bots chat_dispatch_result_held")
+            turn.held("chat_dispatch_result_held", error)
             prepared = True
         if not prepared:
             # A positive terminal input plan, unlike an absent run, owns this
@@ -838,9 +866,13 @@ class ChatTurns:
                 if watcher is None:
                     await self._view(turn)
                     if turn.presentation is not None:
-                        display = self._spawn(self._display_loop(turn, turn.presentation), channel=turn.channel)
+                        display = self._spawn(self._display_loop(turn, turn.presentation), channel=turn.channel, turn=turn)
                 if watcher is None or watcher.done():
-                    watcher = self._spawn(self.observer.watch(record, turn.link, on_preview=lambda value: self._preview(turn, value), on_line=lambda key, values: self._activity(turn, key, values), turn_done=turn.done), channel=turn.channel)
+                    watcher = self._spawn(
+                        self.observer.watch(record, turn.link, on_preview=lambda value: self._preview(turn, value), on_line=lambda key, values: self._activity(turn, key, values), turn_done=turn.done),
+                        channel=turn.channel,
+                        turn=turn,
+                    )
                 if turn.stop_requested:
                     await self._observe(turn, lambda: self._request_stop(turn))
                     if turn.done.is_set():
@@ -848,6 +880,8 @@ class ChatTurns:
                 run = await self._observe(turn, lambda: self.observer.read_run(record, turn.link))
                 if not self._current(turn):
                     return
+                if run is not None:
+                    turn.run_id = run.row.get("run_id")
                 failure = classify_creation_refusal(turn.refusal, channel_execution_scope(record)) if turn.refusal is not None else None
                 if run is not None and run.row.get("status") in {"success", "error", "timeout", "interrupted"}:
                     failure = classify_run(run, channel_execution_scope(record))
@@ -875,7 +909,7 @@ class ChatTurns:
                                 # This plan can lose to a reply that did commit, and
                                 # the next `plan_final` then returns that reply.
                                 if await self._try_final(turn, lambda: self._publication_outcome(turn, "error.generic", run=run, undeliverable=True)) is not None:
-                                    logger.warning("telegram_bots chat_final_undeliverable")
+                                    turn.held("chat_final_undeliverable", **self.observer.final_read(record))
                                     await self._observe(turn, lambda: self._complete(turn))
                                     return
                         # A stopped stream still requires acknowledged exact
@@ -914,6 +948,7 @@ class ChatTurns:
                                 if not self._current(turn):
                                     raise ValueError("chat-turn-retired") from None
                                 turn.record = successor
+                                turn.run_id = None
                                 turn.refusal = None
                                 turn.stop_status = None
                                 turn.stop_marker_checked = False
@@ -928,13 +963,13 @@ class ChatTurns:
                                     turn.record = await self.services.publications.retry_refused(old, turn.link, turn.refusal, on_reserved=pin)
                             except asyncio.CancelledError:
                                 raise
-                            except Exception:
+                            except Exception as error:
                                 if not self._current(turn) or turn.record.publication_id == old.publication_id:
                                     raise
                                 # The successor was positively handed off before
                                 # its creating result became uncertain. Observe
                                 # only that identity; never redispatch it.
-                                logger.warning("telegram_bots chat_retry_result_held")
+                                turn.held("chat_retry_result_held", error)
                             self.observer.retire(old)
                             if watcher is not None and not watcher.done():
                                 watcher.cancel()
@@ -948,9 +983,11 @@ class ChatTurns:
                             continue
                     else:
                         if await self._observe(turn, lambda: self._pause_ui(turn, final=True)):
+                            turn.held("chat_run_failed", status=run.row.get("status") if run is not None else None, outcome=failure.text_key)
                             await self._observe(turn, lambda: self._publication_outcome(turn, failure.text_key, run=run, refusal=turn.refusal if run is None else None))
                             await self._observe(turn, lambda: self._complete(turn))
                             return
+                self._report_wait(turn, run)
                 turn.wake.clear()
                 try:
                     await asyncio.wait_for(turn.wake.wait(), 1)
@@ -1203,8 +1240,8 @@ class ChatTurns:
             page = await await_drained(host.outbox.inbox.prepublication_page(limit=32, max_origins=64))
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.warning("telegram_bots chat_startup_page_held")
+        except Exception as error:
+            _chat_line("chat_startup_page_held", error=error)
             return
         if not phase():
             return
@@ -1218,10 +1255,10 @@ class ChatTurns:
                 await self._recover_input(entry, phase)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
                 # A stale or unreadable cohort member cannot admit itself, and
                 # cannot suppress another independent frozen input's outcome.
-                logger.warning("telegram_bots chat_startup_input_held")
+                _chat_line("chat_startup_input_held", error=error, link=entry.key.link_id)
 
     async def _recover_input(self, entry, phase):
         host = self.services

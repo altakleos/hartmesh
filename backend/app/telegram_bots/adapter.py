@@ -40,6 +40,7 @@ from app.telegram_bots.strangers import STRANGER_REPLIES_PER_BOT_PER_HOUR as STR
 from app.telegram_bots.strangers import STRANGER_REPLY_EVERY_SECONDS as STRANGER_REPLY_EVERY_SECONDS
 from app.telegram_bots.strangers import StrangerLedger as StrangerLedger
 from app.telegram_bots.token_pattern import TOKEN_BODY as TOKEN_BODY
+from deerflow.runtime.runs.terminal import failure_chain
 from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
@@ -669,7 +670,7 @@ class TelegramBotChannel(TelegramChannel):
         await asyncio.gather(*tuple(self._ingress_tasks), return_exceptions=True)
 
     async def _on_error(self, update, context) -> None:
-        logger.warning("telegram_bots handler_failed link=%s bot=%s error=%s", self.link.id, self.link.bot_id, type(context.error).__name__)
+        logger.warning("telegram_bots handler_failed link=%s bot=%s cause=%s", self.link.id, self.link.bot_id, failure_chain(context.error))
         admission = _ADMISSION.get()
         if admission is not None and admission.task is asyncio.current_task() and update is not None and admission.update_id == update.update_id:
             admission.failed = True

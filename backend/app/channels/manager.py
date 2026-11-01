@@ -53,6 +53,7 @@ from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import END_SENTINEL, StreamBridge
 from deerflow.runtime.goal import parse_goal_command
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+from deerflow.runtime.runs.terminal import failure_chain
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference
 from deerflow.skills.storage import get_or_new_skill_storage
@@ -2285,7 +2286,9 @@ class ChannelManager:
                 await self._handle_command(msg)
             else:
                 await self._handle_chat(msg, bound_identity_checked=True)
-        except ChannelExecutionProtocolError:
+        except ChannelExecutionProtocolError as error:
+            # A context of the wrong type is one way here, so it cannot be trusted to have the field.
+            logger.warning("Channel execution refused channel=%s publication=%s cause=%s", msg.channel_name, getattr(msg.execution_context, "publication_id", None), failure_chain(error))
             await self._release_inbound_dedupe_key(msg)
             await self._send_error(msg, "Channel execution protocol refused")
         except InvalidChannelSessionConfigError as exc:

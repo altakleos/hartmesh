@@ -376,6 +376,7 @@ async def test_accepted_stop_cannot_replace_a_normally_completed_exact_output(co
         assert await observer.request_stop(record, e.link, stop_id="completion-race") == "requested"
         identity = await observer.plan_final(record, e.link, stopped=True)
         assert identity is not None
+        assert observer.final_read(record) == {"output": "complete:None", "inventory": "matched:complete:None"}
         async with e.db.sessions() as session:
             row = await session.get(TelegramOutboxRow, identity)
             assert row.payload["reply_basis"]["outcome"]["kind"] == "model_text"

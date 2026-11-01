@@ -100,7 +100,7 @@ async def test_actual_worker_seals_exact_callback_source_and_genuine_sdk_human_i
 
 
 @pytest.mark.asyncio
-async def test_actual_worker_flush_uncertainty_never_terminalizes_staged_success(output_store, monkeypatch):
+async def test_actual_worker_flush_uncertainty_never_terminalizes_staged_success(output_store, monkeypatch, caplog):
     env = await _environment(output_store, monkeypatch)
     completed = AsyncMock()
     calls = []
@@ -120,6 +120,9 @@ async def test_actual_worker_flush_uncertainty_never_terminalizes_staged_success
     completed.assert_not_awaited()
     with pytest.raises(OutputEvidenceError):
         await env.manager.get_output_snapshot(env.record.run_id, user_id=RAW_OWNER)
+    assert f"Run {env.record.run_id} output could not be confirmed: " in caplog.text, "The cause must be in the log before the run is fenced"
+    assert f"Run {env.record.run_id} was fenced" in caplog.text and "lost lease" not in caplog.text
+    assert "synthetic event write uncertainty" not in caplog.text
 
 
 @pytest.mark.asyncio
