@@ -46,7 +46,7 @@ def test_an_explicit_cause_wins_over_the_context():
 @pytest.mark.parametrize(
     "message",
     [
-        "123456789:AAEhBOweik6ad9r-synthetic-token",
+        "123456789:" + "A" * 31,
         "person@example.com",
         "SELECT secret FROM users",
         "Connection refused by db.internal",
