@@ -184,6 +184,7 @@ _TURN_OUTCOME_KEYS = frozenset(
         "busy.two_conversations",
     }
 )
+_NO_RUN_KEYS = frozenset({"error.generic", "busy.cancelled", "chat.restarted"})
 INPUT_OUTCOME_KEYS = (_TURN_OUTCOME_KEYS - {"busy.queued", "busy.thread", "busy.starting_elsewhere", "busy.two_conversations"}) | {"custom_agent.deleted", "busy.followup_full", "voice.failed"}
 
 
@@ -196,10 +197,14 @@ class PublicationOutcomeBasis:
     stop_id: str | None = None
 
 
-def _prepare_publication_outcome(record, *, run, creation_refusal, source_ref, undeliverable=False):
+def _prepare_publication_outcome(record, *, run, creation_refusal, source_ref, undeliverable=False, no_run=False):
     from app.channels.execution import ChannelExecutionScope
     from app.telegram_bots.errors import classify_creation_refusal, classify_run
 
+    if no_run:
+        if run is not None or creation_refusal is not None or undeliverable or type(source_ref) is not dict or set(source_ref) != {"key", "values"} or source_ref["key"] not in _NO_RUN_KEYS:
+            raise ValueError("publication-outcome-conflict") from None
+        return _safe_json({"version": 1, "publication": _publication_identity(record), "proof": {"kind": "no_run"}, "source_ref": source_ref, "finish_route": True})
     if (run is None) == (creation_refusal is None) or type(source_ref) is not dict or set(source_ref) != {"key", "values"}:
         raise ValueError("publication-outcome-conflict") from None
     scope = record.scope
@@ -251,7 +256,17 @@ def validate_publication_outcome(item: OutboxItem) -> PublicationOutcomeBasis:
             if _canonical_primary(proof["scope"]) != _canonical_primary(asdict(execution)) or source["key"] not in {"busy.gave_up", "busy.cancelled"}:
                 raise ValueError
         elif proof.get("kind") == "before_dispatch_stop" and set(proof) == {"kind", "stop_id"}:
-            if type(proof["stop_id"]) is not str or not proof["stop_id"] or len(proof["stop_id"]) > 128 or not proof["stop_id"].isprintable() or source != {"key": "busy.cancelled", "values": {}}:
+            if (
+                type(proof["stop_id"]) is not str
+                or not proof["stop_id"]
+                or len(proof["stop_id"]) > 128
+                or not proof["stop_id"].isprintable()
+                or source not in ({"key": "busy.cancelled", "values": {}}, {"key": "error.generic", "values": {}})
+            ):
+                raise ValueError
+        elif proof.get("kind") == "no_run" and set(proof) == {"kind"}:
+            # The marked message found no run, and no live owner is left to wait for one.
+            if record.run_id is not None or source["key"] not in _NO_RUN_KEYS:
                 raise ValueError
         else:
             raise ValueError
@@ -1324,9 +1339,9 @@ class Outbox:
 
         return await await_drained(perform())
 
-    async def plan_publication_outcome(self, record, *, run=None, creation_refusal=None, source_ref, keyboard, callbacks, guard, undeliverable=False):
+    async def plan_publication_outcome(self, record, *, run=None, creation_refusal=None, source_ref, keyboard, callbacks, guard, undeliverable=False, no_run=False):
         link = _guard_publication_link(record, guard)
-        basis = await await_drained(asyncio.to_thread(_prepare_publication_outcome, record, run=run, creation_refusal=creation_refusal, source_ref=source_ref, undeliverable=undeliverable))
+        basis = await await_drained(asyncio.to_thread(_prepare_publication_outcome, record, run=run, creation_refusal=creation_refusal, source_ref=source_ref, undeliverable=undeliverable, no_run=no_run))
 
         async def attach(writer, identity):
             await self.inbox.seal_publication_outcome(record, outbox_id=identity, session=writer)
@@ -1344,11 +1359,11 @@ class Outbox:
             _attach=attach,
         )
 
-    async def plan_cancelled_before_dispatch(self, record, *, stop_id, guard, callbacks, keyboard=()):
+    async def plan_cancelled_before_dispatch(self, record, *, stop_id, guard, callbacks, keyboard=(), key="busy.cancelled"):
         link = _guard_publication_link(record, guard)
-        if type(stop_id) is not str or not stop_id or len(stop_id) > 128 or not stop_id.isprintable() or record.run_id is not None:
+        if type(stop_id) is not str or not stop_id or len(stop_id) > 128 or not stop_id.isprintable() or record.run_id is not None or key not in {"busy.cancelled", "error.generic"}:
             raise ValueError("publication-outcome-conflict") from None
-        source = {"key": "busy.cancelled", "values": {}}
+        source = {"key": key, "values": {}}
         basis = _safe_json({"version": 1, "publication": _publication_identity(record), "proof": {"kind": "before_dispatch_stop", "stop_id": stop_id}, "source_ref": source, "finish_route": True})
 
         async def attach(writer, identity):

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import math
 import re
+import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -202,6 +203,22 @@ def _plain_origins(link, origins, *, thread_id, endpoint_id):
     return tuple(sorted(origins, key=lambda row: (row.accepted_at.astimezone(UTC), row.update_id, row.message_id)))
 
 
+def _try_again(record):
+    return [[{"label": "label.try_again", "kind": "retry_message", "target_kind": "attempt", "target_id": record.publication_id}]]
+
+
+async def fixed_source(host, link, key):
+    """A fixed sentence with the values it needs. `host` is the supervisor or anything shaped like it."""
+    values = {}
+    if key == "custom_agent.deleted":
+        values = {"product": host.product_name, "agent": link.bot_username or host.product_name}
+    elif key == "chat.files_full":
+        values = {"product": host.product_name, "support": "an administrator"}
+    elif key == "refused.interrupted":
+        values = {"name": (await host.prepare_ingress_values(link))["name"]}
+    return {"key": key, "values": values}
+
+
 def channel_execution_scope(record: PublicationRecord) -> ChannelExecutionScope:
     if type(record) is not PublicationRecord:
         _refuse()
@@ -220,9 +237,29 @@ class PublicationCoordinator:
         self._creating = self._reading = True
         self._operations: set[asyncio.Task] = set()
         self._stop_task = None
+        # Held by the queued message, so an entry lasts exactly as long as that message.
+        self._queued: weakref.WeakValueDictionary[str, ChannelExecutionContext] = weakref.WeakValueDictionary()
         self.human_input_planner = None
         self.file_output_planner = None
         self.file_preflight = None
+        self.host = None
+
+    def fence(self, record: PublicationRecord) -> None:
+        """Refuse a queued message's POST, so a worker that reaches it later cannot run it."""
+        context = self._queued.get(record.publication_id)
+        if context is not None:
+            context.admission.control.retired = True
+
+    def worker_state(self, record: PublicationRecord) -> Literal["queued", "taken"] | None:
+        """Where a marked message is: waiting for a worker, with one, or held by nobody.
+
+        A fence turns back a message `queued`. One `taken` can have a POST on the wire that no
+        fence recalls, so only its worker letting go proves no run is coming.
+        """
+        context = self._queued.get(record.publication_id)
+        if context is None or context.progress.released:
+            return None
+        return "taken" if context.progress.taken else "queued"
 
     def _check_open(self, *, creating):
         if not self._reading or creating and not self._creating:
@@ -403,6 +440,7 @@ class PublicationCoordinator:
                 # Keep this fence and actual enqueue synchronous: no await.
                 admission.check("run_create")
                 reservation.commit(message)
+                self._queued[record.publication_id] = message.execution_context
                 if record.owner_callback_id is not None:
                     await self.inbox.confirm_callback_dispatch(replace(record, dispatch_started=True), guard=create_guard)
             elif won is not False:
@@ -572,7 +610,22 @@ class PublicationCoordinator:
 
         return await self._call(perform, timeout=OBSERVATION_TIMEOUT_SECONDS, expired=lambda: PublicationRunObservation("budget_exhausted", record, reason="budget_exhausted"), deadline=deadline)
 
-    async def observe(self, record: PublicationRecord, current_link: BotLink, *, max_pages: int, deadline: float | None = None) -> PublicationObservation:
+    async def _close_run(self, record, link, run, guard):
+        """A finished run that cannot be delivered ends in what it was, with a way to try again."""
+        from app.telegram_bots.errors import classify_run
+
+        failure = classify_run(run, channel_execution_scope(record))
+        key = "error.generic" if failure is None else "busy.gave_up" if failure.retry_later else failure.text_key
+        source = await fixed_source(self.host, link, key)
+        identity = await self.outbox.plan_publication_outcome(record, run=run, source_ref=source, keyboard=_try_again(record), callbacks=self.host.callbacks, guard=guard, undeliverable=failure is None)
+        return PublicationObservation("planned", record, outbox_id=identity)
+
+    async def observe(self, record: PublicationRecord, current_link: BotLink, *, max_pages: int, deadline: float | None = None, closing: str | None = None) -> PublicationObservation:
+        """Plan what a saved publication can still say. With `closing`, nobody else will: end it.
+
+        `closing` is the sentence for a message that found no run. Only a caller that knows no
+        live turn owns this publication may pass it.
+        """
         try:
             self._check_open(creating=False)
             if type(max_pages) is not int or not 1 <= max_pages <= MAX_OBSERVATION_PAGES:
@@ -586,13 +639,25 @@ class PublicationCoordinator:
 
         async def perform(control):
             try:
+                if closing is not None:
+                    self.fence(record)
                 admission, _, read_guard = await self._attempt(current_link, record.scope, control)
                 control.final_check = lambda: admission.check("source_read")
                 facade = self._facade(record, admission)
                 located = await self._locate(record, admission, read_guard, facade, max_pages, metadata=False)
+                if located.state == "pending" and closing is not None and self.worker_state(record) != "taken":
+                    keyboard = () if closing == "busy.cancelled" else _try_again(located.record)
+                    identity = await self.outbox.plan_publication_outcome(located.record, no_run=True, source_ref={"key": closing, "values": {}}, keyboard=keyboard, callbacks=self.host.callbacks, guard=read_guard)
+                    return PublicationObservation("planned", located.record, outbox_id=identity)
                 if located.state != "matched":
                     return PublicationObservation(located.state, located.record, reason=located.reason)
                 fresh = located.record
+
+                async def unfinished(reason):
+                    if closing is None:
+                        return PublicationObservation("held", fresh, reason=reason)
+                    return await self._close_run(fresh, current_link, located.run, read_guard)
+
                 output = await facade.get_run_output(fresh.run_id)
                 admission.check("source_read")
                 if output is None:
@@ -629,14 +694,14 @@ class PublicationCoordinator:
                             _refuse()
                         return PublicationObservation("planned", fresh, outbox_id=identity)
                 if inventory.state != "matched" or inventory.document.coverage != "complete" or delivery_items(inventory.document):
-                    return PublicationObservation("held", fresh, reason="inventory_unhandled")
+                    return await unfinished("inventory_unhandled")
                 if output.output.state != "complete":
-                    return PublicationObservation("held", fresh, reason="source_unavailable")
+                    return await unfinished("source_unavailable")
                 try:
                     control.check_budget()
                     await await_drained(asyncio.to_thread(freeze_reply_presentation, output.output.source.text, text_sha256=output.output.output_evidence.text_sha256))
                 except ValueError:
-                    return PublicationObservation("held", fresh, reason="unsupported_presentation")
+                    return await unfinished("unsupported_presentation")
                 admission.check("source_read")
                 identity = await self.outbox.plan_verified_publication_reply(fresh, output=output, guard=read_guard)
                 return PublicationObservation("planned", fresh, outbox_id=identity)

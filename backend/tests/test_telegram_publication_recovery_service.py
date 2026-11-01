@@ -187,7 +187,7 @@ async def test_controlled_units_preserve_four_global_one_link_slots_through_expi
     entered, cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
     calls, deadlines, active = [], [], set()
 
-    async def observe(record, link, *, max_pages, deadline):
+    async def observe(record, link, *, max_pages, deadline, closing=None):
         assert record.scope.link_id not in active
         active.add(record.scope.link_id)
         calls.append(record)
@@ -249,7 +249,7 @@ async def test_controlled_same_link_waits_without_overlapping_or_reclaiming_live
     entered, release = asyncio.Event(), asyncio.Event()
     calls, active = [], []
 
-    async def observe(record, link, *, max_pages, deadline):
+    async def observe(record, link, *, max_pages, deadline, closing=None):
         assert not active
         active.append(record)
         calls.append(record)

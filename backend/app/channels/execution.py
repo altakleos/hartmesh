@@ -57,11 +57,20 @@ class ChannelRunAdmission(Protocol):
     def current(self, operation: ChannelOperation) -> bool: ...
 
 
+@dataclass
+class ChannelExecutionProgress:
+    """Where a queued message is, so its owner can tell a wait for a worker from a message nobody holds."""
+
+    taken: bool = False
+    released: bool = False
+
+
 @dataclass(frozen=True)
 class ChannelExecutionContext:
     scope: ChannelExecutionScope
     client: ChannelExecutionClient = field(repr=False)
     admission: ChannelRunAdmission = field(repr=False)
+    progress: ChannelExecutionProgress = field(default_factory=ChannelExecutionProgress, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if type(self.scope) is not ChannelExecutionScope:

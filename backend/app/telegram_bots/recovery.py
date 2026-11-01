@@ -74,9 +74,11 @@ class _Pass:
 
 
 class PublicationRecoveryService:
-    def __init__(self, inbox, outbox, coordinator, links, allowed):
+    def __init__(self, inbox, outbox, coordinator, links, allowed, owned=None):
         self.inbox, self.outbox, self.coordinator, self.links = inbox, outbox, coordinator, links
         self._admission = allowed
+        # Whether a live turn still drives a publication. Only one with no driver may be ended here.
+        self._owned = owned
         self._closing = False
         self._startup_used = False
         self._epoch = None
@@ -163,7 +165,8 @@ class PublicationRecoveryService:
             if link is None:
                 return "held"
             if epoch is None:
-                result = await self.coordinator.observe(record, link, max_pages=MAX_OBSERVATION_PAGES, deadline=control.deadline)
+                closing = None if self._owned is None or self._owned(record, link) else "chat.restarted"
+                result = await self.coordinator.observe(record, link, max_pages=MAX_OBSERVATION_PAGES, deadline=control.deadline, closing=closing)
                 control.check()
                 if type(result) is not PublicationObservation:
                     return "held"

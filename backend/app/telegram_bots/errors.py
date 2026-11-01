@@ -9,7 +9,7 @@ from app.channels.execution_client import ValidatedRun
 from app.channels.outcomes import CreationRefusal, validate_creation_refusal
 from app.gateway.channel_execution import ChannelExecutionReceipt, receipt_from_run_kwargs
 
-RUN_STOP_REASONS: Mapping[str, str] = MappingProxyType({"sandbox_capacity_exceeded": "busy.queued", "files-full": "chat.files_full", "orphan_recovered": "refused.interrupted"})
+RUN_STOP_REASONS: Mapping[str, str] = MappingProxyType({"sandbox_capacity_exceeded": "busy.queued", "files-full": "chat.files_full", "orphan_recovered": "refused.interrupted", "gateway_stopped": "chat.restarted"})
 STORAGE_REFERENCE_WORDS: Mapping[str, str] = MappingProxyType(
     {
         "disk-too-small": "disk-too-small",
@@ -78,7 +78,7 @@ def classify_run(run: ValidatedRun, scope: ChannelExecutionScope) -> TurnFailure
             _refuse()
         if status == "success":
             return None
-        if reason == "orphan_recovered":
+        if reason in {"orphan_recovered", "gateway_stopped"}:
             return TurnFailure(RUN_STOP_REASONS[reason])
         if status == "error" and reason in RUN_STOP_REASONS:
             return TurnFailure(RUN_STOP_REASONS[reason], reason == "sandbox_capacity_exceeded")

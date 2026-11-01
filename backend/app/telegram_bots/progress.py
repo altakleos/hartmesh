@@ -162,7 +162,9 @@ class RunObserver:
 
     async def _facade(self, state):
         self._check(state)
-        if state.facade is None:
+        # A failed authority read retires its attempt for good. Reading on needs a fresh one, or
+        # one blip ends this turn's reads and its Stop. Creating stays single use in the manager.
+        if state.facade is None or state.attempt.admission.retired:
             scope = state.record.scope
             attempt = await await_drained(self.capture_attempt(state.link, thread_id=scope.thread_id, endpoint_id=scope.endpoint_id))
             self._check(state)
