@@ -19,7 +19,8 @@ from test_telegram_publication_custody import publication_environment as publica
 
 from app.telegram_bots.acts import Acts
 from app.telegram_bots.callbacks import CallbackRefused, Prompts
-from app.telegram_bots.threads import ThreadCoordinator
+from app.telegram_bots.links import ThreadPreparationStale
+from app.telegram_bots.threads import ThreadCoordinator, ThreadPreparationFailure
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
 
 
@@ -184,6 +185,47 @@ async def test_new_choice_uses_original_command_and_finishes_only_after_choice(c
         assert result.parts[0]["source_ref"]["key"] == key and result.parts[0]["target_message_id"] == 501
         assert result.payload["product_basis"]["origins"] == [[e.link.id, 1801, e.link.chat_id]]
     assert (await e.callbacks.get(selected.id)).consumed_at is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure, key", [(ThreadPreparationFailure("files_full"), "new.files_full"), (ThreadPreparationStale(), "stale.not_waiting")])
+async def test_start_new_that_could_not_start_turns_the_offer_into_the_reason(command_environment, monkeypatch, failure, key):
+    e = command_environment
+    selected = await new_choice(e, "new_confirm")
+
+    async def refused(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(e.services.threads, "new_conversation", refused)
+    await e.commands.execute(e.channel, selected, query_id="start-new")
+    async with e.sessions() as session:
+        mark = await session.get(TelegramInboundMarkRow, (e.link.id, 1801, e.link.chat_id))
+        result = await session.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.dedupe_key == "notice:choice:" + selected.id))
+    assert result.parts[0]["source_ref"]["key"] == key and result.parts[0]["target_message_id"] == 501
+    assert mark.route_complete and (await e.callbacks.get(selected.id)).consumed_at is not None, "The offer is over, and so is every button on it"
+
+
+@pytest.mark.asyncio
+async def test_keep_pressed_while_start_new_is_working_says_nothing(command_environment, monkeypatch):
+    e = command_environment
+    selected = await new_choice(e, "new_confirm")
+    original, entered, release = e.services.threads.new_conversation, asyncio.Event(), asyncio.Event()
+
+    async def held(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(e.services.threads, "new_conversation", held)
+    working = asyncio.create_task(e.commands.execute(e.channel, selected, query_id="start-new"))
+    await asyncio.wait_for(entered.wait(), 5)
+    async with e.sessions() as session:
+        keep = await session.scalar(select(TelegramCallbackRow).where(TelegramCallbackRow.kind == "new_keep"))
+    with pytest.raises(CallbackRefused) as refused:
+        await e.commands.execute(e.channel, await e.callbacks.get(keep.id), query_id="keep")
+    assert refused.value.key is None
+    release.set()
+    await working
 
 
 @pytest.mark.asyncio

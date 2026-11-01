@@ -19,12 +19,13 @@ async def show(e, raw):
 
 
 async def button(e, kind, *, option_id=None):
+    """The one on screen: a tick keeps the keyboard before it live until the list is left."""
     async with e.services.outbox.sessions() as session:
-        rows = list(await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.kind == kind, TelegramCallbackRow.consumed_at.is_(None))))
+        rows = list(await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.kind == kind, TelegramCallbackRow.consumed_at.is_(None)).order_by(TelegramCallbackRow.created_at)))
         if option_id is not None:
             rows = [row for row in rows if row.payload.get("option_id") == option_id]
-        assert len(rows) == 1
-        return rows[0].id
+        assert rows
+        return rows[-1].id
 
 
 async def click(e, kind, identity, *, target=701, send=False, result_id=None, option_id=None):
@@ -117,9 +118,11 @@ async def test_expired_other_prompt_holds_actual_text_for_explicit_choice(ui, ch
     assert await e.services.human_inputs.handle_text(e.channel, incoming)
     # Neither a replay nor reopening silently submits the held text.
     e.request.enqueue("answerCallbackQuery")
+    e.request.enqueue("editMessageReplyMarkup", result=sent(e, identity=703))
     e.request.enqueue("sendMessage", result=sent(e, identity=704))
     callback = await button(e, choice)
     assert await e.channel.handle_update(press(e, 1532, callback, message_id=703))
+    await drain(e)
     await drain(e)
     if choice == "prompt_send_new":
         stage = e.services.turns.accept_staged.await_args.args[1]
@@ -248,11 +251,11 @@ async def test_reply_to_used_card_is_held_by_actual_routing_tombstone(ui):
     assert e.services.turns.accept_staged.await_count == 0
     e.request.enqueue("sendMessage", result=sent(e, identity=703))
     await drain(e)
-    assert "This answer prompt closed" in e.request.calls[-1].parameters["text"]
+    assert "This prompt can no longer take an answer" in e.request.calls[-1].parameters["text"]
 
 
 @pytest.mark.asyncio
-async def test_fixed_help_cancels_old_controls_when_private_source_is_unreadable(ui, monkeypatch):
+async def test_closing_a_scope_cancels_old_controls_when_private_source_is_unreadable(ui, monkeypatch):
     from unittest.mock import AsyncMock
 
     from app.channels.execution import ChannelExecutionProtocolError
@@ -260,10 +263,7 @@ async def test_fixed_help_cancels_old_controls_when_private_source_is_unreadable
     e = ui
     await show(e, request())
     monkeypatch.setattr(e.services.human_inputs.source, "read_request", AsyncMock(side_effect=ChannelExecutionProtocolError()))
-    e.request.enqueue("sendMessage", result=sent(e, identity=705))
-    assert await e.channel.handle_update(message(e, 1580, content="/help"))
-    await drain(e)
-    assert "/new starts a new conversation" in e.request.calls[-1].parameters["text"]
+    await e.services.human_inputs.command(e.channel, message(e, 1580, content="/new"), "new")
     async with e.services.outbox.sessions() as session:
         controls = list(await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.kind.in_(["clarify_option", "clarify_other"]))))
         assert controls and all(row.consumed_at is not None for row in controls)

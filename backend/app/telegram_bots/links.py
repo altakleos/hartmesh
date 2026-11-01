@@ -327,7 +327,7 @@ class ThreadPreparation:
     owner_callback_id: str | None = None
 
 
-class _ThreadPreparationStale(ValueError):
+class ThreadPreparationStale(ValueError):
     def __init__(self) -> None:
         super().__init__("thread-preparation-stale")
 
@@ -940,18 +940,18 @@ class BotLinkRepository:
             or row.connection_id is None
             or any(getattr(row, key) != getattr(captured, key) for key in basis)
         ):
-            raise _ThreadPreparationStale
+            raise ThreadPreparationStale
         account = await session.get(TelegramAccountRow, row.telegram_user_id, with_for_update=True, populate_existing=True)
         connection = await self._current_bound_connection(session, row)
         if account is None or account.owner_user_id != row.owner_user_id or connection is None or connection.status != "connected":
-            raise _ThreadPreparationStale
+            raise ThreadPreparationStale
         return row
 
     async def _thread_context(self, session: AsyncSession, captured: BotLink, origin: InboxRow) -> tuple[TelegramBotLinkRow, TelegramInboundMarkRow]:
         from app.telegram_bots.inbox import SERVER_BOOKKEEPING_KEYS, InboxRow
 
         if not isinstance(origin, InboxRow) or origin.link_id != captured.id:
-            raise _ThreadPreparationStale
+            raise ThreadPreparationStale
         row = await self._thread_link(session, captured)
         mark = await session.scalar(
             select(TelegramInboundMarkRow)
@@ -960,7 +960,7 @@ class BotLinkRepository:
             .execution_options(populate_existing=True)
         )
         if mark is None or mark.route_kind is None or (mark.update_id, mark.binding_generation, mark.message_thread_id, mark.chat_id) != (origin.update_id, row.binding_generation, origin.message_thread_id, row.chat_id):
-            raise _ThreadPreparationStale
+            raise ThreadPreparationStale
 
         def business(value):
             return json.dumps({key: child for key, child in value.items() if key not in SERVER_BOOKKEEPING_KEYS}, sort_keys=True, allow_nan=False)
@@ -970,7 +970,7 @@ class BotLinkRepository:
             or (mark.route_kind, mark.route_target_id, mark.operation_ids, mark.sanitized_input) != (origin.route_kind, origin.route_target_id, origin.operation_ids, origin.sanitized_input)
             or business(mark.route_basis) != business(origin.route_basis)
         ):
-            raise _ThreadPreparationStale
+            raise ThreadPreparationStale
         return row, mark
 
     @staticmethod
@@ -982,7 +982,7 @@ class BotLinkRepository:
             .execution_options(populate_existing=True)
         )
         if mapping is not None and (mapping.owner_user_id != link.owner_user_id or mapping.provider != "telegram"):
-            raise _ThreadPreparationStale
+            raise ThreadPreparationStale
         return mapping
 
     @staticmethod
@@ -1007,7 +1007,7 @@ class BotLinkRepository:
             or not _DIGEST.fullmatch(saved["endpoint_id"])
             or not _thread_equal(saved["scope"], _thread_scope(link, origin.message_thread_id))
         ):
-            raise _ThreadPreparationStale
+            raise ThreadPreparationStale
         expected_id, expected_thread, selected, mapping_id = (saved[key] for key in ("expected_mapping_id", "expected_thread_id", "selected_thread_id", "mapping_id"))
         if (
             (expected_id is None) != (expected_thread is None)
@@ -1017,13 +1017,13 @@ class BotLinkRepository:
             or selected is not None
             and (not _valid_thread_id(selected) or not _valid_thread_id(mapping_id) or selected not in ({saved["creation_id"]} if saved["purpose"] == "new" else {saved["creation_id"], expected_thread}))
         ):
-            raise _ThreadPreparationStale
+            raise ThreadPreparationStale
         return ThreadPreparation(origin=origin, **deepcopy(saved))
 
     @staticmethod
     def _thread_attempt(check_attempt_current: Callable[[], bool]) -> None:
         if check_attempt_current() is not True:
-            raise _ThreadPreparationStale
+            raise ThreadPreparationStale
 
     async def reserve_thread_preparation(
         self, captured: BotLink, origin: InboxRow, *, purpose: str, endpoint_id: str, check_live_owner: LiveOwnerCheck, check_attempt_current: Callable[[], bool], require_healthy: bool = False, owner_callback_id: str | None = None
@@ -1032,7 +1032,7 @@ class BotLinkRepository:
         from app.telegram_bots.inbox import InboxRow
 
         if purpose not in {"ensure", "new"} or not isinstance(endpoint_id, str) or not _DIGEST.fullmatch(endpoint_id) or type(require_healthy) is not bool:
-            raise _ThreadPreparationStale
+            raise ThreadPreparationStale
         if owner_callback_id is not None:
             return await self._reserve_callback_preparation(captured, origin, owner_callback_id, purpose=purpose, endpoint_id=endpoint_id, check_live_owner=check_live_owner, check_attempt_current=check_attempt_current)
         async with self._owner_writer(captured.owner_user_id) as session:
@@ -1040,24 +1040,24 @@ class BotLinkRepository:
             if "thread_preparation" in mark.route_basis:
                 preparation = self._thread_preparation(mark, row)
                 if preparation.purpose != purpose or preparation.endpoint_id != endpoint_id:
-                    raise _ThreadPreparationStale
+                    raise ThreadPreparationStale
                 if preparation.selected_thread_id is None and (mark.route_complete or mark.state == "interrupted" or mark.thread_id is not None):
-                    raise _ThreadPreparationStale
+                    raise ThreadPreparationStale
                 if preparation.selected_thread_id is None:
                     mapping = await self._thread_mapping(session, row, origin.message_thread_id)
                     if (mapping.id if mapping else None, mapping.thread_id if mapping else None) != (preparation.expected_mapping_id, preparation.expected_thread_id):
-                        raise _ThreadPreparationStale
+                        raise ThreadPreparationStale
                 await check_live_owner(row.owner_user_id, session)
                 if require_healthy and row.health != "ok":
-                    raise _ThreadPreparationStale
+                    raise ThreadPreparationStale
                 self._thread_attempt(check_attempt_current)
                 return preparation
             if mark.route_complete or mark.state == "interrupted" or mark.thread_id is not None:
-                raise _ThreadPreparationStale
+                raise ThreadPreparationStale
             mapping = await self._thread_mapping(session, row, origin.message_thread_id)
             await check_live_owner(row.owner_user_id, session)
             if require_healthy and row.health != "ok":
-                raise _ThreadPreparationStale
+                raise ThreadPreparationStale
             self._thread_attempt(check_attempt_current)
             preparation = ThreadPreparation(
                 origin=InboxRow.from_row(mark),
@@ -1074,7 +1074,7 @@ class BotLinkRepository:
             await session.flush()
             await check_live_owner(row.owner_user_id, session)
             if require_healthy and row.health != "ok":
-                raise _ThreadPreparationStale
+                raise ThreadPreparationStale
             self._thread_attempt(check_attempt_current)
             return self._thread_preparation(mark, row)
 
@@ -1087,7 +1087,7 @@ class BotLinkRepository:
             stage = await inbox.lock_callback_input(captured, callback_id, session=session)
             inbox._publication_snapshot_matches(stage.origins[0], origin)
         except ValueError:
-            raise _ThreadPreparationStale from None
+            raise ThreadPreparationStale from None
         return row, inbox, stage
 
     async def _reserve_callback_preparation(self, captured, origin, callback_id, *, purpose, endpoint_id, check_live_owner, check_attempt_current):
@@ -1102,18 +1102,18 @@ class BotLinkRepository:
                     preparation = replace(preparation, owner_callback_id=callback_id)
                     await inbox.set_callback_preparation(captured, callback_id, expected=saved, preparation=_thread_payload(preparation), session=session)
                 elif preparation.owner_callback_id != callback_id:
-                    raise _ThreadPreparationStale
+                    raise ThreadPreparationStale
                 if preparation.purpose != purpose or preparation.endpoint_id != endpoint_id:
-                    raise _ThreadPreparationStale
+                    raise ThreadPreparationStale
                 if preparation.selected_thread_id is None:
                     if stage.route_complete or stage.state == "interrupted" or stage.record is not None:
-                        raise _ThreadPreparationStale
+                        raise ThreadPreparationStale
                     mapping = await self._thread_mapping(session, row, origin.message_thread_id)
                     if (mapping.id if mapping else None, mapping.thread_id if mapping else None) != (preparation.expected_mapping_id, preparation.expected_thread_id):
-                        raise _ThreadPreparationStale
+                        raise ThreadPreparationStale
             else:
                 if stage.route_complete or stage.state == "interrupted" or stage.record is not None or stage.thread_id is not None:
-                    raise _ThreadPreparationStale
+                    raise ThreadPreparationStale
                 mapping = await self._thread_mapping(session, row, origin.message_thread_id)
                 preparation = ThreadPreparation(
                     stage.origins[0], purpose, uuid4().hex, endpoint_id, _thread_scope(row, origin.message_thread_id), mapping.id if mapping else None, mapping.thread_id if mapping else None, None, None, callback_id
@@ -1121,7 +1121,7 @@ class BotLinkRepository:
                 await inbox.set_callback_preparation(captured, callback_id, expected=None, preparation=_thread_payload(preparation), session=session)
             await check_live_owner(row.owner_user_id, session)
             if row.health != "ok":
-                raise _ThreadPreparationStale
+                raise ThreadPreparationStale
             self._thread_attempt(check_attempt_current)
             return preparation
 
@@ -1143,21 +1143,21 @@ class BotLinkRepository:
                     if supplied[key] is None:
                         supplied[key] = persisted[key]
                 if not _thread_equal(supplied, persisted) or endpoint_id != saved.endpoint_id or thread_id not in ({saved.creation_id} if saved.purpose == "new" else {saved.creation_id, saved.expected_thread_id}):
-                    raise _ThreadPreparationStale
+                    raise ThreadPreparationStale
                 if saved.selected_thread_id is not None:
                     await check_live_owner(row.owner_user_id, session)
                     if row.health != "ok":
-                        raise _ThreadPreparationStale
+                        raise ThreadPreparationStale
                     self._thread_attempt(check_attempt_current)
                     return saved.selected_thread_id == thread_id
                 if stage is None and (mark.route_complete or mark.state == "interrupted" or mark.thread_id is not None) or stage is not None and (stage.route_complete or stage.state == "interrupted" or stage.record is not None):
-                    raise _ThreadPreparationStale
+                    raise ThreadPreparationStale
                 mapping = await self._thread_mapping(session, row, preparation.origin.message_thread_id)
                 if (mapping.id if mapping else None, mapping.thread_id if mapping else None) != (saved.expected_mapping_id, saved.expected_thread_id):
-                    raise _ThreadPreparationStale
+                    raise ThreadPreparationStale
                 await check_live_owner(row.owner_user_id, session)
                 if row.health != "ok":
-                    raise _ThreadPreparationStale
+                    raise ThreadPreparationStale
                 self._thread_attempt(check_attempt_current)
                 natural_key = (
                     ChannelConversationRow.connection_id == row.connection_id,
@@ -1196,7 +1196,7 @@ class BotLinkRepository:
                         .returning(ChannelConversationRow.id)
                     )
                 if mapping_id is None:
-                    raise _ThreadPreparationStale
+                    raise ThreadPreparationStale
                 self._thread_attempt(check_attempt_current)
                 updated = {**persisted, "selected_thread_id": thread_id, "mapping_id": mapping_id}
                 if stage is None:
@@ -1206,10 +1206,10 @@ class BotLinkRepository:
                 await session.flush()
                 await check_live_owner(row.owner_user_id, session)
                 if row.health != "ok":
-                    raise _ThreadPreparationStale
+                    raise ThreadPreparationStale
                 self._thread_attempt(check_attempt_current)
                 return True
-        except _ThreadPreparationStale:
+        except ThreadPreparationStale:
             return False
 
     async def hold_if_current(self, link_id: str, *, token_revision: int, binding_generation: int) -> BotLink | None:

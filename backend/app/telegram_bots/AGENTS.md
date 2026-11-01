@@ -29,12 +29,18 @@ One two-second logical press budget covers checks and acknowledgement; reserve
 ack time and admit no fresh metadata/action leaf after retirement. The fast fixed
 ack uses only captured transport state and a presentation-only locale cache.
 An already-started SQL unit remains owned through cleanup beyond that budget.
+Past the acknowledgement `_tell_press_failed` owns the outcome: a refusal's key or
+`tap.failed`, as a reply. A spent row or a keyless refusal stays silent, having lost
+to a press that worked or is working. `_source_for` reads the thread to tell a deleted
+conversation from a failing Gateway. `keyboard_cleanup_row` takes spent buttons off
+their message in the writer that spends them.
 
-`commands.py` handles fixed navigation and language settings only. Deliberate
-navigation closes only that prompt scope. `acts.py` commits a saved settings
-choice, its exact old/new preference, completed Act, consumed group and replacement
-controls in one guarded writer. `SettingsRepository.update(session=...)` borrows
-the owning engine/writer without committing. Future Act kinds have no consumer.
+`commands.py` handles fixed navigation and language settings only. A command closes
+only a typing prompt; `/new` and `/stop` also end the forms and cards in scope.
+`acts.py` commits a saved settings choice, its exact old/new preference, completed
+Act, consumed group and replacement controls in one guarded writer.
+`SettingsRepository.update(session=...)` borrows the owning engine/writer without
+committing.
 `plan_product_keyboard` freezes descriptions with the original product basis and
 creates parent, group and controls atomically; exact replay reuses identities.
 The supervisor constructs these services after resolving default repositories.
@@ -74,7 +80,11 @@ Prompt/group/plan changes share one guarded writer. Staging a response retains
 the source control until actual enqueue/bind confirmation, so interrupted handoff
 can repair delivery without applying a second gesture. A network Act records the
 saved choice and completes only with that same confirmation; it grants no access
-directly. The next run's existing network middleware applies policy.
+directly. The next run's existing network middleware applies policy. A tick keeps
+its keyboard, because each redraw lands under the next press: a press on a list is
+good at any revision while that list is the current field, a button remembers
+whether it showed a tick so a repeat is not a change of mind, and leaving the list
+consumes every keyboard it drew.
 
 Submission owner version 2 closes over the canonical response and original
 thread; outer publication input version 1 still identifies the origin receipt.
@@ -217,16 +227,15 @@ moves a token that will not start, held or stopped, to the current secret, so
 gave up on a 429 once another gives up `LIMITED_AFTER_SECONDS` later, and the next
 accepted send clears it; the bookkeeping never changes a send's own result.
 
-A turn holds its chat only while its driver can still finish it. `_own` wraps
-`_drive`, so every way out, by return, raise or running out of time, reaches `_close`
-and then lets the next message run, even when no plan could be written. One clock,
-`quiet_since` on `queue.max_wait_seconds`, bounds a turn that shows no life: a run first
-seen or still working resets it, and a read that keeps failing and a reply that cannot be
-planned run it out. Past it a successful run ends under the closed proof `undeliverable`:
-`answer.on_web` with a link and no Try again when the run's output is complete, since
-that answer exists, and otherwise `error.generic` with Try again. A run interrupted
-without proof of this chat's Stop ends as that interrupted run. The outcome plan is itself
-an attempt: it loses to a reply that did commit, which the next `plan_final` returns.
+A turn holds its chat only while its driver can finish it. `_own` wraps `_drive`, so every
+way out reaches `_close` and lets the next message run, even with no plan written. One
+clock, `quiet_since` on `queue.max_wait_seconds`, bounds a turn that shows no life: a run
+first seen or still working resets it, and a failing read or unplannable reply runs it out.
+Past it a successful run ends under the closed proof `undeliverable`: `answer.on_web` with
+a link and no Try again when its output is complete, otherwise `error.generic` with Try
+again. A run interrupted without proof of this chat's Stop ends as that interrupted run.
+The outcome plan is itself an attempt: it loses to a reply that did commit, which the next
+`plan_final` returns.
 
 A table's shape cannot stop an answer. It stays aligned while its line fits `PHONE_WIDTH`,
 an estimate, and it holds no address, and otherwise becomes labelled lines. A final answer
@@ -320,8 +329,7 @@ Owned SQL units retain execute/fetch/commit/rollback/exit through cancellation.
 `plan_publication_reply` and closed fixed notices share `reply:<turn_id>` and
 atomic route sealing. Exact canonical proof/presentation replay retains actual
 part acknowledgements; changed plans refuse. Frozen visible-text ranges use
-codepoints, while Telegram chunk limits use UTF-16. These primitives install no
-dispatcher/observer/model sender themselves; `turns.py` owns their composition.
+codepoints, while Telegram chunk limits use UTF-16.
 Strict remote source and artifact/action eligibility stay mandatory. Legacy `plan_reply` keeps its
 compatibility semantics. See [publication custody](../../docs/TELEGRAM_PUBLICATION_CUSTODY.md).
 
@@ -351,7 +359,6 @@ empty/404/absent-task fact authorizes dispatch. `recovery_page` keysets heads,
 fetches every global-turn member with a sentinel and holds malformed, mixed,
 oversized, legacy or unsupported groups. Limits bound returned groups/origins,
 decoded-payload counts and retained operations, not bytes, SQL scan time or RAM.
-The schema has no turn/head index; no migration is added for this slice.
 
 Actual negative-copy startup takes one retained page before held/create/send
 release. `recovery_authority.py` issues an opaque one-shot epoch for that fixed
@@ -377,9 +384,7 @@ Service slots include native/codec/response cleanup. An absolute pass deadline
 shortens coordinator control before its child is queued. Logical expiry admits
 no fresh work; a previously authorized COMMIT can settle late. The startup page
 and native cleanup can outlast that deadline. Final stop drains the service
-before coordinator/client teardown, retaining dependencies on failure. No new
-after-manager observation pass or grace is installed. Ordinary input activation,
-queue/Stop/retry consumers belong to `turns.py`.
+before coordinator/client teardown, retaining dependencies on failure.
 
 Conversation preparation reserves `route_basis.thread_preparation` on an actual
 admitted, routed, unsealed input before HTTP. Public routing cannot supply this
@@ -619,8 +624,7 @@ retry intent. A late successful commit remains durable; an unpersisted latch
 gets one fixed diagnostic and keeps local refusal. Already-started work may
 outlast grace; no new SQL retry survives the database owner.
 Do not install future-stage no-op schedulers or trust manager text as a model
-source. The existing sender accepts fixed sources and strictly verified model
-finals. Managed text, inbound files and saved controls use `turns.py`.
+source.
 
 `authority.py` rereads the live human account, strict route ceilings, exact
 connection and supported owner-scoped target. Fixed product/status sources need

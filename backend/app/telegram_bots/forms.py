@@ -219,8 +219,9 @@ class Forms:
                     return form
                 # An ordinary input already queued before this form appeared
                 # keeps its actual older update ID when it finally ends the
-                # form. Only this terminal transition may cross that watermark.
-                if form.revision != expected_revision or action != "cancel" and form.last_update_id is not None and update_id < form.last_update_id or form.state in {"submitted", "cancelled"}:
+                # form. Only this terminal transition may cross that watermark,
+                # and a press on a list, which a tick can overtake on its way in.
+                if form.revision != expected_revision or action not in {"cancel", "toggle", "next", "skip"} and form.last_update_id is not None and update_id < form.last_update_id or form.state in {"submitted", "cancelled"}:
                     raise CallbackRefused() from None
                 values = deepcopy(data["values"])
                 if action in {"answer", "toggle", "next", "skip"}:
@@ -246,8 +247,10 @@ class Forms:
                         selected.remove(options[value]) if options[value] in selected else selected.append(options[value])
                         values[field], advance = selected, False
                     elif action == "next":
-                        if kind != "multi_select" or definition["required"] and _empty(values.get(field)):
+                        if kind != "multi_select":
                             raise CallbackRefused() from None
+                        if definition["required"] and _empty(values.get(field)):
+                            raise CallbackRefused("form.required") from None
                     else:
                         if kind == "multi_select":
                             raise CallbackRefused() from None
@@ -260,7 +263,7 @@ class Forms:
                         values[field] = chosen
                         values = _values(data["fields"], values)
                         if definition["required"] and _missing_required(definition, values):
-                            raise CallbackRefused() from None
+                            raise CallbackRefused("form.required") from None
                     if advance:
                         data["field_index"] = len(form.fields) if form.editing else form.field_index + 1
                         if data["field_index"] == len(form.fields):

@@ -793,13 +793,33 @@ class TelegramBotChannel(TelegramChannel):
         async def execute(channel, row):
             turns = getattr(self._services, "turns", None)
             flush = getattr(turns, "flush_inputs", None)
-            if flush is not None:
-                await flush(channel, topic=row.message_thread_id)
-            await channel.execute_callback(row, query_id=query.id, update_id=update.update_id)
+            try:
+                if flush is not None:
+                    await flush(channel, topic=row.message_thread_id)
+                await channel.execute_callback(row, query_id=query.id, update_id=update.update_id)
+            except Exception as error:
+                await channel._tell_press_failed(row, error, link=captured, update_id=update.update_id)
 
         handler = CallbackHandler(repository, execute=execute)
         self._spawn_ingress(handler.press(self, query, captured_link=captured))
         self._classified(update)
+
+    async def _tell_press_failed(self, row, error, *, link, update_id) -> None:
+        """The acknowledgement has gone, so what stopped a press goes out as a reply.
+
+        A spent button and a keyless refusal stay silent: that press lost to one that worked or is working.
+        """
+        from app.telegram_bots.callbacks import CallbackRefused
+
+        refused = isinstance(error, CallbackRefused)
+        if not refused:
+            logger.warning("telegram_bots press_failed link=%s bot=%s kind=%s cause=%s", link.id, link.bot_id, row.kind, failure_chain(error))
+        saved = await self._services.callbacks.get(row.id)
+        if refused and error.key is None or saved is None or saved.consumed_at is not None or not self._callback_current(link):
+            return
+        # A saved answer has already left its keyboard, so there is no button to tap again.
+        key = error.key if refused else "error.generic" if "publication_owner" in saved.payload else "tap.failed"
+        await self.send_text(key, source_id=f"press:{row.id}:{update_id}", reply_to=row.message_id, thread=row.message_thread_id, _captured_link=link)
 
     async def execute_callback(self, row, *, query_id=None, update_id=None):
         human_inputs = getattr(self._services, "human_inputs", None)
@@ -977,7 +997,7 @@ class TelegramBotChannel(TelegramChannel):
         if prompts is not None and basis.get("human_input_ui") != {"command_closed": word}:
             if not self._callback_current(link):
                 return
-            await prompts.close(link, row.chat_id, row.message_thread_id, reason="command")
+            await prompts.close(link, row.chat_id, row.message_thread_id, reason="command", shown_only=True)
             if not self._callback_current(link):
                 return
         await await_drained(self.send_text(basis["key"], source_id=self._source(update, "command"), reply_to=message.message_id, inbox_rows=[row], finish_route=True, url_button=basis["url_button"], _captured_link=link, **basis["values"]))
@@ -994,7 +1014,7 @@ class TelegramBotChannel(TelegramChannel):
         if word != "stop" and flush is not None:
             await flush(self, topic=update.message.message_thread_id)
         human_inputs = getattr(self._services, "human_inputs", None)
-        if human_inputs is not None and word != "stop":
+        if human_inputs is not None and word == "new":  # /stop does this itself. Any other command is only a look around.
             await human_inputs.command(self, update, word, captured_link=self._admission(update).link)
         if word == "stop" and turns is not None:
             await turns.stop_chat(self, update)
@@ -1562,7 +1582,7 @@ class TelegramBotChannel(TelegramChannel):
         The cached locale is presentation only and cannot cross owner/generation.
         Later actions still need their own current SQL custody/owner guard.
         """
-        await self.answer_press(query_id, key, _captured_link=captured_link, _deadline=deadline)
+        await self.answer_press(query_id, key, _captured_link=captured_link, _deadline=deadline, product=self._services.product_name)
 
     async def answer_press(self, query_id: str, key: str | None = None, *, context: SendContext | None = None, _captured_link: BotLink | None = None, _deadline: float | None = None, **values) -> None:
         if not self.application.running or not self._send_allowed():

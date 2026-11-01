@@ -65,6 +65,8 @@ CALLBACK_POLICIES = MappingProxyType(
 
 
 class CallbackRefused(ValueError):
+    """`key` is what the person is told. None tells them nothing: that press lost to one on its way in."""
+
     def __init__(self, key="stale.not_waiting"):
         self.key = key
         super().__init__(key)
@@ -566,10 +568,10 @@ class CallbackRepository:
 
     def _usable(self, row):
         now = self.clock()
-        if row.consumed_at is not None or now >= _aware(row.created_at) + timedelta(days=self.config.callbacks.max_age_days):
+        created = _aware(row.created_at)
+        too_old = now >= created + timedelta(days=self.config.callbacks.max_age_days) or row.target_kind == "draft" and now >= created + timedelta(hours=self.config.callbacks.draft_ttl_hours)
+        if row.consumed_at is not None or too_old or row.expires_at is not None and now >= _aware(row.expires_at):
             raise CallbackRefused() from None
-        if row.expires_at is not None and now >= _aware(row.expires_at) or row.target_kind == "draft" and now >= _aware(row.created_at) + timedelta(hours=self.config.callbacks.draft_ttl_hours):
-            raise CallbackRefused("stale.draft" if row.target_kind == "draft" else "stale.not_waiting") from None
 
     async def adopt(self, link, group_id, message_id, *, chat_id, message_thread_id, outbox_id, presentation_version, check_current):
         if type(message_id) is not int or message_id <= 0 or type(chat_id) is not int or chat_id != link.chat_id or type(presentation_version) is not int:
@@ -739,7 +741,8 @@ class CallbackRepository:
                     except CallbackRefused:
                         pass
                     found.append(snapshot)
-                if current_rows and len({row.group_id for row in current_rows}) == 1:
+                # A list's ticks each draw a keyboard, and they are still one card.
+                if current_rows and len({row.payload.get("form_id") or row.group_id for row in current_rows}) == 1:
                     return CallbackMessageRoute(tuple(current_rows), False)
                 prompts = [row for row in current_rows if row.kind == "prompt"]
                 controls = [row for row in current_rows if row.kind != "prompt"]
@@ -1059,13 +1062,15 @@ class Prompts:
                         if row.expires_at is not None and self.repository.clock() >= _aware(row.expires_at):
                             row.consumed_at, row.closed_reason = self.repository.clock(), "expired"
                         return _row(row)
-                    if row.closed_reason not in {"command", "navigation", "discarded", "answered"}:
+                    # A reply to a spent card holds that one text: no prompt ever waited there.
+                    if row.closed_reason not in {"command", "navigation", "discarded", "answered"} and row.payload.get("purpose") != "retired_presentation":
                         return _row(row)
                 return None
 
         return await await_drained(perform())
 
-    async def close(self, link, chat_id, message_thread_id, *, reason, guard=None, session=None):
+    async def close(self, link, chat_id, message_thread_id, *, reason, guard=None, session=None, shown_only=False):
+        """`shown_only` spares a prompt still on its way: closing it would stop its question from being sent."""
         topic = _topic(message_thread_id)
         if chat_id != link.chat_id or reason not in {"command", "navigation", "discarded", "answered", "cancelled", "expired", "replaced"}:
             raise CallbackRefused() from None
@@ -1073,6 +1078,10 @@ class Prompts:
         async def perform():
             async with self._unit(link, guard, session) as writer:
                 for row in await self._rows(writer, link, chat_id, topic):
+                    anchored = shown_only and type(row.payload.get("anchor_outbox_id")) is str
+                    anchor = await writer.get(TelegramOutboxRow, row.payload["anchor_outbox_id"]) if anchored else None
+                    if anchor is not None and anchor.state != "sent":
+                        continue
                     if row.consumed_at is None or reason in {"command", "navigation", "discarded", "answered"}:
                         row.consumed_at, row.closed_reason = self.repository.clock(), reason
 
@@ -1146,14 +1155,14 @@ class CallbackHandler:
             done, _pending = await asyncio.wait({task}, timeout=max(0, deadline - loop.time() - PRESS_TIMEOUT_SECONDS / 4))
             if not done:
                 active[0] = False
-                key = "stale.not_waiting"
+                key = "tap.failed"  # Nothing is known about the button yet, so nothing can be said against it.
             else:
                 try:
                     row = task.result()
                 except CallbackRefused as error:
                     key = error.key
                 except Exception:
-                    key = "stale.not_waiting"
+                    key = "tap.failed"
             # One acknowledgement attempt; later results/refusals are ordinary
             # replies supplied by the host execute collaborator.
             try:

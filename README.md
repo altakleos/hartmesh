@@ -1438,9 +1438,10 @@ Managed bots also present source-verified clarification choices, typed alternati
 and forms with a review step before Send. Free-text questions accept an ordinary
 chat reply. A blocked-site request offers temporary permission or refusal; the
 saved answer returns through the normal run and network-policy checks. Answer
-controls retain the original conversation and cannot submit twice. Navigating
-away closes the current input scope; a reply to an old prompt requires an explicit
-choice before it can become new input. This adds no schema change.
+controls retain the original conversation and cannot submit twice. `/new` and
+`/stop` close the current input scope, while other commands leave forms and cards
+open; a reply to an old prompt requires an explicit choice before it can become
+new input. A button press that cannot act says why. This adds no schema change.
 Managed bots also accept photos and documents. They are saved as a file added on
 the web is, in the person's own Space when Storage Spaces are on. A caption sends
 the file with the message; a file without a caption waits for the next message in

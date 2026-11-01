@@ -719,6 +719,25 @@ def _prepare_publication_reply(record: PublicationRecord, output: RunOutputProje
     return basis, parts
 
 
+def keyboard_cleanup_row(callback, *, owner_user_id: str, now: datetime, dedupe_key: str | None = None) -> TelegramOutboxRow:
+    """Telegram shows a spent button until told otherwise. This edit tells it, and can execute nothing."""
+    return TelegramOutboxRow(
+        id=uuid4().hex,
+        link_id=callback.link_id,
+        owner_user_id=owner_user_id,
+        binding_generation=callback.binding_generation,
+        dedupe_key=dedupe_key or "notice:spent-keyboard:" + callback.group_id,
+        class_="reply",
+        payload={"kind": "keyboard_cleanup", "presentation_version": 0, "target_message_id": callback.message_id},
+        parts=Outbox._parts([{"kind": "edit", "source_ref": {"key": "delivery.failed", "values": {}}, "remove_keyboard": True, "target_message_id": callback.message_id}], 0),
+        state="pending",
+        not_before=now,
+        chat_id=callback.chat_id,
+        message_thread_id=callback.message_thread_id,
+        created_at=now,
+    )
+
+
 class Outbox:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, inbox=None, config: TelegramBotsConfig | None = None, clock: Callable[[], datetime] = _now) -> None:
         from app.telegram_bots.inbox import InboxRepository
@@ -2666,23 +2685,7 @@ class OutboxSender:
                     cleanup_key = f"notice:repair-cleanup:{row.id}:{callback.group_id}"
                     exists = await session.scalar(select(TelegramOutboxRow.id).where(TelegramOutboxRow.link_id == row.link_id, TelegramOutboxRow.dedupe_key == cleanup_key))
                     if exists is None:
-                        session.add(
-                            TelegramOutboxRow(
-                                id=uuid4().hex,
-                                link_id=row.link_id,
-                                owner_user_id=row.owner_user_id,
-                                binding_generation=row.binding_generation,
-                                dedupe_key=cleanup_key,
-                                class_="reply",
-                                payload={"kind": "keyboard_cleanup", "presentation_version": 0, "target_message_id": callback.message_id},
-                                parts=Outbox._parts([{"kind": "edit", "source_ref": {"key": "delivery.failed", "values": {}}, "remove_keyboard": True, "target_message_id": callback.message_id}], 0),
-                                state="pending",
-                                not_before=now,
-                                chat_id=row.chat_id,
-                                message_thread_id=callback.message_thread_id,
-                                created_at=now,
-                            )
-                        )
+                        session.add(keyboard_cleanup_row(callback, owner_user_id=row.owner_user_id, now=now, dedupe_key=cleanup_key))
 
     async def _failure(self, link_id: str, row_id: str, generation: int, claim: str, error: Exception) -> None:
         async with self.outbox._writer(link_id) as (session, binding):

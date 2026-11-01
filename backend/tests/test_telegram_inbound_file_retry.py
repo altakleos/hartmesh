@@ -11,7 +11,7 @@ from test_telegram_publication_authority import attempt_environment as attempt_e
 from test_telegram_publication_coordinator import coordinator_environment as coordinator_environment
 
 from app.telegram_bots.callbacks import CallbackRepository
-from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramInboundMarkRow
+from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
 
 
 async def source(e, *, expected_files=True, size=3):
@@ -67,6 +67,9 @@ async def test_file_failure_auxiliary_retry_retains_original_thread_group_and_ne
     e.bus.inbound_task_done()
     assert sent.text == "Read the actual file" and sent.files == [file] and sent.execution_context.thread_id == e.thread_id
     assert (await callbacks.get(callback_id)).consumed_at is not None
+    async with e.db.sessions() as reader:
+        cleanup = await reader.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.payload["kind"].as_string() == "keyboard_cleanup"))
+    assert cleanup.parts[0]["target_message_id"] == 1901, "Send again leaves the notice it was on"
     await e.coordinator.dispatch_record(result, e.link)
     with pytest.raises(asyncio.QueueEmpty):
         e.bus.get_inbound_nowait()
