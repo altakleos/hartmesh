@@ -16,6 +16,10 @@ from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
 pytestmark = pytest.mark.asyncio
 
 
+# Liveness, not speed: SQLite workers can be slow to start on a loaded runner.
+BOUND = 15
+
+
 async def build(db, *, swallow_cancel=False):
     first = await bind_link(db, await add_link(db, bot=9_000_000_001))
     other = await bind_link(db, await add_link(db, bot=9_000_000_002), account=7_000_000_002)
@@ -44,7 +48,7 @@ async def build(db, *, swallow_cancel=False):
 
     sender = OutboxSender(outbox, run_id="retirement-process", deliver_part=raw, eligibility=allowed)
     await sender.tick()
-    await asyncio.wait_for(asyncio.gather(*(value.wait() for value in entered.values())), 2)
+    await asyncio.wait_for(asyncio.gather(*(value.wait() for value in entered.values())), BOUND)
     return first, other, identities, entered, releases, cancelled, sender
 
 
@@ -56,7 +60,7 @@ async def saved(db, identity):
 async def test_retire_one_link_drains_its_worker_without_waiting_for_other_link(db):
     first, other, identities, entered, releases, cancelled, sender = await build(db)
     try:
-        await asyncio.wait_for(sender.retire_link(first.id), 2)
+        await asyncio.wait_for(sender.retire_link(first.id), BOUND)
         a, b = await saved(db, identities[first.id]), await saved(db, identities[other.id])
         assert a.state == "pending" and a.claim_owner is None and a.claim_id is None
         assert a.parts[0]["state"] == "pending" and a.parts[0]["message_ids"] == []
@@ -76,7 +80,7 @@ async def test_retirement_invalidates_receipt_before_transport_swallows_cancella
     first, other, identities, entered, releases, cancelled, sender = await build(db, swallow_cancel=True)
     task = asyncio.create_task(sender.retire_link(first.id))
     try:
-        await asyncio.wait_for(cancelled[first.id].wait(), 2)
+        await asyncio.wait_for(cancelled[first.id].wait(), BOUND)
         row = await saved(db, identities[first.id])
         assert row.state == "pending" and row.claim_owner is None and row.claim_id is None
         assert not task.done()
@@ -84,7 +88,7 @@ async def test_retirement_invalidates_receipt_before_transport_swallows_cancella
         # admit a replacement worker for its pending row.
         assert await sender.tick() == 0
         releases[first.id].set()
-        await asyncio.wait_for(task, 2)
+        await asyncio.wait_for(task, BOUND)
         row = await saved(db, identities[first.id])
         assert row.state == "pending" and row.parts[0]["message_ids"] == [] and row.attempts == 0
         assert not cancelled[other.id].is_set()
@@ -101,16 +105,16 @@ async def test_cancelled_retirement_caller_keeps_owned_cleanup_until_sender_stop
     task = asyncio.create_task(sender.retire_link(first.id))
     stopping = None
     try:
-        await asyncio.wait_for(cancelled[first.id].wait(), 2)
+        await asyncio.wait_for(cancelled[first.id].wait(), BOUND)
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         assert task.cancelled()
         stopping = asyncio.create_task(sender.stop())
-        await asyncio.wait_for(cancelled[other.id].wait(), 2)
+        await asyncio.wait_for(cancelled[other.id].wait(), BOUND)
         assert not stopping.done()
         for release in releases.values():
             release.set()
-        await asyncio.wait_for(stopping, 2)
+        await asyncio.wait_for(stopping, BOUND)
         for identity in identities.values():
             row = await saved(db, identity)
             assert row.state == "pending" and row.claim_id is None and row.parts[0]["message_ids"] == []
@@ -150,7 +154,7 @@ async def test_failed_retirement_commit_keeps_live_claim_until_retry_commits(db)
         event.remove(Session, "before_commit", fail_fence)
     try:
         # Concurrent lifecycle callers share one retained retirement task.
-        await asyncio.wait_for(asyncio.gather(sender.retire_link(first.id), sender.retire_link(first.id)), 2)
+        await asyncio.wait_for(asyncio.gather(sender.retire_link(first.id), sender.retire_link(first.id)), BOUND)
         row = await saved(db, identities[first.id])
         assert row.state == "pending" and row.claim_id is None
         assert cancelled[first.id].is_set() and not cancelled[other.id].is_set()
@@ -213,11 +217,11 @@ async def test_stop_fence_failure_still_drains_live_transport_before_raising(db,
     stopping = None
     try:
         await sender.tick()
-        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.wait_for(entered.wait(), BOUND)
         event.listen(Session, "before_commit", fail_fence)
         stopping = asyncio.create_task(sender.stop())
-        await asyncio.wait_for(faulted.wait(), 2)
-        await asyncio.wait_for(cancelled.wait(), 2)
+        await asyncio.wait_for(faulted.wait(), BOUND)
+        await asyncio.wait_for(cancelled.wait(), BOUND)
         assert not stopping.done()  # failure cannot abandon the live SDK waiter
         if cancel_stop_caller:
             stopping.cancel()
@@ -227,7 +231,7 @@ async def test_stop_fence_failure_still_drains_live_transport_before_raising(db,
             assert not stopping.done()
         released.set()
         with pytest.raises(asyncio.CancelledError if cancel_stop_caller else OperationalError):
-            await asyncio.wait_for(stopping, 2)
+            await asyncio.wait_for(stopping, BOUND)
         assert len(calls) == 1  # no next part after stop, even if the first ACK returns
         row = await saved(db, identity)
         assert row.parts[0]["message_ids"] == [502] and row.parts[1]["message_ids"] == []
@@ -253,7 +257,7 @@ async def test_one_stop_fence_failure_does_not_skip_cancelling_other_link_worker
     event.listen(Session, "before_commit", fail_first_fence)
     try:
         with pytest.raises(OperationalError):
-            await asyncio.wait_for(sender.stop(), 2)
+            await asyncio.wait_for(sender.stop(), BOUND)
         assert cancelled[first.id].is_set() and cancelled[other.id].is_set()
         assert await sender.tick() == 0
         for identity in identities.values():

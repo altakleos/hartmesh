@@ -2737,7 +2737,7 @@ export function createEnUS(product: string): Translations {
           "Scan with your phone's camera and sign in; this set-up opens there.",
         before: {
           title: "Before you connect",
-          body: `Telegram carries these chats. Everything you, ${product}, and your AI assistants and AI employees send there, including files and voice notes, passes through Telegram's servers and stays in your Telegram account until you delete it. Bot chats are not end-to-end encrypted, so Telegram can read them, and ${product} cannot delete them for you. A notification can show the start of a message on a locked phone; Telegram and your phone can hide previews. Anyone who can open your Telegram can write to your bots as you. Use a screen lock. If you lose your phone, end its session from another device (Telegram, Settings, Devices) and disconnect your bots here.`,
+          body: `Telegram carries these chats. Everything you and ${product} send there, including files and voice notes, passes through Telegram's servers and stays in your Telegram account until you delete it. Bot chats are not end-to-end encrypted, so Telegram can read them, and ${product} cannot delete them for you. A notification can show the start of a message on a locked phone; Telegram and your phone can hide previews. Anyone who can open your Telegram can write to your bots as you. Use a screen lock. If you lose your phone, end its session from another device (Telegram, Settings, Devices) and disconnect your bots here.`,
           voice: ({ transcriber }) =>
             `Voice notes are turned into text by ${transcriber}, after you agree to that service in the chat. If the service changes, you are asked again. ${product} does not keep the recording.`,
           again:

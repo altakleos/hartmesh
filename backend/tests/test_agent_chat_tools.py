@@ -18,11 +18,11 @@ from deerflow.spaces.contract import PrincipalRef
 PAGES = ("access", "files", "memory", "conversations", "work", "agentSettings", "addAssistant", "addEmployee", "telegram", "scheduled", "account", "timezone")
 AGENT_PAGES = ("access", "files", "work", "agentSettings")
 REFUSAL = "That page does not exist in this chat."
-OFFER = "A button that opens this page is shown under your reply. Say in one sentence that this is done on the web. Do not write an address."
+OFFER = "A link to this page is shown with your reply where this chat can show one. Say in one sentence what the page is for. Do not write an address."
 DESCRIPTION = (
-    "Offer the person a button that opens one page of the web app. Use it when the person asks for something that is done on the web: "
+    "Offer the person a link that opens one page of the web app. Use it when the person asks for something that is done on a page: "
     "who has access, the files, what is remembered, earlier conversations, assignment history, settings, adding an AI assistant or an AI employee, "
-    "Telegram bots, scheduled tasks, the account. Name the page; never write an address."
+    "Telegram bots, scheduled tasks, the account. Answer what you can answer yourself. Name the page; never write an address."
 )
 
 

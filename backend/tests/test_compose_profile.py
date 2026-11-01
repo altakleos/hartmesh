@@ -812,7 +812,7 @@ def test_env_example_lists_exactly_the_fixed_contract_keys() -> None:
         "#HARTMESH_AI_EMPLOYEE_STORAGE_GIB=1",
         "#HARTMESH_COMPANY_STORAGE_GIB=1",
     ]
-    assert "off when absent" in comments[19]
+    assert "on when absent" in comments[19]
     assert comments[20] == "#HARTMESH_TELEGRAM=on"
     assert comments[22:25] == ["#HARTMESH_TELEGRAM_VOICE=auto", "#HARTMESH_TELEGRAM_MAX_BOTS=100", "#HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON=10"]
     assert "verbatim" in comments[25] and "subset" in comments[25]
@@ -1714,15 +1714,32 @@ TELEGRAM_ENV_KEYS = {"HARTMESH_TELEGRAM", "HARTMESH_TELEGRAM_VOICE", "HARTMESH_T
 TELEGRAM_TEMPLATE_REFUSAL = "template `telegram_bots.enabled`, `telegram_bots.public_base_url`, `channel_connections` and `channels.telegram` must be absent; HARTMESH_TELEGRAM and HARTMESH_PUBLIC_HOST select them"
 
 
+def test_readme_carries_the_telegram_bots_section_and_its_keys() -> None:
+    readme = (PROFILE / "README.md").read_text(encoding="utf-8")
+    section = readme.split("\n## Telegram bots\n", 1)[1].split("\n## ", 1)[0]
+    for key in TELEGRAM_ENV_KEYS:
+        assert f"`{key}`" in section, key
+    assert "python -m app.telegram_bots.cli" in section
+    assert "##### `status`" in section, "the command reference stands under Commands"
+    assert "`telegram_bots` counts the held bindings that are Telegram bots" in readme
+    assert '"stopped_at": "2026-10-01T23:58:06.972819+00:00", "telegram_bots": 0}' in readme
+    assert '"schedules": ["…"], "telegram_bots": 0}' in readme
+
+
 @pytest.mark.parametrize("raw", [None, "", " "])
-def test_absent_telegram_key_renders_no_section_while_the_default_is_off(render_config: ModuleType, raw: str | None) -> None:
-    assert render_config.TELEGRAM_ABSENT_MEANS_ON is False
+def test_telegram_rendered_on_by_default(render_config: ModuleType, raw: str | None) -> None:
+    assert render_config.TELEGRAM_ABSENT_MEANS_ON is True
     environ = _base_environ()
     if raw is not None:
         environ["HARTMESH_TELEGRAM"] = raw
     document, _ = render_config.render(yaml.safe_load(TEMPLATE.read_text(encoding="utf-8")), (), environ)
-    assert not {"telegram_bots", "channel_connections", "channels"} & document.keys()
-    assert "show_web_page" not in {entry["name"] for entry in document["tools"]}
+    assert document["telegram_bots"]["enabled"] is True
+    assert "show_web_page" in {entry["name"] for entry in document["tools"]}
+    assert render_config.telegram_summary(document, environ).startswith("telegram=on")
+
+    environ["HARTMESH_TELEGRAM"] = "off"
+    document, _ = render_config.render(yaml.safe_load(TEMPLATE.read_text(encoding="utf-8")), (), environ)
+    assert document["telegram_bots"]["enabled"] is False
     assert render_config.telegram_summary(document, environ) == "telegram=off; "
 
 
@@ -1756,7 +1773,7 @@ def test_template_telegram_keys_refused(render_config: ModuleType, path: tuple[s
 @pytest.mark.parametrize(
     "key,selector,default,accepted,refusal",
     [
-        ("HARTMESH_TELEGRAM", "select_telegram", "absent", ["on", "off"], "HARTMESH_TELEGRAM must be `on` or `off`"),
+        ("HARTMESH_TELEGRAM", "select_telegram", "on", ["on", "off"], "HARTMESH_TELEGRAM must be `on` or `off`"),
         ("HARTMESH_TELEGRAM_VOICE", "select_telegram_voice", "auto", ["auto", "openai", "gemini", "off"], "HARTMESH_TELEGRAM_VOICE must be one of auto, openai, gemini, off"),
         ("HARTMESH_TELEGRAM_MAX_BOTS", "select_telegram_max_bots", 100, [1, 500], "HARTMESH_TELEGRAM_MAX_BOTS must be a whole number from 1 to 500"),
         ("HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON", "select_telegram_max_bots_per_person", 10, [1, 40], "HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON must be a whole number from 1 to 40"),
@@ -1780,7 +1797,7 @@ def test_telegram_env_values_validated(render_config: ModuleType, key: str, sele
 @pytest.mark.parametrize(
     "mode,secret,host,fragment",
     [
-        (None, "", "tenant.example.com", "telegram=off"),
+        (None, "", "tenant.example.com", "telegram=on, bots cannot be added (HARTMESH_PROVIDER_KEYS_SECRET not set)"),
         ("off", "", "tenant.example.com", "telegram=off"),
         ("on", "", "tenant.example.com", "telegram=on, bots cannot be added (HARTMESH_PROVIDER_KEYS_SECRET not set)"),
         ("on", " " * 32, "tenant.example.com", "telegram=on, bots cannot be added (HARTMESH_PROVIDER_KEYS_SECRET not set)"),

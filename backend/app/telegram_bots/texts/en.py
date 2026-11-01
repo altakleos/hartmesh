@@ -111,7 +111,7 @@ TEXTS: dict[str, str] = {
     "new.done": "New conversation started.",
     "new.kept": "Kept. This conversation goes on.",
     "cmd.unknown": "/{command} is not a command in this chat. Tap the menu button to see the commands.",
-    "cmd.agent": "This chat is always {name}. Every AI assistant, AI employee and custom agent has a separate chat.",
+    "cmd.agent": "This chat is always {name}. Each custom agent has a separate chat.",
     "cmd.skill_off": "The skill /{skill} is switched off.",
     "cmd.skill_unavailable": "The skill /{skill} is not available in this chat.",
     "settings.state_basic": "Language of this chat's fixed texts: {language}. Answers follow the language you write in.",

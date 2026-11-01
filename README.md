@@ -1328,17 +1328,17 @@ cleanup when migrating from legacy metadata credentials.
 
 #### IM Channels
 
-Database revision `0042_telegram_bots` adds the persistence foundation for managed
-Telegram bot connections and durable delivery. It leaves existing channel and
-preference tables unchanged and does not enable the new bot connection flow.
-Configuration version 55 reserves managed Telegram bot settings and a bounded
-`show_web_page` tool. The Compose bundle omits them while `HARTMESH_TELEGRAM`
-is absent; the unfinished connection flow is not offered in this release.
-The managed-bot foundation now includes bot-bound token wrapping, atomic
+Each person can connect a Telegram bot of their own to the ordinary chat and to
+each custom agent they own. The Compose bundle offers this unless
+`HARTMESH_TELEGRAM=off`; see its [README](deploy/compose/README.md#telegram-bots).
+Database revision `0042_telegram_bots` adds the persistence for managed Telegram
+bot connections and durable delivery, leaving existing channel and preference
+tables unchanged. Configuration version 55 adds managed Telegram bot settings and
+a bounded `show_web_page` tool. The managed-bot foundation includes bot-bound token wrapping, atomic
 ownership/setup-code transactions, durable binding welcomes, and personal
 notification settings. Revision `0043_telegram_inbox_chat_scope` includes the
 chat ID in retained inbox identities so reconnecting another account works
-without deleting earlier receipts. The connection flow remains reserved.
+without deleting earlier receipts.
 Revision `0044_telegram_assistant_ids` retains opaque assistant-message IDs in a
 Text column, allowing legal SDK identities longer than 64 characters.
 Its presentation layer includes English and Chinese product text, bounded Telegram
@@ -1382,6 +1382,12 @@ The `/api/telegram-bots` routes need a signed-in browser session, so neither a
 personal access token nor the internal token reaches them, and no response carries
 a bot token. A link a bot sends can be opened signed out: after sign-in the person
 lands on the page it named.
+
+A message that begins with `/` and names one of the person's skills runs that
+skill. It stands alone: it joins no earlier text and does not answer an open
+question. A skill that is off, or that a custom agent does not use, gets a plain
+answer instead. An answer a chat cannot carry ends after a minute with the ordinary
+failure message and **Try again**, so that one answer never stops the chat.
 
 Telegram bookkeeping is kept for a limited time: incoming messages for 7 days,
 delivered messages for 30 days, and acts and bot history for 400 days. A delivered
@@ -1432,23 +1438,20 @@ chat reply. A blocked-site request offers temporary permission or refusal; the
 saved answer returns through the normal run and network-policy checks. Answer
 controls retain the original conversation and cannot submit twice. Navigating
 away closes the current input scope; a reply to an old prompt requires an explicit
-choice before it can become new input. This adds no schema change and remains
-behind the unfinished managed-bot activation switch.
+choice before it can become new input. This adds no schema change.
 Managed bots also accept photos and documents. A caption sends the file with
 the message; a file without a caption waits for the next message in the same
 chat and topic for up to 24 hours. Albums, split long messages and forwarded
 material retain their original order. Downloads share a bounded process memory
 budget. Unavailable storage, oversized files and failed saves receive explicit
 notices; the message can continue without the file. Send again retries the
-original input in its original conversation. This adds no schema revision;
-managed-bot activation remains deferred until stage one is complete.
+original input in its original conversation. This adds no schema revision.
 Generated files can also be delivered in the original conversation. A short
 answer accompanies a single document; longer answers appear before their files.
 Suitable images appear as photos or albums. Files that exceed the configured
 limit stay available on the web, and failed transfers offer delivery-only Retry
 without rerunning the AI agent. Retries refuse changed file contents. Uploads
-share the same bounded memory budget as downloads. This adds no schema change;
-managed-bot activation remains deferred until stage one is complete.
+share the same bounded memory budget as downloads. This adds no schema change.
 When a turn produces files and a clarification, form or network-permission
 request, files are delivered before the question. Form fields become active
 only after their prompt appears. Retrying a file keeps the original question
@@ -1459,7 +1462,7 @@ SQL-backed runs can explicitly request versioned output capture. The worker seal
 the exact completed model answer with its durable event source; the authorized
 output API reports pending, complete or unavailable without executing another
 model. Source uncertainty preserves unresolved state. Ordinary runs keep their
-defaults, and managed-bot model activation remains deferred. See
+defaults. See
 [durable output evidence](backend/docs/RUN_OUTPUT_EVIDENCE.md).
 Capture version 2 also seals a generic inventory of file references and structured
 terminal presentations. Authorized consumers can distinguish complete enumeration

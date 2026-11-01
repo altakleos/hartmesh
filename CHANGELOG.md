@@ -7,14 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Telegram bots
+
+Each person can connect a Telegram bot of their own to the ordinary chat and to each
+custom agent they own. A message that names one of their skills runs that skill. The
+bundle README gains the section "Telegram bots".
+
+### Schema changes
+
+The database head advances from `0041_storage_host_replacements` to
+`0044_telegram_assistant_ids` through three additive migrations.
+`0042_telegram_bots` adds fifteen tables whose names begin with `telegram_`;
+`0043_telegram_inbox_chat_scope` scopes retained inbox message identities to their
+chat; `0044_telegram_assistant_ids` retains opaque assistant-message ids. No existing
+table or column changes. Normal Gateway bootstrap applies them on SQLite and
+PostgreSQL. The downgrade refuses while a bot link, a bot event, an act from a chat, a
+or queued message is on record.
+
+### Configuration and deployment
+
+- Configuration format advances from version 54 to 55. The Compose bundle renders it
+  by itself; no tenant file changes.
+- **Telegram bots are on when `HARTMESH_TELEGRAM` is absent.** Write
+  `HARTMESH_TELEGRAM=off` before upgrading to keep them off.
+- No bot can be added until the Gateway is started with
+  `HARTMESH_PROVIDER_KEYS_SECRET`: bot tokens are stored encrypted under it.
+- Four optional `.env` keys: `HARTMESH_TELEGRAM`, `HARTMESH_TELEGRAM_VOICE`,
+  `HARTMESH_TELEGRAM_MAX_BOTS`, `HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON` (README,
+  "Telegram bots").
+- The Gateway opens outgoing HTTPS connections to `api.telegram.org`. No port is
+  published and no service is added.
+- **A copy of a deployment must start with `HARTMESH_TELEGRAM=off`** while its
+  original runs.
+- Operator command: `python -m app.telegram_bots.cli` with `status`, `adopt`, `resume`
+  and `remove`.
+- `accounts disable` and `accounts enable --restore-held` report `telegram_bots`, and
+  the data export carries `telegram.json`.
+- A release without these migrations does not start on a database this release
+  migrated. Roll back by restoring a snapshot of the data disk taken before the
+  upgrade.
+
+### Telegram web screens
+
+Settings lists a person's bots, with the set-up dialog, their row dialogs, language
+and time zone, and an administrator's counts. The sidebar, the new-chat page and a
+custom agent's card lead there, and a page offered in a chat is linked under the
+answer. A signed-out person keeps the page and query through sign-in, and
+`/workspace` passes its query on.
+
+### Telegram retention
+
+Settled Telegram rows are deleted by age: incoming messages after 7 days, delivered
+messages after 30 and acts and bot history after 400, keeping whatever a live control
+or an unfinished delivery still needs. **Try again** on a failed message works for 7
+days.
+
 ### Managed Telegram publication custody
 
 Add dormant SQL primitives for immutable input/publication scope, an irreversible
 dispatch marker, exact run binding and atomic primary reply planning. Freeze
 output proof and rendered presentation; preserve saved delivery receipts on exact
 replay and refuse changed plans. Existing receiptless publications cannot be
-adopted as proof that dispatch never started. Ordinary managed-bot conversations,
-model dispatch and restart reconciliation remain later stages.
+adopted as proof that dispatch never started.
 
 Schema change: revision `0044_telegram_assistant_ids` widens the nullable, nonindexed Telegram inbox assistant-message-ID
 column from 64 characters to Text. A legal long SDK ID previously survived worker
@@ -39,7 +93,7 @@ close, and retain resident launch/worker drainage through cancellation. Local
 offline stream tests no longer probe Redis during collection.
 
 No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55. Managed-bot publication and activation remain deferred.
+remains version 55.
 
 ### Captured run startup and ownership closure
 
@@ -55,7 +109,7 @@ work, resolve exact idempotent reuse first, and commit eligible expired predeces
 closure with its successor. Lease recovery does not prove native/tool containment.
 
 No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55. Managed-bot publication/activation remains separate work.
+remains version 55.
 
 ### Captured worker output and authorized reads
 
@@ -69,7 +123,6 @@ Interrupt and rollback races seal cancellation after cleanup.
 Add the private versioned run-output GET with authorized pending, complete and
 unavailable projections, exact source checks and cancellation-safe SQL cleanup.
 Capture intent and disconnect policy stay fixed across idempotent reuse.
-Managed-bot model activation and durable publication recovery remain deferred.
 
 No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
 remains version 55.
@@ -97,8 +150,7 @@ New admissions discard caller-supplied result evidence.
 
 Prepare a host-only capture option and strict output client with retained source
 authorization and closed scope/status/digest validation. The capture and output
-read implementation above extends these primitives; managed-bot activation
-remains deferred.
+read implementation above extends these primitives.
 
 No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
 remains version 55. Existing ordinary and Memory run behavior stays unchanged.
@@ -113,8 +165,7 @@ return 503 when storage or proof is unavailable. Ordinary reads keep their defau
 The owned client retains dispatched work and reads while new-run admission closes.
 
 No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55. Durable model-result publication and ordinary managed-bot
-conversation activation remain deferred.
+remains version 55.
 
 ### Telegram conversation preparation
 
@@ -132,8 +183,7 @@ Clients can require authoritative binding reads using
 503. Existing reads retain their default behavior.
 
 No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55. Ordinary message handling and managed-bot activation remain
-deferred.
+remains version 55.
 
 ### Compose workspace recovery qualification
 
@@ -171,7 +221,7 @@ Failed handler/database work retains the polling suffix. Ordinary chat, skills,
 files, voice, callback actions and model-final delivery remain inactive.
 
 No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55. Managed-bot activation remains deferred.
+remains version 55.
 
 ### Telegram copy safeguards and operator commands
 
@@ -192,7 +242,7 @@ counts and classifies stored tokens without printing or rewriting them. Removal
 rechecks current account access and uses the shared atomic cleanup transaction.
 
 No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55. Managed-bot activation remains deferred.
+remains version 55.
 
 ### Telegram supervisor and Gateway lifecycle
 
@@ -204,8 +254,7 @@ unreadable authority waits instead of granting delivery. Fixed lifecycle notices
 keep captured destinations and transactional throttles.
 
 No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55. Managed-bot activation remains deferred until stage one is
-complete. Model-final, file and instance-policy consumers remain with their
+remains version 55. Model-final, file and instance-policy consumers remain with their
 subsequent changes.
 
 ### Local command cancellation
@@ -226,8 +275,7 @@ product replies use saved plans, including scheduled plain-text fallback, and
 logging redacts bot credentials across application and library handlers.
 
 No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55. Gateway startup integration follows separately, and managed
-Telegram activation remains deferred.
+remains version 55. Gateway startup integration follows separately.
 
 ### Telegram durable delivery foundation
 
@@ -238,8 +286,7 @@ repair. Input completion waits for every required delivery; recovery schedules
 saved output without starting another model run.
 
 No schema change: head remains `0043_telegram_inbox_chat_scope`. Configuration
-stays at version 55. Transport, polling and Gateway integration follow separately;
-managed Telegram activation remains deferred.
+stays at version 55. Transport, polling and Gateway integration follow separately.
 
 ### Telegram presentation foundation
 
@@ -250,7 +297,7 @@ selects a qualifying configured model entry and uses its captured key with a
 fixed provider endpoint. SDK payload logs are suppressed only during voice calls.
 
 No schema change: the database head remains `0043_telegram_inbox_chat_scope`.
-Configuration remains version 55; managed Telegram activation remains deferred.
+Configuration remains version 55.
 
 ### Telegram ownership foundation
 
@@ -263,17 +310,14 @@ setup codes, and cleanup retires stale delivery claims and connection authority.
 Personal settings retain time zone, language, quiet hours and notification
 preferences with conflict-safe first initialization.
 
-These additions do not activate managed Telegram bots or change configuration
-version 55. The chat-scoped inbox migration below fixes account reconnection.
+These additions do not change configuration version 55. The chat-scoped inbox migration below fixes account reconnection.
 
 ### Configuration and deployment
 
 Configuration version 55 adds strict managed Telegram bot settings, four optional
 Compose environment keys and a page-offer tool that carries page keys rather
-than addresses. Telegram bots are not offered in this release;
-`HARTMESH_TELEGRAM` is reserved and an absent key means that the deployment has
-no Telegram bots. Explicit `on`/`off` renders bound-identity settings and closes
-the deployment-wide Telegram token routes. The renderer reports fixed status
+than addresses. The rendered settings hold bound identity and close the
+deployment-wide Telegram token routes. The renderer reports fixed status
 messages without printing the wrapping secret. These configuration/tool changes
 add no database schema changes beyond the migration described below.
 
