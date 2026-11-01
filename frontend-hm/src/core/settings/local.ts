@@ -5,6 +5,9 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   notification: {
     enabled: true,
   },
+  telegram: {
+    offerDismissed: false,
+  },
   tokenUsage: {
     headerTotal: true,
     inlineMode: "per_turn",
@@ -66,6 +69,9 @@ export interface LocalSettings {
   notification: {
     enabled: boolean;
   };
+  telegram: {
+    offerDismissed: boolean;
+  };
   tokenUsage: {
     headerTotal: boolean;
     inlineMode: TokenUsageInlineMode;
@@ -99,6 +105,10 @@ function mergeLocalSettings(settings?: Partial<LocalSettings>): LocalSettings {
     notification: {
       ...DEFAULT_LOCAL_SETTINGS.notification,
       ...settings?.notification,
+    },
+    telegram: {
+      ...DEFAULT_LOCAL_SETTINGS.telegram,
+      ...settings?.telegram,
     },
   };
 }

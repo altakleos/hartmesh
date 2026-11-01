@@ -1919,6 +1919,7 @@ export function createEnUS(product: string): Translations {
       lessSteps: "Less steps",
       executeCommand: "Execute command",
       presentFiles: "Present files",
+      showWebPage: "Offer a link to a page",
       needYourHelp: "Need your help",
       useTool: (toolName: string) => `Use "${toolName}" tool`,
       searchFor: (query: string) => `Search for "${query}"`,
@@ -2670,6 +2671,334 @@ export function createEnUS(product: string): Translations {
           "You have no access to this workspace. Ask your administrator.",
         sso_access_off:
           "Your access to this workspace has been turned off. Ask your administrator.",
+      },
+    },
+    telegramBots: {
+      sectionLabel: "Telegram",
+      chatName: `${product}`,
+      list: {
+        title: "Your Telegram bots",
+        intro: `${product} and each of your custom agents can have a separate bot in your Telegram. A bot answers only you.`,
+        count: ({ used, limit }) => `${used} of ${limit} bots`,
+      },
+      kind: {
+        custom_agent: "Custom agent",
+      },
+      row: {
+        lastUsed: ({ time }) => `Last message ${time}`,
+        neverUsed: "No message yet",
+        menu: ({ name }) => `More actions for ${name}'s bot`,
+      },
+      short: {
+        none: "not connected",
+        connected: "connected",
+        waiting: "waiting for Start",
+        attention: "needs attention",
+        off: "turned off",
+      },
+      card: {
+        state: ({ state }) => `Telegram: ${state}`,
+      },
+      action: {
+        connect: "Connect Telegram",
+        open: "Open in Telegram",
+        openChat: ({ name }) => `Open chat with ${name}`,
+        newLink: "Get a new link",
+        reconnect: "Reconnect",
+        pasteToken: "Paste a new token",
+        applyProfile: "Apply name and picture again",
+        otherAccount: "Connect a different Telegram account",
+        disconnect: "Disconnect",
+        remove: "Remove bot",
+        tryAgain: "Try again",
+        tryNow: "Try now",
+        thatWasMe: "That was me",
+        useHere: "Use it here",
+      },
+      offer: {
+        chatTitle: `Take ${product} with you`,
+        chatBody: `Chat with ${product} on Telegram: ask, send files and get answers on your phone. About a minute to set up.`,
+        later: "Not now",
+      },
+      sidebar: {
+        label: "Telegram",
+        connect: "Connect",
+        connected: ({ count }) => `${count} connected`,
+        attention: ({ count }) =>
+          count === 1 ? "1 needs attention" : `${count} need attention`,
+      },
+      setup: {
+        title: ({ name }) => `Connect ${name} to Telegram`,
+        intro: ({ name }) =>
+          `${name} gets a bot in your Telegram: a chat that answers only you. You create the bot with BotFather, Telegram's own tool. This takes about a minute.`,
+        onPhone: "Telegram only on your phone? Do this set-up there.",
+        onPhoneLink: "Continue on your phone",
+        onPhoneQr:
+          "Scan with your phone's camera and sign in; this set-up opens there.",
+        before: {
+          title: "Before you connect",
+          body: `Telegram carries these chats. Everything you, ${product}, and your AI assistants and AI employees send there, including files and voice notes, passes through Telegram's servers and stays in your Telegram account until you delete it. Bot chats are not end-to-end encrypted, so Telegram can read them, and ${product} cannot delete them for you. A notification can show the start of a message on a locked phone; Telegram and your phone can hide previews. Anyone who can open your Telegram can write to your bots as you. Use a screen lock. If you lose your phone, end its session from another device (Telegram, Settings, Devices) and disconnect your bots here.`,
+          voice: ({ transcriber }) =>
+            `Voice notes are turned into text by ${transcriber}, after you agree to that service in the chat. If the service changes, you are asked again. ${product} does not keep the recording.`,
+          again:
+            "What Telegram can read is explained under “Before you connect”.",
+          show: "Read it",
+        },
+        step1: {
+          title: "1. Create the bot",
+          open: "Copy username and open BotFather",
+          copied: ({ username }) => `Copied ${username}`,
+          a: "Send /newbot to BotFather.",
+          b: ({ botName }) =>
+            `BotFather asks for a name. Type ${botName}. A typo does not matter: ${product} sets the final name and picture.`,
+          c: ({ username }) =>
+            `BotFather asks for a username. Paste the one you copied: ${username}`,
+          copyAgain: "Copy again",
+          another: "Another username",
+          d: "BotFather answers with a token, a long code with a colon in it. Tap the token to copy it, then come back to this page.",
+          public:
+            "The bot's name and picture can be seen by anyone on Telegram who finds the bot.",
+          helpTitle: "Something went wrong in BotFather?",
+          helpStart:
+            "New to BotFather? Press Start at the bottom of the chat first.",
+          helpTaken:
+            "If BotFather says the username is taken, get another one here and paste that.",
+          helpTooMany:
+            "If BotFather says you have too many bots: Telegram allows 20 per account. Delete one you no longer use with /deletebot.",
+          helpCopy:
+            "If tapping the token does not copy it, press and hold the message and choose Copy. Pasting BotFather's whole message works too.",
+        },
+        step2: {
+          title: "2. Paste the token",
+          label: "Bot token",
+          placeholder: "123456789:AAE…",
+          paste: "Paste",
+          hint: `${product} keeps the token encrypted and never shows it again.`,
+          checking: "Checking with Telegram…",
+          accepted: ({ username }) =>
+            `This is @${username}. Setting the name and picture…`,
+        },
+        timezone: {
+          ask: "Your browser did not say which time zone you are in. Choose it:",
+          label: "Time zone",
+        },
+        step3: {
+          title: "3. Open the chat and press Start",
+          qr: "Or scan this with your phone to open the chat there.",
+          why: "Telegram lets a bot write to you only after you press Start once.",
+          waiting: "Waiting for you to press Start in Telegram…",
+          hint: "Nothing happening? Use the button on this page, not the link BotFather sent, then press Start at the bottom of the chat.",
+          expired: "This link has expired.",
+        },
+        done: {
+          title: ({ name }) => `${name} is on Telegram`,
+          body: ({ telegramName }) =>
+            `Connected as ${telegramName}. The chat is ready: send the first message there.`,
+          notYou: "Not your Telegram account?",
+          locale: ({ language, timezone }) =>
+            `Bot messages are in ${language}; times are in ${timezone}.`,
+          change: "Change",
+          profileLater: `The name and picture could not be set yet. ${product} will try again.`,
+          next: ({ nextName }) => `Next: ${nextName}`,
+          close: "Done",
+        },
+      },
+      transcriber: {
+        openai: "OpenAI",
+        gemini: "Google Gemini",
+      },
+      refusal: {
+        format:
+          "That is not a bot token. A token looks like 123456789:AAE… Copy it again from BotFather's last message.",
+        rejected:
+          "Telegram does not recognise this token. Copy the newest one from BotFather and paste it again.",
+        inUseSelf: ({ other, name }) =>
+          `This bot is already connected to ${other}. One bot serves one chat, so create another bot for ${name}.`,
+        inUseOther:
+          "Someone else at your company has already connected this bot. Create your own in BotFather.",
+        agentLinked: ({ name }) => `You already have a bot for ${name}.`,
+        webhook:
+          "This bot is connected to another service. If you use the bot here, that service stops receiving the bot's messages.",
+        unreachable: `${product} could not reach Telegram. Nothing was saved. Try again in a minute.`,
+        tooManyCodes:
+          "Five of your bots are waiting for Start. Press Start in those chats, then try again.",
+        agentGone: ({ name }) =>
+          `${name} is no longer available to you, so a bot cannot be connected.`,
+        ceiling: "Your account may not connect a bot. Ask an administrator.",
+        noTimezone: "Choose your time zone, then try again.",
+        gone: "This bot is no longer in your list. Refresh the page.",
+        failed: "That did not work. Try again.",
+      },
+      state: {
+        sectionPaused: "Paused",
+        none: "Not connected",
+        preparing: "Setting up…",
+        waiting: "Waiting for you to press Start",
+        expired: "The link expired",
+        replaced: ({ name }) =>
+          `New bot. Open the chat and press Start once. Earlier conversations with ${name} stay in ${product}.`,
+        connected: ({ telegramName }) => `Connected as ${telegramName}`,
+        profileStale:
+          "Connected. The name or picture on Telegram is out of date.",
+        held: "Paused when your access was turned off. Reconnect to use this bot again.",
+        blocked: ({ name }) =>
+          `You blocked this bot in Telegram, so ${name} cannot write to you. Open the chat and unblock the bot.`,
+        conflict:
+          "Another program is using this bot's token, so this bot is not answering. If that is not you, the token may have leaked.",
+        conflictFix: {
+          pasted:
+            "To replace the token, send /revoke to BotFather, choose this bot, and paste the new token here.",
+        },
+        conflictStopped: "Checking stopped after 24 hours.",
+        conflictWebhook: `This bot is connected to another service, so nothing reaches ${product}.`,
+        afterConflict: {
+          chat: ({ time }) =>
+            `Another program began using this bot's token at ${time}. That has stopped, and the bot answers again. Allowing a blocked site stays paused on this bot until you press That was me or replace the token.`,
+          custom_agent: ({ time }) =>
+            `Another program began using this bot's token at ${time}. That has stopped, and the bot answers again. Allowing a blocked site stays paused on this bot until you press That was me or replace the token.`,
+        },
+        tokenRejected:
+          "Telegram no longer accepts this bot's token. That happens after /revoke or /deletebot in BotFather. Paste the new token, or remove this bot.",
+        unreachable: `${product} cannot reach Telegram right now and keeps trying.`,
+        limited: `Telegram is limiting this bot, so some messages arrive late. Saved messages are retried when Telegram allows them. Every answer is also in the conversation in ${product}.`,
+        deliveryPending:
+          "Messages are saved and waiting to be delivered. Delivery will be retried without starting new work.",
+        deliveryFailed:
+          "A saved message could not be delivered. Open the chat and use /help to retry delivery after the problem is fixed. No new work starts.",
+        stopped: ({ admin, provider }) =>
+          `This bot stopped after an internal error. Press Try now. If the bot stops again, ask ${admin ? provider : "an administrator"} to look at this.`,
+        unreadableHost: ({ provider }) =>
+          `This bot's token is still stored, but it cannot be opened right now, so the bot is not answering. The bot works again once ${provider} restores the setting that encrypts tokens. Removing the bot discards the token for good.`,
+        unreadableKey:
+          "The token saved for this bot cannot be opened with the encryption key in use here, so the bot is not answering. Paste a new token to bring the bot back.",
+        agentGone: ({ name }) =>
+          `${name} no longer exists, so this bot no longer answers.`,
+      },
+      profile: {
+        nameCut: ({ shortened }) =>
+          `Telegram shows names up to 64 characters; the bot is named ${shortened}.`,
+      },
+      token: {
+        title: ({ name }) => `Paste a new token for ${name}'s bot`,
+        body: "A new token for the same bot changes nothing else. A token from a different bot replaces this bot after the new connection is saved: you then open the new chat and press Start once. If saving fails, your current bot is kept.",
+        retryPaste:
+          "The result is not confirmed, or the token is needed for the next step. Paste the same token again to continue this request safely.",
+        completedRemoved:
+          "The replacement completed, and that bot was later removed. The bot list has been refreshed.",
+        completedChanged:
+          "This token change completed earlier. The bot has changed again since then. The current state is shown.",
+        replaceFailed:
+          "The replacement did not go through. Your current bot was not changed.",
+        savedRetry:
+          "The token was saved but this bot could not start. Choose Try now on its row.",
+        same: "That is the token this bot already has, so nothing was changed. For a new token, send /revoke to BotFather, choose this bot, and paste the token from BotFather's answer here.",
+      },
+      confirm: {
+        useHere: {
+          title: "Use this bot here?",
+          body: "The other service stops receiving this bot's messages.",
+        },
+        thatWasMe: {
+          title: "Was the other program yours?",
+          body: "Confirm only if you ran something else with this bot's token yourself, for example a test or another tool. If you did not, someone else may have the token: replace the token instead.",
+          button: "Yes, that was me",
+        },
+        otherAccount: {
+          title: "Connect a different Telegram account?",
+          body: ({ telegramName }) =>
+            `This bot stops accepting actions from ${telegramName} at once. No new reply is sent to that account, but a message already sent to Telegram may still arrive. You then get a new link to open with the Telegram account you want.`,
+          button: "Disconnect and get a new link",
+        },
+        remove: {
+          title: ({ name }) => `Remove ${name}'s Telegram bot?`,
+          body: ({ name }) =>
+            `The bot stops accepting actions at once and the token is deleted from ${product}. No new reply is sent; a message already sent to Telegram may still arrive. Your conversations with ${name} stay in ${product}. The bot itself stays in your Telegram account until you delete it in BotFather with /deletebot.`,
+          button: "Remove bot",
+        },
+        lost: {
+          title: ({ count }) => `Disconnect all ${count} bots?`,
+          body: "The bots stop accepting actions at once. No new reply is sent to the disconnected accounts; a message already sent to Telegram may still arrive. Reconnect each bot from this page when you are ready.",
+        },
+      },
+      lost: {
+        title: "Lost your phone?",
+        body: "Disconnect every bot now. Nothing is deleted, and you reconnect each one from this page.",
+        button: "Disconnect all bots",
+      },
+      toast: {
+        tokenReplaced: ({ name }) =>
+          `Token replaced. ${name} keeps answering in the same chat.`,
+        botReplaced: "Bot replaced. Open the chat from its row.",
+        profileApplied: "Name and picture applied.",
+        thatWasMe: "Confirmed. The pause on this bot has ended.",
+        usedHere: "Done. This bot now answers here.",
+        disconnected:
+          "Disconnected. Open the chat with the Telegram account you want and press Start.",
+        removed:
+          "Removed. To delete the bot from Telegram, send /deletebot to BotFather.",
+        lost: "All bots are disconnected.",
+      },
+      unavailable: {
+        off: ({ admin, provider }) =>
+          `Telegram is switched off for your company. Ask ${admin ? provider : "an administrator"} to switch Telegram on.`,
+        offKept: ({ admin, provider }) =>
+          `Telegram is switched off for your company. Your bots are kept and answer again when Telegram is switched on. Ask ${admin ? provider : "an administrator"} to switch Telegram on.`,
+        secretMissing:
+          "Telegram bots cannot be added right now: the setting that encrypts their tokens is missing.",
+        secretInvalid:
+          "Telegram bots cannot be added right now: the setting that encrypts their tokens is not valid.",
+        hostChanged: ({ provider }) =>
+          `Telegram is paused: the service moved to a new server, and ${provider} has to confirm the move. Your bots are kept.`,
+        polledElsewhere:
+          "Telegram is paused here because several bots conflict with another program. Your bots are kept.",
+        unknown: "Telegram is not available right now.",
+        askAdmin: "Ask an administrator.",
+        next: ({ provider }) => `Ask ${provider} to fix this.`,
+        reference: ({ code }) => `Reference for support: ${code}`,
+        limitPerson: ({ count }) =>
+          `You have ${count} Telegram bots, the most one person can have here. Remove one you no longer use to add another.`,
+        limitAll: ({ admin, provider }) =>
+          `No more Telegram bots can be added here: the limit is reached. Remove one you no longer use, or ask ${admin ? provider : "an administrator"} to raise the limit.`,
+        loadError:
+          "Your Telegram bots could not be loaded. Check your connection and refresh.",
+      },
+      prefs: {
+        title: "Messages from your bots",
+        language: {
+          label: "Language of bot messages",
+          body: "Changing it also changes each bot's description and commands.",
+        },
+        timezone: {
+          label: "Time zone",
+          body: "Taken from this browser when you connected your first bot.",
+        },
+        inChat:
+          "/settings in any bot changes the same things, except the time zone.",
+        saved: "Saved.",
+        failed: "That could not be saved. Try again.",
+      },
+      admin: {
+        title: "Telegram at your company",
+        counts: ({ bots, people, polling, failing, held }) =>
+          `${bots} ${bots === 1 ? "bot" : "bots"} for ${people} ${people === 1 ? "person" : "people"}: ${polling} working, ${failing} need the owner's attention, ${held} paused because access was turned off.`,
+        none: "Nobody has connected a Telegram bot yet.",
+        limits: ({ perPerson, limit }) =>
+          `One person can connect up to ${perPerson} bots; ${limit} bots in all.`,
+        private:
+          "Bots are personal. Nobody but the owner sees a bot's username, and nobody sees a token.",
+        voiceOn: ({ transcriber }) =>
+          `Voice notes are turned into text by ${transcriber}, one of the AI services already used here. Each person agrees in the chat before the first recording is sent, and is asked again if that service changes.`,
+        voiceOff: ({ provider }) =>
+          `Voice notes are not switched on here. They can be switched on by ${provider} when one of the AI models set up here comes directly from OpenAI or Google.`,
+      },
+      webPage: {
+        memory: "Open Memory",
+        conversations: "Open conversations",
+        addAssistant: "Add AI assistant",
+        addEmployee: "Add AI employee",
+        telegram: "Open Telegram settings",
+        scheduled: "Open scheduled tasks",
+        account: "Open Account",
       },
     },
   };

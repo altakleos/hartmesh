@@ -13,7 +13,47 @@ export interface WorkspacePresentation {
   starters: UiStarter[];
 }
 
+const TELEGRAM_REASONS = [
+  "off",
+  "secret-missing",
+  "secret-invalid",
+  "host-changed",
+  "polled-elsewhere",
+  "misconfigured",
+] as const;
+
+export type TelegramReason = (typeof TELEGRAM_REASONS)[number];
+
+export interface TelegramFeature {
+  /** False: no answer, or an answer this client cannot read. */
+  known: boolean;
+  enabled: boolean;
+  bots: "ready" | "unavailable";
+  reason: TelegramReason | null;
+  /** The reason exactly as the server sent it, for the reference line. */
+  reasonCode: string | null;
+  voice: "available" | "unavailable";
+  voiceProvider: "openai" | "gemini" | null;
+}
+
+export const CLOSED_TELEGRAM: TelegramFeature = {
+  known: false,
+  enabled: false,
+  bots: "unavailable",
+  reason: null,
+  reasonCode: null,
+  voice: "unavailable",
+  voiceProvider: null,
+};
+
 export interface FeaturesResponse {
+  telegram?: {
+    enabled?: unknown;
+    bots?: unknown;
+    reason?: unknown;
+    voice?: unknown;
+    voice_provider?: unknown;
+  } | null;
   storage_spaces?: {
     enabled?: boolean;
     native_attachments?: boolean;
@@ -107,6 +147,35 @@ export function selectBrowserControlEnabled(
   features: FeaturesResponse,
 ): boolean {
   return features.browser_control?.enabled ?? false;
+}
+
+/** A null, missing or unreadable key renders nothing about Telegram. */
+export function selectTelegram(
+  features: FeaturesResponse | undefined,
+): TelegramFeature {
+  const telegram = features?.telegram;
+  if (
+    !telegram ||
+    typeof telegram.enabled !== "boolean" ||
+    (telegram.bots !== "ready" && telegram.bots !== "unavailable")
+  ) {
+    return CLOSED_TELEGRAM;
+  }
+  const reasonCode =
+    typeof telegram.reason === "string" ? telegram.reason : null;
+  return {
+    known: true,
+    enabled: telegram.enabled,
+    bots: telegram.bots,
+    reason: TELEGRAM_REASONS.find((reason) => reason === reasonCode) ?? null,
+    reasonCode,
+    voice: telegram.voice === "available" ? "available" : "unavailable",
+    voiceProvider:
+      telegram.voice_provider === "openai" ||
+      telegram.voice_provider === "gemini"
+        ? telegram.voice_provider
+        : null,
+  };
 }
 
 export function selectStorageSpacesEnabled(

@@ -14,6 +14,11 @@ from app.telegram_bots.adapter import TOKEN_BODY
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_web_and_server_share_one_token_body():
+    source = (REPO_ROOT / "frontend-hm/src/core/telegram-bots/token.ts").read_text(encoding="utf-8")
+    assert re.search(r'export const TOKEN_BODY = "(.+)";', source).group(1) == TOKEN_BODY
+
+
 def _synthetic_token(digits: int = 9, secret_chars: int = 36) -> str:
     return "1" * digits + ":" + "A" * secret_chars
 

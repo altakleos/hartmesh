@@ -1796,6 +1796,7 @@ export function createZhCN(product: string): Translations {
       lessSteps: "隐藏步骤",
       executeCommand: "执行命令",
       presentFiles: "展示文件",
+      showWebPage: "提供页面链接",
       needYourHelp: "需要你的协助",
       useTool: (toolName: string) => `使用 “${toolName}” 工具`,
       searchFor: (query: string) => `搜索 “${query}”`,
@@ -2498,6 +2499,319 @@ export function createZhCN(product: string): Translations {
           "该邮箱地址属于本工作区中另一个人的账号。请联系管理员释放该地址。",
         sso_no_access: "你没有此工作区的访问权限。请联系管理员。",
         sso_access_off: "你对此工作区的访问已被关闭。请联系管理员。",
+      },
+    },
+    telegramBots: {
+      sectionLabel: "Telegram",
+      chatName: `${product}`,
+      list: {
+        title: "您的 Telegram 机器人",
+        intro: `${product} 和您的每个自定义智能体都可以在您的 Telegram 中拥有独立的机器人。机器人只回答您。`,
+        count: ({ used, limit }) => `${used} / ${limit} 个机器人`,
+      },
+      kind: {
+        custom_agent: "自定义智能体",
+      },
+      row: {
+        lastUsed: ({ time }) => `最后一条消息：${time}`,
+        neverUsed: "还没有消息",
+        menu: ({ name }) => `${name} 的机器人的更多操作`,
+      },
+      short: {
+        none: "未连接",
+        connected: "已连接",
+        waiting: "等待按下 Start",
+        attention: "需要处理",
+        off: "已关闭",
+      },
+      card: {
+        state: ({ state }) => `Telegram：${state}`,
+      },
+      action: {
+        connect: "连接 Telegram",
+        open: "在 Telegram 中打开",
+        openChat: ({ name }) => `打开与 ${name} 的聊天`,
+        newLink: "获取新链接",
+        reconnect: "重新连接",
+        pasteToken: "粘贴新令牌",
+        applyProfile: "重新应用名称和头像",
+        otherAccount: "连接其他 Telegram 账号",
+        disconnect: "断开连接",
+        remove: "移除机器人",
+        tryAgain: "重试",
+        tryNow: "立即重试",
+        thatWasMe: "那是我",
+        useHere: "在这里使用",
+      },
+      offer: {
+        chatTitle: `随身带上 ${product}`,
+        chatBody: `在 Telegram 上与 ${product} 聊天：在手机上提问、发送文件并获得回答。设置大约需要一分钟。`,
+        later: "以后再说",
+      },
+      sidebar: {
+        label: "Telegram",
+        connect: "连接",
+        connected: ({ count }) => `已连接 ${count} 个`,
+        attention: ({ count }) => `${count} 个需要处理`,
+      },
+      setup: {
+        title: ({ name }) => `将 ${name} 连接到 Telegram`,
+        intro: ({ name }) =>
+          `${name} 会在您的 Telegram 中拥有一个机器人：一个只回答您的聊天。您需要用 Telegram 自己的工具 BotFather 创建这个机器人，大约需要一分钟。`,
+        onPhone: "只在手机上使用 Telegram？请在手机上完成此设置。",
+        onPhoneLink: "在手机上继续",
+        onPhoneQr: "用手机相机扫描并登录，此设置会在手机上打开。",
+        before: {
+          title: "连接之前",
+          body: `这些聊天由 Telegram 传输。您、${product} 以及您的 AI 助理和 AI 员工在那里发送的所有内容，包括文件和语音消息，都会经过 Telegram 的服务器，并保留在您的 Telegram 账号中，直到您删除。机器人聊天并非端到端加密，因此 Telegram 可以读取内容，${product} 无法代您删除。锁屏通知可能显示消息开头；Telegram 和手机都可以隐藏预览。任何能打开您的 Telegram 的人都可以以您的身份给机器人发消息。请使用屏幕锁。如果手机丢失，请在其他设备上结束该会话（Telegram、设置、设备），并在这里断开机器人的连接。`,
+          voice: ({ transcriber }) =>
+            `语音消息由 ${transcriber} 转换为文字，您需要先在聊天中同意使用该服务。如果服务更换，会再次询问您。${product} 不保留录音。`,
+          again: "Telegram 能读取哪些内容，请参阅“连接之前”。",
+          show: "查看",
+        },
+        step1: {
+          title: "1. 创建机器人",
+          open: "复制用户名并打开 BotFather",
+          copied: ({ username }) => `已复制 ${username}`,
+          a: "向 BotFather 发送 /newbot。",
+          b: ({ botName }) =>
+            `BotFather 会询问名称。请输入 ${botName}。打错也没关系：${product} 会设置最终的名称和头像。`,
+          c: ({ username }) =>
+            `BotFather 会询问用户名。请粘贴您复制的用户名：${username}`,
+          copyAgain: "再次复制",
+          another: "换一个用户名",
+          d: "BotFather 会回复一个令牌，这是一串带冒号的长代码。点按令牌进行复制，然后回到此页面。",
+          public: "在 Telegram 上找到此机器人的任何人都能看到它的名称和头像。",
+          helpTitle: "在 BotFather 中遇到问题？",
+          helpStart: "第一次使用 BotFather？请先按聊天底部的 Start。",
+          helpTaken:
+            "如果 BotFather 提示用户名已被占用，请在这里换一个再粘贴。",
+          helpTooMany:
+            "如果 BotFather 提示机器人太多：Telegram 每个账号最多 20 个。请用 /deletebot 删除一个不再使用的机器人。",
+          helpCopy:
+            "如果点按令牌无法复制，请长按消息并选择“复制”。粘贴 BotFather 的整条消息也可以。",
+        },
+        step2: {
+          title: "2. 粘贴令牌",
+          label: "机器人令牌",
+          placeholder: "123456789:AAE…",
+          paste: "粘贴",
+          hint: `${product} 会加密保存令牌，并且不再显示。`,
+          checking: "正在向 Telegram 确认…",
+          accepted: ({ username }) => `这是 @${username}。正在设置名称和头像…`,
+        },
+        timezone: {
+          ask: "您的浏览器没有提供所在时区。请选择：",
+          label: "时区",
+        },
+        step3: {
+          title: "3. 打开聊天并按 Start",
+          qr: "或用手机扫描，在手机上打开聊天。",
+          why: "您按一次 Start 之后，Telegram 才允许机器人给您发消息。",
+          waiting: "正在等待您在 Telegram 中按 Start…",
+          hint: "没有反应？请使用此页面上的按钮，而不是 BotFather 发送的链接，然后按聊天底部的 Start。",
+          expired: "此链接已过期。",
+        },
+        done: {
+          title: ({ name }) => `${name} 已在 Telegram 上`,
+          body: ({ telegramName }) =>
+            `已连接为 ${telegramName}。聊天已就绪：请在那里发送第一条消息。`,
+          notYou: "不是您的 Telegram 账号？",
+          locale: ({ language, timezone }) =>
+            `机器人消息使用${language}；时间使用 ${timezone}。`,
+          change: "更改",
+          profileLater: `名称和头像暂时无法设置。${product} 会再次尝试。`,
+          next: ({ nextName }) => `下一个：${nextName}`,
+          close: "完成",
+        },
+      },
+      transcriber: {
+        openai: "OpenAI",
+        gemini: "Google Gemini",
+      },
+      refusal: {
+        format:
+          "这不是机器人令牌。令牌形如 123456789:AAE… 请从 BotFather 的最后一条消息中重新复制。",
+        rejected:
+          "Telegram 不认识此令牌。请从 BotFather 复制最新的令牌并重新粘贴。",
+        inUseSelf: ({ other, name }) =>
+          `此机器人已连接到 ${other}。一个机器人只服务一个聊天，请为 ${name} 创建另一个机器人。`,
+        inUseOther:
+          "公司里已有其他人连接了此机器人。请在 BotFather 中创建您自己的机器人。",
+        agentLinked: ({ name }) => `您已有 ${name} 的机器人。`,
+        webhook:
+          "此机器人已连接到其他服务。如果在这里使用，该服务将不再收到此机器人的消息。",
+        unreachable: `${product} 无法连接 Telegram。没有保存任何内容。请一分钟后重试。`,
+        tooManyCodes:
+          "您有五个机器人正在等待按下 Start。请在这些聊天中按 Start，然后重试。",
+        agentGone: ({ name }) => `您已无法使用 ${name}，因此无法连接机器人。`,
+        ceiling: "您的账号不能连接机器人。请询问管理员。",
+        noTimezone: "请选择您的时区，然后重试。",
+        gone: "此机器人已不在您的列表中。请刷新页面。",
+        failed: "操作没有成功。请重试。",
+      },
+      state: {
+        sectionPaused: "已暂停",
+        none: "未连接",
+        preparing: "正在设置…",
+        waiting: "等待您按下 Start",
+        expired: "链接已过期",
+        replaced: ({ name }) =>
+          `新机器人。请打开聊天并按一次 Start。与 ${name} 的早期会话仍保留在 ${product} 中。`,
+        connected: ({ telegramName }) => `已连接为 ${telegramName}`,
+        profileStale: "已连接。Telegram 上的名称或头像已过期。",
+        held: "在您的访问权限被关闭时已暂停。请重新连接以继续使用此机器人。",
+        blocked: ({ name }) =>
+          `您在 Telegram 中屏蔽了此机器人，因此 ${name} 无法给您发消息。请打开聊天并解除屏蔽。`,
+        conflict:
+          "另一个程序正在使用此机器人的令牌，因此此机器人没有回答。如果那不是您，令牌可能已泄露。",
+        conflictFix: {
+          pasted:
+            "要更换令牌，请向 BotFather 发送 /revoke，选择此机器人，然后在这里粘贴新令牌。",
+        },
+        conflictStopped: "已在 24 小时后停止检查。",
+        conflictWebhook: `此机器人已连接到其他服务，因此没有内容到达 ${product}。`,
+        afterConflict: {
+          chat: ({ time }) =>
+            `另一个程序在 ${time} 开始使用此机器人的令牌。现在已停止，机器人恢复回答。在您按下“那是我”或更换令牌之前，此机器人上仍暂停允许访问被阻止的网站。`,
+          custom_agent: ({ time }) =>
+            `另一个程序在 ${time} 开始使用此机器人的令牌。现在已停止，机器人恢复回答。在您按下“那是我”或更换令牌之前，此机器人上仍暂停允许访问被阻止的网站。`,
+        },
+        tokenRejected:
+          "Telegram 不再接受此机器人的令牌。这通常发生在 BotFather 中执行 /revoke 或 /deletebot 之后。请粘贴新令牌，或移除此机器人。",
+        unreachable: `${product} 目前无法连接 Telegram，正在继续尝试。`,
+        limited: `Telegram 正在限制此机器人，因此部分消息会延迟到达。已保存的消息会在 Telegram 允许时重试。每条回答也都保留在 ${product} 的会话中。`,
+        deliveryPending:
+          "消息已保存，正在等待发送。将重试发送，不会启动新的工作。",
+        deliveryFailed:
+          "一条已保存的消息无法发送。问题解决后，请打开聊天并使用 /help 重试发送。不会启动新的工作。",
+        stopped: ({ admin, provider }) =>
+          `此机器人因内部错误已停止。请按“立即重试”。如果再次停止，请联系${admin ? ` ${provider} ` : "管理员"}查看。`,
+        unreadableHost: ({ provider }) =>
+          `此机器人的令牌仍在保存，但目前无法打开，因此机器人没有回答。${provider} 恢复用于加密令牌的设置后，机器人会恢复工作。移除机器人会永久丢弃令牌。`,
+        unreadableKey:
+          "此机器人保存的令牌无法用这里当前的加密密钥打开，因此机器人没有回答。请粘贴新令牌以恢复机器人。",
+        agentGone: ({ name }) => `${name} 已不存在，因此此机器人不再回答。`,
+      },
+      profile: {
+        nameCut: ({ shortened }) =>
+          `Telegram 显示的名称最多 64 个字符；此机器人名为 ${shortened}。`,
+      },
+      token: {
+        title: ({ name }) => `为 ${name} 的机器人粘贴新令牌`,
+        body: "同一机器人的新令牌不会改变其他内容。其他机器人的令牌会在新连接保存后替换此机器人：之后您需要打开新聊天并按一次 Start。如果保存失败，您当前的机器人会保留。",
+        retryPaste:
+          "结果尚未确认，或下一步需要令牌。请重新粘贴同一令牌，以安全地继续此请求。",
+        completedRemoved: "替换已完成，该机器人后来被移除。机器人列表已刷新。",
+        completedChanged:
+          "此令牌更改之前已完成。此后机器人又发生了变化。现在显示的是当前状态。",
+        replaceFailed: "替换没有成功。您当前的机器人没有变化。",
+        savedRetry:
+          "令牌已保存，但此机器人无法启动。请在它所在的行选择“立即重试”。",
+        same: "这就是此机器人现有的令牌，因此没有任何更改。如需新令牌，请向 BotFather 发送 /revoke，选择此机器人，然后在这里粘贴 BotFather 回复中的令牌。",
+      },
+      confirm: {
+        useHere: {
+          title: "在这里使用此机器人？",
+          body: "其他服务将不再收到此机器人的消息。",
+        },
+        thatWasMe: {
+          title: "另一个程序是您的吗？",
+          body: "只有当您自己用此机器人的令牌运行过其他程序（例如测试或其他工具）时才确认。如果不是，可能有其他人持有令牌：请改为更换令牌。",
+          button: "是的，那是我",
+        },
+        otherAccount: {
+          title: "连接其他 Telegram 账号？",
+          body: ({ telegramName }) =>
+            `此机器人会立即停止接受 ${telegramName} 的操作。不会再向该账号发送新回复，但已发送到 Telegram 的消息仍可能到达。之后您会获得一个新链接，用您想要的 Telegram 账号打开。`,
+          button: "断开连接并获取新链接",
+        },
+        remove: {
+          title: ({ name }) => `移除 ${name} 的 Telegram 机器人？`,
+          body: ({ name }) =>
+            `机器人会立即停止接受操作，令牌也会从 ${product} 中删除。不会再发送新回复；已发送到 Telegram 的消息仍可能到达。您与 ${name} 的会话会保留在 ${product} 中。机器人本身会保留在您的 Telegram 账号中，直到您在 BotFather 中用 /deletebot 删除。`,
+          button: "移除机器人",
+        },
+        lost: {
+          title: ({ count }) => `断开全部 ${count} 个机器人？`,
+          body: "机器人会立即停止接受操作。不会再向已断开的账号发送新回复；已发送到 Telegram 的消息仍可能到达。准备好后，请在此页面重新连接每个机器人。",
+        },
+      },
+      lost: {
+        title: "手机丢失了？",
+        body: "立即断开所有机器人的连接。不会删除任何内容，您可以在此页面重新连接每个机器人。",
+        button: "断开所有机器人",
+      },
+      toast: {
+        tokenReplaced: ({ name }) =>
+          `令牌已更换。${name} 继续在同一聊天中回答。`,
+        botReplaced: "机器人已替换。请从它所在的行打开聊天。",
+        profileApplied: "名称和头像已应用。",
+        thatWasMe: "已确认。此机器人的暂停已结束。",
+        usedHere: "完成。此机器人现在在这里回答。",
+        disconnected:
+          "已断开连接。请用您想要的 Telegram 账号打开聊天并按 Start。",
+        removed:
+          "已移除。要从 Telegram 删除机器人，请向 BotFather 发送 /deletebot。",
+        lost: "所有机器人都已断开连接。",
+      },
+      unavailable: {
+        off: ({ admin, provider }) =>
+          `您的公司已关闭 Telegram。请联系${admin ? ` ${provider} ` : "管理员"}开启 Telegram。`,
+        offKept: ({ admin, provider }) =>
+          `您的公司已关闭 Telegram。您的机器人会保留，在 Telegram 开启后恢复回答。请联系${admin ? ` ${provider} ` : "管理员"}开启 Telegram。`,
+        secretMissing: "目前无法添加 Telegram 机器人：缺少用于加密令牌的设置。",
+        secretInvalid: "目前无法添加 Telegram 机器人：用于加密令牌的设置无效。",
+        hostChanged: ({ provider }) =>
+          `Telegram 已暂停：服务已迁移到新服务器，需要 ${provider} 确认此次迁移。您的机器人会保留。`,
+        polledElsewhere:
+          "Telegram 在这里已暂停，因为多个机器人与另一个程序冲突。您的机器人会保留。",
+        unknown: "Telegram 目前不可用。",
+        askAdmin: "请询问管理员。",
+        next: ({ provider }) => `请联系 ${provider} 解决此问题。`,
+        reference: ({ code }) => `支持参考：${code}`,
+        limitPerson: ({ count }) =>
+          `您有 ${count} 个 Telegram 机器人，已达到这里每人的上限。请移除一个不再使用的机器人后再添加。`,
+        limitAll: ({ admin, provider }) =>
+          `这里无法再添加 Telegram 机器人：已达到上限。请移除一个不再使用的机器人，或联系${admin ? ` ${provider} ` : "管理员"}提高上限。`,
+        loadError: "无法加载您的 Telegram 机器人。请检查网络并刷新。",
+      },
+      prefs: {
+        title: "来自机器人的消息",
+        language: {
+          label: "机器人消息的语言",
+          body: "更改后，每个机器人的描述和命令也会随之更改。",
+        },
+        timezone: {
+          label: "时区",
+          body: "在您连接第一个机器人时取自此浏览器。",
+        },
+        inChat: "在任意机器人中使用 /settings 可更改相同的内容，时区除外。",
+        saved: "已保存。",
+        failed: "无法保存。请重试。",
+      },
+      admin: {
+        title: "您公司的 Telegram",
+        counts: ({ people, bots, polling, failing, held }) =>
+          `${people} 人共 ${bots} 个机器人：${polling} 个正常运行，${failing} 个需要所有者处理，${held} 个因访问权限被关闭而暂停。`,
+        none: "还没有人连接 Telegram 机器人。",
+        limits: ({ perPerson, limit }) =>
+          `每人最多可连接 ${perPerson} 个机器人；总共 ${limit} 个。`,
+        private:
+          "机器人属于个人。除所有者外，没有人能看到机器人的用户名，也没有人能看到令牌。",
+        voiceOn: ({ transcriber }) =>
+          `语音消息由 ${transcriber} 转换为文字，这是这里已在使用的 AI 服务之一。每个人在发送第一段录音前都要在聊天中同意；如果该服务更换，会再次询问。`,
+        voiceOff: ({ provider }) =>
+          `这里尚未开启语音消息。当这里设置的某个 AI 模型直接来自 OpenAI 或 Google 时，${provider} 可以开启。`,
+      },
+      webPage: {
+        memory: "打开记忆",
+        conversations: "打开会话",
+        addAssistant: "添加 AI 助理",
+        addEmployee: "添加 AI 员工",
+        telegram: "打开 Telegram 设置",
+        scheduled: "打开定时任务",
+        account: "打开账号",
       },
     },
   };
