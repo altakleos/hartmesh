@@ -229,7 +229,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
               : t.settings.descriptionForCompany}
           </p>
         </DialogHeader>
-        <div className="grid min-h-0 flex-1 gap-4 md:grid-cols-[220px_minmax(0,1fr)]">
+        <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)] gap-4 md:grid-cols-[220px_minmax(0,1fr)]">
           <nav className="bg-sidebar min-h-0 overflow-y-auto rounded-lg border p-2">
             <ul className="space-y-1 pr-1">
               {visibleSections.map(({ id, label, icon: Icon }) => {
@@ -254,7 +254,8 @@ export function SettingsDialog(props: SettingsDialogProps) {
               })}
             </ul>
           </nav>
-          <ScrollArea className="h-full min-h-0 rounded-lg border">
+          {/* Radix wraps this in a table, which an unbreakable row would widen past the phone. */}
+          <ScrollArea className="h-full min-h-0 rounded-lg border [&>[data-radix-scroll-area-viewport]>div]:!block">
             <div className="space-y-8 p-6">
               {presentationLoading && <SettingsPageLoading />}
               {!presentationLoading && (

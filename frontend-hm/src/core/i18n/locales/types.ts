@@ -2162,6 +2162,7 @@ export interface Translations {
     setup: {
       title: (values: { name: string }) => string;
       intro: (values: { name: string }) => string;
+      fault: string;
       onPhone: string;
       onPhoneLink: string;
       onPhoneQr: string;

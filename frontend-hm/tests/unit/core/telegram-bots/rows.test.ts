@@ -9,6 +9,7 @@ import {
   sectionNoticeOf,
   setupStageOf,
   shortStateOf,
+  stopsSetup,
   targetRowsOf,
 } from "@/core/telegram-bots/rows";
 
@@ -451,5 +452,10 @@ describe("the rows that need attention", () => {
     for (const row of [4, 5, 14, 15, 18, 19, 26]) {
       expect(shortStateOf(row)).toBe("short.attention");
     }
+  });
+
+  it("only a bot that can still hear Start keeps the set-up's own steps", () => {
+    const rows = Array.from({ length: 30 }, (_, row) => row);
+    expect(rows.filter((row) => !stopsSetup(row))).toEqual([21, 22, 23]);
   });
 });

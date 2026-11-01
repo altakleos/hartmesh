@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 
 rs.mock("@/core/api/fetcher", () => ({ fetch: rs.fn() }));
 rs.mock("@/core/config", () => ({ getBackendBaseURL: () => "" }));
@@ -99,6 +99,22 @@ describe("the telegram hooks", () => {
     await waitFor(() => expect(state().loading).toBe(false));
     expect(state().known).toBe(false);
     expect(listRequests()).toHaveLength(0);
+  });
+
+  it("keeps a known answer when a later read fails", async () => {
+    let healthy = true;
+    serve(() =>
+      healthy
+        ? features({ enabled: true, bots: "ready", reason: null })
+        : new Response("{}", { status: 500 }),
+    );
+    const client = start();
+    await waitFor(() => expect(state().known).toBe(true));
+    healthy = false;
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ["features"] });
+    });
+    expect(state().known).toBe(true);
   });
 
   it("reads no list for a null key", async () => {

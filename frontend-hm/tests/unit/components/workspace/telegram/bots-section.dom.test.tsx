@@ -19,11 +19,21 @@ const agents = rs.hoisted(() => ({
 const navigation = rs.hoisted(() => ({
   query: "",
   replace: rs.fn(),
+  seen: ["", new URLSearchParams()] as [string, URLSearchParams],
 }));
 rs.mock("next/navigation", () => ({
   usePathname: () => "/workspace",
   useRouter: () => ({ replace: navigation.replace }),
-  useSearchParams: () => new URLSearchParams(navigation.query),
+  // The same object until the address changes, as Next's own hook returns.
+  useSearchParams: () => {
+    if (navigation.seen[0] !== navigation.query) {
+      navigation.seen = [
+        navigation.query,
+        new URLSearchParams(navigation.query),
+      ];
+    }
+    return navigation.seen[1];
+  },
 }));
 rs.mock("@/core/auth/AuthProvider", () => ({ useAuth: () => auth }));
 rs.mock("sonner", () => ({ toast }));
@@ -48,6 +58,8 @@ rs.mock("@/components/ui/dropdown-menu", () => ({
   }) => <button onClick={onSelect}>{children}</button>,
 }));
 
+import { setSettingsDialogOpen } from "@/components/workspace/settings";
+import { getSettingsDialogSnapshot } from "@/components/workspace/settings/settings-dialog-store";
 import { TelegramBotsSection } from "@/components/workspace/telegram/bots-section";
 import {
   discardTelegramConnects,
@@ -56,6 +68,7 @@ import {
   telegramConnectEpoch,
   useTelegramPageState,
 } from "@/components/workspace/telegram/setup-dialog-store";
+import { WorkspaceSettingsDeepLink } from "@/components/workspace/workspace-settings-deep-link";
 import { fetch } from "@/core/api/fetcher";
 import { createEnUS } from "@/core/i18n/locales/en-US";
 import type { BotList } from "@/core/telegram-bots/api";
@@ -67,6 +80,7 @@ import {
   clearClients,
   json,
   listOf,
+  queries,
   renderWithClient,
   server,
 } from "./support";
@@ -110,6 +124,7 @@ afterEach(() => {
   cleanup();
   clearClients();
   resetTelegramPageState();
+  setSettingsDialogOpen(false);
   rs.restoreAllMocks();
   rs.mocked(fetch).mockReset();
   toast.success.mockReset();
@@ -379,6 +394,70 @@ describe("the Telegram section", () => {
       "chat",
     );
     expect(scroll).toHaveBeenCalled();
+  });
+
+  describe("with the link that opens Settings", () => {
+    const addressLands = () =>
+      navigation.replace.mockImplementation((href: string) => {
+        navigation.query = href.split("?")[1] ?? "";
+      });
+
+    it("leaves a target on the address for a section that mounts late", async () => {
+      navigation.query = "settings=channels&telegram=chat";
+      addressLands();
+      renderOpened();
+      render(<WorkspaceSettingsDeepLink />);
+      // The router answers before the two lazy chunks that hold the section.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(getSettingsDialogSnapshot().open).toBe(true);
+      expect(navigation.replace).not.toHaveBeenCalled();
+      start(READY, listOf([]));
+      await screen.findByTestId("set-up-for");
+      expect(screen.getByTestId("set-up-for").textContent).toBe("chat");
+      await waitFor(() => expect(navigation.query).toBe("settings=channels"));
+    });
+
+    it("takes everything off the address when Settings closes", async () => {
+      navigation.query = "settings=channels&telegram=chat";
+      addressLands();
+      render(<WorkspaceSettingsDeepLink />);
+      await waitFor(() => expect(getSettingsDialogSnapshot().open).toBe(true));
+      act(() => setSettingsDialogOpen(false));
+      await waitFor(() => expect(navigation.query).toBe(""));
+    });
+  });
+
+  it("keeps the rows when a later read fails", async () => {
+    let healthy = true;
+    start(READY, undefined, {
+      [LIST]: () =>
+        healthy ? json(listOf([bot()])) : new Response("{}", { status: 500 }),
+    });
+    await waitFor(() => expect(rowsShown()).toEqual(["HartMesh"]));
+    healthy = false;
+    await act(async () => {
+      await queries().refetchQueries({ queryKey: ["telegram-bots"] });
+    });
+    expect(rowsShown()).toEqual(["HartMesh"]);
+    expect(
+      screen.queryByText(
+        "Your Telegram bots could not be loaded. Check your connection and refresh.",
+      ),
+    ).toBeNull();
+  });
+
+  it("says so when the first read fails, and offers another", async () => {
+    let healthy = false;
+    start(READY, undefined, {
+      [LIST]: () =>
+        healthy ? json(listOf([bot()])) : new Response("{}", { status: 500 }),
+    });
+    await screen.findByText(
+      "Your Telegram bots could not be loaded. Check your connection and refresh.",
+    );
+    healthy = true;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(rowsShown()).toEqual(["HartMesh"]));
   });
 
   it("opens the set-up for an address that names a row without a bot", async () => {

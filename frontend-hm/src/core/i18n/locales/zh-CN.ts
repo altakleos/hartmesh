@@ -2558,6 +2558,7 @@ export function createZhCN(product: string): Translations {
         title: ({ name }) => `将 ${name} 连接到 Telegram`,
         intro: ({ name }) =>
           `${name} 会在您的 Telegram 中拥有一个机器人：一个只回答您的聊天。您需要用 Telegram 自己的工具 BotFather 创建这个机器人，大约需要一分钟。`,
+        fault: "此机器人目前无法连接。可在 Telegram 设置中处理。",
         onPhone: "只在手机上使用 Telegram？请在手机上完成此设置。",
         onPhoneLink: "在手机上继续",
         onPhoneQr: "用手机相机扫描并登录，此设置会在手机上打开。",

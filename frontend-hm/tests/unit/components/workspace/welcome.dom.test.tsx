@@ -24,9 +24,6 @@ rs.mock("@/core/features", () => ({
 rs.mock("@/components/workspace/composer-focus", () => ({
   useComposerFocus: () => focusComposer,
 }));
-rs.mock("@/components/workspace/telegram/welcome-card", () => ({
-  TelegramWelcomeCard: () => null,
-}));
 
 import { Welcome } from "@/components/workspace/welcome";
 import { I18nContext } from "@/core/i18n/context";

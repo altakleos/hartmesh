@@ -1,5 +1,6 @@
 "use client";
 
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -41,10 +42,14 @@ import {
   useRefreshTelegramBots,
   useTelegramBots,
   useTelegramClock,
+  useTelegramReader,
 } from "@/core/telegram-bots/hooks";
 import {
+  rowOf,
+  type RowView,
   sectionNoticeOf,
   setupStageOf,
+  stopsSetup,
   targetRowsOf,
 } from "@/core/telegram-bots/rows";
 import { telegramText, type TelegramKey } from "@/core/telegram-bots/text";
@@ -53,6 +58,7 @@ import {
   type AgentTarget,
   serverTargetOf,
   telegramTargetOf,
+  webPageHref,
 } from "@/core/telegram-bots/web-pages";
 import { useIsMobile } from "@/hooks/use-mobile";
 
@@ -79,6 +85,8 @@ import {
 const BOT_FATHER = "https://t.me/BotFather";
 const WAIT_POLL_MS = 2000;
 const HINT_AFTER_MS = 60_000;
+/** A button holds its words on one line, and a name can be long enough to leave the dialog. */
+const WRAPS = "h-auto max-w-full whitespace-normal";
 
 function browserTimeZone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone ?? "";
@@ -441,7 +449,7 @@ function StepThree({
       ) : (
         <>
           {connect ? (
-            <Button asChild>
+            <Button asChild className={WRAPS}>
               <a href={connect.url} target="_blank" rel="noopener noreferrer">
                 {strings.action.openChat({ name })}
               </a>
@@ -449,6 +457,7 @@ function StepThree({
           ) : (
             <Button
               type="button"
+              className={WRAPS}
               onClick={() => void fresh(prepareConnectWindow(), true)}
             >
               {strings.action.openChat({ name })}
@@ -476,6 +485,40 @@ function StepThree({
           {telegramText(strings, line, values)}
         </p>
       ) : null}
+    </section>
+  );
+}
+
+/** A bot that cannot hear Start: what its row says, and the way to the row's buttons. */
+function SetupFault({ view, target }: { view: RowView; target: AgentTarget }) {
+  const { t } = useI18n();
+  const strings = t.telegramBots;
+  const router = useRouter();
+  const pathname = usePathname();
+  const feature = useTelegram();
+  // The row's one word; the reason stands in the section's notice.
+  const notice = view.row === 1 ? sectionNoticeOf(feature, true) : null;
+  const lines = notice ? [{ ...view.lines[0]!, key: notice.key }] : view.lines;
+  const href = webPageHref("telegram", target, pathname);
+  return (
+    <section className="space-y-2" role="status">
+      <p className="text-sm">{strings.setup.fault}</p>
+      {lines.map((line) => (
+        <p key={line.key} className="text-sm">
+          {telegramText(strings, line.key, line.values)}
+        </p>
+      ))}
+      <Button
+        type="button"
+        onClick={() => {
+          closeTelegramSetup();
+          if (href) {
+            router.push(href);
+          }
+        }}
+      >
+        {strings.webPage.telegram}
+      </Button>
     </section>
   );
 }
@@ -570,6 +613,7 @@ function DoneScreen({
           <Button
             type="button"
             variant="outline"
+            className={WRAPS}
             onClick={() => openTelegramSetup(next.target)}
           >
             {strings.setup.done.next({ nextName: next.name })}
@@ -587,21 +631,28 @@ export function TelegramSetupDialog({ target }: { target: AgentTarget }) {
   const { t } = useI18n();
   const strings = t.telegramBots;
   const isMobile = useIsMobile();
+  const feature = useTelegram();
+  const reader = useTelegramReader();
   const { connects } = useTelegramPageState();
   const [firstBot, setFirstBot] = useState(false);
   const [phoneCode, setPhoneCode] = useState(false);
   const { data, isPending } = useTelegramBots({
-    refetchInterval: (query) =>
-      setupStageOf(botOf(query.state.data?.bots, target), Date.now()) ===
-      "waiting"
+    refetchInterval: (query) => {
+      const seen = botOf(query.state.data?.bots, target);
+      const stage = setupStageOf(seen, Date.now());
+      // An expired link waits for nothing, unless the fault it hides can clear.
+      return stage === "waiting" ||
+        (stage === "expired" && seen?.health !== "ok")
         ? WAIT_POLL_MS
-        : false,
+        : false;
+    },
   });
 
   const name = target.kind === "chat" ? strings.chatName : target.name;
   const now = useTelegramClock();
   const bot = botOf(data?.bots, target);
   const stage = setupStageOf(bot, now);
+  const view = bot ? rowOf({ name, bot, feature, reader, now }) : null;
   const held = bot ? connects.get(bot.id) : undefined;
   const connect = held && Date.parse(held.expires_at) > now ? held : undefined;
   const ownAddress = useMemo(
@@ -614,7 +665,7 @@ export function TelegramSetupDialog({ target }: { target: AgentTarget }) {
 
   return (
     <Dialog open onOpenChange={(open) => !open && closeTelegramSetup()}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto">
+      <DialogContent className="max-h-[90vh] overflow-y-auto [overflow-wrap:anywhere]">
         <DialogHeader>
           <DialogTitle>{strings.setup.title({ name })}</DialogTitle>
           <DialogDescription>{strings.setup.intro({ name })}</DialogDescription>
@@ -623,6 +674,8 @@ export function TelegramSetupDialog({ target }: { target: AgentTarget }) {
           <p className="text-muted-foreground text-sm">{t.common.loading}</p>
         ) : stage === "done" && bot ? (
           <DoneScreen bot={bot} name={name} firstBot={firstBot} />
+        ) : stage !== "steps" && view && stopsSetup(view.row) ? (
+          <SetupFault view={view} target={target} />
         ) : stage !== "steps" && bot ? (
           <StepThree
             key={stage}

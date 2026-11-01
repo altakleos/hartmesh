@@ -17,6 +17,7 @@ const local = rs.hoisted(() => ({
   set: rs.fn(),
   push: rs.fn(),
   openSettings: rs.fn(),
+  search: "",
 }));
 rs.mock("@/core/auth/AuthProvider", () => ({ useAuth: () => auth }));
 rs.mock("@/core/i18n/hooks", () => ({ useI18n: () => ({ t: i18n.t }) }));
@@ -28,6 +29,7 @@ rs.mock("@/core/settings", () => ({
 }));
 rs.mock("next/navigation", () => ({
   useRouter: () => ({ push: local.push }),
+  useSearchParams: () => new URLSearchParams(local.search),
 }));
 rs.mock("@/components/ui/sidebar", () => ({
   SidebarMenuItem: ({ children }: { children: ReactNode }) => <>{children}</>,
@@ -89,6 +91,7 @@ afterEach(() => {
   resetTelegramPageState();
   rs.mocked(fetch).mockReset();
   local.dismissed = false;
+  local.search = "";
   local.set.mockReset();
   local.push.mockReset();
   local.openSettings.mockReset();
@@ -134,6 +137,14 @@ describe("the welcome card", () => {
     clearClients();
 
     serve(OFF);
+    renderWithClient(<TelegramWelcomeCard />);
+    await settle();
+    expect(screen.queryByTestId("telegram-welcome-card")).toBeNull();
+  });
+
+  it("stays out of the page that creates a skill", async () => {
+    local.search = "mode=skill";
+    serve(READY);
     renderWithClient(<TelegramWelcomeCard />);
     await settle();
     expect(screen.queryByTestId("telegram-welcome-card")).toBeNull();

@@ -297,6 +297,7 @@ export function InputBox({
   status = "ready",
   context,
   extraHeader,
+  extraFooter,
   isWelcomeMode,
   threadId,
   draftThreadId = threadId,
@@ -335,6 +336,13 @@ export function InputBox({
     reasoning_effort?: "minimal" | "low" | "medium" | "high";
   };
   extraHeader?: React.ReactNode;
+  /**
+   * Drawn out of flow under the composer. The welcome layout anchors this
+   * block by its bottom, so anything added in flow pushes the greeting and the
+   * starters off the top of a laptop screen. A window too short to show it
+   * whole cannot scroll to the rest, so there it is left out.
+   */
+  extraFooter?: React.ReactNode;
   /**
    * Whether to render the input in welcome layout (vertically centered,
    * with hero + quick action suggestions).  This is purely a visual flag,
@@ -2983,6 +2991,12 @@ export function InputBox({
           ? t.inputBox.disclaimer
           : t.inputBox.assistantDisclaimer}
       </p>
+
+      {extraFooter && (
+        <div className="absolute top-full right-0 left-0 flex justify-center [@media(max-height:515px)]:hidden">
+          {extraFooter}
+        </div>
+      )}
 
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent>
