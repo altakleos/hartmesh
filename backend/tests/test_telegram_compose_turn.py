@@ -48,6 +48,7 @@ async def turn(e, monkeypatch, tmp_path, *, keys, replies, auxiliary, tweak=None
     assert facts.plugins, "This proves nothing about Compose unless its plugins are loaded"
     assert not wire.replies, "Every scripted reply must have been asked for"
     assert set(facts.runs) == {"success"}
+    assert set(facts.turn_runs) == set(facts.run_ids), "A chat's log lines name its run, so the turn has to know it"
     assert not any(FAILURE in (shown or "") for _endpoint, shown in facts.sent), facts.sent
     return facts
 

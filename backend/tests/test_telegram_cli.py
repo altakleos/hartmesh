@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -18,7 +18,7 @@ from _telegram_repository_test_support import db as db
 from sqlalchemy import event, select, text, update
 
 from app.telegram_bots.cipher import token_cipher, wrap_token
-from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramDeploymentRow, TelegramOutboxRow
+from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramDeploymentRow, TelegramInboundMarkRow, TelegramOutboxRow
 from deerflow.persistence.user.access import DisabledIdentityRow, IdentityHoldRow, RoleLimitRow
 from deerflow.persistence.user.model import UserRow
 
@@ -180,6 +180,70 @@ async def test_status_projects_only_safe_current_generation_facts(cli, db, accou
     assert len(await rows(db, TelegramDeploymentRow)) == 1  # add_link's existing capacity singleton
     selected = await cli.status(db.sessions, config=config, guard=guard, owner=owner)
     assert len(selected["links"]) == 1 and selected["attention"] == []
+
+
+@pytest.mark.asyncio
+async def test_status_shows_open_inputs_and_a_poller_that_went_quiet(cli, db, accounts, monkeypatch):
+    monkeypatch.setattr(cli, "static_cause", lambda *_args: None)
+    now = datetime.now(UTC)
+    quiet = await add_link(db, owner=accounts, bot=9_000_000_001)
+    held = await add_link(db, owner=accounts, bot=9_000_000_002)
+    polling = await add_link(db, owner=accounts, bot=9_000_000_003)
+    async with db.sessions.begin() as session:
+        for link, state, seen in ((quiet, "connected", now - cli.POLLING_STALE_AFTER * 2), (held, "held", now - cli.POLLING_STALE_AFTER * 2), (polling, "connected", now)):
+            await session.execute(update(TelegramBotLinkRow).where(TelegramBotLinkRow.id == link.id).values(state=state, health="ok", last_ok_at=seen, chat_id=7000000001, binding_generation=2))
+        for message, state, generation, age in ((1, "accepted", 2, 30), (2, "reply_pending", 2, 10), (3, "done", 2, 90), (4, "accepted", 1, 90)):
+            session.add(TelegramInboundMarkRow(link_id=quiet.id, message_id=message, update_id=message, chat_id=7000000001, binding_generation=generation, accepted_at=now - timedelta(minutes=age), state=state))
+
+    guard = cli.CopyGuard(db.sessions, host_reader=lambda: None)
+    selected = await cli.status(db.sessions, config=app_config(), guard=guard, owner=accounts)
+    by_link = {item["link"]: item for item in selected["links"]}
+    assert by_link[quiet.id]["open_inputs"] == 2, "A finished input and an old binding's input are not this chat's queue"
+    assert by_link[quiet.id]["oldest_open_input_at"] == (now - timedelta(minutes=30)).isoformat()
+    assert by_link[polling.id]["open_inputs"] == 0 and by_link[polling.id]["oldest_open_input_at"] is None
+    assert [item["polling_stale"] for item in (by_link[quiet.id], by_link[held.id], by_link[polling.id])] == [True, False, False]
+    assert selected["note"].endswith("the next start would find polling running")
+
+    overview = await cli.status(db.sessions, config=app_config(), guard=guard)
+    assert [item["link"] for item in overview["attention"]] == [quiet.id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "state,health,polling,quiet",
+    [
+        ("connected", "ok", "running", True),
+        ("connected", "unreachable", "running", False),
+        ("waiting_connect", "ok", "running", False),
+        ("held", "ok", "running", False),
+        ("blocked", "ok", "running", False),
+        ("connected", "ok", "host_changed", False),
+        ("connected", "ok", "polled_elsewhere", False),
+    ],
+)
+async def test_only_a_link_that_should_be_polling_counts_as_quiet(cli, db, accounts, monkeypatch, state, health, polling, quiet):
+    monkeypatch.setattr(cli, "static_cause", lambda *_args: None)
+    link = await add_link(db, owner=accounts)
+    async with db.sessions.begin() as session:
+        await session.execute(update(TelegramBotLinkRow).where(TelegramBotLinkRow.id == link.id).values(state=state, health=health, last_ok_at=datetime.now(UTC) - cli.POLLING_STALE_AFTER * 2))
+    guard = cli.CopyGuard(db.sessions, host_reader=lambda: None)
+
+    async def peek(**_kwargs):
+        return polling
+
+    monkeypatch.setattr(guard, "peek", peek)
+    result = await cli.status(db.sessions, config=app_config(), guard=guard, owner=accounts)
+    assert result["links"][0]["polling_stale"] is quiet
+
+
+@pytest.mark.asyncio
+async def test_a_stale_stamp_means_nothing_while_telegram_is_refused(cli, db, accounts, monkeypatch):
+    link = await add_link(db, owner=accounts)
+    async with db.sessions.begin() as session:
+        await session.execute(update(TelegramBotLinkRow).where(TelegramBotLinkRow.id == link.id).values(state="connected", health="ok", last_ok_at=datetime.now(UTC) - cli.POLLING_STALE_AFTER * 2))
+    monkeypatch.setattr(cli, "static_cause", lambda *_args: "off")
+    result = await cli.status(db.sessions, config=app_config(), guard=cli.CopyGuard(db.sessions, host_reader=lambda: None))
+    assert result["attention"] == []
 
 
 @pytest.mark.asyncio

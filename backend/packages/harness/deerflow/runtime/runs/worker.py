@@ -101,6 +101,7 @@ from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.presented_files import RUNTIME_PRESENTED_FILES_CONTEXT_KEY
 from deerflow.runtime.runs.capture_io import CaptureIOClosed, CaptureIOOwner, CaptureIOUnsupported, capture_io_scope, current_capture_io_owner, run_capture_io
 from deerflow.runtime.runs.stream_cleanup import close_agent_stream
+from deerflow.runtime.runs.terminal import failure_chain
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
@@ -1439,10 +1440,12 @@ async def _run_agent(
                 io_owner.retire()
             if journal is not None:
                 await journal.close(flush=False)
-        except BaseException:
+        except BaseException as error:
             # This child may cancel its owning worker via the existing fence.
             # The caller drains it and distinguishes that induced cancellation
             # from a real executed cancellation; no status-only fallback runs.
+            if not isinstance(error, asyncio.CancelledError):
+                logger.error("Run %s output could not be confirmed: %s", run_id, failure_chain(error))
             if not io_retired():
                 await run_manager._mark_ownership_lost(record, require_active=False, reason="Run output evidence could not be confirmed.")
             if journal is not None:

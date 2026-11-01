@@ -46,6 +46,7 @@ from deerflow.config.app_config import get_app_config
 from deerflow.config.ui_config import product_name
 from deerflow.persistence.engine import get_session_factory
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+from deerflow.runtime.runs.terminal import failure_chain
 from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
@@ -127,6 +128,7 @@ class TelegramSupervisor:
         self.pending_files = None
         self.recovery = None
         self._recovery_epoch = self._recovery_phase = None
+        self._recovery_held = 0
         self._recovery_started = False
         self._publication_reads_open = False
         self._environ = dict(os.environ if environ is None else environ)
@@ -477,7 +479,7 @@ class TelegramSupervisor:
             poll.wake()
         self._periodic(self._tick_sender, 1, "sender")
         self._periodic(self.reconcile, self.config.reconcile_interval_seconds, "reconcile")
-        self._periodic(self.recovery.tick, self.config.reconcile_interval_seconds, "publication-recovery")
+        self._periodic(self._tick_recovery, self.config.reconcile_interval_seconds, "publication-recovery")
         self._periodic(self._refresh_flags, 3600, "bot-flags")
         self._periodic(self.sweep_retention, RETENTION_SWEEP_SECONDS, "retention", first_delay=3600)
         self._periodic(lambda: self.callbacks.sweep(self._clock()), 3600, "callback-sweep")
@@ -512,7 +514,7 @@ class TelegramSupervisor:
         except Exception as error:
             # Uncertain metadata/authority never becomes another dispatch or a
             # global startup refusal. The durable rows remain held for review.
-            self._event("publication_recovery_held", error=type(error).__name__, level=logging.WARNING)
+            self._event("publication_recovery_held", cause=failure_chain(error), level=logging.WARNING)
         finally:
             if self._recovery_epoch is not None:
                 self._recovery_epoch.retire()
@@ -591,11 +593,18 @@ class TelegramSupervisor:
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
-                    self._event("maintenance_failed", error=type(error).__name__, level=logging.WARNING)
+                    self._event("maintenance_failed", job=name, cause=failure_chain(error), level=logging.WARNING)
 
         task = asyncio.create_task(run(), name=f"telegram-{name}")
         self._background.add(task)
         task.add_done_callback(self._background.discard)
+
+    async def _tick_recovery(self) -> None:
+        """A publication recovery keeps held has no other trace, so say when the count moves."""
+        recovered = await self.recovery.tick()
+        if recovered.held != self._recovery_held:
+            self._recovery_held = recovered.held
+            self._event("publication_recovery_pass", held=recovered.held, scanned=recovered.scanned, level=logging.WARNING if recovered.held else logging.INFO)
 
     async def _available(self) -> bool:
         await self._health_barrier.wait()

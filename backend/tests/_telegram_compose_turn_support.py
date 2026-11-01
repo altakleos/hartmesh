@@ -454,6 +454,7 @@ async def drive_message(e, monkeypatch, tmp_path, *, prompts=("What is two plus 
             channel = supervisor.channel(link.id)
             await manager.start()
             _answer_every_call(boot.normal, monkeypatch)
+            turn_runs = []
             for number, prompt in enumerate(prompts):
                 finished.clear()
                 update = Update.de_json(update_payload(1701 + number, message_id=711 + number, account=PERSON, text=prompt), channel.bot)
@@ -462,14 +463,18 @@ async def drive_message(e, monkeypatch, tmp_path, *, prompts=("What is two plus 
                 turn = next(iter(supervisor.turns._turns.values()))
                 await asyncio.wait_for(finished.wait(), 30)
                 await asyncio.wait_for(_finish(turn, boot.clock), 30)
+                turn_runs.append(turn.run_id)
                 for _ in range(6):
                     boot.clock.advance(5)
                     await supervisor.sender.tick()
                     await supervisor.sender.drain()
             async with e.sf() as reader:
+                rows = list(await reader.scalars(select(RunRow)))
                 facts = SimpleNamespace(
                     plugins=[plugin.namespace for _source, plugin in extensions.plugins],
-                    runs=[row.status for row in await reader.scalars(select(RunRow))],
+                    runs=[row.status for row in rows],
+                    run_ids=[row.run_id for row in rows],
+                    turn_runs=turn_runs,
                     sent=[(call.endpoint, call.parameters.get("text") or call.parameters.get("caption")) for call in boot.normal.calls if call.endpoint in SENDS],
                     bot_calls=repr([(call.endpoint, call.parameters) for call in boot.normal.calls]),
                 )

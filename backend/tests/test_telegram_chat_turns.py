@@ -161,7 +161,8 @@ async def controlled_execution(e, monkeypatch):
     e.services.threads = SimpleNamespace(ensure_thread=ensure)
     e.services.publication_authority = SimpleNamespace(capture=capture)
     e.services.publications = SimpleNamespace(dispatch=dispatch, dispatch_record=dispatch_record, retry=retry)
-    turns._observer = SimpleNamespace(watch=watch, read_run=read_run, plan_final=plan_final, request_stop=request_stop, stop_outcome=lambda *args, **kwargs: None, retire=lambda record: None, drain=drain)
+    final_read = lambda record: {"output": "unavailable:unsupported_output"}  # noqa: E731
+    turns._observer = SimpleNamespace(watch=watch, read_run=read_run, plan_final=plan_final, final_read=final_read, request_stop=request_stop, stop_outcome=lambda *args, **kwargs: None, retire=lambda record: None, drain=drain)
     return turns, state, reached
 
 
@@ -192,7 +193,7 @@ async def until(predicate):
 
 
 @pytest.mark.asyncio
-async def test_actual_failure_primary_releases_one_turn_and_starts_waiting_input(db, monkeypatch):
+async def test_actual_failure_primary_releases_one_turn_and_starts_waiting_input(db, monkeypatch, caplog):
     e = await ingress(db, monkeypatch=monkeypatch, lead=True)
     turns, state, reached = await controlled_execution(e, monkeypatch)
     try:
@@ -214,6 +215,8 @@ async def test_actual_failure_primary_releases_one_turn_and_starts_waiting_input
         await until(lambda: state.posts == 2)
         assert first.done.is_set() and state.plans == 0
         assert next(iter(turns._turns.values())).inbound.text == "Next input"
+        chat = f"link={e.link.id} bot={e.link.bot_id} turn={first.record.publication_id} run=run-{first.record.publication_id}"
+        assert f"chat_run_failed {chat} status=error outcome=error.generic" in caplog.text
         async with db.sessions() as session:
             row = await session.get(TelegramInboundMarkRow, (e.link.id, 1071, e.link.chat_id))
             primary = await session.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.dedupe_key == "reply:" + first.record.turn_id))
@@ -596,7 +599,7 @@ async def past_the_bound(turn):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("refusal", [None, ValueError("the output cannot be carried")])
-async def test_a_finished_run_whose_reply_cannot_be_planned_ends_visibly(db, monkeypatch, refusal):
+async def test_a_finished_run_whose_reply_cannot_be_planned_ends_visibly(db, monkeypatch, refusal, caplog):
     e = await ingress(db, monkeypatch=monkeypatch, lead=True)
     turns, state, reached = await controlled_execution(e, monkeypatch)
     outcomes = []
@@ -619,6 +622,35 @@ async def test_a_finished_run_whose_reply_cannot_be_planned_ends_visibly(db, mon
         await past_the_bound(first)
         await asyncio.wait_for(first.done.wait(), 5)
         assert outcomes == [("error.generic", True)]
+        logged = caplog.text
+        chat = f"link={e.link.id} bot={e.link.bot_id} turn={first.record.publication_id} run=run-{first.record.publication_id}"
+        assert f"chat_final_undeliverable {chat} output=unavailable:unsupported_output" in logged
+        assert refusal is None or (f"chat_final_unplanned {chat} cause=ValueError:test_telegram_chat_turns.py:" in logged and "cannot be carried" not in logged)
+    finally:
+        await turns.stop()
+        await e.channel.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_goes_on_says_so_from_the_driver(db, monkeypatch, caplog):
+    from app.telegram_bots.turns import TURN_WAIT_REPORT_SECONDS
+
+    e = await ingress(db, monkeypatch=monkeypatch, lead=True)
+    turns, state, reached = await controlled_execution(e, monkeypatch)
+    clock = {"now": 1000.0}
+    e.channel._time = lambda: clock["now"]
+    try:
+        await e.channel.handle_update(message(e, 1067, content="Take your time"))
+        await asyncio.wait_for(reached.wait(), 5)
+        await until(lambda: state.posts == 1)
+        first = next(iter(turns._turns.values()))
+        await until(lambda: first.observed_since is not None)
+        assert "chat_turn_waiting" not in caplog.text
+
+        clock["now"] += TURN_WAIT_REPORT_SECONDS
+        first.wake.set()
+        await until(lambda: first.wait_reported)
+        assert f"chat_turn_waiting link={e.link.id} bot={e.link.bot_id} turn={first.record.publication_id} waited_s={TURN_WAIT_REPORT_SECONDS}" in caplog.text
     finally:
         await turns.stop()
         await e.channel.stop()
@@ -735,7 +767,7 @@ async def test_failed_owned_read_closes_advisory_view_while_durable_turn_stays_h
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fault", ["read", "committed_outcome"])
-async def test_transient_observation_failure_recovers_same_publication_and_releases_waiter(db, monkeypatch, fault):
+async def test_transient_observation_failure_recovers_same_publication_and_releases_waiter(db, monkeypatch, fault, caplog):
     e = await ingress(db, monkeypatch=monkeypatch, lead=True)
     turns, state, reached = await controlled_execution(e, monkeypatch)
     failed, release = asyncio.Event(), asyncio.Event()
@@ -772,6 +804,7 @@ async def test_transient_observation_failure_recovers_same_publication_and_relea
         assert not first.task.done(), "A transient safe observation failure must retain a recovery driver"
         assert state.posts == 1 and first.record.publication_id == original
         assert turns.queue.waiting_count(e.channel.link, None) == 1
+        assert f"cause={'ReadError' if fault == 'read' else 'OSError'}:test_telegram_chat_turns.py:" in caplog.text and "transient read failure" not in caplog.text and "lost local result" not in caplog.text
         state.terminal = terminal(first.record)
         release.set()
         first.wake.set()

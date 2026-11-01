@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
@@ -35,6 +37,44 @@ def exception_classification(exc: BaseException) -> str:
     if isinstance(exc, (OSError, TimeoutError)):
         return "transport_error"
     return "unexpected_error"
+
+
+_FIXED_WORD = re.compile(r"[a-z][a-z0-9]*(?:[-_][a-z0-9]+)+")
+
+
+def _fixed_word(error: BaseException) -> str | None:
+    """One short slug of an exact builtin type. A dot is no separator: file names and hosts have them."""
+    if type(error) not in (ValueError, RuntimeError) or len(error.args) != 1:
+        return None
+    word = error.args[0]
+    return word if type(word) is str and len(word) <= 64 and _FIXED_WORD.fullmatch(word) else None
+
+
+def failure_chain(error: BaseException | None, *, links: int = 4) -> str:
+    """Why something failed, as one token a log line can carry.
+
+    `raise ... from None` hides a cause from tracebacks, but `__context__` still
+    holds it where the failure is finally reported. Exception text is unsafe, so
+    a message prints only when it is a fixed word. Otherwise a link is its class
+    and where it was raised, which opens no file.
+    """
+    parts = []
+    seen = set()
+    while error is not None and len(parts) < links and id(error) not in seen:
+        seen.add(id(error))
+        name = type(error).__name__
+        part = [name if name.isidentifier() else "Exception"]
+        word = _fixed_word(error)
+        if word is not None:
+            part.append(word)
+        frame = error.__traceback__
+        if frame is not None:
+            while frame.tb_next is not None:
+                frame = frame.tb_next
+            part.append(f"{os.path.basename(frame.tb_frame.f_code.co_filename)}:{frame.tb_lineno}")
+        parts.append(":".join(part))
+        error = error.__cause__ if error.__cause__ is not None else error.__context__
+    return ">".join(parts)
 
 
 class TerminalWriteFailure(RuntimeError):

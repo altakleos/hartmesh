@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import re
 from collections import deque
@@ -11,12 +12,14 @@ from typing import TYPE_CHECKING
 
 from app.telegram_bots.inbox import PublicationRecord
 from app.telegram_bots.publication import MAX_OBSERVATION_PAGES, PublicationObservation
+from deerflow.runtime.runs.terminal import failure_chain
 from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
     from app.telegram_bots.inbox import RecoveryCursor
     from app.telegram_bots.recovery_authority import StartupRecoveryEpoch
 
+logger = logging.getLogger(__name__)
 RECOVERY_PAGE_SIZE = 32
 RECOVERY_MAX_PAGES = 2
 RECOVERY_MAX_OPERATIONS = 4
@@ -275,7 +278,8 @@ class PublicationRecoveryService:
                 raise
             except _Retired:
                 pass
-            except Exception:
+            except Exception as error:
+                logger.warning("telegram_bots publication_recovery_failed cause=%s", failure_chain(error))
                 control.held += 1
             finally:
                 self._retire(control)

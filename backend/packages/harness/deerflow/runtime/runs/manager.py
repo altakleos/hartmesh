@@ -48,7 +48,7 @@ from .store.base import (
     run_is_before_cursor,
     run_sort_key,
 )
-from .terminal import TERMINAL_STATUSES, TerminalRecoveryPolicy, diagnostic, exception_classification, persist_terminal
+from .terminal import TERMINAL_STATUSES, TerminalRecoveryPolicy, diagnostic, exception_classification, failure_chain, persist_terminal
 
 if TYPE_CHECKING:
     from deerflow.config.run_ownership_config import RunOwnershipConfig
@@ -1490,8 +1490,8 @@ class RunManager:
                 return True
         except CaptureIOClosed:
             raise
-        except Exception:
-            pass
+        except Exception as error:
+            logger.error("Run %s prestart output could not be confirmed: %s", record.run_id, failure_chain(error))
         await self._mark_ownership_lost(record, reason="Run prestart output could not be confirmed.", require_active=False)
         return False
 
@@ -3073,7 +3073,7 @@ class RunManager:
 
         if task_to_cancel is not None:
             task_to_cancel.cancel()
-        logger.error("Run %s lost lease ownership; local execution was fenced: %s", record.run_id, reason)
+        logger.error("Run %s was fenced and local execution stopped: %s", record.run_id, reason)
         return True
 
     async def start_heartbeat(self) -> None:
