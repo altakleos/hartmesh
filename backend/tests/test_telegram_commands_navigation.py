@@ -154,7 +154,7 @@ async def test_non_general_new_does_not_reserve_or_reset_general_conversation(co
     await e.commands.handle(e.channel, e.incoming("new", topic=99), "new")
     async with e.sessions() as session:
         row = await session.get(TelegramInboundMarkRow, (e.link.id, 1801, e.link.chat_id))
-        assert row.route_complete and row.route_basis["key"] == "tap.failed"
+        assert row.route_complete and row.route_basis["key"] == "new.in_topic", "There is nothing to tap, and sending it again gives the same"
         assert "thread_preparation" not in row.route_basis
 
 

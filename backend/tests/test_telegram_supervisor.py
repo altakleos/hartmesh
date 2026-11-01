@@ -889,6 +889,44 @@ async def test_actual_sdk_conflict_notices_render_brand_variant_and_throttle(db,
         await e.supervisor.stop()
 
 
+@pytest.mark.parametrize(("key", "paused", "offered"), [("link.conflict", False, True), ("link.conflict_over", False, False), ("link.conflict_over", True, True)])
+async def test_a_conflict_notice_offers_the_settings_page_while_there_is_something_to_do_there(db, monkeypatch, key, paused, offered):
+    from app.telegram_bots import supervisor as module
+
+    monkeypatch.setattr(module, "page_address", lambda page, link: "https://example.test/settings")
+    e, link, held = await running_one(db, monkeypatch, connected=True)
+    try:
+        channel = e.supervisor.channel(link.id)
+        if paused:
+            channel.link = await db.links.update(link.id, acts_paused_since=link.created_at)
+        notice_reply(e.normal, link)
+        await e.supervisor._notice(channel, key)
+        sent = next(call for call in e.normal.calls if call.endpoint == "sendMessage").parameters
+        assert ("reply_markup" in sent) is offered
+        if offered:
+            assert sent["reply_markup"]["inline_keyboard"][0][0] == {"text": "Open Telegram settings", "url": "https://example.test/settings"}
+    finally:
+        await e.supervisor.stop()
+
+
+async def test_an_address_that_cannot_be_built_costs_the_button_and_not_the_notice(db, monkeypatch):
+    from app.telegram_bots import supervisor as module
+
+    def unreadable(*args, **kwargs):
+        raise FileNotFoundError("config.yaml")
+
+    monkeypatch.setattr(module, "page_address", unreadable)
+    e, link, held = await running_one(db, monkeypatch, connected=True)
+    try:
+        notice_reply(e.normal, link)
+        await e.supervisor._notice(e.supervisor.channel(link.id), "link.conflict", throttle=True)
+        calls = [call for call in e.normal.calls if call.endpoint == "sendMessage"]
+        assert len(calls) == 1, "The throttle was already spent, so this was the only chance to say it"
+        assert "reply_markup" not in calls[0].parameters
+    finally:
+        await e.supervisor.stop()
+
+
 async def test_access_off_forbidden_is_disposable_and_preserves_held_state(db, monkeypatch):
     e, link, held = await running_one(db, monkeypatch, connected=True)
     try:

@@ -212,8 +212,10 @@ async def fixed_source(host, link, key):
     values = {}
     if key == "custom_agent.deleted":
         values = {"product": host.product_name, "agent": link.bot_username or host.product_name}
-    elif key in {"chat.files_full", "new.files_full"}:
-        values = {"product": host.product_name, "support": "an administrator"}
+    elif key in {"chat.files_full", "new.files_full", "error.model_refused"}:
+        from app.telegram_bots.authority import is_administrator
+
+        values = {"product": host.product_name, "reader_is_administrator": await is_administrator(link.owner_user_id)}
     elif key == "refused.interrupted":
         values = {"name": (await host.prepare_ingress_values(link))["name"]}
     return {"key": key, "values": values}

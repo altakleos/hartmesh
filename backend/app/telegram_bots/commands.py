@@ -117,7 +117,7 @@ class CallbackCommands:
         if origin.route_kind is None:
             basis = await self._presentation(word, link)
             if word == "new" and origin.message_thread_id is not None:
-                basis = {"key": "tap.failed", "values": {}, "keyboard": []}
+                basis = {"key": "new.in_topic", "values": {}, "keyboard": []}
             guard.current()
             origin = await await_drained(inbox.route(origin, kind="command", target_id=word, basis=basis, operation_ids=[]))
         if origin.route_kind != "command" or origin.route_target_id not in {"new", "help", "privacy", "settings", "web"}:

@@ -328,7 +328,7 @@ async def test_a_skill_word_that_begins_like_a_command_is_a_skill(db, monkeypatc
         await e.channel.stop()
 
 
-@pytest.mark.parametrize(("outcome", "key", "values"), [("off", "cmd.skill_off", {"skill": "weekly-report"}), ("unavailable", "cmd.skill_unavailable", {"skill": "weekly-report"}), ("failed", "error.generic", {})])
+@pytest.mark.parametrize(("outcome", "key", "values"), [("off", "cmd.skill_off", {"skill": "weekly-report"}), ("unavailable", "cmd.skill_unavailable", {"skill": "weekly-report"}), ("failed", "cmd.skill_failed", {"skill": "weekly-report"})])
 async def test_skill_that_cannot_run_says_why_and_is_not_published(db, monkeypatch, outcome, key, values):
     import app.telegram_bots.adapter as adapter
 

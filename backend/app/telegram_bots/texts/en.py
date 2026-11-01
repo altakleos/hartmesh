@@ -1,10 +1,14 @@
 """English fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
-    "hello.chat": "Connected as {email}. This chat is {product}. No other Telegram account can write here.\n\nAsk anything or send a file.\n\nAnswers here come from an AI and can be wrong. Check anything you will act on.",
+    "hello.chat": "Connected as {email}. This chat is {product}. No other Telegram account can write here.\n"
+    "\n"
+    "Ask anything or send a file. Everything here is also kept in {product} on the web.\n"
+    "\n"
+    "Answers here come from an AI and can be wrong. Check anything you will act on.",
     "hello.custom_agent": "Connected as {email}. This chat is {agent}, one of your custom agents in {product}. No other Telegram account can write here.\n"
     "\n"
-    "Ask anything or send a file.\n"
+    "Ask anything or send a file. Everything here is also kept in {product} on the web.\n"
     "\n"
     "{agent} is an AI and can be wrong. Check anything you will act on.",
     "hello.privacy": "This chat goes through Telegram, which can read it.\nSend /privacy for the details.",
@@ -12,7 +16,8 @@ TEXTS: dict[str, str] = {
     "hello.refused": "This link belongs to another bot, so nothing was connected. Open your web app and use the link shown for this bot.",
     "hello.account_taken": "This Telegram account is already connected to another account. Disconnect it there first.",
     "hello.again": "This chat is already connected. /help shows what it can do.",
-    "stranger": "This is a private bot that answers only the person who connected this chat. If that is you, use the connect link in your web app again.",
+    "stranger": "This is a private bot that answers only the person who connected it.",
+    "stranger.waiting": "This bot is not connected yet. If it is yours, use the Open chat button in your web app, then press Start.",
     "help.chat": "This is your {product} bot.\n"
     "\n"
     "In this chat:\n"
@@ -62,6 +67,7 @@ TEXTS: dict[str, str] = {
     "busy.gave_up": "Still busy after two minutes, so your message was not answered. It is kept.",
     "busy.thread": "This conversation is busy with an answer that was started on the web. Your message is in line.",
     "error.generic": "Something went wrong and the message was not answered. It is kept.",
+    "error.model_refused": "The AI service refused this request, so the message was not answered. Ask {support} to check it.",
     "answer.on_web": "This answer cannot be shown here. It is in {product} on the web.",
     "refused.interrupted": "{name}'s workspace was restarted, which stopped this answer. Your message is kept.",
     "run.cancelled": "This request was cancelled.",
@@ -110,14 +116,16 @@ TEXTS: dict[str, str] = {
     "net.kept": "{host} stays blocked.",
     "net.cancelled": "{host} stays blocked, because a new message was sent.",
     "net.stale": "This request is no longer waiting. Ask again and it will be retried.",
-    "new.confirm_plain": "Start a new conversation? Only what was said in this conversation is left behind.",
+    "new.confirm_plain": "Start a new conversation? This one stays in {product} on the web, and the new one starts without what was said here.",
     "new.done": "New conversation started.",
     "new.kept": "Kept. This conversation goes on.",
+    "new.in_topic": "/new works in the main chat, not in a topic.",
     "new.files_full": "Your files are full, so a new conversation cannot start. Delete files or old conversations in {product} on the web, then try again. If that is not enough, ask {support} for more room.",
     "cmd.unknown": "/{command} is not a command in this chat. Tap the menu button to see the commands.",
     "cmd.agent": "This chat is always {name}. Each custom agent has a separate chat.",
     "cmd.skill_off": "The skill /{skill} is switched off.",
     "cmd.skill_unavailable": "The skill /{skill} is not available in this chat.",
+    "cmd.skill_failed": "The skill /{skill} could not be looked up just now. Send it again in a moment.",
     "settings.state_basic": "Language of this chat's fixed texts: {language}. Answers follow the language you write in.",
     "link.conflict": "This chat is paused.\nAnother program is using this bot, so messages may be missed. If that was not you, replace the bot's token: in BotFather send /revoke, then paste the new token in {product} on the web.",
     "link.conflict_over.chat": "This chat works again.\nAllowing a blocked site stays paused on this bot until you replace the token or confirm in {product} on the web that the other program was yours.",

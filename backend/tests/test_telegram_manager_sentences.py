@@ -46,6 +46,7 @@ def scoped_run(*, status="error", reason=None, custom=False):
         ("files-full", "chat.files_full", False),
         ("orphan_recovered", "refused.interrupted", False),
         ("gateway_stopped", "chat.restarted", False),
+        ("model_refused", "error.model_refused", False),
         (None, "error.generic", False),
         ("unknown-host-code", "error.generic", False),
         ("busy", "error.generic", False),

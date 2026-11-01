@@ -1625,7 +1625,7 @@ class BotLinkRepository:
             binding = await self._binding_row(session, current, telegram_user_id, first_name)
             current.connection_id, current.telegram_user_id, current.chat_id = binding.id, telegram_user_id, chat_id
             current.connected_name = first_name or username
-            current.connected_at, current.updated_at = now, now
+            current.connected_at, current.updated_at, current.last_update_at = now, now, None  # A stamp can land after a disconnect.
             current.binding_generation = _advance(current.binding_generation)
             current.state, current.connect_expires_at = "connected", None
             await self._end_codes(session, current.id, current.owner_user_id)

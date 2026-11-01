@@ -101,7 +101,7 @@ from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.presented_files import RUNTIME_PRESENTED_FILES_CONTEXT_KEY
 from deerflow.runtime.runs.capture_io import CaptureIOClosed, CaptureIOOwner, CaptureIOUnsupported, capture_io_scope, current_capture_io_owner, run_capture_io
 from deerflow.runtime.runs.stream_cleanup import close_agent_stream
-from deerflow.runtime.runs.terminal import failure_chain
+from deerflow.runtime.runs.terminal import MODEL_REFUSED_ERROR_REASONS, MODEL_REFUSED_STOP_REASON, failure_chain
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
@@ -2064,12 +2064,14 @@ async def _run_agent(
             error_msg = llm_error_fallback_message
             if error_msg is None and journal is not None:
                 error_msg = journal.llm_error_fallback_message
+            error_reason = getattr(llm_error_fallback_message, "reason", None)
             error_msg = error_msg or "LLM provider failed after retries"
             await _ensure_finalizing_before_edit_failure(run_manager, record)
             cancel_action = await run_manager.set_status_if_not_cancelled(
                 run_id,
                 RunStatus.error,
                 error=error_msg,
+                stop_reason=MODEL_REFUSED_STOP_REASON if error_reason in MODEL_REFUSED_ERROR_REASONS else None,
                 **terminal_status_kwargs,
             )
             if cancel_action is not None:
@@ -3596,16 +3598,26 @@ def _lg_mode_to_sse_event(mode: str) -> str:
     return mode
 
 
+class _ErrorFallbackMessage(str):
+    """The run's error text, which is free text, with the typed reason the middleware gave for it."""
+
+    reason: str | None = None
+
+
 def _error_fallback_message_from_metadata(metadata: dict[str, Any], content: Any) -> str:
     detail = metadata.get("error_detail")
-    if isinstance(detail, str) and detail.strip():
-        return detail.strip()
     reason = metadata.get("error_reason")
-    if isinstance(reason, str) and reason.strip():
-        return reason.strip()
-    if isinstance(content, str) and content.strip():
-        return content.strip()[:2000]
-    return "LLM provider failed after retries"
+    if isinstance(detail, str) and detail.strip():
+        text = detail.strip()
+    elif isinstance(reason, str) and reason.strip():
+        text = reason.strip()
+    elif isinstance(content, str) and content.strip():
+        text = content.strip()[:2000]
+    else:
+        text = "LLM provider failed after retries"
+    message = _ErrorFallbackMessage(text)
+    message.reason = reason if isinstance(reason, str) else None
+    return message
 
 
 def _message_id(obj: Any) -> str | None:

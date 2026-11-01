@@ -35,6 +35,7 @@ from app.telegram_bots.deployment import CopyGuard, feature_reason, static_cause
 from app.telegram_bots.files import FileBytesBudget, PendingFiles
 from app.telegram_bots.links import BotLink, BotLinkRepository
 from app.telegram_bots.log_filter import install_token_log_filter
+from app.telegram_bots.pages import page_address
 from app.telegram_bots.polling import CONFLICT_GRACE_SECONDS, TASK_DEATHS_BEFORE_STOP, TASK_DEATHS_WINDOW_SECONDS, TASK_RESTART_SECONDS, PollRecord, PollTask
 from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryEligibility, Outbox, OutboxSender
 from app.telegram_bots.profile import ProfileSync
@@ -1321,12 +1322,22 @@ class TelegramSupervisor:
             render_key = key
             if key == "link.conflict_over":
                 render_key += ".chat" if link.agent_kind == "lead_agent" else ".custom_agent"
-            message = await asyncio.wait_for(channel.send_notice(render_key, context=context, silent=silent or quiet, product=product_name(self._app_config)), STOP_TIMEOUT_SECONDS)
+            button = await self._settings_button(link) if key == "link.conflict" or key == "link.conflict_over" and channel.link.acts_paused_since is not None else None
+            message = await asyncio.wait_for(channel.send_notice(render_key, context=context, silent=silent or quiet, button=button, product=product_name(self._app_config)), STOP_TIMEOUT_SECONDS)
             self._event("notice", link=link, key=key, result="sent" if message is not None else "failed")
         except asyncio.CancelledError:
             raise
         except Exception as error:
             self._event("notice", link=link, key=key, result="failed", error=type(error).__name__, level=logging.WARNING)
+
+    async def _settings_button(self, link: BotLink) -> tuple[str, str] | None:
+        """A notice's claim is already spent, so an address that cannot be built costs the button, not the notice."""
+        try:
+            address = await await_drained(asyncio.to_thread(page_address, "web.telegram", link))
+        except Exception as error:
+            self._event("notice_button", link=link, result="skipped", error=type(error).__name__, level=logging.WARNING)
+            return None
+        return ("label.open_telegram", address) if address else None
 
     async def remove(self, link_id: str, *, actor_id: str, action="remove", last_text: str | None = "link.removed") -> None:
         link = await self.links.get(link_id)

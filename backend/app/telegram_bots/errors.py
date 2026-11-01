@@ -8,8 +8,11 @@ from app.channels.execution import ChannelExecutionProtocolError, ChannelExecuti
 from app.channels.execution_client import ValidatedRun
 from app.channels.outcomes import CreationRefusal, validate_creation_refusal
 from app.gateway.channel_execution import ChannelExecutionReceipt, receipt_from_run_kwargs
+from deerflow.runtime.runs.terminal import MODEL_REFUSED_STOP_REASON
 
-RUN_STOP_REASONS: Mapping[str, str] = MappingProxyType({"sandbox_capacity_exceeded": "busy.queued", "files-full": "chat.files_full", "orphan_recovered": "refused.interrupted", "gateway_stopped": "chat.restarted"})
+RUN_STOP_REASONS: Mapping[str, str] = MappingProxyType(
+    {"sandbox_capacity_exceeded": "busy.queued", "files-full": "chat.files_full", "orphan_recovered": "refused.interrupted", "gateway_stopped": "chat.restarted", MODEL_REFUSED_STOP_REASON: "error.model_refused"}
+)
 STORAGE_REFERENCE_WORDS: Mapping[str, str] = MappingProxyType(
     {
         "disk-too-small": "disk-too-small",
