@@ -1,5 +1,6 @@
 """Actual SQL fixed outcomes; terminal run rows are explicit protocol fixtures."""
 
+from copy import deepcopy
 from dataclasses import replace
 from types import MappingProxyType
 
@@ -61,15 +62,22 @@ async def test_a_successful_run_that_cannot_be_delivered_keeps_its_own_proof(pub
         return box.plan_publication_outcome(record, run=run, source_ref={"key": key, "values": {}}, keyboard=[], callbacks=callbacks, guard=e.guard_factory(), **kwargs)
 
     with pytest.raises(ValueError):
-        await plan("error.generic")
+        await plan("answer.on_web")
     with pytest.raises(ValueError):
         await plan("busy.gave_up", undeliverable=True)
 
-    identity = await plan("error.generic", undeliverable=True)
+    button = {"page": "web.conversation", "url": "https://hartmesh.example/chat"}
+    identity = await plan("answer.on_web", undeliverable=True, url_button=button)
     item = _item(await _primary(e.db, identity))
     proof = validate_publication_outcome(item)
     assert proof.kind == "undeliverable" and proof.run_id == record.run_id
-    assert await plan("error.generic", undeliverable=True) == identity
+    assert item.parts[0]["url_button"] == button
+    assert await plan("answer.on_web", undeliverable=True, url_button=button) == identity
+
+    changed = deepcopy(item)
+    changed.payload["product_basis"]["parts"][0]["url_button"] = {"page": "web.memory", "url": "https://hartmesh.example/chat"}
+    with pytest.raises(ValueError):
+        validate_publication_outcome(changed)
 
     item.payload["turn_outcome_basis"]["proof"]["row"]["status"] = "error"
     with pytest.raises(ValueError):
@@ -84,7 +92,7 @@ async def test_a_failed_run_is_never_called_undeliverable(publication_environmen
     row.update(status="error", stop_reason=None, metadata={"channel_turn_id": record.publication_id})
     run = ValidatedRun(MappingProxyType(row), receipt_from_run_kwargs(row["kwargs"]))
     with pytest.raises(ValueError):
-        await Outbox(e.sessions).plan_publication_outcome(record, run=run, source_ref={"key": "error.generic", "values": {}}, keyboard=[], callbacks=CallbackRepository(e.sessions), guard=e.guard_factory(), undeliverable=True)
+        await Outbox(e.sessions).plan_publication_outcome(record, run=run, source_ref={"key": "answer.on_web", "values": {}}, keyboard=[], callbacks=CallbackRepository(e.sessions), guard=e.guard_factory(), undeliverable=True)
 
 
 @pytest.mark.asyncio

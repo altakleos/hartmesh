@@ -15,8 +15,8 @@ STAGE_ONE_KEYS = frozenset(
     activity.read activity.write activity.edit activity.list activity.command activity.search activity.fetch
     activity.browser activity.image activity.subtask activity.present activity.work activity.other answer.thinking
     busy.followup busy.followup_full busy.queued busy.cancelled busy.gave_up busy.thread error.generic refused.interrupted
-    chat.restarted chat.files_full run.cancelled stop.answer stop.nothing stop.failed file.saved_ask_plain file.too_large_in
-    file.not_saved file.own_full file.own_preparing file.own_no_seat file.own_unchecked file.own_unavailable
+    chat.restarted chat.files_full run.cancelled stop.answer stop.nothing stop.failed file.saved_ask_plain file.saved_ask_photo
+    file.saved_ask_many answer.on_web file.too_large_in file.not_saved file.own_full file.own_preparing file.own_no_seat file.own_unchecked file.own_unavailable
     file.too_large_out file.out_failed voice.unavailable voice.too_long voice.daily_limit voice.first_notice
     voice.agreed voice.not_used voice.writing voice.heard voice.failed voice.unclear media.unsupported
     update.refused edit.ignored token.pasted token.pasted_kept clarify.options clarify.more_choices clarify.answer_line

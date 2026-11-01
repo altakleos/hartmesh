@@ -1464,7 +1464,7 @@ class TelegramBotChannel(TelegramChannel):
         self._callback_locale = (link.owner_user_id, link.binding_generation, settings.locale)
         renderer = render_plain if plain else render
         try:
-            return renderer(source["key"], settings.locale, **source["values"])
+            return renderer(source["key"], settings.locale, **{"product": self._services.product_name, **source["values"]})
         except (KeyError, TypeError, ValueError):
             raise PermanentDeliveryError("invalid-product-source") from None
 

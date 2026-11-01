@@ -69,6 +69,7 @@ async def test_cold_recipient_timezone_calculation_is_off_loop_with_actual_sdk(d
         settings=db.settings,
         outbox=Outbox(db.sessions, clock=clock.now),
         tls_context=object(),
+        product_name="HartMesh",
         request_factory=factory,
         protect_notice=protect_notice,
         eligibility=allowed,

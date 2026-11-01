@@ -44,7 +44,16 @@ async def build(db, *, connected=True, clock=None, normal_request=None, updates_
         return DeliveryEligibility.allow()
 
     services = SimpleNamespace(
-        send_allowed=lambda: True, config=db.config, links=db.links, outbox=Outbox(db.sessions, clock=clock.now), settings=db.settings, tls_context=tls, request_factory=request_factory, protect_notice=protect_notice, eligibility=eligibility
+        send_allowed=lambda: True,
+        config=db.config,
+        links=db.links,
+        outbox=Outbox(db.sessions, clock=clock.now),
+        settings=db.settings,
+        tls_context=tls,
+        product_name="HartMesh",
+        request_factory=request_factory,
+        protect_notice=protect_notice,
+        eligibility=eligibility,
     )
     token = str(link.bot_id) + ":" + secrets.token_urlsafe(30)
 

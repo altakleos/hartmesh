@@ -7,18 +7,21 @@ import unicodedata
 from dataclasses import dataclass
 from html import escape
 from html.parser import HTMLParser
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from markdown_it import MarkdownIt
 from markdown_it.rules_block import StateBlock
 from markdown_it.token import Token
+
+# An estimate of the widest code line a phone shows without wrapping, at default text size.
+# Erring low only costs a table its columns, and labelled lines read at any width.
+PHONE_WIDTH = 34
 
 
 @dataclass(frozen=True)
 class Rendered:
     html: str
     plain: str
-    wide_tables: list[str]
 
 
 @dataclass(frozen=True)
@@ -67,7 +70,8 @@ class _Writer:
 
     def pop(self, item: _Format | None) -> None:
         if item is not None:
-            assert self.formats.pop() == item
+            closed = self.formats.pop()
+            assert closed == item
 
     def code(self, text: str, language: str | None = None, *, block: bool = False) -> None:
         # Telegram forbids code/pre inside emphasis or links. The next ordinary
@@ -89,7 +93,6 @@ class _Writer:
     def rendered(self) -> tuple[str, str]:
         parts: list[str] = []
         active: tuple[_Format, ...] = ()
-        entities = 0
         for run in self.runs:
             # Quotes and links cannot contain each other. Keep the innermost
             # semantic span and resume the outer span when its text continues.
@@ -99,14 +102,8 @@ class _Writer:
             while common < min(len(active), len(formats)) and active[common] == formats[common]:
                 common += 1
             parts.extend(f"</{item.tag}>" for item in reversed(active[common:]))
-            opened: list[_Format] = []
-            for item in formats[common:]:
-                if entities == 100:
-                    break
-                parts.append(f"<{item.tag}{item.attributes}>")
-                entities += 1
-                opened.append(item)
-            active = (*active[:common], *opened)
+            parts.extend(f"<{item.tag}{item.attributes}>" for item in formats[common:])
+            active = formats
             parts.append(escape(run.text, quote=True))
         parts.extend(f"</{item.tag}>" for item in reversed(active))
         return "".join(parts), "".join(run.text for run in self.runs)
@@ -271,48 +268,84 @@ def _http_address(address: str) -> bool:
         return False
 
 
+def _contact(address: str) -> str:
+    """The mail address or phone number of a link Telegram cannot carry, which a label may hide."""
+    scheme, _, target = address.partition(":")
+    return unquote(target.split("?", 1)[0]) if scheme.lower() in {"mailto", "tel"} else ""
+
+
 def _display_width(text: str) -> int:
     return sum(0 if unicodedata.combining(char) else 2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1 for char in text)
+
+
+def _one_line(tokens: list[Token]) -> list[Token]:
+    """A cell is one line, so a break in it, or a model's `<br>`, reads as a space."""
+
+    def breaks(token: Token) -> bool:
+        return token.type in {"softbreak", "hardbreak"} or token.type == "html_inline" and re.fullmatch(r"</?br\s*/?>", token.content, re.IGNORECASE) is not None
+
+    return [Token("text", "", 0, content=" ") if breaks(token) else token for token in tokens]
+
+
+def _without_colon(tokens: list[Token]) -> list[Token]:
+    """A heading that ends in a colon already reads as a label."""
+    if not tokens or tokens[-1].type != "text":
+        return tokens
+    return [*tokens[:-1], Token("text", "", 0, content=tokens[-1].content.rstrip(" :："))]
 
 
 class _Renderer:
     def __init__(self, parser: MarkdownIt):
         self.parser = parser
         self.writer = _Writer()
-        self.wide_tables: list[str] = []
 
     def inline(self, tokens: list[Token], *, task: bool = False) -> None:
         frames: list[_Format | None] = []
+        contact = ""
         first = True
+        label = False
         for token in tokens:
             kind = token.type
             if kind in {"text", "html_inline"}:
                 text = token.content
                 if first and task:
                     text = re.sub(r"^\[([ xX])\]\s+", lambda match: "☐ " if match[1] == " " else "☑ ", text)
+                if label and text:
+                    # The agent cites as `[citation:Title](url)`, and the web shows the title as well.
+                    text, label = re.sub(r"^citation:\s*", "", text, flags=re.IGNORECASE) or text, False
                 self.writer.write(text)
             elif kind in {"softbreak", "hardbreak"}:
                 self.writer.write("\n")
             elif kind in {"strong_open", "em_open", "s_open"}:
                 frames.append(self.writer.push({"strong_open": "b", "em_open": "i", "s_open": "s"}[kind]))
-            elif kind in {"strong_close", "em_close", "s_close", "link_close"}:
+            elif kind == "link_close":
+                self.writer.pop(frames.pop())
+                label = False
+                if contact and (not self.writer.runs or contact not in self.writer.runs[-1].text):
+                    self.writer.write(f" ({contact})")
+            elif kind in {"strong_close", "em_close", "s_close"}:
                 self.writer.pop(frames.pop())
             elif kind == "code_inline":
                 self.writer.code(token.content)
             elif kind == "link_open":
                 address = token.attrGet("href") or ""
                 frames.append(self.writer.push("a", f' href="{escape(address, quote=True)}"') if _http_address(address) else None)
+                contact = _contact(address)
+                label = True
             elif kind == "image":
                 address = token.attrGet("src") or ""
                 item = self.writer.push("a", f' href="{escape(address, quote=True)}"') if _http_address(address) else None
-                self.inline(token.children or [])
+                if token.children:
+                    self.inline(token.children)
+                elif _http_address(address):
+                    self.writer.write(address)
                 self.writer.pop(item)
             else:
                 self.writer.write(token.content)
             if token.content:
                 first = False
 
-    def blocks(self, tokens: list[Token], source: str) -> None:
+    def blocks(self, tokens: list[Token]) -> None:
         lists: list[dict] = []
         items: list[bool] = []
         quotes: list[_Format | None] = []
@@ -370,7 +403,7 @@ class _Renderer:
             elif kind == "details":
                 item = self.writer.push("blockquote", " expandable")
                 content = _summary_text(token.content)
-                self.blocks(self.parser.parse(content), content)
+                self.blocks(self.parser.parse(content))
                 self.writer.pending = 0
                 self.writer.pop(item)
                 self.writer.write(token.meta.get("tail", ""))
@@ -379,32 +412,47 @@ class _Renderer:
                 finish = index + 1
                 while tokens[finish].type != "table_close":
                     finish += 1
-                self.table(tokens[index : finish + 1], source)
+                self.table(tokens[index : finish + 1])
                 index = finish
             elif kind == "hr":
                 self.writer.write("—")
                 self.writer.gap()
             index += 1
 
-    def table(self, tokens: list[Token], source: str) -> None:
-        rows: list[list[str]] = []
+    def plain(self, cell: list[Token]) -> str:
+        renderer = _Renderer(self.parser)
+        renderer.inline(cell)
+        return renderer.writer.rendered()[1]
+
+    def table(self, tokens: list[Token]) -> None:
+        """Aligned if it fits a phone and has no address to keep. Otherwise labelled lines, which read at any width."""
+        rows: list[list[list[Token]]] = []
         for token in tokens:
             if token.type == "tr_open":
                 rows.append([])
             elif token.type == "inline":
-                cell = _Renderer(self.parser)
-                cell.inline(token.children or [])
-                _, plain = cell.writer.rendered()
-                rows[-1].append(plain.replace("\n", " "))
+                rows[-1].append(_one_line(token.children or []))
+        texts = [[self.plain(cell) for cell in row] for row in rows]
         columns = max(map(len, rows), default=0)
-        if columns > 3:
-            first, last = tokens[0].map
-            self.wide_tables.append("\n".join(source.splitlines()[first:last]))
-            return
-        widths = [max(_display_width(row[column]) for row in rows) for column in range(columns)]
-        aligned = "\n".join(" | ".join(cell + " " * (widths[column] - _display_width(cell)) for column, cell in enumerate(row)) for row in rows)
+        widths = [max(_display_width(row[column]) for row in texts) for column in range(columns)]
+        addressed = any(token.type in {"link_open", "image"} for row in rows for cell in row for token in cell)
         self.writer.gap()
-        self.writer.code(aligned, block=True)
+        if not addressed and sum(widths) + 3 * (columns - 1) <= PHONE_WIDTH:
+            self.writer.code("\n".join(" | ".join(cell + " " * (widths[column] - _display_width(cell)) for column, cell in enumerate(row)) for row in texts), block=True)
+        elif len(rows) == 1:
+            for index, cell in enumerate(rows[0]):
+                self.writer.write(" | " if index else "")
+                self.inline(cell)
+        else:
+            for row, values in zip(rows[1:], texts[1:], strict=True):
+                for head, name, cell, value in zip(rows[0], texts[0], row, values, strict=True):
+                    if value.strip():
+                        self.writer.gap(1)
+                        if name.strip():
+                            self.inline(_without_colon(head))
+                            self.writer.write(": ")
+                        self.inline(cell)
+                self.writer.gap()
         self.writer.gap()
 
 
@@ -417,6 +465,6 @@ def to_html(text: str, *, partial: bool = False) -> Rendered:
     """
     parser = _parser()
     renderer = _Renderer(parser)
-    renderer.blocks(parser.parse(text), text)
+    renderer.blocks(parser.parse(text))
     html, plain = renderer.writer.rendered()
-    return Rendered(html=html, plain=plain, wide_tables=renderer.wide_tables)
+    return Rendered(html=html, plain=plain)

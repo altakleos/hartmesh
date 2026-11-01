@@ -18,6 +18,10 @@ from telegram.error import BadRequest, Forbidden, InvalidToken, NetworkError, Re
 from app.telegram_bots.adapter import LiveRequestFence, LongRetryAfter, _invalid_status
 from deerflow.utils.file_io import await_drained
 
+# Telegram answers only after it has taken the whole file. Under the SDK's 5 seconds a large
+# upload that succeeded reads as a failure, and the file is sent again.
+UPLOAD_READ_SECONDS = 120
+
 
 class _UploadReader:
     """A memory-only public SDK handle, emptied after its upload drains.
@@ -131,7 +135,15 @@ async def upload_output(
     try:
         readers = tuple(_UploadReader(data) for _name, data in files)
         uploads = await await_drained(asyncio.to_thread(_make_uploads, tuple(name for name, _data in files), readers))
-        kwargs = dict(chat_id=chat_id, message_thread_id=message_thread_id, reply_to_message_id=reply_to_message_id, disable_notification=silent, protect_content=protect_content, rate_limit_args=LiveRequestFence(before_dispatch))
+        kwargs = dict(
+            chat_id=chat_id,
+            message_thread_id=message_thread_id,
+            reply_to_message_id=reply_to_message_id,
+            disable_notification=silent,
+            protect_content=protect_content,
+            read_timeout=UPLOAD_READ_SECONDS,
+            rate_limit_args=LiveRequestFence(before_dispatch),
+        )
         if kind == "document":
             message = await bot.send_document(document=uploads[0], caption=caption, parse_mode=None if plain else ParseMode.HTML, **kwargs)
         elif kind == "photo":

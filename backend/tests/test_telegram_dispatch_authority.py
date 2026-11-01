@@ -43,6 +43,7 @@ async def build(db, *, parts=1):
         settings=db.settings,
         outbox=Outbox(db.sessions, clock=clock.now),
         tls_context=object(),
+        product_name="HartMesh",
         request_factory=lambda **kw: request if kw["connection_pool_size"] == 8 else updates,
         eligibility=eligibility,
         protect_notice=protect_notice,

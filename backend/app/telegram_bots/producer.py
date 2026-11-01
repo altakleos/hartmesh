@@ -53,6 +53,7 @@ _URL_SOURCES = {
     "web.memory": ("web.memory", "label.open_memory"),
     "custom_agent.deleted": ("web.telegram", "label.open_telegram"),
     "chat.restarted": ("web.conversation", "label.open_conversation"),
+    "answer.on_web": ("web.conversation", "label.open_conversation"),
 }
 _TRANSPORT_RECEIPTS = frozenset({"sent_at", "dispatched_at", "unavailable_reason", "invalid_token_verification_pending", "url_button_fallback", "plain_fallback"})
 _PART_IDENTITY = frozenset({"part_id", "presentation_version", "ordinal", "state", "message_ids"})
@@ -170,6 +171,7 @@ class OutboxItem:
 _TURN_OUTCOME_KEYS = frozenset(
     {
         "error.generic",
+        "answer.on_web",
         "busy.cancelled",
         "busy.gave_up",
         "chat.restarted",
@@ -185,7 +187,8 @@ _TURN_OUTCOME_KEYS = frozenset(
     }
 )
 _NO_RUN_KEYS = frozenset({"error.generic", "busy.cancelled", "chat.restarted"})
-INPUT_OUTCOME_KEYS = (_TURN_OUTCOME_KEYS - {"busy.queued", "busy.thread", "busy.starting_elsewhere", "busy.two_conversations"}) | {"custom_agent.deleted", "busy.followup_full", "voice.failed"}
+_UNDELIVERABLE_KEYS = frozenset({"answer.on_web", "error.generic"})
+INPUT_OUTCOME_KEYS = (_TURN_OUTCOME_KEYS - {"answer.on_web", "busy.queued", "busy.thread", "busy.starting_elsewhere", "busy.two_conversations"}) | {"custom_agent.deleted", "busy.followup_full", "voice.failed"}
 
 
 @dataclass(frozen=True)
@@ -210,7 +213,7 @@ def _prepare_publication_outcome(record, *, run, creation_refusal, source_ref, u
     scope = record.scope
     execution = ChannelExecutionScope(record.publication_id, scope.owner_user_id, scope.connection_id, str(scope.chat_id), scope.thread_id, scope.endpoint_id, scope.assistant_id, scope.agent_name)
     if undeliverable:
-        if run is None or run.row.get("status") != "success" or classify_run(run, execution) is not None or source_ref["key"] != "error.generic":
+        if run is None or run.row.get("status") != "success" or classify_run(run, execution) is not None or source_ref["key"] not in _UNDELIVERABLE_KEYS:
             raise ValueError("publication-outcome-conflict") from None
         return _safe_json({"version": 1, "publication": _publication_identity(record), "proof": {"kind": "undeliverable", "row": dict(run.row)}, "source_ref": source_ref, "finish_route": True})
     classified = classify_run(run, execution) if run is not None else classify_creation_refusal(creation_refusal, execution)
@@ -250,7 +253,7 @@ def validate_publication_outcome(item: OutboxItem) -> PublicationOutcomeBasis:
         elif proof.get("kind") == "undeliverable" and set(proof) == {"kind", "row"}:
             # The run succeeded, and what it produced cannot be carried by a chat.
             run = ValidatedRun(MappingProxyType(proof["row"]), receipt_from_run_kwargs(proof["row"].get("kwargs")))
-            if proof["row"].get("status") != "success" or classify_run(run, execution) is not None or source["key"] != "error.generic":
+            if proof["row"].get("status") != "success" or classify_run(run, execution) is not None or source["key"] not in _UNDELIVERABLE_KEYS:
                 raise ValueError
         elif proof.get("kind") == "creation_refusal" and set(proof) == {"kind", "scope"}:
             if _canonical_primary(proof["scope"]) != _canonical_primary(asdict(execution)) or source["key"] not in {"busy.gave_up", "busy.cancelled"}:
@@ -272,7 +275,11 @@ def validate_publication_outcome(item: OutboxItem) -> PublicationOutcomeBasis:
             raise ValueError
         if type(source) is not dict or set(source) != {"key", "values"} or source["key"] not in _TURN_OUTCOME_KEYS or source["key"] in {"busy.queued", "busy.thread"}:
             raise ValueError
-        if _canonical_primary({"parts": item.payload["product_basis"]["parts"]}) != _canonical_primary({"parts": [{"kind": "text", "source_ref": source}]}):
+        parts = item.payload["product_basis"]["parts"]
+        button = parts[0].get("url_button") if source["key"] == "answer.on_web" else None
+        if button is not None:
+            url_button_label(source, button)
+        if _canonical_primary({"parts": parts}) != _canonical_primary({"parts": [{"kind": "text", "source_ref": source, **({"url_button": button} if button is not None else {})}]}):
             raise ValueError
         if "delivery_kind" in item.payload or "reply_basis" in item.payload or type(item.binding_generation) is not int or type(item.chat_id) is not int:
             raise ValueError
@@ -600,8 +607,6 @@ def freeze_reply_presentation(text: str, *, text_sha256: str) -> FrozenReplyPres
         if type(text) is not str or not text or not _digest(text_sha256) or _presentation_digest(text) != text_sha256:
             raise ValueError
         rendered = to_html(text)
-        if rendered.wide_tables:
-            raise ValueError
         chunks = []
         cursor = 0
         for html in split_html(rendered.html):
@@ -1347,7 +1352,7 @@ class Outbox:
 
         return await await_drained(perform())
 
-    async def plan_publication_outcome(self, record, *, run=None, creation_refusal=None, source_ref, keyboard, callbacks, guard, undeliverable=False, no_run=False):
+    async def plan_publication_outcome(self, record, *, run=None, creation_refusal=None, source_ref, keyboard, callbacks, guard, undeliverable=False, no_run=False, url_button=None):
         link = _guard_publication_link(record, guard)
         basis = await await_drained(asyncio.to_thread(_prepare_publication_outcome, record, run=run, creation_refusal=creation_refusal, source_ref=source_ref, undeliverable=undeliverable, no_run=no_run))
 
@@ -1365,6 +1370,7 @@ class Outbox:
             _extra={"turn_outcome_basis": basis},
             _dedupe="reply:" + record.turn_id,
             _attach=attach,
+            _url_button=url_button,
         )
 
     async def plan_cancelled_before_dispatch(self, record, *, stop_id, guard, callbacks, keyboard=(), key="busy.cancelled"):

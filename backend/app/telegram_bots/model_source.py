@@ -172,14 +172,12 @@ def validate_model_reply_basis(item: OutboxItem, part: dict | None = None) -> Ve
 
 def prepare_display_reply(record, output, *, display, reply_to_message_id=None, _file_output=False):
     """Recompute a closed source-slice presentation; no host authority is minted."""
-    from html import escape
-
     from app.gateway.run_output import RunOutputProjectionV2
     from app.telegram_bots.inbox import PublicationRecord, publication_identity
     from app.telegram_bots.markdown import to_html
     from app.telegram_bots.producer import _safe_json
-    from app.telegram_bots.split import visible_text
-    from app.telegram_bots.stopped_preview import StoppedSegment, preview_source_slices
+    from app.telegram_bots.split import split_html, visible_text
+    from app.telegram_bots.stopped_preview import StoppedSegment
     from deerflow.runtime.runs.preview import text_digest
 
     try:
@@ -217,10 +215,23 @@ def prepare_display_reply(record, output, *, display, reply_to_message_id=None, 
                 qualify_file_output(record, output)
             else:
                 prepare_verified_reply(record, output)
-        slices = []
+
+        def part(index, begin, end, raw, html, segment=None, *, retained=False):
+            source = {"preview_sha256": text_digest(raw), "thread_id": record.scope.thread_id, "run_id": record.run_id, "range": {"basis": "telegram-source-slices-v1", "start": begin, "end": end}, "slice": index}
+            value = {"kind": "edit" if segment is not None and segment.mode == "edit" else "text", "source_ref": source, "html": html, "visible_text": visible_text(html), "reply_to_message_id": anchor}
+            if segment is not None and segment.mode == "edit":
+                value.update(target_message_id=segment.anchor_message_id, target_protect_content=False)
+            if retained:
+                value["shown_message_id"] = segment.anchor_message_id
+            return value
+
+        parts = []
         if stopped:
-            for segment in segments:
-                slices.append((segment.source_start, segment.source_end, segment.text, segment, False))
+            for index, segment in enumerate(segments):
+                html = to_html(segment.text).html
+                if visible_text(html).strip():
+                    parts.append(part(index, segment.source_start, segment.source_end, segment.text, html, segment))
+            parts.append({"kind": "text", "source_ref": {"key": "stop.answer", "values": {"written": bool(parts), "waiting": display["waiting"]}}, "reply_to_message_id": anchor})
         else:
             text = result.source.text
             eligible = [segment for segment in segments if segment.message_id == result.output_evidence.assistant_message_id]
@@ -232,29 +243,14 @@ def prepare_display_reply(record, output, *, display, reply_to_message_id=None, 
             # Only the latest acknowledged edit is extended. Earlier acknowledged
             # prefix parts are durable receipts, not work to resend on relocation.
             retained = eligible[:-1] if eligible and eligible[-1].mode == "edit" else []
-            for segment in retained:
-                slices.append((segment.source_start, segment.source_end, segment.text, segment, True))
+            for index, segment in enumerate(retained):
+                parts.append(part(index, segment.source_start, segment.source_end, segment.text, to_html(segment.text).html, segment, retained=True))
             start = retained[-1].source_end if retained else 0
             latest = eligible[-1] if eligible and eligible[-1].mode == "edit" else None
-            for index, (begin, end, raw) in enumerate(preview_source_slices(text, start=start)):
-                slices.append((begin, end, raw, latest if index == 0 else None, False))
-        parts = []
-        for index, (begin, end, raw, segment, retained) in enumerate(slices):
-            if not raw:
-                continue
-            rendered = None if stopped else to_html(raw, partial=True)
-            if rendered is not None and rendered.wide_tables:
-                raise ValueError
-            html = escape(raw) if stopped else rendered.html
-            source = {"preview_sha256": text_digest(raw), "thread_id": record.scope.thread_id, "run_id": record.run_id, "range": {"basis": "telegram-source-slices-v1", "start": begin, "end": end}, "slice": index}
-            value = {"kind": "edit" if segment is not None and segment.mode == "edit" else "text", "source_ref": source, "html": html, "visible_text": visible_text(html), "reply_to_message_id": anchor}
-            if segment is not None and segment.mode == "edit":
-                value.update(target_message_id=segment.anchor_message_id, target_protect_content=False)
-            if retained:
-                value["shown_message_id"] = segment.anchor_message_id
-            parts.append(value)
-        if stopped:
-            parts.append({"kind": "text", "source_ref": {"key": "stop.answer", "values": {"written": bool(parts), "waiting": display["waiting"]}}, "reply_to_message_id": anchor})
+            rest = text[start:]
+            # Rendered whole and then cut: a cut in the raw text breaks whatever block it falls in.
+            for index, html in enumerate(split_html(to_html(rest).html), len(retained)):
+                parts.append(part(index, start, len(text), rest, html, latest if index == len(retained) else None))
         outcome = {"kind": display["kind"], "projection": output.model_dump(mode="json")}
         basis = {"version": 4, "publication": publication_identity(record), "outcome": outcome, "presentation": None, "display": display, "parts": parts, "finish_route": True}
         return _safe_json(basis), _safe_json({"parts": parts})["parts"]
@@ -347,6 +343,16 @@ def _page_keys(item, part, output):
     return keys if answering and answering[-1]["part_id"] == part["part_id"] else ()
 
 
+async def _saved_part(captured):
+    """A saved part that does not validate will not validate later, so it is no failed read."""
+    from app.telegram_bots.producer import SourceGone
+
+    try:
+        return await await_drained(asyncio.to_thread(_prepare_part, captured))
+    except ValueError:
+        raise SourceGone from None
+
+
 def _prepare_part(captured):
     from app.telegram_bots.links import BotLink
     from app.telegram_bots.producer import SendingPart
@@ -409,7 +415,7 @@ class ModelSource:
         from app.telegram_bots.producer import SourceGone, SourceNotRead, _canonical_primary
 
         try:
-            private, proof = await await_drained(asyncio.to_thread(_prepare_part, captured))
+            private, proof = await _saved_part(captured)
             if proof.kind not in {"file_outputs", "human_input_files"} or private.part["kind"] not in {"document", "photo", "album"}:
                 raise SourceGone
             fresh = await self._read_output(proof.record, private.link)
@@ -425,7 +431,7 @@ class ModelSource:
         from app.telegram_bots.producer import SourceGone, SourceNotRead
 
         try:
-            private, proof = await await_drained(asyncio.to_thread(_prepare_part, captured))
+            private, proof = await _saved_part(captured)
             if proof.kind == "human_input_files" and private.part["source_ref"].get("key") != "human_input.presentation":
                 # File warnings retain their own source-verified controls;
                 # they do not acquire question/form authority or currency.
