@@ -57,10 +57,17 @@ async def isolated_engine():
                 dependencies._cached_repo, dependencies._cached_local_provider = previous_accounts
 
 
+async def copy_sqlite_file(db, target):
+    # The fixture runs in WAL, so the main file alone can lack committed rows.
+    async with db.engine.connect() as connection:
+        await connection.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+    await asyncio.to_thread(shutil.copyfile, db.engine.url.database, target)
+
+
 async def configured_database(db):
     if db.dialect == "sqlite":
         config = app_config(database={"backend": "sqlite", "sqlite_dir": str(Path(db.engine.url.database).parent), "echo_sql": True})
-        await asyncio.to_thread(shutil.copyfile, db.engine.url.database, config.database.sqlite_path)
+        await copy_sqlite_file(db, config.database.sqlite_path)
         return config
     async with db.engine.connect() as connection:
         schema = await connection.scalar(text("SELECT current_schema()"))
@@ -335,7 +342,7 @@ async def test_existing_database_lifecycle_and_missing_tables(cli, db, accounts,
         # is named differently. Prepare that one existing file explicitly.
         config = app_config(database=database)
         target = Path(config.database.sqlite_path)
-        await asyncio.to_thread(shutil.copyfile, db.engine.url.database, target)
+        await copy_sqlite_file(db, target)
     else:
         async with db.engine.connect() as connection:
             schema = await connection.scalar(text("SELECT current_schema()"))
@@ -347,7 +354,7 @@ async def test_existing_database_lifecycle_and_missing_tables(cli, db, accounts,
     async with db.engine.begin() as connection:
         await connection.execute(text("DROP TABLE telegram_deployment"))
     if db.dialect == "sqlite":
-        await asyncio.to_thread(shutil.copyfile, db.engine.url.database, target)
+        await copy_sqlite_file(db, target)
     with pytest.raises(cli.CommandRefused, match="has no Telegram tables"):
         await cli.run_command("status", app_config=config)
     assert get_engine() is None

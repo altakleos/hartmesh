@@ -44,7 +44,8 @@ Keep startup failures distinct from cancellation through the real service/worker
 Repository tests use `_telegram_repository_test_support.py` with isolated real
 SQLite/PostgreSQL databases, disk-backed fixtures and no runtime bootstrap.
 Group SQLite fixture DDL in one explicit transaction; retain normal production
-writer semantics during tests. Normalize PostgreSQL `sslmode=disable` into the
+writer semantics during tests. The SQLite fixture sets production's WAL and
+`synchronous=NORMAL`, so checkpoint before copying its file. Normalize PostgreSQL `sslmode=disable` into the
 asyncpg connect option, matching CI. Exercise concurrent first-owner/capacity
 admission, borrowed-session rollback, account ownership, binding generations,
 durable Start replay, code epochs, cleanup and immutable replacement receipts.
