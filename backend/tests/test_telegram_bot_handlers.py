@@ -552,7 +552,7 @@ async def test_background_error_cannot_poison_or_bless_another_admission(db, cap
     try:
         assert await e.channel.handle_update(message(e, 520)) is True
         assert await e.channel.handle_update(message(e, 521, content="Unfinished ordinary content")) is False
-        assert "error=RuntimeError" in caplog.text
+        assert "cause=RuntimeError:" in caplog.text
         assert "private fixture content must not be logged" not in caplog.text
     finally:
         await e.channel.stop()
