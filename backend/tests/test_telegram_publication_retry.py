@@ -25,6 +25,21 @@ async def responder(e, record, *, reason="sandbox_capacity_exceeded", status="er
     return row
 
 
+async def test_both_retries_hand_the_next_attempt_what_this_message_saved(coordinator_environment):
+    e = coordinator_environment
+    saved = {}
+    old = await e.coordinator.dispatch(e.link, e.origins, thread_id=e.thread_id)
+    first = e.bus.get_inbound_nowait()
+    e.bus.inbound_task_done()
+    refused = await e.coordinator.retry_refused(old, e.link, capture_creation_refusal(first.execution_context, ChannelExecutionBusyError()), saved_files=saved)
+    assert e.bus.get_inbound_nowait().execution_context.saved_files is saved
+    e.bus.inbound_task_done()
+    await responder(e, refused)
+    await e.coordinator.retry(refused, e.link, saved_files=saved)
+    assert e.bus.get_inbound_nowait().execution_context.saved_files is saved
+    e.bus.inbound_task_done()
+
+
 async def test_capacity_successor_same_turn_exact_replay_and_stale_predecessor_refusal(coordinator_environment):
     e = coordinator_environment
     old = await e.coordinator.dispatch(e.link, e.origins, thread_id=e.thread_id)

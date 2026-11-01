@@ -1277,6 +1277,9 @@ class TelegramBotChannel(TelegramChannel):
     async def file_own_full(self, file, *, execution_context=None):
         await self._file_write_notice(file, "file.own_full", execution_context)
 
+    async def file_own_unavailable(self, file, *, execution_context=None):
+        await self._file_write_notice(file, "file.own_unavailable", execution_context)
+
     async def file_too_large(self, file):
         await self._file_notice(file, "file.too_large_in")
 

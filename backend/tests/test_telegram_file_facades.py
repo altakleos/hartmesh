@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.channels.execution import ChannelUploadRefused
 from app.channels.inbound_files import InboundFileLease
 from app.telegram_bots.files import read_inbound, write_failed
 
@@ -52,15 +53,29 @@ async def test_missing_or_invalid_bot_has_no_transport_effect(monkeypatch, host,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure,method", [(OSError(errno.ENOSPC, "full"), "file_own_full"), (OSError(errno.EDQUOT, "quota"), "file_own_full"), (OSError("other"), "file_not_saved"), (RuntimeError("other"), "file_not_saved")])
+@pytest.mark.parametrize(
+    "failure,method",
+    [
+        (OSError(errno.ENOSPC, "full"), "file_own_full"),
+        (OSError(errno.EDQUOT, "quota"), "file_own_full"),
+        (ChannelUploadRefused(507), "file_own_full"),
+        (ChannelUploadRefused(503), "file_own_unavailable"),
+        (ChannelUploadRefused(409), "file_not_saved"),
+        (ChannelUploadRefused(None), "file_not_saved"),
+        (OSError("other"), "file_not_saved"),
+        (RuntimeError("other"), "file_not_saved"),
+    ],
+)
 async def test_write_failure_selects_fixed_notice_from_actual_errno(monkeypatch, failure, method):
-    channel = SimpleNamespace(file_own_full=AsyncMock(), file_not_saved=AsyncMock())
+    notices = ("file_own_full", "file_own_unavailable", "file_not_saved")
+    channel = SimpleNamespace(**{notice: AsyncMock() for notice in notices})
     seen = install(monkeypatch, channel)
     descriptor = {"telegram_bot_id": 9000000001, "file_id": "remote-id"}
     await write_failed(descriptor, failure)
     getattr(channel, method).assert_awaited_once_with(descriptor, execution_context=None)
-    other = channel.file_not_saved if method == "file_own_full" else channel.file_own_full
-    other.assert_not_called()
+    for notice in notices:
+        if notice != method:
+            getattr(channel, notice).assert_not_called()
     assert seen == [9000000001]
 
 

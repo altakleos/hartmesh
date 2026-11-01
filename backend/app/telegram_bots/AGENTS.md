@@ -257,23 +257,20 @@ stays held only while its proof cannot be read, such as a conversation deleted u
 carry: a tool's own artifact is not in it, since the model read that and its answer is
 the reply, while `content_items` keeps it for human-input requests.
 
-A message that was saved but not yet admitted is not dropped by its replay. A failed
-attempt leaves its update unacknowledged, and `ChatTurns.unfinished` decides what the
-replay does: a row nothing holds, that no turn took and that this process saved goes on
-where it stopped, a typed answer to its prompt included. A routed row from before this
-process is recovery's. A row with no route goes on in any process, since recovery cannot
-read it and it never started anything. A channel going away also leaves its update
-unacknowledged, so the same rule decides at the next channel, unless `recover_link` has
-closed the row first. A join's updates are acknowledged as they join, so a flush that
-fails plans `error.generic` with Try again itself.
+A message saved but not yet admitted is not dropped by its replay. A failed attempt
+leaves its update unacknowledged, and `ChatTurns.unfinished` decides: a row nothing holds,
+no turn took and this process saved goes on where it stopped, a typed answer included. A
+routed row from before this process is recovery's. A row with no route goes on in any
+process, since recovery cannot read it. A channel going away also leaves its update
+unacknowledged, so the same rule decides at the next channel, unless `recover_link` closed
+the row first. A join's updates are acknowledged as they join, so a failed flush plans
+`error.generic` with Try again itself.
 
-A channel that starts after startup owns nothing, so once the copy decision is made
-`recover_link` closes what its link saved before that channel polls, by the path startup
-uses for every link. A publication reserved but never marked is not covered: that waits
-for the next restart, as it did. `end_pending` closes every open input of an ended
-binding, a Try again in line included, since nothing can answer them and retention waits
-for `done`; both an unbind and a hold end a binding. The startup read follows `next_after`,
-and a late answer held for its person's choice is not on it.
+Once the copy decision is made, `recover_link` closes what a late channel's link saved
+before that channel polls, by startup's path. A publication reserved but never marked
+waits for the next restart. `end_pending` closes every open input of an ended binding, a
+Try again in line included; both an unbind and a hold end one. The startup read follows
+`next_after`, and a late answer held for its person's choice is not on it.
 
 `strangers.py` separates touch-only LRU recency from bounded unexpired reply
 charges. The supervisor owns one ledger through adapter/token replacement and
@@ -500,8 +497,7 @@ the library's swallowed exception path never proves admission. Fixed input
 routes and required reply plans commit before acknowledgment. Token-shaped
 content is refused before hashes/inbox/task payloads; disposable tasks retain
 safe identities only and drain before SDK teardown. Text/photos/documents use the
-managed turn controller. Voice notes use `VoiceNotes`; potential skill references
-stay held.
+managed turn controller; voice notes use `VoiceNotes`.
 
 `files.py` owns one Supervisor byte budget and pending attachment descriptors.
 Reserve whole batches before reads, shrink only, and retain each charge until
@@ -514,8 +510,12 @@ input plus even an empty take is saved, so replay never adopts later attachments
 Source-bound file notices are auxiliary to the actual publication. File Retry
 keeps the original thread and input snapshot across restart, /new and collection;
 its control is consumed only after actual enqueue/bind confirmation. Storage
-preflight uses the separately configured Gateway as the bound human; capacity
-is discovered only from an actual write failure.
+preflight and the write both use the separately configured Gateway as the bound
+human: the manager posts each file to `POST /api/threads/{id}/uploads`, the web's route.
+Capacity is discovered only from that write: 507 is `file.own_full`, 503
+`file.own_unavailable`, anything else `file.not_saved`, and the message goes on.
+`_Turn.saved_files` gives each file one outcome across busy and capacity retries;
+Send again is a new turn, and a restart forgets it.
 
 `file_source.py` qualifies V6 file replies from the same complete matched output
 inventory. Metadata is presentation data, never read authority. The existing
@@ -620,8 +620,7 @@ gets one fixed diagnostic and keeps local refusal. Already-started work may
 outlast grace; no new SQL retry survives the database owner.
 Do not install future-stage no-op schedulers or trust manager text as a model
 source. The existing sender accepts fixed sources and strictly verified model
-finals. Managed text, inbound files and saved controls use `turns.py`; outbound
-files, profiles and instance policy have later owners.
+finals. Managed text, inbound files and saved controls use `turns.py`.
 
 `authority.py` rereads the live human account, strict route ceilings, exact
 connection and supported owner-scoped target. Fixed product/status sources need

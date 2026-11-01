@@ -147,6 +147,10 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
         inbound_bytes = b"a,b\n1,2\n"
         if inbound_file:
             from app.gateway.routers import features as feature_routes
+            from app.gateway.routers import uploads as upload_routes
+            from app.gateway.upload_ingestion import ThreadUploadIngestionService
+
+            app.include_router(upload_routes.router)
 
             # Only the provider availability projection is controlled. The
             # actual features route, internal-owner headers and owner decoding
@@ -164,8 +168,8 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
 
         class RecordedASGI(httpx.ASGITransport):
             async def handle_async_request(self, request):
-                # Never retain authentication headers/cookies in diagnostics.
-                body = json.loads(request.content) if request.content else None
+                # Never retain authentication headers/cookies in diagnostics. A file's body is a stream.
+                body = None if request.url.path.endswith("/uploads") else json.loads(request.content) if request.content else None
                 http_calls.append((request.method, request.url.path, body))
                 if mixed_file and request.method == "POST" and request.url.path.rstrip("/") == "/api/threads":
                     # The offline graph has no sandbox startup. Prepare only
@@ -209,7 +213,6 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
             from urllib.parse import parse_qs
 
             from app.telegram_bots.capped_download import ManagedHTTPXRequest
-            from deerflow.uploads import manager as upload_manager
 
             async def telegram_transport(request):
                 if request.method == "GET":
@@ -237,28 +240,14 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
                 return ManagedHTTPXRequest(**kwargs)
 
             supervisor.request_factory = file_request_factory
-            actual_write = upload_manager.write_upload_file_no_symlink
-            actual_prepare_uploads = upload_manager.ensure_uploads_dir
-            prepared_threads = []
+            actual_ingest = ThreadUploadIngestionService.ingest_chunks
 
-            def prepare_actual_uploads(thread, *, user_id=None):
-                # The offline graph has no sandbox startup to prepare its
-                # outputs/workspace roots. Preserve the existing fixture's
-                # precondition only once the manager has the actual admitted
-                # thread, on its native preparation worker.
-                assert isinstance(thread, str) and user_id == OWNER
-                paths.ensure_thread_dirs(thread, user_id=user_id)
-                prepared_threads.append(thread)
-                return actual_prepare_uploads(thread, user_id=user_id)
-
-            monkeypatch.setattr(upload_manager, "ensure_uploads_dir", prepare_actual_uploads)
-
-            def write_actual_upload(directory, filename, data):
+            async def ingest_under_its_charge(service, chunks, **kwargs):
+                # The bytes stay charged until the route has them.
                 charged_writes.append(supervisor.file_bytes_budget.used)
-                assert data == inbound_bytes and supervisor.file_bytes_budget.used == len(inbound_bytes)
-                return actual_write(directory, filename, data)
+                return await actual_ingest(service, chunks, **kwargs)
 
-            monkeypatch.setattr(upload_manager, "write_upload_file_no_symlink", write_actual_upload)
+            monkeypatch.setattr(ThreadUploadIngestionService, "ingest_chunks", ingest_under_its_charge)
         if dialogue is not None or produced_file:
             supervisor.outbox.clock = boot.clock.now
         supervisor.app, supervisor.authority, supervisor._app_config = app, live.authority, configured
@@ -293,7 +282,7 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
                 assert uploaded == [{"filename": "input.csv", "size": len(inbound_bytes), "path": "/mnt/user-data/uploads/input.csv", "is_image": False}]
                 actual_path = paths.sandbox_uploads_dir(thread_id, user_id=OWNER) / "input.csv"
                 assert await asyncio.to_thread(actual_path.read_bytes) == inbound_bytes
-                assert supervisor.file_bytes_budget.used == 0 and prepared_threads == [thread_id]
+                assert supervisor.file_bytes_budget.used == 0
             model_entered.set()
             if no_user:
                 from deerflow.spaces.chat_paths import ChatStoragePaths

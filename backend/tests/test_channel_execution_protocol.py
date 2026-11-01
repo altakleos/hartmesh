@@ -20,7 +20,7 @@ def test_scope_and_context_are_frozen_and_expose_the_original_primitives(protoco
     context = protocol.ChannelExecutionContext(scope, object(), object())
     for key, value in values.items():
         assert getattr(context, key) == value
-    assert [field.name for field in fields(context)] == ["scope", "client", "admission", "progress"]
+    assert [field.name for field in fields(context)] == ["scope", "client", "admission", "progress", "saved_files"]
     assert not context.progress.taken and not context.progress.released
     with pytest.raises(FrozenInstanceError):
         scope.thread_id = "another"

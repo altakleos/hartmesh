@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from urllib.parse import quote
 
-from app.channels.execution import ChannelExecutionBusyError, ChannelExecutionProtocolError, ChannelExecutionScope, ChannelHttpError, ChannelHttpOwner, ChannelOwnedStream, ChannelRunAdmission, JsonValue
+from app.channels.execution import ChannelExecutionBusyError, ChannelExecutionProtocolError, ChannelExecutionScope, ChannelHttpError, ChannelHttpOwner, ChannelOwnedStream, ChannelRunAdmission, ChannelUploadRefused, JsonValue
 from app.gateway.channel_execution import CHANNEL_EXECUTION_BUSY_CODE, CHANNEL_EXECUTION_REQUEST_HEADER, CHANNEL_EXECUTION_RESPONSE_HEADER, CHANNEL_TURN_ID_KEY, ChannelExecutionReceipt, ChannelExecutionRequest, receipt_from_run_kwargs
 from app.gateway.run_output import OUTPUT_INVENTORY_REQUIRE_HEADER, OUTPUT_INVENTORY_VERSION_HEADER, RunOutputProjection, RunOutputProjectionV2
 from deerflow.runtime.runs.output import OUTPUT_CAPTURE_KEY, capture_intent_to_dict
@@ -216,6 +216,31 @@ class _Threads:
         if metadata.get("channel_agent_name") != (f.scope.agent_name or f.scope.assistant_id) or metadata.get("agent_name") != f.scope.agent_name:
             _refuse()
         return body
+
+    async def upload(self, filename: str, data: bytes) -> dict:
+        """Through the route the web uses, as the bound person: it knows where this conversation's files live."""
+        f = self._facade
+        await f._authorize("run_create")
+        try:
+            response = await f._owner.request_json(
+                operation="run_create",
+                owner_user_id=f.scope.owner_user_id,
+                method="POST",
+                path=f._thread_path + "/uploads",
+                files=[("files", (filename, data))],
+                before_dispatch=lambda: f._authorize("run_create"),
+                after_response=lambda: f._authorize("run_create"),
+            )
+        except ChannelExecutionProtocolError as error:
+            error.__traceback__ = None  # Its frames hold the file's bytes, which the next file's budget needs freed.
+            # Only a turn that ended takes the message with it. Anything else costs it this file.
+            f._check_current("run_create")
+            raise ChannelUploadRefused(None) from None
+        f._check_current("run_create")
+        body = response.body
+        if response.status_code != 200 or type(body) is not dict or body.get("success") is not True or type(body.get("files")) is not list or len(body["files"]) != 1:
+            raise ChannelUploadRefused(response.status_code)
+        return body["files"][0]
 
 
 class _Runs:

@@ -118,6 +118,7 @@ class _Turn:
     run_id: str | None = None
     closing: bool = False
     error_plan_refused: bool = False
+    saved_files: dict = field(default_factory=dict)
 
     @property
     def topic(self):
@@ -783,7 +784,7 @@ class ChatTurns:
         if turn.stop_requested:
             await self._request_stop(turn)
             return True
-        turn.record = await self.services.publications.dispatch_record(record, turn.link)
+        turn.record = await self.services.publications.dispatch_record(record, turn.link, saved_files=turn.saved_files)
         return True
 
     async def _view(self, turn):
@@ -1111,9 +1112,9 @@ class ChatTurns:
 
                             try:
                                 if turn.refusal is None:
-                                    turn.record = await self.services.publications.retry(old, turn.link, on_reserved=pin)
+                                    turn.record = await self.services.publications.retry(old, turn.link, on_reserved=pin, saved_files=turn.saved_files)
                                 else:
-                                    turn.record = await self.services.publications.retry_refused(old, turn.link, turn.refusal, on_reserved=pin)
+                                    turn.record = await self.services.publications.retry_refused(old, turn.link, turn.refusal, on_reserved=pin, saved_files=turn.saved_files)
                             except asyncio.CancelledError:
                                 raise
                             except Exception as error:

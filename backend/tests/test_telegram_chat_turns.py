@@ -96,7 +96,7 @@ async def controlled_execution(e, monkeypatch):
     e.services.thread_client = SimpleNamespace(endpoint_id="a" * 64)
     monkeypatch.setattr(importlib.import_module(LivePresentation.__module__), "LivePresentation", ControlledView)
     reached, release = asyncio.Event(), asyncio.Event()
-    state = SimpleNamespace(record=None, reads=0, plans=0, posts=0, terminal=None, pinned=None, stop_calls=0)
+    state = SimpleNamespace(record=None, reads=0, plans=0, posts=0, terminal=None, pinned=None, stop_calls=0, saved_files=[])
 
     async def capture(link, **kwargs):
         owner = await e.services.prepare_live_owner(link.owner_user_id)
@@ -107,7 +107,8 @@ async def controlled_execution(e, monkeypatch):
     async def ensure(*args, **kwargs):
         return "controller-original-thread"
 
-    async def dispatch_record(record, link):
+    async def dispatch_record(record, link, *, saved_files=None):
+        state.saved_files.append(saved_files)
         turn = next(iter(turns._turns.values()))
         state.pinned = turn.record is not None
         reached.set()
@@ -136,13 +137,13 @@ async def controlled_execution(e, monkeypatch):
             await e.services.outbox.inbox.bind_publication_run(args[0], run_id=state.terminal.row["run_id"], guard=attempt.read_guard)
         return state.terminal
 
-    async def retry(previous, link, *, on_reserved=None):
+    async def retry(previous, link, *, on_reserved=None, saved_files=None):
         attempt = await capture(link)
         successor = await e.services.outbox.inbox.reserve_retry_publication(previous, terminal=state.terminal, guard=attempt.create_guard)
         if on_reserved is not None:
             on_reserved(successor)
         state.terminal = None
-        return await dispatch_record(successor, link)
+        return await dispatch_record(successor, link, saved_files=saved_files)
 
     async def request_stop(record, link, *, stop_id):
         state.stop_calls += 1
@@ -207,7 +208,7 @@ async def test_actual_failure_primary_releases_one_turn_and_starts_waiting_input
         # Clear the controlled old run only when the next publication is queued.
         actual_dispatch = e.services.publications.dispatch_record
 
-        async def next_dispatch(record, link):
+        async def next_dispatch(record, link, *, saved_files=None):
             state.terminal = None
             return await actual_dispatch(record, link)
 
@@ -246,6 +247,7 @@ async def test_capacity_retry_keeps_logical_turn_deadline_and_gives_up_once(db, 
         await until(lambda: state.posts == 2)
         assert first is next(iter(turns._turns.values())) and first.waiting_since == deadline_start
         assert first.record.turn_id == original.turn_id and first.record.publication_id != original.publication_id
+        assert len(state.saved_files) == 2 and all(kept is first.saved_files for kept in state.saved_files), "A file saved by one attempt is not saved again by the next"
         state.terminal = terminal(first.record, reason="sandbox_capacity_exceeded")
         e.clock.advance(111)
         first.wake.set()
@@ -369,7 +371,7 @@ async def test_stop_after_reserve_before_marker_prevents_actual_dispatch_and_sea
     turns, state, _ = await controlled_execution(e, monkeypatch)
     entered, release, refused = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
-    async def held_marker(record, link):
+    async def held_marker(record, link, *, saved_files=None):
         owner = await e.services.prepare_live_owner(link.owner_user_id)
         guard = e.services.links.publication_guard(link, check_live_owner=owner, check_attempt_current=lambda: e.channel._callback_current(link))
         entered.set()
@@ -1261,10 +1263,10 @@ async def test_lost_dispatch_result_observes_and_stops_original_run_without_seco
     actual_dispatch = e.coordinator.dispatch_record
     actual_retry = e.coordinator.retry
 
-    async def lost(record, link):
+    async def lost(record, link, **kwargs):
         attempts.append(record.publication_id)
         captured.append(record)
-        result = await actual_dispatch(record, link)
+        result = await actual_dispatch(record, link, **kwargs)
         first_sent.set()
         if retry:
             return result
@@ -1404,7 +1406,7 @@ async def test_terminal_stop_cancels_only_a_proven_capacity_wait_otherwise_relea
         assert turns.queue.waiting_count(e.channel.link, None) == 1
         original_dispatch = e.services.publications.dispatch_record
 
-        async def next_dispatch(record, link):
+        async def next_dispatch(record, link, *, saved_files=None):
             state.terminal = None
             return await original_dispatch(record, link)
 
@@ -1506,7 +1508,7 @@ async def test_stop_admitted_for_finished_turn_never_moves_to_its_queued_success
         actual_accept = e.services.outbox.inbox.accept
         actual_dispatch = e.services.publications.dispatch_record
 
-        async def next_dispatch(record, link):
+        async def next_dispatch(record, link, *, saved_files=None):
             state.terminal = None
             return await actual_dispatch(record, link)
 

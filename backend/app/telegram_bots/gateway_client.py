@@ -6,7 +6,7 @@ import asyncio
 import io
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from hashlib import sha256
@@ -601,6 +601,7 @@ class GatewayClientOwner:
         body: Mapping[str, JsonValue] | None = None,
         params: Mapping[str, QueryValue] | None = None,
         headers: Mapping[str, str] | None = None,
+        files: Sequence[tuple[str, tuple[str, bytes]]] | None = None,
     ) -> ChannelJsonResponse:
         self._check_operation(operation)
         path = _path(path)
@@ -614,11 +615,15 @@ class GatewayClientOwner:
                 await self.start()
                 encoded = await await_drained(asyncio.to_thread(_encode, body)) if body is not None else None
                 fresh_headers = await self._headers_for(owner_user_id, headers)
+                if files is not None:
+                    del fresh_headers["Content-Type"]  # httpx writes it, with the multipart boundary.
                 self._check_operation(operation)
                 context = _BEFORE_DISPATCH.set(self._dispatch_check(operation, before_dispatch))
                 try:
                     response = await self._http_client.send(
-                        self._http_client.build_request(method, path, content=encoded, params=params, headers=fresh_headers, timeout=httpx.Timeout(connect=5, pool=5, read=300, write=300) if operation == "run_create" else httpx.Timeout(30)),
+                        self._http_client.build_request(
+                            method, path, content=encoded, files=files, params=params, headers=fresh_headers, timeout=httpx.Timeout(connect=5, pool=5, read=300, write=300) if operation == "run_create" else httpx.Timeout(30)
+                        ),
                         stream=True,
                     )
                     self._remember_response(response)
@@ -633,7 +638,8 @@ class GatewayClientOwner:
                     _BEFORE_DISPATCH.reset(context)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
+                _discard_error_frames(error)
                 raise ChannelExecutionProtocolError() from None
 
         task = self._register(run(), "channel-http-json")

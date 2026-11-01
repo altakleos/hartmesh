@@ -58,22 +58,10 @@ async def test_parallel_readers_keep_original_context_then_reset(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_preparation_notifier_and_cancelled_reader_keep_scope_until_reset(tmp_path, monkeypatch):
+async def test_cancelled_reader_keeps_scope_until_reset(tmp_path, monkeypatch):
     cap = context("a")
     observed = []
-
-    def refuse(*args, **kwargs):
-        raise OSError("synthetic native refusal")
-
-    async def notify(file, error):
-        observed.append(inbound_files.current_inbound_file_context())
-
-    monkeypatch.setattr(uploads, "ensure_uploads_dir", refuse)
-    monkeypatch.setitem(manager.INBOUND_FILE_WRITE_FAILED, "context-test", notify)
-    monkeypatch.setitem(manager.INBOUND_FILE_PREPARE_FILTERS, "context-test", lambda file: True)
     message = InboundMessage(channel_name="context-test", chat_id="chat", user_id="person", text="Input", files=[{"filename": "file.txt"}], execution_context=cap)
-    assert await manager._ingest_inbound_files("thread", message) == []
-    assert observed == [cap] and inbound_files.current_inbound_file_context() is None
     destination = tmp_path / "uploads"
     destination.mkdir()
     monkeypatch.setattr(uploads, "ensure_uploads_dir", lambda *args, **kwargs: destination)
@@ -93,7 +81,7 @@ async def test_preparation_notifier_and_cancelled_reader_keep_scope_until_reset(
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert observed == [cap, cap] and inbound_files.current_inbound_file_context() is None
+        assert observed == [cap] and inbound_files.current_inbound_file_context() is None
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

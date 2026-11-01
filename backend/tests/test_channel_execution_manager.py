@@ -271,14 +271,17 @@ async def test_file_preparation_keeps_the_original_destination_and_human_extras(
     e = setup
     e.message.files = [{"filename": "incoming"}]
     e.message.metadata["human_message_kwargs"] = {"forwarded": [{"from": "sender"}], "original_user_content": "supplied", "files": [{"filename": "retained"}]}
+    e.client.threads.upload = AsyncMock()
 
     async def receive(msg, thread, *, user_id):
         assert thread == e.context.thread_id and user_id == e.context.owner_user_id
         return replace(msg, text="downloaded", owner_user_id="other", connection_id="other", chat_id="other", execution_context=None)
 
-    async def ingest(thread, msg, *, user_id):
+    async def ingest(thread, msg, *, user_id, upload, saved_files):
         assert (msg.chat_id, msg.connection_id, msg.owner_user_id) == ("chat", "connection", "owner")
         assert msg.execution_context is e.context
+        assert upload is e.client.threads.upload, "A managed chat's files take the route the web uses"
+        assert saved_files is e.context.saved_files, "Whoever makes the attempts keeps what they saved"
         msg.text = "prepared with uploaded path"
         return [{"filename": "uploaded"}]
 

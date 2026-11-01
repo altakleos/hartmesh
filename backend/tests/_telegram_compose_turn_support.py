@@ -20,6 +20,7 @@ import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import parse_qs
 from uuid import UUID
 
 import httpx
@@ -45,14 +46,17 @@ from app.gateway.auth.models import User
 from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.csrf_middleware import CSRFMiddleware
-from app.gateway.routers import artifacts, run_output, thread_runs, threads
+from app.gateway.refusals import refusal_handler
+from app.gateway.routers import artifacts, features, run_output, thread_runs, threads, uploads
 from app.gateway.stream_cleanup import StreamCleanupRegistry
 from app.telegram_bots.authority import TelegramAuthority
+from app.telegram_bots.capped_download import ManagedHTTPXRequest
 from app.telegram_bots.cipher import token_cipher, wrap_token
 from app.telegram_bots.config import load_config
 from app.telegram_bots.gateway_client import GatewayClientOwner
 from app.telegram_bots.links import BotLinkRepository
 from app.telegram_bots.settings import SettingsRepository
+from deerflow.agent_instances.contract import Refusal
 from deerflow.agent_instances.conversations import AgentConversations
 from deerflow.config import agents_api_config, app_config, memory_config, stream_bridge_config
 from deerflow.config.paths import Paths, paths_scope
@@ -233,6 +237,7 @@ class ProviderWire:
 
     def __init__(self, replies, auxiliary):
         self.replies, self.auxiliary, self.lead_requests = list(replies), auxiliary, 0
+        self.lead_bodies = []
 
     def respond(self, request):
         if request.url.host == "searxng":
@@ -241,6 +246,7 @@ class ProviderWire:
         body = self.auxiliary
         if json.loads(request.content or b"{}").get("tools"):
             self.lead_requests += 1
+            self.lead_bodies.append(request.content.decode())
             assert self.replies, "The lead model was called more often than this test scripted"
             reply = self.replies.pop(0)
             body = reply() if callable(reply) else reply
@@ -355,6 +361,30 @@ def _answer_every_call(normal, monkeypatch):
     monkeypatch.setattr(normal, "do_request", do_request)
 
 
+def _serve_a_file(supervisor, boot, data):
+    """The real prepared client a channel uses in production, for Bot API posts and the file's GET."""
+
+    async def telegram(request):
+        if request.method == "GET":
+            return httpx.Response(200, content=data)
+        parameters = {}
+        for key, values in parse_qs(request.content.decode("utf-8"), keep_blank_values=True).items():
+            try:
+                parameters[key] = json.loads(values[0])
+            except ValueError:
+                parameters[key] = values[0]
+        status, body = await boot.normal.do_request("https://offline.invalid/" + request.url.path.rsplit("/", 1)[-1], request.method, SimpleNamespace(parameters=parameters))
+        return httpx.Response(status, content=body)
+
+    def factory(**kwargs):
+        if kwargs["connection_pool_size"] == 1:
+            return boot.updates
+        kwargs["httpx_kwargs"] = {**kwargs["httpx_kwargs"], "transport": httpx.MockTransport(telegram)}
+        return ManagedHTTPXRequest(**kwargs)
+
+    supervisor.request_factory = factory
+
+
 async def _connect_bot(db, supervisor, boot):
     await db.settings.ensure(OWNER, timezone="UTC", locale="en-US")
     token = f"{BOT}:" + "synthetic_" * 5
@@ -380,14 +410,32 @@ async def _connect_bot(db, supervisor, boot):
 
 
 async def _finish(turn, clock):
-    """The driver paces itself on the injected clock, so time has to pass for it to finish."""
+    """The driver paces itself on the injected clock, so time has to pass for it to finish.
+
+    A retry runs a real turn during this. Any faster, and a slow machine meets the turn's stall limit.
+    """
     while not turn.done.is_set():
         clock.advance(1)
+        await asyncio.sleep(0.25)
+
+
+async def _delivered(e, supervisor, clock):
+    """A turn ends when its answer is planned, so what was planned still has to go out."""
+    while True:
+        clock.advance(5)
+        await supervisor.sender.tick()
+        await supervisor.sender.drain()
+        async with e.sf() as reader:
+            if await reader.scalar(select(TelegramOutboxRow.id).where(TelegramOutboxRow.state.in_(("pending", "sending"))).limit(1)) is None:
+                return
         await asyncio.sleep(0.05)
 
 
-async def drive_message(e, monkeypatch, tmp_path, *, prompts=("What is two plus two?",)):
-    """Sends each prompt as a real Telegram update and returns what came of it."""
+async def drive_message(e, monkeypatch, tmp_path, *, prompts=("What is two plus two?",), document=None):
+    """Sends each prompt as a real Telegram update and returns what came of it.
+
+    With `document`, a (name, bytes) pair, the first prompt is that file's caption.
+    """
     async with e.engine.begin() as connection:
         if e.dialect == "sqlite":
             await connection.execute(text("BEGIN"))
@@ -412,6 +460,7 @@ async def drive_message(e, monkeypatch, tmp_path, *, prompts=("What is two plus 
         runs = RunManager(store=e.repository, run_ownership_config=config.run_ownership, event_store=e.event_store)
         prototype = _make_start_run_request(runs, thread_store=e.thread_store)
         app = FastAPI()
+        app.add_exception_handler(Refusal, refusal_handler)
         app.add_middleware(CSRFMiddleware)
         app.add_middleware(AuthMiddleware)
         for key, value in vars(prototype.app.state).items():
@@ -430,11 +479,15 @@ async def drive_message(e, monkeypatch, tmp_path, *, prompts=("What is two plus 
         app.include_router(thread_runs.router)
         app.include_router(run_output.router, prefix="/api/threads")
         app.include_router(artifacts.router)
+        app.include_router(uploads.router)
+        app.include_router(features.router)
         gateway = GatewayClientOwner(gateway_url="http://gateway.test", langgraph_url="http://gateway.test/api", transport=httpx.ASGITransport(app=app))
         boot = build(db, monkeypatch)
         supervisor = boot.supervisor
         supervisor.app, supervisor.authority, supervisor._app_config = app, TelegramAuthority(links=db.links, connections=db.connections), config
         supervisor.thread_client = gateway
+        if document is not None:
+            _serve_a_file(supervisor, boot, document[1])
         store = await asyncio.to_thread(ChannelStore, str(tmp_path / "manager.json"))
         manager = ChannelManager(boot.service.bus, store, connection_repo=db.connections, langgraph_url="http://gateway.test/api", gateway_url=gateway.gateway_url, max_concurrency=1)
         boot.service.manager = manager
@@ -457,17 +510,20 @@ async def drive_message(e, monkeypatch, tmp_path, *, prompts=("What is two plus 
             turn_runs = []
             for number, prompt in enumerate(prompts):
                 finished.clear()
-                update = Update.de_json(update_payload(1701 + number, message_id=711 + number, account=PERSON, text=prompt), channel.bot)
+                payload = update_payload(1701 + number, message_id=711 + number, account=PERSON, text=prompt)
+                if document is not None and number == 0:
+                    name, data = document
+                    payload["message"]["caption"] = payload["message"].pop("text")
+                    payload["message"]["document"] = {"file_id": "inbound-file", "file_unique_id": "inbound-unique", "file_name": name, "mime_type": "text/csv", "file_size": len(data)}
+                    boot.normal.enqueue("getFile", result={"file_id": "inbound-file", "file_unique_id": "inbound-unique", "file_size": len(data), "file_path": f"documents/{name}"})
+                update = Update.de_json(payload, channel.bot)
                 assert await channel.handle_update(update)
                 await asyncio.sleep(0)
                 turn = next(iter(supervisor.turns._turns.values()))
                 await asyncio.wait_for(finished.wait(), 30)
                 await asyncio.wait_for(_finish(turn, boot.clock), 30)
                 turn_runs.append(turn.run_id)
-                for _ in range(6):
-                    boot.clock.advance(5)
-                    await supervisor.sender.tick()
-                    await supervisor.sender.drain()
+                await asyncio.wait_for(_delivered(e, supervisor, boot.clock), 30)
             async with e.sf() as reader:
                 rows = list(await reader.scalars(select(RunRow)))
                 facts = SimpleNamespace(
@@ -477,6 +533,9 @@ async def drive_message(e, monkeypatch, tmp_path, *, prompts=("What is two plus 
                     turn_runs=turn_runs,
                     sent=[(call.endpoint, call.parameters.get("text") or call.parameters.get("caption")) for call in boot.normal.calls if call.endpoint in SENDS],
                     bot_calls=repr([(call.endpoint, call.parameters) for call in boot.normal.calls]),
+                    # Listed here because the temporary conversation paths go when the scope ends.
+                    outside_spaces=[] if document is None else list((tmp_path / "data").rglob(document[0])),
+                    in_spaces=[] if document is None else list((tmp_path / "spaces").rglob("*" + Path(document[0]).suffix)),
                 )
             return facts
         finally:
