@@ -2,6 +2,7 @@ import type { TelegramFeature } from "@/core/features/api";
 
 import type { Bot } from "./api";
 import type { TelegramKey, TelegramReader, TelegramValues } from "./text";
+import type { AgentTarget } from "./web-pages";
 
 export interface RowInput {
   name: string;
@@ -189,6 +190,113 @@ export function rowOf(input: RowInput): RowView {
   return bot.state === "waiting_connect"
     ? waitingRow(input, bot, values)
     : connectedRow(input, bot, values);
+}
+
+export type SetupStage = "steps" | "waiting" | "expired" | "done";
+
+/** Where the set-up stands, read from the list so a reload or a second tab agrees. */
+export function setupStageOf(bot: Bot | null, now: number): SetupStage {
+  if (bot?.state === "connected") {
+    return "done";
+  }
+  if (bot?.state !== "waiting_connect" || bot.bind_mode !== "code") {
+    return "steps";
+  }
+  const expires = bot.connect_expires_at
+    ? Date.parse(bot.connect_expires_at)
+    : Number.POSITIVE_INFINITY;
+  return expires <= now ? "expired" : "waiting";
+}
+
+export interface TargetRow {
+  target: AgentTarget;
+  name: string;
+  bot: Bot | null;
+}
+
+function byName(first: { name: string }, second: { name: string }): number {
+  return first.name.localeCompare(second.name);
+}
+
+/** The ordinary chat, then custom agents by name, then bots whose target has gone. */
+export function targetRowsOf({
+  chatName,
+  agentNames,
+  bots,
+}: {
+  chatName: string;
+  agentNames: string[];
+  bots: Bot[];
+}): TargetRow[] {
+  const remaining = new Map(
+    bots.map((bot) => [`${bot.agent_kind}.${bot.agent_ref}`, bot]),
+  );
+  const claim = (kind: string, reference: string) => {
+    const key = `${kind}.${reference}`;
+    const bot = remaining.get(key) ?? null;
+    remaining.delete(key);
+    return bot;
+  };
+  const chat: TargetRow = {
+    target: { kind: "chat" },
+    name: chatName,
+    bot: claim("lead_agent", "lead_agent"),
+  };
+  const agents = agentNames
+    .map(
+      (name): TargetRow => ({
+        target: { kind: "custom_agent", name },
+        name,
+        bot: claim("custom_agent", name),
+      }),
+    )
+    .sort(byName);
+  const gone = Array.from(
+    remaining.values(),
+    (bot): TargetRow => ({
+      target: { kind: "custom_agent", name: bot.agent_ref },
+      name: bot.agent_name ?? bot.bot_name ?? bot.agent_ref,
+      bot,
+    }),
+  ).sort(byName);
+  return [chat, ...agents, ...gone];
+}
+
+export interface SectionNotice {
+  key: TelegramKey;
+  /** False for a sentence that says whom to ask itself. */
+  ending: boolean;
+  /** False where the sentence already says what the provider has to do. */
+  next: boolean;
+}
+
+/** The notice for the whole section, or null when Telegram can run. */
+export function sectionNoticeOf(
+  feature: Pick<TelegramFeature, "enabled" | "bots" | "reason">,
+  hasBot: boolean,
+): SectionNotice | null {
+  if (!feature.enabled) {
+    return {
+      key: hasBot ? "unavailable.offKept" : "unavailable.off",
+      ending: false,
+      next: false,
+    };
+  }
+  if (feature.bots === "ready") {
+    return null;
+  }
+  switch (feature.reason) {
+    case "secret-missing":
+      return { key: "unavailable.secretMissing", ending: true, next: true };
+    case "secret-invalid":
+      return { key: "unavailable.secretInvalid", ending: true, next: true };
+    case "host-changed":
+      return { key: "unavailable.hostChanged", ending: true, next: false };
+    case "polled-elsewhere":
+      return { key: "unavailable.polledElsewhere", ending: true, next: true };
+    default:
+      return { key: "unavailable.unknown", ending: true, next: true };
+  }
 }
 
 /** The person can do something on these rows, so the sidebar counts them. */

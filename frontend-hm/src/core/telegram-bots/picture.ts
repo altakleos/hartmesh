@@ -12,6 +12,11 @@ export const PICTURE_COLORS: readonly string[] = [
 
 export const CHAT_COLOR = "#334155";
 
+/** A lossy in-memory label, so a retry can tell the same token without keeping it. */
+export function fingerprintOf(text: string): string {
+  return fnv1a(text).toString(16);
+}
+
 function fnv1a(key: string): number {
   let hash = 0x811c9dc5;
   for (const byte of new TextEncoder().encode(key)) {

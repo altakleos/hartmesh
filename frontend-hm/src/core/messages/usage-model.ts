@@ -293,6 +293,10 @@ function describeToolCall(
     return t.toolCalls.presentFiles;
   }
 
+  if (toolCall.name === "show_web_page") {
+    return t.toolCalls.showWebPage;
+  }
+
   if (toolCall.name === "ask_clarification") {
     return t.toolCalls.needYourHelp;
   }

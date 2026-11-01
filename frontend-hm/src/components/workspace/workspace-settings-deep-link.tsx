@@ -58,6 +58,7 @@ export function WorkspaceSettingsDeepLink() {
     if (searchParams.has("settings")) {
       const next = new URLSearchParams(searchParams);
       next.delete("settings");
+      next.delete("telegram");
       const suffix = next.toString();
       router.replace(suffix ? `${pathname}?${suffix}` : pathname, {
         scroll: false,

@@ -100,6 +100,7 @@ function App({ user = alice }: { user?: User | null }) {
 }
 
 beforeEach(() => {
+  window.history.replaceState({}, "", "/workspace/files");
   displayed = [];
   mode.static = false;
   router.push.mockReset();

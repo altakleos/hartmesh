@@ -93,6 +93,7 @@ export interface AddBotRequest {
   agent_kind: string;
   agent_ref: string;
   token: string;
+  /** Only a person's first bot uses these two. */
   timezone: string;
   locale: string;
   take_over_webhook?: boolean;

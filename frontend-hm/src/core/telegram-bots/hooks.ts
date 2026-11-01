@@ -1,15 +1,20 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback } from "react";
+import {
+  useQuery,
+  useQueryClient,
+  type UseQueryOptions,
+} from "@tanstack/react-query";
+import { useCallback, useEffect, useState } from "react";
 
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useBranding, useTelegram } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 
-import { listTelegramBots } from "./api";
+import { type BotList, listTelegramBots } from "./api";
 import type { TelegramReader } from "./text";
 
 /** Every account's list starts with this, so one refresh reaches them all. */
 export const telegramBotsQueryPrefix = ["telegram-bots"] as const;
+const CLOCK_MS = 5000;
 
 /**
  * The one list every place reads. It is read whenever the features answer is
@@ -18,7 +23,9 @@ export const telegramBotsQueryPrefix = ["telegram-bots"] as const;
  */
 export function useTelegramBots({
   refetchInterval,
-}: { refetchInterval?: number } = {}) {
+}: {
+  refetchInterval?: UseQueryOptions<BotList>["refetchInterval"];
+} = {}) {
   const { user } = useAuth();
   const { known } = useTelegram();
   return useQuery({
@@ -27,6 +34,16 @@ export function useTelegramBots({
     enabled: known,
     refetchInterval,
   });
+}
+
+/** A row can change with time alone, when no answer changes and nothing re-renders. */
+export function useTelegramClock(): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), CLOCK_MS);
+    return () => clearInterval(timer);
+  }, []);
+  return now;
 }
 
 export function useRefreshTelegramBots() {

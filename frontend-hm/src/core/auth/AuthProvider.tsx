@@ -13,6 +13,7 @@ import React, {
 
 import { isStaticWebsiteOnly } from "../static-mode";
 
+import { currentReturnPath } from "./next-path";
 import { type User, buildLoginUrl, userSchema } from "./types";
 
 const REFRESH_RETRY_DELAYS_MS = [2_000, 5_000, 15_000] as const;
@@ -134,7 +135,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
           applyUser(null);
           // Redirect to login if on a protected route
           if (currentPathname.current?.startsWith("/workspace")) {
-            router.push(buildLoginUrl(currentPathname.current));
+            router.push(buildLoginUrl(currentReturnPath()));
           }
         } else {
           throw new Error("Session check unavailable");
@@ -276,16 +277,15 @@ export function useAuth(): AuthContextType {
 export function useRequireAuth(): AuthContextType {
   const auth = useAuth();
   const router = useRouter();
-  const pathname = usePathname();
 
   useEffect(() => {
     if (isStaticWebsiteOnly()) return;
 
     // Only redirect if we're sure user is not authenticated (not just loading)
     if (!auth.isLoading && !auth.isAuthenticated) {
-      router.push(buildLoginUrl(pathname || "/workspace"));
+      router.push(buildLoginUrl(currentReturnPath()));
     }
-  }, [auth.isAuthenticated, auth.isLoading, router, pathname]);
+  }, [auth.isAuthenticated, auth.isLoading, router]);
 
   return auth;
 }

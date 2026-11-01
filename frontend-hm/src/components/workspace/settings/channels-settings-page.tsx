@@ -20,6 +20,7 @@ import {
   ItemMedia,
   ItemTitle,
 } from "@/components/ui/item";
+import { TelegramBotsSection } from "@/components/workspace/telegram/bots-section";
 import {
   useConfigureChannelProvider,
   useChannelConnections,
@@ -38,6 +39,7 @@ import {
   providerNeedsRuntimeConfig,
 } from "@/core/channels/provider-state";
 import type { ChannelConnection, ChannelProvider } from "@/core/channels/types";
+import { useTelegram } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
@@ -337,6 +339,7 @@ export function ChannelsSettingsPage() {
   const isLoading = providersLoading || connectionsLoading;
   const error = providersError ?? connectionsError;
   const visibleProviders = providers.filter((provider) => provider.enabled);
+  const { known: telegramKnown } = useTelegram();
 
   const connectionByProvider = new Map<string, ChannelConnection>();
   for (const connection of connections) {
@@ -346,34 +349,47 @@ export function ChannelsSettingsPage() {
     }
   }
 
+  // The bundle reports channels as enabled with no provider, so the existing
+  // "not enabled" text would stand under a working Telegram section.
+  if (telegramKnown && visibleProviders.length === 0) {
+    return <TelegramBotsSection />;
+  }
+
   return (
-    <SettingsSection
-      title={t.settings.channels.title}
-      description={t.settings.channels.description}
-    >
-      {isLoading ? (
-        <div className="text-muted-foreground text-sm">{t.common.loading}</div>
-      ) : error ? (
-        <div className="text-destructive text-sm">{t.channels.unavailable}</div>
-      ) : !enabled ? (
-        <div className="text-muted-foreground text-sm">
-          {t.settings.channels.disabled}
-        </div>
-      ) : visibleProviders.length === 0 ? (
-        <div className="text-muted-foreground text-sm">
-          {t.settings.channels.disabled}
-        </div>
-      ) : (
-        <div className="flex w-full flex-col gap-4">
-          {visibleProviders.map((provider) => (
-            <ChannelProviderItem
-              key={provider.provider}
-              provider={provider}
-              connection={connectionByProvider.get(provider.provider)}
-            />
-          ))}
-        </div>
-      )}
-    </SettingsSection>
+    <div className="space-y-8">
+      {telegramKnown ? <TelegramBotsSection /> : null}
+      <SettingsSection
+        title={t.settings.channels.title}
+        description={t.settings.channels.description}
+      >
+        {isLoading ? (
+          <div className="text-muted-foreground text-sm">
+            {t.common.loading}
+          </div>
+        ) : error ? (
+          <div className="text-destructive text-sm">
+            {t.channels.unavailable}
+          </div>
+        ) : !enabled ? (
+          <div className="text-muted-foreground text-sm">
+            {t.settings.channels.disabled}
+          </div>
+        ) : visibleProviders.length === 0 ? (
+          <div className="text-muted-foreground text-sm">
+            {t.settings.channels.disabled}
+          </div>
+        ) : (
+          <div className="flex w-full flex-col gap-4">
+            {visibleProviders.map((provider) => (
+              <ChannelProviderItem
+                key={provider.provider}
+                provider={provider}
+                connection={connectionByProvider.get(provider.provider)}
+              />
+            ))}
+          </div>
+        )}
+      </SettingsSection>
+    </div>
   );
 }

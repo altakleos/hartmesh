@@ -2,6 +2,7 @@ import { describe, expect, it } from "@rstest/core";
 
 import {
   CHAT_COLOR,
+  fingerprintOf,
   PICTURE_COLORS,
   pictureOf,
 } from "@/core/telegram-bots/picture";
@@ -34,6 +35,13 @@ describe("pictureOf", () => {
 
   it("keeps one character of a longer upper case, as the server does", () => {
     expect(pictureOf("ßeta", "key").initials).toBe("S");
+  });
+
+  it("tells two texts apart without holding either", () => {
+    const secret = "a long secret text";
+    expect(fingerprintOf(secret)).toBe(fingerprintOf(secret));
+    expect(fingerprintOf(secret)).not.toBe(fingerprintOf(`${secret}!`));
+    expect(fingerprintOf(secret).length).toBeLessThanOrEqual(8);
   });
 
   it("uses the eight colours and the chat colour of the design", () => {

@@ -18,6 +18,11 @@ const presentation = rs.hoisted(() => ({
   localSkillManagement: false,
 }));
 
+const channels = rs.hoisted(() => ({
+  telegramKnown: false,
+  providers: [] as { enabled: boolean }[],
+}));
+
 rs.mock("@/core/features", () => ({
   useDeveloperSurfacesVisible: () => presentation.developerSurfacesVisible,
   useWorkspacePresentation: () => ({ isLoading: presentation.isLoading }),
@@ -28,6 +33,11 @@ rs.mock("@/core/features/hooks", () => ({
   useCustomerAdministration: () => ({
     localSkillManagement: presentation.localSkillManagement,
   }),
+  useTelegram: () => ({ known: channels.telegramKnown }),
+}));
+
+rs.mock("@/core/channels/hooks", () => ({
+  useChannelProviders: () => ({ providers: channels.providers }),
 }));
 
 import { SettingsDialog } from "@/components/workspace/settings/settings-dialog";
@@ -58,9 +68,28 @@ afterEach(() => {
   presentation.developerSurfacesVisible = true;
   presentation.isLoading = false;
   presentation.localSkillManagement = false;
+  channels.telegramKnown = false;
+  channels.providers = [];
 });
 
 describe("SettingsDialog", () => {
+  it("names the channels section Telegram when nothing else is enabled", () => {
+    channels.telegramKnown = true;
+    renderDialog();
+    expect(tabNames()).toContain(enUS.telegramBots.sectionLabel);
+    cleanup();
+
+    channels.providers = [{ enabled: true }];
+    renderDialog();
+    expect(tabNames()).toContain(sections.channels);
+    cleanup();
+
+    channels.telegramKnown = false;
+    channels.providers = [];
+    renderDialog();
+    expect(tabNames()).toContain(sections.channels);
+  });
+
   it("offers every screen where the developer surfaces are visible", () => {
     renderDialog();
 

@@ -13,6 +13,17 @@ describe("auth next path validation", () => {
     );
   });
 
+  test("an address with telegram=agent.<id> is kept", () => {
+    const address = `/workspace?settings=channels&telegram=agent.${"a".repeat(32)}`;
+    expect(validateAuthNextPath(address)).toBe(address);
+  });
+
+  test("an address with a colon in the target is refused", () => {
+    expect(
+      validateAuthNextPath("/workspace?settings=channels&telegram=agent:abc"),
+    ).toBeNull();
+  });
+
   test("rejects external and ambiguous redirects", () => {
     expect(validateAuthNextPath(null)).toBeNull();
     expect(validateAuthNextPath("workspace")).toBeNull();
