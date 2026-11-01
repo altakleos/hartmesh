@@ -14,7 +14,7 @@ import secrets
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Sequence
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from html import escape
 from pathlib import PurePosixPath
@@ -32,6 +32,7 @@ from app.channels.telegram import TelegramChannel
 from app.telegram_bots.capped_download import ManagedHTTPXRequest
 from app.telegram_bots.render import render, render_plain
 from app.telegram_bots.settings import silent_now
+from app.telegram_bots.skills import slash_skill_outcome
 from app.telegram_bots.split import utf16_units
 from app.telegram_bots.strangers import BAD_CODE_REPLIES_PER_SENDER_PER_HOUR as BAD_CODE_REPLIES_PER_SENDER_PER_HOUR
 from app.telegram_bots.strangers import STRANGER_MAP_MAX as STRANGER_MAP_MAX
@@ -57,6 +58,8 @@ LIMITER_HOLD_MAX_SECONDS = 5
 SEND_RETRY_AFTER_MAX_SECONDS = 60
 EDIT_HASHES_PER_BOT = 256
 MEDIA_UNSUPPORTED_EVERY_SECONDS = 60
+LIMITED_AFTER_SECONDS = 600
+_SKILL_REPLIES = {"off": "cmd.skill_off", "unavailable": "cmd.skill_unavailable", "failed": "error.generic"}
 FIXED_COMMANDS = ("work", "assign", "assistants", "employees", "new", "stop", "settings", "help", "web", "status", "privacy", "agent", "bootstrap", "goal", "models", "memory")
 _TOKEN_PASTED = re.compile(r"(?<![0-9])" + TOKEN_BODY)
 logger = logging.getLogger(__name__)
@@ -241,6 +244,7 @@ class TelegramBotChannel(TelegramChannel):
         self._unsupported_at: dict[tuple, float] = {}
         self._needs_success = True
         self._failure_serial = 0
+        self._refused_since = None
         factory = getattr(supervisor, "request_factory", ManagedHTTPXRequest)
         self._requests = (
             factory(connection_pool_size=8, httpx_kwargs={"verify": supervisor.tls_context}),
@@ -335,7 +339,7 @@ class TelegramBotChannel(TelegramChannel):
                 self._first_401 = None
             return True
 
-    async def _after_send_success(self) -> None:
+    async def _after_any_success(self) -> None:
         from sqlalchemy.exc import SQLAlchemyError
 
         try:
@@ -344,6 +348,37 @@ class TelegramBotChannel(TelegramChannel):
             # The SDK has already returned its acknowledgement. Auxiliary
             # connectivity bookkeeping cannot turn that known send into retry.
             self._failure()
+
+    async def _after_send_success(self, *, counts: bool = True) -> None:
+        """An accepted message, file or keyboard change ends a run of refusals."""
+        from sqlalchemy.exc import SQLAlchemyError
+
+        await self._after_any_success()
+        if not counts:
+            return
+        self._refused_since = None
+        if self.link.limited_since is not None:
+            try:
+                await self._write_limited(None)
+            except (SQLAlchemyError, ValueError):
+                pass  # The next accepted send clears it.
+
+    async def _send_refused_by_limit(self) -> None:
+        """A durable send gave up on a 429. Ten minutes of that reaches the bot's row."""
+        from sqlalchemy.exc import SQLAlchemyError
+
+        now = self._now()
+        if self._refused_since is None:
+            self._refused_since = now
+        elif self.link.limited_since is None and (now - self._refused_since).total_seconds() >= LIMITED_AFTER_SECONDS:
+            try:
+                await self._write_limited(self._refused_since)
+            except (SQLAlchemyError, ValueError):
+                self._refused_since = None  # The next refusal starts the wait again.
+
+    async def _write_limited(self, since) -> None:
+        await self._services.links.update(self.link.id, limited_since=since)
+        self.link = replace(self.link, limited_since=since)
 
     def _chat_message_sent(self, chat_id, topic):
         turns = getattr(self._services, "turns", None)
@@ -561,7 +596,7 @@ class TelegramBotChannel(TelegramChannel):
             MessageHandler(new & (filters.Regex(_TOKEN_PASTED) | filters.CaptionRegex(_TOKEN_PASTED)), self._on_token_pasted),
             CommandHandler("start", self._cmd_start, filters=new),
             CommandHandler(FIXED_COMMANDS, self._on_command, filters=new),
-            MessageHandler(new & filters.TEXT & filters.COMMAND, self._on_other_slash),
+            MessageHandler(new & filters.TEXT & filters.COMMAND, self._on_text),
             MessageHandler(new & filters.TEXT & ~filters.COMMAND, self._on_text),
             MessageHandler(new & (filters.PHOTO | filters.Document.ALL), self._on_text),
             MessageHandler(new & filters.VOICE, self._on_voice),
@@ -829,7 +864,7 @@ class TelegramBotChannel(TelegramChannel):
     async def _cmd_start(self, update, context) -> None:
         word, arguments = self._command(update.message)
         if word != "start":
-            await self._on_other_slash(update, context)
+            await self._on_text(update, context)
             return
         link, message = self._admission(update).link, update.message
         if link.state == "connected":
@@ -885,7 +920,17 @@ class TelegramBotChannel(TelegramChannel):
             values = prepared or await self._services.prepare_ingress_values(link)
             if not await self._input_current(link):
                 return
-            source_values = {"command": word} if key == "cmd.unknown" else {"name": values["name"]} if key == "cmd.agent" else {"name": values["name"], "product": values["product"]} if key == "web.memory" else {}
+            source_values = (
+                {"command": word}
+                if key == "cmd.unknown"
+                else {"skill": word}
+                if key.startswith("cmd.skill_")
+                else {"name": values["name"]}
+                if key == "cmd.agent"
+                else {"name": values["name"], "product": values["product"]}
+                if key == "web.memory"
+                else {}
+            )
             button = {"page": "web.memory", "url": values["memory_url"]} if key == "web.memory" and values.get("memory_url") else None
             row = await await_drained(self._services.outbox.inbox.route(row, kind="command", target_id=word or "unknown", basis={"key": key, "values": source_values, "url_button": button}, operation_ids=[]))
         basis = row.route_basis
@@ -903,6 +948,10 @@ class TelegramBotChannel(TelegramChannel):
 
     async def _on_command(self, update, context) -> None:
         word, arguments = self._command(update.message)
+        if word not in FIXED_COMMANDS:
+            # Telegram ends a command at a hyphen, so /web-design arrives here.
+            await self._on_text(update, context)
+            return
         turns = getattr(self._services, "turns", None)
         flush = getattr(turns, "flush_inputs", None)
         if word != "stop" and flush is not None:
@@ -913,8 +962,6 @@ class TelegramBotChannel(TelegramChannel):
         if word == "stop" and turns is not None:
             await turns.stop_chat(self, update)
             self._classified(update, remember=True)
-        elif word not in FIXED_COMMANDS:
-            await self._on_other_slash(update, context)
         elif word == "agent":
             await self._fixed_reply(update, "cmd.agent", word)
         elif word == "memory" and self.link.agent_kind == "lead_agent":
@@ -925,22 +972,26 @@ class TelegramBotChannel(TelegramChannel):
         else:
             await self._fixed_reply(update, "cmd.unknown", word)
 
-    async def _on_other_slash(self, update, context) -> None:
-        from deerflow.skills.slash import parse_slash_skill_reference
-
+    async def _on_other_slash(self, update, context) -> bool:
+        """True for a skill's word, which goes on as a chat message with its text unchanged."""
         word, arguments = self._command(update.message)
         if word == "start":
             await self._cmd_start(update, context)
         elif word in FIXED_COMMANDS:
             await self._on_command(update, context)
-        elif parse_slash_skill_reference(update.message.text or "") is None:
-            await self._fixed_reply(update, "cmd.unknown", word)
-        # A genuine potential skill waits for its real catalog/dispatch owner.
+        else:
+            outcome = await await_drained(asyncio.to_thread(slash_skill_outcome, self._admission(update).link, update.message.text or ""))
+            if outcome == "run":
+                return True
+            await self._fixed_reply(update, _SKILL_REPLIES.get(outcome, "cmd.unknown"), word)
+        return False
 
     async def _on_text(self, update, context) -> None:
+        skill = False
         if self._command(update.message)[0]:
-            await self._on_other_slash(update, context)
-            return
+            skill = await self._on_other_slash(update, context)
+            if not skill:
+                return
         turns = getattr(self._services, "turns", None)
         if turns is not None:
             media = bool(update.message.photo or update.message.document)
@@ -948,7 +999,7 @@ class TelegramBotChannel(TelegramChannel):
                 await self._on_unsupported(update, context)
                 return
             human_inputs = getattr(self._services, "human_inputs", None)
-            if not media and human_inputs is not None and await human_inputs.handle_text(self, update, captured_link=self._admission(update).link):
+            if not media and not skill and human_inputs is not None and await human_inputs.handle_text(self, update, captured_link=self._admission(update).link):
                 self._classified(update)
                 return
             link = self._admission(update).link
@@ -960,7 +1011,7 @@ class TelegramBotChannel(TelegramChannel):
 
             if current():
                 self._spawn_ingress(self.live_request(link, "send_chat_action", is_current=current, action="typing", message_thread_id=topic))
-            await turns.accept(self, update)
+            await turns.accept(self, update, separate=skill)
 
     async def _on_voice(self, update, context) -> None:
         voice_notes = getattr(self._services, "voice_notes", None)
@@ -1022,7 +1073,7 @@ class TelegramBotChannel(TelegramChannel):
             self._failure()
             self._log_failure(method, error)
             return None
-        await self._after_send_success()
+        await self._after_any_success()
         return result
 
     async def react_waiting(self, link, row):
@@ -1689,7 +1740,8 @@ class TelegramBotChannel(TelegramChannel):
         context = SendContext(current.link.id, current.item.chat_id, current.link.binding_generation, self.transport_revision, "bound_message")
         method = "sendMessage" if part["kind"] != "edit" else "editMessageReplyMarkup" if part.get("remove_keyboard") else "editMessageText"
         preview_fence = None
-        if current.item.dedupe_key.startswith("notice:chat-stream:"):
+        preview = current.item.dedupe_key.startswith("notice:chat-stream:")
+        if preview:
 
             async def check_preview():
                 if turns.preview_allowed(self, current.item) is not True:
@@ -1758,6 +1810,8 @@ class TelegramBotChannel(TelegramChannel):
             self._failure()
             seconds = error.seconds if isinstance(error, LongRetryAfter) else error._retry_after.total_seconds()
             self._log_part_failure(method, error, current)
+            if not preview:
+                await self._send_refused_by_limit()
             raise DeliveryRetry(seconds) from None
         except Forbidden as error:
             self._failure()
@@ -1779,7 +1833,7 @@ class TelegramBotChannel(TelegramChannel):
         except BadRequest as error:
             description = str(error).lower()
             if "message is not modified" in description and part["kind"] == "edit":
-                await self._after_send_success()
+                await self._after_send_success(counts=not preview)
                 return [part["target_message_id"]]
             self._failure()
             structural = (
@@ -1805,5 +1859,5 @@ class TelegramBotChannel(TelegramChannel):
             raise
         if method == "sendMessage":
             self._chat_message_sent(context.chat_id, current.item.message_thread_id)
-        await self._after_send_success()
+        await self._after_send_success(counts=not preview)
         return [part["target_message_id"] if message is True else message.message_id]

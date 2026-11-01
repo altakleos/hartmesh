@@ -1670,8 +1670,8 @@ class InboxRepository:
             _canonical(publication_identity(proof.record)) != _canonical(publication_identity(fresh))
             or not fresh.dispatch_started
             or proof.run_id != fresh.run_id
-            or proof.kind not in {"run", "creation_refusal"}
-            or proof.kind == "run"
+            or proof.kind not in {"run", "undeliverable", "creation_refusal"}
+            or proof.kind in {"run", "undeliverable"}
             and fresh.run_id is None
         ):
             raise ValueError("publication-outcome-conflict") from None

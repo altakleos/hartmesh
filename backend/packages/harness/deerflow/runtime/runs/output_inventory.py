@@ -400,6 +400,11 @@ def content_items(document) -> tuple:
     return tuple(item for item in document.items if not isinstance(item, PageInventoryDescriptor))
 
 
+def delivery_items(document) -> tuple:
+    """What a reply has to carry. A tool's artifact went to the model, whose answer is the reply."""
+    return tuple(item for item in content_items(document) if not (isinstance(item, StructuredInventoryDescriptor) and item.carrier == "message_artifact"))
+
+
 def offered_pages(document) -> tuple[str, ...]:
     """Page keys in the order the model offered them, without repeats."""
     return tuple(dict.fromkeys(item.key for item in document.items if isinstance(item, PageInventoryDescriptor)))

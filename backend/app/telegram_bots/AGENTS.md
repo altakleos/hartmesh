@@ -204,6 +204,28 @@ adds one states its dependency here and in `_pinned_deliveries`. Callbacks and
 pending files sweep hourly on their own tasks, so one failing never skips the
 other.
 
+`skills.py` answers whether a slash word names a skill, from the owner's own storage
+as the run reads it, off the loop. A skill that can run goes on through `_on_text`
+as a chat message with its text unchanged, and the run's middleware activates it.
+One that is off or that a custom agent does not list answers its own sentence; any
+other word, and any word on an agent's bot, answers `cmd.unknown`.
+
+A token is read once per process and per revision, because a secret changes only
+with a restart. That one reading clears `secret_unreadable` when the token opens, and
+moves a token that will not start, held or stopped, to the current secret, so
+`tokens.previous` can reach 0. `limited_since` follows the first durable send that
+gave up on a 429 once another gives up `LIMITED_AFTER_SECONDS` later, and the next
+accepted send clears it; the bookkeeping never changes a send's own result.
+
+A finished run's reply gets `FINAL_PLAN_SECONDS` after the first attempt ends, because
+a held turn stops the whole chat. Past that a successful run ends with `error.generic`
+under the closed proof `undeliverable`, and a run interrupted without proof of this
+chat's Stop ends as that interrupted run. The error plan is itself an attempt: it
+loses to a reply that did commit, which the next `plan_final` returns. A restart has
+no turn, so recovery keeps such a message held. `delivery_items` is what a reply must
+carry: a tool's own artifact is not in it, since the model read that and its answer is
+the reply, while `content_items` keeps it for human-input requests.
+
 `strangers.py` separates touch-only LRU recency from bounded unexpired reply
 charges. The supervisor owns one ledger through adapter/token replacement and
 bot removal/re-add. Forgetting recency never replenishes the 24-hour pair,

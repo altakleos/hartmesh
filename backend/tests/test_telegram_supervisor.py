@@ -12,7 +12,7 @@ from _telegram_repository_test_support import add_link
 from _telegram_repository_test_support import db as db
 
 from app.channels.message_bus import MessageBus
-from app.telegram_bots.cipher import token_cipher, wrap_token
+from app.telegram_bots.cipher import token_cipher, unwrap_token, wrap_token
 from app.telegram_bots.producer import DeliveryEligibility, Outbox
 
 pytestmark = pytest.mark.asyncio
@@ -409,6 +409,67 @@ async def test_unreadable_ciphertext_keeps_row_and_never_builds_client(db, monke
         assert e.supervisor.channel(link.id) is None
         assert e.normal.calls == e.updates.calls == []
         assert e.supervisor.status() == {"bots": 1, "people": 1, "polling": 0, "failing": 1, "held": 0}
+    finally:
+        await e.supervisor.stop()
+
+
+async def test_a_token_marked_unreadable_recovers_when_its_secret_returns(db, monkeypatch):
+    e = build(db, monkeypatch)
+    link, _token = await credential(db, e.env)
+    await db.links.set_health(link.id, "secret_unreadable", holds=True)
+    e.normal.enqueue_get_me(bot_id=link.bot_id)
+    held = e.updates.enqueue("getUpdates", result=[], release=asyncio.Event())
+    await e.supervisor.check()
+    await e.supervisor.start()
+    try:
+        await asyncio.wait_for(held.started.wait(), 2)
+        assert (await db.links.get(link.id)).health == "ok"
+        assert e.supervisor.channel(link.id) is not None
+    finally:
+        await e.supervisor.stop()
+
+
+async def test_an_unreadable_token_is_read_once_per_start(db, monkeypatch):
+    from app.telegram_bots import supervisor as module
+
+    e = build(db, monkeypatch)
+    link = await add_link(db)
+    reads = []
+    original = module.unwrap_token
+
+    def counted(*args):
+        reads.append(args)
+        return original(*args)
+
+    monkeypatch.setattr(module, "unwrap_token", counted)
+    await e.supervisor.check()
+    await e.supervisor.start()
+    try:
+        await e.supervisor.reconcile()
+        await e.supervisor.reconcile()
+        assert len(reads) == 1
+        assert (await db.links.get(link.id)).health == "secret_unreadable"
+    finally:
+        await e.supervisor.stop()
+
+
+async def test_a_held_bot_follows_a_rotated_secret_without_a_client(db, monkeypatch):
+    previous = {"HARTMESH_PROVIDER_KEYS_SECRET": secrets.token_urlsafe(48)}
+    e = build(db, monkeypatch, environ={"HARTMESH_PROVIDER_KEYS_SECRET": secrets.token_urlsafe(48), "HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS": previous["HARTMESH_PROVIDER_KEYS_SECRET"]})
+    link, token = await credential(db, previous)
+    await db.links.update(link.id, state="held")
+    stored, _revision = await db.links.token(link.id)
+    await e.supervisor.check()
+    await e.supervisor.start()
+    try:
+        after, _revision = await db.links.token(link.id)
+        assert after != stored
+        opened = unwrap_token(token_cipher(e.env), link.bot_id, after)
+        assert opened.key == token and opened.under_previous is False
+        assert e.supervisor.channel(link.id) is None
+        revision = (await db.links.token(link.id))[1]
+        await e.supervisor.reconcile()
+        assert await db.links.token(link.id) == (after, revision), "one reading per start"
     finally:
         await e.supervisor.stop()
 

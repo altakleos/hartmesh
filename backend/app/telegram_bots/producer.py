@@ -193,7 +193,7 @@ class PublicationOutcomeBasis:
     stop_id: str | None = None
 
 
-def _prepare_publication_outcome(record, *, run, creation_refusal, source_ref):
+def _prepare_publication_outcome(record, *, run, creation_refusal, source_ref, undeliverable=False):
     from app.channels.execution import ChannelExecutionScope
     from app.telegram_bots.errors import classify_creation_refusal, classify_run
 
@@ -201,6 +201,10 @@ def _prepare_publication_outcome(record, *, run, creation_refusal, source_ref):
         raise ValueError("publication-outcome-conflict") from None
     scope = record.scope
     execution = ChannelExecutionScope(record.publication_id, scope.owner_user_id, scope.connection_id, str(scope.chat_id), scope.thread_id, scope.endpoint_id, scope.assistant_id, scope.agent_name)
+    if undeliverable:
+        if run is None or run.row.get("status") != "success" or classify_run(run, execution) is not None or source_ref["key"] != "error.generic":
+            raise ValueError("publication-outcome-conflict") from None
+        return _safe_json({"version": 1, "publication": _publication_identity(record), "proof": {"kind": "undeliverable", "row": dict(run.row)}, "source_ref": source_ref, "finish_route": True})
     classified = classify_run(run, execution) if run is not None else classify_creation_refusal(creation_refusal, execution)
     if classified is None or source_ref["key"] != classified.text_key and not (classified.retry_later and source_ref["key"] in {"busy.gave_up", "busy.cancelled"}) or source_ref["key"] in {"busy.queued", "busy.thread"}:
         raise ValueError("publication-outcome-conflict") from None
@@ -234,6 +238,11 @@ def validate_publication_outcome(item: OutboxItem) -> PublicationOutcomeBasis:
             run = ValidatedRun(MappingProxyType(proof["row"]), receipt_from_run_kwargs(proof["row"].get("kwargs")))
             classified = classify_run(run, execution)
             if classified is None or source["key"] != classified.text_key and not (classified.retry_later and source["key"] in {"busy.gave_up", "busy.cancelled"}):
+                raise ValueError
+        elif proof.get("kind") == "undeliverable" and set(proof) == {"kind", "row"}:
+            # The run succeeded, and what it produced cannot be carried by a chat.
+            run = ValidatedRun(MappingProxyType(proof["row"]), receipt_from_run_kwargs(proof["row"].get("kwargs")))
+            if proof["row"].get("status") != "success" or classify_run(run, execution) is not None or source["key"] != "error.generic":
                 raise ValueError
         elif proof.get("kind") == "creation_refusal" and set(proof) == {"kind", "scope"}:
             if _canonical_primary(proof["scope"]) != _canonical_primary(asdict(execution)) or source["key"] not in {"busy.gave_up", "busy.cancelled"}:
@@ -1312,9 +1321,9 @@ class Outbox:
 
         return await await_drained(perform())
 
-    async def plan_publication_outcome(self, record, *, run=None, creation_refusal=None, source_ref, keyboard, callbacks, guard):
+    async def plan_publication_outcome(self, record, *, run=None, creation_refusal=None, source_ref, keyboard, callbacks, guard, undeliverable=False):
         link = _guard_publication_link(record, guard)
-        basis = await await_drained(asyncio.to_thread(_prepare_publication_outcome, record, run=run, creation_refusal=creation_refusal, source_ref=source_ref))
+        basis = await await_drained(asyncio.to_thread(_prepare_publication_outcome, record, run=run, creation_refusal=creation_refusal, source_ref=source_ref, undeliverable=undeliverable))
 
         async def attach(writer, identity):
             await self.inbox.seal_publication_outcome(record, outbox_id=identity, session=writer)

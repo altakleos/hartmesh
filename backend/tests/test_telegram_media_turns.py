@@ -55,6 +55,24 @@ async def test_captioned_actual_media_enters_the_existing_turn(db, monkeypatch, 
 
 
 @pytest.mark.asyncio
+async def test_a_skill_word_joins_no_earlier_text_and_stands_alone(db, monkeypatch):
+    e, turns, state = await controller(db, monkeypatch)
+    try:
+        assert await turns.accept(e.channel, message(e, 1821, content="L" * 4000))
+        assert not turns._turns and state.posts == 0
+        assert await turns.accept(e.channel, message(e, 1822, content="/weekly-report for March"), separate=True)
+        await until(lambda: state.posts == 1)
+        turn = next(iter(turns._turns.values()))
+        assert [row.message_id for row in turn.origins] == [1821]
+        waiting = turns.queue.waiting_inputs(e.link, None)
+        assert [entry.inbound.text for entry in waiting] == ["/weekly-report for March"]
+        assert [entry.separate for entry in waiting] == [True]
+    finally:
+        await turns.stop()
+        await e.channel.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["album", "longtext", "forward"])
 async def test_joining_waits_without_a_worker_then_preserves_order_and_actual_origins(db, monkeypatch, kind):
     e, turns, state = await controller(db, monkeypatch)

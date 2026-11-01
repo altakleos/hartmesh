@@ -115,6 +115,7 @@ class TelegramSupervisor:
         self.session_factory, self.links, self.outbox, self.settings = session_factory, links, outbox, settings
         self.authority, self._app_config = authority, app_config
         self.callbacks = self.prompts = self.acts = self.commands = None
+        self._tokens_read: set[tuple[str, int]] = set()
         self.strangers = StrangerLedger()
         self.copy_guard = copy_guard
         self.thread_client, self.threads = thread_client, None
@@ -622,6 +623,11 @@ class TelegramSupervisor:
                 if saved is not None:
                     self._observe(saved, reason="secret")
                 return None
+            if link.health == "secret_unreadable":
+                saved = await self.links.set_health(link.id, "secret_unreadable", holds=False, expected_token_revision=revision)
+                if saved is not None:
+                    link = saved
+                    self._observe(saved, reason="recovered")
             if opened.under_previous:
                 wrapped = await asyncio.to_thread(wrap_token, cipher, link.bot_id, opened.key)
                 try:
@@ -695,7 +701,15 @@ class TelegramSupervisor:
                 if link is None:
                     return
                 self._observe(link, reason="policy" if target == "policy_off" else "agent")
-            if link.state == "held" or target == "held" or link.health in {"secret_unreadable", "token_rejected", "policy_off", "stopped"}:
+            # A secret changes only with a restart, so one reading per process
+            # settles a token: it recovers, or follows a rotation while idle.
+            unread = (link.id, link.token_revision) not in self._tokens_read
+            self._tokens_read.add((link.id, link.token_revision))
+            if link.state == "held" or target == "held" or link.health in {"token_rejected", "policy_off", "stopped"}:
+                if unread:
+                    await self._open_token(link)
+                return
+            if link.health == "secret_unreadable" and not unread:
                 return
             # Supplied tokens are trusted only for the exact link revision the
             # caller captured. Otherwise reopen the current encrypted token.

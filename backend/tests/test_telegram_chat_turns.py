@@ -576,6 +576,140 @@ async def test_terminal_metadata_without_eligible_output_keeps_turn_and_waiters(
         await e.channel.stop()
 
 
+async def finished_turn(e, turns, state, reached, *, status="success"):
+    """A turn whose run reached `status`, with a later message waiting behind it."""
+    await e.channel.handle_update(message(e, 1068, content="Answer with a card"))
+    await asyncio.wait_for(reached.wait(), 5)
+    await until(lambda: state.posts == 1)
+    first = next(iter(turns._turns.values()))
+    await e.channel.handle_update(message(e, 1069, content="And then this"))
+    state.terminal = terminal(first.record, status=status)
+    first.wake.set()
+    return first
+
+
+async def past_the_bound(turn):
+    await until(lambda: turn.final_since is not None)
+    turn.final_since -= 61
+    turn.wake.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refusal", [None, ValueError("the output cannot be carried")])
+async def test_a_finished_run_whose_reply_cannot_be_planned_ends_visibly(db, monkeypatch, refusal):
+    e = await ingress(db, monkeypatch=monkeypatch, lead=True)
+    turns, state, reached = await controlled_execution(e, monkeypatch)
+    outcomes = []
+
+    async def unplannable(*args, **kwargs):
+        if refusal is not None:
+            raise refusal
+
+    async def outcome(turn, key, *, run=None, refusal=None, undeliverable=False):
+        outcomes.append((key, undeliverable))
+        return "a" * 32
+
+    turns._observer.plan_final = unplannable
+    monkeypatch.setattr(turns, "_publication_outcome", outcome)
+    try:
+        first = await finished_turn(e, turns, state, reached)
+        await until(lambda: first.final_since is not None)
+        assert not first.done.is_set() and outcomes == [], "a short wait is an ordinary one"
+
+        await past_the_bound(first)
+        await asyncio.wait_for(first.done.wait(), 5)
+        assert outcomes == [("error.generic", True)]
+    finally:
+        await turns.stop()
+        await e.channel.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_bound_starts_when_an_attempt_ends_so_a_slow_one_is_retried(db, monkeypatch):
+    e = await ingress(db, monkeypatch=monkeypatch, lead=True)
+    turns, state, reached = await controlled_execution(e, monkeypatch)
+    clock, tries = {"now": 1000.0}, []
+    e.channel._time = lambda: clock["now"]
+
+    async def slow(*args, **kwargs):
+        tries.append(clock["now"])
+        clock["now"] += 90
+        return "b" * 32 if len(tries) == 2 else None
+
+    turns._observer.plan_final = slow
+    try:
+        first = await finished_turn(e, turns, state, reached)
+        await asyncio.wait_for(first.done.wait(), 5)
+        assert len(tries) == 2, "Ninety seconds in the first attempt must not spend the retry"
+    finally:
+        await turns.stop()
+        await e.channel.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_did_commit_wins_over_the_late_error(db, monkeypatch):
+    e = await ingress(db, monkeypatch=monkeypatch, lead=True)
+    turns, state, reached = await controlled_execution(e, monkeypatch)
+    committed = []
+
+    async def lost_result(*args, **kwargs):
+        return "c" * 32 if committed else None
+
+    async def conflict(turn, key, **kwargs):
+        committed.append(key)
+        raise ValueError("product-source-conflict")
+
+    turns._observer.plan_final = lost_result
+    monkeypatch.setattr(turns, "_publication_outcome", conflict)
+    try:
+        first = await finished_turn(e, turns, state, reached)
+        await past_the_bound(first)
+        await until(lambda: committed)
+        assert not first.done.is_set(), "A refused error plan completes nothing"
+        first.wake.set()
+        await asyncio.wait_for(first.done.wait(), 5)
+        assert committed == ["error.generic"], "The next read found the reply, and nothing is planned over it"
+    finally:
+        await turns.stop()
+        await e.channel.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_stop_that_never_got_an_answer_cannot_hold_an_interrupted_run_forever(db, monkeypatch):
+    e = await ingress(db, monkeypatch=monkeypatch, lead=True)
+    turns, state, reached = await controlled_execution(e, monkeypatch)
+    outcomes = []
+
+    async def no_proof_of_our_stop(*args, stopped=False, **kwargs):
+        assert stopped is True
+
+    async def outcome(turn, key, *, run=None, refusal=None, undeliverable=False):
+        outcomes.append((key, undeliverable))
+        return "d" * 32
+
+    turns._observer.plan_final = no_proof_of_our_stop
+    monkeypatch.setattr(turns, "_publication_outcome", outcome)
+    try:
+        await e.channel.handle_update(message(e, 1068, content="Answer with a card"))
+        await asyncio.wait_for(reached.wait(), 5)
+        await until(lambda: state.posts == 1)
+        first = next(iter(turns._turns.values()))
+        await e.channel.handle_update(message(e, 1069, content="And then this"))
+        first.stop_requested = True
+        state.terminal = terminal(first.record, status="interrupted")
+        first.wake.set()
+        await until(lambda: first.final_since is not None)
+        assert not first.done.is_set() and outcomes == [], "An accepted Stop's proof is still worth a short wait"
+
+        await past_the_bound(first)
+        await asyncio.wait_for(first.done.wait(), 5)
+        assert outcomes == [("error.generic", False)], "It closes as the interrupted run it is, under the ordinary run proof"
+        assert not first.waiting_dropped, "An unproved Stop drops nobody's later message"
+    finally:
+        await turns.stop()
+        await e.channel.stop()
+
+
 @pytest.mark.asyncio
 async def test_failed_owned_read_closes_advisory_view_while_durable_turn_stays_held(db, monkeypatch):
     e = await ingress(db, monkeypatch=monkeypatch, lead=True)

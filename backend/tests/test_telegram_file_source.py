@@ -620,7 +620,7 @@ def test_mixed_structured_and_file_inventory_is_held_without_dropping_proof():
     projection = file_output(saved)
     payload = projection.model_dump(mode="json")
     doc = payload["inventory"]["document"]
-    doc["items"].append({"kind": "structured", "carrier": "message_artifact", "value_sha256": "a" * 64, "witness": {"kind": "message_event", "event_seq": 2, "message_id": "actual-tool"}})
+    doc["items"].append({"kind": "structured", "carrier": "terminal_field", "value_sha256": "a" * 64, "witness": {"kind": "message_event", "event_seq": 2, "message_id": "actual-tool"}})
     evidence = build_event_inventory_evidence(projection.output.output_evidence, status="success", inventory_event_seq=9, document=doc)
     payload["inventory"]["evidence"] = evidence.model_dump(mode="json")
     with pytest.raises(ValueError, match="publication-source-conflict"):

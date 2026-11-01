@@ -7,7 +7,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
-from deerflow.runtime.runs.output_inventory import content_items, offered_pages
+from deerflow.runtime.runs.output_inventory import delivery_items, offered_pages
 from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
@@ -53,7 +53,7 @@ def prepare_verified_reply(record, output, *, reply_to_message_id=None):
         record = PublicationRecord(**{**identity, "scope": scope, "origins": tuple(PublicationOrigin(**origin) for origin in identity["origins"]), "dispatch_started": record.dispatch_started, "run_id": record.run_id})
         output = RunOutputProjectionV2.model_validate(output.model_dump(mode="python"))
         result, inventory = output.output, output.inventory
-        if result.state != "complete" or inventory.state != "matched" or inventory.document.coverage != "complete" or content_items(inventory.document) != ():
+        if result.state != "complete" or inventory.state != "matched" or inventory.document.coverage != "complete" or delivery_items(inventory.document) != ():
             raise ValueError
         channel = result.channel_execution
         if (result.owner_user_id, result.thread_id, channel.publication_id, channel.assistant_id, channel.agent_name) != (scope.owner_user_id, scope.thread_id, record.publication_id, scope.assistant_id, scope.agent_name):
