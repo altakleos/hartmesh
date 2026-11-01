@@ -336,7 +336,6 @@ def test_overbound_live_fragment_is_incomplete_not_a_fabricated_receipt(trace):
         {"type": "image_url", "image_url": {"url": "https://unit.invalid/image.png"}},
         {"type": "file", "file": {"filename": "unit.txt", "file_data": "unit-data"}},
         {"type": "unknown_widget", "payload": {"selected": False}},
-        {"type": "text", "text": "unit text", "annotations": [{"type": "file_citation", "file_id": "unit-file"}]},
     ],
 )
 def test_current_sdk_rich_content_cannot_be_complete_empty(trace, role, block):
@@ -445,8 +444,38 @@ def test_same_sdk_ai_tool_intent_is_not_a_terminal_user_offer(trace, kind):
     assert document.coverage == "complete" and document.items == ()
 
 
+@pytest.mark.parametrize(
+    "block",
+    [
+        pytest.param({"id": "current-call", "input": {}, "name": "arbitrary_unit_name", "type": "tool_use", "index": 1, "partial_json": '{"value": 1}'}, id="claude-stream"),
+        pytest.param({"type": "function_call", "name": "arbitrary_unit_name", "arguments": '{"value": 1}', "call_id": "current-call", "id": "fc_1", "index": 1}, id="responses-stream"),
+    ],
+)
+def test_provider_tool_blocks_are_known_by_their_call_not_their_keys(trace, block):
+    intent = AIMessage(id="unit-intent", content=[block], tool_calls=[{"id": "current-call", "name": "arbitrary_unit_name", "args": {"value": 1}}])
+    trace.end(messages=[INPUT, intent, AIMessage(id="unit-answer", content="answer")])
+    document = trace.document()
+    assert document.coverage == "complete" and document.items == ()
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        pytest.param({"text": "answer", "type": "text", "index": 0}, id="claude-text"),
+        pytest.param({"type": "text", "text": "answer", "annotations": [], "index": 0, "id": "msg_1"}, id="responses-text"),
+        pytest.param({"type": "text", "text": "answer", "annotations": [{"type": "file_citation", "file_id": "unit-file"}]}, id="annotated-text"),
+        pytest.param({"thinking": "private", "type": "thinking", "index": 0, "signature": "c2ln"}, id="claude-thinking"),
+        pytest.param({"id": "rs_1", "summary": [], "type": "reasoning", "index": 0}, id="responses-reasoning"),
+    ],
+)
+def test_provider_text_and_reasoning_blocks_are_not_presentation(trace, block):
+    trace.end(messages=[INPUT, AIMessage(id="unit-answer", content=[block])])
+    document = trace.document()
+    assert document.coverage == "complete" and document.items == ()
+
+
 @pytest.mark.parametrize("kind", ["tool_use", "tool_call"])
-@pytest.mark.parametrize("change", ["wrong-id", "wrong-name", "invalid-args", "falsey-id", "unknown-field"])
+@pytest.mark.parametrize("change", ["wrong-id", "wrong-name", "invalid-args", "falsey-id"])
 def test_unmatched_or_malformed_tool_intent_cannot_claim_empty(trace, kind, change):
     key = "input" if kind == "tool_use" else "args"
     block = {"type": kind, "id": "current-call", "name": "arbitrary_unit_name", key: {"value": 1}}
@@ -456,10 +485,8 @@ def test_unmatched_or_malformed_tool_intent_cannot_claim_empty(trace, kind, chan
         block["name"] = "different_name"
     elif change == "invalid-args":
         block[key] = None
-    elif change == "falsey-id":
-        block["id"] = False
     else:
-        block["unknown_offer"] = {"path": PATH}
+        block["id"] = False
     intent = AIMessage(id="unit-intent", content=[block], tool_calls=[{"id": "current-call", "name": "arbitrary_unit_name", "args": {"value": 1}}])
     trace.end(messages=[INPUT, intent, AIMessage(id="unit-answer", content="answer")])
     assert trace.document().coverage == "incomplete"

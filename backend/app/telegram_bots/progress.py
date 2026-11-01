@@ -13,6 +13,7 @@ from app.channels.execution_client import ChannelExecutionFacade
 from app.telegram_bots.inbox import publication_identity
 from app.telegram_bots.stopped_preview import StoppedSegment, _issue_shown_preview, _issue_stopped_preview
 from deerflow.runtime.runs.output_inventory import delivery_items
+from deerflow.runtime.runs.output_source import inspect_output_message
 from deerflow.runtime.runs.preview import PREVIEW_SPAN_KEY, PreviewProtocolError, PreviewSpan, text_digest
 from deerflow.utils.file_io import await_drained
 
@@ -318,7 +319,7 @@ class RunObserver:
             if (span.owner_user_id, span.thread_id, span.run_id, span.publication_id) != (record.scope.owner_user_id, record.scope.thread_id, record.run_id, record.publication_id):
                 _refuse()
             message = data[0]
-            text = message.get("content")
+            text = inspect_output_message(message).text
             if message.get("type") not in {"ai", "AIMessageChunk"} or message.get("id") != span.message_id or type(text) is not str or text_digest(text) != span.text_sha256:
                 _refuse()
             if span.sequence <= state.sequence:

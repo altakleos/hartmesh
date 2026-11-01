@@ -50,12 +50,28 @@ def test_closed_text_shapes_never_trim_or_insert_separators(content):
 
 
 @pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param([{"text": "final", "type": "text", "index": 0}], id="claude-text"),
+        pytest.param([{"thinking": "private", "type": "thinking", "index": 0, "signature": "c2ln"}, {"text": "final", "type": "text", "index": 1}], id="claude-thinking"),
+        pytest.param([{"type": "redacted_thinking", "data": "private", "index": 0}, {"text": "final", "type": "text", "index": 1}], id="claude-redacted"),
+        pytest.param([{"type": "text", "text": "final", "index": 0, "id": "msg_1"}], id="responses-text"),
+        pytest.param([{"id": "rs_1", "summary": [], "type": "reasoning", "index": 0}, {"type": "text", "text": "final", "annotations": [], "index": 1, "id": "msg_1"}], id="responses-reasoning"),
+    ],
+)
+def test_provider_blocks_give_their_text_and_keep_reasoning_private(content):
+    facts = inspect_output_message(message(content=content))
+    assert (facts.text, facts.unavailable_reason) == ("final", None)
+    assert "private" not in repr(facts)
+
+
+@pytest.mark.parametrize(
     "changes",
     [
-        {"content": [{"type": "reasoning", "text": "hidden"}, {"type": "text", "text": "final"}]},
         {"content": [{"type": "image", "text": "do not adopt"}]},
+        {"content": [{"type": "reasoning", "text": "hidden"}, {"type": "image", "url": "do not adopt"}, {"type": "text", "text": "final"}]},
+        {"content": [{"type": "thinking", "thinking": "nothing to show"}]},
         {"content": "", "additional_kwargs": {"reasoning_content": "only reasoning"}},
-        {"content": [{"type": "text", "text": "answer", "unknown": "data"}]},
         {"additional_kwargs": {"hide_from_ui": True}},
         {"additional_kwargs": {"deerflow_error_fallback": True}},
         {"additional_kwargs": {"refusal": "refused"}},

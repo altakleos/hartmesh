@@ -157,8 +157,10 @@ The exact host-normalized human input object receives its real SDK reducer ID.
 Capture matches that identity and the restored original consumed input; it never
 invents an ID or selects a convenient historical human. Autonomous AI-employee
 runs can have no human input. Exact visible text may include separate auxiliary
-reasoning metadata, which is never returned, hashed or used as answer fallback.
-Mixed reasoning/nontext content is conservatively unsupported as a whole.
+reasoning, as metadata or as provider blocks, which is never returned, hashed or
+used as answer fallback. Provider bookkeeping keys on a text block do not change
+it, and `content_block_role` is the one reading of a block. Any other nontext
+block still makes the message unsupported as a whole.
 
 The journal pairs immutable callback facts with actual committed batch results
 to obtain the durable event sequence. It stops producers and drains admitted

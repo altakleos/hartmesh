@@ -17,7 +17,7 @@ from deerflow.utils.file_io import await_drained
 from deerflow.workspace_changes import get_changed_output_paths
 
 from .capture_io import CaptureIOClosed, CaptureIOUnsupported, run_capture_io
-from .output import OutputEvidenceError, validate_receipt
+from .output import OutputEvidenceError, content_block_role, validate_receipt
 from .output_inventory import (
     INVENTORY_EVENT_CATEGORY,
     INVENTORY_EVENT_TYPE,
@@ -255,31 +255,15 @@ class OutputInventoryCapture:
                 continue
             if isinstance(block, Mapping):
                 kind = block.get("type")
-                if kind == "text" and set(block) == {"type", "text"} and type(block["text"]) is str:
+                calls = _field(message, "tool_calls", ())
+                own_calls = calls if _field(message, "type") in {"ai", "AIMessageChunk"} and isinstance(calls, (list, tuple)) else ()
+                role = content_block_role(block, own_calls)
+                # Reasoning and the model's own tool requests are never shown,
+                # so they stay out of presentation hashes. An unmatched tool
+                # block still refuses completeness.
+                if role in {"reasoning", "tool_request"} or role == "text" and type(block.get("text")) is str:
                     continue
-                # Auxiliary reasoning never enters presentation hashes. An
-                # unqualified mixed-content shape still refuses completeness.
-                if type(kind) is str and kind in {"tool_use", "tool_call"}:
-                    argument_key = "input" if kind == "tool_use" else "args"
-                    calls = _field(message, "tool_calls", ())
-                    index = block.get("index", 0)
-                    if (
-                        _field(message, "type") in {"ai", "AIMessageChunk"}
-                        and set(block) <= {"type", "id", "name", argument_key, "index"}
-                        and type(block.get("id")) is str
-                        and bool(block["id"])
-                        and type(block.get("name")) is str
-                        and bool(block["name"])
-                        and isinstance(block.get(argument_key), Mapping)
-                        and type(index) is int
-                        and index >= 0
-                        and isinstance(calls, (list, tuple))
-                        and any(isinstance(call, Mapping) and call.get("id") == block["id"] and call.get("name") == block["name"] for call in calls)
-                    ):
-                        continue
-                    self._incomplete()
-                    continue
-                if type(kind) is str and kind in {"reasoning", "thinking", "redacted_thinking"}:
+                if type(kind) is str and kind in {"tool_use", "tool_call", "function_call"}:
                     self._incomplete()
                     continue
                 if type(kind) is not str or kind not in {"text", "file", "image", "image_url", "audio", "video"}:

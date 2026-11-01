@@ -147,7 +147,7 @@ def _graph(node, *, name="model", checkpointer=None):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["autonomous", "nested", "auxiliary_node", "middleware", "history_id", "manual", "hidden", "tool", "human_input", "reasoning", "reasoning_only", "mixed_reasoning", "failure"])
+@pytest.mark.parametrize("case", ["autonomous", "nested", "auxiliary_node", "middleware", "history_id", "manual", "hidden", "tool", "human_input", "reasoning", "reasoning_only", "mixed_reasoning", "mixed_image", "failure"])
 async def test_actual_worker_output_selection_matrix(output_store, monkeypatch, case):
     from langchain_core.messages import ToolMessage
 
@@ -181,7 +181,9 @@ async def test_actual_worker_output_selection_matrix(output_store, monkeypatch, 
         env.model.responses[0].additional_kwargs["reasoning_content"] = "Synthetic auxiliary reasoning must never be the answer"
         expected = "unsupported_output"
     elif case == "mixed_reasoning":
-        env.model.responses[0].content = [{"type": "text", "text": "Visible subset"}, {"type": "reasoning", "text": "Excluded"}]
+        env.model.responses[0].content = [{"type": "text", "text": "Visible answer"}, {"type": "reasoning", "text": "Excluded"}]
+    elif case == "mixed_image":
+        env.model.responses[0].content = [{"type": "text", "text": "Visible subset"}, {"type": "image", "url": "Excluded"}]
         expected = "unsupported_output"
     elif case == "tool":
         expected = "unsupported_output"
@@ -217,6 +219,8 @@ async def test_actual_worker_output_selection_matrix(output_store, monkeypatch, 
     assert receipt["kind"] == ("text" if expected == "text" else "unavailable")
     if expected != "text":
         assert receipt["reason"] == expected
+    if case == "mixed_reasoning":
+        assert receipt["text_sha256"] == canonical_text_digest("Visible answer"), "Reasoning must stay out of the delivered text"
     if case == "autonomous":
         assert receipt["input_message_id"] is None
     assert len(env.calls) <= 1

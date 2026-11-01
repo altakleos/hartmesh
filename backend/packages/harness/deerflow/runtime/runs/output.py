@@ -28,6 +28,31 @@ class OutputEvidenceScopeError(OutputEvidenceError):
     """Observed stored authority belongs to a different requested scope."""
 
 
+_TOOL_REQUEST_ARGUMENTS = {"tool_use": ("input", Mapping), "tool_call": ("args", Mapping), "function_call": ("arguments", str)}
+
+
+def content_block_role(block: Mapping, tool_calls=()) -> Literal["text", "reasoning", "tool_request", "other"]:
+    """What one provider content block is to a reader.
+
+    Providers add bookkeeping keys such as `index`, `id`, `signature` and
+    `partial_json`, and those never change a block's role. A tool request is
+    known by the call it names in `tool_calls`, so an unmatched one stays `other`.
+    """
+    kind = block.get("type")
+    if kind == "text":
+        return "text"
+    if kind in ("reasoning", "thinking", "redacted_thinking"):
+        return "reasoning"
+    if type(kind) is str and kind in _TOOL_REQUEST_ARGUMENTS:
+        key, shape = _TOOL_REQUEST_ARGUMENTS[kind]
+        identity = block.get("call_id" if kind == "function_call" else "id")
+        name = block.get("name")
+        if type(identity) is str and identity and type(name) is str and name and isinstance(block.get(key), shape):
+            if any(isinstance(call, Mapping) and call.get("id") == identity and call.get("name") == name for call in tool_calls):
+                return "tool_request"
+    return "other"
+
+
 class _Versioned(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, revalidate_instances="always")
 

@@ -11,7 +11,7 @@ from typing import Literal
 
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.runtime.events.store.base import RunEventStore
-from deerflow.runtime.runs.output import OutputEvidenceError, OutputUnavailableReason, TextOutputReceipt, canonical_text_digest, validate_receipt
+from deerflow.runtime.runs.output import OutputEvidenceError, OutputUnavailableReason, TextOutputReceipt, canonical_text_digest, content_block_role, validate_receipt
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import strip_injected_user_message_id_suffix
 
@@ -71,14 +71,12 @@ def _text(content):
         if type(block) is str:
             parts.append(block)
         elif isinstance(block, Mapping):
-            if block.get("type") == "text":
+            role = content_block_role(block)
+            if role == "text":
                 if type(block.get("text")) is not str:
                     raise OutputEvidenceError()
-                if set(block) == {"type", "text"}:
-                    parts.append(block["text"])
-                else:
-                    unsupported = True
-            else:
+                parts.append(block["text"])
+            elif role != "reasoning":
                 unsupported = True
         else:
             raise OutputEvidenceError()
