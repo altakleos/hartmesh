@@ -195,7 +195,9 @@ test.describe("Telegram bots", () => {
     });
     await openSetup(page);
     await expect(page.getByText(strings.setup.before.title)).toBeVisible();
-    await expect(page.getByText(/turned into text by OpenAI/)).toBeVisible();
+    await expect(
+      page.getByText(/after you agree to that service/),
+    ).toBeVisible();
 
     await paste(page, `Use this token: ${TOKEN}`);
     await expect(page.getByRole("link", { name: OPEN_CHAT })).toHaveAttribute(
@@ -617,8 +619,15 @@ test.describe("Telegram bots", () => {
     await page.goto(`/workspace/chats/${threadId}`);
     const links = page.getByTestId("web-page-links");
     await expect(links).toBeVisible();
-    await links.getByRole("link", { name: strings.webPage.account }).click();
-    await expect(page).toHaveURL(/settings=account/);
+    const link = links.getByRole("link", { name: strings.webPage.account });
+    await expect(link).toHaveAttribute(
+      "href",
+      `/workspace/chats/${threadId}?settings=account`,
+    );
+    await expect(async () => {
+      await link.click();
+      await expect(page.getByRole("dialog")).toBeVisible({ timeout: 1000 });
+    }).toPass();
   });
 
   test("off, secret missing, moved, copy running: notice and no button", async ({
@@ -645,7 +654,7 @@ test.describe("Telegram bots", () => {
       await page.unrouteAll({ behavior: "ignoreErrors" });
       await mockTelegram(page, { telegram });
       await page.goto(DEEP_LINK);
-      await expect(page.getByRole("status")).toContainText(sentence);
+      await expect(page.getByTestId("telegram-notice")).toContainText(sentence);
       await expect(
         page
           .getByRole("button", { name: strings.action.connect, exact: true })
@@ -671,7 +680,9 @@ test.describe("Telegram bots", () => {
     await expect(
       page.getByText(strings.admin.limits({ perPerson: 10, limit: 100 })),
     ).toBeVisible();
-    await expect(page.getByText(/turned into text by OpenAI/)).toBeVisible();
+    await expect(
+      page.getByText(/one of the AI services already used here/),
+    ).toBeVisible();
   });
 
   test("no features answer: nothing renders", async ({ page }) => {

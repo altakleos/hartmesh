@@ -99,7 +99,11 @@ export function TelegramBotsSection() {
   return (
     <section className="space-y-6">
       {notice ? (
-        <div className="rounded-lg border p-3 text-sm" role="status">
+        <div
+          className="rounded-lg border p-3 text-sm"
+          data-testid="telegram-notice"
+          role="status"
+        >
           <p>{telegramText(strings, notice.key, values)}</p>
           {notice.ending && !reader.admin ? (
             <p>{strings.unavailable.askAdmin}</p>
