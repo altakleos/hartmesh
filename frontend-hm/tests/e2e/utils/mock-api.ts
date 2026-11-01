@@ -118,6 +118,7 @@ export type MockAPIOptions = {
     agentInstancesEnabled?: boolean;
     browserControlEnabled?: boolean;
     mcpTasksEnabled?: boolean;
+    telegram?: Record<string, unknown> | null;
   };
   runStreamHandler?: (route: Route) => Promise<void>;
 };
@@ -382,6 +383,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       true,
     browserControlEnabled: options?.features?.browserControlEnabled ?? true,
     mcpTasksEnabled: options?.features?.mcpTasksEnabled ?? true,
+    telegram: options?.features?.telegram ?? null,
   };
 
   const upsertThread = (thread: MockThread) => {
@@ -480,6 +482,30 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   void page.route("**/api/v1/auth/logout", (route) => {
     if (route.request().method() === "POST") {
       return route.fulfill({ status: 204 });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/telegram-bots", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          bots: [],
+          limits: { per_person: 10, used: 0 },
+          settings: null,
+          quick_setup: {
+            available: false,
+            manager_link_id: null,
+            manager_username: null,
+          },
+          pending_creation: null,
+          removed_bots: [],
+          policies: [],
+          read_by_others: [],
+        }),
+      });
     }
     return route.fallback();
   });
@@ -1443,6 +1469,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           },
           browser_control: { enabled: featureFlags.browserControlEnabled },
           mcp_tasks: { enabled: featureFlags.mcpTasksEnabled },
+          telegram: featureFlags.telegram,
           storage_spaces: {
             enabled: false,
             state: "off",

@@ -15,6 +15,8 @@ import {
   selectStorageSpacesEnabled,
   selectStorageState,
   selectSeats,
+  selectTelegram,
+  type TelegramFeature,
   selectWorkspacePresentation,
 } from "./api";
 
@@ -87,6 +89,17 @@ export function useMcpTasksEnabled() {
   const { data, isPending } = useFeatures(selectMcpTasksEnabled);
   return {
     enabled: data ?? false,
+    isLoading: isPending,
+  };
+}
+
+/** Fails closed: until the deployment has answered, nothing about Telegram renders. */
+export function useTelegram(): TelegramFeature & { isLoading: boolean } {
+  const { data, isPending, isError } = useFeatures(selectTelegram);
+  return {
+    ...(isError
+      ? selectTelegram(undefined)
+      : (data ?? selectTelegram(undefined))),
     isLoading: isPending,
   };
 }

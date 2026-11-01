@@ -74,9 +74,11 @@ async def stop_environment(e):
 async def wait_until(predicate):
     async def ready():
         while not predicate():
-            await asyncio.sleep(0)
+            # A spin here takes the GIL from the SQLite thread, so a bot's start
+            # would slow with every statement until it missed this bound.
+            await asyncio.sleep(0.01)
 
-    await asyncio.wait_for(ready(), 3)
+    await asyncio.wait_for(ready(), 15)
 
 
 async def test_known_host_mismatch_refuses_before_health_or_bot_calls(db, monkeypatch):

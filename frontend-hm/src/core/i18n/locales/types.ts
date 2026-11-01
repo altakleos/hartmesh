@@ -1529,6 +1529,7 @@ export interface Translations {
     lessSteps: string;
     executeCommand: string;
     presentFiles: string;
+    showWebPage: string;
     needYourHelp: string;
     useTool: (toolName: string) => string;
     searchForRelatedInfo: string;
@@ -2103,6 +2104,278 @@ export interface Translations {
       sso_email_taken: string;
       sso_no_access: string;
       sso_access_off: string;
+    };
+  };
+  telegramBots: {
+    sectionLabel: string;
+    chatName: string;
+    list: {
+      title: string;
+      intro: string;
+      count: (values: { used: number; limit: number }) => string;
+    };
+    kind: {
+      custom_agent: string;
+    };
+    row: {
+      lastUsed: (values: { time: string }) => string;
+      neverUsed: string;
+      menu: (values: { name: string }) => string;
+    };
+    short: {
+      none: string;
+      connected: string;
+      waiting: string;
+      attention: string;
+      off: string;
+    };
+    card: {
+      state: (values: { state: string }) => string;
+    };
+    action: {
+      connect: string;
+      open: string;
+      openChat: (values: { name: string }) => string;
+      newLink: string;
+      reconnect: string;
+      pasteToken: string;
+      applyProfile: string;
+      otherAccount: string;
+      disconnect: string;
+      remove: string;
+      tryAgain: string;
+      tryNow: string;
+      thatWasMe: string;
+      useHere: string;
+    };
+    offer: {
+      chatTitle: string;
+      chatBody: string;
+      later: string;
+    };
+    sidebar: {
+      label: string;
+      connect: string;
+      connected: (values: { count: number }) => string;
+      attention: (values: { count: number }) => string;
+    };
+    setup: {
+      title: (values: { name: string }) => string;
+      intro: (values: { name: string }) => string;
+      onPhone: string;
+      onPhoneLink: string;
+      onPhoneQr: string;
+      before: {
+        title: string;
+        body: string;
+        voice: (values: { transcriber: string }) => string;
+        again: string;
+        show: string;
+      };
+      step1: {
+        title: string;
+        open: string;
+        copied: (values: { username: string }) => string;
+        a: string;
+        b: (values: { botName: string }) => string;
+        c: (values: { username: string }) => string;
+        copyAgain: string;
+        another: string;
+        d: string;
+        public: string;
+        helpTitle: string;
+        helpStart: string;
+        helpTaken: string;
+        helpTooMany: string;
+        helpCopy: string;
+      };
+      step2: {
+        title: string;
+        label: string;
+        placeholder: string;
+        paste: string;
+        hint: string;
+        checking: string;
+        accepted: (values: { username: string }) => string;
+      };
+      timezone: {
+        ask: string;
+        label: string;
+      };
+      step3: {
+        title: string;
+        qr: string;
+        why: string;
+        waiting: string;
+        hint: string;
+        expired: string;
+      };
+      done: {
+        title: (values: { name: string }) => string;
+        body: (values: { telegramName: string }) => string;
+        notYou: string;
+        locale: (values: { language: string; timezone: string }) => string;
+        change: string;
+        profileLater: string;
+        next: (values: { nextName: string }) => string;
+        close: string;
+      };
+    };
+    transcriber: {
+      openai: string;
+      gemini: string;
+    };
+    refusal: {
+      format: string;
+      rejected: string;
+      inUseSelf: (values: { other: string; name: string }) => string;
+      inUseOther: string;
+      agentLinked: (values: { name: string }) => string;
+      webhook: string;
+      unreachable: string;
+      tooManyCodes: string;
+      agentGone: (values: { name: string }) => string;
+      ceiling: string;
+      noTimezone: string;
+      gone: string;
+      failed: string;
+    };
+    state: {
+      sectionPaused: string;
+      none: string;
+      preparing: string;
+      waiting: string;
+      expired: string;
+      replaced: (values: { name: string }) => string;
+      connected: (values: { telegramName: string }) => string;
+      profileStale: string;
+      held: string;
+      blocked: (values: { name: string }) => string;
+      conflict: string;
+      conflictFix: {
+        pasted: string;
+      };
+      conflictStopped: string;
+      conflictWebhook: string;
+      afterConflict: {
+        chat: (values: { time: string }) => string;
+        custom_agent: (values: { time: string }) => string;
+      };
+      tokenRejected: string;
+      unreachable: string;
+      limited: string;
+      deliveryPending: string;
+      deliveryFailed: string;
+      stopped: (values: { admin: boolean; provider: string }) => string;
+      unreadableHost: (values: { provider: string }) => string;
+      unreadableKey: string;
+      agentGone: (values: { name: string }) => string;
+    };
+    profile: {
+      nameCut: (values: { shortened: string }) => string;
+    };
+    token: {
+      title: (values: { name: string }) => string;
+      body: string;
+      retryPaste: string;
+      completedRemoved: string;
+      completedChanged: string;
+      replaceFailed: string;
+      savedRetry: string;
+      same: string;
+    };
+    confirm: {
+      useHere: {
+        title: string;
+        body: string;
+      };
+      thatWasMe: {
+        title: string;
+        body: string;
+        button: string;
+      };
+      otherAccount: {
+        title: string;
+        body: (values: { telegramName: string }) => string;
+        button: string;
+      };
+      remove: {
+        title: (values: { name: string }) => string;
+        body: (values: { name: string }) => string;
+        button: string;
+      };
+      lost: {
+        title: (values: { count: number }) => string;
+        body: string;
+      };
+    };
+    lost: {
+      title: string;
+      body: string;
+      button: string;
+    };
+    toast: {
+      tokenReplaced: (values: { name: string }) => string;
+      botReplaced: string;
+      profileApplied: string;
+      thatWasMe: string;
+      usedHere: string;
+      disconnected: string;
+      removed: string;
+      lost: string;
+    };
+    unavailable: {
+      off: (values: { admin: boolean; provider: string }) => string;
+      offKept: (values: { admin: boolean; provider: string }) => string;
+      secretMissing: string;
+      secretInvalid: string;
+      hostChanged: (values: { provider: string }) => string;
+      polledElsewhere: string;
+      unknown: string;
+      askAdmin: string;
+      next: (values: { provider: string }) => string;
+      reference: (values: { code: string }) => string;
+      limitPerson: (values: { count: number }) => string;
+      limitAll: (values: { admin: boolean; provider: string }) => string;
+      loadError: string;
+    };
+    prefs: {
+      title: string;
+      language: {
+        label: string;
+        body: string;
+      };
+      timezone: {
+        label: string;
+        body: string;
+      };
+      inChat: string;
+      saved: string;
+      failed: string;
+    };
+    admin: {
+      title: string;
+      counts: (values: {
+        bots: number;
+        people: number;
+        polling: number;
+        failing: number;
+        held: number;
+      }) => string;
+      none: string;
+      limits: (values: { perPerson: number; limit: number }) => string;
+      private: string;
+      voiceOn: (values: { transcriber: string }) => string;
+      voiceOff: (values: { provider: string }) => string;
+    };
+    webPage: {
+      memory: string;
+      conversations: string;
+      addAssistant: string;
+      addEmployee: string;
+      telegram: string;
+      scheduled: string;
+      account: string;
     };
   };
 }
