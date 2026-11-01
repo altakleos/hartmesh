@@ -40,6 +40,7 @@ from app.telegram_bots.strangers import STRANGER_REPLIES_PER_BOT_PER_HOUR as STR
 from app.telegram_bots.strangers import STRANGER_REPLY_EVERY_SECONDS as STRANGER_REPLY_EVERY_SECONDS
 from app.telegram_bots.strangers import StrangerLedger as StrangerLedger
 from app.telegram_bots.token_pattern import TOKEN_BODY as TOKEN_BODY
+from app.telegram_bots.token_pattern import TOKEN_IN_TEXT
 from deerflow.runtime.runs.terminal import failure_chain
 from deerflow.utils.file_io import await_drained
 
@@ -59,10 +60,11 @@ LIMITER_HOLD_MAX_SECONDS = 5
 SEND_RETRY_AFTER_MAX_SECONDS = 60
 EDIT_HASHES_PER_BOT = 256
 MEDIA_UNSUPPORTED_EVERY_SECONDS = 60
+AGENT_OFF_EVERY_SECONDS = 3600
 LIMITED_AFTER_SECONDS = 600
 _SKILL_REPLIES = {"off": "cmd.skill_off", "unavailable": "cmd.skill_unavailable", "failed": "error.generic"}
 FIXED_COMMANDS = ("work", "assign", "assistants", "employees", "new", "stop", "settings", "help", "web", "status", "privacy", "agent", "bootstrap", "goal", "models", "memory")
-_TOKEN_PASTED = re.compile(r"(?<![0-9])" + TOKEN_BODY)
+_TOKEN_PASTED = re.compile(TOKEN_IN_TEXT)
 logger = logging.getLogger(__name__)
 
 
@@ -72,7 +74,7 @@ class _Admission:
     update_id: int
     task: asyncio.Task
     acknowledged: bool = False
-    failed: bool = False
+    error: BaseException | None = None
 
 
 _ADMISSION: ContextVar[_Admission | None] = ContextVar("telegram_ingress_admission", default=None)
@@ -243,6 +245,7 @@ class TelegramBotChannel(TelegramChannel):
         self._file_tasks: set[asyncio.Task] = set()
         self._edit_hashes: OrderedDict[tuple, bytes] = OrderedDict()
         self._unsupported_at: dict[tuple, float] = {}
+        self._agent_gone_at = float("-inf")
         self._needs_success = True
         self._failure_serial = 0
         self._refused_since = None
@@ -580,9 +583,20 @@ class TelegramBotChannel(TelegramChannel):
             marker = _ADMISSION.set(admission)
             try:
                 await self.application.process_update(update)
-                return admission.acknowledged and not admission.failed
+                if admission.error is not None:
+                    raise admission.error
+                return admission.acknowledged
             finally:
                 _ADMISSION.reset(marker)
+
+    async def refuse_update(self, update: Update, error: BaseException) -> None:
+        """Let go of an update that failed every attempt, or it stops this bot for good."""
+        logger.warning("telegram_bots update_skipped link=%s bot=%s update=%s cause=%s", self.link.id, self.link.bot_id, update.update_id, failure_chain(error))
+        message, link = update.message, self.link
+        if message is not None and message.chat.type == "private":
+            # Before a person is bound, their `/start` is the one thing that can get here.
+            purpose = "bound_message" if message.chat_id == link.chat_id else "stranger"
+            self._spawn_ingress(self._ingress_notice("update.refused", self._context(link, message.chat_id, purpose), reply_to=message.message_id))
 
     def _register_handlers(self) -> None:
         self.application.add_handler(TypeHandler(Update, self._gate), group=-1)
@@ -673,7 +687,7 @@ class TelegramBotChannel(TelegramChannel):
         logger.warning("telegram_bots handler_failed link=%s bot=%s cause=%s", self.link.id, self.link.bot_id, failure_chain(context.error))
         admission = _ADMISSION.get()
         if admission is not None and admission.task is asyncio.current_task() and update is not None and admission.update_id == update.update_id:
-            admission.failed = True
+            admission.error = context.error
             raise ApplicationHandlerStop
 
     async def _gate(self, update, context) -> None:
@@ -729,6 +743,26 @@ class TelegramBotChannel(TelegramChannel):
             if not self._same_scope(link, current) or current.state != "connected":
                 raise ApplicationHandlerStop
             admission.link = current
+        if message is not None and link.health == "agent_unavailable" and link.agent_kind == "custom_agent" and self._only_the_agent_can_answer(message, word):
+            # Nothing past here can answer, and the sender holds every ordinary reply on this health.
+            now = self._time()
+            if now - self._agent_gone_at >= AGENT_OFF_EVERY_SECONDS:
+                self._agent_gone_at = now
+                self._spawn_ingress(self._tell_agent_gone(link))
+            self._classified(update)
+            raise ApplicationHandlerStop
+
+    def _only_the_agent_can_answer(self, message, word) -> bool:
+        """A pasted token still has to go, and a running turn can still be stopped."""
+        if any(_TOKEN_PASTED.search(value or "") for value in (message.text, message.caption)):
+            return False
+        turns = getattr(self._services, "turns", None)
+        return not (word == "stop" and turns is not None and turns.has_turn(self, topic=message.message_thread_id))
+
+    async def _tell_agent_gone(self, link) -> None:
+        context = self._context(link, link.chat_id, "bound_message")
+        if await self._ingress_notice("custom_agent.deleted", context, agent=link.bot_name or link.agent_ref, product=self._services.product_name) is None:
+            self._agent_gone_at = float("-inf")  # Not sent, so the next message tries again.
 
     async def _on_my_chat_member(self, update, context) -> None:
         link, member = self._admission(update).link, update.my_chat_member
@@ -933,7 +967,9 @@ class TelegramBotChannel(TelegramChannel):
                 else {}
             )
             button = {"page": "web.memory", "url": values["memory_url"]} if key == "web.memory" and values.get("memory_url") else None
-            row = await await_drained(self._services.outbox.inbox.route(row, kind="command", target_id=word or "unknown", basis={"key": key, "values": source_values, "url_button": button}, operation_ids=[]))
+            # A word that is no command can be anything a person pasted, so it travels in the values alone.
+            target = "unknown" if key == "cmd.unknown" else word or "unknown"
+            row = await await_drained(self._services.outbox.inbox.route(row, kind="command", target_id=target, basis={"key": key, "values": source_values, "url_button": button}, operation_ids=[]))
         basis = row.route_basis
         if not await self._input_current(link):
             return

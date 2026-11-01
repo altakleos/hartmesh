@@ -109,7 +109,9 @@ async def test_start_and_stop_own_no_updater_and_persist_current_bot_facts(db):
     assert fixture.channel.application.running
     saved = await db.links.get(fixture.link.id)
     assert saved.can_manage_bots and saved.topics_enabled
+    fixture.services.send_allowed = lambda: False
     assert await fixture.channel.handle_update(make_update(99)) is False
+    fixture.services.send_allowed = lambda: True
     assert [call.endpoint for call in fixture.request.calls] == ["getMe"]
     assert fixture.updates.calls == []
     await fixture.channel.stop()

@@ -11,9 +11,9 @@ import pytest
 import pytest_asyncio
 from _telegram_bot_test_support import ManualClock, RecordingRequest, make_update, offline_bot, update_payload
 from sqlalchemy.exc import OperationalError
-from telegram.error import Conflict, NetworkError, TimedOut
+from telegram.error import Conflict, NetworkError, TelegramError, TimedOut
 
-from app.telegram_bots.polling import ALLOWED, PollRecord, PollTask
+from app.telegram_bots.polling import ADMISSION_GIVE_UP_SECONDS, ALLOWED, PollRecord, PollTask
 
 pytestmark = pytest.mark.asyncio
 
@@ -54,6 +54,7 @@ class Channel:
         self.application = SimpleNamespace(running=True)
         self.accepted = []
         self.admissions = {}
+        self.refused = []
         self.verification = None
         self.verdict = SimpleNamespace(status="valid", user=None)
         self.verified = []
@@ -74,6 +75,9 @@ class Channel:
         if isinstance(result, Exception):
             raise result
         return result
+
+    async def refuse_update(self, value, error):
+        self.refused.append((value.update_id, error))
 
     async def wait_token_verification(self):
         if self.verification is not None and not self.verification.is_set():
@@ -341,6 +345,146 @@ async def test_timed_out_repolls_immediately_but_network_errors_use_bounded_back
         assert env.clock.sleeps == [1.0]
         env.clock.advance(1)
         await asyncio.wait_for(called.wait(), 2)
+    finally:
+        await cancel(running)
+
+
+async def test_an_update_that_keeps_failing_is_let_go_after_a_minute_and_the_bot_reads_on(env):
+    refusal = ValueError("invalid-inbox-route")
+    env.channel.admissions[11] = refusal
+    env.updates.enqueue("getUpdates", result=[update_payload(10), update_payload(11), update_payload(12)])
+    held = env.updates.enqueue("getUpdates", result=[], release=asyncio.Event())
+    running = asyncio.create_task(env.task.run())
+    try:
+        await env.clock.wait_for_sleep()
+        assert not env.channel.refused and env.task.offset is None, "A failure may be brief, so the update stays"
+        env.clock.advance(ADMISSION_GIVE_UP_SECONDS)
+        await asyncio.wait_for(held.started.wait(), 2)
+        assert env.channel.accepted == [10, 11, 11, 12]
+        assert env.channel.refused == [(11, refusal)]
+        assert env.updates.calls[-1].parameters["offset"] == 13
+    finally:
+        await cancel(running)
+
+
+async def test_a_fault_that_clears_inside_the_minute_loses_nothing(env):
+    update = make_update(10)
+    env.channel.admissions[10] = ValueError("database or disk is full")
+    for _ in range(4):
+        assert await env.task.admit_batch((update,)) == 0
+        env.clock.advance(ADMISSION_GIVE_UP_SECONDS / 5)
+    env.channel.admissions[10] = True
+    assert await env.task.admit_batch((update,)) == 1
+    assert not env.channel.refused and env.channel.accepted == [10] * 5
+
+
+async def test_a_plain_no_is_not_a_failure_and_never_lets_an_update_go(env):
+    update = make_update(10)
+    env.channel.admissions[10] = False
+    for _ in range(3):
+        assert await env.task.admit_batch((update,)) == 0
+        env.clock.advance(ADMISSION_GIVE_UP_SECONDS)
+    assert not env.channel.refused and env.task.offset is None
+
+
+async def test_every_update_gets_its_own_minute(env):
+    first, second = make_update(10), make_update(11)
+    env.channel.admissions[10] = ValueError("first")
+    await env.task.admit_batch((first, second))
+    env.clock.advance(ADMISSION_GIVE_UP_SECONDS - 1)
+    env.channel.admissions[10] = True
+    env.channel.admissions[11] = ValueError("second")
+    await env.task.admit_batch((first, second))  # The first passes, and the second starts its own minute.
+    env.clock.advance(ADMISSION_GIVE_UP_SECONDS - 1)
+    await env.task.admit_batch((second,))
+    assert not env.channel.refused
+    env.clock.advance(1)
+    await env.task.admit_batch((second,))
+    assert [identity for identity, _error in env.channel.refused] == [11]
+
+
+async def test_a_conflict_cannot_leave_an_unreachable_hidden_under_it(env):
+    env.channel.link.health = "conflict"
+    task = PollTask(env.channel, on_health=env.on_health, record=PollRecord(), clock=env.clock.now, sleep=env.clock.sleep)
+    await task._success()
+    assert env.health == [("conflict", False), ("unreachable", False)]
+
+
+async def test_a_saved_unreachable_is_cleared_by_the_first_good_poll_of_a_new_process(env):
+    env.channel.link.health = "unreachable"
+    task = PollTask(env.channel, on_health=env.on_health, record=PollRecord(), clock=env.clock.now, sleep=env.clock.sleep)
+    env.channel.bot = SimpleNamespace(get_updates=AsyncMock(return_value=[]))
+    assert await task.probe() == "ok"
+    assert env.health == [("unreachable", False)]
+
+
+async def test_a_long_stop_is_told_on_the_first_good_poll(env):
+    env.task.note_last_contact(env.clock.now() - timedelta(hours=24))
+    env.channel.bot = SimpleNamespace(get_updates=AsyncMock(return_value=[]))
+    assert await env.task.probe() == "ok"
+    assert env.task.back_online_due and env.health == [("unreachable", False)]
+    assert await env.task.probe() == "ok"
+    assert not env.task.back_online_due
+
+
+async def test_a_short_stop_stays_quiet(env):
+    env.task.note_last_contact(env.clock.now() - timedelta(hours=1))
+    env.channel.bot = SimpleNamespace(get_updates=AsyncMock(return_value=[]))
+    assert await env.task.probe() == "ok"
+    assert not env.task.back_online_due and env.health == []
+
+
+async def test_an_answer_the_sdk_cannot_read_is_a_retry_and_not_a_death(env):
+    reached = asyncio.Event()
+    answers = iter([TelegramError("unreadable answer")])
+
+    async def get_updates(**_kwargs):
+        for answer in answers:
+            raise answer
+        reached.set()
+        await asyncio.Event().wait()
+
+    env.channel.bot = SimpleNamespace(get_updates=get_updates)
+    running = asyncio.create_task(env.task.run())
+    try:
+        await env.clock.wait_for_sleep()
+        assert not running.done()
+        env.clock.advance(60)
+        await asyncio.wait_for(reached.wait(), 2)
+    finally:
+        await cancel(running)
+
+
+async def test_a_product_error_at_the_start_still_escapes(env):
+    env.channel.application.running = False
+    env.channel.start = AsyncMock(side_effect=RuntimeError("synthetic product fault"))
+    with pytest.raises(RuntimeError, match="synthetic product fault"):
+        await env.task.run()
+
+
+async def test_a_probe_that_meets_anything_else_reports_and_does_not_raise(env):
+    env.channel.bot = SimpleNamespace(get_updates=AsyncMock(side_effect=TypeError("unparsable update")))
+    assert await env.task.probe() == "network"
+
+
+async def test_a_start_that_gets_an_unreadable_answer_tries_again(env):
+    env.channel.application.running = False
+    held = asyncio.Event()
+
+    async def start():
+        if env.channel.start_calls == 0:
+            env.channel.start_calls = 1
+            raise TelegramError("unreadable answer")
+        held.set()
+        await asyncio.Event().wait()
+
+    env.channel.start_calls = 0
+    env.channel.start = start
+    running = asyncio.create_task(env.task.run())
+    try:
+        await env.clock.wait_for_sleep()
+        env.clock.advance(60)
+        await asyncio.wait_for(held.wait(), 2)
     finally:
         await cancel(running)
 

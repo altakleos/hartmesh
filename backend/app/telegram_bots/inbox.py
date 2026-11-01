@@ -24,7 +24,7 @@ from uuid import uuid4
 from sqlalchemy import and_, literal, or_, select, text, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.telegram_bots.adapter import TOKEN_BODY
+from app.telegram_bots.token_pattern import TOKEN_IN_TEXT
 from deerflow.persistence.channel_connections.model import ChannelConnectionRow
 from deerflow.persistence.telegram_bots.model import TelegramAccountRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow, TelegramPendingFileRow
 
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from app.telegram_bots.authority import LiveOwnerCheck
     from app.telegram_bots.links import BotLink, PublicationGuard
 
-_TOKEN = re.compile(TOKEN_BODY)
+_TOKEN = re.compile(TOKEN_IN_TEXT)
 SERVER_BOOKKEEPING_KEYS = frozenset({"publications", "current_publication_id", "thread_preparation", "publication_recovery", "callback_choice", "prepublication_group", "human_input_ui", "pending_files", "voice_note"})
 _INPUT_KEYS = {"text", "caption", "files", "voice", "command", "type", "reply_to_message_id", "prompt_id", "media_group_id"}
 _UNSAFE_KEYS = {"raw_update", "update", "token", "bot_token", "access_token", "download_url", "file_path", "audio_bytes", "bytes", "_content", "content_bytes"}

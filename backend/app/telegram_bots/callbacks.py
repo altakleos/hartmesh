@@ -17,7 +17,7 @@ from sqlalchemy import select, text
 from app.telegram_bots.config import TelegramBotsConfig
 from app.telegram_bots.inbox import callback_publication_pending
 from app.telegram_bots.links import BotLink
-from app.telegram_bots.token_pattern import TOKEN_BODY
+from app.telegram_bots.token_pattern import TOKEN_IN_TEXT
 from deerflow.persistence.channel_connections.model import ChannelConnectionRow
 from deerflow.persistence.telegram_bots.model import TelegramAccountRow, TelegramActRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
@@ -25,7 +25,7 @@ from deerflow.utils.file_io import await_drained
 CALLBACK_PREFIX = "h1:"
 PRESS_TIMEOUT_SECONDS = 2.0
 _ID = re.compile(r"^[0-9a-f]{32}$")
-_TOKEN = re.compile(TOKEN_BODY)
+_TOKEN = re.compile(TOKEN_IN_TEXT)
 _SCOPE = ("id", "owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "binding_generation", "token_revision")
 _RESERVED = frozenset(
     {"label", "label_values", "keyboard_row", "keyboard_column", "anchor_outbox_id", "presentation_version", "presentation_pending", "presentation_history", "message_adopted", "prompt_successor", "publication_owner", "prompt_visibility"}

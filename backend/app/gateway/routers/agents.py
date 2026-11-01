@@ -696,6 +696,9 @@ async def delete_agent(name: str, request: Request) -> None:
         )
 
     logger.info(f"Deleted agent '{name}'")
+    telegram_bots = getattr(request.app.state, "telegram_bots", None)
+    if telegram_bots is not None:
+        telegram_bots.reconcile_soon()  # Its bot can then say the agent is gone from the next message on.
 
 
 def _delete_agent_with_memory_cancel(name: str, user_id: str | None) -> AgentDeleteOutcome:

@@ -477,7 +477,15 @@ Failed HTTP closes retain only member-close signals; the shared charge releases
 after both transport cleanup and the batch owner settle. File Retry repairs
 saved delivery in its original thread without publishing another model input.
 
-`polling.py` owns retained suffixes and startup-held batches. Serialize every
+`polling.py` owns retained suffixes and startup-held batches. A poll failure ends
+in a retry while the database is down, a refusal with a reply, or a counted death;
+it never just stops. An update still failing after `ADMISSION_GIVE_UP_SECONDS` is
+let go through `refuse_update`: a brief fault clears within that minute, and no
+list of errors could tell the two apart. `handle_update` raises the handler's
+error so that clock sees it, and a plain False is an ordinary retry. Keep
+`except Exception` at the death guards: a database going down raises raw driver
+errors no list names. An uncertain `authority.target` never writes a health.
+Serialize every
 getUpdates operation, including probes, drops and shutdown confirmation. A
 current-token 409 commits `record_conflict` before counters/callbacks/admission;
 failed persistence owns that retry before another poll. Successful old-token

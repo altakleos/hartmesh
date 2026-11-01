@@ -19,7 +19,7 @@ STAGE_ONE_KEYS = frozenset(
     file.not_saved file.own_full file.own_preparing file.own_no_seat file.own_unchecked file.own_unavailable
     file.too_large_out file.out_failed voice.unavailable voice.too_long voice.daily_limit voice.first_notice
     voice.agreed voice.not_used voice.writing voice.heard voice.failed voice.unclear media.unsupported
-    edit.ignored token.pasted token.pasted_kept clarify.options clarify.more_choices clarify.answer_line
+    update.refused edit.ignored token.pasted token.pasted_kept clarify.options clarify.more_choices clarify.answer_line
     clarify.other_prompt clarify.form_field clarify.form_yes clarify.form_no clarify.form_done clarify.form_review
     net.ask_plain net.allowed net.kept net.cancelled net.stale new.confirm_plain new.done new.kept
     cmd.unknown cmd.agent cmd.skill_off cmd.skill_unavailable settings.state_basic link.conflict

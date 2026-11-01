@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from sqlalchemy.exc import SQLAlchemyError
-from telegram.error import BadRequest, Conflict, Forbidden, InvalidToken, NetworkError, RetryAfter, TelegramError, TimedOut
+from telegram.error import Conflict, Forbidden, InvalidToken, NetworkError, RetryAfter, TelegramError, TimedOut
 
 from deerflow.utils.file_io import await_drained
 
@@ -35,6 +35,7 @@ OFFLINE_NOTICE_AFTER_HOURS = 23
 TASK_RESTART_SECONDS, TASK_DEATHS_BEFORE_STOP, TASK_DEATHS_WINDOW_SECONDS = 5, 5, 600
 TOKEN_RECHECK_SECONDS = 30
 UPDATES_HELD_PER_LINK = 10
+ADMISSION_GIVE_UP_SECONDS = 60
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +106,10 @@ class PollTask:
         self._fence_committed = False
         self._drop_required = False
         self._network_since: datetime | None = None
-        self._had_failure = False
+        # A saved `unreachable` is cleared by the first good poll of any process.
+        self._had_failure = channel.link.health == "unreachable"
+        self._last_contact: datetime | None = None
+        self._failing: tuple[int | None, datetime | None] = (None, None)
         self._health_transition: PollHealthTransition | None = None
         self._pending_health: tuple[str, bool, PollHealthTransition | None] | None = None
         self._streak = 0
@@ -239,11 +243,15 @@ class PollTask:
         if current is None:
             return
         now = self._clock()
-        self.back_online_due = bool(self._had_failure and current.last_ok_at is not None and now - current.last_ok_at > timedelta(hours=OFFLINE_NOTICE_AFTER_HOURS))
+        saved_contact, self._last_contact = self._last_contact, None
+        contact = saved_contact if saved_contact is not None else current.last_ok_at if self._had_failure else None
+        self.back_online_due = contact is not None and now - contact > timedelta(hours=OFFLINE_NOTICE_AFTER_HOURS)
+        conflict_over = self._conflicted
         if self._conflicted:
             await self._health("conflict", False)
             self._conflicted, self._probe_until = False, None
-        if self._had_failure:
+        # A conflict hides an `unreachable` under it, and the gate refuses every update while that stays.
+        if self._had_failure or self.back_online_due or conflict_over:
             await self._health("unreachable", False)
         if not await self.channel.record_poll_success(recovered=self._had_failure):
             self._retired = True
@@ -413,7 +421,7 @@ class PollTask:
                 self._result()
             await self._network(error)
             return "timeout"
-        except (BadRequest, NetworkError, Forbidden) as error:
+        except TelegramError as error:
             if await self._current() is None:
                 return "invalid-token"
             if count:
@@ -466,8 +474,16 @@ class PollTask:
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
+                    # A brief fault clears within the minute, and no list of errors could tell the
+                    # two apart. One update that never passes must not leave this bot deaf for good.
                     self._event("poll_error", error=error, level=logging.WARNING)
-                    break
+                    head, now = self._pending[0].update_id, self._clock()
+                    if self._failing[0] != head:
+                        self._failing = (head, now)
+                    if now - self._failing[1] < timedelta(seconds=ADMISSION_GIVE_UP_SECONDS):
+                        break
+                    await self.channel.refuse_update(self._pending[0], error)
+                    admitted = True
                 if admitted is not True:
                     break
                 accepted += 1
@@ -583,7 +599,7 @@ class PollTask:
                 return "network"
             try:
                 result = await self._probe_locked(extend=True)
-            except SQLAlchemyError as error:
+            except Exception as error:
                 self._event("poll_error", error=error, level=logging.WARNING)
                 result = "network"
         if self._pending:
@@ -596,6 +612,10 @@ class PollTask:
             if self._pending or self._held or self._fence_pending or self._pending_health or self._drop_required or self.offset is None:
                 return
             await self._fetch_locked(mode="confirm")
+
+    def note_last_contact(self, last_ok_at: datetime | None) -> None:
+        """A start writes `last_ok_at` before the first poll, so the saved value is handed over."""
+        self._last_contact = last_ok_at
 
     def require_drop_pending(self) -> None:
         """Transfer a restore's discard intent before the poll owner starts."""
@@ -649,7 +669,7 @@ class PollTask:
                         return
                     self._failure(error, http=429, retry_in=self._retry_after)
                     continue
-                except (NetworkError, InvalidToken, Forbidden) as error:
+                except TelegramError as error:
                     current = await self._current()
                     if current is None or current.health == "token_rejected":
                         return

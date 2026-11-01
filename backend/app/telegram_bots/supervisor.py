@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from app.channels.message_bus import OutboundMessage
 
 START_CONCURRENCY = 10
+CLAIM_RECOVERY_ATTEMPTS = 300
 HEALTH_WAIT_SECONDS, HEALTH_WAIT_INTERVAL_SECONDS = 60.0, 0.5
 STOP_TIMEOUT_SECONDS = 5.0
 NOTICE_EVERY_HOURS = 24
@@ -353,7 +354,7 @@ class TelegramSupervisor:
             self._health_barrier.set()
             rows = tuple(self._initial_links.values())
             self._event("supervisor_start", links=len(rows), concurrency=START_CONCURRENCY)
-            await asyncio.gather(*(self._launch(row, fresh_start=True) for row in rows))
+            await asyncio.gather(*(self._launch_contained(row, fresh_start=True) for row in rows))
             if self._stopping or self._cause is not None:
                 return
             status = self.status()
@@ -464,12 +465,18 @@ class TelegramSupervisor:
             if poll.pending_drop:
                 poll.discard_held()
             await poll.release_held()
+        attempts = 0
         while not self._stopping:
             try:
                 await self.sender.recover_prior_claims()
                 break
-            except SQLAlchemyError as error:
-                self._event("claim_recovery_failed", error=type(error).__name__, level=logging.WARNING)
+            except Exception as error:
+                # A database coming back raises raw errors as well. A fault that stays must end
+                # in the refusal an operator sees, not in a sender that never starts.
+                attempts += 1
+                if attempts >= CLAIM_RECOVERY_ATTEMPTS:
+                    raise
+                self._event("claim_recovery_failed", cause=failure_chain(error), level=logging.WARNING)
                 await self._sleep(1)
         if self._stopping or self._cause is not None:
             return
@@ -648,6 +655,13 @@ class TelegramSupervisor:
             return link, opened.key
         return None
 
+    async def _launch_contained(self, link: BotLink, **options) -> None:
+        """One link's failed start stays that link's: reconcile tries it again, and the rest go on."""
+        try:
+            await self._launch(link, **options)
+        except Exception as error:
+            self._event("bot_start_failed", link=link, cause=failure_chain(error), level=logging.WARNING)
+
     async def _launch(self, link: BotLink, token: str | None = None, *, fresh_start=False, drop_pending=False) -> None:
         if not await self._available():
             return
@@ -700,7 +714,7 @@ class TelegramSupervisor:
             try:
                 target = await self.authority.target(link)
             except Exception:
-                target = "agent_unavailable"
+                target = None  # Uncertain is not gone. Reconcile settles it, as it does for a live link.
             if target == "unsupported":
                 self._unsupported.add(link.id)
                 return
@@ -761,6 +775,8 @@ class TelegramSupervisor:
                 self._observe(current_link, reason="invalid-token" if current_link.health == "token_rejected" else "recovered")
                 if current_link.state != "held" and current_link.health not in {"secret_unreadable", "token_rejected", "policy_off", "stopped"}:
                     poll = self._make_poll(channel)
+                    if fresh_start:
+                        poll.note_last_contact(link.last_ok_at)
                     if initial_failure is not None:
                         poll.defer_start_retry(initial_failure[0], observed_at=initial_failure[1])
                     if drop_pending:
@@ -855,8 +871,10 @@ class TelegramSupervisor:
             try:
                 await self._poll_done(channel, poll, task)
                 return
-            except SQLAlchemyError as error:
-                self._event("poll_death_write_failed", link=channel.link, error=type(error).__name__, level=logging.WARNING)
+            except Exception as error:
+                # A database that is down raises raw driver errors too, and a watcher that
+                # dies on one leaves a dead poller nobody counts. No list of them is complete.
+                self._event("poll_death_write_failed", link=channel.link, cause=failure_chain(error), level=logging.WARNING)
                 await self._sleep(1)
 
     async def _poll_done(self, channel: TelegramBotChannel, poll: PollTask, task: asyncio.Task) -> None:
@@ -906,8 +924,8 @@ class TelegramSupervisor:
                     channel.link = saved
                     self._start_poll(channel, self._make_poll(channel))
                     return
-            except SQLAlchemyError as error:
-                self._event("poll_restart_write_failed", link=channel.link, error=type(error).__name__, level=logging.WARNING)
+            except Exception as error:
+                self._event("poll_restart_write_failed", link=channel.link, cause=failure_chain(error), level=logging.WARNING)
                 await self._sleep(1)
 
     def send_allowed(self) -> bool:
@@ -945,8 +963,12 @@ class TelegramSupervisor:
             product = product_name(self._app_config)
             name = product
             if link.agent_kind == "custom_agent":
-                target = load_agent_config(link.agent_ref, user_id=link.owner_user_id)
-                name = target.display_name or target.name
+                try:
+                    target = load_agent_config(link.agent_ref, user_id=link.owner_user_id)
+                    name = target.display_name or target.name
+                except FileNotFoundError:
+                    # Deleted, and the reply that says so has to be written anyway.
+                    name = link.bot_name or link.agent_ref
             elif link.agent_kind != "lead_agent":
                 raise ValueError("unsupported-ingress-target")
             return {"product": product, "name": name, "agent": name, "memory_url": page_address("web.memory", link)}
@@ -1392,7 +1414,7 @@ class TelegramSupervisor:
                     link = restored
                     self._observe(link, reason="recovered")
                     await self._retire(link.id, reason="held")
-                    await self._launch(link, drop_pending=True)
+                    await self._launch_contained(link, drop_pending=True)
                     channel = self.channel(link.id)
                     if channel is not None:
                         transition_notices.append((channel, "access.back", False))
@@ -1429,7 +1451,7 @@ class TelegramSupervisor:
                     link = saved
                 self._observe(link, reason="agent" if target == "agent_unavailable" else "recovered")
                 if channel is None:
-                    await self._launch(link)
+                    await self._launch_contained(link)
                 else:
                     channel.link = link
             owners = {channel.link.owner_user_id for channel, _, _ in transition_notices}

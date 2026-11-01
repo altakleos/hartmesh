@@ -749,7 +749,8 @@ class TelegramChannel(Channel):
         if not isinstance(value, str):
             return fallback
         try:
-            candidate = normalize_filename(value.strip())
+            # A colon makes a name read as a URI or a bot token, and no file system needs one.
+            candidate = normalize_filename(value.strip()).replace(":", "_")
         except (UnicodeError, ValueError):
             return fallback
         if is_upload_staging_file(candidate) or any(ord(char) < 32 for char in candidate):

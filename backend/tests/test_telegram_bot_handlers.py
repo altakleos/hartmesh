@@ -2,6 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from _telegram_bot_test_support import update_payload
@@ -14,6 +15,8 @@ from telegram import Update
 from test_telegram_bot_adapter import build, start
 from test_telegram_supervisor import _supervisor_logging as _supervisor_logging
 
+from app.channels.telegram import TelegramChannel
+from app.telegram_bots.authority import AccessOff
 from app.telegram_bots.producer import OutboxSender
 from app.telegram_bots.render import render, render_plain
 from app.telegram_bots.strangers import StrangerLedger
@@ -168,7 +171,7 @@ async def test_fixed_command_is_durable_sealed_and_replayed_without_new_delivery
         await e.channel.stop()
 
 
-async def test_sql_handler_failure_swallowed_by_ptb_still_returns_false(db, monkeypatch):
+async def test_a_handler_failure_swallowed_by_ptb_reaches_the_poller(db, monkeypatch):
     e = await ingress(db)
     try:
         original = e.services.outbox.plan_product
@@ -177,7 +180,8 @@ async def test_sql_handler_failure_swallowed_by_ptb_still_returns_false(db, monk
             raise OperationalError("fixture", {}, RuntimeError("synthetic SQL failure"))
 
         monkeypatch.setattr(e.services.outbox, "plan_product", fail)
-        assert await e.channel.handle_update(message(e, 305)) is False
+        with pytest.raises(OperationalError):
+            await e.channel.handle_update(message(e, 305))
         monkeypatch.setattr(e.services.outbox, "plan_product", original)
         assert await e.channel.handle_update(message(e, 305)) is True
         assert await e.channel.handle_update(message(e, 306, content="Ordinary unfinished input")) is False
@@ -359,6 +363,187 @@ async def test_unknown_or_reserved_slash_word_gets_cmd_unknown_and_is_not_publis
         assert await e.channel.handle_update(message(e, 472, content="/no-such-skill words")) is True
         assert accepted == []
         assert _skill_replies(await rows(db, TelegramOutboxRow)) == [("cmd.unknown", {"command": "no-such-skill"})]
+    finally:
+        await e.channel.stop()
+
+
+async def test_a_path_pasted_as_the_first_word_is_answered_and_stops_nothing(db, monkeypatch):
+    import app.telegram_bots.adapter as adapter
+
+    monkeypatch.setattr(adapter, "slash_skill_outcome", lambda link, text: None)
+    e = await ingress(db)
+    e.services.turns = _skill_turns(AsyncMock())
+    path = "/users/maria/documents/invoices/2026/october/invoice-4711-final-signed-copy-of-it.pdf"
+    assert len(path) > 65
+    try:
+        assert await e.channel.handle_update(message(e, 473, content=path + " what is the total?")) is True
+        assert _skill_replies(await rows(db, TelegramOutboxRow)) == [("cmd.unknown", {"command": path[1:]})]
+    finally:
+        await e.channel.stop()
+
+
+async def test_a_long_number_as_the_first_word_is_answered_all_the_way_to_a_reply(db, monkeypatch):
+    import app.telegram_bots.adapter as adapter
+
+    monkeypatch.setattr(adapter, "slash_skill_outcome", lambda link, text: None)
+    e = await ingress(db)
+    e.services.turns = _skill_turns(AsyncMock())
+    word = "1762000000000:" + "a" * 30
+    try:
+        assert await e.channel.handle_update(message(e, 475, content="/" + word)) is True
+        assert _skill_replies(await rows(db, TelegramOutboxRow)) == [("cmd.unknown", {"command": word})]
+    finally:
+        await e.channel.stop()
+
+
+async def test_a_long_number_beside_a_hash_is_a_message_and_a_token_still_is_not(db):
+    e = await ingress(db)
+    inbox = e.services.outbox.inbox
+    try:
+        timestamp = "1762000000000:" + "a" * 30
+        row, created = await inbox.accept(e.link, message(e, 476, content=timestamp), sanitized_input={"text": timestamp})
+        assert created and row.sanitized_input["text"] == timestamp
+        token = "123456789012:" + "a" * 30
+        with pytest.raises(ValueError, match="unsafe-sanitized-input"):
+            await inbox.accept(e.link, message(e, 477, content=token), sanitized_input={"text": token})
+    finally:
+        await e.channel.stop()
+
+
+@pytest.mark.parametrize("name,expected", [("data: notes.xlsx", "data_ notes.xlsx"), ("DATA:NOTES.PDF", "DATA_NOTES.PDF"), ("plain.pdf", "plain.pdf")])
+async def test_a_colon_leaves_a_file_name_and_its_extension_stays(name, expected):
+    assert TelegramChannel._safe_inbound_filename(name, "fallback") == expected
+
+
+async def test_an_update_that_is_let_go_is_logged_and_its_sender_told(db, caplog):
+    e = await ingress(db)
+    try:
+        e.request.enqueue("sendMessage", result=sent(e))
+        await e.channel.refuse_update(message(e, 478, content="Unreadable"), ValueError("invalid-inbox-route"))
+        await drain_disposable(e)
+        call = e.request.calls[-1]
+        assert call.endpoint == "sendMessage" and call.parameters["text"] == render_plain("update.refused", "en-US") and call.parameters["reply_parameters"]["message_id"] == 478
+        assert f"update_skipped link={e.link.id} bot={e.link.bot_id} update=478 cause=ValueError:invalid-inbox-route" in caplog.text
+    finally:
+        await e.channel.stop()
+
+
+async def test_a_person_who_is_not_bound_yet_is_told_too(db):
+    e = await ingress(db, connected=False)
+    try:
+        e.request.enqueue("sendMessage", result=sent(e, chat=7_000_000_003))
+        await e.channel.refuse_update(message(e, 479, content="/start code", sender=7_000_000_003), ValueError("private"))
+        await drain_disposable(e)
+        call = e.request.calls[-1]
+        assert call.endpoint == "sendMessage" and call.parameters["chat_id"] == 7_000_000_003
+    finally:
+        await e.channel.stop()
+
+
+async def test_an_update_with_no_private_message_answers_nobody(db):
+    e = await ingress(db)
+    try:
+        before = len(e.request.calls)
+        await e.channel.refuse_update(membership(e, 480, status="member"), ValueError("private"))
+        await e.channel.refuse_update(message(e, 481, content="Unreadable", chat=-100, kind="group"), ValueError("private"))
+        await drain_disposable(e)
+        assert len(e.request.calls) == before
+    finally:
+        await e.channel.stop()
+
+
+async def deleted_agents_bot(db):
+    e = await ingress(db)
+    e.now = [1000.0]
+    e.channel._time = lambda: e.now[0]
+    e.stopped = AsyncMock()
+    e.running = False
+    e.services.turns = SimpleNamespace(stop_chat=e.stopped, retire=AsyncMock(), message_sent=lambda *_args, **_kwargs: None, has_turn=lambda _channel, *, topic: e.running)
+    await db.links.set_health(e.link.id, "agent_unavailable", holds=True, expected_token_revision=e.link.token_revision)
+    e.answers = lambda: [call.parameters["text"] for call in e.request.calls if call.endpoint == "sendMessage"]
+    e.gone = render_plain("custom_agent.deleted", "en-US", agent=e.link.agent_ref, product="HartMesh")
+    return e
+
+
+async def test_a_deleted_agents_bot_says_so_once_an_hour_and_keeps_nothing(db):
+    e = await deleted_agents_bot(db)
+    try:
+        kept = len(await rows(db, TelegramInboundMarkRow))
+        e.request.enqueue("sendMessage", result=sent(e))
+        for number, content in enumerate(("Hello", "/help", "/start again")):
+            assert await e.channel.handle_update(message(e, 481 + number, content=content)) is True
+        await drain_disposable(e)
+        assert e.answers() == [e.gone]
+        assert len(await rows(db, TelegramInboundMarkRow)) == kept, "Nothing can answer these, so none is kept"
+
+        e.now[0] += 3600
+        e.request.enqueue("sendMessage", result=sent(e, identity=501))
+        assert await e.channel.handle_update(message(e, 485, content="Hello again")) is True
+        await drain_disposable(e)
+        assert e.answers() == [e.gone, e.gone]
+    finally:
+        await e.channel.stop()
+
+
+async def test_a_notice_that_could_not_be_sent_does_not_spend_the_hour(db):
+    e = await deleted_agents_bot(db)
+    try:
+        e.request.enqueue("sendMessage", status=500, body={"ok": False, "error_code": 500, "description": "Internal"})
+        assert await e.channel.handle_update(message(e, 486, content="Hello")) is True
+        await drain_disposable(e)
+        e.request.enqueue("sendMessage", result=sent(e))
+        assert await e.channel.handle_update(message(e, 487, content="Hello again")) is True
+        await drain_disposable(e)
+        assert e.answers()[-1] == e.gone and len(e.answers()) == 2
+    finally:
+        await e.channel.stop()
+
+
+async def test_stop_reaches_a_running_turn_on_a_deleted_agents_bot(db):
+    e = await deleted_agents_bot(db)
+    e.running = True
+    try:
+        assert await e.channel.handle_update(message(e, 488, content="/stop")) is True
+        e.stopped.assert_awaited_once()
+        assert e.answers() == []
+    finally:
+        await e.channel.stop()
+
+
+async def test_stop_with_nothing_running_gets_the_answer_a_deleted_agents_bot_has(db):
+    e = await deleted_agents_bot(db)
+    try:
+        e.request.enqueue("sendMessage", result=sent(e))
+        assert await e.channel.handle_update(message(e, 489, content="/stop")) is True
+        await drain_disposable(e)
+        e.stopped.assert_not_awaited()
+        assert e.answers() == [e.gone]
+    finally:
+        await e.channel.stop()
+
+
+async def test_a_token_pasted_to_a_deleted_agents_bot_is_still_removed(db):
+    e = await deleted_agents_bot(db)
+    try:
+        e.request.enqueue("deleteMessage", result=True)
+        e.request.enqueue("sendMessage", result=sent(e))
+        assert await e.channel.handle_update(message(e, 490, content="123456789:" + "A" * 35)) is True
+        await drain_disposable(e)
+        assert "deleteMessage" in [call.endpoint for call in e.request.calls]
+    finally:
+        await e.channel.stop()
+
+
+async def test_a_lead_agent_link_never_says_an_agent_was_deleted(db, monkeypatch):
+    e = await ingress(db, lead=True, monkeypatch=monkeypatch)
+    await db.links.set_health(e.link.id, "agent_unavailable", holds=True, expected_token_revision=e.link.token_revision)
+    accept = AsyncMock()
+    e.services.turns = SimpleNamespace(**vars(_skill_turns(accept)), has_turn=lambda _channel, *, topic: False)
+    try:
+        await e.channel.handle_update(message(e, 491, content="Hello"))
+        await drain_disposable(e)
+        accept.assert_awaited_once()
+        assert not [call for call in e.request.calls if call.endpoint == "sendMessage"]
     finally:
         await e.channel.stop()
 
@@ -591,7 +776,8 @@ async def test_fresh_disabled_owner_cannot_bind_from_its_still_valid_code(db, mo
     async with db.sessions.begin() as session:
         session.add(DisabledIdentityRow(issuer=LOCAL_ACCOUNT_ISSUER, subject=e.live.id, disabled_at=datetime.now(UTC)))
     try:
-        assert await e.channel.handle_update(message(e, 540, content="/start " + code)) is False
+        with pytest.raises(AccessOff):
+            await e.channel.handle_update(message(e, 540, content="/start " + code))
         assert (await db.links.get(e.link.id)).state == "waiting_connect"
         assert await rows(db, TelegramInboundMarkRow) == [] and await rows(db, TelegramOutboxRow) == []
         assert [call.endpoint for call in e.request.calls] == ["getMe"]
