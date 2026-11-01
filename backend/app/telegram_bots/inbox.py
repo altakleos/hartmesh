@@ -3234,8 +3234,11 @@ class InboxRepository:
             )
             return [_snapshot(mark) for mark in marks]
 
-    async def prepublication_page(self, *, after: PrepublicationCursor | None = None, limit: int = 32, max_origins: int = 64) -> PrepublicationPage:
-        """Read bounded actual input owners; never create a missing route/profile."""
+    async def prepublication_page(self, *, after: PrepublicationCursor | None = None, limit: int = 32, max_origins: int = 64, link_id: str | None = None) -> PrepublicationPage:
+        """Read bounded actual input owners; never create a missing route/profile.
+
+        A late answer held for its person's choice is not left over: it is still waiting for them.
+        """
         from deerflow.utils.file_io import await_drained
 
         if type(limit) is not int or not 1 <= limit <= 32 or type(max_origins) is not int or not 1 <= max_origins <= 64 or after is not None and type(after) is not PrepublicationCursor:
@@ -3250,12 +3253,15 @@ class InboxRepository:
                     TelegramInboundMarkRow.outbox_id.is_(None),
                     TelegramInboundMarkRow.state.in_(["accepted", "reply_pending"]),
                     or_(TelegramInboundMarkRow.route_kind.is_(None), TelegramInboundMarkRow.route_kind == "turn", and_(TelegramInboundMarkRow.route_kind == "voice", TelegramInboundMarkRow.route_target_id == "working")),
+                    TelegramInboundMarkRow.route_basis["human_input_ui"]["held_prompt_id"].as_string().is_(None),
                 )
                 callback = select(TelegramCallbackRow).where(
                     TelegramCallbackRow.payload[CALLBACK_PUBLICATION_KEY].as_string().is_not(None),
                     TelegramCallbackRow.payload[CALLBACK_PUBLICATION_KEY]["scope"].as_string().is_(None),
                     TelegramCallbackRow.payload[CALLBACK_PUBLICATION_KEY]["route_complete"].as_boolean().is_(False),
                 )
+                if link_id is not None:
+                    normal, callback = normal.where(TelegramInboundMarkRow.link_id == link_id), callback.where(TelegramCallbackRow.link_id == link_id)
                 normal_order = (TelegramInboundMarkRow.accepted_at, TelegramInboundMarkRow.link_id, TelegramInboundMarkRow.message_id, TelegramInboundMarkRow.chat_id)
                 callback_order = (TelegramCallbackRow.created_at, TelegramCallbackRow.link_id, TelegramCallbackRow.message_id, TelegramCallbackRow.chat_id)
                 if after is not None:

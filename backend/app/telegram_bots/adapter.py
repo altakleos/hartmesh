@@ -998,7 +998,6 @@ class TelegramBotChannel(TelegramChannel):
             await human_inputs.command(self, update, word, captured_link=self._admission(update).link)
         if word == "stop" and turns is not None:
             await turns.stop_chat(self, update)
-            self._classified(update, remember=True)
         elif word == "agent":
             await self._fixed_reply(update, "cmd.agent", word)
         elif word == "memory" and self.link.agent_kind == "lead_agent":

@@ -789,6 +789,9 @@ class TelegramSupervisor:
                         poll.defer_start_retry(initial_failure[0], observed_at=initial_failure[1])
                     if drop_pending:
                         poll.require_drop_pending()
+                    # Before that decision another copy may own the rows, and startup closes them after it.
+                    if not fresh_start and self.turns is not None and self._copy_decision is False:
+                        await self.turns.recover_link(channel)
                     self._start_poll(channel, poll)
             except BaseException:
                 if channel is not None:

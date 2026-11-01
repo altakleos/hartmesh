@@ -579,6 +579,42 @@ async def test_v6_relocation_retains_acknowledged_answer_and_exact_media_source(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("gone", [True, False])
+async def test_cleanup_with_no_readable_source_gives_up_or_waits_and_never_retries_each_second(publication_environment, gone):
+    from datetime import timedelta
+
+    from app.telegram_bots.producer import DeliveryEligibility, OutboxSender, SourceGone, SourceNotRead
+    from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
+
+    e = publication_environment
+    box, _saved, _output, captured, _capture = await claimed_primary(e, display=edit_display())
+
+    async def deliver(**kwargs):
+        return [1901]
+
+    async def eligible(*args):
+        return DeliveryEligibility("allow")
+
+    async def clean(**kwargs):
+        raise SourceGone() if gone else SourceNotRead()
+
+    sender = OutboxSender(box, run_id="worker", deliver_part=deliver, eligibility=eligible, cleanup_caption=clean)
+    await sender._run(e.link.id, captured.item.id, e.link.binding_generation, "claim")
+    async with box._writer(e.link.id) as (writer, _):
+        row = await writer.get(TelegramOutboxRow, captured.item.id, with_for_update=True)
+        row.state, row.claim_owner, row.claim_id = "sending", "worker", "claim"
+    began = box.clock()
+    await sender._run(e.link.id, captured.item.id, e.link.binding_generation, "claim")
+    async with e.sessions() as reader:
+        row = await reader.get(TelegramOutboxRow, captured.item.id)
+    if gone:
+        assert row.state == "sent" and row.payload["caption_cleanup"]["state"] == "unavailable"
+    else:
+        assert row.payload["caption_cleanup"]["state"] == "pending"
+        assert row.not_before.replace(tzinfo=began.tzinfo) >= began + timedelta(seconds=60)
+
+
+@pytest.mark.asyncio
 async def test_permanent_optional_cleanup_cannot_hold_successful_file(publication_environment):
     from app.telegram_bots.producer import DeliveryEligibility, OutboxSender
     from deerflow.persistence.telegram_bots.model import TelegramOutboxRow

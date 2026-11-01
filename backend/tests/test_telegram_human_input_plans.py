@@ -2,6 +2,8 @@
 
 from copy import deepcopy
 from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -14,7 +16,7 @@ from test_telegram_publication_observation import ACK, run_row
 
 from app.telegram_bots.human_input_source import HumanInputSource
 from app.telegram_bots.model_source import ModelSource
-from app.telegram_bots.producer import DeliveryClaimRetired, SendingPart
+from app.telegram_bots.producer import DeliveryClaimRetired, SendingPart, SourceGone
 from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow
 
 
@@ -58,6 +60,9 @@ async def test_qualified_request_primary_and_aux_step_keep_source_read_for_each_
     basis["messages"][-1]["content"]["artifact"]["human_input"]["question"] = "Changed after plan"
     with pytest.raises(DeliveryClaimRetired):
         await model.read_part(captured)
+    answered = ModelSource(read_output=e.coordinator.read_output, human_input_source=SimpleNamespace(read_request=AsyncMock(return_value=None)))
+    with pytest.raises(SourceGone):
+        await answered.read_part(captured)
 
 
 @pytest.mark.asyncio

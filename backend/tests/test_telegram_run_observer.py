@@ -386,7 +386,7 @@ async def test_accepted_stop_cannot_replace_a_normally_completed_exact_output(co
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ["requested", "refused", "terminal", "unknown"])
+@pytest.mark.parametrize("outcome", ["requested", "refused", "terminal"])
 async def test_deferred_stop_retains_exact_decision_without_renewing_or_resubmitting(coordinator_environment, outcome):
     from sqlalchemy import event
 
@@ -403,8 +403,6 @@ async def test_deferred_stop_retains_exact_decision_without_renewing_or_resubmit
     async def respond(request):
         calls.append(request)
         if request.url.path.endswith("/cancel"):
-            if outcome == "unknown":
-                raise httpx.ReadError("controlled cancel uncertainty")
             return httpx.Response(409 if outcome == "refused" else 202)
         if request.url.path.endswith("/join"):
             return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, content=b"")
@@ -442,6 +440,46 @@ async def test_deferred_stop_retains_exact_decision_without_renewing_or_resubmit
         assert all(row.route_basis["publications"][-1]["publication_execution"].get("stop_id") == (None if outcome == "refused" else "original-stop") for row in rows)
         observer.retire(record)
         assert observer.stop_outcome(record, e.link, stop_id="original-stop") is None
+    finally:
+        await observer.drain()
+
+
+@pytest.mark.asyncio
+async def test_a_stop_whose_cancel_got_no_answer_is_sent_again_under_the_same_id(coordinator_environment):
+    from app.telegram_bots.progress import RunObserver
+
+    e = coordinator_environment
+    record = await e.coordinator.dispatch(e.link, e.origins, thread_id=e.thread_id)
+    exact = run_row(record)
+    exact["metadata"] = {"channel_turn_id": record.publication_id}
+    answers = [httpx.ReadError("controlled cancel uncertainty"), httpx.Response(202)]
+    posts = []
+
+    async def respond(request):
+        if request.url.path.endswith("/cancel"):
+            posts.append(request)
+            answer = answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        if request.url.path.endswith("/join"):
+            return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, content=b"")
+        return httpx.Response(200, headers=ACK, json=exact)
+
+    async def no_line(*args):
+        pass
+
+    e.responder = respond
+    observer = RunObserver(coordinator=e.coordinator, http_owner=e.http, capture_attempt=e.host.capture, is_current=lambda _record: True)
+    try:
+        assert await observer.request_stop(record, e.link, stop_id="original-stop") == "pending"
+        assert await observer.watch(record, e.link, on_preview=no_line, on_line=no_line, turn_done=asyncio.Event()) == "coordinator-run"
+        assert observer.stop_outcome(record, e.link, stop_id="original-stop") == "unknown"
+        assert await observer.request_stop(record, e.link, stop_id="original-stop") == "requested"
+        assert await observer.request_stop(record, e.link, stop_id="original-stop") == "requested"
+        assert len(posts) == 2, "Once it is answered it is not sent again"
+        rows = await saved_marks(e)
+        assert all(row.route_basis["publications"][-1]["publication_execution"].get("stop_id") == "original-stop" for row in rows)
     finally:
         await observer.drain()
 

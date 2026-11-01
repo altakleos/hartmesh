@@ -128,7 +128,7 @@ async def test_actual_sender_rereads_each_model_part_and_preserves_prefix(public
         elif mode == "changed-after-prefix":
             assert len(sent) == 1 and len(reads) == 2
             assert saved.parts[0]["state"] == "sent" and saved.parts[0]["message_ids"] == [501]
-            assert saved.parts[1]["state"] != "sent" and saved.state != "failed"
+            assert saved.parts[1]["state"] != "sent" and saved.state == "failed", "The rest cannot be sent, and the person is told"
         else:
             assert len(reads) == 1 and not sent and saved.state != "failed"
     finally:

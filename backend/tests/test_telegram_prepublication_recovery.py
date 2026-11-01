@@ -36,6 +36,13 @@ async def test_reader_returns_staged_callback_without_fake_publication(retry_inp
     assert entry.input_owner_callback_id == e.callback_id and entry.origins == stage.origins and entry.hold_reason is None
 
 
+async def test_reader_for_one_link_leaves_out_another_links_inputs(retry_input_environment):
+    e = retry_input_environment
+    await e.stage()
+    assert len((await e.inbox.prepublication_page(limit=32, link_id=e.link.id)).entries) == 1
+    assert (await e.inbox.prepublication_page(limit=32, link_id="another-link")).entries == ()
+
+
 async def test_unrouted_singleton_retains_held_profile_without_inventing_forwarded_fact(coordinator_environment):
     e = coordinator_environment
     async with e.db.sessions.begin() as session:

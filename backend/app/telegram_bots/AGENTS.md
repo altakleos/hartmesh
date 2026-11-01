@@ -248,6 +248,24 @@ stays held only while its proof cannot be read, such as a conversation deleted u
 carry: a tool's own artifact is not in it, since the model read that and its answer is
 the reply, while `content_items` keeps it for human-input requests.
 
+A message that was saved but not yet admitted is not dropped by its replay. A failed
+attempt leaves its update unacknowledged, and `ChatTurns.unfinished` decides what the
+replay does: a row nothing holds, that no turn took and that this process saved goes on
+where it stopped, a typed answer to its prompt included. A routed row from before this
+process is recovery's. A row with no route goes on in any process, since recovery cannot
+read it and it never started anything. A channel going away also leaves its update
+unacknowledged, so the same rule decides at the next channel, unless `recover_link` has
+closed the row first. A join's updates are acknowledged as they join, so a flush that
+fails plans `error.generic` with Try again itself.
+
+A channel that starts after startup owns nothing, so once the copy decision is made
+`recover_link` closes what its link saved before that channel polls, by the path startup
+uses for every link. A publication reserved but never marked is not covered: that waits
+for the next restart, as it did. `end_pending` closes every open input of an ended
+binding, a Try again in line included, since nothing can answer them and retention waits
+for `done`; both an unbind and a hold end a binding. The startup read follows `next_after`,
+and a late answer held for its person's choice is not on it.
+
 `strangers.py` separates touch-only LRU recency from bounded unexpired reply
 charges. The supervisor owns one ledger through adapter/token replacement and
 bot removal/re-add. Forgetting recency never replenishes the 24-hour pair,
@@ -444,8 +462,12 @@ changed binding/token/adapter or newly required protection retires admission;
 the next sender pass persists any strengthened protection before transport.
 No ORM row or SQL transaction crosses transport.
 `fallback_to_plain` preserves that part's identity and source and schedules one
-later attempt. `DeliveryClaimRetired` exits normally and never becomes a payload
-failure. Raw `send_part` returns acknowledgement IDs and calls no planner.
+later attempt. A plain `DeliveryClaimRetired` exits normally and never becomes a payload
+failure. Two subclasses carry a model source read through the same fences to `_run`, which
+gives them an outcome, because a row with none is claimed again every second ahead of the
+rest of its bot's deliveries: `SourceGone` ends the row as failed with `delivery.failed`,
+and `SourceNotRead` backs off. Raw `send_part` returns acknowledgement IDs and calls no
+planner.
 `defer_token_verification` journals only the closed classification continuation
 of an observed failure. A server wait releases its claim; an unverified network
 outcome leaves backoff to the worker. Resume matching-token verification before

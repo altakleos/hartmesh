@@ -416,6 +416,10 @@ class RunObserver:
             async with state.stop_lock:
                 self._check(state)
                 decision = state.stop_decisions.get(stop_id)
+                if decision == "unknown":
+                    # The cancel may never have arrived. Asking again is safe, since `cancel_run` reads the run first.
+                    decision, state.stop_attempted = "pending", False
+                    state.stop_decisions[stop_id] = decision
                 if decision is not None:
                     if decision != "pending" or state.record.run_id is None or state.stop_attempted:
                         return decision

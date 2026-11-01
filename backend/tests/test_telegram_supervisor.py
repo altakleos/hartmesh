@@ -497,6 +497,100 @@ async def test_an_uncertain_answer_at_start_does_not_call_a_live_agent_gone(db, 
         await e.supervisor.stop()
 
 
+async def test_a_channel_that_starts_later_closes_what_was_left_before_it_polls(db, monkeypatch):
+    order = []
+
+    async def recover(_turns, channel):
+        order.append(("recovered", channel.link.id))
+
+    monkeypatch.setattr("app.telegram_bots.turns.ChatTurns.recover_link", recover)
+    e, link, _held = await running_one(db, monkeypatch, connected=True)
+    assert order == [], "At startup the whole cohort is closed together"
+    start = e.supervisor._start_poll
+
+    def polling(channel, poll):
+        order.append(("polling", channel.link.id))
+        start(channel, poll)
+
+    monkeypatch.setattr(e.supervisor, "_start_poll", polling)
+    try:
+        await e.supervisor._retire(link.id, reason="token-stored")
+        e.normal.enqueue_get_me(bot_id=link.bot_id)
+        again = e.updates.enqueue("getUpdates", result=[], release=asyncio.Event())
+        await e.supervisor._launch(await db.links.get(link.id))
+        await asyncio.wait_for(again.started.wait(), 2)
+        assert order == [("recovered", link.id), ("polling", link.id)]
+    finally:
+        await e.supervisor.stop()
+
+
+async def test_a_channel_that_starts_before_the_copy_decision_leaves_the_rows_to_startup(db, monkeypatch):
+    called = []
+
+    async def recover(_turns, channel):
+        called.append(channel.link.id)
+
+    monkeypatch.setattr("app.telegram_bots.turns.ChatTurns.recover_link", recover)
+    e, link, _held = await running_one(db, monkeypatch, connected=True)
+    try:
+        await e.supervisor._retire(link.id, reason="token-stored")
+        e.supervisor._copy_decision = None
+        e.normal.enqueue_get_me(bot_id=link.bot_id)
+        again = e.updates.enqueue("getUpdates", result=[], release=asyncio.Event())
+        await e.supervisor._launch(await db.links.get(link.id))
+        await asyncio.wait_for(again.started.wait(), 2)
+        assert called == []
+    finally:
+        await e.supervisor.stop()
+
+
+async def saved_row(e, db, link, identity):
+    from _telegram_bot_test_support import update_payload
+    from telegram import Update
+
+    inbox = e.supervisor.outbox.inbox
+    update = Update.de_json(update_payload(identity, message_id=identity, account=link.telegram_user_id, text=f"Saved {identity}"), e.supervisor.channel(link.id).bot)
+    row, _ = await inbox.accept(await db.links.get(link.id), update, sanitized_input={"type": "text", "text": f"Saved {identity}"})
+    return await inbox.route(row, kind="turn", target_id=link.agent_ref, basis={"input_profile": {"version": 1, "kind": "plain_text", "forwarded": False}}, operation_ids=[])
+
+
+async def closed_with(db, link, identity):
+    from sqlalchemy import select
+
+    from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow, TelegramOutboxRow
+
+    async with db.sessions() as session:
+        mark = await session.get(TelegramInboundMarkRow, (link.id, identity, link.chat_id))
+        rows = list(await session.scalars(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id)))
+    return mark.route_complete and any(part.get("source_ref", {}).get("key") == "chat.restarted" for row in rows for part in row.parts)
+
+
+@pytest.mark.parametrize("first_start_fails", [False, True])
+async def test_a_channel_closes_what_was_left_even_if_its_first_start_fails(db, monkeypatch, first_start_fails):
+    def live(e, _link):
+        async def owner(_owner_id):
+            async def check(_owner, _writer):
+                return None
+
+            return check
+
+        e.supervisor.authority.prepare_live_owner = owner
+
+    e, link, _held = await running_one(db, monkeypatch, connected=True, prepare=live)
+    try:
+        await saved_row(e, db, link, 10801)
+        await e.supervisor._retire(link.id, reason="token-stored")
+        if first_start_fails:
+            e.normal.enqueue("getMe", status=500, body={"ok": False, "error_code": 500, "description": "Synthetic blip"})
+        else:
+            e.normal.enqueue_get_me(bot_id=link.bot_id)
+            e.updates.enqueue("getUpdates", result=[], release=asyncio.Event())
+        await e.supervisor._launch(await db.links.get(link.id))
+        assert await closed_with(db, link, 10801)
+    finally:
+        await e.supervisor.stop()
+
+
 async def test_a_long_stop_of_the_gateway_is_told_after_the_first_good_poll(db, monkeypatch):
     from datetime import timedelta
 

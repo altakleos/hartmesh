@@ -406,21 +406,23 @@ class ModelSource:
 
     async def read_file_part(self, captured):
         from app.telegram_bots.file_source import PreparedFilePart
-        from app.telegram_bots.producer import DeliveryClaimRetired, _canonical_primary
+        from app.telegram_bots.producer import SourceGone, SourceNotRead, _canonical_primary
 
         try:
             private, proof = await await_drained(asyncio.to_thread(_prepare_part, captured))
             if proof.kind not in {"file_outputs", "human_input_files"} or private.part["kind"] not in {"document", "photo", "album"}:
-                raise ValueError
+                raise SourceGone
             fresh = await self._read_output(proof.record, private.link)
             if fresh is None or _canonical_primary(fresh.model_dump(mode="json")) != _canonical_primary(proof.output.model_dump(mode="json")):
-                raise ValueError
+                raise SourceGone
             return PreparedFilePart(proof.record, tuple(deepcopy(private.part["files"])), private.part.get("caption_html"), private.part.get("caption_text"), private.part["unavailable"])
+        except SourceGone:
+            raise
         except Exception:
-            raise DeliveryClaimRetired() from None
+            raise SourceNotRead() from None
 
     async def read_part(self, captured: SendingPart) -> PreparedModelPart:
-        from app.telegram_bots.producer import DeliveryClaimRetired
+        from app.telegram_bots.producer import SourceGone, SourceNotRead
 
         try:
             private, proof = await await_drained(asyncio.to_thread(_prepare_part, captured))
@@ -431,17 +433,17 @@ class ModelSource:
 
                 fresh = await self._read_output(proof.record, private.link)
                 if fresh is None or _canonical_primary(fresh.model_dump(mode="json")) != _canonical_primary(proof.output.model_dump(mode="json")) or private.part["source_ref"].get("key") not in {"file.out_failed", "file.too_large_out"}:
-                    raise ValueError
+                    raise SourceGone
                 return None
             if proof.kind in {"human_input", "human_input_files"}:
                 from app.telegram_bots.human_input_source import check_qualified_request
                 from app.telegram_bots.producer import _canonical_primary
 
                 if self._human_input_source is None:
-                    raise ValueError
+                    raise SourceGone
                 qualified = await self._human_input_source.read_request(proof.record, private.link)
                 if qualified is None or _canonical_primary(check_qualified_request(qualified, proof.record)) != _canonical_primary(private.item.payload["reply_basis"]["outcome"]["request_basis"]):
-                    raise ValueError
+                    raise SourceGone
                 return PreparedModelPart(private.part["html"], private.part["visible_text"], True, _page_keys(private.item, private.part, proof.output))
             fresh = await self._read_output(proof.record, private.link)
 
@@ -449,23 +451,28 @@ class ModelSource:
                 from app.telegram_bots.producer import _canonical_primary
 
                 if fresh is None:
-                    raise ValueError
+                    raise SourceGone
                 if proof.kind == "file_outputs":
                     if _canonical_primary(fresh.model_dump(mode="json")) != _canonical_primary(proof.output.model_dump(mode="json")) or private.part["kind"] not in {"text", "edit"}:
-                        raise ValueError
+                        raise SourceGone
                     if "key" in private.part["source_ref"]:
                         return None
                     return PreparedModelPart(private.part["html"], private.part["visible_text"], page_keys=_page_keys(private.item, private.part, proof.output))
-                if private.item.payload["reply_basis"]["version"] == 4:
-                    candidate, _ = prepare_display_reply(proof.record, fresh, display=private.item.payload["reply_basis"]["display"], reply_to_message_id=private.item.payload["reply_basis"]["parts"][0]["reply_to_message_id"])
-                else:
-                    candidate, _ = prepare_verified_reply(proof.record, fresh, reply_to_message_id=private.part["reply_to_message_id"])
+                try:
+                    if private.item.payload["reply_basis"]["version"] == 4:
+                        candidate, _ = prepare_display_reply(proof.record, fresh, display=private.item.payload["reply_basis"]["display"], reply_to_message_id=private.item.payload["reply_basis"]["parts"][0]["reply_to_message_id"])
+                    else:
+                        candidate, _ = prepare_verified_reply(proof.record, fresh, reply_to_message_id=private.part["reply_to_message_id"])
+                except ValueError:
+                    raise SourceGone from None  # The saved answer no longer reads as the one this reply was planned from.
                 if _canonical_primary(candidate) != _canonical_primary(private.item.payload["reply_basis"]):
-                    raise ValueError
+                    raise SourceGone
                 if proof.kind == "stopped_preview" and private.part["source_ref"].get("key") == "stop.answer":
                     return None
                 return PreparedModelPart(private.part["html"], private.part["visible_text"], page_keys=_page_keys(private.item, private.part, proof.output))
 
             return await await_drained(asyncio.to_thread(compare))
+        except SourceGone:
+            raise
         except Exception:
-            raise DeliveryClaimRetired() from None
+            raise SourceNotRead() from None

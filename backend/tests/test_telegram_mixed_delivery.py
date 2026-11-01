@@ -5,6 +5,7 @@ The separate worker composition tests establish actual runtime provenance.
 
 from copy import deepcopy
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from _telegram_repository_test_support import db as db
@@ -16,7 +17,7 @@ from app.telegram_bots.human_input import present_request
 from app.telegram_bots.human_input_source import HumanInputSource
 from app.telegram_bots.mixed_source import prepare_mixed_files
 from app.telegram_bots.model_source import ModelSource
-from app.telegram_bots.producer import DeliveryEligibility
+from app.telegram_bots.producer import DeliveryEligibility, SourceGone, SourceNotRead
 from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
 
 pytestmark = pytest.mark.asyncio
@@ -41,6 +42,16 @@ async def capture(e, p, index):
         row.parts = parts
         part_id = parts[index]["part_id"]
     return await e.outbox.capture_sending_part(link_id=e.link.id, outbox_id=p.id, part_id=part_id, claim_owner="root-source", claim_id="claim", token_revision=e.link.token_revision)
+
+
+@pytest.mark.parametrize("read, raised", [(AsyncMock(return_value=None), SourceGone), (AsyncMock(side_effect=OSError("blip")), SourceNotRead)])
+async def test_a_file_part_tells_a_source_that_went_away_from_a_read_that_failed(coordinator_environment, read, raised):
+    e = coordinator_environment
+    p = await primary(e)
+    media = await capture(e, p, 0)
+    p.reader._read_output = read
+    with pytest.raises(raised):
+        await p.reader.read_file_part(media)
 
 
 async def test_saved_mixed_media_and_question_use_distinct_fresh_source_paths(coordinator_environment):

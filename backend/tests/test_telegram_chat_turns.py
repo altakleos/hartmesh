@@ -976,12 +976,16 @@ async def test_retirement_while_input_write_settles_never_occupies_queue(db, mon
 
     monkeypatch.setattr(inbox, boundary, retire_after)
     try:
-        assert await e.channel.handle_update(message(e, 1031, content="Save before retirement"))
+        assert await e.channel.handle_update(message(e, 1031, content="Save before retirement")) is False, "The next channel must get this update"
         assert not turns._tasks and not turns._turns and not turns.queue._turns
         async with db.sessions() as session:
             row = await session.get(TelegramInboundMarkRow, (e.link.id, 1031, e.link.chat_id))
             assert row is not None and not row.route_complete
             assert row.route_kind == (None if boundary == "accept" else "turn")
+        monkeypatch.setattr(inbox, boundary, actual)
+        e.active[0] = True
+        assert await e.channel.handle_update(message(e, 1031, content="Save before retirement")) is True
+        assert turns._turns
     finally:
         await turns.stop()
         await e.channel.stop()
