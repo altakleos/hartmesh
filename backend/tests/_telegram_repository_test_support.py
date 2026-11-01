@@ -47,6 +47,10 @@ async def db(request, tmp_path):
 
         @event.listens_for(engine.sync_engine, "connect")
         def pragmas(connection, record):
+            # Production's pragmas, so a commit costs here what it costs there
+            # and a slow disk does not decide how long these tests take.
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=NORMAL")
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("PRAGMA busy_timeout=30000")
 
