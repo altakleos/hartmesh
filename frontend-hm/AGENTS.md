@@ -433,32 +433,7 @@ canonical decision includes every reviewed response ID. Read is independent and
 no response invokes run/resume. Generic inputs survive optional plugin absence;
 file references use existing Spaces and never imply upload or mounting.
 
-`core/telegram-bots/` is the client of `/api/telegram-bots`. `useTelegram` fails
-closed: a null, missing or unreadable features key renders nothing about Telegram.
-`rowOf` in `rows.ts` is the one row table; every place that shows a bot's state
-reads it. Refusals are shown by `reason` through `telegramRefusalKey`, never by
-`detail`. Keep the two calls that carry a token as plain `api.ts` calls, not
-mutations, because the query library would keep the token as its variables. Call
-`findToken` on a paste, a press or a blur, never while typing. `TOKEN_BODY`,
-`pictureOf`, `displayNameOf` and `suggestUsername` mirror server rules and are
-pinned on both sides. Texts live under `telegramBots` as dotted keys; `telegramText`
-resolves them, and a text that says whom to ask takes the reader's role, because no
-text sends a user to the provider. `components/workspace/telegram/` draws the
-section inside `ChannelsSettingsPage`. `setup-dialog-store.ts` holds what only this
-page knows: the open set-up, the connect addresses it received, and which links are
-the answer to a pasted token. `TelegramTokenField` is the one paste rule for both
-token dialogs, and `TelegramTokenDialog` keeps one `operation_id` per token, by a
-lossy fingerprint, so a retry after a lost answer returns the saved receipt. Consent
-to take a webhook over covers the refused token's fingerprint only. A held connect
-address is stored with `telegramConnectEpoch`, so an answer to a request made before
-Disconnect all is dropped. `setupStageOf` derives the set-up's stage from the list,
-so a reload or a second tab agrees; do not keep a second copy of it. `useTelegramClock`
-re-renders what changes with time alone, because an unchanged poll renders nothing.
-`?settings=channels&telegram=<target>` opens a row; a target uses a dot because the
-sign-in return refuses a colon. The workspace layout sends a signed-out person to
-sign-in from the browser through `RedirectToLogin`, because a layout receives no
-query. `qrcode.react` is imported only by `qr-code.tsx`, behind the dynamic set-up
-host, so it stays out of the workspace's first load.
+Telegram screens: [the client guide](src/core/telegram-bots/AGENTS.md).
 
 Managed storage UX uses the existing account-and-role-scoped features query:
 `useStorage` fails closed for absent/malformed/failed answers and polls personal

@@ -1,0 +1,5 @@
+# CLAUDE.md
+
+The agent guidance for this directory lives in [AGENTS.md](AGENTS.md) so it is shared across coding agents (Claude Code, Codex, and others). Claude Code imports it below.
+
+@AGENTS.md
