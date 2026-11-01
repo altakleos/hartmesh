@@ -107,11 +107,16 @@ async def test_profile_names_no_role_person_or_company(db, monkeypatch, lead):
         await e.channel.stop()
 
 
-@pytest.mark.parametrize(("name", "slug"), [("Reporting analyst", "reportinganalyst"), ("3D helper", "ai_3dhelper"), ("财务", "ai"), ("A" * 40, "a" * 20)])
+@pytest.mark.parametrize(("name", "slug"), [("Reporting analyst", "reportinganalyst"), ("3D helper", "ai_3dhelper"), ("A" * 40, "a" * 20)])
 def test_username_suggestion_rules(name, slug):
     username = suggested_username(name)
     assert re.fullmatch(re.escape(slug) + r"_[a-hj-km-np-z2-9]{4}_bot", username)
     assert 10 <= len(username) <= 32 and username.endswith("_bot")
+
+
+def test_a_name_with_no_slug_and_the_ordinary_chat_have_their_own_forms():
+    assert re.fullmatch(r"ai_[a-hj-km-np-z2-9]{8}_bot", suggested_username("财务"))
+    assert re.fullmatch(r"chat_[a-hj-km-np-z2-9]{6}_bot", suggested_username("", chat=True))
 
 
 def test_avatar_is_a_640_pixel_square_jpeg():

@@ -23,6 +23,7 @@ from app.gateway.deps import get_config, get_current_user_from_request
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.knowledge_scope_admission import RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
 from app.gateway.run_models import MAX_CONVERSATION_REFERENCES
+from app.telegram_bots.router import telegram_feature
 from deerflow.config.app_config import AppConfig
 from deerflow.config.tenant_bundle import MAX_COMPANY_NAME_CHARS, MAX_SUPPORT_URL_CHARS, TenantBundle, configured_tenant_bundle
 from deerflow.config.ui_config import MAX_STARTER_PROMPT_CHARS, MAX_STARTER_TITLE_CHARS, MAX_STARTERS, UiConfig
@@ -158,6 +159,14 @@ class CustomerAdministrationFeature(BaseModel):
     provider_operations: bool = False
 
 
+class TelegramFeature(BaseModel):
+    enabled: bool = False
+    bots: Literal["ready", "unavailable"] = "unavailable"
+    reason: str | None = None
+    voice: Literal["available", "unavailable"] = "unavailable"
+    voice_provider: Literal["openai", "gemini"] | None = None
+
+
 async def _customer_administration_feature(request: Request, config: AppConfig) -> CustomerAdministrationFeature:
     policy = request_customer_administration_policy(request)
     actor = await resolve_customer_management_actor(request)
@@ -211,6 +220,7 @@ class FeaturesResponse(BaseModel):
     knowledge_base: KnowledgeBaseFeature
     ui: UiFeature
     branding: BrandingFeature
+    telegram: TelegramFeature | None = None
 
 
 @router.get(
@@ -237,6 +247,7 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
         people_search=people_search,
         customer_administration=await _customer_administration_feature(request, config),
         agents_api=AgentsApiFeature(enabled=config.agents_api.enabled),
+        telegram=telegram_feature(request.app, config),
         browser_control=BrowserControlFeature(enabled=browser.available),
         # MCP task bindings and the submitter are startup-scoped. Report the
         # capability that actually started rather than a hot-reloaded config

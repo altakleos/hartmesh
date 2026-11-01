@@ -1372,7 +1372,10 @@ answered together in order. `/stop` and the current answer's Stop control stop
 that exact turn and discard its waiting messages. Transient execution-capacity
 refusals wait for up to two minutes; Cancel takes the input out of line, and
 Try again makes a new authorized attempt. Redelivering an update never retries
-the model. The connection UI remains reserved for a subsequent stage.
+the model. The web app's Telegram screens are reserved for a subsequent stage; the
+`/api/telegram-bots` routes they will use need a signed-in browser session, so
+neither a personal access token nor the internal token reaches them, and no
+response carries a bot token.
 
 The service sets each bot's public name, descriptions, command menu and picture,
 in the language its owner chose, and retries for 24 hours if Telegram refuses.

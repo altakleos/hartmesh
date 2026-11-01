@@ -76,6 +76,7 @@ from app.gateway.routers import (
     user_preferences,
 )
 from app.gateway.trace_middleware import TraceMiddleware
+from app.telegram_bots.router import router as telegram_bots_router
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
 from deerflow.tracing.monocle import setup_monocle_tracing_if_enabled
@@ -1371,6 +1372,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Auth API is mounted at /api/v1/auth
     app.include_router(auth.router)
     app.include_router(user_preferences.router)
+    app.include_router(telegram_bots_router)
 
     # Feedback API is mounted at /api/threads/{thread_id}/runs/{run_id}/feedback
     app.include_router(feedback.router)

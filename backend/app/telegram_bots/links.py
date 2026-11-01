@@ -706,6 +706,15 @@ class BotLinkRepository:
             await session.flush()
             return _snapshot(row)
 
+    async def save_settings(self, owner_user_id: str, columns: dict, *, language_changed: bool):
+        """Settings and the owed profiles a new language brings, in one writer."""
+        async with self._owner_writer(owner_user_id) as session:
+            saved = await self.settings.update(owner_user_id, session=session, **columns)
+            if language_changed:
+                await session.execute(select(TelegramBotLinkRow.id).where(TelegramBotLinkRow.owner_user_id == owner_user_id).order_by(TelegramBotLinkRow.id).with_for_update())
+                await session.execute(update(TelegramBotLinkRow).where(TelegramBotLinkRow.owner_user_id == owner_user_id).values(profile_pending=True))
+            return saved
+
     async def finish_profile(self, link_id: str, *, token_revision: int, version: int, bot_name: str, locale: str, at: datetime) -> BotLink | None:
         """Record a completed push, unless its token or language is no longer current.
 
