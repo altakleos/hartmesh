@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import math
 import mimetypes
@@ -28,7 +29,7 @@ from app.channels import buzz_run_policy as _buzz_run_policy  # noqa: F401
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
-from app.channels.execution import ChannelExecutionBusyError, ChannelExecutionContext, ChannelExecutionProtocolError, ChannelOperation
+from app.channels.execution import ChannelExecutionBusyError, ChannelExecutionContext, ChannelExecutionProtocolError, ChannelOperation, ChannelUploadRefused
 from app.channels.inbound_files import InboundFileLease, inbound_file_context
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
@@ -201,19 +202,14 @@ def _slim_metadata(meta: dict[str, Any]) -> dict[str, Any]:
 
 INBOUND_FILE_READERS: dict[str, InboundFileReader] = {}
 INBOUND_FILE_WRITE_FAILED: dict[str, Callable[[dict[str, Any], Exception], Awaitable[None]]] = {}
-INBOUND_FILE_PREPARE_FILTERS: dict[str, Callable[[dict[str, Any]], bool]] = {}
 
 
 def register_inbound_file_reader(channel_name: str, reader: InboundFileReader) -> None:
     INBOUND_FILE_READERS[channel_name] = reader
 
 
-def register_inbound_file_write_failed(channel_name: str, handler: Callable[[dict[str, Any], Exception], Awaitable[None]], *, prepare_failure_filter: Callable[[dict[str, Any]], bool] | None = None) -> None:
+def register_inbound_file_write_failed(channel_name: str, handler: Callable[[dict[str, Any], Exception], Awaitable[None]]) -> None:
     INBOUND_FILE_WRITE_FAILED[channel_name] = handler
-    if prepare_failure_filter is not None:
-        INBOUND_FILE_PREPARE_FILTERS[channel_name] = prepare_failure_filter
-    else:
-        INBOUND_FILE_PREPARE_FILTERS.pop(channel_name, None)
 
 
 async def _read_http_inbound_file(file_info: dict[str, Any], client: httpx.AsyncClient) -> bytes | None:
@@ -1255,14 +1251,36 @@ async def _write_inbound_file(uploads_dir: Path, safe_name: str, data: bytes) ->
     return await asyncio.to_thread(write)
 
 
-async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id: str | None = None) -> list[dict[str, Any]]:
+async def _ingest_inbound_files(
+    thread_id: str,
+    msg: InboundMessage,
+    *,
+    user_id: str | None = None,
+    upload: Callable[[str, bytes], Awaitable[dict[str, Any]]] | None = None,
+    saved_files: dict[str, dict[str, Any] | None] | None = None,
+) -> list[dict[str, Any]]:
     with inbound_file_context(msg.execution_context):
-        return await _ingest_inbound_files_scoped(thread_id, msg, user_id=user_id)
+        return await _ingest_inbound_files_scoped(thread_id, msg, user_id=user_id, upload=upload, saved_files=saved_files)
 
 
-async def _ingest_inbound_files_scoped(thread_id: str, msg: InboundMessage, *, user_id: str | None = None) -> list[dict[str, Any]]:
+async def _ingest_inbound_files_scoped(
+    thread_id: str,
+    msg: InboundMessage,
+    *,
+    user_id: str | None = None,
+    upload: Callable[[str, bytes], Awaitable[dict[str, Any]]] | None = None,
+    saved_files: dict[str, dict[str, Any] | None] | None = None,
+) -> list[dict[str, Any]]:
+    """Save a message's files where its run will find them.
+
+    `upload` hands each one to the route the web uses, which knows the conversation's storage, and
+    `saved_files` keeps what it answered, None for a refusal, so that each file has one outcome however
+    many attempts the message takes: no second copy, and no notice a later attempt makes untrue.
+    Without `upload` they are written under the thread's own directory.
+    """
     if not msg.files:
         return []
+    saved_files = {} if saved_files is None else saved_files
 
     from deerflow.uploads.manager import UnsafeUploadPathError, claim_unique_filename, ensure_uploads_dir, normalize_filename
 
@@ -1273,27 +1291,28 @@ async def _ingest_inbound_files_scoped(thread_id: str, msg: InboundMessage, *, u
         existing = {entry.name for entry in target.iterdir() if entry.is_file()}
         return target, existing
 
-    try:
+    uploads_dir, seen_names = None, set()
+    if upload is None:
         uploads_dir, seen_names = await await_drained(asyncio.to_thread(_prepare_uploads_dir))
-    except Exception as error:
-        notify = INBOUND_FILE_WRITE_FAILED.get(msg.channel_name)
-        accepts = INBOUND_FILE_PREPARE_FILTERS.get(msg.channel_name)
-        files = [file for file in msg.files if isinstance(file, dict)]
-        if notify is None or accepts is None or not files or len(files) != len(msg.files) or not all(accepts(file) is True for file in files):
-            raise
-        logger.warning("[Manager] inbound upload preparation failed: channel=%s, error=%s", msg.channel_name, _reader_error_summary(error))
-        for file in files:
+
+    async def tell_write_failed(file: dict[str, Any], error: Exception) -> None:
+        handler = INBOUND_FILE_WRITE_FAILED.get(msg.channel_name)
+        if handler is not None:
             try:
-                await await_drained(notify(file, error))
-            except Exception as failure:
-                logger.warning("[Manager] inbound write failure notification failed: channel=%s, error=%s", msg.channel_name, _reader_error_summary(failure))
-        return []
+                await await_drained(handler(file, error))
+            except Exception as exc:
+                logger.warning("[Manager] inbound write failure notification failed: channel=%s, error=%s", msg.channel_name, _reader_error_summary(exc))
 
     created: list[dict[str, Any]] = []
     file_reader = INBOUND_FILE_READERS.get(msg.channel_name, _read_http_inbound_file)
     async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
         for idx, f in enumerate(msg.files):
             if not isinstance(f, dict):
+                continue
+            saved_key = json.dumps({key: value for key, value in f.items() if key != INBOUND_FILE_CONTENT_KEY}, sort_keys=True) if upload is not None else None
+            if saved_key in saved_files:
+                if saved_files[saved_key] is not None:
+                    created.append(saved_files[saved_key])
                 continue
 
             lease = reader_result = data = inline_content = error = None
@@ -1335,6 +1354,17 @@ async def _ingest_inbound_files_scoped(thread_id: str, msg: InboundMessage, *, u
                 if not filename:
                     ext = ".png" if ftype == "image" else ".bin"
                     filename = f"{msg.thread_ts or 'msg'}_{idx}{ext}"
+                if upload is not None:
+                    try:
+                        saved = await upload(filename, data)
+                    except ChannelUploadRefused as refused:
+                        logger.warning("[Manager] inbound file refused: channel=%s, file=%s, status=%s", msg.channel_name, _inbound_file_label(f, idx=idx), refused.status)
+                        saved_files[saved_key] = None
+                        await tell_write_failed(f, refused)
+                        continue
+                    saved_files[saved_key] = {"filename": saved["filename"], "size": saved["size"], "path": saved["virtual_path"], "is_image": ftype == "image"}
+                    created.append(saved_files[saved_key])
+                    continue
                 try:
                     safe_name = claim_unique_filename(normalize_filename(filename), seen_names)
                 except ValueError:
@@ -1348,12 +1378,7 @@ async def _ingest_inbound_files_scoped(thread_id: str, msg: InboundMessage, *, u
                     continue
                 if error is not None:
                     logger.warning("[Manager] failed to write inbound file: channel=%s, file=%s, error=%s", msg.channel_name, safe_name, _reader_error_summary(error))
-                    handler = INBOUND_FILE_WRITE_FAILED.get(msg.channel_name)
-                    if handler is not None:
-                        try:
-                            await await_drained(handler(f, error))
-                        except Exception as exc:
-                            logger.warning("[Manager] inbound write failure notification failed: channel=%s, error=%s", msg.channel_name, _reader_error_summary(exc))
+                    await tell_write_failed(f, error)
                     continue
 
                 created.append({"filename": safe_name, "size": size, "path": f"/mnt/user-data/uploads/{safe_name}", "is_image": ftype == "image"})
@@ -2712,7 +2737,7 @@ class ChannelManager:
                     # metadata and host capability never follow that rewrite.
                     msg = replace(msg, text=prepared.text, files=prepared.files)
             original_text = msg.text
-            uploaded = await await_drained(_ingest_inbound_files(execution.thread_id, msg, user_id=execution.owner_user_id))
+            uploaded = await await_drained(_ingest_inbound_files(execution.thread_id, msg, user_id=execution.owner_user_id, upload=execution.client.threads.upload, saved_files=execution.saved_files)) if msg.files else []
             extras = dict(msg.metadata.get("human_message_kwargs") or {})
             _validate_execution_carriers(execution, extras)
             extras["channel_turn_id"] = execution.publication_id

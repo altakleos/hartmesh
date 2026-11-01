@@ -392,7 +392,7 @@ class PublicationCoordinator:
 
         return await self._call(perform, creating=True)
 
-    async def _dispatch_reserved(self, link, record, origins, admission, create_guard):
+    async def _dispatch_reserved(self, link, record, origins, admission, create_guard, *, saved_files=None):
         if record.dispatch_started:
             return record
         execution_scope = _channel_scope(record)
@@ -424,7 +424,7 @@ class PublicationCoordinator:
             },
             files=files,
             execution_required=True,
-            execution_context=ChannelExecutionContext(execution_scope, facade, admission),
+            execution_context=ChannelExecutionContext(execution_scope, facade, admission, saved_files={} if saved_files is None else saved_files),
         )
         if files and self.file_preflight is not None:
             allowed = await self.file_preflight(link, record, [dict(file) for file in files], execution_context=message.execution_context)
@@ -457,7 +457,7 @@ class PublicationCoordinator:
         finally:
             reservation.release()
 
-    async def dispatch_record(self, record: PublicationRecord, current_link: BotLink) -> PublicationRecord:
+    async def dispatch_record(self, record: PublicationRecord, current_link: BotLink, *, saved_files: dict[str, dict] | None = None) -> PublicationRecord:
         self._check_open(creating=True)
         record, current_link = deepcopy(record), deepcopy(current_link)
         self._record_link(record, current_link)
@@ -468,20 +468,20 @@ class PublicationCoordinator:
             await self._thread_proof(current_link, record.scope.thread_id, admission)
             fresh, origins = await self.inbox.read_publication_input(record, guard=create_guard)
             origins = _plain_origins(current_link, origins, thread_id=record.scope.thread_id, endpoint_id=record.scope.endpoint_id)
-            return await self._dispatch_reserved(current_link, fresh, origins, admission, create_guard)
+            return await self._dispatch_reserved(current_link, fresh, origins, admission, create_guard, saved_files=saved_files)
 
         return await self._call(perform, creating=True)
 
-    async def retry(self, previous: PublicationRecord, current_link: BotLink, *, on_reserved: Callable[[PublicationRecord], None] | None = None) -> PublicationRecord:
-        return await self._retry(previous, current_link, refusal=None, on_reserved=on_reserved)
+    async def retry(self, previous: PublicationRecord, current_link: BotLink, *, on_reserved: Callable[[PublicationRecord], None] | None = None, saved_files: dict[str, dict] | None = None) -> PublicationRecord:
+        return await self._retry(previous, current_link, refusal=None, on_reserved=on_reserved, saved_files=saved_files)
 
-    async def retry_refused(self, previous: PublicationRecord, current_link: BotLink, refusal, *, on_reserved: Callable[[PublicationRecord], None] | None = None) -> PublicationRecord:
+    async def retry_refused(self, previous: PublicationRecord, current_link: BotLink, refusal, *, on_reserved: Callable[[PublicationRecord], None] | None = None, saved_files: dict[str, dict] | None = None) -> PublicationRecord:
         from app.channels.outcomes import validate_creation_refusal
 
         validate_creation_refusal(refusal, channel_execution_scope(previous))
-        return await self._retry(previous, current_link, refusal=refusal, on_reserved=on_reserved)
+        return await self._retry(previous, current_link, refusal=refusal, on_reserved=on_reserved, saved_files=saved_files)
 
-    async def _retry(self, previous, current_link, *, refusal, on_reserved):
+    async def _retry(self, previous, current_link, *, refusal, on_reserved, saved_files):
         self._check_open(creating=True)
         if on_reserved is not None and not callable(on_reserved):
             _refuse()
@@ -519,7 +519,7 @@ class PublicationCoordinator:
                         result.close()
                     _refuse()
             fresh, origins = await self.inbox.read_publication_input(successor, guard=create_guard)
-            return await self._dispatch_reserved(current_link, fresh, _plain_origins(current_link, origins, thread_id=fresh.scope.thread_id, endpoint_id=fresh.scope.endpoint_id), admission, create_guard)
+            return await self._dispatch_reserved(current_link, fresh, _plain_origins(current_link, origins, thread_id=fresh.scope.thread_id, endpoint_id=fresh.scope.endpoint_id), admission, create_guard, saved_files=saved_files)
 
         return await self._call(perform, creating=True)
 

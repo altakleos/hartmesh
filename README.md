@@ -1441,9 +1441,10 @@ saved answer returns through the normal run and network-policy checks. Answer
 controls retain the original conversation and cannot submit twice. Navigating
 away closes the current input scope; a reply to an old prompt requires an explicit
 choice before it can become new input. This adds no schema change.
-Managed bots also accept photos and documents. A caption sends the file with
-the message; a file without a caption waits for the next message in the same
-chat and topic for up to 24 hours. Albums, split long messages and forwarded
+Managed bots also accept photos and documents. They are saved as a file added on
+the web is, in the person's own Space when Storage Spaces are on. A caption sends
+the file with the message; a file without a caption waits for the next message in
+the same chat and topic for up to 24 hours. Albums, split long messages and forwarded
 material retain their original order. Downloads share a bounded process memory
 budget. Unavailable storage, oversized files and failed saves receive explicit
 notices; the message can continue without the file. Send again retries the

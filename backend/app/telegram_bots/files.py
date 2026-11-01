@@ -9,6 +9,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from app.channels.execution import ChannelUploadRefused
 from app.channels.inbound_files import InboundFileLease
 from deerflow.utils.file_io import await_drained
 
@@ -123,8 +124,11 @@ async def write_failed(file, exc: Exception) -> None:
         channel = _channel(file)
         if channel is None:
             return
-        if isinstance(exc, OSError) and exc.errno in {errno.ENOSPC, errno.EDQUOT}:
+        status = exc.status if isinstance(exc, ChannelUploadRefused) else None
+        if isinstance(exc, OSError) and exc.errno in {errno.ENOSPC, errno.EDQUOT} or status == 507:
             await channel.file_own_full(file, execution_context=execution_context)
+        elif status == 503:
+            await channel.file_own_unavailable(file, execution_context=execution_context)
         else:
             await channel.file_not_saved(file, execution_context=execution_context)
     except Exception as failure:

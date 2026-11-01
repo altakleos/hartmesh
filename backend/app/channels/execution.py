@@ -24,6 +24,14 @@ class ChannelExecutionProtocolError(RuntimeError):
         super().__init__("Channel execution protocol refused")
 
 
+class ChannelUploadRefused(RuntimeError):
+    """The Gateway did not take a file. `status` says why, None if no readable answer came, and no private text travels with it."""
+
+    def __init__(self, status: int | None) -> None:
+        super().__init__("Channel file upload refused")
+        self.status = status
+
+
 class ChannelExecutionBusyError(RuntimeError):
     def __init__(self) -> None:
         super().__init__("Channel execution thread busy")
@@ -71,6 +79,8 @@ class ChannelExecutionContext:
     client: ChannelExecutionClient = field(repr=False)
     admission: ChannelRunAdmission = field(repr=False)
     progress: ChannelExecutionProgress = field(default_factory=ChannelExecutionProgress, repr=False, compare=False)
+    # Files this message has saved, kept by whoever makes its attempts so that the next one does not save them again.
+    saved_files: dict[str, dict] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if type(self.scope) is not ChannelExecutionScope:
@@ -165,6 +175,7 @@ class ChannelHttpOwner(Protocol):
         body: Mapping[str, JsonValue] | None = None,
         params: Mapping[str, QueryValue] | None = None,
         headers: Mapping[str, str] | None = None,
+        files: Sequence[tuple[str, tuple[str, bytes]]] | None = None,
     ) -> ChannelJsonResponse: ...
 
     def stream_sse(
@@ -191,6 +202,8 @@ class ChannelHttpOwner(Protocol):
 
 class ChannelExecutionThreads(Protocol):
     async def get(self, thread_id: str, *, headers: Mapping[str, str] | None = None) -> dict: ...
+
+    async def upload(self, filename: str, data: bytes) -> dict: ...
 
 
 class ChannelExecutionRuns(Protocol):

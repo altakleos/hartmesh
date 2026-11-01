@@ -7,7 +7,7 @@ import httpx
 import pytest
 from test_channel_execution_client import ACK, PUBLICATION, facade, row
 
-from app.channels.execution import ChannelExecutionProtocolError
+from app.channels.execution import ChannelExecutionProtocolError, ChannelUploadRefused
 
 pytestmark = pytest.mark.asyncio
 
@@ -34,6 +34,73 @@ async def test_cancel_borrows_original_owner_and_needs_no_create_permission():
         assert dict(calls[-1].url.params) == {"wait": "false", "action": "interrupt"}
         assert calls[-1].content == b""
         assert "run_create" not in admission.calls and "run_cancel" in admission.calls
+    finally:
+        await owner.stop()
+
+
+async def test_a_file_goes_up_by_the_route_the_web_uses_as_the_bound_person():
+    calls = []
+    entry = {"filename": "input.csv", "size": 3, "virtual_path": "/mnt/user-data/uploads/input.csv"}
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(200, json={"success": True, "files": [entry], "message": "ok", "skipped_files": []})
+
+    client, owner, admission, _ = facade(respond)
+    try:
+        assert await client.threads.upload("input.csv", b"a,b") == entry
+        request = calls[-1]
+        assert (request.method, request.url.path) == ("POST", "/prefix/api/threads/thread/uploads")
+        assert request.headers["content-type"].startswith("multipart/form-data; boundary=")
+        assert b'name="files"; filename="input.csv"' in request.content and b"a,b" in request.content
+        assert "run_create" in admission.calls
+    finally:
+        await owner.stop()
+
+
+@pytest.mark.parametrize(
+    "status, body",
+    [
+        (507, {"detail": "full"}),
+        (409, {"detail": "conversation is busy"}),
+        (200, {"success": False, "files": [], "message": "skipped", "skipped_files": ["input.csv"]}),
+    ],
+)
+async def test_a_file_the_gateway_did_not_take_says_how(status, body):
+    client, owner, _admission, _ = facade(lambda request: httpx.Response(status, json=body))
+    try:
+        with pytest.raises(ChannelUploadRefused) as refused:
+            await client.threads.upload("input.csv", b"a,b")
+        assert refused.value.status == status
+    finally:
+        await owner.stop()
+
+
+@pytest.mark.parametrize("answer", [httpx.ReadTimeout("synthetic: nothing came"), httpx.Response(500, text="Internal Server Error")], ids=["no answer", "an answer that is not JSON"])
+async def test_a_gateway_with_no_readable_answer_costs_the_message_only_its_file(answer):
+    def respond(request):
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    client, owner, _admission, _ = facade(respond)
+    try:
+        with pytest.raises(ChannelUploadRefused) as refused:
+            await client.threads.upload("input.csv", b"a,b")
+        assert refused.value.status is None
+    finally:
+        await owner.stop()
+
+
+async def test_a_turn_that_ended_during_its_upload_ends_there():
+    def respond(request):
+        admission.permitted.discard("run_create")
+        raise httpx.ReadTimeout("synthetic")
+
+    client, owner, admission, _ = facade(respond)
+    try:
+        with pytest.raises(ChannelExecutionProtocolError):
+            await client.threads.upload("input.csv", b"a,b")
     finally:
         await owner.stop()
 

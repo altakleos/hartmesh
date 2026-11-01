@@ -8,7 +8,8 @@ import threading
 import pytest
 
 from app.channels import manager
-from app.channels.message_bus import InboundMessage
+from app.channels.execution import ChannelUploadRefused
+from app.channels.message_bus import INBOUND_FILE_CONTENT_KEY, InboundMessage
 from deerflow.uploads import manager as uploads
 
 
@@ -22,6 +23,64 @@ def ingestion(tmp_path, monkeypatch):
         return InboundMessage(channel_name="lease-test", chat_id="chat", user_id="platform-person", text="A message", files=list(files))
 
     return destination, message
+
+
+@pytest.mark.asyncio
+async def test_a_later_attempt_finds_what_the_route_saved_and_reads_nothing(monkeypatch):
+    reads, posts, kept = [], [], {}
+
+    async def reader(file, client):
+        reads.append(file["filename"])
+        return b"bytes"
+
+    async def upload(filename, data):
+        posts.append((filename, data))
+        return {"filename": "input_1.csv", "size": 5, "virtual_path": "/mnt/user-data/uploads/input_1.csv"}
+
+    def message():
+        return InboundMessage(channel_name="upload-test", chat_id="chat", user_id="platform-person", text="A message", files=[{"filename": "input.csv"}])
+
+    monkeypatch.setitem(manager.INBOUND_FILE_READERS, "upload-test", reader)
+    first = await manager._ingest_inbound_files("thread", message(), upload=upload, saved_files=kept)
+    second = await manager._ingest_inbound_files("thread", message(), upload=upload, saved_files=kept)
+    assert first == second == [{"filename": "input_1.csv", "size": 5, "path": "/mnt/user-data/uploads/input_1.csv", "is_image": False}], "The model is told the name the route chose"
+    assert reads == ["input.csv"] and posts == [("input.csv", b"bytes")]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_file_stays_refused_so_its_notice_stays_true(monkeypatch):
+    reads, told, kept = [], [], {}
+
+    async def reader(file, client):
+        reads.append(file["filename"])
+        return b"bytes"
+
+    async def upload(filename, data):
+        raise ChannelUploadRefused(503)
+
+    async def tell(file, error):
+        told.append(error.status)
+
+    def message():
+        return InboundMessage(channel_name="upload-test", chat_id="chat", user_id="platform-person", text="A message", files=[{"filename": "input.csv"}])
+
+    monkeypatch.setitem(manager.INBOUND_FILE_READERS, "upload-test", reader)
+    monkeypatch.setitem(manager.INBOUND_FILE_WRITE_FAILED, "upload-test", tell)
+    assert await manager._ingest_inbound_files("thread", message(), upload=upload, saved_files=kept) == []
+    assert await manager._ingest_inbound_files("thread", message(), upload=upload, saved_files=kept) == []
+    assert reads == ["input.csv"] and told == [503], "One notice, and no attempt that could make it false"
+
+
+@pytest.mark.asyncio
+async def test_a_file_that_arrived_with_its_bytes_can_still_be_kept(monkeypatch):
+    kept = {}
+
+    async def upload(filename, data):
+        return {"filename": filename, "size": len(data), "virtual_path": "/mnt/user-data/uploads/" + filename}
+
+    message = InboundMessage(channel_name="upload-test", chat_id="chat", user_id="platform-person", text="A message", files=[{"filename": "input.csv", INBOUND_FILE_CONTENT_KEY: b"bytes"}])
+    (saved,) = await manager._ingest_inbound_files("thread", message, upload=upload, saved_files=kept)
+    assert saved["path"] == "/mnt/user-data/uploads/input.csv"
 
 
 @pytest.mark.asyncio
