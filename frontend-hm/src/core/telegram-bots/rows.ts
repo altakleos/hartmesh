@@ -208,6 +208,11 @@ export function setupStageOf(bot: Bot | null, now: number): SetupStage {
   return expires <= now ? "expired" : "waiting";
 }
 
+/** False while the set-up's own steps describe the row: the bot can hear Start. */
+export function stopsSetup(row: number): boolean {
+  return row !== 21 && row !== 22 && row !== 23;
+}
+
 export interface TargetRow {
   target: AgentTarget;
   name: string;

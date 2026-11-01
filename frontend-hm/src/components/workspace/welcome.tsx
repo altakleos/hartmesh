@@ -11,7 +11,6 @@ import { cn } from "@/lib/utils";
 import { AuroraText } from "../ui/aurora-text";
 
 import { useComposerFocus } from "./composer-focus";
-import { TelegramWelcomeCard } from "./telegram/welcome-card";
 
 let waved = false;
 
@@ -145,7 +144,6 @@ export function Welcome({
         )
       )}
       {!isSkillMode && <Starters className="mt-1" />}
-      {!isSkillMode && <TelegramWelcomeCard />}
     </div>
   );
 }

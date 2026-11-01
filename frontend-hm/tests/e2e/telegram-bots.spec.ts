@@ -15,6 +15,12 @@ const CONNECT = {
   url: "https://t.me/fixture_bot?start=code",
   expires_at: "2099-01-01T00:00:00Z",
 };
+// The three a Compose tenant starts with: two rows at laptop width.
+const STARTERS = [
+  { id: "review", title: "Monthly business review", prompt: "Build a review." },
+  { id: "summary", title: "Summarize a document", prompt: "Summarize it." },
+  { id: "sheet", title: "Ask about a spreadsheet", prompt: "Look at it." },
+];
 
 function bot(overrides: Record<string, unknown> = {}) {
   return {
@@ -704,5 +710,77 @@ test.describe("Telegram bots", () => {
     await page.reload();
     await expect(page.getByRole("textbox").first()).toBeVisible();
     await expect(card).toHaveCount(0);
+  });
+
+  test("the welcome card leaves Home where it was on a laptop", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1366, height: 657 });
+    await mockTelegram(page);
+    // Routed after the shared mock so these win.
+    await page.route("**/api/features", (route) =>
+      route.fulfill({
+        json: {
+          agents_api: { enabled: true },
+          telegram: READY,
+          ui: { profile: "business", starters: STARTERS },
+        },
+      }),
+    );
+    await page.goto("/workspace/chats/new");
+    const card = page.getByTestId("telegram-welcome-card");
+    await expect(card).toBeVisible();
+    await expect(page.getByText(enUS.welcome.greeting)).toBeInViewport();
+    const starters = page.getByTestId("welcome-starters");
+    for (const starter of STARTERS) {
+      // A click fails if anything lies over the tile, as the page's header once did.
+      await starters.getByRole("button", { name: starter.title }).click();
+      await expect(page.getByRole("textbox").first()).toHaveValue(
+        starter.prompt,
+      );
+    }
+    await card.getByRole("button", { name: strings.offer.later }).click();
+    await expect(card).toHaveCount(0);
+  });
+
+  test("a link that names a row opens its set-up and leaves the address clean", async ({
+    page,
+  }) => {
+    await mockTelegram(page);
+    await page.goto(`${DEEP_LINK}&telegram=chat`);
+    await expect(
+      page.getByRole("heading", { name: strings.setup.title({ name: NAME }) }),
+    ).toBeVisible();
+    await expect(page).not.toHaveURL(/telegram=/);
+  });
+
+  test("a phone reaches every control of the section", async ({ page }) => {
+    const name = "customer-support-assistant";
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockTelegram(page, {
+      bots: [
+        bot(),
+        bot({
+          ...WAITING,
+          id: "link-b",
+          bot_id: 2,
+          agent_kind: "custom_agent",
+          agent_ref: name,
+          agent_name: name,
+          bot_name: name,
+          bot_username: "customersupportassis_x7q2_bot",
+        }),
+      ],
+    });
+    await page.goto(DEEP_LINK);
+    await expect(section(page)).toBeVisible();
+    const menu = page.getByRole("button", { name: strings.row.menu({ name }) });
+    await menu.scrollIntoViewIfNeeded();
+    const box = await menu.boundingBox();
+    expect(box!.x + box!.width).toBeLessThanOrEqual(390);
+    await menu.click();
+    await expect(
+      page.getByRole("menuitem", { name: strings.action.remove }),
+    ).toBeVisible();
   });
 });

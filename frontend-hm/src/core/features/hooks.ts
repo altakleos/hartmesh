@@ -93,15 +93,14 @@ export function useMcpTasksEnabled() {
   };
 }
 
-/** Fails closed: until the deployment has answered, nothing about Telegram renders. */
+/**
+ * Fails closed: until the deployment has answered, nothing about Telegram
+ * renders. A later failed read keeps the answer, so a Gateway restart does not
+ * close an open dialog; the server still refuses by itself.
+ */
 export function useTelegram(): TelegramFeature & { isLoading: boolean } {
-  const { data, isPending, isError } = useFeatures(selectTelegram);
-  return {
-    ...(isError
-      ? selectTelegram(undefined)
-      : (data ?? selectTelegram(undefined))),
-    isLoading: isPending,
-  };
+  const { data, isPending } = useFeatures(selectTelegram);
+  return { ...(data ?? selectTelegram(undefined)), isLoading: isPending };
 }
 
 export function useStorageSpacesEnabled() {

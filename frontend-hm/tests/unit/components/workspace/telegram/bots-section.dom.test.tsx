@@ -48,6 +48,7 @@ rs.mock("@/components/ui/dropdown-menu", () => ({
   }) => <button onClick={onSelect}>{children}</button>,
 }));
 
+import { setSettingsDialogOpen } from "@/components/workspace/settings";
 import { TelegramBotsSection } from "@/components/workspace/telegram/bots-section";
 import {
   discardTelegramConnects,
@@ -56,6 +57,7 @@ import {
   telegramConnectEpoch,
   useTelegramPageState,
 } from "@/components/workspace/telegram/setup-dialog-store";
+import { WorkspaceSettingsDeepLink } from "@/components/workspace/workspace-settings-deep-link";
 import { fetch } from "@/core/api/fetcher";
 import { createEnUS } from "@/core/i18n/locales/en-US";
 import type { BotList } from "@/core/telegram-bots/api";
@@ -67,6 +69,7 @@ import {
   clearClients,
   json,
   listOf,
+  queries,
   renderWithClient,
   server,
 } from "./support";
@@ -110,6 +113,7 @@ afterEach(() => {
   cleanup();
   clearClients();
   resetTelegramPageState();
+  setSettingsDialogOpen(false);
   rs.restoreAllMocks();
   rs.mocked(fetch).mockReset();
   toast.success.mockReset();
@@ -379,6 +383,54 @@ describe("the Telegram section", () => {
       "chat",
     );
     expect(scroll).toHaveBeenCalled();
+  });
+
+  it("opens the set-up after Settings took its own word off the address first", async () => {
+    navigation.query = "settings=channels&telegram=chat";
+    navigation.replace.mockImplementation((href: string) => {
+      navigation.query = href.split("?")[1] ?? "";
+    });
+    renderOpened();
+    render(<WorkspaceSettingsDeepLink />);
+    // The router answers before the two lazy chunks that hold the section.
+    await waitFor(() => expect(navigation.query).toBe("telegram=chat"));
+    start(READY, listOf([]));
+    await screen.findByTestId("set-up-for");
+    expect(screen.getByTestId("set-up-for").textContent).toBe("chat");
+    await waitFor(() => expect(navigation.query).toBe(""));
+  });
+
+  it("keeps the rows when a later read fails", async () => {
+    let healthy = true;
+    start(READY, undefined, {
+      [LIST]: () =>
+        healthy ? json(listOf([bot()])) : new Response("{}", { status: 500 }),
+    });
+    await waitFor(() => expect(rowsShown()).toEqual(["HartMesh"]));
+    healthy = false;
+    await act(async () => {
+      await queries().refetchQueries({ queryKey: ["telegram-bots"] });
+    });
+    expect(rowsShown()).toEqual(["HartMesh"]);
+    expect(
+      screen.queryByText(
+        "Your Telegram bots could not be loaded. Check your connection and refresh.",
+      ),
+    ).toBeNull();
+  });
+
+  it("says so when the first read fails, and offers another", async () => {
+    let healthy = false;
+    start(READY, undefined, {
+      [LIST]: () =>
+        healthy ? json(listOf([bot()])) : new Response("{}", { status: 500 }),
+    });
+    await screen.findByText(
+      "Your Telegram bots could not be loaded. Check your connection and refresh.",
+    );
+    healthy = true;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(rowsShown()).toEqual(["HartMesh"]));
   });
 
   it("opens the set-up for an address that names a row without a bot", async () => {
