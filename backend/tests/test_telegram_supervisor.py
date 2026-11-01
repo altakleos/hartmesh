@@ -910,6 +910,30 @@ async def test_replacement_waits_for_old_sender_and_client_retirement(db, monkey
         await asyncio.gather(*(task for task in (retiring, adding) if task is not None), return_exceptions=True)
 
 
+async def test_retention_runs_daily_after_an_hour_and_the_smaller_sweeps_hourly(db, monkeypatch):
+    e = build(db, monkeypatch)
+    periodic: dict = {}
+    monkeypatch.setattr(e.supervisor, "_periodic", lambda operation, seconds, name, *, first_delay=None: periodic.__setitem__(name, (operation, seconds, first_delay)))
+    await e.supervisor.start()
+    try:
+        assert periodic["retention"][1:] == (86400, 3600)
+        assert periodic["callback-sweep"][1:] == (3600, None) and periodic["pending-file-sweep"][1:] == (3600, None)
+        assert await periodic["callback-sweep"][0]() == 0
+        assert await periodic["pending-file-sweep"][0]() == 0
+    finally:
+        await e.supervisor.stop()
+
+
+async def test_retention_logs_one_line_of_counts(db, monkeypatch, caplog):
+    e = build(db, monkeypatch)
+    await credential(db, e.env)
+    with caplog.at_level("INFO", logger="app.telegram_bots.supervisor"):
+        await e.supervisor.sweep_retention()
+    lines = [record.getMessage() for record in caplog.records if "retention_sweep" in record.getMessage()]
+    assert len(lines) == 1 and all(f" {key}=" in lines[0] for key in ("inbound", "outbox", "acts", "events"))
+    await e.supervisor.stop()
+
+
 async def test_event_retention_deletes_only_before_400_day_boundary(db, monkeypatch):
     from datetime import UTC, datetime, timedelta
 
@@ -927,7 +951,7 @@ async def test_event_retention_deletes_only_before_400_day_boundary(db, monkeypa
         events[1].created_at = now - timedelta(days=400)
         old_id, boundary_id = events[0].id, events[1].id
     counts = await e.supervisor.sweep_retention(now)
-    assert counts == {"inbound": 0, "outbox": 0, "acts": 0, "events": 1, "pending_files": 0}
+    assert counts == {"inbound": 0, "outbox": 0, "acts": 0, "events": 1}
     async with db.sessions() as session:
         assert await session.get(TelegramBotLinkEventRow, old_id) is None
         assert await session.get(TelegramBotLinkEventRow, boundary_id) is not None

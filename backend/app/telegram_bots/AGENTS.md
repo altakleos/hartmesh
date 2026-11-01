@@ -188,6 +188,22 @@ looks for the old link, so a replay never swaps twice; only after commit does
 `adopt_token` restart the client. `telegram_feature` fails closed to the model's
 defaults. Later-stage routes are not declared, so they answer 404 or 405.
 
+`retention.py` runs daily, first an hour after start. Each table is swept in its
+own transaction. Outbox candidates are locked, skipping any row in use, before the
+dependencies are read: a live callback's target or `anchor_outbox_id`, an
+unfinished publication owner's `source_outbox_id`, `outbox_id` and `delivery_ids`
+(it may sit on a consumed callback), an unfinished mark's deliveries, and the
+`reply:<turn>` row of a live anchor's turn, which a form's later steps read by key.
+A new kind of outbox reference must be added there. No extra clock starts when a
+dependency ends. A mark is done only once its deliveries are sent or skipped, so
+inbound retention needs only the open-act check. `retry_message` deliberately gets
+no pin: its mark holds the person's text, so the seven days stand and a later press
+refuses as `stale.not_waiting`. Stage one writes no
+`stop_dispatch`, `continuation`, digest or attempt status message; a stage that
+adds one states its dependency here and in `_pinned_deliveries`. Callbacks and
+pending files sweep hourly on their own tasks, so one failing never skips the
+other.
+
 `strangers.py` separates touch-only LRU recency from bounded unexpired reply
 charges. The supervisor owns one ledger through adapter/token replacement and
 bot removal/re-add. Forgetting recency never replenishes the 24-hour pair,

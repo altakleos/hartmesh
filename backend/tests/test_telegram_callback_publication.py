@@ -179,6 +179,16 @@ async def test_callback_prethread_fixed_outcome_is_atomic_and_new_retry_keeps_sn
 
 
 @pytest.mark.asyncio
+async def test_callback_retry_after_inbound_retention_is_refused_and_starts_nothing(retry_input_environment):
+    e = retry_input_environment
+    async with e.db.sessions.begin() as session:
+        await session.execute(delete(TelegramInboundMarkRow).where(TelegramInboundMarkRow.link_id == e.link.id))
+    with pytest.raises(ValueError):
+        await e.stage()
+    assert e.bus.inbound_queue.empty()
+
+
+@pytest.mark.asyncio
 async def test_callback_published_recovery_is_not_lost_when_original_marks_are_done(retry_input_environment):
     e = retry_input_environment
     await e.stage()

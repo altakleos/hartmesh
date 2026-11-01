@@ -1578,6 +1578,32 @@ async def test_project_export_definitions_and_preferences_need_no_user_directory
 
 
 @pytest.mark.anyio
+async def test_account_export_carries_telegram_json_without_tokens_or_bodies(tmp_path, monkeypatch) -> None:
+    deployment = _Deployment(tmp_path, monkeypatch)
+    document = {"settings": {"timezone": "UTC"}, "bots": [{"id": "link", "bot_username": "fixture_bot"}], "acts": []}
+    asked: list[str] = []
+
+    async def telegram(user_id: str) -> dict:
+        asked.append(user_id)
+        return document
+
+    monkeypatch.setattr(account_export, "telegram_export_document", telegram)
+    job = await deployment.export(PERSON_A)
+    entries = _archive(job)
+    assert job.state == "ready" and asked == [A_ID]
+    assert json.loads(entries["telegram.json"]) == document
+    assert b"`telegram.json`: your Telegram settings" in entries["README.md"]
+
+
+@pytest.mark.anyio
+async def test_the_archive_has_no_telegram_entry_for_a_person_who_never_used_it(tmp_path, monkeypatch) -> None:
+    deployment = _Deployment(tmp_path, monkeypatch)
+    entries = _archive(await deployment.export(PERSON_A))
+    assert "telegram.json" not in entries
+    assert b"There is no `telegram.json`" in entries["README.md"]
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("damage,reason", [("missing", "vanished"), ("changed", "changed"), ("linked_file", "link"), ("linked_parent", "link"), ("hard_link", "hard_link"), ("unsafe_path", "unsafe_name"), ("unsafe_name", "unsafe_name")])
 async def test_project_export_records_unsafe_or_missing_originals(project_export, tmp_path, damage, reason):
     from deerflow.persistence.projects.model import ProjectDocumentRow
