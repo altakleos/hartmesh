@@ -1,14 +1,19 @@
 """Simplified Chinese fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
-    "hello.chat": "已连接为 {email}。此聊天是 {product}。其他 Telegram 账号无法在这里发消息。\n\n可以提问或发送文件。\n\n这里的回答来自 AI，可能有误。采取行动前请核实。",
-    "hello.custom_agent": "已连接为 {email}。此聊天是 {agent}，你在 {product} 中的一个自定义智能体。其他 Telegram 账号无法在这里发消息。\n\n可以提问或发送文件。\n\n{agent} 是 AI，可能有误。采取行动前请核实。",
+    "hello.chat": "已连接为 {email}。此聊天是 {product}。其他 Telegram 账号无法在这里发消息。\n\n可以提问或发送文件。这里的内容也会保留在 {product} 网页版中。\n\n这里的回答来自 AI，可能有误。采取行动前请核实。",
+    "hello.custom_agent": "已连接为 {email}。此聊天是 {agent}，你在 {product} 中的一个自定义智能体。其他 Telegram 账号无法在这里发消息。\n"
+    "\n"
+    "可以提问或发送文件。这里的内容也会保留在 {product} 网页版中。\n"
+    "\n"
+    "{agent} 是 AI，可能有误。采取行动前请核实。",
     "hello.privacy": "此聊天经过 Telegram，Telegram 可以读取内容。\n发送 /privacy 查看详情。",
     "hello.link_expired": "此连接链接已失效。请打开网页版，为这个机器人获取新链接。",
     "hello.refused": "此链接属于另一个机器人，因此没有连接。请打开网页版，使用为这个机器人提供的链接。",
     "hello.account_taken": "此 Telegram 账号已连接到另一个账号。请先在那里断开连接。",
     "hello.again": "此聊天已连接。发送 /help 查看能做什么。",
-    "stranger": "这是私人机器人，只回答连接此聊天的人。如果是你，请再次使用网页版中的连接链接。",
+    "stranger": "这是私人机器人，只回答连接它的人。",
+    "stranger.waiting": "此机器人尚未连接。如果这是你的机器人，请使用网页版中的“打开聊天”按钮，再点击 Start。",
     "help.chat": "这是你的 {product} 机器人。\n\n在此聊天中：\n- 发消息，或发送文件、照片或语音消息\n- /new 开始新对话\n- /stop 停止当前回答\n- /settings 设置语言\n- 在斜杠后输入技能名称，可为一条消息使用该技能",
     "help.custom_agent": "这是 {agent}，你在 {product} 中的一个自定义智能体。\n\n在此聊天中：\n- 发消息，或发送文件、照片或语音消息\n- /new 开始新对话\n- /stop 停止当前回答\n- 在斜杠后输入技能名称，可为一条消息使用该技能",
     "privacy.full": (
@@ -40,6 +45,7 @@ TEXTS: dict[str, str] = {
     "busy.gave_up": "两分钟后仍繁忙，因此未回答你的消息。消息已保留。",
     "busy.thread": "此对话正在回答从网页版开始的问题。你的消息已排队。",
     "error.generic": "出现问题，消息未获回答。消息已保留。",
+    "error.model_refused": "AI 服务拒绝了此请求，消息未获回答。请联系{support}检查。",
     "answer.on_web": "此回答无法在这里显示。它保存在 {product} 网页版中。",
     "refused.interrupted": "{name} 的工作区已重启，导致本次回答停止。你的消息已保留。",
     "run.cancelled": "此次请求已取消。",
@@ -88,14 +94,16 @@ TEXTS: dict[str, str] = {
     "net.kept": "继续阻止 {host}。",
     "net.cancelled": "由于发送了新消息，继续阻止 {host}。",
     "net.stale": "此请求已不再等待处理。再次提出请求即可重试。",
-    "new.confirm_plain": "是否开始新对话？只会放下此对话中说过的内容。",
+    "new.confirm_plain": "是否开始新对话？此对话会保留在 {product} 网页版中，新对话不会带上这里说过的内容。",
     "new.done": "已开始新对话。",
     "new.kept": "已保留。继续此对话。",
+    "new.in_topic": "/new 只能在主聊天中使用，不能在话题中使用。",
     "new.files_full": "你的文件已满，无法开始新对话。请在 {product} 网页版删除文件或旧对话，然后重试。如果仍不够，请联系{support}增加容量。",
     "cmd.unknown": "/{command} 不是此聊天的命令。请点菜单按钮查看命令。",
     "cmd.agent": "此聊天始终是 {name}。每个自定义智能体都有独立的聊天。",
     "cmd.skill_off": "技能 /{skill} 已关闭。",
     "cmd.skill_unavailable": "此聊天无法使用技能 /{skill}。",
+    "cmd.skill_failed": "暂时无法查询技能 /{skill}。请稍后再发送一次。",
     "settings.state_basic": "此聊天固定文字的语言：{language}。回答会使用你输入的语言。",
     "link.conflict": "此聊天已暂停。\n另一个程序正在使用此机器人，消息可能遗漏。如果不是你在使用，请更换机器人令牌：在 BotFather 中发送 /revoke，然后在 {product} 网页版粘贴新令牌。",
     "link.conflict_over.chat": "此聊天已恢复。\n此机器人仍暂停允许访问被阻止的网站，直到你更换令牌，或在 {product} 网页版确认另一个程序是你在使用。",

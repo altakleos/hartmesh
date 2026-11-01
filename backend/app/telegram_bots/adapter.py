@@ -62,7 +62,7 @@ EDIT_HASHES_PER_BOT = 256
 MEDIA_UNSUPPORTED_EVERY_SECONDS = 60
 AGENT_OFF_EVERY_SECONDS = 3600
 LIMITED_AFTER_SECONDS = 600
-_SKILL_REPLIES = {"off": "cmd.skill_off", "unavailable": "cmd.skill_unavailable", "failed": "error.generic"}
+_SKILL_REPLIES = {"off": "cmd.skill_off", "unavailable": "cmd.skill_unavailable", "failed": "cmd.skill_failed"}
 FIXED_COMMANDS = ("work", "assign", "assistants", "employees", "new", "stop", "settings", "help", "web", "status", "privacy", "agent", "bootstrap", "goal", "models", "memory")
 _TOKEN_PASTED = re.compile(TOKEN_IN_TEXT)
 logger = logging.getLogger(__name__)
@@ -343,6 +343,13 @@ class TelegramBotChannel(TelegramChannel):
                 self._first_401 = None
             return True
 
+    async def _learn_locale(self) -> None:
+        """A press's alert cannot wait for a read, so it uses this. A process starts with no text sent yet."""
+        link = self.link
+        settings = await await_drained(self._services.settings.get(link.owner_user_id))
+        if settings is not None:
+            self._callback_locale = (link.owner_user_id, link.binding_generation, settings.locale)
+
     async def _after_any_success(self) -> None:
         from sqlalchemy.exc import SQLAlchemyError
 
@@ -433,6 +440,7 @@ class TelegramBotChannel(TelegramChannel):
                     raise NetworkError("Transport unavailable")
                 if await self.refresh_link() is None:
                     raise NetworkError("Transport retired")
+                await self._learn_locale()
                 await self.application.initialize()
                 if not await self._success(self.bot.bot):
                     raise NetworkError("Transport retired")
@@ -644,12 +652,18 @@ class TelegramBotChannel(TelegramChannel):
         fields = ("id", "owner_user_id", "agent_kind", "agent_ref", "bot_id", "token_revision", "binding_generation", "connection_id", "telegram_user_id", "chat_id")
         return right is not None and all(getattr(left, field) == getattr(right, field) for field in fields)
 
-    def _command(self, message) -> tuple[str, list[str]]:
-        text = message.text or ""
+    def command_text(self, message) -> str:
+        """The message without the `@bot` Telegram adds to a command, which is the words the person meant."""
         admission = _ADMISSION.get()
         captured = admission.link if admission is not None and admission.task is asyncio.current_task() else self.link
-        normalized = self._strip_bot_username_from_leading_command(text.lstrip(), captured.bot_username)
-        words = normalized.split()
+        return self._strip_bot_username_from_leading_command((message.text or "").lstrip(), captured.bot_username)
+
+    def _command(self, message) -> tuple[str, list[str]]:
+        from app.telegram_bots.turns import forward_origin
+
+        if forward_origin(message)[0]:
+            return "", []  # Someone else's words are material, not the person's command.
+        words = self.command_text(message).split()
         return (words[0][1:].lower(), words[1:]) if words and words[0].startswith("/") else ("", [])
 
     def _context(self, link, chat_id, purpose) -> SendContext:
@@ -722,7 +736,7 @@ class TelegramBotChannel(TelegramChannel):
             if update.callback_query is not None:
                 self._spawn_ingress(self.answer_press(update.callback_query.id, "stale.other_person", context=self._context(link, chat.id if chat else None, "callback")))
             elif message is not None and user is not None and not user.is_bot and user.id > 0 and self._services.strangers.seen(link.bot_id, user.id, self._time()):
-                self._spawn_ingress(self._ingress_notice("stranger", self._context(link, message.chat_id, "stranger")))
+                self._spawn_ingress(self._ingress_notice("stranger.waiting" if link.state == "waiting_connect" else "stranger", self._context(link, message.chat_id, "stranger")))
             self._classified(update)
             raise ApplicationHandlerStop
         if link.state == "held":
@@ -751,6 +765,20 @@ class TelegramBotChannel(TelegramChannel):
                 self._spawn_ingress(self._tell_agent_gone(link))
             self._classified(update)
             raise ApplicationHandlerStop
+        if message is not None or update.callback_query is not None:
+            await self._note_person_active(admission.link)
+
+    async def _note_person_active(self, link) -> None:
+        """Quiet hours and the web's row read this. Once a minute is enough, and a failed write must not cost the message."""
+        now = self._now()
+        if link.last_update_at is not None and (now - link.last_update_at).total_seconds() < 60:
+            return
+        try:
+            current = await await_drained(self._services.links.update_if_current(link.id, token_revision=self.transport_revision, last_update_at=now))
+        except Exception:
+            return
+        if current is not None:
+            self.link = current
 
     def _only_the_agent_can_answer(self, message, word) -> bool:
         """A pasted token still has to go, and a running turn can still be stopped."""
@@ -1029,14 +1057,14 @@ class TelegramBotChannel(TelegramChannel):
             await self._fixed_reply(update, "cmd.unknown", word)
 
     async def _on_other_slash(self, update, context) -> bool:
-        """True for a skill's word, which goes on as a chat message with its text unchanged."""
+        """True for a skill's word, which goes on as a chat message, without any @bot on the word."""
         word, arguments = self._command(update.message)
         if word == "start":
             await self._cmd_start(update, context)
         elif word in FIXED_COMMANDS:
             await self._on_command(update, context)
         else:
-            outcome = await await_drained(asyncio.to_thread(slash_skill_outcome, self._admission(update).link, update.message.text or ""))
+            outcome = await await_drained(asyncio.to_thread(slash_skill_outcome, self._admission(update).link, self.command_text(update.message)))
             if outcome == "run":
                 return True
             await self._fixed_reply(update, _SKILL_REPLIES.get(outcome, "cmd.unknown"), word)
@@ -1519,7 +1547,8 @@ class TelegramBotChannel(TelegramChannel):
             retry_after_seconds=error.seconds if isinstance(error, LongRetryAfter) else None,
         )
 
-    async def send_notice(self, key: str, *, context: SendContext, reply_to: int | None = None, silent: bool = False, thread: int | None = None, _ingress=False, **values) -> int | None:
+    async def send_notice(self, key: str, *, context: SendContext, reply_to: int | None = None, silent: bool = False, thread: int | None = None, _ingress=False, button: tuple[str, str] | None = None, **values) -> int | None:
+        """`button` is a (label key, address) pair. Losing it to a refused address is better than losing the notice."""
         if context.chat_id is None:
             raise ValueError("notice-destination-required")
         if not self.application.running:
@@ -1532,12 +1561,27 @@ class TelegramBotChannel(TelegramChannel):
         protect = await self._services.protect_notice(context)
         if type(protect) is not bool:
             raise ValueError("invalid-notice-policy")
+        markup = None
+        if button is not None:
+            settings = await await_drained(self._services.settings.get(self.link.owner_user_id))
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton(render_plain(button[0], settings.locale), url=button[1])]])
         if not await self._notice_context_current(context):
             return None
         if _ingress and (self.link.health not in {"ok", "agent_unavailable"} or self.link.state == "held"):
             return None
+
+        async def send(buttons):
+            return await self.bot.send_message(
+                chat_id=context.chat_id, text=text, parse_mode=ParseMode.HTML, reply_to_message_id=reply_to, disable_notification=silent, message_thread_id=thread, protect_content=protect, reply_markup=buttons
+            )
+
         try:
-            message = await self.bot.send_message(chat_id=context.chat_id, text=text, parse_mode=ParseMode.HTML, reply_to_message_id=reply_to, disable_notification=silent, message_thread_id=thread, protect_content=protect)
+            try:
+                message = await send(markup)
+            except BadRequest as error:
+                if markup is None or "url" not in str(error).lower():
+                    raise
+                message = await send(None)
         except Forbidden as error:
             self._failure()
             self._log_failure("sendMessage", error)

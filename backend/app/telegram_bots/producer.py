@@ -171,6 +171,7 @@ class OutboxItem:
 _TURN_OUTCOME_KEYS = frozenset(
     {
         "error.generic",
+        "error.model_refused",
         "answer.on_web",
         "busy.cancelled",
         "busy.gave_up",

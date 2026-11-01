@@ -1658,7 +1658,8 @@ async def test_run_agent_overrides_spoofed_pre_existing_message_ids_without_snap
 
 
 @pytest.mark.anyio
-async def test_run_agent_marks_llm_error_fallback_as_error_status():
+@pytest.mark.parametrize("reason, stop_reason", [("transient", None), ("quota", "model_refused"), ("auth", "model_refused")])
+async def test_run_agent_marks_llm_error_fallback_as_error_status(reason, stop_reason):
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
     bridge = SimpleNamespace(
@@ -1676,7 +1677,7 @@ async def test_run_agent_marks_llm_error_fallback_as_error_status():
                         additional_kwargs={
                             "deerflow_error_fallback": True,
                             "error_type": "APIConnectionError",
-                            "error_reason": "transient",
+                            "error_reason": reason,
                             "error_detail": "Connection error.",
                         },
                     )
@@ -1700,6 +1701,7 @@ async def test_run_agent_marks_llm_error_fallback_as_error_status():
     assert fetched is not None
     assert fetched.status == RunStatus.error
     assert fetched.error == "Connection error."
+    assert fetched.stop_reason == stop_reason
     bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 

@@ -227,7 +227,8 @@ class _Threads:
                 owner_user_id=f.scope.owner_user_id,
                 method="POST",
                 path=f._thread_path + "/uploads",
-                files=[("files", (filename, data))],
+                # With no type, httpx guesses one, and the first guess in a process reads files on this loop.
+                files=[("files", (filename, data, "application/octet-stream"))],
                 before_dispatch=lambda: f._authorize("run_create"),
                 after_response=lambda: f._authorize("run_create"),
             )

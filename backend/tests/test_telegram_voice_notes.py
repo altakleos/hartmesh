@@ -199,7 +199,7 @@ async def test_changed_transcriber_asks_again(db, monkeypatch):
     try:
         await arrive(e, 3004)
         assert await keys(e, db) == ["voice.first_notice"]
-        assert (await plans(e, db))[0]["values"]["transcriber"] == "Google"
+        assert (await plans(e, db))[0]["values"]["transcriber"] == "Google Gemini"
         assert e.transcriber.calls == [] and e.reads == []
     finally:
         await stop(e)
@@ -484,7 +484,7 @@ async def test_outstanding_consent_cannot_authorize_changed_provider(db, monkeyp
         assert old.id not in [row.id for row in await controls(db, e, "voice_ok")], "The old press is spent"
         fresh = (await controls(db, e, "voice_ok"))[0]
         assert fresh.payload["offered_provider"] == "gemini"
-        assert {"key": "voice.first_notice", "values": {"transcriber": "Google", "product": "HartMesh"}} in await plans(e, db)
+        assert {"key": "voice.first_notice", "values": {"transcriber": "Google Gemini", "product": "HartMesh"}} in await plans(e, db)
         script_file(e, 3018)
         await pressing(e, db, "voice_ok", 9004, 702)
         assert (await db.settings.get(e.link.owner_user_id)).voice_agreed_for == "gemini" and [row.message_id for row in e.routed] == [3018]

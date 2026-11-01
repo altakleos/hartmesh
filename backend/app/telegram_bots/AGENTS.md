@@ -121,8 +121,8 @@ Each publication uses a fresh random draft ID to reject late Stop gestures from
 an earlier attempt; the reply anchor remains the actual first human message.
 Retiring the last auxiliary Thinking row also settles its original input in the
 same writer, including when its primary reply was already acknowledged.
-`ManagedExtBot` preserves empty draft strings across the pinned SDK defaults
-conversion; keep the real SDK serialization check when changing that boundary.
+`ManagedExtBot` preserves empty draft strings across the SDK defaults conversion;
+a real SDK serialization check pins that.
 
 Ambiguous details containers display literally. Impossible canonical
 split budgets raise `ValueError`; disposable drafts may clip their first part.
@@ -249,11 +249,12 @@ A message waiting for its run is not on that clock. The worker reports through
 `ChannelExecutionContext.progress`, so `worker_state` tells a wait for a worker, however
 long, from a message nobody holds. Once a worker lets go a run shows within
 `RUN_SHOWS_SECONDS` or never will, and it ends under the closed proof `no_run`. Stop
-fences the message, retiring the admission a worker checks, so a message still `queued`
-gets the same short limit. A fence cannot recall a POST already sent, so a message
-`taken` is waited for even after Stop, and `observe(closing=)` answers pending, not
-`no_run`, until its worker lets go. A chat starved of workers therefore has no limit:
-`chat_turn_waiting` says `worker=queued`, and `/stop` ends it.
+fences the message, so one still `queued` gets the same short limit. A fence cannot
+recall a POST already sent, so a `taken` message is waited for even after Stop, and
+`observe(closing=)` answers pending until its worker lets go. A chat starved of workers
+has no limit: `chat_turn_waiting` says `worker=queued`, and `/stop` ends it.
+A run the provider refused for `quota` or `auth` carries `stop_reason` `model_refused`,
+which is `error.model_refused` with Try again.
 
 `observe(closing=)` is the durable twin: a marked publication with no live owner ends in
 a plan. Only a caller that knows no turn owns it may pass `closing`; recovery asks
@@ -569,7 +570,8 @@ schedule another negative-offset discard. Await completion outside the lifecycle
 lock needed by health callbacks.
 
 Transport facts use narrow `update_if_current`; health callbacks supply
-`expected_token_revision`. A no-facts status guard writes no timestamp. Cause
+`expected_token_revision`. A no-facts status guard writes no timestamp.
+`_note_person_active` stamps `last_update_at` at most once a minute; `_bind` clears it. Cause
 caches are revision-scoped and publish after commit; one live supervisor owns
 ordinary health causes. SQL revision fences support rotation through another
 repository, but do not merge independent hidden cause sets at the same revision.
@@ -656,8 +658,7 @@ or updates. Replay consults that saved Start before consumed-code/state checks;
 an old binding generation cannot reconnect. Inbox identities include the chat:
 `(link_id, message_id, chat_id)` from additive revision 0043. Every inbox lookup
 must carry the captured chat; never delete older receipts to admit another
-account's same message ID. Work baseline markers stay null
-until the stage-three initializer joins this same session.
+account's same message ID.
 
 Codes store hashes with captured link/conflict epoch/token revision. Every
 current-token conflict commits a monotonic epoch and invalidates waiting codes;

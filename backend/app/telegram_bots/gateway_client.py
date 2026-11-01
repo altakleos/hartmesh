@@ -601,7 +601,7 @@ class GatewayClientOwner:
         body: Mapping[str, JsonValue] | None = None,
         params: Mapping[str, QueryValue] | None = None,
         headers: Mapping[str, str] | None = None,
-        files: Sequence[tuple[str, tuple[str, bytes]]] | None = None,
+        files: Sequence[tuple[str, tuple[str, bytes, str]]] | None = None,
     ) -> ChannelJsonResponse:
         self._check_operation(operation)
         path = _path(path)

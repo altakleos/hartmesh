@@ -51,11 +51,15 @@ async def send_file_part(channel, saved, capture) -> list[int]:
     part = saved.part
     original_link = saved.link
 
+    def unchanged(captured):
+        # The link row's stamps move once a minute, and a stamp is no reason to give up a read file.
+        return captured.part == expected.part and captured.item == expected.item and channel._same_scope(original_link, captured.link)
+
     async def current():
         if not channel._callback_current(original_link):
             raise DeliveryClaimRetired()
         latest = await services.outbox.capture_sending_part(**capture)
-        if latest.part != expected.part or latest.item != expected.item or latest.link != original_link:
+        if not unchanged(latest):
             raise DeliveryClaimRetired()
         verdict = await services.eligibility(latest.link, latest.item, latest.part)
         if not isinstance(verdict, DeliveryEligibility) or verdict.decision != "allow" or verdict.protect_content and not latest.part.get("protect_content", False):
@@ -64,7 +68,7 @@ async def send_file_part(channel, saved, capture) -> list[int]:
             raise DeliveryClaimRetired()
         # The fresh read may have waited behind another claim/link transition.
         final = await services.outbox.capture_sending_part(**capture)
-        if final.part != expected.part or final.item != expected.item or final.link != original_link or not channel._callback_current(original_link):
+        if not unchanged(final) or not channel._callback_current(original_link):
             raise DeliveryClaimRetired()
 
     async def dispatch_current():
@@ -267,18 +271,21 @@ async def cleanup_caption(channel, capture) -> bool | str:
     ids = tuple(saved.item.payload["caption_cleanup"]["message_ids"])
     prepared = await services.model_source.read_file_part(saved)
 
+    def unchanged(captured):
+        return captured.part == saved.part and captured.item == saved.item and channel._same_scope(saved.link, captured.link)
+
     async def current():
         if not channel._callback_current(saved.link):
             raise DeliveryClaimRetired()
         latest = await services.outbox.capture_caption_cleanup(**capture)
-        if latest != saved:
+        if not unchanged(latest):
             raise DeliveryClaimRetired()
         verdict = await services.eligibility(latest.link, latest.item, latest.part)
         if not isinstance(verdict, DeliveryEligibility) or verdict.decision != "allow":
             raise DeliveryClaimRetired()
         if await services.model_source.read_file_part(latest) != prepared or not channel._callback_current(saved.link):
             raise DeliveryClaimRetired()
-        if await services.outbox.capture_caption_cleanup(**capture) != saved:
+        if not unchanged(await services.outbox.capture_caption_cleanup(**capture)):
             raise DeliveryClaimRetired()
 
     for message_id in ids:

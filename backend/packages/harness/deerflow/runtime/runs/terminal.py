@@ -26,6 +26,9 @@ UNCONFIRMED_STATE = "run_state_unconfirmed"
 RECOVERED_METADATA_REASON = "terminal_metadata_recovered"
 UNCONFIRMED_ERROR = "The run stopped, but its final state could not be confirmed. Check its status before retrying; contact your administrator if it remains unresolved."
 TERMINAL_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
+# The provider refused the account, not this request, so trying again does nothing until someone acts.
+MODEL_REFUSED_STOP_REASON = "model_refused"
+MODEL_REFUSED_ERROR_REASONS = frozenset({"quota", "auth"})
 
 
 def exception_classification(exc: BaseException) -> str:

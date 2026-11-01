@@ -112,6 +112,7 @@ class _Turn:
     capacity_notice_sent: bool = False
     stop_marker_checked: bool = False
     stop_press: tuple | None = None
+    waiting_told: bool = False
     submission: object = None
     quiet_since: float | None = None
     observed_since: float | None = None
@@ -373,6 +374,8 @@ class ChatTurns:
         files = channel._extract_inbound_files(message)
         files = [{**value, "message_id": message.message_id, "telegram_bot_id": link.bot_id} for value in files]
         text = message.text if type(message.text) is str else message.caption if type(message.caption) is str else ""
+        if separate:
+            text = channel.command_text(message)  # A skill's word reaches the run as the person meant it.
         if not text.strip() and not files:
             return False
         if not await channel._input_current(link) or self._closed or channel in self._retired or not channel._callback_current(link):
@@ -907,16 +910,23 @@ class ChatTurns:
             origins = self._callback_origins[(turn.link.id, entry.callback_id)][1] if entry.callback_id else tuple(self._origins[(turn.link.id, identity)] for identity in entry.inbound.metadata[_SOURCES])
             held = _Turn(turn.channel, turn.link, entry.inbound, origins, callback_id=entry.callback_id)
             guard = _Guard(self.services, turn.channel, turn.link, lambda: self._current(turn), repair=True)
-            await self.services.outbox.plan_input_outcome(
-                turn.link,
-                source_id="chat-cancelled:" + (entry.callback_id or str(origins[0].message_id)),
-                source_ref={"key": "busy.cancelled", "values": {}},
-                keyboard=(),
-                callbacks=self.services.callbacks,
-                guard=guard,
-                inbox_rows=() if held.callback_id else origins,
-                input_owner_callback_id=held.callback_id,
-            )
+            if turn.waiting_told and entry.callback_id is None:
+                # The stop's own text says these were not answered, so one line does for all of them.
+                await guard.prepare()
+                guard.current()
+                for origin in origins:
+                    await self.services.outbox.inbox.finish_route(origin)
+            else:
+                await self.services.outbox.plan_input_outcome(
+                    turn.link,
+                    source_id="chat-cancelled:" + (entry.callback_id or str(origins[0].message_id)),
+                    source_ref={"key": "busy.cancelled", "values": {}},
+                    keyboard=(),
+                    callbacks=self.services.callbacks,
+                    guard=guard,
+                    inbox_rows=() if held.callback_id else origins,
+                    input_owner_callback_id=held.callback_id,
+                )
             if not self._current(turn):
                 return
             if entry.callback_id is not None:
@@ -1048,6 +1058,7 @@ class ChatTurns:
                             if identity is not None:
                                 if stopped:
                                     self._drop_waiting(turn)
+                                    turn.waiting_told = waiting
                                 await self._observe(turn, lambda: self._complete(turn))
                                 return
                             # A held turn stops this whole chat, so the wait for a

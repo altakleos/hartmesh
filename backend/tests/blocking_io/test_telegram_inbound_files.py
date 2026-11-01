@@ -1,6 +1,7 @@
 """Actual capped download, native upload and worker input under strict I/O."""
 
 import asyncio
+import mimetypes
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -19,4 +20,6 @@ async def timezone_fixture_precondition():
 
 @pytest.mark.asyncio
 async def test_managed_file_download_write_and_worker_input_own_their_io(capture_environment, monkeypatch, tmp_path):
+    # The first type guess in a process reads files, so a test that ran earlier must not hide one made on the loop.
+    monkeypatch.setattr(mimetypes, "_db", None)
     await exercise_turn(capture_environment, monkeypatch, tmp_path, "text", managed_ingress=True, inbound_file=True)

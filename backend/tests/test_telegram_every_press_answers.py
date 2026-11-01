@@ -399,6 +399,16 @@ def test_a_group_spent_twice_plans_one_cleanup():
     assert len(added) == 1, "Confirming a dispatch and binding its run both arrive here"
 
 
+async def planned(db, key):
+    """The turn writes its text just after it clears its flag, and a loaded machine shows the gap."""
+    for _ in range(500):
+        async with db.sessions() as session:
+            if key in [part.get("source_ref", {}).get("key") for row in await session.scalars(select(TelegramOutboxRow)) for part in row.parts]:
+                return
+        await asyncio.sleep(0.01)
+    raise AssertionError(key + " was never planned")
+
+
 async def stop_button(db, world):
     e = world.e
     await until(lambda: world.first.presentation is not None and world.first.presentation._anchor_outbox is not None)
@@ -455,6 +465,7 @@ async def test_stop_the_run_refuses_later_still_says_so(db, monkeypatch):
         world.turns._observer.stop_outcome = lambda *args, **kwargs: "refused"
         first.wake.set()
         await until(lambda: first.stop_requested is False)
+        await planned(db, "stop.failed")
         for number in range(3):
             e.request.enqueue("sendMessage", result=sent(e, identity=1645 + number))
         await world.settle()

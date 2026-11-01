@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.telegram_bots.adapter import TelegramBotChannel
 from app.telegram_bots.files import FileBytesBudget
 from app.telegram_bots.producer import DeliveryEligibility
 
@@ -27,7 +28,8 @@ async def fixture(monkeypatch, *, filename="result.txt"):
     content = b"qualified file"
     descriptor = {"path": "/mnt/user-data/outputs/" + filename, "filename": filename, "size": len(content), "mime_type": "text/plain", "state": "ready"}
     part = {"kind": "document", "source_ref": {"output_files": [{"path": descriptor["path"], "sha256": None}]}, "reply_to_message_id": 7, "protect_content": True}
-    link = SimpleNamespace(id="link", owner_user_id="owner", chat_id=7000000001, binding_generation=1, token_revision=1)
+    person = 7000000001
+    link = SimpleNamespace(id="link", owner_user_id="owner", agent_kind="lead_agent", agent_ref="lead_agent", bot_id=9000000001, connection_id="connection", telegram_user_id=person, chat_id=person, binding_generation=1, token_revision=1)
     saved = SimpleNamespace(part=part, link=link, item=SimpleNamespace(chat_id=link.chat_id, message_thread_id=23, silent=True))
     prepared = SimpleNamespace(record=SimpleNamespace(scope=SimpleNamespace(thread_id="thread")), files=(descriptor,), caption_html="<b>Answer</b>", caption_text="Answer", unavailable=None)
     budget = FileBytesBudget(50_000_000)
@@ -80,7 +82,9 @@ async def fixture(monkeypatch, *, filename="result.txt"):
     services = SimpleNamespace(
         outbox=outbox, model_source=SimpleNamespace(read_file_part=read_source), file_bytes_budget=budget, thread_client=owner, config=TelegramBotsConfig(), eligibility=eligibility, settings=SimpleNamespace(get=get_settings)
     )
-    channel = SimpleNamespace(_services=services, bot=object(), transport_revision=1, link=link, _callback_current=lambda old: True, _after_send_success=success, _chat_message_sent=lambda *args: None)
+    channel = SimpleNamespace(
+        _services=services, bot=object(), transport_revision=1, link=link, _callback_current=lambda old: True, _same_scope=TelegramBotChannel._same_scope, _after_send_success=success, _chat_message_sent=lambda *args: None
+    )
     monkeypatch.setattr("app.telegram_bots.outbound_upload.upload_output", upload)
     return SimpleNamespace(channel=channel, saved=saved, prepared=prepared, events=events, budget=budget, owner=owner, services=services, content=content)
 
@@ -91,6 +95,67 @@ async def test_reserves_before_read_hashes_before_api_and_releases_after_ack(mon
     f = await fixture(monkeypatch)
     assert await send_file_part(f.channel, f.saved, {}) == [51]
     assert f.events == ["describe", "read", "hash", "describe", "upload", "success"] and f.budget.used == 0
+
+
+async def test_a_stamp_on_the_link_row_does_not_give_up_a_file_on_its_way(monkeypatch):
+    from app.telegram_bots.outbound import send_file_part
+
+    f = await fixture(monkeypatch)
+    stamped = SimpleNamespace(**vars(f.saved.link), last_update_at="a moment ago", last_ok_at="a moment ago")
+
+    async def capture(**kwargs):
+        return SimpleNamespace(part=f.saved.part, item=f.saved.item, link=stamped)
+
+    async def read_source(actual):
+        return f.prepared
+
+    f.services.outbox.capture_sending_part = capture
+    f.services.model_source.read_file_part = read_source
+    assert await send_file_part(f.channel, f.saved, {}) == [51]
+
+
+async def test_a_stamp_on_the_link_row_does_not_leave_a_preview_behind(monkeypatch):
+    from _telegram_bot_test_support import RecordingRequest, offline_bot
+
+    from app.telegram_bots.adapter import BoundedRateLimiter
+    from app.telegram_bots.outbound import cleanup_caption
+
+    f = await fixture(monkeypatch)
+    f.saved.item.payload = {"caption_cleanup": {"part_id": "caption", "message_ids": [19], "state": "pending"}}
+    stamped = SimpleNamespace(part=f.saved.part, item=f.saved.item, link=SimpleNamespace(**vars(f.saved.link), last_update_at="a moment ago", last_ok_at="a moment ago"))
+    captures = iter([f.saved])
+
+    async def capture(**kwargs):
+        return next(captures, stamped)
+
+    async def read_source(actual):
+        return f.prepared
+
+    f.services.outbox.capture_caption_cleanup = capture
+    f.services.model_source.read_file_part = read_source
+    request = RecordingRequest()
+    request.enqueue_get_me()
+    request.enqueue("deleteMessage")
+    f.channel.bot = offline_bot(request, rate_limiter=BoundedRateLimiter())
+    async with f.channel.bot:
+        assert await cleanup_caption(f.channel, {})
+    assert [call.parameters["message_id"] for call in request.calls if call.endpoint == "deleteMessage"] == [19]
+
+
+async def test_a_new_binding_does_give_up_a_file_on_its_way(monkeypatch):
+    from app.telegram_bots.outbound import send_file_part
+    from app.telegram_bots.producer import DeliveryClaimRetired
+
+    f = await fixture(monkeypatch)
+    rebound = SimpleNamespace(**{**vars(f.saved.link), "binding_generation": 2})
+
+    async def capture(**kwargs):
+        return SimpleNamespace(part=f.saved.part, item=f.saved.item, link=rebound)
+
+    f.services.outbox.capture_sending_part = capture
+    with pytest.raises(DeliveryClaimRetired):
+        await send_file_part(f.channel, f.saved, {})
+    assert "upload" not in f.events
 
 
 async def test_changed_first_read_hash_never_reaches_sdk(monkeypatch):
