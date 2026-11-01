@@ -111,6 +111,7 @@ class _Turn:
     capacity_waiting: bool = False
     capacity_notice_sent: bool = False
     stop_marker_checked: bool = False
+    stop_press: tuple | None = None
     submission: object = None
     quiet_since: float | None = None
     observed_since: float | None = None
@@ -1194,10 +1195,14 @@ class ChatTurns:
                 turn.stop_id = None
                 if turn.presentation is not None:
                     await turn.presentation.resume()
+                press, turn.stop_press = turn.stop_press, None
                 if turn.stop_status == "refused":
                     for row in turn.stop_commands:
                         await turn.channel.send_text("stop.failed", source_id=f"chat-stop-refused:{row.chat_id}:{row.message_id}", inbox_rows=[row], finish_route=True, thread=turn.topic, _captured_link=turn.link)
                     turn.stop_commands.clear()
+                    if press is not None:
+                        row, update_id = press
+                        await turn.channel.send_text("stop.failed", source_id=f"press:{row.id}:{update_id}", reply_to=row.message_id, thread=turn.topic, _captured_link=turn.link)
                 return
             if turn.stop_status == "pending" and not turn.stop_marker_checked:
                 record = turn.record
@@ -1311,6 +1316,15 @@ class ChatTurns:
                 return True
         return False
 
+    async def _spend_buttons(self, channel, link, row):
+        from app.telegram_bots.producer import keyboard_cleanup_row
+
+        guard = _Guard(self.services, channel, link, lambda: self._open(channel, link), repair=True)
+        async with self.services.callbacks.writer(link, guard) as writer:
+            group = await self.services.callbacks.lock_current(link, row.id, chat_id=row.chat_id, message_id=row.message_id, message_thread_id=row.message_thread_id, guard=guard, session=writer)
+            await self.services.callbacks.consume_group(group, session=writer)
+            writer.add(keyboard_cleanup_row(group.selected, owner_user_id=link.owner_user_id, now=self.services.outbox.clock()))
+
     async def execute_callback(self, channel, row, *, update_id, query_id):
         from app.telegram_bots.callbacks import CallbackRefused
 
@@ -1322,16 +1336,23 @@ class ChatTurns:
             if row.kind in {"stop_answer", "cancel_wait"}:
                 if turn is None or turn.channel is not channel or not self._current(turn):
                     raise CallbackRefused() from None
+                if turn.stop_requested:
+                    return  # A repeat tap: the first one is doing this.
                 if row.kind == "cancel_wait":
-                    if turn.record is None or turn.capacity_waiting is not True or row.target_kind != "attempt" or row.target_id != turn.record.turn_id:
+                    if turn.record is None or row.target_kind != "attempt" or row.target_id != turn.record.turn_id:
                         raise CallbackRefused() from None
+                    if turn.capacity_waiting is not True:
+                        raise CallbackRefused("stop.failed") from None  # It is being tried right now, and may yet wait again.
                 else:
                     view = turn.presentation
                     if view is None or not await view.matches_callback(row):
                         raise CallbackRefused() from None
                     if not self._current(turn) or turn.presentation is not view or row.target_kind != "draft" or row.target_id != str(view.draft_id):
                         raise CallbackRefused() from None
+                turn.stop_press = (row, update_id)
                 await self._stop_turn(turn, stop_id="callback:" + row.id)
+                if row.kind == "cancel_wait" and turn.stop_status != "refused":
+                    await await_drained(self._spend_buttons(channel, link, row))
                 return
             if row.kind not in {"retry_message", "file_retry"}:
                 raise CallbackRefused() from None
@@ -1340,22 +1361,26 @@ class ChatTurns:
             from app.telegram_bots.callbacks import _RESERVED
 
             business = {key: value for key, value in row.payload.items() if key not in _RESERVED}
-            if row.kind == "file_retry" and set(business) == {"thread_id", "path"}:
-                source = getattr(self.services, "model_source", None)
-                if source is None:
-                    raise CallbackRefused() from None
-                await source.retry_file_callback(link, row, callbacks=self.services.callbacks, guard=guard)
-                return
-            stage = await self.services.outbox.inbox.stage_callback_input(
-                link,
-                callback_id=row.id,
-                update_id=update_id,
-                chat_id=row.chat_id,
-                message_id=row.message_id,
-                message_thread_id=row.message_thread_id,
-                callbacks=self.services.callbacks,
-                guard=guard,
-            )
+            try:
+                if row.kind == "file_retry" and set(business) == {"thread_id", "path"}:
+                    source = getattr(self.services, "model_source", None)
+                    if source is None:
+                        raise CallbackRefused() from None
+                    await source.retry_file_callback(link, row, callbacks=self.services.callbacks, guard=guard)
+                    return
+                stage = await self.services.outbox.inbox.stage_callback_input(
+                    link,
+                    callback_id=row.id,
+                    update_id=update_id,
+                    chat_id=row.chat_id,
+                    message_id=row.message_id,
+                    message_thread_id=row.message_thread_id,
+                    callbacks=self.services.callbacks,
+                    guard=guard,
+                )
+            except ValueError:
+                # What this would try again is gone, and tapping again cannot bring it back.
+                raise CallbackRefused() from None
             guard.current()
             if stage.route_complete:
                 return

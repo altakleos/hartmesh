@@ -1600,9 +1600,19 @@ class InboxRepository:
         rows = list(await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == selected.group_id).order_by(TelegramCallbackRow.id).with_for_update()))
         if not rows or any((row.link_id, row.chat_id, row.message_thread_id, row.binding_generation) != (selected.link_id, selected.chat_id, selected.message_thread_id, selected.binding_generation) for row in rows):
             raise ValueError("callback-publication-conflict") from None
-        for row in rows:
-            if row.consumed_at is None:
-                row.consumed_at, row.closed_reason = _now(), "done"
+        link = await session.get(TelegramBotLinkRow, selected.link_id)
+        self._spend_group(session, selected, rows, owner_user_id=link.owner_user_id)
+
+    @staticmethod
+    def _spend_group(session, selected, rows, *, owner_user_id):
+        """A question's own view replaces its keyboard, so only these leave spent buttons on screen."""
+        spent = [row for row in rows if row.consumed_at is None]
+        for row in spent:
+            row.consumed_at, row.closed_reason = _now(), "done"
+        if spent and selected.kind in {"retry_message", "file_retry", "prompt_send_new"} and selected.message_id is not None:
+            from app.telegram_bots.producer import keyboard_cleanup_row
+
+            session.add(keyboard_cleanup_row(selected, owner_user_id=owner_user_id, now=_now()))
 
     async def attach_input_outcome(self, link: BotLink, callback_id: str, *, outbox_id: str, session: AsyncSession) -> None:
         """Attach a definite prepublication outcome in its caller's writer."""
@@ -1924,9 +1934,7 @@ class InboxRepository:
         rows = list(await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == row.group_id).order_by(TelegramCallbackRow.id).with_for_update()))
         if not rows or any((item.link_id, item.chat_id, item.message_thread_id, item.binding_generation) != (row.link_id, row.chat_id, row.message_thread_id, row.binding_generation) for item in rows):
             raise ValueError("callback-publication-conflict") from None
-        for item in rows:
-            if item.consumed_at is None:
-                item.consumed_at, item.closed_reason = _now(), "done"
+        self._spend_group(session, row, rows, owner_user_id=record.scope.owner_user_id)
         data["confirmed_publication_id"] = record.publication_id
         row.payload = {**deepcopy(row.payload), CALLBACK_PUBLICATION_KEY: data}
         if self.on_callback_confirmed is not None:
@@ -2759,7 +2767,7 @@ class InboxRepository:
         self, link: BotLink, origin: InboxRow, *, callback_id: str, chat_id: int, message_id: int, message_thread_id: int | None, callbacks, guard: PublicationGuard, session: AsyncSession | None = None
     ) -> InboxRow:
         """Fix one /new choice before HTTP; completion remains its caller's job."""
-        from app.telegram_bots.callbacks import CALLBACK_METADATA_KEYS
+        from app.telegram_bots.callbacks import CALLBACK_METADATA_KEYS, CallbackRefused
         from app.telegram_bots.links import prepare_publication_guard
         from deerflow.utils.file_io import await_drained
 
@@ -2827,7 +2835,7 @@ class InboxRepository:
                 raise ValueError("callback-choice-conflict") from None
             choice = {"version": 1, "callback_id": group.selected.id, "kind": group.selected.kind, "group_id": group.selected.group_id, "anchor_outbox_id": group.anchor_outbox_id}
             if "callback_choice" in mark.route_basis and _canonical(mark.route_basis["callback_choice"]) != _canonical(choice):
-                raise ValueError("callback-choice-conflict") from None
+                raise CallbackRefused(None) from None
             mark.route_basis = {**deepcopy(mark.route_basis), "callback_choice": choice}
             await writer.flush()
             result = _snapshot(mark)

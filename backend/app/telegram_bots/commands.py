@@ -131,7 +131,7 @@ class CallbackCommands:
             origin = preparation.origin
             keyboard = KEYBOARDS["new.confirm_plain"](thread_id=preparation.expected_thread_id or preparation.creation_id)
         if origin.route_basis.get("human_input_ui") != {"command_closed": word}:
-            await self.services.prompts.close(link, origin.chat_id, origin.message_thread_id, reason="command")
+            await self.services.prompts.close(link, origin.chat_id, origin.message_thread_id, reason="command", shown_only=True)
         guard.current()
         part = {"kind": "text", "source_ref": {"key": basis["key"], "values": basis["values"]}}
         if basis.get("keyboard_template") != "new.confirm_plain":
@@ -185,16 +185,29 @@ class CallbackCommands:
         )
         choice = claimed.route_basis["callback_choice"]
         if choice["kind"] == "new_confirm":
-            await self.services.threads.new_conversation(link, origin=claimed)
-            key = "new.done"
+            source = await self._started_new(link, claimed)
         elif choice["kind"] == "new_keep":
-            key = "new.kept"
+            source = {"key": "new.kept", "values": {}}
         else:
             raise CallbackRefused() from None
         await prepare_publication_guard(guard)
-        await await_drained(self._finish_new(link, row, guard, claimed, key))
+        await await_drained(self._finish_new(link, row, guard, claimed, source))
 
-    async def _finish_new(self, link, row, guard, claimed, key):
+    async def _started_new(self, link, claimed):
+        """What the offer turns into. A passing failure raises instead, so the person can tap again."""
+        from app.telegram_bots.links import ThreadPreparationStale
+        from app.telegram_bots.publication import fixed_source
+        from app.telegram_bots.threads import ThreadPreparationFailure
+
+        try:
+            await self.services.threads.new_conversation(link, origin=claimed)
+        except ThreadPreparationFailure:
+            return await fixed_source(self.services, link, "new.files_full")
+        except ThreadPreparationStale:
+            return {"key": "stale.not_waiting", "values": {}}
+        return {"key": "new.done", "values": {}}
+
+    async def _finish_new(self, link, row, guard, claimed, source):
         async with self.services.outbox.sessions() as writer, writer.begin():
             if writer.get_bind().dialect.name == "sqlite":
                 await writer.execute(text("BEGIN IMMEDIATE"))
@@ -202,7 +215,7 @@ class CallbackCommands:
             await self.services.outbox.plan_product_keyboard(
                 link,
                 source_id="choice:" + row.id,
-                parts=[{"kind": "edit", "target_message_id": row.message_id, "source_ref": {"key": key, "values": {}}}],
+                parts=[{"kind": "edit", "target_message_id": row.message_id, "source_ref": source}],
                 keyboard=[],
                 callbacks=self.services.callbacks,
                 guard=guard,
@@ -234,7 +247,7 @@ class CallbackCommands:
         result = await await_drained(self._execute_local(link, row, guard, keyboard, query_id))
         if row.kind == "web_list":
             guard.current()
-            await self.services.prompts.close(link, row.chat_id, row.message_thread_id, reason="navigation")
+            await self.services.prompts.close(link, row.chat_id, row.message_thread_id, reason="navigation", shown_only=True)
             guard.current()
         return result
 

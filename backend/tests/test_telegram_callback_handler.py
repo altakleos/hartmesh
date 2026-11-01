@@ -134,13 +134,16 @@ def test_pause_table_covers_every_declared_conditional_kind():
     assert not module.pause_covers("act_check", {}, link, original_act_kind="settings")
 
 
-@pytest.mark.parametrize("age,key", [(timedelta(hours=25), "stale.draft"), (timedelta(days=181), "stale.not_waiting")])
-def test_draft_window_does_not_override_the_global_callback_age_limit(age, key):
-    row = SimpleNamespace(consumed_at=None, created_at=NOW - age, expires_at=None, target_kind="draft")
+@pytest.mark.parametrize("age,target,usable", [(timedelta(hours=25), "draft", False), (timedelta(hours=25), "thread", True), (timedelta(days=181), "thread", False)])
+def test_a_draft_lapses_sooner_and_every_button_lapses_at_the_age_limit(age, target, usable):
+    row = SimpleNamespace(consumed_at=None, created_at=NOW - age, expires_at=None, target_kind=target)
     repo = api().CallbackRepository(None, clock=lambda: NOW)
+    if usable:
+        repo._usable(row)
+        return
     with pytest.raises(api().CallbackRefused) as failure:
         repo._usable(row)
-    assert failure.value.key == key
+    assert failure.value.key == "stale.not_waiting"
 
 
 @pytest.mark.asyncio
@@ -191,7 +194,7 @@ async def test_held_precheck_deadline_answers_once_retains_cleanup_and_never_ado
         await asyncio.wait_for(entered.wait(), 2)
         await asyncio.sleep(0.15)
         assert not task.done(), "The original ingress lifetime must retain precheck cleanup"
-        assert calls == [("answer", "query", "stale.not_waiting")]
+        assert calls == [("answer", "query", "tap.failed")], "Nothing is known about the button yet, so nothing is said against it"
     finally:
         release.set()
         await task
@@ -253,4 +256,4 @@ async def test_retired_first_read_does_not_admit_another_metadata_query(callback
         release.set()
         await task
     assert lookups == []
-    assert calls == [("answer", "query", "stale.not_waiting")]
+    assert calls == [("answer", "query", "tap.failed")]

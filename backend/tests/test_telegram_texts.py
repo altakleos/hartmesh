@@ -21,11 +21,11 @@ STAGE_ONE_KEYS = frozenset(
     voice.agreed voice.not_used voice.writing voice.heard voice.failed voice.unclear media.unsupported
     update.refused edit.ignored token.pasted token.pasted_kept clarify.options clarify.more_choices clarify.answer_line
     clarify.other_prompt clarify.form_field clarify.form_yes clarify.form_no clarify.form_done clarify.form_review
-    net.ask_plain net.allowed net.kept net.cancelled net.stale new.confirm_plain new.done new.kept
+    net.ask_plain net.allowed net.kept net.cancelled net.stale new.confirm_plain new.done new.kept new.files_full
     cmd.unknown cmd.agent cmd.skill_off cmd.skill_unavailable settings.state_basic link.conflict
     link.conflict_over.chat link.conflict_over.custom_agent link.limited link.back_online link.removed access.off
     access.back custom_agent.deleted unavailable.ask_admin unavailable.next unavailable.reference
-    stale.other_person stale.not_waiting tap.failed delivery.failed prompt.closed prompt.unavailable
+    stale.other_person stale.not_waiting tap.failed form.required delivery.failed prompt.closed prompt.unavailable
     prompt.discarded preview.part_header profile.name.chat profile.short.chat profile.short.custom_agent
     profile.description.chat profile.description.custom_agent profile.removed
     web.list web.memory web.conversations web.conversation web.addAssistant web.addEmployee web.telegram

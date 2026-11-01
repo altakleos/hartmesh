@@ -141,6 +141,9 @@ async def test_callback_dispatch_consumes_only_after_actual_bus_commit(retry_inp
     record = await e.inbox.reserve_callback_publication(e.link, e.callback_id, thread_id=e.thread_id, endpoint_id=e.http.endpoint_id, guard=e.guard_factory())
     dispatched = await e.coordinator.dispatch_record(record, e.link)
     assert dispatched.dispatch_started and (await e.callbacks.get(e.callback_id)).consumed_at is not None
+    async with e.db.sessions() as session:
+        cleanup = await session.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.payload["kind"].as_string() == "keyboard_cleanup"))
+    assert cleanup.parts[0]["remove_keyboard"] and cleanup.parts[0]["target_message_id"] == 1901, "The spent button leaves the message that showed it"
     message = e.bus.get_inbound_nowait()
     e.bus.inbound_task_done()
     assert message.metadata["event_id"] == "c" + e.callback_id

@@ -212,7 +212,7 @@ async def fixed_source(host, link, key):
     values = {}
     if key == "custom_agent.deleted":
         values = {"product": host.product_name, "agent": link.bot_username or host.product_name}
-    elif key == "chat.files_full":
+    elif key in {"chat.files_full", "new.files_full"}:
         values = {"product": host.product_name, "support": "an administrator"}
     elif key == "refused.interrupted":
         values = {"name": (await host.prepare_ingress_values(link))["name"]}

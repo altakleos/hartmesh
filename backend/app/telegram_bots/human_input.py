@@ -48,15 +48,18 @@ def _choice_label(label, index):
     return label if len(label) <= BUTTON_LABEL_MAX_SINGLE else f"{index}. {label[:BUTTON_CHOICE_CUT]}…"
 
 
-def _choice_rows(options, *, thread_id, kind, payload, selected=(), cap=CLARIFY_CHOICES_MAX):
+def _choice_rows(options, *, thread_id, kind, payload, selected=None, cap=CLARIFY_CHOICES_MAX):
+    """`selected` is a list's ticks. Each of its buttons remembers what it showed, so a repeat press can be told from a change of mind."""
     chosen = options[:cap]
     numbered = len(options) > CHOICE_BUTTONS_MAX
     buttons = []
     for index, option in enumerate(chosen, 1):
         label = str(index) if numbered else _choice_label(option["label"], index)
-        if option["value"] in selected:
+        ticked = selected is not None and option["value"] in selected
+        if ticked:
             label = "✓ " + label
-        buttons.append(_button(kind, thread_id, {**payload, "option_id": option["id"]}, values={"label": label}))
+        shown = {} if selected is None else {"ticked": ticked}
+        buttons.append(_button(kind, thread_id, {**payload, "option_id": option["id"], **shown}, values={"label": label}))
     width = NUMBER_BUTTONS_PER_ROW if numbered else 1
     return [buttons[index : index + width] for index in range(0, len(buttons), width)]
 
@@ -143,7 +146,7 @@ def present_form(raw, form, *, thread_id, reply_to_message_id, locale, view="fie
     if kind in {"select", "multi_select"}:
         options = field["options"]
         html += "\n\n" + "\n".join(escape(f"{index}. {option['label']}") for index, option in enumerate(options, 1))
-        keyboard = _choice_rows(options, thread_id=thread_id, kind="form_option", payload=payload, selected=form.values.get(field["name"], ()) if kind == "multi_select" else ())
+        keyboard = _choice_rows(options, thread_id=thread_id, kind="form_option", payload=payload, selected=form.values.get(field["name"], ()) if kind == "multi_select" else None)
         if kind == "multi_select":
             keyboard.append([_button("form_next", thread_id, payload, values={"label": render_plain("clarify.form_done", locale)})])
     elif kind == "checkbox":
@@ -206,13 +209,34 @@ class HumanInputs:
         return channel._callback_current(link)
 
     async def _source_for(self, link, item):
+        """A refusal means what this asked is gone, and asking again cannot bring it back."""
+        from app.channels.execution import ChannelExecutionProtocolError
+        from app.telegram_bots.callbacks import CallbackRefused
         from app.telegram_bots.human_input_source import validate_human_input_reply_basis
+        from app.telegram_bots.publication import PublicationRefused
 
         checked = validate_human_input_reply_basis(item)
-        source = await self.source.read_request(checked.record, link)
+        try:
+            source = await self.source.read_request(checked.record, link)
+        except (PublicationRefused, ChannelExecutionProtocolError):
+            # A deleted conversation and a failing Gateway read alike here, so the thread itself is asked.
+            if await self._thread_gone(link, checked.record.scope.thread_id):
+                raise CallbackRefused() from None
+            raise ChannelExecutionProtocolError() from None
         if source is None or source.basis != item.payload["reply_basis"]["outcome"]["request_basis"]:
-            raise ValueError("human-input-source-conflict") from None
+            raise CallbackRefused() from None
         return source
+
+    async def _thread_gone(self, link, thread_id):
+        import httpx
+
+        try:
+            await self.services.thread_client.get_thread(link.owner_user_id, thread_id)
+        except httpx.HTTPStatusError as error:
+            return error.response.status_code == 404
+        except Exception:
+            return False  # Not knowing is not gone.
+        return False
 
     async def plan_terminal(self, record, link, *, guard=None):
         from deerflow.utils.file_io import await_drained
@@ -374,7 +398,7 @@ class HumanInputs:
             if group.anchor_outbox_id != item.id or row.target_kind != "thread" or row.target_id != source.record.scope.thread_id:
                 raise CallbackRefused() from None
             if any("publication_owner" in member.payload for member in group.rows):
-                raise CallbackRefused() from None
+                raise CallbackRefused(None) from None
             if row.kind == "clarify_other":
                 if request["source"] != "ask_clarification" or not request.get("options"):
                     raise CallbackRefused() from None
@@ -471,7 +495,7 @@ class HumanInputs:
                 part.update(kind="edit", target_message_id=target, target_protect_content=bool(previous.get("sent_protect_content", False)))
         elif not any(part.get("force_reply") for part in parts) and len(parts) == 1 and not old and fallback_message_id is not None:
             parts[0].update(kind="edit", target_message_id=fallback_message_id, target_protect_content=False)
-        if any(part.get("force_reply") for part in parts) and item.payload["reply_basis"].get("keyboard") and old:
+        if item.payload["reply_basis"].get("keyboard") and old and not any(part.get("kind") == "edit" for part in parts):
             cleared = [
                 {
                     "kind": "edit",
@@ -498,11 +522,14 @@ class HumanInputs:
         from app.telegram_bots.callbacks import CallbackRefused
 
         row = group.selected
-        form = await self.services.forms.read(link, row.payload.get("form_id"), guard=guard, session=writer)
-        if form.revision != row.payload.get("revision") or form.request["request_id"] != decode_request(source.request)["request_id"]:
-            raise CallbackRefused() from None
-        view = "field"
         kind = row.kind
+        form = await self.services.forms.read(link, row.payload.get("form_id"), guard=guard, session=writer)
+        definition = form.fields[form.field_index] if form.state == "field" else {}
+        # Every tick redraws the keyboard, so someone ticking quickly is still pressing the one before.
+        same_list = kind in {"form_option", "form_next", "form_skip"} and definition.get("type") == "multi_select" and definition["name"] == row.payload.get("field")
+        if form.revision != row.payload.get("revision") and not same_list or form.request["request_id"] != decode_request(source.request)["request_id"]:
+            raise CallbackRefused() from None
+        view, action = "field", None
         if kind in {"form_change", "back"}:
             if form.state != "review":
                 raise CallbackRefused() from None
@@ -511,16 +538,21 @@ class HumanInputs:
             field = row.payload.get("field")
             action, value = {"form_next": ("next", None), "form_skip": ("skip", None), "form_field": ("edit", None)}.get(kind, ("answer", row.payload.get("option_id")))
             if kind == "form_option":
-                definition = form.fields[form.field_index]
                 if definition["type"] == "multi_select":
                     action = "toggle"
+                    chosen = next((option["value"] for option in definition["options"] if option["id"] == value), None)
+                    if "ticked" in row.payload and (chosen in form.values.get(field, ())) != row.payload["ticked"]:
+                        return  # This press has already landed, and its ✓ has not reached the screen.
                 elif definition["type"] == "checkbox":
                     if value not in {"yes", "no"}:
                         raise CallbackRefused() from None
                     value = value == "yes"
             form = await self.services.forms.transition(link, form.id, expected_revision=form.revision, update_id=update_id, action=action, field=field, value=value, guard=guard, session=writer)
             view = "review" if form.state == "review" else "field"
-        await self.services.callbacks.consume_group(group, session=writer)
+        if action != "toggle":
+            # Leaving a list leaves behind every keyboard its ticks drew.
+            await self.services.callbacks.consume_group(group, session=writer)
+            await self.services.callbacks.consume_scope(link, kinds={"form_option", "form_next", "form_skip"}, reason="done", message_thread_id=row.message_thread_id, guard=guard, session=writer)
         await self.services.prompts.close(link, row.chat_id, row.message_thread_id, reason="navigation", guard=guard, session=writer)
         presentation = present_form(source.request, form, thread_id=form.thread_id, reply_to_message_id=source.record.origins[0].message_id, locale=locale, view=view)
         identity = await self._view(link, item, source, presentation, step_id=f"form:{form.id}:{form.revision}:{view}:{row.id}", guard=guard, writer=writer, fallback_message_id=row.message_id)
@@ -613,6 +645,7 @@ class HumanInputs:
         return False if target is None else await await_drained(self._apply_text(channel, link, guard, row, target))
 
     async def _apply_text(self, channel, link, guard, origin, target):
+        from app.telegram_bots.callbacks import CallbackRefused
         from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow
 
         prompt, retired, rows = target
@@ -627,7 +660,11 @@ class HumanInputs:
         if item is None:
             await self._closed_notice(link, origin, prompt, guard=guard)
             return True
-        source = await self._source_for(link, item)
+        try:
+            source = await self._source_for(link, item)
+        except CallbackRefused:
+            await self._closed_notice(link, origin, prompt, guard=guard, unavailable=True)
+            return True
         settings = await self.services.settings.get(link.owner_user_id)
         stage = None
         async with self.services.callbacks.writer(link, guard) as writer:
@@ -662,6 +699,9 @@ class HumanInputs:
     async def _retired_card_notice(self, link, origin, rows, *, guard):
         from hashlib import sha256
 
+        from app.channels.execution import ChannelExecutionProtocolError
+        from app.telegram_bots.callbacks import CallbackRefused
+
         selected = next((row for row in rows if type(row.payload.get("anchor_outbox_id")) is str), None)
         if selected is None:
             raise ValueError("unresolved-quoted-presentation") from None
@@ -669,19 +709,26 @@ class HumanInputs:
         if item is None:
             raise ValueError("unresolved-quoted-presentation") from None
         purpose, payload = "retired_presentation", {}
-        if item.payload.get("reply_basis", {}).get("version") in {5, 7} and any(row.consumed_at is None for row in rows):
-            source = await self._source_for(link, item)
-            request = decode_request(source.request)
+        # An old keyboard of a form can be spent while its form goes on.
+        field = next((row for row in rows if "form_id" in row.payload), None)
+        try:
+            form = None if field is None else await self.services.forms.read(link, field.payload["form_id"], guard=guard)
+        except CallbackRefused:
+            form = None
+        form_open = form is not None and form.state == "field"
+        source = None
+        if item.payload.get("reply_basis", {}).get("version") in {5, 7} and (form_open or any(row.consumed_at is None for row in rows)):
+            try:
+                source = await self._source_for(link, item)
+            except (ValueError, ChannelExecutionProtocolError):
+                pass  # Without its source nothing here can be answered, which is what the retired notice says.
+        if source is not None:
             payload = {"thread_id": source.record.scope.thread_id}
-            if request["input_mode"] == "form":
-                field = next((row for row in rows if "form_id" in row.payload), None)
-                if field is not None:
-                    form = await self.services.forms.read(link, field.payload["form_id"], guard=guard)
-                    if form.state == "field":
-                        purpose = "form_field"
-                        payload.update(form_id=form.id, field=form.fields[form.field_index]["name"], revision=form.revision)
-            else:
+            if decode_request(source.request)["input_mode"] != "form":
                 purpose = "request_card"
+            elif form_open:
+                purpose = "form_field"
+                payload.update(form_id=form.id, field=form.fields[form.field_index]["name"], revision=form.revision)
         identity = sha256(f"retired:{selected.group_id}:{origin.message_id}".encode()).hexdigest()[:32]
         async with self.services.callbacks.writer(link, guard) as writer:
             await self.services.prompts.open(
@@ -703,6 +750,8 @@ class HumanInputs:
 
     async def _closed_notice(self, link, origin, prompt, *, guard, writer=None, unavailable=False):
         from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow
+
+        unavailable = unavailable or prompt.payload.get("purpose") == "retired_presentation"
 
         async def save(session):
             payload = {"prompt_id": prompt.id, "message_id": origin.message_id}
@@ -737,6 +786,7 @@ class HumanInputs:
 
         from app.telegram_bots.callbacks import CallbackRefused
         from app.telegram_bots.inbox import InboxRow
+        from app.telegram_bots.producer import keyboard_cleanup_row
         from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow
 
         link = deepcopy(channel.link)
@@ -776,24 +826,27 @@ class HumanInputs:
             elif row.kind == "prompt_discard":
                 await self.services.prompts.close(link, link.chat_id, row.message_thread_id, reason="discarded", guard=guard, session=writer)
                 await self.services.callbacks.consume_group(group, session=writer)
-                await self.services.outbox.plan_product(
+                await self.services.outbox.plan_product_keyboard(
                     link,
                     source_id="prompt-discard:" + row.id,
-                    parts=[{"kind": "text", "source_ref": {"key": "prompt.discarded", "values": {}}, "reply_to_message_id": origin.message_id}],
+                    parts=[{"kind": "edit", "source_ref": {"key": "prompt.discarded", "values": {}}, "target_message_id": row.message_id}],
+                    keyboard=[],
+                    callbacks=self.services.callbacks,
+                    guard=guard,
                     inbox_rows=[origin],
                     finish_route=True,
                     message_thread_id=row.message_thread_id,
                     session=writer,
                 )
             elif row.kind == "prompt_reopen":
+                await self.services.callbacks.consume_group(group, session=writer)
+                writer.add(keyboard_cleanup_row(row, owner_user_id=link.owner_user_id, now=self.services.outbox.clock()))
                 if source is None:
-                    await self.services.callbacks.consume_group(group, session=writer)
                     await self._closed_notice(link, origin, prompt, guard=guard, writer=writer, unavailable=True)
                     return
                 if prompt.payload["purpose"] == "form_field":
                     form = await self.services.forms.read(link, prompt.payload["form_id"], guard=guard, session=writer)
                     if form.state in {"submitted", "cancelled"}:
-                        await self.services.callbacks.consume_group(group, session=writer)
                         await self._closed_notice(link, origin, prompt, guard=guard, writer=writer, unavailable=True)
                         return
                     view = "review" if form.state == "review" else "field"
@@ -807,7 +860,6 @@ class HumanInputs:
                     form = None
                 else:
                     raise CallbackRefused() from None
-                await self.services.callbacks.consume_group(group, session=writer)
                 await self.services.prompts.close(link, link.chat_id, row.message_thread_id, reason="navigation", guard=guard, session=writer)
                 identity = await self._view(link, item, source, presentation, step_id="reopen:" + row.id, guard=guard, writer=writer)
                 if form is not None:
@@ -907,6 +959,7 @@ class HumanInputs:
             await self.services.callbacks.consume_scope(
                 link, kinds={"clarify_option", "clarify_other", "network", "form_option", "form_next", "form_skip", "form_send", "form_change", "form_field"}, reason=reason, message_thread_id=topic, guard=guard, session=writer
             )
+            cleared = set()
             for item, source in sources:
                 request = decode_request(source.request)
                 if request["source"] == "sandbox_network":
@@ -922,7 +975,9 @@ class HumanInputs:
                     from app.telegram_bots.mixed_source import human_input_parts
 
                     old = [part for part in human_input_parts(item) if part.get("state") == "sent" and part.get("message_ids")]
-                    if old:
+                    # A list's ticks leave one message with several live keyboards, and it is cleared once.
+                    if old and old[-1]["message_ids"][-1] not in cleared:
+                        cleared.add(old[-1]["message_ids"][-1])
                         last = saved[-1]
                         clean = {
                             "kind": "edit",
