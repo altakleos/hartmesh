@@ -311,9 +311,11 @@ cancellation, and converts HTML to Markdown off the Gateway's event loop.
 project definitions, their conversation membership and active shelf documents,
 plus saved server-side notification, model, chat-mode and reasoning preferences.
 These accompany conversations, personal files, custom skills, memory, schedules
-and agents. Deleted projects, trashed documents and other users' work are
-excluded. The archive's README and manifest identify skipped files and the
-contents of each download part.
+and agents. If you used Telegram, `telegram.json` holds your settings, your bots
+without their tokens, and a list of what you did from them without its content.
+Deleted projects, trashed documents and other users' work are excluded. The
+archive's README and manifest identify skipped files and the contents of each
+download part.
 
 With managed Compose storage enabled, the export reads conversation files,
 My Files and current project documents from your assigned personal storage.
@@ -1376,6 +1378,14 @@ the model. The web app's Telegram screens are reserved for a subsequent stage; t
 `/api/telegram-bots` routes they will use need a signed-in browser session, so
 neither a personal access token nor the internal token reaches them, and no
 response carries a bot token.
+
+Telegram bookkeeping is kept for a limited time: incoming messages for 7 days,
+delivered messages for 30 days, and acts and bot history for 400 days. A delivered
+message that a live button or an unfinished delivery still needs stays until that
+ends. **Try again** works for 7 days, because it resends the incoming message;
+after that the bot says it is no longer waiting. The account command's `disable` reports how many held bindings are Telegram
+bots as `telegram_bots`, and `enable --restore-held` does the same under
+`restored`.
 
 The service sets each bot's public name, descriptions, command menu and picture,
 in the language its owner chose, and retries for 24 hours if Telegram refuses.

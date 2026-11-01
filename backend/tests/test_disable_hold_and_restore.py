@@ -174,6 +174,28 @@ async def test_disable_holds_every_covered_accounts_active_schedules_and_binding
 
 
 @pytest.mark.anyio
+async def test_telegram_bots_are_counted_from_the_hold_record_so_a_re_run_prints_the_same_number(stores) -> None:
+    account = await stores.users.create_user(_account())
+    user_id = str(account.id)
+    bot = await stores.connections.upsert_connection(owner_user_id=user_id, provider="telegram", external_account_id="7001", workspace_id="1", bot_user_id="9001")
+    shared_channel = await stores.connections.upsert_connection(owner_user_id=user_id, provider="telegram", external_account_id="7002", workspace_id="2")
+    slack = await _bind(stores, user_id)
+    command = _command(stores)
+
+    first = await command.run("disable", email="pat@example.com")
+    second = await command.run("disable", email="pat@example.com")
+
+    assert first["held"]["channel_bindings"] == sorted([bot["id"], shared_channel["id"], slack])
+    assert first["surfaces"]["channel_bindings"]["telegram_bots"] == 1
+    assert second["surfaces"]["channel_bindings"]["telegram_bots"] == 1, "nothing is connected any more, and the record still says one"
+
+    restored = await command.run("enable", email="pat@example.com", restore_held=True)
+
+    assert restored["restored"]["channel_bindings"] == sorted([bot["id"], shared_channel["id"], slack])
+    assert restored["restored"]["telegram_bots"] == 1
+
+
+@pytest.mark.anyio
 async def test_after_disable_and_enable_a_held_schedule_does_not_fire_at_its_next_due_time(stores) -> None:
     from app.scheduler.service import ScheduledTaskService
 
@@ -186,7 +208,7 @@ async def test_after_disable_and_enable_a_held_schedule_does_not_fire_at_its_nex
     enabled = await command.run("enable", email="pat@example.com")
 
     assert enabled["held"] == {"schedules": [weekly], "channel_bindings": [binding]}
-    assert enabled["restored"] == {"schedules": [], "channel_bindings": []}
+    assert enabled["restored"] == {"schedules": [], "channel_bindings": [], "telegram_bots": 0}
     assert "stay off until" in enabled["note"]
     assert await stores.users.list_holds(ISSUER, "sub-pat") == [], "a plain enable discards the record"
     scheduler = ScheduledTaskService(
@@ -220,7 +242,7 @@ async def test_restore_held_turns_back_on_exactly_what_the_disable_held_at_its_n
     restored = await command.run("enable", email="pat@example.com", restore_held=True)
 
     assert restored["verdict"] == "enabled" and restored["restore_held"] is True
-    assert restored["restored"] == {"schedules": sorted([overdue, once_ahead]), "channel_bindings": [binding]}
+    assert restored["restored"] == {"schedules": sorted([overdue, once_ahead]), "channel_bindings": [binding], "telegram_bots": 0}
     assert restored["stayed_off"] == [{"surface": "schedules", "id": once_passed, "reason": "time_passed"}]
     assert restored["surfaces_unconfirmed"] == [] and restored["returncode"] == 0
     assert await _status(stores, overdue) == "enabled"
@@ -282,13 +304,13 @@ async def test_a_restore_that_fails_is_unconfirmed_kept_in_the_record_and_finish
 
     assert failed["returncode"] == EXIT_UNCONFIRMED_RUNS and failed["surfaces_unconfirmed"] == ["schedules"]
     assert failed["stayed_off"] == [{"surface": "schedules", "id": weekly, "reason": "restore_failed"}]
-    assert failed["restored"] == {"schedules": [], "channel_bindings": [binding]}
+    assert failed["restored"] == {"schedules": [], "channel_bindings": [binding], "telegram_bots": 0}
     assert await stores.users.list_holds(ISSUER, "sub-pat") == [("schedule", weekly, str(account.id))], "only what was settled leaves the record"
 
     monkeypatch.setattr(stores.schedules, "restore_held", restore_held)
     again = await command.run("enable", email="pat@example.com", restore_held=True)
 
-    assert again["verdict"] == "already_enabled" and again["restored"] == {"schedules": [weekly], "channel_bindings": []}
+    assert again["verdict"] == "already_enabled" and again["restored"] == {"schedules": [weekly], "channel_bindings": [], "telegram_bots": 0}
     assert again["returncode"] == 0 and await _status(stores, weekly) == "enabled"
 
 

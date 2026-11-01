@@ -12,14 +12,13 @@ import os
 import traceback
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 from uuid import uuid4
 from weakref import WeakKeyDictionary
 
 import httpx
-from sqlalchemy import delete
 from sqlalchemy.exc import SQLAlchemyError
 from telegram import Bot
 from telegram.error import RetryAfter, TelegramError
@@ -40,12 +39,12 @@ from app.telegram_bots.polling import CONFLICT_GRACE_SECONDS, TASK_DEATHS_BEFORE
 from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryEligibility, Outbox, OutboxSender
 from app.telegram_bots.profile import ProfileSync
 from app.telegram_bots.render import render_plain
+from app.telegram_bots.retention import sweep_rows
 from app.telegram_bots.settings import SettingsRepository, silent_now
 from app.telegram_bots.voice import VoiceNotes, resolve_transcriber
 from deerflow.config.app_config import get_app_config
 from deerflow.config.ui_config import product_name
 from deerflow.persistence.engine import get_session_factory
-from deerflow.persistence.telegram_bots.model import TelegramBotLinkEventRow
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.utils.file_io import await_drained
 
@@ -56,8 +55,7 @@ START_CONCURRENCY = 10
 HEALTH_WAIT_SECONDS, HEALTH_WAIT_INTERVAL_SECONDS = 60.0, 0.5
 STOP_TIMEOUT_SECONDS = 5.0
 NOTICE_EVERY_HOURS = 24
-RETENTION_SWEEP_SECONDS = 3600
-LINK_EVENT_RETENTION_DAYS = 400
+RETENTION_SWEEP_SECONDS = 86400
 
 logger = logging.getLogger(__name__)
 _current: TelegramSupervisor | None = None
@@ -480,7 +478,10 @@ class TelegramSupervisor:
         self._periodic(self.reconcile, self.config.reconcile_interval_seconds, "reconcile")
         self._periodic(self.recovery.tick, self.config.reconcile_interval_seconds, "publication-recovery")
         self._periodic(self._refresh_flags, 3600, "bot-flags")
-        self._periodic(self.sweep_retention, RETENTION_SWEEP_SECONDS, "retention")
+        self._periodic(self.sweep_retention, RETENTION_SWEEP_SECONDS, "retention", first_delay=3600)
+        self._periodic(lambda: self.callbacks.sweep(self._clock()), 3600, "callback-sweep")
+        if self.pending_files is not None:
+            self._periodic(lambda: self.pending_files.sweep(self._clock()), 3600, "pending-file-sweep")
         self._periodic(self.profile_sync.push_owed, 3600, "profile", first_delay=0)
 
     async def _recover_startup_publications(self) -> None:
@@ -1433,17 +1434,10 @@ class TelegramSupervisor:
                 continue
 
     async def sweep_retention(self, now: datetime | None = None) -> dict[str, int]:
-        # Pending files are independent expiring descriptors. Retain callback,
-        # inbox and delivery custody until their dependency-aware collector.
-        counts = {"inbound": 0, "outbox": 0, "acts": 0, "events": 0, "pending_files": 0}
         if self.session_factory is None or self._cause is not None:
-            return counts
+            return {"inbound": 0, "outbox": 0, "acts": 0, "events": 0}
         began = self._time()
-        if self.pending_files is not None:
-            counts["pending_files"] = await self.pending_files.sweep(now or self._clock())
-        async with self.session_factory() as session, session.begin():
-            result = await session.execute(delete(TelegramBotLinkEventRow).where(TelegramBotLinkEventRow.created_at < (now or self._clock()) - timedelta(days=LINK_EVENT_RETENTION_DAYS)))
-            counts["events"] = result.rowcount
+        counts = await await_drained(sweep_rows(self.session_factory, now or self._clock(), callback_max_age_days=self.config.callbacks.max_age_days))
         self._event("retention_sweep", **counts, took_ms=round((self._time() - began) * 1000))
         return counts
 

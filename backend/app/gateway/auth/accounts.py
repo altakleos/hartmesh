@@ -155,7 +155,9 @@ stopped. Never-claimed items can be confirmed cancelled from their rows.
 Rejoining revives nothing. ``disable`` holds what could start work for the
 person again -- every covered account's active schedules, paused, and its
 connected channel bindings, which then route nothing -- and names them under
-``held`` (``schedules``, ``channel_bindings``). What it holds is recorded for
+``held`` (``schedules``, ``channel_bindings``), counting the Telegram bots among
+those bindings from the stored record (``telegram_bots``, the same key under
+``restored``), so a re-run prints the same number. What it holds is recorded for
 the identity (``identity_holds``, migration ``0027_account_access``) before it is acted on, so a
 command stopped in between leaves a record a re-run completes. It also ends
 the work waiting to run for them, which would otherwise run once they are
@@ -1187,12 +1189,25 @@ class AccountsCommand:
         ended = await self._receipts.end_for_owners(user_ids, outcome_code=CHANNEL_RECEIPT_OWNER_REFUSED)
         return ended, await self._receipts.count_claimed_for_owners(user_ids)
 
+    async def _telegram_bots(self, bindings: set[tuple[str, str]]) -> int:
+        """Of these (binding, owner) pairs, how many are managed Telegram bots.
+
+        Read from the stored bindings, so a re-run prints the same number.
+        """
+        if self._channel_connections is None or not bindings:
+            return 0
+        rows: dict[str, dict[str, Any]] = {}
+        for owner in {user_id for _, user_id in bindings}:
+            rows.update({str(row["id"]): row for row in await self._channel_connections.list_connections(owner)})
+        return sum(1 for target_id, _ in bindings if rows.get(target_id, {}).get("provider") == "telegram" and rows[target_id].get("bot_user_id"))
+
     async def _report_held(self, identity: tuple[str, str], held: _Held, clock: SurfaceClock, *, committed: int) -> dict[str, list[str]]:
         """Report the held and ended surfaces; returns the identity's whole hold record, by surface."""
         record = await self._users.list_holds(*identity)
         document = {surface: sorted(target_id for kind, target_id, _ in record if kind == held_kind) for surface, held_kind in HELD_SURFACES.items()}
+        telegram_bots = await self._telegram_bots({(target_id, user_id) for kind, target_id, user_id in record if kind == HELD_SURFACES["channel_bindings"]})
         for surface in HELD_SURFACES:
-            facts: dict[str, Any] = {"connect_codes_ended": held.connect_codes} if surface == "channel_bindings" else {}
+            facts: dict[str, Any] = {"connect_codes_ended": held.connect_codes, "telegram_bots": telegram_bots} if surface == "channel_bindings" else {}
             if held.failed[surface]:
                 clock.not_stopped(surface, ACTION_HELD, len(document[surface]), unconfirmed=True, not_ended=len(held.failed[surface]), **facts)
             else:
@@ -1345,7 +1360,7 @@ class AccountsCommand:
             # rather than cut what they open for up to its periodic look.
             await self._sweeps.request_check()
         held = {surface: sorted(target_id for kind, target_id, _ in record if kind == held_kind) for surface, held_kind in HELD_SURFACES.items()}
-        restored: dict[str, list[str]] = {surface: [] for surface in HELD_SURFACES}
+        restored: dict[str, Any] = {surface: [] for surface in HELD_SURFACES}
         stayed_off: list[dict[str, str]] = []
         if restore_held:
             now = await self._schedules.authority_now(fallback=datetime.now(UTC)) if self._schedules is not None else datetime.now(UTC)
@@ -1366,6 +1381,8 @@ class AccountsCommand:
                     stayed_off.append({"surface": surface, "id": target_id, "reason": outcome})
                 await self._users.discard_holds(issuer, subject, [(kind, target_id)])
             restored = {surface: sorted(ids) for surface, ids in restored.items()}
+        owners = {target_id: user_id for kind, target_id, user_id in record if kind == HELD_SURFACES["channel_bindings"]}
+        restored["telegram_bots"] = await self._telegram_bots({(target_id, owners[target_id]) for target_id in restored["channel_bindings"]})
         refreshed = await self._users.get_user_by_id(str(account.id)) if account is not None else None
         failed = [entry for entry in stayed_off if entry["reason"] == "restore_failed"]
         document: dict[str, Any] = {

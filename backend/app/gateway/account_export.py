@@ -25,6 +25,8 @@ The archive::
     projects.json                         active and archived projects, documents and conversation membership
     projects/<id>/documents/<id>/...       originals and existing converted Markdown, excluding trash
     preferences.json                      the person's saved UI preferences
+    telegram.json                         the person's Telegram settings, their bots without
+                                          tokens, and their acts without bodies
 
 It holds no credential: no token, provider key or connection secret is in any
 of these, and nothing an administrator configured for the whole company. The
@@ -156,6 +158,66 @@ async def preferences_export_document(user_id: str) -> dict[str, Any] | None:
         return None
     stored = await UserPreferencesRepository(sessions).get(user_id)
     return {key: stored[key] for key in PREFERENCE_FIELDS if key in stored}
+
+
+async def telegram_export_document(user_id: str) -> dict[str, Any] | None:
+    """A person's Telegram rows. Tokens and act bodies never enter this document."""
+    from sqlalchemy import select
+
+    from deerflow.persistence.engine import get_session_factory
+    from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow, TelegramPersonSettingsRow
+
+    sessions = get_session_factory()
+    if sessions is None:
+        return None
+
+    def time(minute: int) -> str:
+        return f"{minute // 60:02d}:{minute % 60:02d}"
+
+    def stamp(value: Any) -> str | None:
+        return None if value is None else value.isoformat()
+
+    async with sessions() as session:
+        settings = await session.get(TelegramPersonSettingsRow, user_id)
+        links = list(await session.scalars(select(TelegramBotLinkRow).where(TelegramBotLinkRow.owner_user_id == user_id).order_by(TelegramBotLinkRow.created_at, TelegramBotLinkRow.id)))
+        acts = list(await session.scalars(select(TelegramActRow).where(TelegramActRow.owner_user_id == user_id).order_by(TelegramActRow.created_at, TelegramActRow.id)))
+    if settings is None and not links:
+        return None
+    return {
+        "settings": None
+        if settings is None
+        else {
+            "timezone": settings.timezone,
+            "locale": settings.locale,
+            "quiet_enabled": settings.quiet_enabled,
+            "quiet_start": time(settings.quiet_start_minute),
+            "quiet_end": time(settings.quiet_end_minute),
+            "notify": settings.notify,
+            "summary_enabled": settings.summary_enabled,
+            "summary_time": time(settings.summary_minute),
+            "voice_agreed_for": settings.voice_agreed_for,
+            "voice_agreed_at": stamp(settings.voice_agreed_at),
+        },
+        "bots": [
+            {
+                "id": link.id,
+                "agent_kind": link.agent_kind,
+                "agent_ref": link.agent_ref,
+                "bot_username": link.bot_username,
+                "origin": link.origin,
+                "state": link.state,
+                "health": link.health,
+                "connected_as": link.connected_name,
+                "created_at": stamp(link.created_at),
+                "connected_at": stamp(link.connected_at),
+            }
+            for link in links
+        ],
+        "acts": [
+            {"id": act.id, "kind": act.kind, "state": act.state, "reason": act.reason, "bot_id": act.bot_id, "instance_id": act.instance_id, "work_id": act.work_id, "request_id": act.request_id, "created_at": stamp(act.created_at)}
+            for act in acts
+        ],
+    }
 
 
 MANIFEST_NAME = "manifest.json"
@@ -557,6 +619,7 @@ def _readme(manifest: dict[str, Any], *, own_files: int, own_bytes: int, has: di
         else "- There is no `projects.json`: projects are not kept on this deployment."
     )
     lines.append("- `preferences.json`: your saved notification and chat preferences." if has["preferences"] else "- There is no `preferences.json`: preferences are not kept on this deployment.")
+    lines.append("- `telegram.json`: your Telegram settings, your bots and what you did from them. It holds no bot token." if has["telegram"] else "- There is no `telegram.json`: you have not used Telegram here.")
     lines += ["", "This is a readable export, not an automatic restore format. Work changed during preparation may reflect different moments; skipped files are listed below."]
     lines += ["", "## Conversations", ""]
     if not manifest["conversations"]:
@@ -1149,6 +1212,9 @@ class AccountExportService:
             preferences = await preferences_export_document(user_id)
             if preferences is not None:
                 written.append(await self._off_loop(job, parts.add_bytes, "preferences.json", _json(preferences)))
+            telegram = await telegram_export_document(user_id)
+            if telegram is not None:
+                written.append(await self._off_loop(job, parts.add_bytes, "telegram.json", _json(telegram)))
             memory = await self._memory(user_id, None, skipped)
             if memory is not None:
                 written.append(await self._off_loop(job, parts.add_bytes, "memory.json", _json(memory)))
@@ -1185,7 +1251,7 @@ class AccountExportService:
                 manifest,
                 own_files=own_files,
                 own_bytes=own_bytes,
-                has={"memory": memory is not None, "schedules": schedules is not None, "agents": agents is not None, "projects": projects is not None, "preferences": preferences is not None},
+                has={"memory": memory is not None, "schedules": schedules is not None, "agents": agents is not None, "projects": projects is not None, "preferences": preferences is not None, "telegram": telegram is not None},
             )
             written.append(await self._off_loop(job, parts.add_bytes, README_NAME, readme))
             manifest["totals"] = {"conversations": len(conversations), "files": len(written), "bytes": sum(item["size"] for item in written), "skipped": len(skipped)}
