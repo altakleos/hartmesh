@@ -433,17 +433,7 @@ canonical decision includes every reviewed response ID. Read is independent and
 no response invokes run/resume. Generic inputs survive optional plugin absence;
 file references use existing Spaces and never imply upload or mounting.
 
-`core/telegram-bots/` is the client of `/api/telegram-bots`. `useTelegram` fails
-closed: a null, missing or unreadable features key renders nothing about Telegram.
-`rowOf` in `rows.ts` is the one row table; every place that shows a bot's state
-reads it. Refusals are shown by `reason` through `telegramRefusalKey`, never by
-`detail`. Keep the two calls that carry a token as plain `api.ts` calls, not
-mutations, because the query library would keep the token as its variables. Call
-`findToken` on a paste, a press or a blur, never while typing. `TOKEN_BODY`,
-`pictureOf`, `displayNameOf` and `suggestUsername` mirror server rules and are
-pinned on both sides. Texts live under `telegramBots` as dotted keys; `telegramText`
-resolves them, and a text that says whom to ask takes the reader's role, because no
-text sends a user to the provider.
+Telegram screens: [the client guide](src/core/telegram-bots/AGENTS.md).
 
 Managed storage UX uses the existing account-and-role-scoped features query:
 `useStorage` fails closed for absent/malformed/failed answers and polls personal

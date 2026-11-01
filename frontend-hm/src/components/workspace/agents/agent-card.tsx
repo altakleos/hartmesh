@@ -33,6 +33,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { TelegramAgentCardButton } from "@/components/workspace/telegram/agent-card-button";
 import { useDeleteAgent } from "@/core/agents";
 import type { Agent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
@@ -191,6 +192,7 @@ export function AgentCard({ agent }: AgentCardProps) {
             {t.agents.chat}
           </Button>
           <div className="flex gap-1">
+            <TelegramAgentCardButton name={agent.name} />
             <Button
               size="icon"
               variant="ghost"

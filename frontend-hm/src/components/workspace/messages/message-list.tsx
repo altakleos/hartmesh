@@ -29,6 +29,7 @@ import { useConversationFiles } from "@/components/workspace/chats/conversation-
 import { extractArtifactsFromThread } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { getArtifactArchiveCandidatesByGroupIndex } from "@/core/messages/artifact-archive";
+import { getWebPageLinksByGroupIndex } from "@/core/messages/chat-tools";
 import {
   buildConversationChapters,
   CONVERSATION_OUTLINE_MIN_TURNS,
@@ -81,6 +82,7 @@ import {
   derivePendingSubtaskStatus,
   parseSubtaskResult,
 } from "@/core/tasks/subtask-result";
+import type { AgentTarget } from "@/core/telegram-bots/web-pages";
 import type { AgentThreadState } from "@/core/threads";
 import {
   runActivityLabel,
@@ -114,6 +116,7 @@ import {
   VirtualMessageList,
   type VirtualMessageListHandle,
 } from "./virtual-message-list";
+import { WebPageLinks } from "./web-page-links";
 
 const EMPTY_TOKEN_DEBUG_STEPS: TokenDebugStep[] = [];
 const EMPTY_ARTIFACT_PATHS: readonly string[] = [];
@@ -286,6 +289,7 @@ function LoadMoreHistoryIndicator({
 }
 
 export function MessageList({
+  agentTarget,
   archiveDownloadsEnabled = true,
   className,
   testId,
@@ -309,6 +313,8 @@ export function MessageList({
   initialScroll = "smooth",
   resizeScroll = "smooth",
 }: {
+  /** Whose conversation this is; without one no link under an answer is drawn. */
+  agentTarget?: AgentTarget;
   archiveDownloadsEnabled?: boolean;
   className?: string;
   testId?: string;
@@ -554,6 +560,10 @@ export function MessageList({
   );
   const artifactArchiveCandidatesByGroupIndex = useMemo(
     () => getArtifactArchiveCandidatesByGroupIndex(groupedMessages),
+    [groupedMessages],
+  );
+  const webPageLinksByGroupIndex = useMemo(
+    () => getWebPageLinksByGroupIndex(groupedMessages),
     [groupedMessages],
   );
   const workspaceChangeAnchorGroupIndices = useMemo(
@@ -1093,7 +1103,15 @@ export function MessageList({
             ]
           : [];
 
-    if (!content && displays.length === 0) {
+    const webPageKeys = webPageLinksByGroupIndex.get(groupIndex);
+    const links =
+      agentTarget &&
+      webPageKeys &&
+      !(thread.isLoading && groupIndex === lastGroupIndex) ? (
+        <WebPageLinks keys={webPageKeys} target={agentTarget} />
+      ) : null;
+
+    if (!content && !links && displays.length === 0) {
       return null;
     }
 
@@ -1103,6 +1121,7 @@ export function MessageList({
         className="flex w-full flex-col gap-2"
       >
         {content}
+        {links}
         {displays.map((display) => (
           <RunDuration
             key={display.runId}

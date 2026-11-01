@@ -14,6 +14,7 @@ import {
   SearchIcon,
   SquareTerminalIcon,
   WrenchIcon,
+  ExternalLinkIcon,
 } from "lucide-react";
 import { memo, useEffect, useMemo, useState } from "react";
 
@@ -932,6 +933,14 @@ function ToolCall({
         key={id}
         label={resolveLabel(t.toolCalls.needYourHelp)}
         icon={MessageCircleQuestionMarkIcon}
+      ></ChainOfThoughtStep>
+    );
+  } else if (name === "show_web_page") {
+    return (
+      <ChainOfThoughtStep
+        key={id}
+        label={resolveLabel(t.toolCalls.showWebPage)}
+        icon={ExternalLinkIcon}
       ></ChainOfThoughtStep>
     );
   } else if (name === "write_todos") {

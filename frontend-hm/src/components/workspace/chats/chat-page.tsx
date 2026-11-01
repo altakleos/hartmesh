@@ -69,6 +69,7 @@ import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
+import type { AgentTarget } from "@/core/telegram-bots/web-pages";
 import {
   useBranchThread,
   useThreadMetadata,
@@ -225,6 +226,16 @@ export default function ChatPage() {
     refreshKey: `${thread.isLoading}:${agentRunRefusal?.sequence ?? 0}`,
   });
   const instance = resident.detail;
+  const agentTarget: AgentTarget | undefined = instance
+    ? {
+        kind: "agent",
+        id: instance.id,
+        name: instance.name,
+        permissions: instance.permissions,
+      }
+    : binding
+      ? undefined
+      : { kind: "chat" };
   const stop = useConversationStop({
     threadId,
     binding,
@@ -602,6 +613,7 @@ export default function ChatPage() {
                     />
                   ) : (
                     <MessageList
+                      agentTarget={agentTarget}
                       archiveDownloadsEnabled={
                         legacyCapabilities &&
                         (isNewThread || isMock || threadMetadata.data != null)

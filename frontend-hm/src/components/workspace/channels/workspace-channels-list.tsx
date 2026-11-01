@@ -13,6 +13,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
+import { TelegramSidebarRow } from "@/components/workspace/telegram/sidebar-row";
 import {
   useConfigureChannelProvider,
   useChannelProviders,
@@ -29,6 +30,7 @@ import {
   providerNeedsRuntimeConfig,
 } from "@/core/channels/provider-state";
 import type { ChannelProvider } from "@/core/channels/types";
+import { useTelegram } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
@@ -61,6 +63,8 @@ export function WorkspaceChannelsList() {
     null,
   );
   const visibleProviders = providers.filter((provider) => provider.enabled);
+  const telegram = useTelegram();
+  const telegramShown = telegram.known && telegram.enabled;
 
   const startConnect = (
     provider: ChannelProvider,
@@ -107,7 +111,8 @@ export function WorkspaceChannelsList() {
     );
   }
 
-  if (error || !enabled || visibleProviders.length === 0) {
+  const shownProviders = error || !enabled ? [] : visibleProviders;
+  if (shownProviders.length === 0 && !telegramShown) {
     return null;
   }
 
@@ -115,7 +120,8 @@ export function WorkspaceChannelsList() {
     <SidebarGroup className="pt-0">
       <SidebarGroupLabel>{t.sidebar.channels}</SidebarGroupLabel>
       <SidebarMenu>
-        {visibleProviders.map((provider) => {
+        {telegramShown ? <TelegramSidebarRow /> : null}
+        {shownProviders.map((provider) => {
           const canEditRuntimeConfig = providerCanEditRuntimeConfig(provider);
           const isConnected =
             !provider.unavailable_reason &&

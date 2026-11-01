@@ -22,12 +22,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { useChannelProviders } from "@/core/channels/hooks";
 import {
   useDeveloperSurfacesVisible,
   useWorkspacePresentation,
 } from "@/core/features";
 import { useBranding } from "@/core/features";
-import { useCustomerAdministration } from "@/core/features/hooks";
+import { useCustomerAdministration, useTelegram } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
@@ -135,6 +136,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
     }
   }, [defaultSection, dialogProps.open]);
 
+  const telegram = useTelegram();
+  const { providers: channelProviders } = useChannelProviders();
+
   const sections = useMemo(
     () => [
       {
@@ -154,7 +158,10 @@ export function SettingsDialog(props: SettingsDialogProps) {
       },
       {
         id: "channels",
-        label: t.settings.sections.channels,
+        label:
+          telegram.known && !channelProviders.some(({ enabled }) => enabled)
+            ? t.telegramBots.sectionLabel
+            : t.settings.sections.channels,
         icon: CableIcon,
       },
       {
@@ -177,6 +184,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
       { id: "about", label: t.settings.sections.about, icon: InfoIcon },
     ],
     [
+      channelProviders,
+      t.telegramBots.sectionLabel,
+      telegram.known,
       t.settings.sections.account,
       t.settings.sections.appearance,
       t.settings.sections.channels,

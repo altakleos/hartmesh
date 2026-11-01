@@ -6,6 +6,8 @@ is not a dependency. Existing shared fixtures under `contracts/` remain the
 cross-language contract.
 
 `selectStorageState` fails closed on missing/malformed/current failed discovery.
+`selectTelegram` does too: a Telegram control that cannot work stays shown with its
+sentence, and a bot token is never kept in state after its request.
 File refusals map a nested 503 `reason` before its `message`; HTTP 507 uses the
 root refusal envelope. Keep localized readiness/support and account retirement;
 no customer-facing storage notice exposes byte capacities or pool terminology.

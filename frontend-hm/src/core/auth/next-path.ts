@@ -18,6 +18,11 @@ export function validateAuthNextPath(
   return nextPath;
 }
 
+/** The page and query a person is on, for the sign-in page to return to. */
+export function currentReturnPath(): string {
+  return window.location.pathname + window.location.search;
+}
+
 export function resolveAuthNextPath(
   nextPath: string | null | undefined,
   fallback = DEFAULT_AUTH_NEXT_PATH,

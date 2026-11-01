@@ -1374,10 +1374,14 @@ answered together in order. `/stop` and the current answer's Stop control stop
 that exact turn and discard its waiting messages. Transient execution-capacity
 refusals wait for up to two minutes; Cancel takes the input out of line, and
 Try again makes a new authorized attempt. Redelivering an update never retries
-the model. The web app's Telegram screens are reserved for a subsequent stage; the
-`/api/telegram-bots` routes they will use need a signed-in browser session, so
-neither a personal access token nor the internal token reaches them, and no
-response carries a bot token.
+the model. Bots are managed under **Settings → Telegram**, which lists one row for the
+ordinary chat and for each custom agent. **Connect Telegram** walks through
+BotFather, the token and pressing Start; the Telegram entry in the sidebar, a card
+on the new-chat page and a button on a custom agent's card lead to the same place.
+The `/api/telegram-bots` routes need a signed-in browser session, so neither a
+personal access token nor the internal token reaches them, and no response carries
+a bot token. A link a bot sends can be opened signed out: after sign-in the person
+lands on the page it named.
 
 Telegram bookkeeping is kept for a limited time: incoming messages for 7 days,
 delivered messages for 30 days, and acts and bot history for 400 days. A delivered

@@ -6,7 +6,10 @@ import {
   needsAttention,
   rowOf,
   type RowInput,
+  sectionNoticeOf,
+  setupStageOf,
   shortStateOf,
+  targetRowsOf,
 } from "@/core/telegram-bots/rows";
 
 const NOW = Date.parse("2026-11-01T12:00:00Z");
@@ -324,6 +327,107 @@ describe("rowOf", () => {
       name: "HartMesh",
       telegramName: "Rosa",
     });
+  });
+});
+
+describe("setupStageOf", () => {
+  it("follows the bot in the list", () => {
+    const pending = { ...waiting, connect_expires_at: ahead(600) };
+    expect(setupStageOf(null, NOW)).toBe("steps");
+    expect(setupStageOf(bot(), NOW)).toBe("done");
+    expect(setupStageOf(bot(pending), NOW)).toBe("waiting");
+    expect(
+      setupStageOf(bot({ ...waiting, connect_expires_at: ago(1) }), NOW),
+    ).toBe("expired");
+  });
+
+  it("waits with no live code, and never for a bot that has no code", () => {
+    expect(
+      setupStageOf(bot({ ...waiting, connect_expires_at: null }), NOW),
+    ).toBe("waiting");
+    expect(
+      setupStageOf(
+        bot({ ...waiting, bind_mode: "creator", connect_expires_at: ago(1) }),
+        NOW,
+      ),
+    ).toBe("steps");
+  });
+});
+
+describe("targetRowsOf", () => {
+  const custom = (ref: string, name: string | null = ref) =>
+    bot({
+      id: ref,
+      agent_kind: "custom_agent",
+      agent_ref: ref,
+      agent_name: name,
+    });
+
+  it("gives the ordinary chat, then custom agents by name, then what has gone", () => {
+    const rows = targetRowsOf({
+      chatName: "HartMesh",
+      agentNames: ["zeta", "alpha"],
+      bots: [custom("zeta"), custom("deleted"), bot({ id: "chat" })],
+    });
+    expect(rows.map(({ name }) => name)).toEqual([
+      "HartMesh",
+      "alpha",
+      "zeta",
+      "deleted",
+    ]);
+    expect(rows.map(({ bot }) => bot?.id ?? null)).toEqual([
+      "chat",
+      null,
+      "zeta",
+      "deleted",
+    ]);
+  });
+
+  it("names a gone target by its bot when the server can read no other name", () => {
+    const rows = targetRowsOf({
+      chatName: "HartMesh",
+      agentNames: [],
+      bots: [
+        { ...custom("gone", null), bot_name: "The bot" },
+        { ...custom("older", null), bot_name: null },
+      ],
+    });
+    expect(rows.slice(1).map(({ name }) => name)).toEqual(["older", "The bot"]);
+  });
+});
+
+describe("sectionNoticeOf", () => {
+  it("has nothing to say while Telegram can run", () => {
+    expect(sectionNoticeOf(ready, true)).toBeNull();
+  });
+
+  it("says whom to ask inside the sentence when Telegram is off", () => {
+    const off = { ...ready, enabled: false, reason: "off" as const };
+    expect(sectionNoticeOf(off, false)).toEqual({
+      key: "unavailable.off",
+      ending: false,
+      next: false,
+    });
+    expect(sectionNoticeOf(off, true)?.key).toBe("unavailable.offKept");
+  });
+
+  it("gives each reason its sentence, with no next step after a move", () => {
+    expect(sectionNoticeOf(unavailable("secret-invalid"), false)).toEqual({
+      key: "unavailable.secretInvalid",
+      ending: true,
+      next: true,
+    });
+    expect(sectionNoticeOf(unavailable("host-changed"), false)).toEqual({
+      key: "unavailable.hostChanged",
+      ending: true,
+      next: false,
+    });
+    expect(sectionNoticeOf(unavailable("misconfigured"), false)?.key).toBe(
+      "unavailable.unknown",
+    );
+    expect(sectionNoticeOf(unavailable(null), false)?.key).toBe(
+      "unavailable.unknown",
+    );
   });
 });
 

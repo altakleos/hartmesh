@@ -7,6 +7,7 @@ import { CommandPalette } from "@/components/workspace/command-palette";
 import { GatewayOfflineBanner } from "@/components/workspace/gateway-offline-banner";
 import { ModelLoadErrorBanner } from "@/components/workspace/model-load-error-banner";
 import { SettingsDialogHost } from "@/components/workspace/settings";
+import { TelegramSetupHost } from "@/components/workspace/telegram/setup-host";
 import { WorkspaceSettingsDeepLink } from "@/components/workspace/workspace-settings-deep-link";
 import { WorkspaceSidebar } from "@/components/workspace/workspace-sidebar";
 import { ExtensionPageBootstrap } from "@/core/extensions/hooks";
@@ -46,6 +47,7 @@ export async function WorkspaceContent({
         </SidebarProvider>
         <CommandPalette />
         <SettingsDialogHost />
+        <TelegramSetupHost />
         <WorkspaceSettingsDeepLink />
         <Toaster position="top-center" />
       </FileActionLifetimeProvider>
