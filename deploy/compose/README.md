@@ -2222,9 +2222,10 @@ and support Files, Work, Memory, Access and Settings.
 keeps execution closed until it has reconciled durable run ownership, retained
 workspace attachments and the complete Docker resource census. A proxy or
 network with no sandbox does not keep it closed: the census at Gateway start
-removes it and logs what it found, unless a pending record still names it.
-That record refuses only its account. Other unknown containers or paired
-networks do keep it closed, as does a set that could hold storage. Recovery of
+removes it and logs what it found, unless a pending record or a workspace
+claim still names it. A pending record refuses only its account. Other
+unknown containers or paired networks do keep it closed, as does a set that
+could hold storage. Recovery of
 original resident resources uses retained immutable identities and preserves
 live foreign leases; other unknown resources and unconfirmed cleanup remain charged.
 The existing maintenance task retries qualification every 60 seconds, and sooner

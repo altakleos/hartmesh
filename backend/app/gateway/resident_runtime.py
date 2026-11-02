@@ -200,21 +200,25 @@ class ResidentRuntime:
                     raise StorageRuntimeUnavailable("Resident original graph changed during census qualification")
 
             provider.external_changed(capture)
+            postponed = False
             if unexplained:
                 # A crash, a reboot or one failed start must not close sandboxes for everyone, and
                 # nothing else visits a set with no primary. Only before admission first opens is
                 # nobody building one: after that, a resident past take_slot is no drained producer.
+                # So a pass that postpones for a run's owner must not publish, or the chance is lost.
                 reader = NativeResourceSet(provider._backend, guard=bridge.assert_current)
                 unresolved = bridge.assert_current()
+                first = not self.admission.has_opened()
+                postponed = first and bool(self.foreign_run_blocks)
                 leftovers = []
-                if not self.admission.has_opened() and not self.foreign_run_blocks:
+                if first and not postponed:
                     leftovers = [item for item in unexplained if item.sandbox_id not in claims and not any(record.name.endswith("-" + item.sandbox_id) for record in unresolved)]
                 removed = remove_leftovers(reader, leftovers)
                 logger.warning("Native census found %d resources with no sandbox and removed %d: %s", len(unexplained), len(removed), ", ".join(sorted(item.fact.name for item in unexplained)[:6]))
 
             def validate():
                 provider._require_bootstrap_producers_drained_locked()
-                if self.foreign_run_blocks:
+                if self.foreign_run_blocks or postponed:
                     raise StorageRuntimeUnavailable("Durable inflight runs lack their completely drained local owner")
                 if (
                     self.provider is not provider

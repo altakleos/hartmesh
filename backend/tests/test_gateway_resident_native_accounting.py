@@ -147,17 +147,46 @@ async def test_a_leftover_on_a_running_gateway_stays_and_refuses_nobody(fixture,
 
 
 @pytest.mark.anyio
-async def test_a_leftover_stays_while_durable_runs_lack_their_owner(fixture):
+async def test_a_leftover_waits_for_a_durable_run_and_goes_before_the_gateway_opens(fixture):
+    """A crash leaves both, and reconciliation can clear the run before publication."""
     host, provider, admission, local, _calls = runtime(fixture)
     with_relay(local)
     host.inventory_runs = AsyncMock(side_effect=lambda: setattr(host, "foreign_run_blocks", frozenset({"run"})))
     permit = provider._begin_bootstrap_accounting(admission)
     try:
         proof = await host.account_native(permit)
+        assert local.removed == []
+        host.foreign_run_blocks = frozenset()
         with pytest.raises(StorageRuntimeUnavailable, match="Durable inflight"):
             provider.external_changed(lambda: proof.require_current_locked(provider, permit))
+        host.inventory_runs = AsyncMock()
+        proof = await host.account_native(permit)
+        provider.external_changed(lambda: proof.require_current_locked(provider, permit))
     finally:
         provider._end_bootstrap_accounting(permit)
+    assert local.removed == ["f" * 64]
+
+
+@pytest.mark.anyio
+async def test_a_producer_that_appears_during_the_census_keeps_its_set(fixture):
+    """Work activation can reach the gate without admission, so capture must come before removal."""
+    host, provider, admission, local, _calls = runtime(fixture)
+    gate, tokens, original = provider._owner_admission_gate(), [], local._runtime_runner
+
+    def run(command, **kwargs):
+        if command[1] == "ps" and "label=deerflow.sandbox_id" in command and not tokens:
+            tokens.append(gate.enter("resident:" + "e" * 32))
+        return original(command, **kwargs)
+
+    local._runtime_runner = run
+    with_relay(local, sandbox_id="e" * 32)
+    permit = provider._begin_bootstrap_accounting(admission)
+    try:
+        with pytest.raises(StorageRuntimeUnavailable, match="not completely drained"):
+            await host.account_native(permit)
+    finally:
+        provider._end_bootstrap_accounting(permit)
+        gate.end(tokens[0])
     assert local.removed == []
 
 
