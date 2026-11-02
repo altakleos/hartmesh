@@ -230,13 +230,13 @@ describe("the Telegram section", () => {
 
     agents.list = [{ name: "alpha" }];
     start(READY, listOf([bot()], { limits: { per_person: 1, used: 1 } }));
-    await screen.findByText("1 of 1 bots");
+    await screen.findByText("1 of 1 bot");
     const connect = await screen.findByRole("button", {
       name: "Connect Telegram",
     });
     expect((connect as HTMLButtonElement).disabled).toBe(true);
     expect(
-      screen.getAllByText(/You have 1 Telegram bots/).length,
+      screen.getAllByText(/You have 1 Telegram bot,/).length,
     ).toBeGreaterThan(0);
   });
 
@@ -326,7 +326,7 @@ describe("the Telegram section", () => {
     expect(posted()[1]).toBe("/api/telegram-bots/link-a/disconnect");
 
     fireEvent.click(await screen.findByText("Disconnect all bots"));
-    await screen.findByText("Disconnect all 1 bots?");
+    await screen.findByText("Disconnect your bot?");
     expect(posted()).toHaveLength(2);
     const buttons = screen.getAllByRole("button", {
       name: "Disconnect all bots",
@@ -427,6 +427,33 @@ describe("the Telegram section", () => {
     });
   });
 
+  it("reads the administrator's counts again with the list", async () => {
+    auth.user = { id: "alice", system_role: "admin" };
+    const calls = start(READY, listOf([]), {
+      [ADMIN]: () =>
+        json({
+          enabled: true,
+          reason: null,
+          bots: 0,
+          people: 0,
+          polling: 0,
+          failing: 0,
+          held: 0,
+          limits: { per_person: 10, deployment: 100 },
+          voice: "unavailable",
+          voice_provider: null,
+        }),
+    });
+    await screen.findByText("Nobody has connected a Telegram bot yet.");
+    const reads = () =>
+      calls.filter(({ url }) => url.endsWith("/admin/summary")).length;
+    const before = reads();
+    await act(async () => {
+      await queries().invalidateQueries({ queryKey: ["telegram-bots"] });
+    });
+    expect(reads()).toBeGreaterThan(before);
+  });
+
   it("keeps the rows when a later read fails", async () => {
     let healthy = true;
     start(READY, undefined, {
@@ -502,23 +529,30 @@ describe("the Telegram section", () => {
   });
 
   it("offers nothing held here after Disconnect all", async () => {
-    let state = listOf([bot({ state: "waiting_connect", connected_as: null })]);
+    const expires = ago(-600);
+    const waiting = () =>
+      bot({
+        state: "waiting_connect",
+        connected_as: null,
+        connect_expires_at: expires,
+      });
+    let state = listOf([waiting()]);
     start(READY, undefined, {
       [LIST]: () => json(state),
       "POST /api/telegram-bots/link-a/connect": () =>
-        json({ url: "https://t.me/x?start=c", expires_at: ago(-600) }),
+        json({ url: "https://t.me/x?start=c", expires_at: expires }),
       "POST /api/telegram-bots/disconnect-all": () => {
-        state = listOf([bot({ state: "waiting_connect", connected_as: null })]);
+        state = listOf([waiting()]);
         return json({ disconnected: 1 });
       },
     });
     fireEvent.click(
       await screen.findByRole("button", { name: "Disconnect all bots" }),
     );
-    await screen.findByText("Disconnect all 1 bots?");
+    await screen.findByText("Disconnect your bot?");
     holdTelegramConnect(
       "link-a",
-      { url: "https://t.me/x?start=old", expires_at: ago(-600) },
+      { url: "https://t.me/x?start=old", expires_at: expires },
       telegramConnectEpoch(),
     );
     await screen.findByRole("link", {
@@ -694,6 +728,34 @@ describe("the Telegram section", () => {
     });
   });
 
+  it("Use it here says it did not work while the webhook is still in place", async () => {
+    const held = bot({ health: "conflict", webhook_host: "x.test" });
+    const calls = start(READY, listOf([held]), {
+      "POST /api/telegram-bots/link-a/retry": () => json({ bot: held }),
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Use it here" }));
+    await screen.findByText("Use this bot here?");
+    const buttons = screen.getAllByRole("button", { name: "Use it here" });
+    fireEvent.click(buttons[buttons.length - 1]!);
+    await waitFor(() =>
+      expect(calls.some(({ url }) => url.endsWith("/retry"))).toBe(true),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("Use this bot here?")).toBeNull(),
+    );
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalledWith("That did not work. Try again.");
+  });
+
+  it("does not let a stray press close Remove bot", async () => {
+    start(READY, listOf([bot()]));
+    fireEvent.click(await screen.findByText("Remove bot"));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
+    fireEvent.pointerDown(document.body);
+    expect(dialog.isConnected).toBe(true);
+  });
+
   it("That was me says nothing when another tab already did it", async () => {
     start(READY, listOf([bot({ acts_paused_since: ago(60) })]), {
       "POST /api/telegram-bots/link-a/acknowledge-conflict": () =>
@@ -744,12 +806,19 @@ describe("the Telegram section", () => {
   });
 
   it("offers Open chat as a link only while the page holds a live address", async () => {
+    const expires = ago(-600);
     const calls = start(
       READY,
-      listOf([bot({ state: "waiting_connect", connected_as: null })]),
+      listOf([
+        bot({
+          state: "waiting_connect",
+          connected_as: null,
+          connect_expires_at: expires,
+        }),
+      ]),
       {
         "POST /api/telegram-bots/link-a/connect": () =>
-          json({ url: "https://t.me/x?start=c", expires_at: ago(-600) }),
+          json({ url: "https://t.me/x?start=c", expires_at: expires }),
       },
     );
     const open = await screen.findByRole("button", {

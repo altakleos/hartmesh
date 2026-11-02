@@ -96,7 +96,7 @@ export function discardTelegramConnects() {
   update({ connects: new Map(), replaced: new Set() });
 }
 
-/** For a test: a module's state outlives a rendered tree. */
+/** A module's state outlives a rendered tree, and with it the account that drew it. */
 export function resetTelegramPageState() {
   update(EMPTY);
 }

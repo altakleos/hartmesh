@@ -2679,7 +2679,8 @@ export function createEnUS(product: string): Translations {
       list: {
         title: "Your Telegram bots",
         intro: `${product} and each of your custom agents can have a separate bot in your Telegram. A bot answers only you.`,
-        count: ({ used, limit }) => `${used} of ${limit} bots`,
+        count: ({ used, limit }) =>
+          `${used} of ${limit} ${limit === 1 ? "bot" : "bots"}`,
       },
       kind: {
         custom_agent: "Custom agent",
@@ -2717,20 +2718,24 @@ export function createEnUS(product: string): Translations {
       },
       offer: {
         chatTitle: `Take ${product} with you`,
-        chatBody: `Chat with ${product} on Telegram: ask, send files and get answers on your phone. About a minute to set up.`,
+        chatBody: `Chat with ${product} on Telegram: ask, send files and get answers on your phone. A few minutes to set up.`,
+        companyTitle: "Take this chat with you",
+        companyBody:
+          "Chat on Telegram: ask, send files and get answers on your phone. A few minutes to set up.",
         later: "Not now",
       },
       sidebar: {
         label: "Telegram",
         connect: "Connect",
         connected: ({ count }) => `${count} connected`,
-        attention: ({ count }) =>
-          count === 1 ? "1 needs attention" : `${count} need attention`,
+        attention: ({ count }) => `${count} to check`,
+        waiting: "Press Start",
+        paused: "Paused",
       },
       setup: {
         title: ({ name }) => `Connect ${name} to Telegram`,
         intro: ({ name }) =>
-          `${name} gets a bot in your Telegram: a chat that answers only you. You create the bot with BotFather, Telegram's own tool. This takes about a minute.`,
+          `${name} gets a bot in your Telegram: a chat that answers only you. You create the bot with BotFather, Telegram's own tool. This takes a few minutes.`,
         fault:
           "This bot cannot connect right now. What it needs is in your Telegram settings.",
         onPhone: "Telegram only on your phone? Do this set-up there.",
@@ -2750,7 +2755,7 @@ export function createEnUS(product: string): Translations {
           title: "1. Create the bot",
           open: "Copy username and open BotFather",
           copied: ({ username }) => `Copied ${username}`,
-          a: "Send /newbot to BotFather.",
+          a: "In BotFather's chat, press Start if you see it, then send /newbot.",
           b: ({ botName }) =>
             `BotFather asks for a name. Type ${botName}. A typo does not matter: ${product} sets the final name and picture.`,
           c: ({ username }) =>
@@ -2761,8 +2766,6 @@ export function createEnUS(product: string): Translations {
           public:
             "The bot's name and picture can be seen by anyone on Telegram who finds the bot.",
           helpTitle: "Something went wrong in BotFather?",
-          helpStart:
-            "New to BotFather? Press Start at the bottom of the chat first.",
           helpTaken:
             "If BotFather says the username is taken, get another one here and paste that.",
           helpTooMany:
@@ -2775,6 +2778,7 @@ export function createEnUS(product: string): Translations {
           label: "Bot token",
           placeholder: "123456789:AAE…",
           paste: "Paste",
+          check: "Check",
           hint: `${product} keeps the token encrypted and never shows it again.`,
           checking: "Checking with Telegram…",
           accepted: ({ username }) =>
@@ -2795,7 +2799,7 @@ export function createEnUS(product: string): Translations {
         done: {
           title: ({ name }) => `${name} is on Telegram`,
           body: ({ telegramName }) =>
-            `Connected as ${telegramName}. The chat is ready: send the first message there.`,
+            `Connected as ${telegramName}. The chat is ready: send the first message there. It also appears in your conversations here.`,
           notYou: "Not your Telegram account?",
           locale: ({ language, timezone }) =>
             `Bot messages are in ${language}; times are in ${timezone}.`,
@@ -2866,7 +2870,7 @@ export function createEnUS(product: string): Translations {
         deliveryPending:
           "Messages are saved and waiting to be delivered. Delivery will be retried without starting new work.",
         deliveryFailed:
-          "A saved message could not be delivered. Open the chat and use /help to retry delivery after the problem is fixed. No new work starts.",
+          "A saved message could not be delivered. Press Retry delivery under the notice in the chat. No new work starts.",
         stopped: ({ admin, provider }) =>
           `This bot stopped after an internal error. Press Try now. If the bot stops again, ask ${admin ? provider : "an administrator"} to look at this.`,
         unreadableHost: ({ provider }) =>
@@ -2882,9 +2886,10 @@ export function createEnUS(product: string): Translations {
       },
       token: {
         title: ({ name }) => `Paste a new token for ${name}'s bot`,
-        body: "A new token for the same bot changes nothing else. A token from a different bot replaces this bot after the new connection is saved: you then open the new chat and press Start once. If saving fails, your current bot is kept.",
+        body: "To get a new token, send /revoke to BotFather and choose this bot. A new token for the same bot changes nothing else. A token from a different bot replaces this bot after the new connection is saved: you then open the new chat and press Start once. If saving fails, your current bot is kept.",
         retryPaste:
-          "The result is not confirmed, or the token is needed for the next step. Paste the same token again to continue this request safely.",
+          "That may not have gone through. Paste the same token again: nothing happens twice.",
+        pasteOnceMore: "Paste the same token once more to use this bot here.",
         completedRemoved:
           "The replacement completed, and that bot was later removed. The bot list has been refreshed.",
         completedChanged:
@@ -2908,18 +2913,24 @@ export function createEnUS(product: string): Translations {
         otherAccount: {
           title: "Connect a different Telegram account?",
           body: ({ telegramName }) =>
-            `This bot stops accepting actions from ${telegramName} at once. No new reply is sent to that account, but a message already sent to Telegram may still arrive. You then get a new link to open with the Telegram account you want.`,
+            `This bot stops answering ${telegramName} at once. No new reply is sent to that account, but a message already sent to Telegram may still arrive. You then get a new link to open with the Telegram account you want.`,
           button: "Disconnect and get a new link",
         },
         remove: {
           title: ({ name }) => `Remove ${name}'s Telegram bot?`,
           body: ({ name }) =>
-            `The bot stops accepting actions at once and the token is deleted from ${product}. No new reply is sent; a message already sent to Telegram may still arrive. Your conversations with ${name} stay in ${product}. The bot itself stays in your Telegram account until you delete it in BotFather with /deletebot.`,
+            `The bot stops answering at once and the token is deleted from ${product}. No new reply is sent; a message already sent to Telegram may still arrive. Your conversations with ${name} stay in ${product}. The bot itself stays in your Telegram account until you delete it in BotFather with /deletebot.`,
           button: "Remove bot",
         },
         lost: {
-          title: ({ count }) => `Disconnect all ${count} bots?`,
-          body: "The bots stop accepting actions at once. No new reply is sent to the disconnected accounts; a message already sent to Telegram may still arrive. Reconnect each bot from this page when you are ready.",
+          title: ({ count }) =>
+            count === 1
+              ? "Disconnect your bot?"
+              : `Disconnect all ${count} bots?`,
+          body: ({ count }) =>
+            count === 1
+              ? "The bot stops answering at once. No new reply is sent to the disconnected account; a message already sent to Telegram may still arrive. Reconnect it from this page when you are ready."
+              : "The bots stop answering at once. No new reply is sent to the disconnected accounts; a message already sent to Telegram may still arrive. Reconnect each bot from this page when you are ready.",
         },
       },
       lost: {
@@ -2958,7 +2969,7 @@ export function createEnUS(product: string): Translations {
         next: ({ provider }) => `Ask ${provider} to fix this.`,
         reference: ({ code }) => `Reference for support: ${code}`,
         limitPerson: ({ count }) =>
-          `You have ${count} Telegram bots, the most one person can have here. Remove one you no longer use to add another.`,
+          `You have ${count} Telegram ${count === 1 ? "bot" : "bots"}, the most one person can have here. Remove one you no longer use to add another.`,
         limitAll: ({ admin, provider }) =>
           `No more Telegram bots can be added here: the limit is reached. Remove one you no longer use, or ask ${admin ? provider : "an administrator"} to raise the limit.`,
         loadError:
@@ -2974,8 +2985,7 @@ export function createEnUS(product: string): Translations {
           label: "Time zone",
           body: "Taken from this browser when you connected your first bot.",
         },
-        inChat:
-          "/settings in any bot changes the same things, except the time zone.",
+        inChat: "/settings in any bot changes the language too.",
         saved: "Saved.",
         failed: "That could not be saved. Try again.",
       },
@@ -2985,7 +2995,7 @@ export function createEnUS(product: string): Translations {
           `${bots} ${bots === 1 ? "bot" : "bots"} for ${people} ${people === 1 ? "person" : "people"}: ${polling} working, ${failing} need the owner's attention, ${held} paused because access was turned off.`,
         none: "Nobody has connected a Telegram bot yet.",
         limits: ({ perPerson, limit }) =>
-          `One person can connect up to ${perPerson} bots; ${limit} bots in all.`,
+          `One person can connect up to ${perPerson} ${perPerson === 1 ? "bot" : "bots"}; ${limit} ${limit === 1 ? "bot" : "bots"} in all.`,
         private:
           "Bots are personal. Nobody but the owner sees a bot's username, and nobody sees a token.",
         voiceOn: ({ transcriber }) =>

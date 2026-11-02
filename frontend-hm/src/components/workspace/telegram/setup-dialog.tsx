@@ -19,11 +19,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useAgents } from "@/core/agents/hooks";
-import {
-  closeConnectWindow,
-  openConnectUrl,
-  prepareConnectWindow,
-} from "@/core/channels/open-connect-url";
 import { useTelegram } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import { enUS } from "@/core/i18n/locales/en-US";
@@ -32,8 +27,6 @@ import {
   addTelegramBot,
   type Bot,
   type Connect,
-  disconnectTelegramBot,
-  requestTelegramConnect,
   TELEGRAM_SECTION_REFUSALS,
   TelegramRefusal,
   telegramRefusalKey,
@@ -45,6 +38,7 @@ import {
   useTelegramReader,
 } from "@/core/telegram-bots/hooks";
 import {
+  liveConnectOf,
   rowOf,
   type RowView,
   sectionNoticeOf,
@@ -68,7 +62,6 @@ import { TelegramQrCode } from "./qr-code";
 import { timeZonesWith } from "./settings-block";
 import {
   closeTelegramSetup,
-  forgetTelegramReplaced,
   holdTelegramConnect,
   openTelegramSetup,
   requestTelegramSettingsFocus,
@@ -78,6 +71,8 @@ import {
 import { TelegramTokenField, useWebhookConsent } from "./token-dialog";
 import {
   refusalOther,
+  useTelegramConnect,
+  useTelegramDisconnect,
   useTelegramFailure,
   useTelegramValues,
 } from "./use-telegram-failure";
@@ -207,7 +202,6 @@ function StepOne({ target, name }: { target: AgentTarget; name: string }) {
       <details className="text-sm">
         <summary className="cursor-pointer">{strings.helpTitle}</summary>
         <ul className="mt-1 list-inside list-disc space-y-1">
-          <li>{strings.helpStart}</li>
           <li>{strings.helpTaken}</li>
           <li>{strings.helpTooMany}</li>
           <li>{strings.helpCopy}</li>
@@ -264,9 +258,9 @@ function StepTwo({
       if (reason === "timezone-required" || reason === "invalid-timezone") {
         setAskZone(true);
       }
-      if (reason === "agent-linked") {
-        await refresh();
-      }
+      // The bot may exist even so, when only the answer was lost. The list moves
+      // the dialog on, where pasting the token again would say to make another.
+      await refresh();
       if (reason !== null && TELEGRAM_SECTION_REFUSALS.has(reason)) {
         failure.handled(error);
       }
@@ -331,6 +325,11 @@ function StepTwo({
           {strings.setup.step2.checking}
         </p>
       ) : null}
+      {consent.agreed && !checking && !refusal ? (
+        <p className="text-muted-foreground text-sm">
+          {strings.token.pasteOnceMore}
+        </p>
+      ) : null}
       {refusal ? (
         <div className="space-y-2" role="alert">
           <p className="text-destructive text-sm">
@@ -346,24 +345,10 @@ function StepTwo({
               size="sm"
               onClick={() => {
                 consent.agree();
-                setRefusal({
-                  ...refusal,
-                  key: "token.retryPaste",
-                  reason: null,
-                });
+                setRefusal(null);
               }}
             >
               {strings.action.useHere}
-            </Button>
-          ) : null}
-          {refusal.reason === "telegram-unreachable" ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => setRefusal(null)}
-            >
-              {strings.action.tryAgain}
             </Button>
           ) : null}
           {linked ? (
@@ -393,38 +378,26 @@ function StepThree({
   const { t } = useI18n();
   const strings = t.telegramBots;
   const isMobile = useIsMobile();
-  const refresh = useRefreshTelegramBots();
   const failure = useTelegramFailure();
   const values = useTelegramValues(name);
   const [hint, setHint] = useState(false);
   const [line, setLine] = useState<TelegramKey | null>(null);
+  const fresh = useTelegramConnect(bot, (error) => {
+    const refusal = error instanceof TelegramRefusal ? error : null;
+    setLine(refusal ? telegramRefusalKey(refusal) : "refusal.failed");
+    if (refusal?.reason && TELEGRAM_SECTION_REFUSALS.has(refusal.reason)) {
+      failure.handled(refusal);
+    }
+  });
 
   useEffect(() => {
     const timer = setTimeout(() => setHint(true), HINT_AFTER_MS);
     return () => clearTimeout(timer);
   }, []);
 
-  const fresh = async (opened: Window | null, open: boolean) => {
+  const request = (open: boolean) => {
     setLine(null);
-    const epoch = telegramConnectEpoch();
-    try {
-      const next = await requestTelegramConnect(bot.id);
-      if (!holdTelegramConnect(bot.id, next, epoch)) {
-        closeConnectWindow(opened);
-      } else if (open) {
-        openConnectUrl(next.url, opened);
-      }
-    } catch (error) {
-      closeConnectWindow(opened);
-      const refusal = error instanceof TelegramRefusal ? error : null;
-      if (refusal?.reason !== "already-connected") {
-        setLine(refusal ? telegramRefusalKey(refusal) : "refusal.failed");
-      }
-      if (refusal?.reason && TELEGRAM_SECTION_REFUSALS.has(refusal.reason)) {
-        failure.handled(refusal);
-      }
-    }
-    await refresh();
+    void fresh.request({ open });
   };
 
   return (
@@ -441,7 +414,8 @@ function StepThree({
           <Button
             type="button"
             variant="outline"
-            onClick={() => void fresh(null, false)}
+            disabled={fresh.busy}
+            onClick={() => request(false)}
           >
             {strings.action.newLink}
           </Button>
@@ -458,7 +432,8 @@ function StepThree({
             <Button
               type="button"
               className={WRAPS}
-              onClick={() => void fresh(prepareConnectWindow(), true)}
+              disabled={fresh.busy}
+              onClick={() => request(true)}
             >
               {strings.action.openChat({ name })}
             </Button>
@@ -501,7 +476,7 @@ function SetupFault({ view, target }: { view: RowView; target: AgentTarget }) {
   const lines = notice ? [{ ...view.lines[0]!, key: notice.key }] : view.lines;
   const href = webPageHref("telegram", target, pathname);
   return (
-    <section className="space-y-2" role="status">
+    <section className="space-y-2">
       <p className="text-sm">{strings.setup.fault}</p>
       {lines.map((line) => (
         <p key={line.key} className="text-sm">
@@ -537,8 +512,7 @@ function DoneScreen({
   const feature = useTelegram();
   const { data } = useTelegramBots();
   const { agents } = useAgents();
-  const refresh = useRefreshTelegramBots();
-  const failure = useTelegramFailure();
+  const leaving = useTelegramDisconnect();
 
   const settings = data?.settings;
   const blocked =
@@ -569,16 +543,8 @@ function DoneScreen({
           type="button"
           variant="link"
           className="h-auto p-0"
-          onClick={() => {
-            const epoch = telegramConnectEpoch();
-            void disconnectTelegramBot(bot.id)
-              .then((answer) => {
-                forgetTelegramReplaced(bot.id);
-                holdTelegramConnect(bot.id, answer.connect, epoch);
-                return refresh();
-              })
-              .catch((error: unknown) => failure.show(error, name));
-          }}
+          disabled={leaving.busy}
+          onClick={() => void leaving.disconnect(bot, name)}
         >
           {strings.action.disconnect}
         </Button>
@@ -653,8 +619,11 @@ export function TelegramSetupDialog({ target }: { target: AgentTarget }) {
   const bot = botOf(data?.bots, target);
   const stage = setupStageOf(bot, now);
   const view = bot ? rowOf({ name, bot, feature, reader, now }) : null;
-  const held = bot ? connects.get(bot.id) : undefined;
-  const connect = held && Date.parse(held.expires_at) > now ? held : undefined;
+  const connect = liveConnectOf(
+    bot ? connects.get(bot.id) : undefined,
+    bot,
+    now,
+  );
   const ownAddress = useMemo(
     () =>
       typeof window === "undefined"
@@ -670,54 +639,60 @@ export function TelegramSetupDialog({ target }: { target: AgentTarget }) {
           <DialogTitle>{strings.setup.title({ name })}</DialogTitle>
           <DialogDescription>{strings.setup.intro({ name })}</DialogDescription>
         </DialogHeader>
-        {isPending ? (
-          <p className="text-muted-foreground text-sm">{t.common.loading}</p>
-        ) : stage === "done" && bot ? (
-          <DoneScreen bot={bot} name={name} firstBot={firstBot} />
-        ) : stage !== "steps" && view && stopsSetup(view.row) ? (
-          <SetupFault view={view} target={target} />
-        ) : stage !== "steps" && bot ? (
-          <StepThree
-            key={stage}
-            bot={bot}
-            name={name}
-            connect={connect}
-            expired={stage === "expired"}
-          />
-        ) : (
-          <div className="space-y-4">
-            {isMobile ? null : (
-              <div className="space-y-2">
-                <p className="text-muted-foreground text-sm">
-                  {strings.setup.onPhone}{" "}
-                  <Button
-                    type="button"
-                    variant="link"
-                    className="h-auto p-0"
-                    onClick={() => setPhoneCode(true)}
-                  >
-                    {strings.setup.onPhoneLink}
-                  </Button>
-                </p>
-                {phoneCode ? (
-                  <TelegramQrCode
-                    value={ownAddress}
-                    label={strings.setup.onPhoneQr}
-                  />
-                ) : null}
-              </div>
-            )}
-            <TheParagraph hasBot={(data?.bots.length ?? 0) > 0} />
-            <StepOne target={target} name={name} />
-            <StepTwo
-              target={target}
-              name={name}
-              needsZone={data?.settings === null && !browserTimeZone()}
-              isFirst={data?.settings === null}
-              onAdded={setFirstBot}
-            />
-          </div>
-        )}
+        {/* The stages change by themselves, above all to Done, with the person away in
+            Telegram. One region stays through all of them, as a live region must. */}
+        <div role="status">
+          {isPending ? (
+            <p className="text-muted-foreground text-sm">{t.common.loading}</p>
+          ) : stage !== "steps" && bot && view ? (
+            stage === "done" ? (
+              <DoneScreen bot={bot} name={name} firstBot={firstBot} />
+            ) : stopsSetup(view.row) ? (
+              <SetupFault view={view} target={target} />
+            ) : (
+              <StepThree
+                key={stage}
+                bot={bot}
+                name={name}
+                connect={connect}
+                expired={stage === "expired"}
+              />
+            )
+          ) : (
+            <div className="space-y-4">
+              {isMobile ? null : (
+                <div className="space-y-2">
+                  <p className="text-muted-foreground text-sm">
+                    {strings.setup.onPhone}{" "}
+                    <Button
+                      type="button"
+                      variant="link"
+                      className="h-auto p-0"
+                      onClick={() => setPhoneCode(true)}
+                    >
+                      {strings.setup.onPhoneLink}
+                    </Button>
+                  </p>
+                  {phoneCode ? (
+                    <TelegramQrCode
+                      value={ownAddress}
+                      label={strings.setup.onPhoneQr}
+                    />
+                  ) : null}
+                </div>
+              )}
+              <TheParagraph hasBot={(data?.bots.length ?? 0) > 0} />
+              <StepOne target={target} name={name} />
+              <StepTwo
+                target={target}
+                name={name}
+                needsZone={data?.settings === null && !browserTimeZone()}
+                isFirst={data?.settings === null}
+                onAdded={setFirstBot}
+              />
+            </div>
+          )}
+        </div>
       </DialogContent>
     </Dialog>
   );

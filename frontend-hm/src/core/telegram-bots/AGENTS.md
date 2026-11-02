@@ -27,8 +27,9 @@ and are pinned on both sides.
 
 Tokens: keep the two calls that carry a token as plain `api.ts` calls, never
 mutations, because the query library would keep the token as its variables. Call
-`findToken` on a paste, a press or a blur, never while typing. `TelegramTokenField`
-is the one paste rule for both token dialogs. `TelegramTokenDialog` keeps one
+`findToken` on a paste, a press or Enter, never while typing or on leaving the field,
+because leaving is how a person changes their mind. `TelegramTokenField` is the one
+paste rule for both token dialogs. `TelegramTokenDialog` keeps one
 `operation_id` per token, by a lossy fingerprint, so a retry after a lost answer
 returns the saved receipt. Consent to take a webhook over covers the refused token's
 fingerprint only.
@@ -36,7 +37,10 @@ fingerprint only.
 `setup-dialog-store.ts` holds what only this page knows: the open set-up, the
 connect addresses it received, and which links answer a pasted token. A held
 address is stored with `telegramConnectEpoch`, so an answer to a request made before
-Disconnect all is dropped.
+Disconnect all is dropped, and `liveConnectOf` offers it only while it is the one the
+list names. `TelegramSetupHost` clears the store when it unmounts, because the store
+outlives the account and the host does not. `useTelegramConnect` and
+`useTelegramDisconnect` are the one way to make those two requests.
 
 `?settings=channels&telegram=<target>` opens a row; a target uses a dot because the
 sign-in return refuses a colon. The section mounts behind two lazy chunks and reads

@@ -160,7 +160,7 @@ describe("the token dialog", () => {
     expect(sent()).toEqual([]);
   });
 
-  it("sends nothing while a token is typed, and the whole token when the field loses the focus", async () => {
+  it("sends nothing while a token is typed or on leaving the field, and the whole token on Enter", async () => {
     const { sent } = start(() => committed());
     for (let length = 1; length <= tokenA.length; length += 7) {
       fireEvent.change(field(), {
@@ -168,10 +168,35 @@ describe("the token dialog", () => {
       });
     }
     fireEvent.change(field(), { target: { value: tokenA } });
-    expect(sent()).toEqual([]);
     fireEvent.blur(field());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(sent()).toEqual([]);
+    fireEvent.submit(field().closest("form")!);
     await waitFor(() => expect(sent()).toHaveLength(1));
     expect(sent()[0]?.body).toMatchObject({ token: tokenA });
+  });
+
+  it("offers a button for text that arrived without a paste, as a phone's keyboard can put it", async () => {
+    const { sent } = start(() => committed());
+    expect(screen.queryByRole("button", { name: "Check" })).toBeNull();
+    fireEvent.change(field(), { target: { value: "not a token" } });
+    fireEvent.click(screen.getByRole("button", { name: "Check" }));
+    await screen.findByText(/That is not a bot token/);
+    expect(sent()).toEqual([]);
+    fireEvent.change(field(), { target: { value: tokenA } });
+    fireEvent.click(screen.getByRole("button", { name: "Check" }));
+    await waitFor(() => expect(sent()).toHaveLength(1));
+    expect(sent()[0]?.body).toMatchObject({ token: tokenA });
+    expect(screen.getByRole("button", { name: "Paste" })).toBeTruthy();
+  });
+
+  it("keeps the token out of saved passwords and ties the field to its sentence", () => {
+    start(() => committed());
+    expect(field().getAttribute("autocomplete")).toBe("new-password");
+    const hint = document.getElementById(
+      field().getAttribute("aria-describedby") ?? "",
+    );
+    expect(hint?.textContent).toMatch(/keeps the token encrypted/);
   });
 
   it("repeats one operation for the same token after a lost answer, and starts a new one for another", async () => {
@@ -179,10 +204,10 @@ describe("the token dialog", () => {
       throw new TypeError("network");
     });
     paste(tokenA);
-    await screen.findByText(/The result is not confirmed/);
+    await screen.findByText(/That may not have gone through/);
     paste(tokenA);
     await waitFor(() => expect(sent()).toHaveLength(2));
-    await screen.findByText(/The result is not confirmed/);
+    await screen.findByText(/That may not have gone through/);
     paste(tokenB);
     await waitFor(() => expect(sent()).toHaveLength(3));
     const ids = sent().map(
@@ -198,7 +223,10 @@ describe("the token dialog", () => {
     const { sent } = start(() => answer());
     paste(tokenA);
     fireEvent.click(await screen.findByRole("button", { name: "Use it here" }));
-    await screen.findByText(/The result is not confirmed/);
+    // Put on the page along with its text, where only an alert is sure to be read.
+    const asked = await screen.findByRole("alert");
+    expect(asked.textContent).toMatch(/Paste the same token once more/);
+    expect(asked.classList.contains("text-destructive")).toBe(false);
     expect(sent()).toHaveLength(1);
     answer = () => committed();
     paste(tokenA);
@@ -216,7 +244,7 @@ describe("the token dialog", () => {
     const { sent } = start(() => answer());
     paste(tokenA);
     fireEvent.click(await screen.findByRole("button", { name: "Use it here" }));
-    await screen.findByText(/The result is not confirmed/);
+    await screen.findByText(/Paste the same token once more/);
     answer = () => refusal(400, "token-invalid");
     paste(tokenB);
     await waitFor(() => expect(sent()).toHaveLength(2));
@@ -265,13 +293,14 @@ describe("the token dialog", () => {
     await waitFor(() => expect(document.activeElement).toBe(field()));
   });
 
-  it("sends nothing when Cancel is pressed with text in the field", () => {
+  it("sends nothing when the dialog is left with text in the field", async () => {
     const { sent } = start(() => committed());
     fireEvent.change(field(), { target: { value: tokenA } });
     const cancel = screen.getByRole("button", { name: "Cancel" });
-    expect(fireEvent.mouseDown(cancel)).toBe(false);
+    fireEvent.blur(field());
     fireEvent.click(cancel);
     expect(onClose).toHaveBeenCalled();
+    await new Promise((resolve) => setTimeout(resolve, 20));
     expect(sent()).toEqual([]);
   });
 
@@ -280,7 +309,7 @@ describe("the token dialog", () => {
       throw new TypeError("network");
     });
     paste(tokenA);
-    await screen.findByText(/The result is not confirmed/);
+    await screen.findByText(/That may not have gone through/);
     const first = (sent()[0]?.body as { operation_id: string }).operation_id;
     cleanup();
     clearClients();

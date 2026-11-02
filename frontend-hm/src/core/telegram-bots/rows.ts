@@ -1,6 +1,6 @@
 import type { TelegramFeature } from "@/core/features/api";
 
-import type { Bot } from "./api";
+import type { Bot, Connect } from "./api";
 import type { TelegramKey, TelegramReader, TelegramValues } from "./text";
 import type { AgentTarget } from "./web-pages";
 
@@ -206,6 +206,23 @@ export function setupStageOf(bot: Bot | null, now: number): SetupStage {
     ? Date.parse(bot.connect_expires_at)
     : Number.POSITIVE_INFINITY;
   return expires <= now ? "expired" : "waiting";
+}
+
+/**
+ * A held address works only while it is the one the list names: a new token, a
+ * conflict, Disconnect all or a link from a second tab each end it without a word.
+ */
+export function liveConnectOf(
+  held: Connect | undefined,
+  bot: Bot | null,
+  now: number,
+): Connect | undefined {
+  return held &&
+    bot?.connect_expires_at &&
+    Date.parse(held.expires_at) === Date.parse(bot.connect_expires_at) &&
+    Date.parse(held.expires_at) > now
+    ? held
+    : undefined;
 }
 
 /** False while the set-up's own steps describe the row: the bot can hear Start. */

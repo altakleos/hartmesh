@@ -204,8 +204,31 @@ describe("the telegram strings", () => {
       "Connected as Rosa",
     );
     expect(telegramText(strings, "chatName")).toBe("HartMesh");
-    expect(strings.sidebar.attention({ count: 1 })).toBe("1 needs attention");
-    expect(strings.sidebar.attention({ count: 3 })).toBe("3 need attention");
+    expect(strings.sidebar.attention({ count: 3 })).toBe("3 to check");
+  });
+
+  it("has a form for one where the sentence counts", () => {
+    const strings = createEnUS("HartMesh").telegramBots;
+    expect(strings.confirm.lost.title({ count: 1 })).toBe(
+      "Disconnect your bot?",
+    );
+    expect(strings.confirm.lost.title({ count: 3 })).toBe(
+      "Disconnect all 3 bots?",
+    );
+    expect(strings.confirm.lost.body({ count: 1 })).toMatch(
+      /^The bot stops answering/,
+    );
+    expect(strings.confirm.lost.body({ count: 3 })).toMatch(
+      /^The bots stop answering/,
+    );
+    expect(strings.list.count({ used: 1, limit: 1 })).toBe("1 of 1 bot");
+    expect(strings.list.count({ used: 1, limit: 3 })).toBe("1 of 3 bots");
+    expect(strings.unavailable.limitPerson({ count: 1 })).toContain(
+      "You have 1 Telegram bot,",
+    );
+    expect(strings.admin.limits({ perPerson: 1, limit: 1 })).toBe(
+      "One person can connect up to 1 bot; 1 bot in all.",
+    );
   });
 
   it("a text that says whom to ask follows the reader", () => {

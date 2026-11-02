@@ -3,6 +3,7 @@ import { describe, expect, it } from "@rstest/core";
 import { CLOSED_TELEGRAM, type TelegramFeature } from "@/core/features/api";
 import type { Bot } from "@/core/telegram-bots/api";
 import {
+  liveConnectOf,
   needsAttention,
   rowOf,
   type RowInput,
@@ -457,5 +458,32 @@ describe("the rows that need attention", () => {
   it("only a bot that can still hear Start keeps the set-up's own steps", () => {
     const rows = Array.from({ length: 30 }, (_, row) => row);
     expect(rows.filter((row) => !stopsSetup(row))).toEqual([21, 22, 23]);
+  });
+});
+
+describe("an address held in the page", () => {
+  const held = { url: "https://t.me/x?start=c", expires_at: ahead(600) };
+
+  it("is live while the list names the same instant", () => {
+    const named = bot({
+      connect_expires_at: held.expires_at.replace("Z", "+00:00"),
+    });
+    expect(liveConnectOf(held, named, NOW)).toBe(held);
+  });
+
+  it.each([
+    ["ended by a new token or a conflict", null],
+    ["replaced from a second tab", ahead(900)],
+  ])("is dead once %s", (_name, connect_expires_at) => {
+    expect(
+      liveConnectOf(held, bot({ connect_expires_at }), NOW),
+    ).toBeUndefined();
+  });
+
+  it("is dead after its time, and with no bot", () => {
+    const named = bot({ connect_expires_at: held.expires_at });
+    expect(liveConnectOf(held, named, NOW + 601_000)).toBeUndefined();
+    expect(liveConnectOf(held, null, NOW)).toBeUndefined();
+    expect(liveConnectOf(undefined, named, NOW)).toBeUndefined();
   });
 });

@@ -46,6 +46,11 @@ export function useTelegramClock(): number {
   return now;
 }
 
+/** Under the shared prefix, so a change to a bot refreshes the counts as well. */
+export function telegramAdminQueryKey(account: string | null) {
+  return [...telegramBotsQueryPrefix, account, "admin"] as const;
+}
+
 export function useRefreshTelegramBots() {
   const queryClient = useQueryClient();
   return useCallback(

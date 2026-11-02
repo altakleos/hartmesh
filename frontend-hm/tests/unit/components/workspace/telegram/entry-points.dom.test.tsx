@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -51,6 +52,7 @@ import type { BotList } from "@/core/telegram-bots/api";
 import { telegramTargetOf } from "@/core/telegram-bots/web-pages";
 
 import {
+  ago,
   bot,
   clearClients,
   json,
@@ -69,10 +71,14 @@ const MISSING = {
   reason: "secret-missing",
 };
 
-function serve(telegram: unknown, list: BotList = listOf([])) {
+function serve(
+  telegram: unknown,
+  list: BotList = listOf([]),
+  branding: unknown = undefined,
+) {
   const { handle } = server({
     "GET /api/features": () =>
-      json({ agents_api: { enabled: true }, telegram }),
+      json({ agents_api: { enabled: true }, telegram, branding }),
     "GET /api/telegram-bots": () => json(list),
   });
   rs.mocked(fetch).mockImplementation(handle);
@@ -157,7 +163,22 @@ describe("the welcome card", () => {
       name: "Connect Telegram",
     });
     expect((connect as HTMLButtonElement).disabled).toBe(true);
-    screen.getByText(/the setting that encrypts their tokens is missing/);
+    screen.getByText(
+      /the setting that encrypts their tokens is missing\. Ask an administrator\./,
+    );
+  });
+
+  it("speaks for the product, or for nobody where a company has its name up", async () => {
+    serve(READY);
+    renderWithClient(<TelegramWelcomeCard />);
+    await screen.findByText("Take HartMesh with you");
+    cleanup();
+    clearClients();
+
+    serve(READY, listOf([]), { company_name: "Acme" });
+    renderWithClient(<TelegramWelcomeCard />);
+    await screen.findByText("Take this chat with you");
+    expect(screen.queryByText(/HartMesh/)).toBeNull();
   });
 });
 
@@ -169,7 +190,7 @@ describe("the sidebar row", () => {
     return screen.getByRole("button").textContent;
   };
 
-  it("reads Connect, the number connected, or the number that need attention", async () => {
+  it("reads Connect, the number connected, or the number to check", async () => {
     expect(await text(listOf([]))).toBe("Connect");
     cleanup();
     clearClients();
@@ -178,9 +199,7 @@ describe("the sidebar row", () => {
     cleanup();
     clearClients();
 
-    expect(await text(listOf([bot({ state: "held" })]))).toBe(
-      "1 needs attention",
-    );
+    expect(await text(listOf([bot({ state: "held" })]))).toBe("1 to check");
     cleanup();
     clearClients();
 
@@ -192,7 +211,68 @@ describe("the sidebar row", () => {
           bot({ id: "c" }),
         ]),
       ),
-    ).toBe("2 need attention");
+    ).toBe("2 to check");
+  });
+
+  it("says Press Start for a bot waiting for it, not that none is connected", async () => {
+    expect(
+      await text(
+        listOf([
+          bot({
+            state: "waiting_connect",
+            connected_as: null,
+            connect_expires_at: ago(-600),
+          }),
+        ]),
+      ),
+    ).toBe("Press Start");
+  });
+
+  it("keeps counting a bot as connected while Telegram cannot be reached", async () => {
+    expect(await text(listOf([bot({ health: "unreachable" })]))).toBe(
+      "1 connected",
+    );
+    cleanup();
+    clearClients();
+
+    expect(
+      await text(
+        listOf([
+          bot({ id: "a", health: "unreachable" }),
+          bot({
+            id: "b",
+            state: "waiting_connect",
+            connected_as: null,
+            connect_expires_at: ago(-600),
+          }),
+        ]),
+      ),
+    ).toBe("1 connected");
+  });
+
+  it("notices a link run out, though no answer changed", async () => {
+    rs.useFakeTimers({ toFake: ["setInterval", "Date"] });
+    try {
+      const running = bot({
+        state: "waiting_connect",
+        connected_as: null,
+        connect_expires_at: ago(-2),
+      });
+      expect(await text(listOf([running]))).toBe("Press Start");
+      act(() => {
+        rs.advanceTimersByTime(6000);
+      });
+      expect(screen.getByRole("button").textContent).toBe("1 to check");
+    } finally {
+      rs.useRealTimers();
+    }
+  });
+
+  it("says Paused while Telegram cannot run, whatever a row says", async () => {
+    serve(MISSING, listOf([bot()]));
+    renderWithClient(<TelegramSidebarRow />);
+    await settle();
+    expect(screen.getByRole("button").textContent).toBe("Paused");
   });
 
   it("opens the section", async () => {
@@ -220,8 +300,9 @@ describe("the agent card's button", () => {
     render(<Setup />);
     renderWithClient(<TelegramAgentCardButton name="helper" />);
     await settle();
-    const connect = await screen.findByTitle("Connect Telegram");
-    fireEvent.click(connect);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Connect Telegram" }),
+    );
     expect(await screen.findByTestId("set-up-for")).toBeTruthy();
     expect(screen.getByTestId("set-up-for").textContent).toBe(
       "custom_agent.helper",
@@ -240,7 +321,10 @@ describe("the agent card's button", () => {
   it("is disabled where a bot cannot be connected, and says why", async () => {
     serve(OFF);
     renderWithClient(<TelegramAgentCardButton name="helper" />);
-    await screen.findByTitle("Telegram: turned off");
+    // On what surrounds the button: a disabled one takes no pointer to show a title.
+    const titled = await screen.findByTitle("Telegram: turned off");
+    expect(titled).not.toBe(await button());
+    expect(titled.contains(await button())).toBe(true);
     expect((await button()).disabled).toBe(true);
     cleanup();
     clearClients();

@@ -3,7 +3,7 @@
 import { useSearchParams } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
-import { useTelegram } from "@/core/features/hooks";
+import { useBranding, useTelegram } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import { useLocalSettings } from "@/core/settings";
 import { useTelegramBots, useTelegramReader } from "@/core/telegram-bots/hooks";
@@ -17,6 +17,7 @@ export function TelegramWelcomeCard() {
   const { t } = useI18n();
   const strings = t.telegramBots;
   const feature = useTelegram();
+  const { companyName } = useBranding();
   const reader = useTelegramReader();
   const { data } = useTelegramBots();
   const [settings, setSettings] = useLocalSettings();
@@ -41,15 +42,29 @@ export function TelegramWelcomeCard() {
     : atLimit
       ? strings.unavailable.limitPerson({ count: data.limits.used })
       : null;
+  // Nobody here can act on the reason, so it ends as the section's notice does.
+  const ending = !notice?.ending
+    ? null
+    : !reader.admin
+      ? strings.unavailable.askAdmin
+      : notice.next
+        ? strings.unavailable.next({ provider: reader.provider })
+        : null;
 
   return (
     <section
       className="mt-4 w-full max-w-md rounded-lg border p-4 text-left"
       data-testid="telegram-welcome-card"
     >
-      <h2 className="font-medium">{strings.offer.chatTitle}</h2>
+      <h2 className="font-medium">
+        {companyName === null
+          ? strings.offer.chatTitle
+          : strings.offer.companyTitle}
+      </h2>
       <p className="text-muted-foreground mt-1 text-sm">
-        {strings.offer.chatBody}
+        {companyName === null
+          ? strings.offer.chatBody
+          : strings.offer.companyBody}
       </p>
       <div className="mt-3 flex gap-2">
         <Button
@@ -70,7 +85,9 @@ export function TelegramWelcomeCard() {
         </Button>
       </div>
       {blocked ? (
-        <p className="text-muted-foreground mt-2 text-xs">{blocked}</p>
+        <p className="text-muted-foreground mt-2 text-xs">
+          {ending ? `${blocked} ${ending}` : blocked}
+        </p>
       ) : null}
     </section>
   );
