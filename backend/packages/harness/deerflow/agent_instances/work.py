@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from sqlalchemy import select
+from sqlalchemy.orm import aliased
 
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied, AgentPermission, Refusal
 from deerflow.agent_instances.work_contract import AssignmentFields, DelegateWork, WorkBlocker, WorkCommand, WorkOutcome, WorkReview, WorkSource
@@ -18,6 +19,7 @@ INSPECT = AgentPermission.INSPECT
 DELEGATE = AgentPermission.USE | INSPECT
 MANAGE = AgentPermission.MANAGE | INSPECT
 UNRESOLVED = ("starting", "running", "stopping", "uncertain")
+_UNREAD = object()
 
 
 def _date(value):
@@ -104,13 +106,21 @@ class AgentWork:
         except (ValueError, TypeError, KeyError):
             raise AgentConflict("Stored Work bindings are invalid; preserve the record for host reconciliation") from None
 
-    async def _project(self, session, actor, parent, snapshot, *, current_attempt=True, execution_state=None):
+    @staticmethod
+    def _with_attempt(query):
+        """Settling commits a row and its attempt together, so a read that shows both takes them in one statement."""
+        other = aliased(AgentWorkAttemptRow)
+        latest = select(other.id).where(other.work_id == AgentWorkRow.id).order_by(other.created_at.desc(), other.id.desc()).limit(1).scalar_subquery()
+        return query.add_columns(AgentWorkAttemptRow).outerjoin(AgentWorkAttemptRow, AgentWorkAttemptRow.id == latest)
+
+    async def _project(self, session, actor, parent, snapshot, *, current_attempt=True, execution_state=None, attempt=_UNREAD):
         await self._validate_snapshot(session, snapshot)
         value = await self._redact(session, actor, snapshot)
         policy = await self._policy(session, parent)
-        attempt = None
-        if current_attempt:
-            attempt = (await session.execute(select(AgentWorkAttemptRow).where(AgentWorkAttemptRow.work_id == snapshot["id"]).order_by(AgentWorkAttemptRow.created_at.desc(), AgentWorkAttemptRow.id.desc()).limit(1))).scalar_one_or_none()
+        if attempt is _UNREAD:
+            attempt = None
+            if current_attempt:
+                attempt = (await session.execute(select(AgentWorkAttemptRow).where(AgentWorkAttemptRow.work_id == snapshot["id"]).order_by(AgentWorkAttemptRow.created_at.desc(), AgentWorkAttemptRow.id.desc()).limit(1))).scalar_one_or_none()
         from deerflow.persistence.agent_instances.human_input import HumanInputRequestRow
 
         live_request = await session.scalar(select(HumanInputRequestRow.id).where(HumanInputRequestRow.work_id == snapshot["id"], HumanInputRequestRow.state != "closed")) if current_attempt else None
@@ -167,7 +177,7 @@ class AgentWork:
         async with self._sf() as session:
             if instance_id is not None:
                 await self._parent(session, actor, instance_id, INSPECT)
-            query = (
+            query = self._with_attempt(
                 select(AgentWorkRow, AgentInstanceRow)
                 .join(AgentInstanceRow, AgentInstanceRow.id == AgentWorkRow.instance_id)
                 .join(AgentInstanceGrantRow, AgentInstanceGrantRow.instance_id == AgentWorkRow.instance_id)
@@ -179,21 +189,23 @@ class AgentWork:
             if instance_id is not None:
                 query = query.where(AgentWorkRow.instance_id == instance_id)
             results = (await session.execute(query)).all()
-            records = [await self._project(session, actor, parent, self._snapshot(row)) for row, parent in results]
+            records = [await self._project(session, actor, parent, self._snapshot(row), attempt=attempt) for row, parent, attempt in results]
         # The probe owns its read session. Never hold a connection while it
         # checks current host/Space state, including a one-connection pool.
         states = {}
         if self.agents.execution_probe is not None:
-            for _row, parent in results:
+            for _row, parent, _attempt in results:
                 if parent.id not in states:
                     states[parent.id] = await self.agents.execution_probe(parent.id)
-        return [self._execution_projection(record, states.get(parent.id)) for record, (_row, parent) in zip(records, results, strict=True)]
+        return [self._execution_projection(record, states.get(parent.id)) for record, (_row, parent, _attempt) in zip(records, results, strict=True)]
 
     async def get(self, *, actor, instance_id, work_id):
         async with self._sf() as session:
             parent, _ = await self._parent(session, actor, instance_id, INSPECT)
-            row = await self._row(session, instance_id, work_id)
-            record = await self._project(session, actor, parent, self._snapshot(row))
+            found = (await session.execute(self._with_attempt(select(AgentWorkRow).where(AgentWorkRow.id == work_id, AgentWorkRow.instance_id == instance_id)))).one_or_none()
+            if found is None:
+                raise AgentDenied("Work is unavailable")
+            record = await self._project(session, actor, parent, self._snapshot(found[0]), attempt=found[1])
         state = await self.agents.execution_probe(parent.id) if self.agents.execution_probe is not None else None
         return self._execution_projection(record, state)
 

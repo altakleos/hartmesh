@@ -110,6 +110,14 @@ Native bridge qualification/current proof restores all typed indexes from one
 mixed snapshot before publication. `native_teardown.py` retains bounded pending
 accounting, exact member ID/typed-name collision guards and restore tombstones.
 The journal revision closes readiness until the restored set exactly matches.
+`bridge.accounting` spans each teardown or resident publication and its restoration, and
+qualification and the pending snapshot take it, so a reader waits instead of finding the
+journal ahead of memory, which would close admission for every sandbox. Never wait for it
+under the provider's metadata lock: `ready`, which may run there, only tries it, and reads
+another thread's publication as no fault. `NativeResourceSet._member` waits out `removing` under its
+own deadline, because a stopped `--rm` primary reads so until the daemon finishes, and
+`dead` is a state cleanup can still remove. `shutdown()` releases the lease of any set it
+could not confirm absent, so the next Gateway's recovery is not refused for a TTL.
 Only the bridge's typed `_NativeAccountingStale` identifies this snapshot mismatch.
 Gateway reconciliation may requalify that same bridge/provider/owner once, after
 resume has released SQL admission and the Home lock. Retry complete fresh row,

@@ -5163,6 +5163,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self.destroy(sandbox_id)
             except Exception as e:
                 logger.error(f"Failed to destroy sandbox {sandbox_id} during shutdown: {e}")
+            self._let_go_unconfirmed(sandbox_id)
 
         for sandbox_id, (info, _) in warm_items:
             # Route through _destroy_warm_entry so the ownership claim and the
@@ -5170,6 +5171,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             # predicate here: shutdown stops every parked set it still finds
             # (entry identity is checked by the destroy itself).
             self._destroy_warm_entry(sandbox_id, info, reason="shutdown", still_reapable=lambda: True)
+            self._let_go_unconfirmed(sandbox_id)
 
         try:
             self._ownership.close()
@@ -5178,6 +5180,16 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         self._acquire_serializer.close()
         self._acquire_worker_executor.shutdown(wait=False, cancel_futures=True)
+
+    def _let_go_unconfirmed(self, sandbox_id: str) -> None:
+        """Nothing renews or retries a set after shutdown, and its lease would refuse the next Gateway's recovery for a TTL.
+
+        A stop still running keeps its marker, because a peer must not take that container.
+        """
+        with self._lock:
+            unconfirmed = sandbox_id in self._warm_pool and sandbox_id not in self._local_teardown
+        if unconfirmed:
+            self._release_ownership(sandbox_id)
 
     def _check_sync_lifecycle(self):
         from deerflow_extension_api.storage import StorageUnsupported

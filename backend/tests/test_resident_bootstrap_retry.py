@@ -264,3 +264,25 @@ async def test_real_sql_lease_takeover_wakes_maintenance_and_settles_only_after_
     events = [event for event in history if event["action"] == "attempt_contained"]
     assert len(events) == 1 and events[0]["actor_kind"] == "host"
     assert events[0]["report"]["reason"] == "run-orphaned"
+
+
+@pytest.mark.asyncio
+async def test_a_pending_workspace_is_looked_at_again_soon_and_the_wait_grows(monkeypatch):
+    status = ss.ExecutionStatus(pending_reconcile=["attachment"], pending_recheck_seconds=0.01)
+    app = SimpleNamespace(state=SimpleNamespace(agent_execution=status, storage_recheck_wake=asyncio.Event(), storage_spaces=SimpleNamespace(settle_interrupted=AsyncMock(return_value=0)), resident_runtime=None))
+    for name, value in (("_resident_step", None), ("abandon_unfinished", None), ("finish_releases", 0), ("assign_spaces", None)):
+        monkeypatch.setattr(ss, name, AsyncMock(return_value=value))
+    monkeypatch.setattr(ss, "storage_state", AsyncMock(return_value=SimpleNamespace(state="ready")))
+    monkeypatch.setattr(ss, "execution_state", AsyncMock(return_value=SimpleNamespace(execution="unavailable")))
+    assert await ss._maintenance_step(app, timeout=5)
+    await asyncio.wait_for(app.state.storage_recheck_wake.wait(), 2)
+    assert status.pending_recheck_seconds == 0.02, "One pending workspace refuses every instance until a pass clears it"
+
+    armed = []
+    monkeypatch.setattr(asyncio.get_running_loop(), "call_later", lambda *args: armed.append(args))
+    status.pending_recheck_seconds = ss.RECHECK_SECONDS
+    ss._recheck_pending_soon(app)
+    assert not armed, "One that stays pending costs the pass every workspace gets"
+    status.pending_reconcile = []
+    ss._recheck_pending_soon(app)
+    assert status.pending_recheck_seconds == ss.PENDING_RECHECK_SECONDS

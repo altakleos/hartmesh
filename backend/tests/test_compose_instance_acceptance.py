@@ -837,6 +837,7 @@ def test_chat_without_files_mounts_nothing_of_the_user(compose, member):
             evidence.mkdir(parents=True, exist_ok=True)
             (evidence / "case4-before-cleanup.log").write_text(compose.logs(), encoding="utf-8")
             compose.run("stop", "--timeout", "30", "gateway")
+            (evidence / "case4-after-stop.log").write_text(compose.logs(), encoding="utf-8")  # What the stopping Gateway could not finish.
             try:
                 facts = {"old": old, "new": new, "account": account, "daemon": daemon}
                 # Test-owned bootstrap mirrors the service's privilege drop
@@ -1286,6 +1287,7 @@ def test_file_given_while_no_workspace_runs_is_present_at_the_next_run(compose, 
     content = MARKER + b"-while-closed"
     files = give_file(session, employee, content)
     assert not any(entry["Name"].startswith("/hartmesh-space-") for entry in compose.containers())
+    await_execution_ready(session)
     session.run(employee["thread_id"], files=files)
     current, _entry = workspace(compose, employee)
     assert current["container_id"] != previous["container_id"]

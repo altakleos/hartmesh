@@ -26,6 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so a later attempt cannot make the notice false or send it twice.
 - The `state` log line reads `bound` or `disconnected` for those changes, not `inbound`.
 
+### Sandboxes and AI employees
+
+- A sandbox teardown that overlapped another one no longer closed sandbox admission, which
+  failed every sandbox tool for every person until the next maintenance pass.
+- A stopped sandbox whose container Docker was still removing no longer left its relay
+  running, its slot charged and its owner unable to start another one. A `dead` container
+  is removed too, and a Gateway that stops with a set unfinished lets go of its lease, so
+  the next Gateway's recovery is not refused it for a lease's lifetime.
+- A workspace left pending by a maintenance pass refuses every AI assistant and AI employee
+  for a much shorter time, because the next pass comes after 5 seconds instead of 60. A
+  run still settling its attempt no longer leaves one pending.
+- Reading a Work item while its attempt settles no longer pairs the settled attempt with
+  the item's earlier status.
+
 ## [2.2.0+hartmesh.48] - 2026-11-02
 
 ### Telegram bots
