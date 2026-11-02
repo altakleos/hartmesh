@@ -390,6 +390,17 @@ def _snapshot(row: TelegramBotLinkRow) -> BotLink:
     return BotLink(**result)
 
 
+def _health_event(cause: str | None, holds: bool, causes: set[str], *, in_conflict: bool) -> str | None:
+    """What a bot's history records. `set_health` runs on every poll, so only a change.
+
+    A conflict goes by its stored date: a worse fault can hide it from `health`,
+    and a restart from `causes`.
+    """
+    if cause == "conflict":
+        return None if holds is in_conflict else "conflict" if holds else "conflict_ended"
+    return cause if holds and cause in {"token_rejected", "stopped"} and cause not in causes else None
+
+
 def _safe_detail(detail: dict | None) -> dict:
     if detail is None:
         return {}
@@ -1390,6 +1401,7 @@ class BotLinkRepository:
                     return None
                 cached = self._health_causes.get(link_id) if self._health_revisions.get(link_id) == row.token_revision else None
                 causes = set(cached if cached is not None else {row.health} if row.health != "ok" else set())
+                event = _health_event(cause, holds, causes, in_conflict=row.conflict_since is not None)
                 if cause is not None:
                     causes.add(cause) if holds else causes.discard(cause)
                 selected = next((item for item in _HEALTH_ORDER if item in causes), "ok")
@@ -1406,6 +1418,8 @@ class BotLinkRepository:
                         row.conflict_since = _now()
                 elif cause == "conflict" and not holds:
                     row.conflict_since = row.probe_until = row.webhook_host = None
+                if event is not None:
+                    await self._event(session, row, event, actor_id="system")
                 await session.flush()
                 result = _snapshot(row)
             if check_attempt_current is not None and check_attempt_current() is not True:
@@ -1434,6 +1448,8 @@ class BotLinkRepository:
             # saved replies and acknowledged parts still belong to this binding.
             await session.execute(update(TelegramOutboxRow).where(TelegramOutboxRow.link_id == row.id, TelegramOutboxRow.state.in_(("pending", "sending"))).values(state="pending", claim_owner=None, claim_id=None, claimed_at=None))
             row.health, row.profile_pending = "ok", True
+            if row.conflict_since is not None:
+                await self._event(session, row, "conflict_ended", actor_id=actor_id)
             row.conflict_since = row.probe_until = row.webhook_host = None
             if token_changed:
                 row.acts_paused_since = None
@@ -1802,7 +1818,8 @@ class BotLinkRepository:
         if row.connection_id is not None:
             binding = await session.scalar(select(ChannelConnectionRow).where(ChannelConnectionRow.id == row.connection_id, ChannelConnectionRow.owner_user_id == owner).with_for_update())
             if binding is not None:
-                binding.status = "revoked"
+                # The id stays, because the same account reconnecting finds its conversation.
+                binding.status, binding.external_account_name = "revoked", None
                 await session.execute(delete(ChannelCredentialRow).where(ChannelCredentialRow.connection_id == binding.id))
         row.binding_generation = _advance(row.binding_generation)
         row.connection_id = row.telegram_user_id = row.chat_id = row.connected_name = None
@@ -1857,9 +1874,15 @@ class BotLinkRepository:
         await self._unbind(session, row)
         # Unbind clears the current connection pointer but retains revoked
         # identities. Remove all this bot's owned mappings, including earlier
-        # accounts, so a later link cannot inherit one of its old threads.
-        identities = select(ChannelConnectionRow.id).where(ChannelConnectionRow.owner_user_id == row.owner_user_id, ChannelConnectionRow.provider == "telegram", ChannelConnectionRow.workspace_id == str(row.bot_id))
-        await session.execute(delete(ChannelConversationRow).where(ChannelConversationRow.owner_user_id == row.owner_user_id, ChannelConversationRow.connection_id.in_(identities)).execution_options(synchronize_session=False))
+        # accounts, so a later link cannot inherit one of its old threads, and
+        # then those identities, which hold a person's Telegram id for nothing.
+        identity = (ChannelConnectionRow.owner_user_id == row.owner_user_id, ChannelConnectionRow.provider == "telegram", ChannelConnectionRow.workspace_id == str(row.bot_id))
+        await session.execute(
+            delete(ChannelConversationRow)
+            .where(ChannelConversationRow.owner_user_id == row.owner_user_id, ChannelConversationRow.connection_id.in_(select(ChannelConnectionRow.id).where(*identity)))
+            .execution_options(synchronize_session=False)
+        )
+        await session.execute(delete(ChannelConnectionRow).where(*identity, ChannelConnectionRow.status == "revoked").execution_options(synchronize_session=False))
         await self._event(session, row, action, actor_id=actor_id, detail=detail)
         await session.delete(row)
         await session.flush()

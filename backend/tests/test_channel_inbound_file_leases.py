@@ -72,6 +72,30 @@ async def test_a_refused_file_stays_refused_so_its_notice_stays_true(monkeypatch
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [True, False])
+@pytest.mark.parametrize("outcome", ["unreadable", "empty", "refused"])
+async def test_a_file_a_person_sent_is_not_named_in_the_log_of_a_managed_chat(monkeypatch, caplog, managed, outcome):
+    name = "a-private-name.pdf"
+
+    async def reader(file, client):
+        if outcome == "unreadable":
+            raise OSError("no")
+        return None if outcome == "empty" else b"bytes"
+
+    async def upload(filename, data):
+        raise ChannelUploadRefused(503)
+
+    message = InboundMessage(channel_name="upload-test", chat_id="chat", user_id="platform-person", text="A message", files=[{"filename": name}], execution_required=managed)
+    monkeypatch.setitem(manager.INBOUND_FILE_READERS, "upload-test", reader)
+    with caplog.at_level("WARNING", logger="app.channels.manager"):
+        assert await manager._ingest_inbound_files("thread", message, upload=upload, saved_files={}) == []
+    if managed:
+        assert name not in caplog.text and "file=#0" in caplog.text
+    else:
+        assert f"file={name}" in caplog.text, "Other channels keep the name their operators read"
+
+
+@pytest.mark.asyncio
 async def test_a_file_that_arrived_with_its_bytes_can_still_be_kept(monkeypatch):
     kept = {}
 

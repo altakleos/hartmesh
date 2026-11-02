@@ -48,6 +48,7 @@ def _postgres_engine_kwargs(
         "pool_recycle": pool_recycle,
         "connect_args": merged_connect_args,
         "json_serializer": _json_serializer,
+        "hide_parameters": True,
     }
 
 
@@ -169,7 +170,9 @@ async def init_engine(
             url = parsed.set(database=database, query=query)
         else:
             await asyncio.to_thread(os.makedirs, sqlite_dir or ".", exist_ok=True)
-        _engine = create_async_engine(url, echo=echo, json_serializer=_json_serializer)
+        # A failed statement's values would reach the log with its error: a
+        # person's words and ids, in any table.
+        _engine = create_async_engine(url, echo=echo, json_serializer=_json_serializer, hide_parameters=True)
 
         # Enable WAL on every new connection. SQLite PRAGMA settings are
         # per-connection, so we wire the listener instead of running PRAGMA

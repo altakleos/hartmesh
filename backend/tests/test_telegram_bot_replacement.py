@@ -67,7 +67,7 @@ async def test_other_bot_replacement_is_atomic_and_keeps_a_slot_above_lowered_li
     assert await db.links.get(original.id) is None
     assert len(await db.links.list_all()) == 3 and len(await db.links.list_for_owner(original.owner_user_id)) == 2
     assert await db.links.codes_waiting(original.owner_user_id) == 1
-    assert (await rows(db, ChannelConnectionRow))[0].status == "revoked"
+    assert not await rows(db, ChannelConnectionRow)
     assert not await rows(db, ChannelConversationRow)
     assert await db.links.replacement_receipt(original.owner_user_id, OPERATION, DIGEST) == receipt
 

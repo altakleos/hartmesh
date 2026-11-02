@@ -239,22 +239,6 @@ class PendingFiles:
 
         return await await_drained(perform())
 
-    async def sweep(self, now):
-        from datetime import timedelta
-
-        from sqlalchemy import delete
-
-        from deerflow.persistence.telegram_bots.model import TelegramPendingFileRow
-
-        cutoff = now - timedelta(hours=self.config.files.pending_ttl_hours)
-
-        async def perform():
-            async with self.callbacks.sessions() as writer, writer.begin():
-                result = await writer.execute(delete(TelegramPendingFileRow).where(TelegramPendingFileRow.created_at <= cutoff))
-                return result.rowcount
-
-        return await await_drained(perform())
-
 
 @dataclass(frozen=True)
 class OutputPlan:

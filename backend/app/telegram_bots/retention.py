@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import delete, select, text
 
 from app.telegram_bots.inbox import CALLBACK_PUBLICATION_KEY, callback_publication_pending
-from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkEventRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkEventRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow, TelegramPendingFileRow
 
 INBOUND_RETENTION_DAYS = 7
 OUTBOX_RETENTION_DAYS = 30
@@ -101,6 +101,11 @@ async def _sweep_outbox(sessions, now: datetime, callback_max_age_days: int) -> 
 async def _sweep(sessions, statement) -> int:
     async with _writer(sessions) as session:
         return (await session.execute(statement)).rowcount
+
+
+async def sweep_pending_files(sessions, now: datetime, *, ttl_hours: int) -> int:
+    """A file sent without a caption leaves its name and Telegram id until then."""
+    return await _sweep(sessions, delete(TelegramPendingFileRow).where(TelegramPendingFileRow.created_at <= _aware(now) - timedelta(hours=ttl_hours)))
 
 
 async def sweep_rows(sessions, now: datetime, *, callback_max_age_days: int) -> dict[str, int]:

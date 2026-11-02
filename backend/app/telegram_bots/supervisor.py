@@ -40,7 +40,7 @@ from app.telegram_bots.polling import CONFLICT_GRACE_SECONDS, TASK_DEATHS_BEFORE
 from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryEligibility, Outbox, OutboxSender
 from app.telegram_bots.profile import ProfileSync
 from app.telegram_bots.render import render_plain
-from app.telegram_bots.retention import sweep_rows
+from app.telegram_bots.retention import sweep_pending_files, sweep_rows
 from app.telegram_bots.settings import SettingsRepository, silent_now
 from app.telegram_bots.voice import VoiceNotes, resolve_transcriber
 from deerflow.config.app_config import get_app_config
@@ -175,6 +175,8 @@ class TelegramSupervisor:
         self._retire_by_link: dict[str, asyncio.Task] = {}
         self._retiring_channels: set[TelegramBotChannel] = set()
         self._background: set[asyncio.Task] = set()
+        self._sweeps: set[asyncio.Task] = set()
+        self._sweeping = True
         self._callbacks: set[asyncio.Task] = set()
         self._notices: set[asyncio.Task] = set()
         self._restarts: dict[str, asyncio.Task] = {}
@@ -226,6 +228,9 @@ class TelegramSupervisor:
             return
         self._checked = True
         try:
+            # Before any refusal: a refused Telegram still owes its sweeps.
+            if self.session_factory is None:
+                self.session_factory = get_session_factory()
             if self._app_config is None:
                 self._app_config = await asyncio.to_thread(get_app_config)
             cause = await asyncio.to_thread(static_cause, self.config, self._app_config, self._environ)
@@ -234,8 +239,6 @@ class TelegramSupervisor:
                 return
             manager = self.channel_service.manager if self.channel_service is not None else None
             connections = getattr(manager, "connection_repo", None)
-            if self.session_factory is None:
-                self.session_factory = get_session_factory()
             if self.session_factory is None:
                 self._refuse("channel-service-failed")
                 return
@@ -309,6 +312,7 @@ class TelegramSupervisor:
         began = self._time()
         try:
             await self.check()
+            self._start_sweeps()
             if self._cause is not None or self._stopping:
                 return
             self.channel_service.bus.subscribe_outbound(self._listener)
@@ -394,7 +398,7 @@ class TelegramSupervisor:
             self._event("supervisor_start_failed", error=type(error).__name__, level=logging.ERROR)
             if self._cause is None:
                 self._refuse("channel-service-failed")
-            await self.begin_shutdown()
+            await self._stop_bots()
             self._unsubscribe()
         finally:
             if self._start_task is asyncio.current_task():
@@ -497,11 +501,17 @@ class TelegramSupervisor:
         self._periodic(self.reconcile, self.config.reconcile_interval_seconds, "reconcile")
         self._periodic(self._tick_recovery, self.config.reconcile_interval_seconds, "publication-recovery")
         self._periodic(self._refresh_flags, 3600, "bot-flags")
-        self._periodic(self.sweep_retention, RETENTION_SWEEP_SECONDS, "retention", first_delay=3600)
-        self._periodic(lambda: self.callbacks.sweep(self._clock()), 3600, "callback-sweep")
-        if self.pending_files is not None:
-            self._periodic(lambda: self.pending_files.sweep(self._clock()), 3600, "pending-file-sweep")
         self._periodic(self.profile_sync.push_owed, 3600, "profile", first_delay=0)
+
+    def _start_sweeps(self) -> None:
+        """Stored text has a promised end, and it outlives whatever stopped Telegram."""
+        if self.session_factory is None:
+            return
+        callbacks = CallbackRepository(self.session_factory, config=self.config)
+        hours = self.config.files.pending_ttl_hours
+        self._periodic(self.sweep_retention, RETENTION_SWEEP_SECONDS, "retention", first_delay=3600, refused_too=True)
+        self._periodic(lambda: callbacks.sweep(self._clock()), 3600, "callback-sweep", refused_too=True)
+        self._periodic(lambda: await_drained(sweep_pending_files(self.session_factory, self._clock(), ttl_hours=hours)), 3600, "pending-file-sweep", refused_too=True)
 
     async def _recover_startup_publications(self) -> None:
         """Capture one complete cohort before any held/create/send release.
@@ -596,13 +606,16 @@ class TelegramSupervisor:
                 self._latch_persisted = True
                 return
 
-    def _periodic(self, operation, seconds: float, name: str, *, first_delay: float | None = None) -> None:
+    def _periodic(self, operation, seconds: float, name: str, *, first_delay: float | None = None, refused_too: bool = False) -> None:
+        def over() -> bool:
+            return not self._sweeping if refused_too else self._stopping or self._cause is not None
+
         async def run():
             delay = seconds if first_delay is None else first_delay
-            while not self._stopping and self._cause is None:
+            while not over():
                 await self._sleep(delay)
                 delay = seconds
-                if self._stopping or self._cause is not None:
+                if over():
                     return
                 try:
                     await operation()
@@ -612,8 +625,10 @@ class TelegramSupervisor:
                     self._event("maintenance_failed", job=name, cause=failure_chain(error), level=logging.WARNING)
 
         task = asyncio.create_task(run(), name=f"telegram-{name}")
-        self._background.add(task)
-        task.add_done_callback(self._background.discard)
+        # Outside `_background`, which a refusal found while running cancels.
+        owner = self._sweeps if refused_too else self._background
+        owner.add(task)
+        task.add_done_callback(owner.discard)
 
     async def _tick_recovery(self) -> None:
         """A publication recovery keeps held has no other trace, so say when the count moves."""
@@ -1501,7 +1516,7 @@ class TelegramSupervisor:
                 continue
 
     async def sweep_retention(self, now: datetime | None = None) -> dict[str, int]:
-        if self.session_factory is None or self._cause is not None:
+        if self.session_factory is None:
             return {"inbound": 0, "outbox": 0, "acts": 0, "events": 0}
         began = self._time()
         counts = await await_drained(sweep_rows(self.session_factory, now or self._clock(), callback_max_age_days=self.config.callbacks.max_age_days))
@@ -1509,6 +1524,15 @@ class TelegramSupervisor:
         return counts
 
     async def begin_shutdown(self) -> None:
+        """The Gateway is going, so the sweeps go with the bots."""
+        self._sweeping = False
+        sweeps = tuple(self._sweeps)
+        for task in sweeps:
+            task.cancel()
+        await self._stop_bots()
+        await asyncio.gather(*sweeps, return_exceptions=True)
+
+    async def _stop_bots(self) -> None:
         self._stopping, self._ready = True, False
         if self._recovery_epoch is not None:
             self._recovery_epoch.retire()
