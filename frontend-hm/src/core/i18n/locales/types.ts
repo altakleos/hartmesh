@@ -2151,6 +2151,9 @@ export interface Translations {
     offer: {
       chatTitle: string;
       chatBody: string;
+      /** For a tenant with a company name, which the product's name does not replace here. */
+      companyTitle: string;
+      companyBody: string;
       later: string;
     };
     sidebar: {
@@ -2158,6 +2161,8 @@ export interface Translations {
       connect: string;
       connected: (values: { count: number }) => string;
       attention: (values: { count: number }) => string;
+      waiting: string;
+      paused: string;
     };
     setup: {
       title: (values: { name: string }) => string;
@@ -2185,7 +2190,6 @@ export interface Translations {
         d: string;
         public: string;
         helpTitle: string;
-        helpStart: string;
         helpTaken: string;
         helpTooMany: string;
         helpCopy: string;
@@ -2195,6 +2199,7 @@ export interface Translations {
         label: string;
         placeholder: string;
         paste: string;
+        check: string;
         hint: string;
         checking: string;
         accepted: (values: { username: string }) => string;
@@ -2279,6 +2284,7 @@ export interface Translations {
       title: (values: { name: string }) => string;
       body: string;
       retryPaste: string;
+      pasteOnceMore: string;
       completedRemoved: string;
       completedChanged: string;
       replaceFailed: string;
@@ -2307,7 +2313,7 @@ export interface Translations {
       };
       lost: {
         title: (values: { count: number }) => string;
-        body: string;
+        body: (values: { count: number }) => string;
       };
     };
     lost: {

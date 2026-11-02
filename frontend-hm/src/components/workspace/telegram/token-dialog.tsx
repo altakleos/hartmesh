@@ -39,9 +39,10 @@ import {
 
 /**
  * The field of both token dialogs. The text is searched on a paste, on a press
- * and when the field loses the focus, and never while typing: the pattern has
- * no upper bound, so a token typed by hand would match before it is complete.
- * The field is emptied as soon as a token is sent, so it is not kept in the page.
+ * and on Enter, and never while typing: the pattern has no upper bound, so a
+ * token typed by hand would match before it is complete. Never on leaving the
+ * field either, because that is how a person changes their mind. The field is
+ * emptied as soon as a token is sent, so it is not kept in the page.
  */
 export function TelegramTokenField({
   disabled,
@@ -55,6 +56,7 @@ export function TelegramTokenField({
   const { t } = useI18n();
   const strings = t.telegramBots;
   const id = useId();
+  const hintId = useId();
   const field = useRef<HTMLInputElement>(null);
   const mounted = useRef(true);
   const [text, setText] = useState("");
@@ -91,7 +93,15 @@ export function TelegramTokenField({
   };
 
   return (
-    <div className="flex flex-col gap-2">
+    <form
+      className="flex flex-col gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (text) {
+          search(text);
+        }
+      }}
+    >
       <label className="text-sm font-medium" htmlFor={id}>
         {strings.setup.step2.label}
       </label>
@@ -100,7 +110,8 @@ export function TelegramTokenField({
           ref={field}
           id={id}
           type="password"
-          autoComplete="off"
+          autoComplete="new-password"
+          aria-describedby={hintId}
           spellCheck={false}
           placeholder={strings.setup.step2.placeholder}
           value={text}
@@ -110,25 +121,27 @@ export function TelegramTokenField({
             event.preventDefault();
             search(event.clipboardData.getData("text"));
           }}
-          onBlur={() => {
-            if (text) {
-              search(text);
-            }
-          }}
         />
-        <Button
-          type="button"
-          variant="outline"
-          disabled={disabled}
-          onClick={() => void pasteFromClipboard()}
-        >
-          {strings.setup.step2.paste}
-        </Button>
+        {/* A phone's keyboard can put text in without a paste, and has no Enter to speak of. */}
+        {text ? (
+          <Button type="submit" variant="outline" disabled={disabled}>
+            {strings.setup.step2.check}
+          </Button>
+        ) : (
+          <Button
+            type="button"
+            variant="outline"
+            disabled={disabled}
+            onClick={() => void pasteFromClipboard()}
+          >
+            {strings.setup.step2.paste}
+          </Button>
+        )}
       </div>
-      <p className="text-muted-foreground text-xs">
+      <p id={hintId} className="text-muted-foreground text-xs">
         {strings.setup.step2.hint}
       </p>
-    </div>
+    </form>
   );
 }
 
@@ -139,6 +152,7 @@ export function useWebhookConsent() {
   return {
     refuse: (token: string) => setRefused(fingerprintOf(token)),
     agree: () => setAgreed(refused),
+    agreed: agreed !== null,
     covers: (token: string) => agreed === fingerprintOf(token),
   };
 }
@@ -276,20 +290,19 @@ export function TelegramTokenDialog({
             variant="outline"
             onClick={() => {
               consent.agree();
-              setLines(["token.retryPaste"]);
+              setLines([]);
             }}
           >
             {strings.action.useHere}
           </Button>
         ) : null}
+        {consent.agreed && !checking && lines.length === 0 ? (
+          <p className="text-muted-foreground text-sm" role="alert">
+            {strings.token.pasteOnceMore}
+          </p>
+        ) : null}
         <DialogFooter>
-          <Button
-            type="button"
-            variant="ghost"
-            // Keeps the focus in the field: leaving it would send what it holds.
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={onClose}
-          >
+          <Button type="button" variant="ghost" onClick={onClose}>
             {t.common.cancel}
           </Button>
         </DialogFooter>

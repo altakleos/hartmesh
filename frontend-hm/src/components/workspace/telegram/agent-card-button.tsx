@@ -6,7 +6,11 @@ import { Button } from "@/components/ui/button";
 import { ChannelProviderIcon } from "@/components/workspace/channels/channel-provider-icon";
 import { useTelegram } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
-import { useTelegramBots, useTelegramReader } from "@/core/telegram-bots/hooks";
+import {
+  useTelegramBots,
+  useTelegramClock,
+  useTelegramReader,
+} from "@/core/telegram-bots/hooks";
 import {
   rowOf,
   sectionNoticeOf,
@@ -25,6 +29,7 @@ export function TelegramAgentCardButton({ name }: { name: string }) {
   const feature = useTelegram();
   const reader = useTelegramReader();
   const { data } = useTelegramBots();
+  const now = useTelegramClock();
 
   if (!feature.known) {
     return null;
@@ -39,7 +44,7 @@ export function TelegramAgentCardButton({ name }: { name: string }) {
     strings.card.state({ state: telegramText(strings, key) });
 
   if (bot) {
-    const { row } = rowOf({ name, bot, feature, reader, now: Date.now() });
+    const { row } = rowOf({ name, bot, feature, reader, now });
     return (
       <Button
         size="icon"
@@ -60,20 +65,22 @@ export function TelegramAgentCardButton({ name }: { name: string }) {
   const blocked =
     sectionNoticeOf(feature, false) !== null ||
     (data !== undefined && data.limits.used >= data.limits.per_person);
+  const title = blocked
+    ? short(feature.enabled ? "short.none" : "short.off")
+    : strings.action.connect;
+  // A disabled button takes no pointer, so its title stands on what surrounds it.
   return (
-    <Button
-      size="icon"
-      variant="ghost"
-      className="h-8 w-8 shrink-0"
-      disabled={blocked}
-      title={
-        blocked
-          ? short(feature.enabled ? "short.none" : "short.off")
-          : strings.action.connect
-      }
-      onClick={() => openTelegramSetup(target)}
-    >
-      <ChannelProviderIcon provider="telegram" className="size-3.5" />
-    </Button>
+    <span className="inline-flex shrink-0" title={title}>
+      <Button
+        size="icon"
+        variant="ghost"
+        className="h-8 w-8"
+        aria-label={title}
+        disabled={blocked}
+        onClick={() => openTelegramSetup(target)}
+      >
+        <ChannelProviderIcon provider="telegram" className="size-3.5" />
+      </Button>
+    </span>
   );
 }

@@ -12,35 +12,27 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ProviderSupportLink } from "@/components/workspace/instances/execution-notice";
-import {
-  closeConnectWindow,
-  openConnectUrl,
-  prepareConnectWindow,
-} from "@/core/channels/open-connect-url";
 import { useBranding } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   applyTelegramProfile,
   type Bot,
-  requestTelegramConnect,
   retryTelegramBot,
-  TelegramRefusal,
 } from "@/core/telegram-bots/api";
 import { useRefreshTelegramBots } from "@/core/telegram-bots/hooks";
-import type { RowView, TargetRow } from "@/core/telegram-bots/rows";
+import {
+  liveConnectOf,
+  type RowView,
+  type TargetRow,
+} from "@/core/telegram-bots/rows";
 import { type TelegramKey, telegramText } from "@/core/telegram-bots/text";
 import { displayNameOf } from "@/core/telegram-bots/username";
 import { telegramTargetOf } from "@/core/telegram-bots/web-pages";
 
 import { BotPicture } from "./bot-picture";
 import type { TelegramRowDialogState } from "./row-dialogs";
-import {
-  holdTelegramConnect,
-  openTelegramSetup,
-  telegramConnectEpoch,
-  useTelegramPageState,
-} from "./setup-dialog-store";
-import { useTelegramFailure } from "./use-telegram-failure";
+import { openTelegramSetup, useTelegramPageState } from "./setup-dialog-store";
+import { useTelegramConnect, useTelegramFailure } from "./use-telegram-failure";
 
 const NAME_MAX = 64;
 const MENU_HIDDEN_ROWS = new Set([1, 5]);
@@ -80,37 +72,15 @@ export function TelegramBotRow({
   const { providerName, supportURL } = useBranding();
   const refresh = useRefreshTelegramBots();
   const failure = useTelegramFailure();
+  const connect = useTelegramConnect(bot, (error) => failure.show(error, name));
   const [busy, setBusy] = useState(false);
   const blockedId = useId();
 
-  const held = bot ? connects.get(bot.id) : undefined;
-  const liveConnect =
-    held && Date.parse(held.expires_at) > now ? held : undefined;
-
-  const newConnect = async (keepInPage: boolean) => {
-    if (!bot) {
-      return;
-    }
-    const tab = keepInPage ? null : prepareConnectWindow();
-    const epoch = telegramConnectEpoch();
-    try {
-      const connect = await requestTelegramConnect(bot.id);
-      if (!holdTelegramConnect(bot.id, connect, epoch)) {
-        closeConnectWindow(tab);
-      } else if (!keepInPage) {
-        openConnectUrl(connect.url, tab);
-      }
-    } catch (error) {
-      closeConnectWindow(tab);
-      if (
-        !(error instanceof TelegramRefusal) ||
-        error.reason !== "already-connected"
-      ) {
-        failure.show(error, name);
-      }
-    }
-    await refresh();
-  };
+  const liveConnect = liveConnectOf(
+    bot ? connects.get(bot.id) : undefined,
+    bot,
+    now,
+  );
 
   const run = async (key: TelegramKey) => {
     if (key === "action.connect") {
@@ -135,9 +105,9 @@ export function TelegramBotRow({
     setBusy(true);
     try {
       if (key === "action.reconnect" || key === "action.openChat") {
-        await newConnect(false);
+        await connect.request({ open: true });
       } else if (key === "action.newLink") {
-        await newConnect(true);
+        await connect.request({ open: false });
       } else if (key === "action.tryNow") {
         await retryTelegramBot(bot.id);
         await refresh();

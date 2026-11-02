@@ -2,17 +2,22 @@
 
 import { useQuery } from "@tanstack/react-query";
 
+import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 import { getTelegramAdminSummary } from "@/core/telegram-bots/api";
-import { useTelegramReader } from "@/core/telegram-bots/hooks";
+import {
+  telegramAdminQueryKey,
+  useTelegramReader,
+} from "@/core/telegram-bots/hooks";
 
 /** Counts and limits only: bots are personal, so no username stands here. */
 export function TelegramAdminBlock() {
   const { t } = useI18n();
   const strings = t.telegramBots;
+  const { user } = useAuth();
   const { provider } = useTelegramReader();
   const { data } = useQuery({
-    queryKey: ["telegram-bots-admin"],
+    queryKey: telegramAdminQueryKey(user?.id ?? null),
     queryFn: getTelegramAdminSummary,
   });
   if (!data) {

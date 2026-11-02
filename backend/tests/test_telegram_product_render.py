@@ -142,7 +142,7 @@ def test_every_proactive_first_line_fits_without_clipping_later_brand_values(loc
 def test_delivery_failure_catalog_keeps_exact_sentences_and_renderer_only_adds_line_break():
     from app.telegram_bots.texts import catalog
 
-    english = "A saved message could not be delivered here. Retrying delivery will not start new work."
+    english = "A message could not be shown here. Retry delivery sends it again and starts nothing new."
     assert catalog("en")["delivery.failed"] == english
     assert render("delivery.failed", "en").replace("\n", " ") == english
     assert render("delivery.failed", "zh-CN").replace("\n", "") == catalog("zh-CN")["delivery.failed"]

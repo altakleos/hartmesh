@@ -265,7 +265,7 @@ test.describe("Telegram bots", () => {
     await openSetup(page);
     await paste(page, TOKEN);
     await page.getByRole("button", { name: strings.action.useHere }).click();
-    await expect(page.getByText(strings.token.retryPaste)).toBeVisible();
+    await expect(page.getByText(strings.token.pasteOnceMore)).toBeVisible();
     answers["POST "] = () => {
       state.bots = [bot({ ...WAITING })];
       return [201, { bot: state.bots[0], connect: CONNECT }];
@@ -564,7 +564,7 @@ test.describe("Telegram bots", () => {
     await menu.click();
     await page.getByRole("menuitem", { name: strings.action.remove }).click();
     await page
-      .getByRole("dialog")
+      .getByRole("alertdialog")
       .getByRole("button", { name: strings.confirm.remove.button })
       .click();
     await expect(page.getByText(strings.toast.removed)).toBeVisible();

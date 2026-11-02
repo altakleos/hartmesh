@@ -55,6 +55,14 @@ def test_sealed_cancellation_text_does_not_claim_queue_removal(locale, expected)
     assert catalog(locale)["run.cancelled"] != catalog(locale)["busy.cancelled"]
 
 
+@pytest.mark.parametrize(
+    "locale,expected",
+    [("en", "Stopped. The text above is unfinished. Messages that were waiting were not answered."), ("zh-CN", "已停止。上面的文字尚未完成。等待中的消息未获回答。")],
+)
+def test_two_sentences_of_a_stop_join_as_the_language_joins_them(locale, expected):
+    assert render_plain("stop.answer", locale, written=True, waiting=True) == expected
+
+
 def test_chat_texts_use_no_pronoun_after_name():
     assert not [key for key, text in catalog("en").items() if "{name}" in text and re.search(r"\b(?:its|his|her|she|he)\b", text, re.I)]
 

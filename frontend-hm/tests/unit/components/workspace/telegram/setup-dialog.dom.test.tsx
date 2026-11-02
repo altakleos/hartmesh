@@ -96,14 +96,14 @@ const settings: Settings = {
 };
 // Built at run time: no tracked file may hold text of a token's shape.
 const token = `${"1".repeat(9)}:${"A".repeat(35)}`;
+const connect = { url: "https://t.me/x?start=code", expires_at: ago(-600) };
 const waiting = (overrides: Partial<Bot> = {}) =>
   bot({
     state: "waiting_connect",
     connected_as: null,
-    connect_expires_at: ago(-600),
+    connect_expires_at: connect.expires_at,
     ...overrides,
   });
-const connect = { url: "https://t.me/x?start=code", expires_at: ago(-600) };
 let state = listOf([]);
 
 interface Start {
@@ -225,7 +225,7 @@ describe("the set-up dialog", () => {
     expect(added()[0]?.body).toMatchObject({ token });
   });
 
-  it("sends nothing while a token is typed, and sends the whole token when the field loses the focus", async () => {
+  it("sends nothing while a token is typed or on leaving the field, and the whole token on Enter", async () => {
     const { added } = start({
       routes: { [ADD]: () => json({ bot: waiting(), connect }, 201) },
     });
@@ -234,8 +234,10 @@ describe("the set-up dialog", () => {
       fireEvent.change(input, { target: { value: token.slice(0, length) } });
     }
     fireEvent.change(input, { target: { value: token } });
-    expect(added()).toEqual([]);
     fireEvent.blur(input);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(added()).toEqual([]);
+    fireEvent.submit(input.closest("form")!);
     await waitFor(() => expect(added()).toHaveLength(1));
     expect(added()[0]?.body).toMatchObject({ token });
   });
@@ -301,7 +303,9 @@ describe("the set-up dialog", () => {
     await paste(token);
     fireEvent.click(await screen.findByRole("button", { name: "Use it here" }));
     expect(added()).toHaveLength(1);
-    await screen.findByText(/Paste the same token again/);
+    const asked = await screen.findByText(/Paste the same token once more/);
+    expect(asked.closest('[role="status"]')).not.toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
     expect((await field()).value).toBe("");
     answer = () => json({ bot: waiting(), connect }, 201);
     await paste(token);
@@ -316,7 +320,7 @@ describe("the set-up dialog", () => {
     const { added } = start({ routes: { [ADD]: () => answer() } });
     await paste(token);
     fireEvent.click(await screen.findByRole("button", { name: "Use it here" }));
-    await screen.findByText(/Paste the same token again/);
+    await screen.findByText(/Paste the same token once more/);
     answer = () => refusal(400, "token-invalid");
     await paste(other);
     await waitFor(() => expect(added()).toHaveLength(2));
@@ -325,13 +329,28 @@ describe("the set-up dialog", () => {
     expect(screen.queryByRole("button", { name: "Use it here" })).toBeNull();
   });
 
-  it("offers Try again after Telegram could not be reached", async () => {
+  it("offers no button that would only clear the line when Telegram cannot be reached", async () => {
     start({ routes: { [ADD]: () => refusal(502, "telegram-unreachable") } });
     await paste(token);
-    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
-    await waitFor(() =>
-      expect(screen.queryByText(/could not reach Telegram/)).toBeNull(),
-    );
+    await screen.findByText(/could not reach Telegram/);
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect((await field()).disabled).toBe(false);
+  });
+
+  it("moves on when a lost answer turns out to have added the bot", async () => {
+    let state = listOf([]);
+    start({
+      list: () => state,
+      routes: {
+        [ADD]: () => {
+          state = listOf([waiting()]);
+          throw new TypeError("network");
+        },
+      },
+    });
+    await paste(token);
+    await screen.findByText("3. Open the chat and press Start");
+    expect(screen.queryByText("That did not work. Try again.")).toBeNull();
   });
 
   it("asks for the time zone when the browser reports none", async () => {
@@ -503,6 +522,71 @@ describe("the set-up dialog", () => {
       name: "Open chat with HartMesh",
     });
     expect(link.getAttribute("href")).toBe(connect.url);
+  });
+
+  it("asks for one link however often Open chat is pressed", async () => {
+    rs.spyOn(window, "open").mockReturnValue(null);
+    const { calls } = start({
+      list: () => listOf([waiting()]),
+      routes: { "POST /api/telegram-bots/link-a/connect": () => json(connect) },
+    });
+    const open = await screen.findByRole("button", {
+      name: "Open chat with HartMesh",
+    });
+    fireEvent.click(open);
+    fireEvent.click(open);
+    await screen.findByRole("link", { name: "Open chat with HartMesh" });
+    expect(calls.filter(({ url }) => url.endsWith("/connect"))).toHaveLength(1);
+  });
+
+  it("does not offer an address the list no longer names", async () => {
+    let state = listOf([waiting()]);
+    start({
+      list: () => state,
+      routes: { "POST /api/telegram-bots/link-a/connect": () => json(connect) },
+    });
+    rs.spyOn(window, "open").mockReturnValue(null);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open chat with HartMesh" }),
+    );
+    await screen.findByRole("link", { name: "Open chat with HartMesh" });
+    state = listOf([waiting({ connect_expires_at: ago(-900) })]);
+    await screen.findByRole(
+      "button",
+      { name: "Open chat with HartMesh" },
+      { timeout: 4000 },
+    );
+    expect(
+      screen.queryByRole("link", { name: "Open chat with HartMesh" }),
+    ).toBeNull();
+  });
+
+  it("announces the steps that change by themselves, from one region that stays", async () => {
+    let state = listOf([]);
+    const { added } = start({
+      list: () => state,
+      routes: {
+        [ADD]: () => {
+          state = listOf([waiting()]);
+          return json({ bot: waiting(), connect }, 201);
+        },
+      },
+    });
+    await field();
+    const region = screen.getByRole("status");
+
+    await paste(token);
+    await waitFor(() => expect(added()).toHaveLength(1));
+    await screen.findByRole("link", { name: "Open chat with HartMesh" });
+    state = listOf([bot()], { settings });
+    const done = await screen.findByText(
+      "HartMesh is on Telegram",
+      {},
+      { timeout: 4000 },
+    );
+
+    expect(region.isConnected).toBe(true);
+    expect(region.contains(done)).toBe(true);
   });
 
   it("offers Get a new link when the link expired", async () => {
@@ -700,5 +784,21 @@ describe("the set-up dialog", () => {
     });
     fireEvent.click(await screen.findByRole("button", { name: "Disconnect" }));
     await screen.findByText("Waiting for you to press Start in Telegram…");
+  });
+
+  it("takes a bot already disconnected from another tab as done", async () => {
+    let state = listOf([bot()]);
+    start({
+      list: () => state,
+      routes: {
+        "POST /api/telegram-bots/link-a/disconnect": () => {
+          state = listOf([waiting()]);
+          return refusal(409, "not-connected");
+        },
+      },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Disconnect" }));
+    await screen.findByText("3. Open the chat and press Start");
+    expect(toast.error).not.toHaveBeenCalled();
   });
 });

@@ -260,7 +260,7 @@ async def test_a_typed_answer_to_a_prompt_whose_conversation_is_gone_is_told_so(
     assert await e.services.human_inputs.handle_text(e.channel, message(e, 1719, content="My note"), captured_link=e.channel.link), "It used to raise, and hold up the chat's updates"
     e.request.enqueue("sendMessage", result=sent(e, identity=702))
     await drain(e)
-    assert e.request.calls[-1].parameters["text"].startswith("This prompt can no longer take an answer")
+    assert e.request.calls[-1].parameters["text"].startswith("That question can no longer take an answer")
 
 
 @pytest.mark.asyncio
@@ -684,12 +684,12 @@ async def test_a_reply_to_a_spent_card_holds_that_text_alone(ui):
     e.request.enqueue("sendMessage", result=sent(e, identity=703))
     await drain(e)
     labels = [button["text"] for line in e.request.calls[-1].parameters["reply_markup"]["inline_keyboard"] for button in line]
-    assert "Reopen answer" not in labels and len(labels) == 2, "There is nothing to reopen"
+    assert "Reopen question" not in labels and len(labels) == 2, "There is nothing to reopen"
     assert await e.services.human_inputs.handle_text(e.channel, quoted(e, 1782, "Another answer to the same card", CARD), captured_link=e.channel.link)
     e.request.enqueue("sendMessage", result=sent(e, identity=704))
     await drain(e)
     labels = [button["text"] for line in e.request.calls[-1].parameters["reply_markup"]["inline_keyboard"] for button in line]
-    assert "Reopen answer" not in labels, "A second reply finds the same dead card"
+    assert "Reopen question" not in labels, "A second reply finds the same dead card"
 
 
 async def form_on_its_typed_field(e):
@@ -709,7 +709,7 @@ async def test_a_reply_to_a_spent_keyboard_of_an_open_form_can_be_reopened(ui):
     e.request.enqueue("sendMessage", result=sent(e, identity=703))
     await drain(e)
     labels = [button["text"] for line in e.request.calls[-1].parameters["reply_markup"]["inline_keyboard"] for button in line]
-    assert "Reopen answer" in labels, "The form is open, so it is not dead"
+    assert "Reopen question" in labels, "The form is open, so it is not dead"
 
 
 @pytest.mark.asyncio
@@ -720,7 +720,7 @@ async def test_a_reply_to_a_spent_keyboard_of_a_form_with_no_conversation_left_i
     assert await e.services.human_inputs.handle_text(e.channel, quoted(e, 1787, "My note", CARD), captured_link=e.channel.link), "It used to raise, and hold up the chat's updates"
     e.request.enqueue("sendMessage", result=sent(e, identity=703))
     await drain(e)
-    assert e.request.calls[-1].parameters["text"].startswith("This prompt can no longer take an answer")
+    assert e.request.calls[-1].parameters["text"].startswith("That question can no longer take an answer")
 
 
 @pytest.mark.asyncio

@@ -6,8 +6,17 @@ import { ChannelProviderIcon } from "@/components/workspace/channels/channel-pro
 import { openSettingsDialog } from "@/components/workspace/settings/settings-dialog-store";
 import { useTelegram } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
-import { useTelegramBots, useTelegramReader } from "@/core/telegram-bots/hooks";
-import { needsAttention, rowOf } from "@/core/telegram-bots/rows";
+import {
+  useTelegramBots,
+  useTelegramClock,
+  useTelegramReader,
+} from "@/core/telegram-bots/hooks";
+import {
+  needsAttention,
+  rowOf,
+  sectionNoticeOf,
+  shortStateOf,
+} from "@/core/telegram-bots/rows";
 import { cn } from "@/lib/utils";
 
 /** Rendered while Telegram is on, also when it cannot run: the section says why. */
@@ -17,14 +26,18 @@ export function TelegramSidebarRow() {
   const feature = useTelegram();
   const reader = useTelegramReader();
   const { data } = useTelegramBots();
+  const now = useTelegramClock();
 
   const bots = data?.bots ?? [];
-  const now = Date.now();
-  const attention = bots.filter((bot) =>
-    needsAttention(
+  const rows = bots.map(
+    (bot) =>
       rowOf({ name: bot.agent_name ?? "", bot, feature, reader, now }).row,
-    ),
-  ).length;
+  );
+  const paused = sectionNoticeOf(feature, true) !== null;
+  const attention = paused ? 0 : rows.filter(needsAttention).length;
+  // A connected bot stays connected through an outage, which is no one's to fix.
+  const connected = bots.filter((bot) => bot.state === "connected").length;
+  const waiting = rows.some((row) => shortStateOf(row) === "short.waiting");
 
   return (
     <SidebarMenuItem>
@@ -46,12 +59,13 @@ export function TelegramSidebarRow() {
           <span className="truncate">
             {bots.length === 0
               ? strings.sidebar.connect
-              : attention > 0
-                ? strings.sidebar.attention({ count: attention })
-                : strings.sidebar.connected({
-                    count: bots.filter((bot) => bot.state === "connected")
-                      .length,
-                  })}
+              : paused
+                ? strings.sidebar.paused
+                : attention > 0
+                  ? strings.sidebar.attention({ count: attention })
+                  : waiting && connected === 0
+                    ? strings.sidebar.waiting
+                    : strings.sidebar.connected({ count: connected })}
           </span>
         </Button>
       </div>

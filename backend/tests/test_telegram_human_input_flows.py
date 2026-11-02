@@ -113,7 +113,7 @@ async def test_expired_other_prompt_holds_actual_text_for_explicit_choice(ui, ch
     e.request.enqueue("sendMessage", result=sent(e, identity=703))
     assert await e.services.human_inputs.handle_text(e.channel, incoming)
     await drain(e)
-    assert "This answer prompt closed" in e.request.calls[-1].parameters["text"]
+    assert "That question is closed" in e.request.calls[-1].parameters["text"]
     assert e.services.turns.accept_staged.await_count == 0
     assert await e.services.human_inputs.handle_text(e.channel, incoming)
     # Neither a replay nor reopening silently submits the held text.
@@ -251,7 +251,7 @@ async def test_reply_to_used_card_is_held_by_actual_routing_tombstone(ui):
     assert e.services.turns.accept_staged.await_count == 0
     e.request.enqueue("sendMessage", result=sent(e, identity=703))
     await drain(e)
-    assert "This prompt can no longer take an answer" in e.request.calls[-1].parameters["text"]
+    assert "That question can no longer take an answer" in e.request.calls[-1].parameters["text"]
 
 
 @pytest.mark.asyncio

@@ -17,20 +17,17 @@ import {
   acknowledgeTelegramConflict,
   type Bot,
   disconnectAllTelegramBots,
-  disconnectTelegramBot,
   removeTelegramBot,
   retryTelegramBot,
   TelegramRefusal,
 } from "@/core/telegram-bots/api";
 import { useRefreshTelegramBots } from "@/core/telegram-bots/hooks";
 
+import { discardTelegramConnects } from "./setup-dialog-store";
 import {
-  discardTelegramConnects,
-  forgetTelegramReplaced,
-  holdTelegramConnect,
-  telegramConnectEpoch,
-} from "./setup-dialog-store";
-import { useTelegramFailure } from "./use-telegram-failure";
+  useTelegramDisconnect,
+  useTelegramFailure,
+} from "./use-telegram-failure";
 
 export type TelegramRowDialogState =
   | {
@@ -40,6 +37,7 @@ export type TelegramRowDialogState =
     }
   | { kind: "lost"; count: number };
 
+/** A destructive one is an alert: no way out by a stray press beside it. */
 function Confirm({
   title,
   body,
@@ -70,7 +68,15 @@ function Confirm({
   };
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent>
+      <DialogContent
+        {...(destructive
+          ? {
+              role: "alertdialog",
+              showCloseButton: false,
+              onInteractOutside: (event: Event) => event.preventDefault(),
+            }
+          : {})}
+      >
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{body}</DialogDescription>
@@ -108,12 +114,13 @@ export function TelegramRowDialog({
   const strings = t.telegramBots;
   const refresh = useRefreshTelegramBots();
   const failure = useTelegramFailure();
+  const { disconnect } = useTelegramDisconnect();
 
   if (dialog.kind === "lost") {
     return (
       <Confirm
         title={strings.confirm.lost.title({ count: dialog.count })}
-        body={strings.confirm.lost.body}
+        body={strings.confirm.lost.body({ count: dialog.count })}
         button={strings.lost.button}
         onClose={onClose}
         onConfirm={async () => {
@@ -147,20 +154,11 @@ export function TelegramRowDialog({
           })}
           button={strings.confirm.otherAccount.button}
           onClose={onClose}
-          onConfirm={async () => {
-            const epoch = telegramConnectEpoch();
-            try {
-              const answer = await disconnectTelegramBot(bot.id);
-              forgetTelegramReplaced(bot.id);
-              holdTelegramConnect(bot.id, answer.connect, epoch);
-              toast.success(strings.toast.disconnected);
-            } catch (error) {
-              if (!ignored(error, "not-connected")) {
-                failure.show(error, name);
-              }
-            }
-            await refresh();
-          }}
+          onConfirm={() =>
+            disconnect(bot, name, () =>
+              toast.success(strings.toast.disconnected),
+            )
+          }
         />
       );
     case "remove":
@@ -221,8 +219,15 @@ export function TelegramRowDialog({
           onClose={onClose}
           onConfirm={async () => {
             try {
-              await retryTelegramBot(bot.id, { takeOverWebhook: true });
-              toast.success(strings.toast.usedHere);
+              const answer = await retryTelegramBot(bot.id, {
+                takeOverWebhook: true,
+              });
+              // A channel that could not start answers too, with the webhook still in place.
+              if (answer.bot.webhook_host === null) {
+                toast.success(strings.toast.usedHere);
+              } else {
+                failure.show(null, name);
+              }
             } catch (error) {
               failure.show(error, name);
             }

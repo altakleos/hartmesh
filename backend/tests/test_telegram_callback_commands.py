@@ -65,7 +65,7 @@ async def test_settings_command_press_changes_one_setting_and_edits_with_new_con
         assert await e.channel.handle_update(message(e, 910, content="/settings"))
         await drain(e)
         first = next(call for call in e.request.calls if call.endpoint == "sendMessage")
-        assert "Language of this chat's fixed texts: English" in first.parameters["text"]
+        assert "Buttons and notices from your bots are in English" in first.parameters["text"]
         async with db.sessions() as session:
             chinese = next(row for row in await session.scalars(select(TelegramCallbackRow)) if row.payload.get("value") == "zh-CN")
             callback_id = chinese.id
