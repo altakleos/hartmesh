@@ -19,11 +19,13 @@ _SCOPE = ("id", "owner_user_id", "bot_id", "agent_kind", "agent_ref", "connectio
 class ThreadPreparationFailure(ValueError):
     """Closed local/acknowledged preparation failures for the turn owner."""
 
+    MESSAGES = {"custom_agent_deleted": "custom-agent-deleted", "files_full": "thread-files-full", "conversation_deleted": "conversation-deleted"}
+
     def __init__(self, kind: str):
-        if kind not in {"custom_agent_deleted", "files_full"}:
+        if kind not in self.MESSAGES:
             raise ValueError("invalid-thread-preparation-failure")
         self.kind = kind
-        super().__init__("custom-agent-deleted" if kind == "custom_agent_deleted" else "thread-files-full")
+        super().__init__(self.MESSAGES[kind])
 
 
 @dataclass
@@ -206,7 +208,7 @@ class ThreadCoordinator:
                 await self._permission(attempt, "threads:write")
                 needed.add("threads:write")
                 identity = preparation.creation_id
-                metadata = {"channel_agent_name": link.agent_ref, "channel_source": {"type": "im_channel", "provider": "telegram", "chat_id": str(link.chat_id), "connection_id": link.connection_id}}
+                metadata = {"channel_agent_name": link.agent_ref, "channel_source": {"type": "im_channel", "provider": "telegram", "connection_id": link.connection_id}}
                 if link.agent_kind == "custom_agent":
                     metadata["agent_name"] = link.agent_ref
                 try:
@@ -273,11 +275,20 @@ class ThreadCoordinator:
             self._check(attempt)
 
         await authorize()
-        response = await self.client.get_thread(attempt.link.owner_user_id, stage.thread_id, before_dispatch=authorize)
-        if self._validate(response, attempt.link, stage.thread_id) != (attempt.link.agent_kind, attempt.link.agent_ref):
-            raise ValueError("invalid-thread-target")
+        await self._read_existing(attempt, stage.thread_id, authorize)
         await authorize()
         return stage.thread_id
+
+    async def _read_existing(self, attempt, thread_id, authorize):
+        """A press or an answer goes on in the conversation it came from, and only that one."""
+        try:
+            response = await self.client.get_thread(attempt.link.owner_user_id, thread_id, before_dispatch=authorize)
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code == 404:
+                raise ThreadPreparationFailure("conversation_deleted") from None
+            raise
+        if self._validate(response, attempt.link, thread_id) != (attempt.link.agent_kind, attempt.link.agent_ref):
+            raise ValueError("invalid-thread-target")
 
     async def _prepare_submission(self, attempt, stage):
         from app.telegram_bots.inbox import InboxRepository
@@ -299,9 +310,7 @@ class ThreadCoordinator:
             self._check(attempt)
 
         await authorize()
-        response = await self.client.get_thread(attempt.link.owner_user_id, stage.thread_id, before_dispatch=authorize)
-        if self._validate(response, attempt.link, stage.thread_id) != (attempt.link.agent_kind, attempt.link.agent_ref):
-            raise ValueError("invalid-thread-target")
+        await self._read_existing(attempt, stage.thread_id, authorize)
         await authorize()
         return stage.thread_id
 

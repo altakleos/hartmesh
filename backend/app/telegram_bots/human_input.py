@@ -218,25 +218,11 @@ class HumanInputs:
         checked = validate_human_input_reply_basis(item)
         try:
             source = await self.source.read_request(checked.record, link)
-        except (PublicationRefused, ChannelExecutionProtocolError):
-            # A deleted conversation and a failing Gateway read alike here, so the thread itself is asked.
-            if await self._thread_gone(link, checked.record.scope.thread_id):
-                raise CallbackRefused() from None
+        except PublicationRefused:
             raise ChannelExecutionProtocolError() from None
         if source is None or source.basis != item.payload["reply_basis"]["outcome"]["request_basis"]:
             raise CallbackRefused() from None
         return source
-
-    async def _thread_gone(self, link, thread_id):
-        import httpx
-
-        try:
-            await self.services.thread_client.get_thread(link.owner_user_id, thread_id)
-        except httpx.HTTPStatusError as error:
-            return error.response.status_code == 404
-        except Exception:
-            return False  # Not knowing is not gone.
-        return False
 
     async def plan_terminal(self, record, link, *, guard=None):
         from deerflow.utils.file_io import await_drained

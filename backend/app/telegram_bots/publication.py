@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import quote
 
-from app.channels.execution import ChannelExecutionContext, ChannelExecutionScope, ChannelHttpOwner
+from app.channels.execution import ChannelExecutionContext, ChannelExecutionProtocolError, ChannelExecutionScope, ChannelHttpOwner
 from app.channels.execution_client import ChannelExecutionFacade, ValidatedRun
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus
 from app.gateway.run_output import RunOutputProjectionV2
@@ -548,7 +548,13 @@ class PublicationCoordinator:
         async def perform(control):
             admission, _, _ = await self._attempt(current_link, record.scope, control)
             control.final_check = lambda: admission.check("source_read")
-            result = await self._facade(record, admission).get_run_output(record.run_id)
+            try:
+                result = await self._facade(record, admission).get_run_output(record.run_id)
+            except (PublicationRefused, ChannelExecutionProtocolError):
+                # With no conversation there is no output, and every reader ends on that.
+                if not await self._thread_gone(record, admission):
+                    raise
+                return None
             admission.check("source_read")
             if result is not None and type(result) is not RunOutputProjectionV2:
                 _refuse()
@@ -633,6 +639,27 @@ class PublicationCoordinator:
         )
         return PublicationObservation("planned", record, outbox_id=identity)
 
+    async def _thread_gone(self, record: PublicationRecord, admission) -> bool:
+        """A deleted conversation and a failing Gateway read alike, so the thread itself is asked. Not knowing is not gone."""
+        try:
+            response = await self._http_owner.request_json(
+                operation="thread_read",
+                owner_user_id=record.scope.owner_user_id,
+                method="GET",
+                path="threads/" + quote(record.scope.thread_id, safe=""),
+                headers={"X-DeerFlow-Require-Thread-Binding": "true"},
+                before_dispatch=lambda: admission.authorize("thread_read"),
+                after_response=lambda: admission.authorize("thread_read"),
+            )
+        except (PublicationRefused, ChannelExecutionProtocolError):
+            return False
+        return response.status_code == 404
+
+    async def _end_deleted(self, record: PublicationRecord, guard) -> PublicationObservation:
+        """No Try again: it would ask the same deleted conversation, and sending the message again starts a new one."""
+        identity = await self.outbox.plan_publication_outcome(record, deleted=True, source_ref={"key": "chat.conversation_deleted", "values": {}}, keyboard=(), callbacks=self.host.callbacks, guard=guard)
+        return PublicationObservation("planned", record, outbox_id=identity)
+
     async def observe(self, record: PublicationRecord, current_link: BotLink, *, max_pages: int, deadline: float | None = None, closing: str | None = None) -> PublicationObservation:
         """Plan what a saved publication can still say. With `closing`, nobody else will: end it.
 
@@ -657,7 +684,12 @@ class PublicationCoordinator:
                 admission, _, read_guard = await self._attempt(current_link, record.scope, control)
                 control.final_check = lambda: admission.check("source_read")
                 facade = self._facade(record, admission)
-                located = await self._locate(record, admission, read_guard, facade, max_pages, metadata=False)
+                try:
+                    located = await self._locate(record, admission, read_guard, facade, max_pages, metadata=False)
+                except (PublicationRefused, ChannelExecutionProtocolError):
+                    if closing is None or not await self._thread_gone(record, admission):
+                        raise
+                    return await self._end_deleted(record, read_guard)
                 if located.state == "pending" and closing is not None and self.worker_state(record) != "taken":
                     keyboard = () if closing == "busy.cancelled" else _try_again(located.record)
                     identity = await self.outbox.plan_publication_outcome(located.record, no_run=True, source_ref={"key": closing, "values": {}}, keyboard=keyboard, callbacks=self.host.callbacks, guard=read_guard)

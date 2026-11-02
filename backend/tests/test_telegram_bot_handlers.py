@@ -534,6 +534,21 @@ async def test_a_token_pasted_to_a_deleted_agents_bot_is_still_removed(db):
         await e.channel.stop()
 
 
+async def test_a_bot_connected_after_its_agent_was_deleted_says_so_at_once(db, monkeypatch):
+    e = await ingress(db, connected=False, monkeypatch=monkeypatch)
+    try:
+        code = code_of(await db.links.mint_code(e.link))
+        await db.links.set_health(e.link.id, "agent_unavailable", holds=True, expected_token_revision=e.link.token_revision)
+        e.request.enqueue("sendMessage", result=sent(e))
+        assert await e.channel.handle_update(message(e, 492, content="/start " + code)) is True
+        await drain_disposable(e)
+        assert (await db.links.get(e.link.id)).state == "connected"
+        said = [call.parameters["text"] for call in e.request.calls if call.endpoint == "sendMessage"]
+        assert said == [render_plain("custom_agent.deleted", "en-US", agent=e.link.agent_ref, product="HartMesh")], "The hello waits on this health, so nothing else would answer the press on Start"
+    finally:
+        await e.channel.stop()
+
+
 async def test_a_lead_agent_link_never_says_an_agent_was_deleted(db, monkeypatch):
     e = await ingress(db, lead=True, monkeypatch=monkeypatch)
     await db.links.set_health(e.link.id, "agent_unavailable", holds=True, expected_token_revision=e.link.token_revision)

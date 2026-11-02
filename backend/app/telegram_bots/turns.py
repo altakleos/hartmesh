@@ -762,6 +762,9 @@ class ChatTurns:
         except ThreadPreparationFailure as failure:
             if not self._current(turn):
                 return False
+            if failure.kind == "conversation_deleted":
+                await self._input_outcome(turn, "chat.conversation_deleted")  # Another Try again would ask the same conversation.
+                return False
             key = "custom_agent.deleted" if failure.kind == "custom_agent_deleted" else "chat.files_full"
             await self._input_outcome(turn, key, keyboard=self._button("retry_message", turn.callback_id or str(turn.origins[0].message_id), target_kind="request"))
             return False

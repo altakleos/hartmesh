@@ -426,6 +426,116 @@ async def test_a_conversation_deleted_on_the_web_just_starts_a_new_one(db, monke
         await s.close()
 
 
+async def no_retry(s):
+    async with s.db.sessions() as session:
+        return not list(await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.kind == "retry_message")))
+
+
+async def test_a_conversation_deleted_once_its_run_ended_says_so_and_the_chat_goes_on(db, monkeypatch, tmp_path):
+    s = await stack(db, monkeypatch, tmp_path)
+    try:
+        assert await send(s, 9711, "A long question") is True
+        turn = only_turn(s)
+        await until(lambda: turn.run_id is not None)
+        # The Gateway refuses to delete a conversation with a live run, so its run has ended.
+        s.gateway.finish(turn.record.publication_id, output=output_projection(turn.record))
+        s.gateway.deleted.add(turn.record.scope.thread_id)
+        await past_the_limit(s, turn)
+        await until(lambda: not s.turns._turns)
+        assert await planned_keys(s) == ["chat.conversation_deleted"]
+        saved = await mark(s, 9711)
+        assert saved.route_complete and saved.run_id is not None, "The row still names the run that went with its conversation"
+        assert await no_retry(s), "Try again would ask the same deleted conversation"
+    finally:
+        await s.close()
+
+
+async def test_a_conversation_deleted_across_a_restart_is_told_so(db, monkeypatch, tmp_path):
+    s = await stack(db, monkeypatch, tmp_path)
+    try:
+        assert await send(s, 9721, "A long question") is True
+        turn = only_turn(s)
+        await until(lambda: turn.run_id is not None)
+        record = turn.record
+        recovery = await restart(s)
+        s.gateway.finish(record.publication_id, output=output_projection(record))
+        s.gateway.deleted.add(record.scope.thread_id)
+        result = await recovery.tick()
+        assert result.planned == 1 and result.held == 0
+        assert await planned_keys(s) == ["chat.conversation_deleted"]
+        saved = await mark(s, 9721)
+        assert saved.route_complete and saved.run_id is not None
+        assert await no_retry(s)
+        await recovery.stop()
+    finally:
+        await s.close()
+
+
+async def test_a_conversation_deleted_before_any_run_was_seen_is_told_so(db, monkeypatch, tmp_path):
+    s = await stack(db, monkeypatch, tmp_path)
+    try:
+        s.gateway.stream_status = 503
+        assert await send(s, 9723, "A question") is True
+        turn = only_turn(s)
+        await until(lambda: turn.record is not None and turn.record.dispatch_started)
+        record = turn.record
+        recovery = await restart(s)
+        assert (await mark(s, 9723)).run_id is None
+        s.gateway.deleted.add(record.scope.thread_id)
+        result = await recovery.tick()
+        assert result.planned == 1 and await planned_keys(s) == ["chat.conversation_deleted"]
+        assert (await mark(s, 9723)).route_complete
+        await recovery.stop()
+    finally:
+        await s.close()
+
+
+async def test_try_again_after_the_conversation_was_deleted_says_so(db, monkeypatch, tmp_path):
+    s = await stack(db, monkeypatch, tmp_path)
+    try:
+        assert await send(s, 9725, "A question") is True
+        turn = only_turn(s)
+        await until(lambda: turn.record is not None and turn.record.publication_id in s.gateway.runs)
+        record = turn.record
+        s.gateway.finish(record.publication_id, status="error", output=stopped_output(record, "error"))
+        turn.wake.set()
+        await until(lambda: not s.turns._turns)
+        assert await planned_keys(s) == ["error.generic"]
+        s.gateway.deleted.add(record.scope.thread_id)
+        posts = s.gateway.posts()
+        await press_try_again(s, record.publication_id)
+        await until(lambda: not s.turns._turns)
+        keys = await planned_keys(s)
+        assert "chat.conversation_deleted" in keys and keys.count("error.generic") == 1, "It says what happened, once, and offers nothing that would fail the same way"
+        assert s.gateway.posts() == posts
+    finally:
+        await s.close()
+
+
+@pytest.mark.parametrize(
+    "failing",
+    [
+        pytest.param(lambda path: httpx.Response(503, json={"detail": "scripted"}), id="nothing answers"),
+        pytest.param(lambda path: httpx.Response(404, json={"detail": "scripted"}) if "/runs" in path else None, id="the run reads refuse, and the conversation is there"),
+        pytest.param(lambda path: httpx.Response(403, json={"detail": "scripted"}) if "/runs" in path else None, id="the run reads are not allowed, and the conversation is there"),
+    ],
+)
+async def test_a_failing_gateway_is_not_a_deleted_conversation(db, monkeypatch, tmp_path, failing):
+    s = await stack(db, monkeypatch, tmp_path)
+    try:
+        assert await send(s, 9731, "A long question") is True
+        turn = only_turn(s)
+        await until(lambda: s.gateway.runs)
+        record = turn.record
+        recovery = await restart(s)
+        s.gateway.fault = lambda request: failing(request.url.path) if request.method == "GET" else None
+        result = await recovery.tick()
+        assert result.planned == 0 and await planned_keys(s) == [], f"{record.publication_id} has an answer it may still deliver"
+        await recovery.stop()
+    finally:
+        await s.close()
+
+
 async def test_one_failed_authority_read_does_not_end_a_turns_reads(db, monkeypatch, tmp_path):
     s = await stack(db, monkeypatch, tmp_path)
     try:

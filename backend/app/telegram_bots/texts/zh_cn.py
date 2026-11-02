@@ -50,6 +50,7 @@ TEXTS: dict[str, str] = {
     "refused.interrupted": "{name} 的工作区已重启，导致本次回答停止。你的消息已保留。",
     "run.cancelled": "此次请求已取消。",
     "chat.restarted": "服务在回答完成前重启。你的消息已保留。",
+    "chat.conversation_deleted": "这个会话已在网页版删除，因此这条消息的回复无法在此显示。重新发送即可开始新会话。",
     "chat.files_full": "你的文件已满，无法开始新对话。请在 {product} 网页版删除文件或旧对话，然后重试。如果仍不够，请联系{support}增加容量。你的消息已保留。",
     "stop.answer": "已停止。上面的文字尚未完成。",
     "stop.nothing": "没有正在进行的内容可停止。",
@@ -106,6 +107,7 @@ TEXTS: dict[str, str] = {
     "cmd.skill_failed": "暂时无法查询技能 /{skill}。请稍后再发送一次。",
     "settings.state_basic": "机器人的按钮和通知使用{language}。回答会使用你输入的语言。",
     "link.conflict": "此聊天已暂停。\n另一个程序正在使用此机器人，消息可能遗漏。如果不是你在使用，请更换机器人令牌：在 BotFather 中发送 /revoke，然后在 {product} 网页版粘贴新令牌。",
+    "link.conflict_over.plain": "此聊天已恢复。",
     "link.conflict_over.chat": "此聊天已恢复。\n此机器人仍暂停允许访问被阻止的网站，直到你更换令牌，或在 {product} 网页版确认另一个程序是你在使用。",
     "link.conflict_over.custom_agent": "此聊天已恢复。\n此机器人仍暂停允许访问被阻止的网站，直到你更换令牌，或在 {product} 网页版确认另一个程序是你在使用。",
     "link.limited": "自其他程序使用此机器人后，此操作已暂停。请打开 {product} 网页版，更换令牌或确认是你在使用。",
@@ -123,6 +125,7 @@ TEXTS: dict[str, str] = {
     "tap.failed": "未能完成。请再点一次。",
     "form.required": "此项为必填项，表单无法在缺少它时继续。",
     "delivery.failed": "一条消息未能在此显示。重试发送只会再次发送它，不会开始新的工作。",
+    "delivery.gone": "一条消息未能在此显示，也无法再次发送。如果它所在的会话还在，可以在网页版查看。",
     "prompt.closed": "该问题已关闭，这条内容未作为回答。可重新打开问题、将此内容作为新消息发送，或丢弃。",
     "prompt.unavailable": "该问题已无法接收回答。可将此内容作为新消息发送，或丢弃。",
     "prompt.discarded": "已丢弃。没有保存或发送任何内容。",
@@ -193,7 +196,6 @@ WORDS = {"administrator": "管理员", "manager": "管理者", "colleague": "一
 FORMS.update(
     {
         "stop.answer": {"unwritten": "已停止。", "waiting": "等待中的消息未获回答。"},
-        "chat.restarted": {"no_message": "服务在回答完成前重启。请重新发送消息。"},
         "help.chat": {"no_voice": TEXTS["help.chat"].replace("、照片或语音消息", "或照片")},
         "help.custom_agent": {"no_voice": TEXTS["help.custom_agent"].replace("、照片或语音消息", "或照片")},
         "media.unsupported": {"no_voice": TEXTS["media.unsupported"].replace("语音消息、", "")},

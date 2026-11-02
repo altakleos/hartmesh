@@ -15,7 +15,7 @@ STAGE_ONE_KEYS = frozenset(
     activity.read activity.write activity.edit activity.list activity.command activity.search activity.fetch
     activity.browser activity.image activity.subtask activity.present activity.work activity.other answer.thinking
     busy.followup busy.followup_full busy.queued busy.cancelled busy.gave_up busy.thread error.generic refused.interrupted
-    chat.restarted chat.files_full run.cancelled stop.answer stop.nothing stop.failed file.saved_ask_plain file.saved_ask_photo
+    chat.restarted chat.conversation_deleted chat.files_full run.cancelled stop.answer stop.nothing stop.failed file.saved_ask_plain file.saved_ask_photo
     file.saved_ask_many answer.on_web file.too_large_in file.not_saved file.own_full file.own_preparing file.own_no_seat file.own_unchecked file.own_unavailable
     file.too_large_out file.out_failed voice.unavailable voice.too_long voice.daily_limit voice.first_notice
     voice.agreed voice.not_used voice.writing voice.heard voice.failed voice.unclear media.unsupported
@@ -23,9 +23,9 @@ STAGE_ONE_KEYS = frozenset(
     clarify.other_prompt clarify.form_field clarify.form_yes clarify.form_no clarify.form_done clarify.form_review
     net.ask_plain net.allowed net.kept net.cancelled net.stale new.confirm_plain new.done new.kept new.in_topic new.files_full
     cmd.unknown cmd.agent cmd.skill_off cmd.skill_unavailable cmd.skill_failed stranger.waiting error.model_refused settings.state_basic link.conflict
-    link.conflict_over.chat link.conflict_over.custom_agent link.limited link.back_online link.removed access.off
+    link.conflict_over.plain link.conflict_over.chat link.conflict_over.custom_agent link.limited link.back_online link.removed access.off
     access.back custom_agent.deleted unavailable.ask_admin unavailable.next unavailable.reference
-    stale.other_person stale.not_waiting tap.failed form.required delivery.failed prompt.closed prompt.unavailable
+    stale.other_person stale.not_waiting tap.failed form.required delivery.failed delivery.gone prompt.closed prompt.unavailable
     prompt.discarded preview.part_header profile.name.chat profile.short.chat profile.short.custom_agent
     profile.description.chat profile.description.custom_agent profile.removed
     web.list web.memory web.conversations web.conversation web.addAssistant web.addEmployee web.telegram
@@ -98,7 +98,9 @@ def test_alert_texts_fit_200_characters():
 
 
 def test_first_keys_are_exact_stage_one_proactive_subset():
-    assert FIRST_KEYS == frozenset({"hello.privacy", "link.conflict", "link.conflict_over.chat", "link.conflict_over.custom_agent", "link.back_online", "link.removed", "access.off", "access.back", "delivery.failed"})
+    assert FIRST_KEYS == frozenset(
+        {"hello.privacy", "link.conflict", "link.conflict_over.plain", "link.conflict_over.chat", "link.conflict_over.custom_agent", "link.back_online", "link.removed", "access.off", "access.back", "delivery.failed"}
+    )
 
 
 def test_no_text_sends_a_user_to_the_provider():

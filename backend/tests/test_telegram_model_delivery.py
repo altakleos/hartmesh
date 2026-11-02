@@ -119,7 +119,7 @@ async def test_actual_sender_rereads_each_model_part_and_preserves_prefix(public
         elif mode == "claimed-media":
             assert not sent and not reads and len(saved.parts) == 1 and "unavailable_reason" not in saved.parts[0]
         elif mode in {"claimed-callback", "claimed-contradiction", "claimed-missing-basis"}:
-            assert not sent and not reads and saved.state == "failed", "A saved part that does not validate never will, so the person is told"
+            assert not sent and not reads and (saved.state, saved.skip_reason) == ("skipped", "source-gone"), "A saved part that does not validate never will, so it ends"
         elif mode == "part-fixed-injection":
             assert claimed == 0 and not sent and not reads
         elif mode == "valid":
@@ -129,7 +129,7 @@ async def test_actual_sender_rereads_each_model_part_and_preserves_prefix(public
         elif mode == "changed-after-prefix":
             assert len(sent) == 1 and len(reads) == 2
             assert saved.parts[0]["state"] == "sent" and saved.parts[0]["message_ids"] == [501]
-            assert saved.parts[1]["state"] != "sent" and saved.state == "failed", "The rest cannot be sent, and the person is told"
+            assert saved.parts[1]["state"] != "sent" and (saved.state, saved.skip_reason) == ("skipped", "source-gone"), "The rest cannot be sent, so it ends"
         else:
             assert len(reads) == 1 and not sent and saved.state != "failed"
     finally:

@@ -176,6 +176,7 @@ _TURN_OUTCOME_KEYS = frozenset(
         "busy.cancelled",
         "busy.gave_up",
         "chat.restarted",
+        "chat.conversation_deleted",
         "chat.files_full",
         "refused.interrupted",
         "refused.restarting",
@@ -189,6 +190,7 @@ _TURN_OUTCOME_KEYS = frozenset(
 )
 _NO_RUN_KEYS = frozenset({"error.generic", "busy.cancelled", "chat.restarted"})
 _UNDELIVERABLE_KEYS = frozenset({"answer.on_web", "error.generic"})
+_DELETED_SOURCE = {"key": "chat.conversation_deleted", "values": {}}
 INPUT_OUTCOME_KEYS = (_TURN_OUTCOME_KEYS - {"answer.on_web", "busy.queued", "busy.thread", "busy.starting_elsewhere", "busy.two_conversations"}) | {"custom_agent.deleted", "busy.followup_full", "voice.failed"}
 
 
@@ -201,10 +203,14 @@ class PublicationOutcomeBasis:
     stop_id: str | None = None
 
 
-def _prepare_publication_outcome(record, *, run, creation_refusal, source_ref, undeliverable=False, no_run=False):
+def _prepare_publication_outcome(record, *, run, creation_refusal, source_ref, undeliverable=False, no_run=False, deleted=False):
     from app.channels.execution import ChannelExecutionScope
     from app.telegram_bots.errors import classify_creation_refusal, classify_run
 
+    if deleted:
+        if run is not None or creation_refusal is not None or undeliverable or no_run or source_ref != _DELETED_SOURCE:
+            raise ValueError("publication-outcome-conflict") from None
+        return _safe_json({"version": 1, "publication": _publication_identity(record), "proof": {"kind": "conversation_deleted"}, "source_ref": source_ref, "finish_route": True})
     if no_run:
         if run is not None or creation_refusal is not None or undeliverable or type(source_ref) is not dict or set(source_ref) != {"key", "values"} or source_ref["key"] not in _NO_RUN_KEYS:
             raise ValueError("publication-outcome-conflict") from None
@@ -271,6 +277,10 @@ def validate_publication_outcome(item: OutboxItem) -> PublicationOutcomeBasis:
         elif proof.get("kind") == "no_run" and set(proof) == {"kind"}:
             # The marked message found no run, and no live owner is left to wait for one.
             if record.run_id is not None or source["key"] not in _NO_RUN_KEYS:
+                raise ValueError
+        elif proof.get("kind") == "conversation_deleted" and set(proof) == {"kind"}:
+            # The thread itself answered 404, so nothing it held can be read or sent again.
+            if source != _DELETED_SOURCE:
                 raise ValueError
         else:
             raise ValueError
@@ -1372,9 +1382,9 @@ class Outbox:
 
         return await await_drained(perform())
 
-    async def plan_publication_outcome(self, record, *, run=None, creation_refusal=None, source_ref, keyboard, callbacks, guard, undeliverable=False, no_run=False, url_button=None):
+    async def plan_publication_outcome(self, record, *, run=None, creation_refusal=None, source_ref, keyboard, callbacks, guard, undeliverable=False, no_run=False, deleted=False, url_button=None):
         link = _guard_publication_link(record, guard)
-        basis = await await_drained(asyncio.to_thread(_prepare_publication_outcome, record, run=run, creation_refusal=creation_refusal, source_ref=source_ref, undeliverable=undeliverable, no_run=no_run))
+        basis = await await_drained(asyncio.to_thread(_prepare_publication_outcome, record, run=run, creation_refusal=creation_refusal, source_ref=source_ref, undeliverable=undeliverable, no_run=no_run, deleted=deleted))
 
         async def attach(writer, identity):
             await self.inbox.seal_publication_outcome(record, outbox_id=identity, session=writer)
@@ -2466,9 +2476,7 @@ class OutboxSender:
             except SourceGone:
                 # With no outcome this oldest row would be claimed again every second, and nothing after it would send.
                 logger.warning("telegram_bots delivery_source_gone link=%s delivery=%s", link_id, row_id)
-                error = PermanentDeliveryError()
-                error._hartmesh_telegram_failure_logged = True
-                await self._failure(link_id, row_id, generation, claim, error)
+                await self._source_gone(link_id, row_id, generation, claim)
                 return
             except SourceNotRead as error:
                 logger.warning("telegram_bots delivery_source_unread link=%s delivery=%s attempts=%s", link_id, row_id, row.attempts + 1)
@@ -2680,13 +2688,65 @@ class OutboxSender:
                 payload.update(presentation_pending=False, presentation_version=version, anchor_outbox_id=row.id)
                 callback.payload, callback.message_id, callback.message_thread_id = payload, anchor, row.message_thread_id
             if callback.kind == "delivery_retry" and callback.target_kind == "outbox" and callback.target_id == row.id:
-                callback.consumed_at, callback.closed_reason = now, "done"
-                if callback.message_id is not None:
-                    # Replayable cleanup only. This row cannot execute the action.
-                    cleanup_key = f"notice:repair-cleanup:{row.id}:{callback.group_id}"
-                    exists = await session.scalar(select(TelegramOutboxRow.id).where(TelegramOutboxRow.link_id == row.link_id, TelegramOutboxRow.dedupe_key == cleanup_key))
-                    if exists is None:
-                        session.add(keyboard_cleanup_row(callback, owner_user_id=row.owner_user_id, now=now, dedupe_key=cleanup_key))
+                await self._end_retry(session, callback, row, now)
+
+    @staticmethod
+    async def _end_retry(session: AsyncSession, callback: TelegramCallbackRow, row: TelegramOutboxRow, now: datetime) -> None:
+        callback.consumed_at, callback.closed_reason = now, "done"
+        if callback.message_id is not None:
+            # Replayable cleanup only. This row cannot execute the action.
+            cleanup_key = f"notice:repair-cleanup:{row.id}:{callback.group_id}"
+            exists = await session.scalar(select(TelegramOutboxRow.id).where(TelegramOutboxRow.link_id == row.link_id, TelegramOutboxRow.dedupe_key == cleanup_key))
+            if exists is None:
+                session.add(keyboard_cleanup_row(callback, owner_user_id=row.owner_user_id, now=now, dedupe_key=cleanup_key))
+
+    @staticmethod
+    def _notice_row(row: TelegramOutboxRow, key: str, *, kind: str, dedupe_key: str, now: datetime, repair: bool) -> TelegramOutboxRow:
+        source = {"kind": "text", "source_ref": {"key": key, "values": {}}}
+        return TelegramOutboxRow(
+            id=uuid4().hex,
+            link_id=row.link_id,
+            owner_user_id=row.owner_user_id,
+            binding_generation=row.binding_generation,
+            dedupe_key=dedupe_key,
+            class_="reply",
+            payload={
+                "kind": kind,
+                **({"repair_outbox_id": row.id} if repair else {}),
+                "presentation_version": 0,
+                "product_basis": {"origins": [], "chat_id": row.chat_id, "message_thread_id": row.message_thread_id, "finish_route": False, "parts": [source]},
+            },
+            parts=Outbox._parts([{**source, "stored_keyboard": True} if repair else source], 0),
+            state="pending",
+            not_before=now,
+            chat_id=row.chat_id,
+            message_thread_id=row.message_thread_id,
+            created_at=now,
+        )
+
+    async def _source_gone(self, link_id: str, row_id: str, generation: int, claim: str) -> None:
+        """No retry can send this row, so it ends here, with its controls, which settles its message, and the person is told."""
+        async with self.outbox._writer(link_id) as (session, binding):
+            row = await session.get(TelegramOutboxRow, row_id, with_for_update=True)
+            if not self.outbox._fenced(row, generation=generation, owner=self.run_id, claim=claim):
+                return
+            self._pending(row)
+            await self._skip(session, row, "source-gone")
+            now = self.outbox.clock()
+            controls = await session.scalars(
+                select(TelegramCallbackRow)
+                .where(TelegramCallbackRow.link_id == row.link_id, TelegramCallbackRow.binding_generation == generation, TelegramCallbackRow.consumed_at.is_(None), TelegramCallbackRow.kind.in_(("delivery_retry", "prompt")))
+                .order_by(TelegramCallbackRow.id)
+                .with_for_update()
+            )
+            for control in list(controls):
+                if control.kind == "prompt" and control.payload.get("anchor_outbox_id") == row.id:
+                    # Its question was never shown, nothing else would close it, and an `expired` prompt still answers the next message.
+                    control.consumed_at, control.closed_reason = now, "discarded"
+                elif control.kind == "delivery_retry" and control.target_kind == "outbox" and control.target_id == row.id:
+                    await self._end_retry(session, control, row, now)
+            if binding is not None and binding.state == "connected" and (binding.owner_user_id, binding.binding_generation, binding.chat_id) == (row.owner_user_id, generation, row.chat_id):
+                session.add(self._notice_row(row, "delivery.gone", kind="delivery_gone_notice", dedupe_key=f"delivery-gone:{row_id}", now=now, repair=False))
 
     async def _failure(self, link_id: str, row_id: str, generation: int, claim: str, error: Exception) -> None:
         async with self.outbox._writer(link_id) as (session, binding):
@@ -2744,32 +2804,12 @@ class OutboxSender:
                     return
                 from app.telegram_bots.callbacks import CallbackRefused, CallbackRepository
 
-                source = {"kind": "text", "source_ref": {"key": "delivery.failed", "values": {}}}
                 # Preserve the original failed-delivery journal even if its
                 # account/connection custody has since ended. Only construction
                 # of the now-undeliverable old-scope notice is rolled back.
                 try:
                     async with session.begin_nested():
-                        notice = TelegramOutboxRow(
-                            id=uuid4().hex,
-                            link_id=link_id,
-                            owner_user_id=row.owner_user_id,
-                            binding_generation=generation,
-                            dedupe_key=f"delivery-failed:{row_id}:{failure_version}",
-                            class_="reply",
-                            payload={
-                                "kind": "delivery_failure_notice",
-                                "repair_outbox_id": row_id,
-                                "presentation_version": 0,
-                                "product_basis": {"origins": [], "chat_id": row.chat_id, "message_thread_id": row.message_thread_id, "finish_route": False, "parts": [source]},
-                            },
-                            parts=Outbox._parts([{**source, "stored_keyboard": True}], 0),
-                            state="pending",
-                            not_before=now,
-                            chat_id=row.chat_id,
-                            message_thread_id=row.message_thread_id,
-                            created_at=now,
-                        )
+                        notice = self._notice_row(row, "delivery.failed", kind="delivery_failure_notice", dedupe_key=f"delivery-failed:{row_id}:{failure_version}", now=now, repair=True)
                         session.add(notice)
                         await session.flush()
                         group = await CallbackRepository(self.outbox.sessions, config=self.outbox.config, clock=self.outbox.clock).write_repair_group(

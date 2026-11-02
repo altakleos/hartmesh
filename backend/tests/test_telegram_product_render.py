@@ -47,7 +47,6 @@ def test_unavailable_endings_hide_reference_from_users(locale):
 
 def test_optional_wording_has_safe_defaults_and_explicit_facts():
     assert render("stop.answer", "en", written=False, waiting=True) == "Stopped. Messages that were waiting were not answered."
-    assert render("chat.restarted", "en", kept=False) == "The service restarted before this was answered. Send it again."
     assert "voice note" not in render("help.chat", "en", product="HartMesh", voice_enabled=False)
     assert "voice notes" not in render("media.unsupported", "en", voice_enabled=False)
     assert "voice note" in render("help.chat", "en", product="HartMesh", voice_enabled=True)

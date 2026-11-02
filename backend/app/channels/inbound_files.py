@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+import json
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from typing import Any
 
 from app.channels.execution import ChannelExecutionContext
+from app.channels.message_bus import INBOUND_FILE_CONTENT_KEY
 from deerflow.utils.file_io import await_drained
 
 _CONTEXT: ContextVar[ChannelExecutionContext | None] = ContextVar("inbound_file_context", default=None)
+
+
+def saved_file_key(file: Mapping[str, Any]) -> str:
+    """One file across a message's attempts, whatever bytes a reader attached to it."""
+    return json.dumps({key: value for key, value in file.items() if key != INBOUND_FILE_CONTENT_KEY}, sort_keys=True)
 
 
 def current_inbound_file_context() -> ChannelExecutionContext | None:

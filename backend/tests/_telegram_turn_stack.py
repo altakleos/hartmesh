@@ -74,6 +74,8 @@ class Gateway:
             response = self.fault(request)
             if response is not None:
                 return response
+        if (match := re.match(r"/api/threads/([^/]+)/", path)) and match.group(1) in self.deleted:
+            return httpx.Response(404, json={"detail": "Thread not found"})  # No acknowledgement: the route is never reached.
         if method == "POST" and path == "/api/threads":
             identity = json.loads(request.content)["thread_id"]
             self.threads[identity] = True

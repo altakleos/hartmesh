@@ -72,6 +72,7 @@ TEXTS: dict[str, str] = {
     "refused.interrupted": "{name}'s workspace was restarted, which stopped this answer. Your message is kept.",
     "run.cancelled": "This request was cancelled.",
     "chat.restarted": "The service restarted before this was answered. Your message is kept.",
+    "chat.conversation_deleted": "This conversation was deleted on the web, so no answer to this message can be shown here. Send it again to start a new one.",
     "chat.files_full": "Your files are full, so a new conversation cannot start. Delete files or old conversations in {product} on the web, then try again. If that is not enough, ask {support} for more room. Your message is kept.",
     "stop.answer": "Stopped. The text above is unfinished.",
     "stop.nothing": "There is nothing to stop.",
@@ -128,6 +129,7 @@ TEXTS: dict[str, str] = {
     "cmd.skill_failed": "The skill /{skill} could not be looked up just now. Send it again in a moment.",
     "settings.state_basic": "Buttons and notices from your bots are in {language}. Answers follow the language you write in.",
     "link.conflict": "This chat is paused.\nAnother program is using this bot, so messages may be missed. If that was not you, replace the bot's token: in BotFather send /revoke, then paste the new token in {product} on the web.",
+    "link.conflict_over.plain": "This chat works again.",
     "link.conflict_over.chat": "This chat works again.\nAllowing a blocked site stays paused on this bot until you replace the token or confirm in {product} on the web that the other program was yours.",
     "link.conflict_over.custom_agent": "This chat works again.\nAllowing a blocked site stays paused on this bot until you replace the token or confirm in {product} on the web that the other program was yours.",
     "link.limited": "Paused on this bot since another program used it. Open {product} on the web and replace the token or confirm it was you.",
@@ -145,6 +147,7 @@ TEXTS: dict[str, str] = {
     "tap.failed": "That did not go through. Tap again.",
     "form.required": "This one is required, so the form cannot go on without it.",
     "delivery.failed": "A message could not be shown here. Retry delivery sends it again and starts nothing new.",
+    "delivery.gone": "A message could not be shown here, and it cannot be sent again. If its conversation still exists, it is on the web.",
     "prompt.closed": "That question is closed, so this was not used as the answer. Reopen the question, send this as a new message, or discard it.",
     "prompt.unavailable": "That question can no longer take an answer. Send this as a new message, or discard it.",
     "prompt.discarded": "Discarded. Nothing was saved or sent.",
@@ -215,7 +218,6 @@ WORDS = {"administrator": "an administrator", "manager": "a manager", "colleague
 FORMS.update(
     {
         "stop.answer": {"unwritten": "Stopped.", "waiting": " Messages that were waiting were not answered."},
-        "chat.restarted": {"no_message": "The service restarted before this was answered. Send it again."},
         "help.chat": {"no_voice": TEXTS["help.chat"].replace(", a photo or a voice note", " or a photo")},
         "help.custom_agent": {"no_voice": TEXTS["help.custom_agent"].replace(", a photo or a voice note", " or a photo")},
         "media.unsupported": {"no_voice": TEXTS["media.unsupported"].replace("voice notes, ", "")},

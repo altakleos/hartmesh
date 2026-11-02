@@ -227,9 +227,22 @@ async def test_only_acknowledged_inventory_miss_is_none(coordinator_environment)
     assert await e.coordinator.read_output(record, e.link) is None
 
     async def unacknowledged(request):
-        return httpx.Response(404, json={})
+        return httpx.Response(404, json={}) if "/runs/" in request.url.path else httpx.Response(200, json={})
 
     e.responder = unacknowledged
+    with pytest.raises(PublicationRefused):
+        await e.coordinator.read_output(record, e.link)
+
+    async def conversation_gone(request):
+        return httpx.Response(404, json={})
+
+    e.responder = conversation_gone
+    assert await e.coordinator.read_output(record, e.link) is None, "With no conversation there is no output"
+
+    async def failing(request):
+        return httpx.Response(404, json={}) if "/runs/" in request.url.path else httpx.Response(503, json={})
+
+    e.responder = failing
     with pytest.raises(PublicationRefused):
         await e.coordinator.read_output(record, e.link)
 

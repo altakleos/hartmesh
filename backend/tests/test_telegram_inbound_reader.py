@@ -15,6 +15,7 @@ from _telegram_repository_test_support import db as db
 from test_telegram_bot_adapter import build, start
 
 from app.channels.execution import ChannelExecutionContext, ChannelExecutionScope
+from app.channels.inbound_files import saved_file_key
 
 pytestmark = pytest.mark.asyncio
 
@@ -99,6 +100,39 @@ async def test_declared_oversize_never_gets_file(db, monkeypatch):
         assert e.services.turns.file_notice.await_args.kwargs["key"] == "file.too_large_in"
         assert e.services.turns.file_notice.await_args.kwargs["url_button"]["page"] == "web.conversation"
         assert [c.endpoint for c in e.request.calls] == ["getMe"]
+    finally:
+        await e.channel.stop()
+
+
+async def test_a_notice_about_a_file_decides_it_for_every_later_attempt(db, monkeypatch):
+    e = await fixture(db, monkeypatch, size=20_000_001)
+    monkeypatch.setattr("app.telegram_bots.pages.page_address", lambda *a, **kw: "https://product.example/conversation")
+    try:
+        assert await e.channel.read_inbound_file(e.file, execution_context=e.cap) is None
+        assert e.cap.saved_files == {saved_file_key(e.file): None}
+        assert await e.channel.preflight_inbound_file(e.file, publication_id=e.cap.publication_id, execution_context=e.cap) is False
+        assert e.services.turns.file_notice.await_count == 1, "One notice, however many attempts the message takes"
+    finally:
+        await e.channel.stop()
+
+
+async def test_a_notice_that_was_not_planned_decides_nothing(db, monkeypatch):
+    e = await fixture(db, monkeypatch, size=20_000_001)
+    e.services.turns.file_notice.return_value = None  # The turn ended under it.
+    monkeypatch.setattr("app.telegram_bots.pages.page_address", lambda *a, **kw: "https://product.example/conversation")
+    try:
+        assert await e.channel.read_inbound_file(e.file, execution_context=e.cap) is None
+        assert e.cap.saved_files == {}, "Nobody was told, so a later attempt may still read it"
+    finally:
+        await e.channel.stop()
+
+
+async def test_a_saved_file_stays_with_its_message_on_a_later_attempt(db, monkeypatch):
+    e = await fixture(db, monkeypatch, size=20_000_001)
+    e.cap.saved_files[saved_file_key(e.file)] = {"filename": "sample.csv", "size": 3, "path": "/mnt/user-data/uploads/sample.csv", "is_image": False}
+    try:
+        assert await e.channel.preflight_inbound_file(e.file, publication_id=e.cap.publication_id, execution_context=e.cap) is True
+        assert e.services.turns.file_notice.await_count == 0, "It is saved, so what this attempt would say about it does not matter"
     finally:
         await e.channel.stop()
 

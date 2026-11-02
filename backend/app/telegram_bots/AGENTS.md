@@ -175,20 +175,6 @@ that page and wait for their press. In a live process `_give_up` answers any not
 a step could not finish, once; a spent press is the only silent outcome. A spoken
 leading slash is dropped, so a transcript can never select a skill.
 
-`profile.py` owns a bot's public name, descriptions, menu and picture. `ProfileSync`
-borrows each running client and owns no worker: the supervisor runs `push_owed` at
-start and hourly, `add` pushes a new bot, and a saved language marks the person's
-links owed in its settings writer, taking links in ID order right after settings.
-One keyed lock serializes pushes per link, and each waiter rereads what is owed.
-`finish_profile` compares the saved language in the owner writer, so a language
-chosen during a push keeps the link owed. The name goes last because Telegram
-rations it. A client replaced mid-push is no failure; its successor still owes the
-push. After `profile.retry_hours` of failures a link waits for the next start,
-because `_failing_since` is process memory, unless its owner acts. `avatar.py` is a
-pure drawing function, always called off-loop; it loads the two pinned `fonts/`
-files with `Layout.BASIC`, and initials are drawn only when every character has a
-glyph and is left to right. Keep the Python and web colour rule in step.
-
 `router.py` is the browser's surface; every route needs a session and acts on the
 caller's own rows. Refusals go through `_RefusingRoute` and the closed `_REFUSALS`
 table, as `{detail, reason}` plus only the keys their row names. Routes 2 and 3
@@ -259,7 +245,11 @@ which is `error.model_refused` with Try again.
 a plan. Only a caller that knows no turn owns it may pass `closing`; recovery asks
 `owns_publication`, which compares the publication and not the link row, since a poll
 rewrites that row's stamps, and which lets go of a turn that is closing. A publication
-stays held only while its proof cannot be read, such as a conversation deleted under it.
+stays held only while its proof cannot be read. A conversation deleted under it ends under
+the closed proof `conversation_deleted`, once the thread itself answers 404, whatever run
+the row names: `chat.conversation_deleted` and no Try again, which would ask the same
+conversation. A deleted conversation has no output either: `read_output` answers None
+after the same 404, and every reader of it ends on that.
 `orphan_recovered` keeps the design's `refused.interrupted`; `gateway_stopped` is
 `chat.restarted`.
 `delivery_items` is what a reply must
@@ -280,12 +270,6 @@ before that channel polls, by startup's path. A publication reserved but never m
 waits for the next restart. `end_pending` closes every open input of an ended binding, a
 Try again in line included; both an unbind and a hold end one. The startup read follows
 `next_after`, and a late answer held for its person's choice is not on it.
-
-`strangers.py` separates touch-only LRU recency from bounded unexpired reply
-charges. The supervisor owns one ledger through adapter/token replacement and
-bot removal/re-add. Forgetting recency never replenishes the 24-hour pair,
-per-bot hourly or global per-sender bad-code allowance. Overflow suppresses a
-notice instead of evicting a live charge; all state resets on process restart.
 
 `links.py` owns capacity and connection transactions. Capacity changes lock the
 deployment singleton, then owner settings, then links in ID order. SQLite takes
@@ -352,50 +336,6 @@ stays held. Phase one closes creating/sending but retains authorized final reads
 through manager drain; final stop drains coordinator cleanup before the same HTTP
 owner. Failed cleanup retains that owner and listener for retry. Explicit document
 2 uses generic live-host NoUser qualification; see [turn execution](../../docs/TELEGRAM_TURN_EXECUTION.md).
-
-`recovery.py` is the Supervisor-owned bounded scheduler over that same callable
-coordinator and sender. Periodic passes observe marked publications only; no
-empty/404/absent-task fact authorizes dispatch. `recovery_page` keysets heads,
-fetches every global-turn member with a sentinel and holds malformed, mixed,
-oversized, legacy or unsupported groups. Limits bound returned groups/origins,
-decoded-payload counts and retained operations, not bytes, SQL scan time or RAM.
-
-Actual negative-copy startup takes one retained page before held/create/send
-release. `recovery_authority.py` issues an opaque one-shot epoch for that fixed
-cohort. Tickets are host capabilities, never UUID/boolean/JSON authority. They
-bind original adapter/token/endpoint/current phase/deadline. Retire all tickets
-synchronously before release; unseen/unarmed tail stays held. The distinct fixed
-guard prepares current account/target outside SQL with no named private or
-execution ceilings, then borrows the existing same-engine custody guard with a
-last synchronous ticket check. `publication_recovery` is reserved bookkeeping;
-exclude it from business input hashes but compare and validate the complete
-stored fact. Atomic `plan_restart_before_dispatch` writes that fact, strict fixed
-basis3 primary and all route seals together, preserving null run/assistant IDs.
-Marker and closure winners serialize; uncertainty never resubmits a model.
-Only the exact closed fact/primary receipt confirms a lost writer result.
-Prepare fresh zero-ceiling read admission for that confirmation; recheck SQL
-custody after decoding, then the borrowed human account and literal original
-read fence. The service compares the actual closure's startup ID with its failed
-attempt. That correlation is evidence, never a renewed write ticket. A retired
-epoch must refuse each startup leaf before a metadata backend is called.
-Known model declarations and malformed bases cannot gain fixed privilege.
-
-Service slots include native/codec/response cleanup. An absolute pass deadline
-shortens coordinator control before its child is queued. Logical expiry admits
-no fresh work; a previously authorized COMMIT can settle late. The startup page
-and native cleanup can outlast that deadline. Final stop drains the service
-before coordinator/client teardown, retaining dependencies on failure.
-
-Conversation preparation reserves `route_basis.thread_preparation` on an actual
-admitted, routed, unsealed input before HTTP. Public routing cannot supply this
-server bookkeeping; business replay/group comparisons omit it and snapshots
-retain it. Save one purpose, endpoint fingerprint, creation UUID and expected
-mapping. The mapping and selected-thread outcome commit together under current
-owner/account/link/connection/target/generation authority. Existing conversation
-row IDs rotate on every replacement, including the generic connection writer,
-so a frozen timestamp cannot hide an A-to-B-to-A mapping change. Expected absence
-uses atomic insertion; it makes no claim about arbitrary absent-present-absent
-history under unchanged authority.
 
 `gateway_client.py` owns one public SDK/HTTPX client for the independently resolved
 LangGraph URL, prepared TLS, finite timeouts and no environment proxy/key discovery.
@@ -477,9 +417,10 @@ No ORM row or SQL transaction crosses transport.
 later attempt. A plain `DeliveryClaimRetired` exits normally and never becomes a payload
 failure. Two subclasses carry a model source read through the same fences to `_run`, which
 gives them an outcome, because a row with none is claimed again every second ahead of the
-rest of its bot's deliveries: `SourceGone` ends the row as failed with `delivery.failed`,
-and `SourceNotRead` backs off. Raw `send_part` returns acknowledgement IDs and calls no
-planner.
+rest of its bot's deliveries: `SourceGone` skips the row and ends what hung on it, its
+Retry delivery and a prompt it would have shown, which settles its message, with
+`delivery.gone` and no Retry, since no retry can send it, and `SourceNotRead` backs off.
+Raw `send_part` returns acknowledgement IDs and calls no planner.
 `defer_token_verification` journals only the closed classification continuation
 of an observed failure. A server wait releases its claim; an unverified network
 outcome leaves backoff to the worker. Resume matching-token verification before
@@ -519,8 +460,10 @@ preflight and the write both use the separately configured Gateway as the bound
 human: the manager posts each file to `POST /api/threads/{id}/uploads`, the web's route.
 Capacity is discovered only from that write: 507 is `file.own_full`, 503
 `file.own_unavailable`, anything else `file.not_saved`, and the message goes on.
-`_Turn.saved_files` gives each file one outcome across busy and capacity retries;
-Send again is a new turn, and a restart forgets it.
+`_Turn.saved_files` gives each file one outcome across busy and capacity retries. A planned
+notice is that outcome, and `_file_notice` records it, so no later attempt reads the file,
+tells the person twice or makes the notice false. A read nobody was told about is no
+outcome and runs again. Send again is a new turn, and a restart forgets it.
 
 `file_source.py` qualifies V6 file replies from the same complete matched output
 inventory. Metadata is presentation data, never read authority. The existing
@@ -535,38 +478,6 @@ It returns closed failures; drain native users before releasing `OutputBatch`.
 Failed HTTP closes retain only member-close signals; the shared charge releases
 after both transport cleanup and the batch owner settle. File Retry repairs
 saved delivery in its original thread without publishing another model input.
-
-`polling.py` owns retained suffixes and startup-held batches. A poll failure ends
-in a retry while the database is down, a refusal with a reply, or a counted death;
-it never just stops. An update still failing after `ADMISSION_GIVE_UP_SECONDS` is
-let go through `refuse_update`: a brief fault clears within that minute, and no
-list of errors could tell the two apart. `handle_update` raises the handler's
-error so that clock sees it, and a plain False is an ordinary retry. Keep
-`except Exception` at the death guards: a database going down raises raw driver
-errors no list names. An uncertain `authority.target` never writes a health.
-Serialize every
-getUpdates operation, including probes, drops and shutdown confirmation. A
-current-token 409 commits `record_conflict` before counters/callbacks/admission;
-failed persistence owns that retry before another poll. Successful old-token
-results also retire. Pass the complete absolute conflict transition through the
-health callback; a timer alone cannot declare conflict. Held release transfers
-ownership without waiting for database recovery.
-The poller's complete current-link SQL guard uses `await_drained`: cancellation
-must finish its cursor and transaction before retirement proceeds. A canceled
-SQLite SELECT can retain a lock even after connection invalidation. Recheck
-current poll/token identity after the owned guard; stale work still cannot send
-or admit input. This guarantee covers that guard, not every driver operation.
-Starting pending admission consumes its observed wake. A fresh wake arriving
-during awaited admission remains available to interrupt the following wait;
-a serviced held-release signal must not skip that failed suffix's backoff.
-`defer_start_retry` transfers the first startup rate-limit observation before
-any awaited status guard. Rate waits retain that absolute deadline across guards
-and queued sleeper startup; ordinary timed waits retain their entry deadline.
-Wake/cancel still joins both timer and wake children. Restore requests one discard
-intent with
-`require_drop_pending`; `complete_pending_drop` only joins that intent and cannot
-schedule another negative-offset discard. Await completion outside the lifecycle
-lock needed by health callbacks.
 
 Transport facts use narrow `update_if_current`; health callbacks supply
 `expected_token_revision`. A no-facts status guard writes no timestamp.
@@ -601,32 +512,6 @@ and run. A cause prints through `deerflow.runtime.runs.terminal.failure_chain`:
 `raise ... from None` keeps `__context__`, so class, fixed slug and raising line
 survive to the report while exception text stays out of the log.
 
-`supervisor.py` owns the one Gateway-loop runtime. Await `check` before serving,
-retain `start` as a task, and use the shared health barrier and ten-start permit
-for scan/add/retry/replacement paths. A permit covers construction and the first
-SDK start attempt; cancelled constructors keep their result owned until loop-side
-cleanup. Captured channel and poll identities fence callbacks even when a retry
-uses the same token revision. Preserve death history across poll recreation.
-Freeze initial membership/conflict facts before routes are admitted; finalize
-actual startup pollers only after every first attempt. One coordinator times its
-sticky decision from the first actual poll dispatch. Health readiness and send
-admission are separate. Defer notices before claiming metadata and gate control
-acknowledgements, profile/takeover mutations and raw delivery. The mandatory
-`TransportServices.send_allowed()` must return exactly True after the adapter's
-last awaited authority/SQL guard. Retired startup buffers cannot retain Updates
-after the decision; live failed admission suffixes remain owned and ordered.
-`begin_shutdown` drains producers/pollers/workers while retaining the listener;
-the Gateway drains existing channels before `stop` confirms safe offsets,
-unsubscribes and closes clients. The Gateway owns the single five-second stop
-grace. Only its expiration calls `drain_after_stop_timeout`: retire future latch
-retries, wake/drain backoff, then join the active SQL attempt and the same owned
-client cleanup before database teardown. Ordinary cancelled stop waiters retain
-retry intent. A late successful commit remains durable; an unpersisted latch
-gets one fixed diagnostic and keeps local refusal. Already-started work may
-outlast grace; no new SQL retry survives the database owner.
-Do not install future-stage no-op schedulers or trust manager text as a model
-source.
-
 `authority.py` rereads the live human account, strict route ceilings, exact
 connection and supported owner-scoped target. Fixed product/status sources need
 no private-read ceiling; withdrawn execution-only permissions do not suppress a
@@ -647,41 +532,7 @@ metadata under the token/generation/connection writer before bounded transport.
 Held-input and reconcile paths share its atomic access-off claim. A real new
 hold clears that category's prior claim; one disposable attempt serves the hold.
 
-Binding saves account ownership, channel identity, generation, event, sanitized
-Start identity and ordered welcome/privacy delivery in one unit. Start accepts
-only update/message/chat IDs and an optional topic ID. Welcome input parts are
-`{source_ref: {key, values}, silent?: bool}`: a target-specific hello first,
-optional shared-reader text, then `hello.privacy`, always silent. The repository
-allocates durable part identities and stores source references, never raw codes
-or updates. Replay consults that saved Start before consumed-code/state checks;
-an old binding generation cannot reconnect. Inbox identities include the chat:
-`(link_id, message_id, chat_id)` from additive revision 0043. Every inbox lookup
-must carry the captured chat; never delete older receipts to admit another
-account's same message ID.
-
-Codes store hashes with captured link/conflict epoch/token revision. Every
-current-token conflict commits a monotonic epoch and invalidates waiting codes;
-stale tokens cannot change it. Exhausted epochs fail closed. Generic `update`
-cannot write binding authority, revisions, origin or health; use their dedicated
-transactions. Cleanup invalidates delivery claim IDs and old-generation file/
-topic metadata. Disconnect-all is idempotent and mints no new authority.
-
-Token wrapping uses `ProviderKeyCipher` with the Telegram label and bot-bound
-variable; its default label preserves existing provider-key bytes. Rewrap uses
-`store_token(action="rewrap", expected_revision=..., expected_encrypted_token=...)`
-and changes neither logical revision nor valid codes. A logical replacement
-retires codes/transport claims while retaining saved same-binding deliveries.
-Only a positive plaintext comparison with its captured revision may clear the
-pause: `validated_bot.token_changed=True` requires `expected_token_revision`.
-Ciphertext inequality proves nothing. Token-replacement receipts contain stable
-IDs/digests and owed postcommit actions, never a token or connect code. Read an
-exact owner-scoped receipt before old-link lookup or remote validation.
-
-Health cause publication holds a per-link lock before SQL and through commit/
-session cleanup. Install process-local causes only after success; token repair
-uses that same order. `set_health(..., transition=...)` accepts complete absolute
-conflict timestamps and an optional hostname atomically. The poller supplies its
-full window on first active entry. Omitting transition metadata preserves the
-window; explicit null clears the hostname. Ending conflict preserves the action
-pause. `conflict`, `token_rejected`, `stopped` and a conflict's end each write a
-link event.
+Recovery, conversation preparation, polling, the supervisor, binding, tokens, health,
+profiles and strangers are in [the bot lifecycle](../../docs/TELEGRAM_BOT_LIFECYCLE.md).
+Read it before changing `recovery.py`, `recovery_authority.py`, `threads.py`, `polling.py`,
+`supervisor.py`, `profile.py`, `avatar.py`, `strangers.py`, or those paths of `links.py`.

@@ -85,7 +85,9 @@ async def test_first_preparation_creates_as_owner_then_authoritatively_reads_and
         assert identity != "forged-preference"
         assert [request.method for request in e.http_calls] == ["POST", "GET"]
         assert e.http_calls[-1].headers["X-DeerFlow-Require-Thread-Binding"] == "true"
-        assert e.remote[identity]["metadata"] == {"channel_agent_name": "lead_agent", "channel_source": {"type": "im_channel", "provider": "telegram", "chat_id": str(e.link.chat_id), "connection_id": e.link.connection_id}}
+        assert e.remote[identity]["metadata"] == {"channel_agent_name": "lead_agent", "channel_source": {"type": "im_channel", "provider": "telegram", "connection_id": e.link.connection_id}}, (
+            "A chat id is a person's Telegram id, and it would outlive the bot here"
+        )
         assert await db.connections.get_thread_id(e.link.connection_id, str(e.link.chat_id), None) == identity
         assert await e.threads.ensure_thread(e.channel.link, inbound(e), origin=row) == identity
         assert sum(request.method == "POST" for request in e.http_calls) == 1

@@ -7,7 +7,9 @@ from . import en, zh_cn
 
 _CATALOGS = {"en": MappingProxyType(en.TEXTS), "zh-CN": MappingProxyType(zh_cn.TEXTS)}
 
-FIRST_KEYS: frozenset[str] = frozenset({"hello.privacy", "link.conflict", "link.conflict_over.chat", "link.conflict_over.custom_agent", "link.back_online", "link.removed", "access.off", "access.back", "delivery.failed"})
+FIRST_KEYS: frozenset[str] = frozenset(
+    {"hello.privacy", "link.conflict", "link.conflict_over.plain", "link.conflict_over.chat", "link.conflict_over.custom_agent", "link.back_online", "link.removed", "access.off", "access.back", "delivery.failed"}
+)
 
 
 def _language_keyboard(*, link):

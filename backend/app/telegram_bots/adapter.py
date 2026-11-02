@@ -27,7 +27,7 @@ from telegram.error import BadRequest, Forbidden, InvalidToken, NetworkError, Re
 from telegram.ext import AIORateLimiter, Application, ApplicationHandlerStop, CallbackQueryHandler, ChatMemberHandler, CommandHandler, Defaults, ExtBot, ManagedBotUpdatedHandler, MessageHandler, TypeHandler, filters
 
 from app.channels.execution import ChannelExecutionContext
-from app.channels.inbound_files import InboundFileLease
+from app.channels.inbound_files import InboundFileLease, saved_file_key
 from app.channels.telegram import TelegramChannel
 from app.telegram_bots.capped_download import ManagedHTTPXRequest
 from app.telegram_bots.render import render, render_plain
@@ -985,6 +985,9 @@ class TelegramBotChannel(TelegramChannel):
             return
         self.link = saved
         self._admission(update).link = saved
+        if saved.health == "agent_unavailable" and saved.agent_kind == "custom_agent":
+            self._agent_gone_at = self._time()  # The sender holds the hello on this health.
+            self._spawn_ingress(self._tell_agent_gone(saved))
         self._classified(update, remember=True)
 
     async def _fixed_reply(self, update, key, word, *, prepared=None):
@@ -1291,7 +1294,9 @@ class TelegramBotChannel(TelegramChannel):
             return
         values = await self._file_values(context.link, file, features=features)
         button = await self._file_button(context.link, thread_id=context.record.scope.thread_id) if key == "file.too_large_in" else None
-        await turns.file_notice(self, context, key=key, values=values, url_button=button, retry=key == "file.not_saved", execution_context=execution_context)
+        planned = await turns.file_notice(self, context, key=key, values=values, url_button=button, retry=key == "file.not_saved", execution_context=execution_context)
+        if planned is not None and type(execution_context) is ChannelExecutionContext:
+            execution_context.saved_files[saved_file_key(file)] = None  # The notice stands for every later attempt of this message.
 
     def _file_current(self, execution_context, context):
         if type(execution_context) is not ChannelExecutionContext:
@@ -1337,6 +1342,9 @@ class TelegramBotChannel(TelegramChannel):
         context = await self._services.turns.file_context(self, file, execution_context=execution_context)
         if context is None or context.record.publication_id != publication_id or not self._file_current(execution_context, context):
             raise DeliveryClaimRetired()
+        decided = saved_file_key(file)
+        if decided in execution_context.saved_files:
+            return execution_context.saved_files[decided] is not None
 
         async def check():
             await execution_context.admission.authorize("run_create")
