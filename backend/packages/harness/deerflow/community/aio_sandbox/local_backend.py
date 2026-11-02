@@ -1440,12 +1440,21 @@ class LocalContainerBackend(SandboxBackend):
             for attempt in range(_PARTIAL_SET_PASSES):
                 if attempt:
                     time.sleep(1)
-                if self._restricted_resources_status(sandbox_id) == "missing":
+                if self._partial_set_gone(sandbox_id):
                     return True
                 self._cleanup_restricted_resources(sandbox_id, stop_sandbox=False)
-            return self._restricted_resources_status(sandbox_id) == "missing"
+            return self._partial_set_gone(sandbox_id)
         finally:
             _NATIVE_SLOT_INVENTORY_DEADLINE.reset(token)
+
+    def _partial_set_gone(self, sandbox_id: str) -> bool:
+        """A read Docker refused proves nothing yet, and the removal after it may still work."""
+        try:
+            return self._restricted_resources_status(sandbox_id) == "missing"
+        except StorageHostUnqualified:
+            raise
+        except RuntimeError:
+            return False
 
     def prepare_resident(self, sandbox_id, container_name, extra_mounts, labels):
         """Prepare one stopped workspace through the existing native builder."""

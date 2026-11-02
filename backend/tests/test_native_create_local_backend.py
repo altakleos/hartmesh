@@ -191,6 +191,23 @@ def test_removing_the_set_has_one_deadline_of_its_own(fixture, monkeypatch):
     assert _NATIVE_SLOT_INVENTORY_DEADLINE.get() is None
 
 
+def test_an_inherited_deadline_stays_the_shorter_one(fixture, monkeypatch):
+    from deerflow.community.aio_sandbox.local_backend import _NATIVE_SLOT_INVENTORY_DEADLINE
+
+    journal, _state, bridge, _owner = fixture
+    local = restricted(bridge, monkeypatch, journal)
+    inherited = time.monotonic() + 5
+    seen = []
+    local._restricted_resources_status = Mock(side_effect=lambda sandbox_id: (seen.append(_NATIVE_SLOT_INVENTORY_DEADLINE.get()), "missing")[1])
+    token = _NATIVE_SLOT_INVENTORY_DEADLINE.set(inherited)
+    try:
+        assert local._remove_partial_set("a") is True
+        assert _NATIVE_SLOT_INVENTORY_DEADLINE.get() == inherited
+    finally:
+        _NATIVE_SLOT_INVENTORY_DEADLINE.reset(token)
+    assert seen == [inherited]
+
+
 def test_a_spent_deadline_keeps_the_attempt_reserved(fixture, monkeypatch):
     journal, state, bridge, _owner = fixture
     local = restricted(bridge, monkeypatch, journal)
@@ -233,7 +250,7 @@ def test_a_set_not_proved_gone_keeps_the_attempt_reserved(fixture, monkeypatch, 
     if fault == "still-there":
         local._restricted_resources_status = Mock(side_effect=["missing", *["mismatch"] * 4])
     elif fault == "unreadable":
-        local._restricted_resources_status = Mock(side_effect=["missing", RuntimeError("daemon unavailable")])
+        local._restricted_resources_status = Mock(side_effect=["missing", *[RuntimeError("daemon unavailable")] * 4])
     else:
         local._restricted_resources_status = Mock(side_effect=["missing", "mismatch"])
         local._cleanup_restricted_resources = Mock(side_effect=subprocess.TimeoutExpired("docker", 15))
@@ -242,11 +259,33 @@ def test_a_set_not_proved_gone_keeps_the_attempt_reserved(fixture, monkeypatch, 
     assert len(journal.pending()) == 1 and state.pending_for(owner_id="alice")
 
 
+def test_one_failed_read_does_not_stop_the_removal(fixture, monkeypatch):
+    journal, state, bridge, _owner = fixture
+    local = restricted(bridge, monkeypatch, journal)
+    local._restricted_resources_status = Mock(side_effect=["missing", RuntimeError("daemon unavailable"), "missing"])
+    with pytest.raises(StorageHostUnqualified):
+        local.create("chat", "a", user_id="alice", storage_labels={"hartmesh.storage.space." + SLOT: "1"})
+    assert local._cleanup_restricted_resources.call_count == 1
+    assert journal.pending() == () and not state.pending_for(owner_id="alice")
+
+
+def test_the_last_read_can_still_prove_the_set_gone(fixture, monkeypatch):
+    journal, state, bridge, _owner = fixture
+    local = restricted(bridge, monkeypatch, journal)
+    local._restricted_resources_status = Mock(side_effect=["missing", *["mismatch"] * 3, "missing"])
+    with pytest.raises(StorageHostUnqualified):
+        local.create("chat", "a", user_id="alice", storage_labels={"hartmesh.storage.space." + SLOT: "1"})
+    assert local._cleanup_restricted_resources.call_count == 3
+    assert journal.pending() == () and not state.pending_for(owner_id="alice")
+
+
 def test_a_restricted_failure_after_the_primary_is_sent_stays_reserved_and_removes_nothing(fixture, monkeypatch):
     journal, state, bridge, _owner = fixture
     local = restricted(bridge, monkeypatch, journal)
     local._create_internal_network = local._create_egress_network = Mock()
     local._start_network_proxy = Mock(return_value="172.20.0.2")
+    # A set exists to remove, so only the guard stands between it and a live primary.
+    local._restricted_resources_status = Mock(side_effect=["missing", *["mismatch"] * 4])
     local._runtime_runner = Mock(side_effect=subprocess.CalledProcessError(125, ["docker"], stderr="uncertain result"))
     with pytest.raises(StorageHostUnqualified):
         local.create("chat", "a", user_id="alice", storage_labels={"hartmesh.storage.space." + SLOT: "1"})

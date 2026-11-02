@@ -416,6 +416,18 @@ made an attempt withdraws it when its primary was never sent and its own sidecar
 networks are proved gone; a restored record has no such proof and stays. The exact
 journal stays owned through retry and worker drainage, alongside the pool lock.
 
+Recovering a stuck attempt is manual. A pending record refuses its account, and a
+proxy or network with no sandbox beside it fails the native census for everyone. Stop
+the Gateway first: removing a record under a running Gateway frees nothing, because
+memory keeps it. A record's `name` is `<prefix>-<sandbox id>`, and the proxy and
+networks carry the label `deerflow.sandbox_id=<sandbox id>`, so `docker ps -a` and
+`docker network ls` with `--filter label=deerflow.sandbox_id=<sandbox id>` list them.
+A leftover from a late Docker effect has no record, so filter by the label's key alone
+and look for a proxy or network with no sandbox beside it. If a container with the
+record's `name` exists, stop and keep the record: the request reached Docker and the
+record protects its storage. Otherwise remove the proxy and networks, then the record,
+then start the Gateway.
+
 The same bounded namespace also understands private version-2 teardown records.
 They preserve the original primary, relay and network IDs/names, daemon, opaque
 owner/thread and exact correlation slots; an optional retirement target is distinct

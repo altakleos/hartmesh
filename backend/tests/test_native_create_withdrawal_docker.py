@@ -1,8 +1,7 @@
 """A failed restricted start on a real daemon leaves nothing to refuse the owner with.
 
 The proxy here is a real ``--rm`` container on the real networks of the set, so what
-is removed and what reads as gone are the daemon's own answers, on the Engine CI runs
-and on the README's minimum when run locally.
+is removed and what reads as gone are the daemon's own answers.
 
 Needs Docker and an image holding ``sleep``, named by HARTMESH_STORAGE_WRITER_IMAGE
 and never pulled here. The managed storage job in CI sets it and refuses a skip.

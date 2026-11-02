@@ -297,11 +297,12 @@ def test_withdrawal_is_durable_before_it_reports_success(pool, monkeypatch):
     store = evidence(pool)
     try:
         attempt = begin(store)
-        steps, unlink, fsync = [], os.unlink, os.fsync
+        steps, unlink, fsync, current = [], os.unlink, os.fsync, store._assert_current
         monkeypatch.setattr(os, "unlink", lambda *args, **kwargs: (steps.append("unlink"), unlink(*args, **kwargs))[1])
         monkeypatch.setattr(os, "fsync", lambda descriptor: (steps.append("fsync"), fsync(descriptor))[1])
+        monkeypatch.setattr(store, "_assert_current", lambda: (steps.append("current"), current())[1])
         store.withdraw(attempt)
-        assert steps == ["unlink", "fsync"]
+        assert steps == ["current", "unlink", "fsync", "current"]
     finally:
         store.close()
 

@@ -299,12 +299,14 @@ def test_a_passing_daemon_fault_during_withdrawal_leaves_admission_open(fixture,
 
 
 def test_a_failed_journal_removal_keeps_the_handoff_counted(fixture, monkeypatch):
-    journal, state, bridge, _owner = fixture
+    journal, state, bridge, owner = fixture
     handoff = bridge.begin(name="native-a", labels=LABELS)
+    # Closing stops requalification from adding the record back, so this reads the handoff itself.
+    owner.live = False
     monkeypatch.setattr(journal, "withdraw", lambda attempt: (_ for _ in ()).throw(OSError("not removed")))
     with pytest.raises(OSError):
         bridge.withdraw(handoff)
-    assert state.pending_for(owner_id="alice")
+    assert state._items[handoff.attempt.id] is handoff, "Memory lets go only after the journal has"
     with state.lock:
         assert state.extra_slots_locked(starting={}, known_container_ids=set()) == 1
 

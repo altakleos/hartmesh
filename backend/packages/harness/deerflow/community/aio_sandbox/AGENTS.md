@@ -160,7 +160,7 @@ the process that made it. `submitted` is written before the runner and lives onl
 memory, so a restored handoff, which has no sandbox id, is refused. The pending record
 keeps the name exclusive while the attempt's own sidecars and networks go, under one
 60-second deadline, and it stays unless their absence is proved, because a leftover
-set reads as a mismatch on that thread's next start and stops the next boot's census.
+set reads as a mismatch on that thread's next start and fails the next native census.
 Withdrawal releases, so it takes teardown authority and works while the runtime closes.
 `LocalContainerBackend._withdraw_unsubmitted` owns this; nothing else clears pending.
 SDK-less quarantine retains actual identity, never a guessed client.

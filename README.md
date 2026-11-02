@@ -699,13 +699,12 @@ create for the same account or container name. A start that fails before its
 container request was sent removes its sidecars and networks and withdraws its
 record, so the person's next try normally starts afresh. If Docker cannot confirm
 they are gone, or the Gateway dies part way, the record stays and refuses that
-account, and a leftover proxy or network also fails the next start's native census,
-which refuses everyone. A Docker command that timed out can leave the same leftover
-by taking effect after the check. To recover, stop the Gateway, confirm no container
-of that name exists, remove the leftover proxy and networks, then remove the record.
-Cancellation retains verified containers for fenced cleanup. Operators must otherwise
-preserve the directory alongside the pool; unsafe or unknown evidence refuses
-admission.
+account, and a leftover proxy or network also fails the next native census, which
+refuses everyone and can run without a restart. A Docker command that timed out can
+leave the same leftover by taking effect after the check. Recovery is manual; see
+[the steps](docs/STORAGE_SPACES.md#qualified-linux-backing). Cancellation retains
+verified containers for fenced cleanup. Operators must otherwise preserve the
+directory alongside the pool; unsafe or unknown evidence refuses admission.
 The journal also retains private teardown records for restricted sandboxes.
 Unresolved records reserve capacity and fence matching owners, names and target
 slots while positively unrelated work remains admissible.
