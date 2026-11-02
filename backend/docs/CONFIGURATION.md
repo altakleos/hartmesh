@@ -1186,6 +1186,26 @@ The default GitHub API rate limits are quite restrictive. For frequent project r
 1. Uncomment the `GITHUB_TOKEN` line in the `.env` file and add your personal access token
 2. Restart the DeerFlow service to apply changes
 
+### Telegram Bots
+
+The `telegram_bots` section gives each person a bot of their own, connected in the
+web app. With no such section nothing about Telegram runs. The Compose bundle renders
+the section by itself and documents its `.env` keys ([bundle README](../../deploy/compose/README.md#telegram-bots)).
+Anywhere else, the Gateway starts a supervisor for the section, which polls only when
+all of these hold, and otherwise logs one `telegram:` line saying why:
+
+- `enabled` is true and authentication is on.
+- `channel_connections.enabled` and `channel_connections.require_bound_identity` are true.
+- `HARTMESH_PROVIDER_KEYS_SECRET` is set, 32 characters or longer.
+- `run_events.backend` is `db`.
+- The Gateway runs one worker.
+
+An extension that contributes middleware is not checked at start. Bots then poll and
+every turn fails before the model, because such a run cannot be proved.
+
+This is separate from `channels.telegram`, the deployment-wide bot described under IM
+channels in the root README.
+
 ## Environment Variables
 
 DeerFlow supports environment variable substitution using the `$` prefix:

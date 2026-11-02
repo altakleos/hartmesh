@@ -3182,9 +3182,9 @@ class InboxRepository:
     async def settle_deliveries(self, *, link_id: str, session: AsyncSession) -> None:
         """Settle only sealed inputs whose complete delivery set is terminal.
 
-        The caller already owns the link writer lock. This also understands
-        welcome records written by links.bind before this repository existed.
-        A failed or missing delivery remains unresolved for repair.
+        The caller already owns the link writer lock. This also understands the
+        welcome records links.bind writes. A failed or missing delivery remains
+        unresolved for repair.
         """
         self._borrow(session)
         # Caller sessions may disable autoflush. Persist their plan/receipt and

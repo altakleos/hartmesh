@@ -85,6 +85,9 @@ _LINES = {
     "channel-service-failed": "telegram: not started (the channel service failed to start)",
     "gateway-not-ready": "telegram: not started (the Gateway did not answer its own health check in 60 s)",
 }
+# A tenant stands at `secret-missing` from the upgrade until it sets the secret, so
+# a log that alerts on errors must not fire at every start.
+_REFUSAL_LEVELS = {"off": logging.INFO, "secret-missing": logging.WARNING}
 
 
 class TelegramSupervisor:
@@ -217,7 +220,7 @@ class TelegramSupervisor:
         logger.info(line)
         if cause == "polled-elsewhere":
             observations = {"polled": 0, "counted": 0, "people": 0, **observations}
-        self._event("polling_refused", reason=cause, links=len(self._rows), level=logging.INFO if cause == "off" else logging.ERROR, **observations)
+        self._event("polling_refused", reason=cause, links=len(self._rows), level=_REFUSAL_LEVELS.get(cause, logging.ERROR), **observations)
         self._health_barrier.set()
         self._send_event.set()
 

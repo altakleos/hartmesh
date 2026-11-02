@@ -1328,167 +1328,112 @@ cleanup when migrating from legacy metadata credentials.
 
 #### IM Channels
 
-Each person can connect a Telegram bot of their own to the ordinary chat and to
-each custom agent they own. The Compose bundle offers this unless
-`HARTMESH_TELEGRAM=off`; see its [README](deploy/compose/README.md#telegram-bots).
-Database revision `0042_telegram_bots` adds the persistence for managed Telegram
-bot connections and durable delivery, leaving existing channel and preference
-tables unchanged. Configuration version 55 adds managed Telegram bot settings and
-a bounded `show_web_page` tool. The managed-bot foundation includes bot-bound token wrapping, atomic
-ownership/setup-code transactions, durable binding welcomes, and personal
-notification settings. Revision `0043_telegram_inbox_chat_scope` includes the
-chat ID in retained inbox identities so reconnecting another account works
-without deleting earlier receipts.
-Revision `0044_telegram_assistant_ids` retains opaque assistant-message IDs in a
-Text column, allowing legal SDK identities longer than 64 characters.
-Its presentation layer includes English and Chinese product text, bounded Telegram
-HTML, complete multipart previews, permission-aware web links and voice-provider
-selection from the deployment's current model configuration.
-Durable input and delivery records now retain routing, publication and output
-identities through retries. Fenced workers resume unacknowledged reply parts,
-and an input completes only after all required deliveries settle. The managed
-transport and poller retain unadmitted updates and use captured token revisions
-for status changes and delivery. A Gateway-owned supervisor now checks deployment
-prerequisites before serving requests, waits for its own health endpoint, bounds
-bot startup concurrency, and coordinates polling, retries and shutdown. Saved
-fixed replies recheck the current human owner, exact channel binding and target
-before sending. A known Docker-host change now pauses polling until an operator
-adopts the new host; a best-effort startup conflict check can also pause a
-deployment when another deployment appears to poll the same bots. Concurrent
-copies must have Telegram disabled before their first boot, since the automatic
-checks cannot identify every copy or elect the rightful deployment.
+##### Telegram bots
 
-Local operator commands run inside the Gateway container with its rendered
-configuration and environment: `python -m app.telegram_bots.cli status`
-(`--owner <account id>` includes that person's links), `adopt`, `resume`, and
-`remove --owner <disabled account id>`. For a local-password account,
-`remove --local-account <email>` removes bot links while leaving the account's
-password usable. Every command prints one JSON document. Status reads an existing
-database without upgrading it or opening a Telegram client. Adopt and resume
-take effect at the next Gateway start and do not clear a bot's action pause.
-If shutdown logs `copy_latch_unpersisted`, the pause was not saved in the database;
-that process stays paused and the next start evaluates the safeguards again.
-Managed bots for the ordinary chat and custom agents accept plain text. While an
-answer runs, further messages wait without occupying a model worker and are
-answered together in order. `/stop` and the current answer's Stop control stop
-that exact turn and discard its waiting messages. Transient execution-capacity
-refusals wait for up to two minutes; Cancel takes the input out of line, and
-Try again makes a new authorized attempt. Redelivering an update never retries
-the model. Bots are managed under **Settings → Telegram**, which lists one row for the
-ordinary chat and for each custom agent. **Connect Telegram** walks through
-BotFather, the token and pressing Start; the Telegram entry in the sidebar, a card
-on the new-chat page and a button on a custom agent's card lead to the same place.
-The `/api/telegram-bots` routes need a signed-in browser session, so neither a
-personal access token nor the internal token reaches them, and no response carries
-a bot token. A link a bot sends can be opened signed out: after sign-in the person
-lands on the page it named.
+Each person can connect a Telegram bot of their own to the ordinary chat and to each
+custom agent they own. A bot answers only that person, and its conversations are
+ordinary conversations that also appear on the web. The Compose bundle offers this
+unless `HARTMESH_TELEGRAM=off`. Its [README](deploy/compose/README.md#telegram-bots)
+covers the keys, the secret that protects bot tokens, the operator's commands, the log
+and what is kept.
 
-A message that begins with `/` and names one of the person's skills runs that
-skill. It stands alone: it joins no earlier text and does not answer an open
-question. A skill that is off, or that a custom agent does not use, gets a plain
-answer instead. A table too wide for a phone arrives as labelled lines. An answer a
-chat cannot carry, such as one holding text shaped like a bot token, says so after two
-minutes and links to the conversation on the web, so that one answer never stops the
-chat.
+Bots are managed under **Settings → Telegram**, which lists one row for the ordinary
+chat and for each custom agent. **Connect Telegram** walks through BotFather, the token
+and pressing Start; the Telegram entry in the sidebar, a card on the new-chat page and
+a button on a custom agent's card lead to the same place. A link a bot sends can be
+opened signed out: after sign-in the person lands on the page it named. The
+`/api/telegram-bots` routes need a signed-in browser session, so neither a personal
+access token nor the internal token reaches them, and no response carries a bot token.
 
-Telegram bookkeeping is kept for a limited time: incoming messages for 7 days,
-delivered messages for 30 days, and acts and bot history for 400 days. A delivered
-message that a live button or an unfinished delivery still needs stays until that
-ends. **Try again** works for 7 days, because it resends the incoming message;
+**Messages.** Answers appear as temporary drafts by default, or as edited messages when
+`telegram_bots.streaming` is `edit`. While an answer runs, further messages wait without
+occupying a model worker and are answered together in order. `/stop` and the current
+answer's Stop control stop that turn and discard its waiting messages. When the
+workspace has no room a message waits for up to two minutes; Cancel takes it out of
+line, and Try again makes a new attempt. A table too wide for a phone arrives as
+labelled lines. An answer a chat cannot carry, such as one holding text shaped like a
+bot token, says so after two minutes and links to the conversation on the web, so that
+one answer never stops the chat. When the AI service refuses the account, for example
+out of quota, the chat says so and whom to ask. A deleted custom agent's bot says so,
+with a link to Telegram settings. Neither a redelivered update nor recovery after a
+restart runs the model again: a reply that was saved is sent, and only the parts not
+yet acknowledged.
+
+**Commands and skills.** `/help`, `/privacy`, `/web`, `/settings` for the language, and
+`/new` with Start new / Keep this one. A message that begins with `/` and names one of
+the person's skills runs that skill. It stands alone: it joins no earlier text and does
+not answer an open question. A skill that is off, or that a custom agent does not use,
+gets a plain answer instead.
+
+**Questions.** Bots present clarification choices, typed alternatives and forms with a
+review step before Send. Free-text questions accept an ordinary chat reply. A
+blocked-site request offers temporary permission or refusal. `/new` and `/stop` close
+the current input, while other commands leave forms and cards open. A reply to an old
+prompt asks first before it becomes new input, and a button press that cannot act says
+why.
+
+**Files.** Photos and documents are saved as a file added on the web is, in the
+person's own Space when Storage Spaces are on. A caption sends the file with the
+message; a file without a caption waits for the next message in the same chat and topic
+for up to 24 hours. Albums, split long messages and forwarded material keep their
+order. Unavailable storage, oversized files and failed saves each get their own notice,
+and the message can go on without the file. Send again retries the original input.
+
+Files an agent produces are delivered in the same conversation: a short answer with a
+single document, longer answers before their files, and suitable images as photos or
+albums. A file over the limit stays available on the web, and a failed transfer offers
+Retry without running the agent again, which refuses a file whose contents changed.
+When a turn also asks a question, its files come first.
+
+**Voice notes** work when the deployment already offers OpenAI or Gemini models at the
+provider's own address (`HARTMESH_TELEGRAM_VOICE` chooses or switches this off). A
+person agrees once to the named service, on any of their bots, and is asked again if
+the service changes. The recording is held in memory only and sent to that one service;
+the bot then shows what it heard and treats it as the person's typed message, including
+as the answer to an open question. Notes are limited to 5 minutes each and 30 minutes
+per person per local day, counted from successful transcriptions. A note interrupted by
+a restart is reported as failed and is never sent to the service again.
+
+**Bots and pages.** The service sets each bot's public name, descriptions, command menu
+and picture, in the language its owner chose, and retries for 24 hours if Telegram
+refuses. The ordinary chat's bot carries the product's name and a chat mark; a custom
+agent's bot carries that agent's name and initials. When a model offers a page of the
+web app, the answer carries up to three link buttons, built from the deployment's public
+address and never from the model's text. Without a public address the buttons are left
+out, and an address Telegram refuses appears as the last line of the message.
+
+**What is kept.** Telegram bookkeeping is kept for a limited time: incoming messages for
+7 days, delivered messages for 30 days, and acts and bot history for 400 days. A
+delivered message that a live button or an unfinished delivery still needs stays until
+that ends. **Try again** works for 7 days, because it resends the incoming message;
 after that the bot says it is no longer waiting. These limits keep running while
-Telegram is off or paused. The account command's `disable` reports how many held bindings are Telegram
-bots as `telegram_bots`, and `enable --restore-held` does the same under
+Telegram is off or paused.
+
+**Operating it.** Commands run inside the Gateway container with its rendered
+configuration and environment: `python -m app.telegram_bots.cli status` (`--owner
+<account id>` includes that person's links), `adopt`, `resume`, and `remove --owner
+<disabled account id>`. For a local-password account, `remove --local-account <email>`
+removes bot links while leaving the account's password usable. Every command prints one
+JSON document. Status reads an existing database without upgrading it or opening a
+Telegram client. The account command's `disable` reports how many held bindings are
+Telegram bots as `telegram_bots`, and `enable --restore-held` does the same under
 `restored`.
 
-The service sets each bot's public name, descriptions, command menu and picture,
-in the language its owner chose, and retries for 24 hours if Telegram refuses.
-The ordinary chat's bot carries the product's name and a chat mark; a custom
-agent's bot carries that agent's name and initials.
+A known Docker-host change pauses polling until an operator adopts the new host, and a
+best-effort startup check can pause a deployment when another deployment appears to
+poll the same bots. Adopt and resume take effect at the next Gateway start and do not
+clear a bot's action pause. Concurrent copies must have Telegram disabled before their
+first boot, since the automatic checks cannot identify every copy or elect the rightful
+deployment.
 
-When a model offers a page of the web app, the answer carries up to three link
-buttons. Their addresses are built from the deployment's public address, never
-from the model's text. Without a public address the buttons are left out, and an
-address Telegram refuses appears as the last line of the message.
+For how a turn runs, see [turn execution](backend/docs/TELEGRAM_TURN_EXECUTION.md) and
+[publication custody](backend/docs/TELEGRAM_PUBLICATION_CUSTODY.md). A turn's answer is
+sealed with its run ([durable output evidence](backend/docs/RUN_OUTPUT_EVIDENCE.md)),
+with an inventory of what it presented
+([terminal output inventory](backend/docs/RUN_OUTPUT_INVENTORY.md)). Output capture is
+for the Gateway's own callers.
 
-Voice notes work when the deployment already offers OpenAI or Gemini models at
-the provider's own address (`HARTMESH_TELEGRAM_VOICE` chooses or switches this
-off). A person agrees once to the named service, on any of their bots, and is
-asked again if the service changes. The recording is held in memory only and
-sent to that one service; the bot then shows what it heard and treats it as the
-person's typed message, including as the answer to an open question. Notes are
-limited to 5 minutes each and 30 minutes per person per local day, counted from
-successful transcriptions. A note interrupted by a restart is reported as failed
-and is never sent to the service again.
-
-Answers appear as temporary drafts by default, or as edited messages when
-`telegram_bots.streaming` is `edit`. Protected content always uses protected
-messages. Final replies use saved delivery plans; retries resume only
-unacknowledged parts. Missing edit anchors replace the pending suffix while
-retaining earlier acknowledgements. Preview text and final output must belong to
-the exact saved publication and run; model wording cannot authorize retries or
-cancellation. Recovery observes saved execution and never starts a model run.
-
-The managed path also supports `/help`, `/privacy`, `/web`, basic language
-settings, and `/new` with Start new / Keep this one controls. Buttons use saved,
-scoped identities; stale or foreign presses cannot change settings or
-conversations. Memory navigation uses the configured public address when
-available. A deleted custom agent can produce a fixed repair notice with a
-Telegram-settings link. Delivery repair retries the saved message without
-rerunning the AI agent. This change adds no database schema revision.
-Managed bots also present source-verified clarification choices, typed alternatives,
-and forms with a review step before Send. Free-text questions accept an ordinary
-chat reply. A blocked-site request offers temporary permission or refusal; the
-saved answer returns through the normal run and network-policy checks. Answer
-controls retain the original conversation and cannot submit twice. `/new` and
-`/stop` close the current input scope, while other commands leave forms and cards
-open; a reply to an old prompt requires an explicit choice before it can become
-new input. A button press that cannot act says why. When the AI service refuses
-the account, for example out of quota, the chat says so and whom to ask. This
-adds no schema change.
-Managed bots also accept photos and documents. They are saved as a file added on
-the web is, in the person's own Space when Storage Spaces are on. A caption sends
-the file with the message; a file without a caption waits for the next message in
-the same chat and topic for up to 24 hours. Albums, split long messages and forwarded
-material retain their original order. Downloads share a bounded process memory
-budget. Unavailable storage, oversized files and failed saves receive explicit
-notices; the message can continue without the file. Send again retries the
-original input in its original conversation. This adds no schema revision.
-Generated files can also be delivered in the original conversation. A short
-answer accompanies a single document; longer answers appear before their files.
-Suitable images appear as photos or albums. Files that exceed the configured
-limit stay available on the web, and failed transfers offer delivery-only Retry
-without rerunning the AI agent. Retries refuse changed file contents. Uploads
-share the same bounded memory budget as downloads. This adds no schema change.
-When a turn produces files and a clarification, form or network-permission
-request, files are delivered before the question. Form fields become active
-only after their prompt appears. Retrying a file keeps the original question
-and its answer intact, including after that question has been answered.
-See [turn execution](backend/docs/TELEGRAM_TURN_EXECUTION.md) and
-[publication custody](backend/docs/TELEGRAM_PUBLICATION_CUSTODY.md).
-SQL-backed runs can explicitly request versioned output capture. The worker seals
-the exact completed model answer with its durable event source; the authorized
-output API reports pending, complete or unavailable without executing another
-model. Source uncertainty preserves unresolved state. Ordinary runs keep their
-defaults. See
-[durable output evidence](backend/docs/RUN_OUTPUT_EVIDENCE.md).
-Capture version 2 also seals a generic inventory of file references and structured
-terminal presentations. Authorized consumers can distinguish complete enumeration
-from an incomplete subset before publishing a reply. See the
-[terminal output inventory](backend/docs/RUN_OUTPUT_INVENTORY.md) contract.
-Document 2 is an explicit opt-in with negotiated reads; existing capture requests
-keep document 1. It distinguishes a real managed-output scan from a host-qualified
-absence of an admitted output view without inventing an empty scan.
-Captured runs also seal known startup failures and prestart cancellations.
-Lease-based recovery records an abandoned run as failed. Replacement requests
-refuse locally active or finishing captured work and captured work with a valid
-lease on another worker. Eligible expired ownership closes atomically with
-admission of its replacement.
-Cancelled SQL run reads now finish their started database work and session
-cleanup before returning cancellation, preventing abandoned read resources.
-Captured runs also close new storage and stream writes after the Gateway's
-shared shutdown grace. Started database calls, scans and resource cleanup finish
-before their providers close; a blocked native call can extend shutdown.
-Retirement preserves confirmed results and leaves uncertain execution unresolved.
+##### Other channels
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 
@@ -1638,6 +1583,9 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 ```
 
 **Telegram Setup**
+
+This is the one deployment-wide bot of the upstream channel configuration, not the
+bots above. The Compose bundle keeps it closed and refuses to render it.
 
 1. Chat with [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the HTTP API token.
 2. Set `TELEGRAM_BOT_TOKEN` in `.env` and enable the channel in `config.yaml`.

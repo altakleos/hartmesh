@@ -10,19 +10,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Telegram bots
 
 Each person can connect a Telegram bot of their own to the ordinary chat and to each
-custom agent they own. A message that names one of their skills runs that skill. The
-bundle README gains the section "Telegram bots".
+custom agent they own. A bot answers only that person, and its conversations are
+ordinary conversations that also appear on the web. **Connect Telegram** in Settings
+walks through BotFather, the token and pressing Start; the sidebar, the new-chat page
+and a custom agent's card lead there.
+
+In a chat, an answer appears as it is written. Further messages wait and are answered
+together, and `/stop` stops the current answer. Photos and documents are saved as a
+file added on the web is, and an agent's files are delivered back. Questions, forms
+and blocked-site requests arrive in the chat, and a message that begins with `/` and
+names one of the person's skills runs that skill. `/help`, `/web`, `/privacy`,
+`/settings` and `/new` are there too. A press that cannot act says why, and when the
+AI service refuses the account, the chat says so and whom to ask.
+
+The bundle README gains the section "Telegram bots".
+
+**Voice notes leave the deployment.** With `HARTMESH_TELEGRAM_VOICE` at its default
+`auto`, a voice note goes to OpenAI or Google when the deployment already offers that
+provider's models at the provider's own address, after the person agrees once to the
+named service. The recording is held in memory only. Write
+`HARTMESH_TELEGRAM_VOICE=off` when recordings must never leave the deployment.
 
 ### Schema changes
 
 The database head advances from `0041_storage_host_replacements` to
 `0044_telegram_assistant_ids` through three additive migrations.
 `0042_telegram_bots` adds fifteen tables whose names begin with `telegram_`;
-`0043_telegram_inbox_chat_scope` scopes retained inbox message identities to their
-chat; `0044_telegram_assistant_ids` retains opaque assistant-message ids. No existing
-table or column changes. Normal Gateway bootstrap applies them on SQLite and
-PostgreSQL. The downgrade refuses while a bot link, a bot event, an act from a chat, a
-or queued message is on record.
+`0043_telegram_inbox_chat_scope` adds the chat id to the inbox's primary key, so that
+different accounts can reuse a chat-local message id on one bot;
+`0044_telegram_assistant_ids` widens the nullable assistant-message id on that table
+from 64 characters to text. No other existing table or column changes. Normal Gateway
+bootstrap applies them on SQLite and PostgreSQL. The downgrade refuses while a bot
+link, a bot event, an act from a chat or an outbox row is on record, and `0043` and
+`0044` refuse a downgrade that would collapse or truncate retained ids.
+
+A release without these migrations does not start on a database this release
+migrated. Roll back by restoring a snapshot of the data disk taken before the upgrade.
 
 ### Configuration and deployment
 
@@ -35,329 +58,100 @@ or queued message is on record.
 - Four optional `.env` keys: `HARTMESH_TELEGRAM`, `HARTMESH_TELEGRAM_VOICE`,
   `HARTMESH_TELEGRAM_MAX_BOTS`, `HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON` (README,
   "Telegram bots").
+- The rendered configuration gains, with `HARTMESH_TELEGRAM=off` as well, the
+  `telegram_bots` section, `channel_connections` with bound identity required and its
+  own Telegram entry off, which closes the deployment-wide Telegram token routes, and
+  `channels.max_concurrency: 8`. The default stays 5 outside the bundle. The tool list
+  gains `show_web_page`.
 - The Gateway opens outgoing HTTPS connections to `api.telegram.org`. No port is
   published and no service is added.
 - **A copy of a deployment must start with `HARTMESH_TELEGRAM=off`** while its
-  original runs.
+  original runs. A known change of Docker host, or another program polling most of the
+  same bots, pauses polling until an operator acts. These checks are best effort.
 - Operator command: `python -m app.telegram_bots.cli` with `status`, `adopt`, `resume`
   and `remove`.
 - `accounts disable` and `accounts enable --restore-held` report `telegram_bots`, and
   the data export carries `telegram.json`.
-- A release without these migrations does not start on a database this release
-  migrated. Roll back by restoring a snapshot of the data disk taken before the
-  upgrade.
+- A `telegram_bots` section refuses to start with `run_events.backend` other than `db`
+  or with more than one Gateway worker, and says so at start. The bundle passes both,
+  unless `.env` holds a stray `GATEWAY_WORKERS` or `WEB_CONCURRENCY` above 1.
+- Outside the bundle, an extension that contributes middleware is not checked at start:
+  bots poll, and every turn fails before the model.
 
-### Telegram web screens
+### Web
 
 Settings lists a person's bots, with the set-up dialog, their row dialogs, language
 and time zone, and an administrator's counts. The sidebar, the new-chat page and a
 custom agent's card lead there, and a page offered in a chat is linked under the
-answer. A signed-out person keeps the page and query through sign-in, and
-`/workspace` passes its query on.
-
-### Telegram retention
-
-Settled Telegram rows are deleted by age: incoming messages after 7 days, delivered
-messages after 30 and acts and bot history after 400, keeping whatever a live control
-or an unfinished delivery still needs. **Try again** on a failed message works for 7
-days.
-
-### Managed Telegram publication custody
-
-Add dormant SQL primitives for immutable input/publication scope, an irreversible
-dispatch marker, exact run binding and atomic primary reply planning. Freeze
-output proof and rendered presentation; preserve saved delivery receipts on exact
-replay and refuse changed plans. Existing receiptless publications cannot be
-adopted as proof that dispatch never started.
-
-Schema change: revision `0044_telegram_assistant_ids` widens the nullable, nonindexed Telegram inbox assistant-message-ID
-column from 64 characters to Text. A legal long SDK ID previously survived worker
-sealing but failed PostgreSQL reply planning. Preserve the original opaque ID;
-downgrade refuses longer retained IDs before DDL. Configuration stays version 55.
-
-### Captured I/O ownership and shutdown
-
-Give captured runs one host-owned lifetime for finite database, checkpoint,
-Store, event, scan and stream operations. Close new calls after the shared
-shutdown grace and retain started native work and exact resource cleanup across
-repeated cancellation. Retained history iterators and temporary snapshot caches
-close explicitly. Shutdown does not establish tool or container containment.
-
-Keep prestart proof, confirmed terminal evidence and unresolved execution distinct
-from retirement. Release only the exact original checkpoint reservation; peer or
-changed rows remain untouched. Preserve ordinary public SDK behavior; captured
-sync calls backed by async storage refuse before invoking the delegate.
-
-Use an application-owned stream cleanup registry, fence Redis reconnect after
-close, and retain resident launch/worker drainage through cancellation. Local
-offline stream tests no longer probe Redis during collection.
-
-No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55.
-
-### Captured run startup and ownership closure
-
-Seal known prestart cancellation and startup failure with their actual unavailable
-outcome. Preserve failed metadata setup through the attached worker's cleanup;
-missing or completed tasks after startup do not establish cancellation cleanup.
-Retain the original identity of an unseen committed admission after a lost result;
-concurrent idempotent retries cannot change its compensation decision.
-
-Recover eligible abandoned captured runs with an atomic failed seal, preserving
-cancellation requests and original scope. Refuse replacement of live captured
-work, resolve exact idempotent reuse first, and commit eligible expired predecessor
-closure with its successor. Lease recovery does not prove native/tool containment.
-
-No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55.
-
-### Captured worker output and authorized reads
-
-Add explicit versioned output capture for SQL-backed runs. Seal the exact
-completed model answer and its committed source event atomically with status;
-retain genuine SDK message identities and exact UTF-8 text. Nested, auxiliary,
-hidden or unsupported output cannot become a replacement answer. Source-write
-uncertainty fences the worker without replaying the model or claiming success.
-Interrupt and rollback races seal cancellation after cleanup.
-
-Add the private versioned run-output GET with authorized pending, complete and
-unavailable projections, exact source checks and cancellation-safe SQL cleanup.
-Capture intent and disconnect policy stay fixed across idempotent reuse.
-
-No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55.
-
-### SQL run read cancellation cleanup
-
-Keep run queries and their sessions owned through repeated cancellation. Resolve
-the owner before dispatch and let a timed-out read settle before terminal recovery
-starts another attempt. Existing row filtering, results and durable write fences
-continue to apply.
-
-Fix a reproduced stranded-reader COMMIT lock in SQLite DELETE mode. WAL writes
-remain healthy while gaining deterministic cursor cleanup through cancellation.
-
-No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55.
-
-### Durable output-evidence primitives
-
-Add generic immutable output receipts, atomic SQL status-and-receipt writes and
-authoritative detached snapshots. Exact committed status and receipt are required
-after an ambiguous write; cached success or terminal status alone is insufficient.
-Text sealing respects durable cancellation, owner, version and lease fences.
-New admissions discard caller-supplied result evidence.
-
-Prepare a host-only capture option and strict output client with retained source
-authorization and closed scope/status/digest validation. The capture and output
-read implementation above extends these primitives.
-
-No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55. Existing ordinary and Memory run behavior stays unchanged.
-
-### Correlated channel execution foundation
-
-Add a shared execution capability with a captured human owner, conversation,
-publication and AI employee target. The Gateway stamps an admitted visible human
-message and persists a versioned receipt; replay requires the same receipt and
-request. Strict run/message reads acknowledge supported, authorized lookups and
-return 503 when storage or proof is unavailable. Ordinary reads keep their defaults.
-The owned client retains dispatched work and reads while new-run admission closes.
-
-No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55.
-
-### Telegram conversation preparation
-
-Prepare owner-scoped conversations with durable thread-creation identities,
-explicit Gateway ownership and agent-binding proof, and atomic conversation-map
-updates. Lost responses and same-bot token replacement reuse the original
-creation request; stale attempts cannot overwrite a newer conversation. A deleted
-custom AI assistant has a fixed repair notice and optional public settings link.
-Fixed status retries retain their original source, destination and completion
-intent through URL/plain-text delivery fallback.
-
-Thread responses now expose the stored human owner as nullable `owner_user_id`.
-Clients can require authoritative binding reads using
-`X-DeerFlow-Require-Thread-Binding: true`; unavailable binding authority returns
-503. Existing reads retain their default behavior.
-
-No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55.
-
-### Compose workspace recovery qualification
-
-After deliberately removing an idle workspace, wait for its exact attachment
-retirement, primary and relay removal, and current execution readiness before
-starting the next acceptance run. Keep production admission checks and the
-in-flight workspace-loss test unchanged.
-
-No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55.
-
-### Work activation during workspace maintenance
-
-Serialize initial Work capacity admission with the AI employee's Home checks,
-so healthy maintenance does not reject activation as a restarting workspace.
-Recheck current restoration, shutdown and recycle state after waiting.
-
-No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55.
-
-### Telegram private input and fixed replies
-
-Add ordered private-chat update handling, bounded stranger replies, token-paste
-refusal, atomic setup-code binding and durable `/start`, `/agent`, `/memory` and
-unknown fixed-command responses. Preserve setup-code consumption after a
-deliberate wrong-bot refusal. Reconnection checks the current human account and
-exact binding without changing its generation or action pause.
-Held-access notices share one persisted claim per hold between input handling
-and background reconciliation.
-
-Memory links use URL-only controls and a saved text-address fallback when
-Telegram rejects the address. A blocked delivery waits for reconnection without
-transient backoff; unrelated server waits and pacing deadlines remain intact.
-Failed handler/database work retains the polling suffix. Ordinary chat, skills,
-files, voice, callback actions and model-final delivery remain inactive.
-
-No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55.
-
-### Telegram copy safeguards and operator commands
-
-Pause managed-bot polling on a known Docker-host change or a qualifying broad
-startup conflict. Keep updates and sending gated until the one-time startup
-decision completes. These checks are best effort: concurrent copies must have
-Telegram disabled before their first boot.
-Expired shutdown grace retires future latch-write retries while retaining active
-database and client cleanup before persistence closes.
-Poll retirement drains its current-link SQL guard before cancellation, fixing a
-reproduced retained SQLite cursor lock during removal.
-Held-input release consumes its serviced wake signal so a failed suffix keeps
-its retry backoff; fresh wakes still interrupt the wait.
-
-Add local JSON `status`, `adopt`, `resume` and account-scoped `remove` commands.
-Status opens existing storage read-only, reports current-generation delivery
-counts and classifies stored tokens without printing or rewriting them. Removal
-rechecks current account access and uses the shared atomic cleanup transaction.
-
-No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55.
-
-### Telegram supervisor and Gateway lifecycle
-
-Add Gateway-owned managed-bot startup, health waiting, bounded concurrent bot
-initialization, revision-fenced polling recovery and two-phase shutdown. Cleanup
-also runs when later Gateway startup fails. Current human-account, binding and
-supported-target checks run at claim, between parts and after reply preparation;
-unreadable authority waits instead of granting delivery. Fixed lifecycle notices
-keep captured destinations and transactional throttles.
-
-No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55. Model-final, file and instance-policy consumers remain with their
-subsequent changes.
-
-### Local command cancellation
-
-Fix a race where a detached child forked during cancellation could keep the
-command's output pipes open after its shell died. Bounded rescans retain exact
-command markers and Gateway self-exclusion; existing drain timeouts stay unchanged.
-
-No schema or configuration change.
-
-### Telegram transport and polling foundation
-
-Add a single-loop Telegram client, bounded rate limiting and ordered polling.
-Retained update batches cannot be acknowledged before durable admission; polling
-conflicts invalidate waiting connect codes before any more input is handled.
-Captured token and delivery claims fence status writes and raw transport. Fixed
-product replies use saved plans, including scheduled plain-text fallback, and
-logging redacts bot credentials across application and library handlers.
-
-No schema change: head remains `0043_telegram_inbox_chat_scope`; configuration
-remains version 55. Gateway startup integration follows separately.
-
-### Telegram durable delivery foundation
-
-Add durable input admission, immutable routing and publication identities, and
-reply delivery plans with ordered acknowledgements. Delivery workers use fenced
-claims, release capacity between retries and preserve saved content through
-repair. Input completion waits for every required delivery; recovery schedules
-saved output without starting another model run.
-
-No schema change: head remains `0043_telegram_inbox_chat_scope`. Configuration
-stays at version 55. Transport, polling and Gateway integration follow separately.
-
-### Telegram presentation foundation
-
-Add English and Chinese product text, safe Markdown-to-Telegram HTML, balanced
-message splitting and complete multipart previews. Web handovers use configured
-addresses, stored bot targets and current reader permissions. Voice transcription
-selects a qualifying configured model entry and uses its captured key with a
-fixed provider endpoint. SDK payload logs are suppressed only during voice calls.
-
-No schema change: the database head remains `0043_telegram_inbox_chat_scope`.
-Configuration remains version 55.
-
-### Telegram ownership foundation
-
-Add bot-specific credential wrapping while preserving existing provider-key
-cipher compatibility. Durable bot-link transactions serialize capacity, account
-ownership, setup codes, binding generations and ordered welcome/privacy delivery.
-Replacement receipts make retries safe after the old link was removed; rollback
-keeps its token, binding and conversation intact. Conflict epochs fence old
-setup codes, and cleanup retires stale delivery claims and connection authority.
-Personal settings retain time zone, language, quiet hours and notification
-preferences with conflict-safe first initialization.
-
-These additions do not change configuration version 55. The chat-scoped inbox migration below fixes account reconnection.
-
-### Configuration and deployment
-
-Configuration version 55 adds strict managed Telegram bot settings, four optional
-Compose environment keys and a page-offer tool that carries page keys rather
-than addresses. The rendered settings hold bound identity and close the
-deployment-wide Telegram token routes. The renderer reports fixed status
-messages without printing the wrapping secret. These configuration/tool changes
-add no database schema changes beyond the migration described below.
-
-### Schema changes
-
-Add revision `0042_telegram_bots`, after `0041_storage_host_replacements`, with
-15 tables for Telegram bot bindings, settings, callbacks, action receipts and
-durable inbound/outbound delivery state. Existing channel, account, preference,
-storage and Work tables are unchanged. Repeated upgrades validate existing table
-shapes; downgrade refuses to erase retained bot links, tokens or history.
-The managed bot connection flow is not enabled by this schema preparation.
-An older binary that does not know this revision needs the pre-upgrade snapshot
-for rollback.
-
-Revision `0043_telegram_inbox_chat_scope` then adds the existing chat ID to the
-inbox primary key. Different accounts can reuse a chat-local message ID on one
-bot link while retaining separate Start/reply histories. Upgrade preserves rows
-and constraints; downgrade refuses before DDL if retained identities would
-collapse across chats. Earlier creation DDL and release ancestry stay unchanged.
-For older-revision replay over already-created current tables, 0042 accepts
-only the independently frozen 0043 inbox shape after full validation; it does
-not change its data, skip revisions or accept unknown schema drift.
-
-### Fixed storage reservations
-
-Managed Space fstab entries now exclude loop images from the standard scheduled
-trim service, and new mounts explicitly disable online discard. Existing pools
-can update their entries with `si fstab-sync` or preparation, preserving files
-and inventory. Direct trim and custom host-wide trim still require operator
-exclusions. Physical allocation checks remain strict; sparse images are not
-automatically refilled. Native CI exercises both actual trim and the exclusion.
-
-The storage reservation fix itself changes no database schema.
+answer. A signed-out person keeps the page and query through sign-in, and `/workspace`
+passes its query on.
+
+Settings now fits a phone, in every section. A long unbroken name wraps instead of
+pushing controls off the screen.
+
+### API
+
+- `GET /api/features` gains `telegram`, with `enabled`, `bots`, `reason`, `voice` and
+  `voice_provider`.
+- `/api/telegram-bots` needs a signed-in browser session. No response carries a token.
+- Thread responses expose the stored human owner as nullable `owner_user_id`, and
+  `X-DeerFlow-Require-Thread-Binding: true` asks for an authoritative binding read,
+  which answers 503 when that authority is unavailable.
+- The run event stream contract gains `run.output_inventory`.
+- `output_capture` on a run request is for the Gateway's own callers; anyone else gets
+  403. `GET /api/threads/{thread_id}/runs/{run_id}/output` reads a sealed output for the
+  run's owner. `GET /api/threads/{thread_id}/runs/by-idempotency-key` finds a run by its
+  key, for a read that sends `X-DeerFlow-Require-Channel-Execution`.
+
+### What is kept
+
+Settled Telegram rows are deleted by age, whether or not Telegram is running: incoming
+messages after 7 days, delivered messages after 30, and acts and bot history after
+400, keeping whatever a live control or an unfinished delivery still needs. **Try
+again** works for 7 days. Removing a bot deletes its identity rows and conversation
+mappings. The bundle README's "What is kept" lists every record, and "What people
+should know" is the text a provider can give to people.
+
+The log lines written for the bots hold no message text, no file name and no person's
+Telegram id. The shared channel log names a bot's chat by its connection id, and a
+failed database statement is logged without its values, in every table.
+
+### Runs
+
+A run can now seal its exact completed answer, and the files and structured output it
+presented, with its status, so a channel can tell a complete answer from an incomplete
+one before publishing it. Known startup failures and prestart cancellations are sealed
+with their outcome. Lease recovery records an abandoned run as failed, and a replacement
+is refused while captured work is live. None of this changes an ordinary run.
+
+Started database, checkpoint, stream and scan work finishes through cancellation and
+the shutdown grace, and captured runs write nothing new after it. A blocked native
+call can extend shutdown, and lease recovery proves nothing about a tool or container
+still running. SQL run reads keep their session until they end, which fixes a
+reproduced stranded-reader commit lock in SQLite's rollback-journal mode.
+
+Inbound channel attachments finish started writes before cancellation releases their
+buffers. A failed attachment is left out of the model's input, and the other files go
+on.
+
+### Fixes
+
+- Fixed storage reservations: managed Space fstab entries exclude loop images from the
+  scheduled trim service, and new mounts disable online discard. Existing pools update
+  their entries with `si fstab-sync` or preparation, keeping files and inventory.
+  Direct trim and custom host-wide trim still need operator exclusions, and an image
+  that is already sparse is not refilled.
+- Work activation waits for an AI employee's Home checks instead of refusing it as a
+  restarting workspace during healthy maintenance.
+- A detached child forked during a local command's cancellation can no longer keep the
+  command's output pipes open after its shell died.
 
 ### Dependencies and verification
 
-Pin python-telegram-bot to 22.8 with its rate-limiter extra and declare Pillow
-directly. Add offline compatibility coverage for Bot API 10.0, error handling,
-request serialization and the existing Telegram adapter. This dependency update
-does not enable new Telegram bot setup or change the database schema.
+- Backend: `python-telegram-bot[rate-limiter]==22.8`, and direct dependencies on
+  `pillow`, `markdown-it-py`, `openai` and `google-genai`.
+- Web: `qrcode.react`.
+- Docker and browser CI jobs are pinned to `ubuntu-24.04`.
 
 ## [2.2.0+hartmesh.47] - 2026-10-23
 

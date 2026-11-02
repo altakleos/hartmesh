@@ -329,8 +329,8 @@ Owned SQL units retain execute/fetch/commit/rollback/exit through cancellation.
 atomic route sealing. Exact canonical proof/presentation replay retains actual
 part acknowledgements; changed plans refuse. Frozen visible-text ranges use
 codepoints, while Telegram chunk limits use UTF-16.
-Strict remote source and artifact/action eligibility stay mandatory. Legacy `plan_reply` keeps its
-compatibility semantics. See [publication custody](../../docs/TELEGRAM_PUBLICATION_CUSTODY.md).
+Strict remote source and artifact/action eligibility stay mandatory. See
+[publication custody](../../docs/TELEGRAM_PUBLICATION_CUSTODY.md).
 
 `publication.py` supplies finite callable dispatch/observe/read operations, not an
 input handler or recovery scheduler. Accept only complete saved groups with a

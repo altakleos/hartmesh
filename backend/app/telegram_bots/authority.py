@@ -101,9 +101,9 @@ async def require(owner_user_id: str, *needed: str, prepared_config: AppConfig |
 class TelegramAuthority:
     """One collaborator shared by claim, part and final raw-dispatch checks.
 
-    Only trusted fixed product/status text is supported in this slice. It reads
-    no private thread/run/agent definition for delivery, so its required read
-    ceilings are (). Model and file sources acquire their own checks later.
+    Fixed product/status text reads no private thread/run/agent definition, so its
+    required read ceilings are (). A model source also needs `threads:read` and
+    `runs:read`, and `delivery` validates its basis.
     """
 
     def __init__(self, *, links: BotLinkRepository, connections: ChannelConnectionRepository):

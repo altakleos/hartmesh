@@ -222,8 +222,8 @@ class PublicationGuard(Protocol):
 async def prepare_publication_guard(guard: PublicationGuard) -> None:
     """Refresh an optional host guard immediately before its owned writer.
 
-    Legacy guards have no preparation hook. Provider and target preparation
-    belongs outside a borrowed SQL writer; final custody still uses check().
+    A guard may have no preparation hook. Provider and target preparation belongs
+    outside a borrowed SQL writer; final custody still uses check().
     """
     from inspect import isawaitable
 
