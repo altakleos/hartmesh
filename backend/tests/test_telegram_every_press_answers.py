@@ -605,11 +605,10 @@ async def test_quick_ticks_all_land_on_the_keyboard_on_screen(ui):
 
 
 @pytest.mark.asyncio
-async def test_a_press_that_passed_still_lands_when_telegram_is_slow_to_take_its_answer(ui, monkeypatch):
+async def test_a_press_that_passed_still_lands_when_telegram_is_slow_to_take_its_answer(ui):
     e = ui
     await show(e, form(COLOURS))
     red = await live(e, "form_option", "red")
-    monkeypatch.setattr("app.telegram_bots.callbacks.PRESS_TIMEOUT_SECONDS", 2.0)
     answer = e.request.enqueue("answerCallbackQuery", release=asyncio.Event())
     assert await e.channel.handle_update(press(e, 1759, red, message_id=CARD))
     await asyncio.gather(*tuple(e.channel._ingress_tasks))

@@ -8,8 +8,14 @@ unchanged passing checks; preserve native/Compose restrictions and required CI
 qualification.
 
 CI shards print each running case and dump Python-thread stacks after 120 seconds
-without ending the test. Very long parametrized IDs can truncate formatted GitHub
-CLI logs; inspect raw run-log ZIP step files before assessing missing results.
+without ending the test. `gh run view --log` stops at the first line over 64 KiB, so give a
+huge parametrized value an `id=`, and inspect raw run-log ZIP step files before assessing
+missing results.
+
+`conftest.py` freezes what collection built and runs full garbage-collection passes between
+tests, never inside one. A pass over a shard's heap holds the GIL for about two seconds,
+and a test with a wall-clock deadline reads that as a slow database. Do not widen a
+deadline to get past a freeze; find what started it.
 
 Factory default tests establish their own absent-config precondition and restore
 ambient configuration afterward. AppConfig loading can set stream-bridge globals;

@@ -46,7 +46,7 @@ def test_legacy_read_preserves_exact_bytes(settings, tmp_path):
         b'{"version":1,"extra":true}',
         b'{"version":1,"charts":[NaN]}',
         b"[" * 1000 + b"]" * 1000,
-        b" " * 65537,
+        pytest.param(b" " * 65537, id="over-64-kib"),
         b"\xff",
     ],
 )
