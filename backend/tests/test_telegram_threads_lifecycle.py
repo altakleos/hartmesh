@@ -98,7 +98,7 @@ async def test_actual_manager_drains_a_dispatched_wait_before_supervisor_closes_
     from app.channels.store import ChannelStore
 
     e = build(db, monkeypatch)
-    entered, release, delivered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    entered, release = asyncio.Event(), asyncio.Event()
     calls = []
 
     async def respond(request):
@@ -106,14 +106,9 @@ async def test_actual_manager_drains_a_dispatched_wait_before_supervisor_closes_
         if request.method == "POST":
             entered.set()
             await release.wait()
-            return httpx.Response(200, json={"messages": [{"type": "ai", "content": "synthetic completed reply"}]})
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=b'event: metadata\ndata: {"run_id":"retained"}\n\n')
         return httpx.Response(200, json={"thread_id": "original", "owner_user_id": "human", "agent_instance": None, "metadata": {"channel_agent_name": "lead_agent"}})
 
-    async def outbound(message):
-        if message.is_final and message.text == "synthetic completed reply":
-            delivered.set()
-
-    e.service.bus.subscribe_outbound(outbound)
     manager = ChannelManager(
         e.service.bus, ChannelStore(str(tmp_path / "channels.json")), connection_repo=db.connections, langgraph_url="https://runtime.example/api", gateway_url="https://gateway.example", max_concurrency=1, shutdown_grace_period_seconds=3
     )
@@ -141,7 +136,6 @@ async def test_actual_manager_drains_a_dispatched_wait_before_supervisor_closes_
         assert result.status_code == 200 and not client.closed
         release.set()
         await asyncio.wait_for(stopping, 3)
-        await asyncio.wait_for(delivered.wait(), 3)
         assert not client.closed
         assert sum(request.method == "POST" for request in calls) == 1
         await e.supervisor.stop()

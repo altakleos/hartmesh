@@ -143,7 +143,6 @@ def test_upstream_literals_unchanged():
     inline = {
         "_handle_message": ["An internal error occurred. Please try again.", "Channel execution protocol refused"],
         "_load_thread_agent": ["This conversation has an invalid stored agent selection. Use /agent use <name> to start a valid conversation."],
-        "_publish_execution_result": ["(No response from agent)"],
         "_handle_chat_on_thread": ["(No response from agent)"],
         "_handle_streaming_chat": ["An error occurred while processing your request. Please try again.", "(No response from agent)"],
     }

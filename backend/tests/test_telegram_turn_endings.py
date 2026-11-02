@@ -426,6 +426,39 @@ async def test_a_conversation_deleted_on_the_web_just_starts_a_new_one(db, monke
         await s.close()
 
 
+async def test_a_failing_read_is_no_proof_that_a_run_never_started(db, monkeypatch, tmp_path):
+    s = await stack(db, monkeypatch, tmp_path)
+    try:
+        assert await send(s, 9702, "A long question") is True
+        turn = only_turn(s)
+        await until(lambda: turn.record is not None and turn.record.publication_id in s.gateway.runs)
+        s.gateway.fault = run_reads_fail
+        await past_the_limit(s, turn, seconds=RUN_SHOWS_SECONDS + 1)
+        await asyncio.sleep(0.2)
+        assert s.turns._turns, "The worker saw the run start, so five seconds of failed reads prove nothing"
+        await past_the_limit(s, turn)
+        await until(lambda: not s.turns._turns)
+    finally:
+        await s.close()
+
+
+async def test_a_join_that_ends_at_once_wakes_the_turn_but_is_not_asked_again_and_again(db, monkeypatch, tmp_path):
+    s = await stack(db, monkeypatch, tmp_path)
+    try:
+        assert await send(s, 9703, "A long question") is True
+        turn = only_turn(s)
+        woken, wake = [], turn.wake.set
+        turn.wake.set = lambda: (woken.append(True), wake())[1]
+        await until(lambda: turn.run_id is not None)
+        joined_before = sum(path.endswith("/join") for _method, path in s.gateway.calls)
+        await asyncio.sleep(2.2)
+        joins = sum(path.endswith("/join") for _method, path in s.gateway.calls) - joined_before
+        assert 1 <= joins <= 4, "This stack's join ends at once, and a chat must not read it as fast as it can"
+        assert woken, "The end of the stream is the first sign of the run's end, and no worker is left to say so"
+    finally:
+        await s.close()
+
+
 async def no_retry(s):
     async with s.db.sessions() as session:
         return not list(await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.kind == "retry_message")))

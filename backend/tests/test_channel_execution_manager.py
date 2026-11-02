@@ -90,25 +90,22 @@ def setup(tmp_path, monkeypatch):
     message = InboundMessage(channel_name="slack", chat_id="chat", user_id="sender", text="hello", owner_user_id="owner", connection_id="connection", execution_required=True, execution_context=context)
     ordinary = Mock(side_effect=AssertionError("No ordinary client fallback"))
     monkeypatch.setattr(manager, "_get_client", ordinary)
-    monkeypatch.setattr(manager, "_channel_supports_streaming", lambda _channel: False)
     return SimpleNamespace(manager=manager, message=message, context=context, client=client, admission=admission, stream=stream, outbounds=outbounds, ordinary=ordinary)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("required", [False, True])
-@pytest.mark.parametrize("streaming", [False, True])
-async def test_valid_host_context_uses_original_thread_and_typed_creating_path(setup, monkeypatch, required, streaming):
+async def test_valid_host_context_uses_original_thread_and_typed_creating_path(setup, monkeypatch, required):
     e = setup
     e.message.execution_required = required
     # Neither the current map, remembered target nor ordinary metadata PATCH is
     # authority for this already-prepared original publication.
     monkeypatch.setattr(e.manager, "_lookup_thread_id", AsyncMock(side_effect=AssertionError("No latest mapping")))
     e.manager._thread_agent_names[e.context.thread_id] = "different-agent"
-    monkeypatch.setattr(e.manager, "_channel_supports_streaming", lambda _channel: streaming)
     await e.manager._handle_chat(e.message)
     e.ordinary.assert_not_called()
     e.client.threads.get.assert_awaited_once_with(e.context.thread_id)
-    invocation = (e.client.runs.stream if streaming else e.client.runs.wait).call_args
+    invocation = e.client.runs.stream.call_args
     assert invocation.args == (e.context.thread_id, e.context.assistant_id)
     assert invocation.kwargs["channel_execution"] == {"version": 1, "publication_id": e.context.publication_id}
     assert invocation.kwargs["metadata"] == {"channel_turn_id": e.context.publication_id}
@@ -116,9 +113,7 @@ async def test_valid_host_context_uses_original_thread_and_typed_creating_path(s
     assert invocation.kwargs["on_disconnect"] == "continue" and invocation.kwargs["on_completion"] is None
     (human,) = invocation.kwargs["input"]["messages"]
     assert human["additional_kwargs"]["channel_turn_id"] == e.context.publication_id
-    assert e.outbounds[-1].thread_id == e.context.thread_id
-    assert e.outbounds[-1].connection_id == e.context.connection_id
-    assert e.stream.closed is streaming
+    assert e.stream.closed
 
 
 @pytest.mark.asyncio
@@ -129,7 +124,7 @@ async def test_host_scope_mismatch_refuses_before_thread_or_run(setup, attribute
     with pytest.raises(ChannelExecutionProtocolError):
         await e.manager._handle_chat(e.message)
     e.client.threads.get.assert_not_called()
-    e.client.runs.wait.assert_not_called()
+    e.client.runs.stream.assert_not_called()
     e.ordinary.assert_not_called()
 
 
@@ -198,7 +193,7 @@ async def test_every_explicit_target_or_publication_conflict_refuses_before_http
     with pytest.raises(ChannelExecutionProtocolError):
         await e.manager._handle_chat(e.message, extra_context=extra)
     e.client.threads.get.assert_not_called()
-    e.client.runs.wait.assert_not_called()
+    e.client.runs.stream.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -292,10 +287,9 @@ async def test_file_preparation_keeps_the_original_destination_and_human_extras(
     monkeypatch.setattr(service, "get_channel_service", lambda: SimpleNamespace(get_channel=lambda _name: SimpleNamespace(receive_file=receive)))
     monkeypatch.setattr(module, "_ingest_inbound_files", ingest)
     await e.manager._handle_chat(e.message)
-    (human,) = e.client.runs.wait.call_args.kwargs["input"]["messages"]
+    (human,) = e.client.runs.stream.call_args.kwargs["input"]["messages"]
     assert human["content"] == "prepared with uploaded path"
     assert human["additional_kwargs"] == {"channel_turn_id": e.context.publication_id, "forwarded": [{"from": "sender"}], "original_user_content": "downloaded", "files": [{"filename": "retained"}, {"filename": "uploaded"}]}
-    assert (e.outbounds[-1].chat_id, e.outbounds[-1].connection_id, e.outbounds[-1].owner_user_id) == ("chat", "connection", "owner")
 
 
 @pytest.mark.asyncio
@@ -312,11 +306,9 @@ async def test_a_managed_turn_names_its_connection_and_never_the_chat_in_the_log
             await asyncio.wait_for(e.manager.bus.join_inbound(), 2)
     finally:
         await e.manager.stop()
-    assert [outbound.text for outbound in e.outbounds] == ["answer"]
     assert chat not in caplog.text
     assert "[Bus] inbound enqueued: channel=slack, connection=connection, type=chat" in caplog.text
     assert "[Manager] received inbound: channel=slack, connection=connection, type=chat" in caplog.text
-    assert "[Bus] outbound dispatching: channel=slack, connection=connection, listeners=" in caplog.text
 
 
 def test_no_log_call_of_the_shared_channel_code_passes_a_chat_id_itself():
@@ -337,14 +329,68 @@ async def test_an_ordinary_channel_keeps_its_chat_in_the_log(caplog):
 
 
 @pytest.mark.asyncio
-async def test_a_managed_stream_spends_nothing_per_frame(setup, monkeypatch):
-    """The facade reads its own authority, and the driver has its own clock."""
+async def test_a_worker_lets_go_of_a_run_at_its_first_frame(setup):
+    """Eight long answers must not hold every other chat. The run goes on, and the driver has its own clock."""
     e = setup
-    monkeypatch.setattr(e.manager, "_channel_supports_streaming", lambda _channel: True)
-    e.stream.parts = iter(SimpleNamespace(event="messages-tuple", data=[{"type": "AIMessageChunk", "id": "m", "content": text}, {}], id=None) for text in ("one ", "two ", "three"))
-    await e.manager._handle_chat(e.message)
-    assert [(outbound.text, outbound.is_final) for outbound in e.outbounds] == [("one two three", True)]
-    assert e.admission.calls.count("run_read") == 2, "Before and after the answer's files, and no more"
+    frames = [SimpleNamespace(event=event, data={}, id=None) for event in ("metadata", "values", "values")]
+    e.stream.parts = iter(frames)
+    await asyncio.wait_for(e.manager._handle_chat(e.message), 2)
+    assert e.stream.closed and len(list(e.stream.parts)) == 2, "Nothing past the first frame is read"
+    assert not e.outbounds, "It was no answer, so nobody is told one"
+    assert e.client.runs.stream.call_args.kwargs["on_disconnect"] == "continue", "Closing the stream must not cancel the run"
+
+
+@pytest.mark.asyncio
+async def test_a_stream_still_going_is_closed_after_its_first_frame(setup):
+    from app.channels.execution_client import ChannelExecutionFacade
+    from app.telegram_bots.gateway_client import GatewayClientOwner
+
+    e = setup
+    closed, never = asyncio.Event(), asyncio.Event()
+
+    class LiveStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'event: metadata\ndata: {"run_id":"run"}\n\n'
+            await never.wait()
+
+        async def aclose(self):
+            closed.set()
+
+    def respond(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"thread_id": "original-thread", "owner_user_id": "owner", "agent_instance": None, "metadata": {"channel_agent_name": "lead_agent"}})
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=LiveStream())
+
+    owner = GatewayClientOwner(gateway_url="https://gateway.example", langgraph_url="https://runtime.example/prefix/api", transport=httpx.MockTransport(respond))
+    scope = replace(e.context.scope, endpoint_id=owner.endpoint_id)
+    e.message.execution_context = ChannelExecutionContext(scope, ChannelExecutionFacade(owner, scope=scope, admission=e.admission), e.admission)
+    try:
+        await asyncio.wait_for(e.manager._handle_chat(e.message), 2)
+        assert closed.is_set(), "The answer goes on for hours, and this connection does not"
+    finally:
+        await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_never_shows_keeps_its_worker_until_it_does(setup):
+    e = setup
+    first_frame, closed = asyncio.Event(), []
+
+    class Waiting(OwnedStream):
+        async def __anext__(self):
+            await first_frame.wait()
+            return SimpleNamespace(event="metadata", data={}, id=None)
+
+        async def aclose(self):
+            closed.append(True)
+
+    e.client.runs.stream.return_value = Waiting()
+    task = asyncio.create_task(e.manager._handle_chat(e.message))
+    await asyncio.sleep(0.05)
+    assert not task.done(), "Only the first frame proves a run exists, so only then can the message be let go"
+    first_frame.set()
+    await asyncio.wait_for(task, 2)
+    assert closed == [True]
 
 
 @pytest.mark.asyncio
@@ -383,7 +429,7 @@ async def test_worker_captures_the_context_before_async_dedupe_preparation(setup
         release.set()
         await asyncio.wait_for(e.manager.bus.join_inbound(), 2)
         e.client.threads.get.assert_not_called()
-        e.client.runs.wait.assert_not_called()
+        e.client.runs.stream.assert_not_called()
         assert [message.text for message in e.outbounds] == ["Channel execution protocol refused"]
     finally:
         release.set()
@@ -409,7 +455,7 @@ async def test_context_capture_precedes_a_bound_identity_await(setup, monkeypatc
         with pytest.raises(ChannelExecutionProtocolError):
             await task
         e.client.threads.get.assert_not_called()
-        e.client.runs.wait.assert_not_called()
+        e.client.runs.stream.assert_not_called()
     finally:
         release.set()
         await asyncio.gather(task, return_exceptions=True)
@@ -438,13 +484,14 @@ async def test_serialized_wait_refreshes_the_original_admission_before_a_second_
             queued.set()
         return result
 
-    async def waiting(*_args, **_kwargs):
-        entered.set()
-        await release.wait()
-        return {"messages": []}
+    class Waiting(OwnedStream):
+        async def __anext__(self):
+            entered.set()
+            await release.wait()
+            raise StopAsyncIteration
 
     monkeypatch.setattr(e.manager, "_begin_serialized_thread_run", observe)
-    e.client.runs.wait.side_effect = waiting
+    e.client.runs.stream.return_value = Waiting()
     second_admission = Admission()
     second = replace(e.message, execution_context=replace(e.context, scope=replace(e.context.scope, publication_id="b" * 32), admission=second_admission))
     first_task = asyncio.create_task(e.manager._handle_chat(e.message))
@@ -458,7 +505,7 @@ async def test_serialized_wait_refreshes_the_original_admission_before_a_second_
         await first_task
         with pytest.raises(ChannelExecutionProtocolError):
             await second_task
-        assert e.client.runs.wait.await_count == 1
+        assert e.client.runs.stream.call_count == 1
         assert not e.manager._serialized_thread_runs
     finally:
         release.set()
@@ -482,7 +529,7 @@ async def test_policy_await_cannot_replace_the_canonical_target_or_escape_late_r
         release.set()
         with pytest.raises(ChannelExecutionProtocolError):
             await task
-        e.client.runs.wait.assert_not_called()
+        e.client.runs.stream.assert_not_called()
     finally:
         release.set()
         await asyncio.gather(task, return_exceptions=True)
@@ -501,7 +548,12 @@ async def test_literal_current_check_cannot_be_replaced_by_a_truthy_grant(setup,
 @pytest.mark.parametrize("failure,busy", [(ChannelExecutionBusyError(), True), (RuntimeError("409 thread busy private detail"), False)])
 async def test_only_the_typed_busy_exception_is_a_busy_manager_outcome(setup, failure, busy):
     e = setup
-    e.client.runs.wait.side_effect = failure
+
+    class Refused(OwnedStream):
+        async def __anext__(self):
+            raise failure
+
+    e.client.runs.stream.return_value = Refused()
     if busy:
         await e.manager._handle_chat(e.message)
         assert "already processing" in e.outbounds[-1].text
@@ -509,7 +561,7 @@ async def test_only_the_typed_busy_exception_is_a_busy_manager_outcome(setup, fa
         with pytest.raises(ChannelExecutionProtocolError):
             await e.manager._handle_chat(e.message)
         assert not e.outbounds
-    assert e.client.runs.wait.await_count == 1
+    assert e.client.runs.stream.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -599,9 +651,8 @@ async def test_false_none_keeps_the_ordinary_client_and_ignores_metadata_capabil
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("agent", [None, "custom-agent"])
-async def test_actual_facade_and_one_http_owner_receive_the_managers_canonical_creating_body(setup, monkeypatch, streaming, agent):
+async def test_actual_facade_and_one_http_owner_receive_the_managers_canonical_creating_body(setup, monkeypatch, agent):
     from app.channels.execution_client import ChannelExecutionFacade
     from app.telegram_bots.gateway_client import GatewayClientOwner
 
@@ -612,16 +663,13 @@ async def test_actual_facade_and_one_http_owner_receive_the_managers_canonical_c
         calls.append(request)
         if request.method == "GET":
             return httpx.Response(200, json={"thread_id": "original-thread", "owner_user_id": "owner", "agent_instance": None, "metadata": {"channel_agent_name": agent or "lead_agent", **({"agent_name": agent} if agent else {})}})
-        if streaming:
-            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=b'event: values\ndata: {"messages":[{"type":"ai","content":"answer"}]}\n\n')
-        return httpx.Response(200, json={"messages": [{"type": "ai", "content": "answer"}]})
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=b'event: values\ndata: {"messages":[{"type":"ai","content":"answer"}]}\n\n')
 
     owner = GatewayClientOwner(gateway_url="https://gateway.example", langgraph_url="https://runtime.example/prefix/api", transport=httpx.MockTransport(respond))
     scope = replace(e.context.scope, endpoint_id=owner.endpoint_id, agent_name=agent)
     client = ChannelExecutionFacade(owner, scope=scope, admission=e.admission)
     e.message.execution_context = ChannelExecutionContext(scope, client, e.admission)
     e.message.metadata["human_message_kwargs"] = {"forwarded": [{"from": "sender"}], "original_user_content": "retained original"}
-    monkeypatch.setattr(e.manager, "_channel_supports_streaming", lambda _channel: streaming)
     try:
         await e.manager._handle_chat(e.message)
         assert [call.method for call in calls] == ["GET", "POST"]
@@ -639,14 +687,12 @@ async def test_actual_facade_and_one_http_owner_receive_the_managers_canonical_c
         assert human["additional_kwargs"]["original_user_content"] == "retained original"
         assert request.headers["Idempotency-Key"] == scope.publication_id
         assert "execution_context" not in request.content.decode() and "execution_required" not in request.content.decode()
-        assert e.outbounds[-1].text == "answer"
     finally:
         await owner.stop()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [False, True])
-async def test_actual_manager_drain_retains_a_dispatched_result_after_new_run_admission_closes(setup, monkeypatch, streaming):
+async def test_actual_manager_drain_waits_for_a_dispatched_run_to_show_after_new_run_admission_closes(setup, monkeypatch):
     from app.channels.execution_client import ChannelExecutionFacade
     from app.telegram_bots.gateway_client import GatewayClientOwner
 
@@ -681,10 +727,7 @@ async def test_actual_manager_drain_retains_a_dispatched_result_after_new_run_ad
         if request.method == "GET":
             return httpx.Response(200, json={"thread_id": "original-thread", "owner_user_id": "owner", "agent_instance": None, "metadata": {"channel_agent_name": "lead_agent"}})
         dispatched.set()
-        if streaming:
-            return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=response_stream)
-        await release.wait()
-        return httpx.Response(200, json={"messages": [{"type": "ai", "content": "retained answer"}]})
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=response_stream)
 
     async def observe(message):
         if message.text == "Channel execution protocol refused":
@@ -696,7 +739,6 @@ async def test_actual_manager_drain_retains_a_dispatched_result_after_new_run_ad
     e.message.execution_context = ChannelExecutionContext(scope, ChannelExecutionFacade(owner, scope=scope, admission=admission), admission)
     next_scope = replace(scope, publication_id="b" * 32)
     next_message = replace(e.message, execution_context=ChannelExecutionContext(next_scope, ChannelExecutionFacade(owner, scope=next_scope, admission=admission), admission))
-    monkeypatch.setattr(e.manager, "_channel_supports_streaming", lambda _channel: streaming)
     e.manager.bus.subscribe_outbound(observe)
     stop = None
     await e.manager.start()
@@ -713,8 +755,8 @@ async def test_actual_manager_drain_retains_a_dispatched_result_after_new_run_ad
         release.set()
         await asyncio.wait_for(stop, 2)
         assert [call.method for call in calls] == ["GET", "POST", "GET"]
-        assert [message.text for message in e.outbounds] == ["Channel execution protocol refused", "retained answer"]
-        assert not owner.closed and (response_stream.closed if streaming else True)
+        assert [message.text for message in e.outbounds] == ["Channel execution protocol refused"]
+        assert not owner.closed and response_stream.closed
         assert not e.manager._worker_tasks
     finally:
         release.set()
@@ -725,8 +767,7 @@ async def test_actual_manager_drain_retains_a_dispatched_result_after_new_run_ad
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [False, True])
-async def test_actual_worker_transport_ambiguity_never_requeues_or_retries_a_model_post(setup, monkeypatch, streaming):
+async def test_actual_worker_transport_ambiguity_never_requeues_or_retries_a_model_post(setup, monkeypatch):
     from app.channels.execution_client import ChannelExecutionFacade
     from app.telegram_bots.gateway_client import GatewayClientOwner
 
@@ -744,7 +785,6 @@ async def test_actual_worker_transport_ambiguity_never_requeues_or_retries_a_mod
     e.message.execution_context = ChannelExecutionContext(scope, ChannelExecutionFacade(owner, scope=scope, admission=e.admission), e.admission)
     e.message.workspace_id = "workspace"
     e.message.metadata["event_id"] = "event"
-    monkeypatch.setattr(e.manager, "_channel_supports_streaming", lambda _channel: streaming)
     await e.manager.start()
     try:
         await e.manager.bus.publish_inbound(e.message)
