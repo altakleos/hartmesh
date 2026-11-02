@@ -42,9 +42,11 @@ logger = logging.getLogger(__name__)
 
 _AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
 _NATIVE_SLOT_INVENTORY_DEADLINE = ContextVar("native_slot_inventory_deadline", default=None)
+_PARTIAL_SET_PASSES = 3
+_PARTIAL_SET_SECONDS = 60
 
 
-def _native_creation_diagnostic(error: NativeCreateUnconfirmed) -> str:
+def _native_creation_diagnostic(error: NativeCreateUnconfirmed, *, withdrawn: bool = False) -> str:
     """Log bounded causal locations, never exception text or subprocess payloads."""
 
     def bounded_name(value):
@@ -71,7 +73,7 @@ def _native_creation_diagnostic(error: NativeCreateUnconfirmed) -> str:
                 cause[field] = value
         causes.append(cause)
         current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
-    return json.dumps({"attempt_id": attempt_id, "primary_submitted": getattr(handoff, "submitted", False) is True, "causes": causes, "truncated": current is not None}, separators=(",", ":"))
+    return json.dumps({"attempt_id": attempt_id, "primary_submitted": getattr(handoff, "submitted", False) is True, "withdrawn": withdrawn, "causes": causes, "truncated": current is not None}, separators=(",", ":"))
 
 
 class ChatMountMismatch(BackingUnavailable):
@@ -1361,7 +1363,8 @@ class LocalContainerBackend(SandboxBackend):
                 break
             except NativeCreateUnconfirmed as exc:
                 release_port(port)
-                logger.warning("Managed native sandbox creation unconfirmed: %s", _native_creation_diagnostic(exc))
+                withdrawn = self._withdraw_unsubmitted(native_bridge, exc.handoff, sandbox_id)
+                logger.warning("Managed native sandbox creation unconfirmed: %s", _native_creation_diagnostic(exc, withdrawn=withdrawn))
                 # A nonzero CLI reply is never permission to submit another
                 # request or adopt a conflicting name past pending evidence.
                 raise
@@ -1404,6 +1407,54 @@ class LocalContainerBackend(SandboxBackend):
             owner=self._owner_from_labels(owner_labels),
             chat_storage_enabled=storage_labels is not None,
         )
+
+    def _withdraw_unsubmitted(self, bridge, handoff, sandbox_id: str) -> bool:
+        """Let one failed start cost one attempt, not the owner's sandboxes for good.
+
+        Nothing else clears a pending record. One that sent no primary reserves
+        nothing, but it does keep this name to this worker, so the set goes first.
+        Any doubt leaves it in place, because refusing is the safe answer.
+        """
+        if handoff is None or handoff.submitted:
+            return False
+        try:
+            if self._network_mode != "open" and not self._remove_partial_set(sandbox_id):
+                return False
+            bridge.withdraw(handoff)
+            return True
+        except Exception as exc:
+            logger.warning("Native create attempt %s stays reserved: %s", handoff.attempt.id, type(exc).__name__)
+            return False
+
+    def _remove_partial_set(self, sandbox_id: str) -> bool:
+        """The set was absent before this attempt, so these names are its own.
+
+        A stopped ``--rm`` proxy keeps its networks until the daemon has finished
+        removing it, so one pass can leave them behind. A failed start used to
+        return at once, so all of this shares one deadline.
+        """
+        inherited = _NATIVE_SLOT_INVENTORY_DEADLINE.get()
+        deadline = time.monotonic() + _PARTIAL_SET_SECONDS
+        token = _NATIVE_SLOT_INVENTORY_DEADLINE.set(min(deadline, inherited) if inherited is not None else deadline)
+        try:
+            for attempt in range(_PARTIAL_SET_PASSES):
+                if attempt:
+                    time.sleep(1)
+                if self._partial_set_gone(sandbox_id):
+                    return True
+                self._cleanup_restricted_resources(sandbox_id, stop_sandbox=False)
+            return self._partial_set_gone(sandbox_id)
+        finally:
+            _NATIVE_SLOT_INVENTORY_DEADLINE.reset(token)
+
+    def _partial_set_gone(self, sandbox_id: str) -> bool:
+        """A read Docker refused proves nothing yet, and the removal after it may still work."""
+        try:
+            return self._restricted_resources_status(sandbox_id) == "missing"
+        except StorageHostUnqualified:
+            raise
+        except RuntimeError:
+            return False
 
     def prepare_resident(self, sandbox_id, container_name, extra_mounts, labels):
         """Prepare one stopped workspace through the existing native builder."""

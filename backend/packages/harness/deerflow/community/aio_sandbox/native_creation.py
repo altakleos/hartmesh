@@ -154,6 +154,23 @@ class NativeCreateHandoffs:
             handoff.submitted = True
             self._touch(handoff.attempt)
 
+    def require_unsubmitted(self, handoff):
+        """`submitted` lives only in memory, so only `record_pending`'s own handoff can answer.
+
+        A restored handoff has no sandbox id, and its False means nothing.
+        """
+        with self.lock:
+            self._current(handoff)
+            if handoff.sandbox_id is None or handoff.submitted or handoff.verified is not None or handoff.acknowledged:
+                raise StorageHostUnqualified("Only an unsubmitted request of this process can be withdrawn")
+
+    def withdrawn(self, handoff):
+        """Its journal record is gone. An older snapshot must not bring it back."""
+        with self.lock:
+            self._current(handoff)
+            self._items.pop(handoff.attempt.id)
+            self._touch(handoff.attempt)
+
     def record_acknowledged(self, handoff):
         with self.lock:
             self._current(handoff)
@@ -416,6 +433,22 @@ class NativeCreateBridge:
         except Exception as exc:
             self._check_failure_evidence()
             raise NativeCreateUnconfirmed(handoff) from exc
+
+    def withdraw(self, handoff):
+        """Drop an attempt that never sent its primary, so no container of it can exist.
+
+        This releases, so it stays allowed while the runtime closes: a shutdown
+        during a cold start is how an ordinary start meets this path. It still
+        needs physical ownership and the current daemon.
+        """
+        try:
+            self.assert_current(teardown=True)
+            self.handoffs.require_unsubmitted(handoff)
+            self.evidence.withdraw(handoff.attempt)
+            self.handoffs.withdrawn(handoff)
+        except Exception:
+            self._check_failure_evidence()
+            raise
 
     def submit(self, *, name, labels, command, runner, handoff=None):
         try:

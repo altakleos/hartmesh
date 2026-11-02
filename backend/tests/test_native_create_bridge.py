@@ -34,9 +34,11 @@ def fixture(tmp_path):
     (pool / ".native-creates").mkdir(mode=0o700)
     journal = NativeCreateEvidence(pool, daemon_id="daemon-A")
     state = NativeCreateHandoffs(daemon_id="daemon-A", lock=Lock())
-    owner = SimpleNamespace(live=True, daemon="daemon-A")
+    owner = SimpleNamespace(live=True, daemon="daemon-A", lost=False)
 
     def check_owner(*, teardown=False):
+        if owner.lost:
+            raise StorageHostUnqualified("Runtime ownership lost")
         if not owner.live and not teardown:
             raise StorageHostUnqualified("Runtime closing")
 
@@ -223,6 +225,90 @@ def test_callback_failure_after_pending_publication_submits_nothing(fixture, mon
         bridge.submit(name="native-a", labels=LABELS, command=command(), runner=runner)
     assert calls == [] and len(journal.pending()) == 1
     assert state.pending_for(owner_id="alice")
+
+
+def test_an_attempt_that_sent_nothing_is_withdrawn_and_frees_its_owner(fixture):
+    journal, state, bridge, _owner = fixture
+    handoff = bridge.begin(name="native-a", labels=LABELS)
+    bridge.withdraw(handoff)
+    assert journal.pending() == () and not state.pending_for(owner_id="alice")
+    bridge.require_admissible(name="native-a", owner_id="alice")
+    runner, calls, _observed = engine(journal)
+    assert bridge.submit(name="native-a", labels=LABELS, command=command(), runner=runner) == CONTAINER
+    assert len(calls) == 2
+
+
+def test_a_withdrawn_handoff_cannot_send_its_primary(fixture):
+    journal, _state, bridge, _owner = fixture
+    handoff = bridge.begin(name="native-a", labels=LABELS)
+    bridge.withdraw(handoff)
+    runner, calls, _observed = engine(journal)
+    with pytest.raises(StorageHostUnqualified):
+        bridge.submit(name="native-a", labels=LABELS, command=command(), runner=runner, handoff=handoff)
+    assert calls == [] and journal.pending() == ()
+
+
+def test_a_sent_primary_can_never_be_withdrawn(fixture):
+    journal, state, bridge, _owner = fixture
+    handoff = bridge.begin(name="native-a", labels=LABELS)
+    runner, _calls, observed = engine(journal, error=RuntimeError("uncertain"))
+    with pytest.raises(StorageHostUnqualified):
+        bridge.submit(name="native-a", labels=LABELS, command=command(), runner=runner, handoff=handoff)
+    with pytest.raises(StorageHostUnqualified):
+        bridge.withdraw(handoff)
+    assert journal.pending() == (observed[0],) and state.pending_for(owner_id="alice")
+
+
+@pytest.mark.parametrize("fault", ["owner", "daemon"])
+def test_withdrawal_needs_the_current_owner_and_daemon(fixture, fault):
+    journal, state, bridge, owner = fixture
+    handoff = bridge.begin(name="native-a", labels=LABELS)
+    if fault == "owner":
+        owner.lost = True
+    else:
+        owner.daemon = "daemon-B"
+    with pytest.raises(StorageHostUnqualified):
+        bridge.withdraw(handoff)
+    assert len(journal.pending()) == 1 and state.pending_for(owner_id="alice")
+
+
+def test_a_closing_runtime_can_still_withdraw(fixture):
+    journal, state, bridge, owner = fixture
+    handoff = bridge.begin(name="native-a", labels=LABELS)
+    owner.live = False
+    assert not bridge.ready
+    bridge.withdraw(handoff)
+    assert journal.pending() == () and not state.pending_for(owner_id="alice")
+
+
+def test_a_passing_daemon_fault_during_withdrawal_leaves_admission_open(fixture, monkeypatch):
+    journal, state, bridge, _owner = fixture
+    handoff = bridge.begin(name="native-a", labels=LABELS)
+    check_daemon, faults = bridge._check_daemon, [StorageHostUnqualified("Daemon unavailable")]
+
+    def blip():
+        if faults:
+            raise faults.pop()
+        check_daemon()
+
+    monkeypatch.setattr(bridge, "_check_daemon", blip)
+    with pytest.raises(StorageHostUnqualified):
+        bridge.withdraw(handoff)
+    assert bridge.ready, "One failed withdrawal must not close sandboxes for everyone"
+    assert len(journal.pending()) == 1 and state.pending_for(owner_id="alice")
+
+
+def test_a_failed_journal_removal_keeps_the_handoff_counted(fixture, monkeypatch):
+    journal, state, bridge, owner = fixture
+    handoff = bridge.begin(name="native-a", labels=LABELS)
+    # Closing stops requalification from adding the record back, so this reads the handoff itself.
+    owner.live = False
+    monkeypatch.setattr(journal, "withdraw", lambda attempt: (_ for _ in ()).throw(OSError("not removed")))
+    with pytest.raises(OSError):
+        bridge.withdraw(handoff)
+    assert state._items[handoff.attempt.id] is handoff, "Memory lets go only after the journal has"
+    with state.lock:
+        assert state.extra_slots_locked(starting={}, known_container_ids=set()) == 1
 
 
 def test_same_handoff_cannot_resubmit_an_unreturned_primary_command(fixture):

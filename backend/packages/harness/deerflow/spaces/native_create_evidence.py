@@ -432,6 +432,19 @@ class NativeCreateEvidence:
             os.unlink(attempt.id + ".json", dir_fd=self._directory_fd)
             os.fsync(self._directory_fd)
 
+    def withdraw(self, attempt):
+        """Remove a pending attempt whose caller proved no primary request was sent."""
+        with self._lock:
+            self._assert_current()
+            if not isinstance(attempt, NativeCreateAttempt) or attempt.daemon_id != self.daemon_id or attempt.phase != "pending":
+                raise StorageHostUnqualified("Only this daemon's exact pending attempt can be withdrawn")
+            name = attempt.id + ".json"
+            if self._read(name)[0] != attempt:
+                raise StorageHostUnqualified("Native create attempt changed before withdrawal")
+            os.unlink(name, dir_fd=self._directory_fd)
+            os.fsync(self._directory_fd)
+            self._assert_current()
+
     @staticmethod
     def _encode_teardown(record):
         if not isinstance(record, (NativeTeardownRecord, NativeResidentRecord)):

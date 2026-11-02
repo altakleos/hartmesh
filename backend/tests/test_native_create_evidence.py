@@ -2,6 +2,7 @@
 
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -276,6 +277,81 @@ def test_restart_can_prune_only_valid_durable_acknowledgment_for_same_daemon(poo
         assert list((pool / ".native-creates").iterdir()) == []
     finally:
         same.close()
+
+
+def test_withdrawal_removes_a_pending_attempt_durably(pool):
+    first = evidence(pool)
+    attempt = begin(first)
+    first.withdraw(attempt)
+    assert first.pending() == ()
+    first.require_admissible(owner_id=attempt.owner_id, name=attempt.name)
+    first.close()
+    second = evidence(pool)
+    try:
+        assert second.pending() == ()
+    finally:
+        second.close()
+
+
+def test_withdrawal_is_durable_before_it_reports_success(pool, monkeypatch):
+    store = evidence(pool)
+    try:
+        attempt = begin(store)
+        steps, unlink, fsync, current = [], os.unlink, os.fsync, store._assert_current
+        monkeypatch.setattr(os, "unlink", lambda *args, **kwargs: (steps.append("unlink"), unlink(*args, **kwargs))[1])
+        monkeypatch.setattr(os, "fsync", lambda descriptor: (steps.append("fsync"), fsync(descriptor))[1])
+        monkeypatch.setattr(store, "_assert_current", lambda: (steps.append("current"), current())[1])
+        store.withdraw(attempt)
+        assert steps == ["current", "unlink", "fsync", "current"]
+    finally:
+        store.close()
+
+
+def test_withdrawal_of_a_mountless_attempt_removes_it(pool):
+    store = evidence(pool)
+    try:
+        attempt = store.begin_mountless(owner_id="alice", thread_id="chat-a", name="hartmesh-native-a")
+        store.withdraw(attempt)
+        assert store.pending() == ()
+    finally:
+        store.close()
+
+
+def test_a_failed_withdrawal_keeps_the_attempt_across_restart(pool, monkeypatch):
+    first = evidence(pool)
+    attempt = begin(first)
+    monkeypatch.setattr(os, "unlink", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("not removed")))
+    with pytest.raises(OSError):
+        first.withdraw(attempt)
+    monkeypatch.undo()
+    assert first.pending() == (attempt,)
+    first.close()
+    second = evidence(pool)
+    try:
+        assert second.pending() == (attempt,)
+    finally:
+        second.close()
+
+
+def test_withdrawal_refuses_what_it_did_not_begin(pool):
+    from dataclasses import replace
+
+    first = evidence(pool)
+    attempt = begin(first)
+    try:
+        for other in (replace(attempt, thread_id="chat-b"), replace(attempt, phase="acknowledged", container_id=CONTAINER), SimpleNamespace(id=attempt.id)):
+            with pytest.raises(StorageHostUnqualified):
+                first.withdraw(other)
+        assert first.pending() == (attempt,)
+    finally:
+        first.close()
+    second = evidence(pool, daemon="daemon-B")
+    try:
+        with pytest.raises(StorageHostUnqualified):
+            second.withdraw(attempt)
+        assert second.pending() == (attempt,)
+    finally:
+        second.close()
 
 
 def test_pending_attempt_from_another_daemon_cannot_be_acknowledged(pool):
