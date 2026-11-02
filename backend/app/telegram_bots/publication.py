@@ -562,6 +562,24 @@ class PublicationCoordinator:
 
         return await self._call(perform, timeout=OUTPUT_READ_TIMEOUT_SECONDS)
 
+    async def newest_run_id(self, record: PublicationRecord, current_link: BotLink) -> str | None:
+        """The conversation's newest run, which is how a card learns it was passed by on the web."""
+        try:
+            self._check_open(creating=False)
+            record, current_link = deepcopy(record), deepcopy(current_link)
+            self._record_link(record, current_link)
+        except Exception:
+            _refuse()
+
+        async def perform(control):
+            admission, _, _ = await self._attempt(current_link, record.scope, control)
+            control.final_check = lambda: admission.check("source_read")
+            page = await self._facade(record, admission).list_runs_page(limit=1)
+            admission.check("source_read")
+            return page.data[0].row["run_id"] if page.data else None
+
+        return await self._call(perform, timeout=OUTPUT_READ_TIMEOUT_SECONDS)
+
     async def _locate(self, record, admission, read_guard, facade, max_pages, *, metadata):
         def matches(run):
             saved = run.row.get("metadata")

@@ -124,7 +124,7 @@ def present_form(raw, form, *, thread_id, reply_to_message_id, locale, view="fie
             pairs.append((field["label"], _display_value(value, locale)))
         if pairs:
             label, first = pairs[0]
-            value = first + "".join(f"\n{label}: {value}" for label, value in pairs[1:])
+            value = first + "".join("\n" + render_plain("clarify.form_answer", locale, label=label, value=value) for label, value in pairs[1:])
             html = render("clarify.form_review", locale, label=label, value=value)
         else:
             html = render("clarify.form_review", locale, label="", value="").split("\n", 1)[0]
@@ -139,8 +139,11 @@ def present_form(raw, form, *, thread_id, reply_to_message_id, locale, view="fie
     field = fields[form.field_index]
     payload = {**payload, "field": field["name"]}
     html = render("clarify.form_field", locale, n=form.field_index + 1, total=len(fields), label=field["label"])
+    if field.get("placeholder"):
+        html += "\n" + escape(field["placeholder"])
     if include_question:
-        html = escape(request["question"]) + "\n\n" + html
+        intro = request["question"] + ("\n\n" + request["context"] if request.get("context") else "")
+        html = escape(intro) + "\n\n" + html
     kind = field["type"]
     keyboard = []
     if kind in {"select", "multi_select"}:
@@ -222,6 +225,25 @@ class HumanInputs:
             raise ChannelExecutionProtocolError() from None
         if source is None or source.basis != item.payload["reply_basis"]["outcome"]["request_basis"]:
             raise CallbackRefused() from None
+        return source
+
+    async def _waiting_source(self, link, item):
+        """A card's source, for what would answer it. Closing one needs no such check.
+
+        The conversation may have gone on from the web, and an answer here would start a run
+        from an old one. Only Telegram input closes a card, so its run being the newest is the proof.
+        """
+        from app.channels.execution import ChannelExecutionProtocolError
+        from app.telegram_bots.callbacks import CallbackRefused
+        from app.telegram_bots.publication import PublicationRefused
+
+        source = await self._source_for(link, item)
+        try:
+            newest = await self.source.coordinator.newest_run_id(source.record, link)
+        except PublicationRefused:
+            raise ChannelExecutionProtocolError() from None
+        if newest != source.record.run_id:
+            raise CallbackRefused("net.stale" if decode_request(source.request)["source"] == "sandbox_network" else "stale.not_waiting")
         return source
 
     async def plan_terminal(self, record, link, *, guard=None):
@@ -340,7 +362,7 @@ class HumanInputs:
         item = await self.services.outbox.get(link, identity)
         if item is None:
             raise CallbackRefused() from None
-        source = await self._source_for(link, item)
+        source = await self._waiting_source(link, item)
         return link, item, source, _InputGuard(self, channel, link)
 
     async def execute_callback(self, channel, row, *, update_id, query_id=None):
@@ -647,7 +669,7 @@ class HumanInputs:
             await self._closed_notice(link, origin, prompt, guard=guard)
             return True
         try:
-            source = await self._source_for(link, item)
+            source = await self._waiting_source(link, item)
         except CallbackRefused:
             await self._closed_notice(link, origin, prompt, guard=guard, unavailable=True)
             return True
@@ -705,7 +727,7 @@ class HumanInputs:
         source = None
         if item.payload.get("reply_basis", {}).get("version") in {5, 7} and (form_open or any(row.consumed_at is None for row in rows)):
             try:
-                source = await self._source_for(link, item)
+                source = await self._waiting_source(link, item)
             except (ValueError, ChannelExecutionProtocolError):
                 pass  # Without its source nothing here can be answered, which is what the retired notice says.
         if source is not None:
@@ -787,7 +809,7 @@ class HumanInputs:
                 from app.channels.execution import ChannelExecutionProtocolError
 
                 try:
-                    source = await self._source_for(link, item)
+                    source = await self._waiting_source(link, item)
                 except (ValueError, ChannelExecutionProtocolError):
                     source = None
         settings = await self.services.settings.get(link.owner_user_id)

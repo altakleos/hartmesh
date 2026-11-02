@@ -41,6 +41,69 @@ async def click(e, kind, identity, *, target=701, send=False, result_id=None, op
 
 
 @pytest.mark.asyncio
+async def test_a_card_left_open_while_the_conversation_went_on_from_the_web_says_so(ui):
+    e = ui
+    await show(e, request(options=[{"id": "a", "label": "A", "value": "A"}]))
+    e.newer_run = {"run_id": "a-later-run-from-the-web", "created_at": "2031-01-01T00:00:00+00:00"}
+    callback = await button(e, "clarify_option", option_id="a")
+    e.request.enqueue("answerCallbackQuery")
+    e.request.enqueue("sendMessage", result=sent(e, identity=702))
+    assert await e.channel.handle_update(press(e, 1490, callback, message_id=701))
+    await drain(e)
+    e.services.turns.accept_staged.assert_not_awaited()
+    assert "Nothing is waiting" in next(call for call in reversed(e.request.calls) if call.endpoint == "sendMessage").parameters["text"], "It would start a run from an old answer"
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_site_passed_by_on_the_web_can_be_asked_for_again(ui):
+    e = ui
+    await show(
+        e,
+        request(
+            source="sandbox_network",
+            input_mode="single_choice",
+            details={"host": "example.test", "port": 8443, "ttl_seconds": 300},
+            options=[{"id": "allow_temporary", "label": "Allow", "value": "allow_temporary"}, {"id": "deny", "label": "Deny", "value": "deny"}],
+        ),
+    )
+    e.newer_run = {"run_id": "a-later-run-from-the-web", "created_at": "2031-01-01T00:00:00+00:00"}
+    callback = await button(e, "network")
+    e.request.enqueue("answerCallbackQuery")
+    e.request.enqueue("sendMessage", result=sent(e, identity=702))
+    assert await e.channel.handle_update(press(e, 1491, callback, message_id=701))
+    await drain(e)
+    assert "no longer waiting" in next(call for call in reversed(e.request.calls) if call.endpoint == "sendMessage").parameters["text"]
+
+
+@pytest.mark.asyncio
+async def test_closing_a_card_the_web_passed_by_still_clears_it(ui):
+    e = ui
+    await show(e, request(options=[{"id": "a", "label": "A", "value": "A"}]))
+    e.newer_run = {"run_id": "a-later-run-from-the-web", "created_at": "2031-01-01T00:00:00+00:00"}
+    incoming = message(e, 1492, content="Continue without choosing")
+    origin, _ = await e.services.outbox.inbox.accept(e.link, incoming, sanitized_input={"type": "text", "text": incoming.message.text})
+    origin = await e.services.outbox.inbox.route(origin, kind="turn", target_id=e.link.agent_ref, basis={"input_profile": {"version": 1, "kind": "plain_text", "forwarded": False}}, operation_ids=[])
+    await e.services.human_inputs.before_plain_publication(e.channel, e.link, [origin])
+    e.request.enqueue("editMessageReplyMarkup", result=sent(e, identity=701))
+    await drain(e)
+    assert e.request.calls[-1].endpoint == "editMessageReplyMarkup", "Its spent buttons do not stay on screen"
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_that_cannot_say_which_run_is_newest_does_not_answer_the_card(ui):
+    e = ui
+    await show(e, request(options=[{"id": "a", "label": "A", "value": "A"}]))
+    e.newer_run = {"created_at": "not-a-date"}  # A row this page refuses to read.
+    callback = await button(e, "clarify_option", option_id="a")
+    e.request.enqueue("answerCallbackQuery")
+    e.request.enqueue("sendMessage", result=sent(e, identity=702))
+    assert await e.channel.handle_update(press(e, 1493, callback, message_id=701))
+    await drain(e)
+    e.services.turns.accept_staged.assert_not_awaited()
+    assert "Tap again" in next(call for call in reversed(e.request.calls) if call.endpoint == "sendMessage").parameters["text"]
+
+
+@pytest.mark.asyncio
 async def test_other_answer_is_saved_once_and_replay_does_not_become_plain(ui):
     e = ui
     await show(e, request())

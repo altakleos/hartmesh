@@ -31,6 +31,7 @@ from deerflow.persistence.telegram_bots.model import TelegramCallbackRow
 async def ui(db, monkeypatch):
     e = await setup(db, monkeypatch)
     e.seed = None
+    e.newer_run = {}
 
     async def respond(incoming):
         if incoming.url.path == "/api/threads/request-thread":
@@ -39,7 +40,10 @@ async def ui(db, monkeypatch):
             return httpx.Response(200, headers=ACK, json=e.seed["projection"])
         if incoming.url.path.endswith("/messages"):
             return httpx.Response(200, headers=ACK, json={"data": e.seed["messages"], "has_more": False})
-        return httpx.Response(200, headers=ACK, json={**run_row(e.record), "metadata": {"channel_turn_id": e.record.publication_id}, "status": "success"})
+        row = {**run_row(e.record), "metadata": {"channel_turn_id": e.record.publication_id}, "status": "success"}
+        if incoming.url.path.endswith("/runs/page"):
+            return httpx.Response(200, headers=ACK, json={"data": [{**row, **e.newer_run}], "has_more": False, "next_before_created_at": None, "next_before_run_id": None})
+        return httpx.Response(200, headers=ACK, json=row)
 
     http = GatewayClientOwner(gateway_url="http://gateway.test", langgraph_url="http://gateway.test/api", transport=httpx.MockTransport(respond))
     host = PublicationAttemptAuthority(links=db.links, authority=e.live.authority, client=http, channel=e.services.channel, create_allowed=e.services.send_allowed, read_allowed=e.services.send_allowed)

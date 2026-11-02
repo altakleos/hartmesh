@@ -52,6 +52,77 @@ async def test_draft_coalesces_activity_and_reappears_after_a_chat_send(db, monk
 
 
 @pytest.mark.asyncio
+async def test_a_preview_keeps_off_a_flood_wait_and_off_a_message_it_cannot_edit(db, monkeypatch):
+    e = await ingress(db, monkeypatch=monkeypatch, lead=True)
+    module = importlib.import_module("app.telegram_bots.streaming")
+    view = module.LivePresentation(channel=e.channel, link=e.channel.link, draft_id=1102, topic=None, is_current=lambda: True, observer=None)
+
+    def drafts():
+        return len([call for call in e.request.calls if call.endpoint == "sendMessageDraft"])
+
+    try:
+        e.request.enqueue("sendMessageDraft")
+        await view.start()
+        await view.activity("activity.read", {"file": "first.txt"})
+        e.request.enqueue("sendMessageDraft", status=429, body={"ok": False, "error_code": 429, "description": "Too Many Requests", "parameters": {"retry_after": 60}})
+        e.clock.advance(1)
+        await view.flush()
+        assert drafts() == 2
+        await view.activity("activity.read", {"file": "second.txt"})
+        e.clock.advance(30)
+        await view.flush()
+        assert drafts() == 2, "Telegram said a minute, and asking every second adds to the flood"
+        e.clock.advance(31)
+        e.request.enqueue("sendMessageDraft")
+        await view.flush()
+        assert drafts() == 3
+    finally:
+        await view.close()
+        await e.channel.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_preview_leaves_a_message_it_cannot_edit_and_goes_on_with_a_new_one(db, monkeypatch):
+    e = await setup(db, monkeypatch)
+    module = importlib.import_module("app.telegram_bots.streaming")
+
+    async def protected(_context):
+        return True
+
+    e.services.protect_notice = protected
+    view = module.LivePresentation(channel=e.channel, link=e.channel.link, draft_id=1122, topic=None, is_current=lambda: True, observer=None)
+    own_view(view)
+
+    def edits():
+        return [call for call in e.request.calls if call.endpoint == "editMessageText"]
+
+    try:
+        e.request.enqueue("sendMessage", result=sent(e, identity=601))
+        await view.start()
+        await drain(e)
+        await view.activity("activity.read", {"file": "first.txt"})
+        e.request.enqueue("editMessageText", status=400, body={"ok": False, "error_code": 400, "description": "Bad Request: message to edit not found"})
+        await view.flush()
+        assert len(edits()) == 1 and view._gone_anchor == 601
+        e.clock.advance(1)
+        await view.activity("activity.read", {"file": "second.txt"})
+        await view.flush()
+        assert len(edits()) == 1, "No retry can bring a deleted message back"
+        view._anchor = 602  # A later model span plans its own message.
+        e.request.enqueue("editMessageText", result=sent(e, identity=602))
+        e.clock.advance(1)
+        await view.activity("activity.read", {"file": "third.txt"})
+        await view.flush()
+        assert len(edits()) == 2 and edits()[-1].parameters["message_id"] == 602, "The next message is not silenced with the old one"
+        e.request.enqueue("deleteMessage")
+        await view.abandon()
+    finally:
+        await view.close()
+        await e.sender.stop()
+        await e.channel.stop()
+
+
+@pytest.mark.asyncio
 async def test_retired_draft_and_unrelated_stop_cannot_use_later_binding(db, monkeypatch):
     e = await ingress(db, monkeypatch=monkeypatch, lead=True)
     module = importlib.import_module("app.telegram_bots.streaming")

@@ -90,6 +90,7 @@ TEXTS: dict[str, str] = {
     "clarify.form_no": "否",
     "clarify.form_done": "完成",
     "clarify.form_review": "是否发送这些回答？\n{label}：{value}",
+    "clarify.form_answer": "{label}：{value}",
     "net.ask_plain": "一个步骤尝试访问被阻止的 {host}。允许访问 {host} {minutes} 分钟，还是继续阻止？",
     "net.allowed": "已允许访问 {host} {minutes} 分钟。正在重试该步骤。",
     "net.kept": "继续阻止 {host}。",

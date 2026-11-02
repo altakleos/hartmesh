@@ -112,6 +112,7 @@ TEXTS: dict[str, str] = {
     "clarify.form_no": "No",
     "clarify.form_done": "Done",
     "clarify.form_review": "Send these answers?\n{label}: {value}",
+    "clarify.form_answer": "{label}: {value}",
     "net.ask_plain": "A step tried to reach {host}, which is blocked. Allow {host} for {minutes} minutes, or keep {host} blocked.",
     "net.allowed": "{host} is allowed for {minutes} minutes. The step is being tried again.",
     "net.kept": "{host} stays blocked.",

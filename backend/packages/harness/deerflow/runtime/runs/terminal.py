@@ -92,7 +92,9 @@ class TerminalWriteFailure(RuntimeError):
 @dataclass(frozen=True)
 class TerminalRecoveryPolicy:
     # Each attempt includes its read and optional conditional write. SQL session
-    # rollback/close must finish before an attempt is considered settled.
+    # rollback/close must finish before an attempt is considered settled. With a
+    # wanted output the read is drained, so a stalled read outlasts `attempt_timeout`
+    # until the database driver gives up, if it is configured to: this is no bound on a hang.
     max_attempts: int = 3
     attempt_timeout: float = 5.0
     retry_delay: float = 0.1

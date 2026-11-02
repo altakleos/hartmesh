@@ -1123,7 +1123,7 @@ class TelegramBotChannel(TelegramChannel):
     async def _run_on_telegram_loop(self, coroutine):
         return await coroutine
 
-    async def live_request(self, link, method, *, is_current, protected=None, **kwargs):
+    async def live_request(self, link, method, *, is_current, protected=None, on_refused=None, **kwargs):
         """Disposable presentation call with a fence inside limiter retries."""
         from app.telegram_bots.authority import require
         from app.telegram_bots.producer import DeliveryClaimRetired
@@ -1159,6 +1159,8 @@ class TelegramBotChannel(TelegramChannel):
         except TelegramError as error:
             self._failure()
             self._log_failure(method, error)
+            if on_refused is not None:
+                on_refused(error)
             return None
         await self._after_any_success()
         return result
