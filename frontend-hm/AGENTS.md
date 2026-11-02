@@ -437,7 +437,7 @@ Telegram screens: [the client guide](src/core/telegram-bots/AGENTS.md).
 
 Managed storage UX uses the existing account-and-role-scoped features query:
 `useStorage` fails closed for absent/malformed/failed answers and polls personal
-preparation every 15 seconds; `useSeats` ignores the actual storage-off zero-seat
+preparation and faults every 15 seconds; `useSeats` ignores the actual storage-off zero-seat
 envelope. HTTP clients retain structured refusal metadata and presentation maps
 it with the current locale. Personal readiness never closes Shared. Files retries
 busy reads every five seconds and retries recovery at most once per failure

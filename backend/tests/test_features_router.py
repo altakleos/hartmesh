@@ -154,6 +154,44 @@ async def test_features_do_not_project_a_person_from_unsupported_identity(startu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "free,failed,bound,own",
+    [
+        pytest.param(9, "user", False, "fault", id="free-seats-and-a-failed-slot"),
+        pytest.param(0, "user", False, "fault", id="this-person-holds-the-last-seat-and-its-slot-failed"),
+        pytest.param(-1, "user", False, "no-seat", id="more-accounts-than-seats-beside-a-failed-slot"),
+        pytest.param(0, None, False, "no-seat", id="every-seat-taken"),
+        pytest.param(9, None, False, "not-assigned", id="free-seats-and-nothing-failed"),
+        pytest.param(9, "assistant", False, "not-assigned", id="another-kinds-slot-failed"),
+        pytest.param(9, "user", True, "not-assigned", id="someone-elses-slot-failed"),
+    ],
+)
+async def test_seats_are_blamed_only_when_they_are_taken(startup, monkeypatch, free, failed, bound, own):
+    from _storage_spaces_test_support import ALICE
+
+    from deerflow.spaces.contract import Custody, MutationMode
+
+    ss, app, config, sf, catalog, _, _ = startup
+    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    files = app.state.storage_spaces
+    slots = {spec.kind: slot for slot, spec in catalog.volumes.items()}
+    original = ss.allowance
+
+    async def allowance(state, kind, **kwargs):
+        return ss.Allowance(10, 10, 31, 10 - free, free) if kind == "user" else await original(state, kind, **kwargs)
+
+    monkeypatch.setattr(ss, "allowance", allowance)
+    if bound:
+        await files.assign(kind="user", actor=ALICE, name="User fixture", custody=Custody.personal(ALICE), mode=MutationMode.NATIVE)
+    else:
+        files.unclaimed_slots["user"].add(slots["user"])
+    if failed is not None:
+        app.state.agent_execution.unverified[slots[failed]] = "fixture hole"
+    response = await _managed_features(startup, user_id="bob")
+    assert response["storage_spaces"]["own"] == own
+
+
+@pytest.mark.asyncio
 async def test_features_report_assigned_unverified_and_no_free_slot_without_reallocating(startup, monkeypatch):
     from _storage_spaces_test_support import ALICE
 

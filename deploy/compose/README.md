@@ -2334,12 +2334,23 @@ normal preparation using the updated image. This preserves the inventory and fil
 `mount-all` does not rewrite fstab or remount an already mounted filesystem; new
 mount options take effect at the next normal unmount/mount maintenance window.
 
-Custom host trim automation must also exclude these loop filesystems. `fstrim -a`
-and direct `fstrim <Space mountpoint>` bypass the fstab exclusion. `nodiscard`
-prevents online discard when blocks are freed; it does not block an explicit
-FITRIM request. Neither this update nor `fstab-sync` repairs an already sparse
-image, and qualification never silently refills one. Inspect unavailable backings
-through the existing storage recovery procedure before resuming work.
+Custom host trim automation must also exclude these loop filesystems. `fstrim -a`,
+the QEMU guest agent's `guest-fstrim` and direct `fstrim <Space mountpoint>` read the
+mount table rather than fstab, so they bypass the exclusion. `nodiscard` prevents
+online discard when blocks are freed; it does not block an explicit FITRIM request.
+
+Normal preparation, which runs at every start, and `si verify --repair` restore a
+trimmed image. They fill its holes in place, on a mounted image and with its files
+intact, within the same data-disk headroom as any growth, and report the spaces and
+bytes as `restored` in their document. A slot the disk cannot restore is listed in
+`problems` and stays refused. `fstab-sync` repairs nothing, the Gateway cannot write
+the images, and qualification never silently refills one, so an image trimmed after
+start stays refused until the next preparation.
+
+Until then `/health` reads `"storage": "incomplete"`, which refuses a rollout that
+waits for `ready`, and someone with no file space yet is told of a storage fault
+rather than a shortage of seats. The Gateway re-verifies every image each minute, so
+both clear without a restart once the images pass.
 
 ### The keys
 
@@ -2797,7 +2808,7 @@ A Docker daemon that does not answer from inside the container is not a refusal 
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `storage` | string | `ready`, `incomplete` or `unavailable`, independently derived from the current storage snapshot. |
+| `storage` | string | `ready`, `incomplete` or `unavailable`, independently derived from the current storage snapshot. `incomplete` means fewer spaces than the keys call for, or a space that failed verification. |
 | `storage_reason` | string or null | With `unavailable`: `disk-too-small`, `storage-pool-missing`, `inventory-unreadable`, `host-unqualified` or `admission-failed`. |
 | `execution` | string | `ready`, `none`, `held` or `unavailable`, derived from storage/plan/hold; not proof of the live Gateway admission gate. |
 | `reason` | string or null | With `unavailable`: `storage-unavailable`, and the storage reason is in `storage_reason`; with `none`: `agents-none`; with `held`: `operator-hold`. |

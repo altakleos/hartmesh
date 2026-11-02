@@ -183,6 +183,7 @@ test("files that are being prepared, an account without a seat and files that di
   for (const [own, sentence] of [
     ["not-assigned", enUS.chat.filesPreparing("Acme")],
     ["no-seat", enUS.chat.filesNoSeat(true, "Acme")],
+    ["fault", enUS.chat.filesFault("Acme")],
     ["unverified", enUS.chat.myFilesUnchecked],
   ] as const) {
     await discovery(page, { ...ready, state: "incomplete", own });

@@ -45,7 +45,10 @@ export function fileAreaNotice(
         storage.own === "unverified"
           ? "space-unverified"
           : "space-not-assigned",
-      detailCode: storage.own === "no-seat" ? "no-seat" : null,
+      detailCode:
+        storage.own === "no-seat" || storage.own === "fault"
+          ? storage.own
+          : null,
       message: "",
     };
   }
@@ -142,10 +145,16 @@ export function storageRefusalSentence(
   }
   if (refusal.code === "storage-busy")
     return context.area === "shared" ? t.shared.busy : t.files.busy;
-  if (refusal.reason === "space-not-assigned")
-    return refusal.detailCode === "no-seat"
-      ? t.chat.filesNoSeat(context.administrator === true, context.support)
+  if (refusal.reason === "space-not-assigned") {
+    if (refusal.detailCode === "no-seat")
+      return t.chat.filesNoSeat(
+        context.administrator === true,
+        context.support,
+      );
+    return refusal.detailCode === "fault"
+      ? t.chat.filesFault(context.support)
       : t.chat.filesPreparing(context.support);
+  }
   if (refusal.reason === "space-unverified")
     return context.area === "shared"
       ? t.shared.unchecked

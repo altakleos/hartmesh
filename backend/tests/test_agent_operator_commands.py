@@ -254,6 +254,26 @@ async def test_status_counts_committed_transitions_since_gateway_start_not_inten
 
 
 @pytest.mark.asyncio
+async def test_status_reads_incomplete_while_a_slot_fails_verification(operator, monkeypatch):
+    from app.gateway.gateway_observation import publish
+
+    lifetime = publish(operator.fixture.path, started_at=datetime.now(UTC) - timedelta(seconds=10))
+    try:
+        assert (await operator.run("status"))["storage"] == "ready"
+        original = operator._slots
+
+        async def failing(snapshot):
+            slots, allowances = await original(snapshot)
+            return [{**slots[0], "state": "unverified"}, *slots[1:]], allowances
+
+        monkeypatch.setattr(operator, "_slots", failing)
+        document = await operator.run("status")
+        assert document["storage"] == "incomplete" and document["storage_reason"] is None
+    finally:
+        lifetime.close()
+
+
+@pytest.mark.asyncio
 async def test_status_refuses_a_gateway_restart_during_its_sql_snapshot(operator, monkeypatch):
     from app.gateway.gateway_observation import GatewayObservationUnavailable, publish
 

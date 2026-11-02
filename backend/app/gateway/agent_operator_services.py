@@ -322,7 +322,8 @@ class OperatorCommands(OperatorActions, OperatorSettlement, OperatorSupervision)
         if self.probe_error is not None and reason is None:
             reason, text = "admission-failed", str(self.probe_error)
         fit = self.fit or await run_file_io(storage_fit, Path(self.config.storage_spaces.inventory_path).parent, self.config.storage_spaces.plan, self.files.catalog)
-        storage = "unavailable" if reason else "incomplete" if any(fit.missing.values()) else "ready"
+        failing = any(row["state"] == "unverified" for row in slots)
+        storage = "unavailable" if reason else "incomplete" if failing or any(fit.missing.values()) else "ready"
         hold = await run_file_io(_hold)
         plan = self.config.storage_spaces.plan
         execution, execution_reason = (

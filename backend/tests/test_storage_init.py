@@ -1,11 +1,14 @@
 """Offline operator behavior; syscall doubles do not qualify native enforcement."""
 
+import hashlib
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -17,6 +20,8 @@ from app.gateway import storage_init as si
 PREFLIGHT = si.StorageInitializer.preflight
 MOUNT_FACTS = si.StorageInitializer.mounted_image_facts
 MOUNT_ROOT_FACTS = si.StorageInitializer._mounted_root_facts
+REAL_FALLOCATE = os.posix_fallocate
+REAL_EXTENTS = si.verify_image_extents
 
 
 @pytest.mark.parametrize("argv", [[], ["unknown"], ["resize"], ["forget"]])
@@ -593,6 +598,187 @@ def test_verify_reports_each_unusable_space_state(verified_operator, monkeypatch
     row = tool.slot_state(spec)
     assert row["state"] == state and row["kind"] == spec.kind
     assert row["detail"] == ("hole" if state == "not-allocated" else None)
+
+
+HOLE = 1 << 20
+
+
+@pytest.fixture
+def allocated(operator, monkeypatch):
+    """Real allocation on real files: the kernel answers, and only the mount stays a double."""
+    monkeypatch.setattr(si.os, "posix_fallocate", REAL_FALLOCATE)
+    monkeypatch.setattr(si, "verify_image_extents", REAL_EXTENTS)
+    return operator
+
+
+def punch(spec):
+    """Leave the hole a discard through the loop driver leaves in the backing image."""
+    subprocess.run(["fallocate", "--punch-hole", "--offset", str(HOLE), "--length", str(HOLE), str(spec.image_path)], check=True, timeout=10)
+
+
+def fully_allocated(spec):
+    fd = os.open(spec.image_path, os.O_RDONLY)
+    try:
+        REAL_EXTENTS(fd, spec.max_bytes)
+    finally:
+        os.close(fd)
+
+
+def digest(spec):
+    return hashlib.sha256(spec.image_path.read_bytes()).hexdigest()
+
+
+def about_one_hole(value):
+    """st_blocks also counts the file's own extent blocks, so a sum can move by a block or two."""
+    return abs(value - HOLE) <= 2 * 4096
+
+
+def test_prepare_restores_what_a_trim_punched_and_keeps_the_content(allocated):
+    tool = allocated[0]
+    tool.prepare()
+    spec = next(iter(tool.load().volumes.values()))
+    fully_allocated(spec)
+    with spec.image_path.open("r+b") as stream:
+        stream.seek(4 * HOLE)
+        stream.write(b"a person's file")
+    before = digest(spec)
+    punch(spec)
+    with pytest.raises(si.BackingUnavailable):
+        fully_allocated(spec)
+    doc = tool.prepare()
+    assert doc["restored"]["spaces"] == 1 and about_one_hole(doc["restored"]["bytes"])
+    assert doc["returncode"] == 0 and "1 restored" in doc["note"]
+    fully_allocated(spec)
+    assert digest(spec) == before
+    assert tool.prepare()["restored"] == {"spaces": 0, "bytes": 0}
+
+
+def test_prepare_finds_a_small_hole_the_block_count_cannot_show(allocated, monkeypatch):
+    tool = allocated[0]
+    tool.prepare()
+    spec = next(iter(tool.load().volumes.values()))
+    punch(spec)
+    original = os.fstat
+
+    def counted(fd):
+        metadata = original(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            return metadata
+        fields = list(metadata)
+        extras = {name: getattr(metadata, name) for name in dir(metadata) if name.startswith("st_")}
+        extras["st_blocks"] = max(metadata.st_blocks, metadata.st_size // 512)
+        return os.stat_result(fields, extras)
+
+    monkeypatch.setattr(si.os, "fstat", counted)
+    tool.restore_allocation(spec)
+    monkeypatch.setattr(si.os, "fstat", original)
+    fully_allocated(spec)
+
+
+def test_a_restored_image_is_logged(allocated, capsys):
+    tool = allocated[0]
+    tool.prepare()
+    spec = next(iter(tool.load().volumes.values()))
+    punch(spec)
+    capsys.readouterr()
+    tool.prepare()
+    assert f"restored space {spec.slot_id}" in capsys.readouterr().err
+
+
+def test_restore_leaves_an_image_of_another_size_for_verification_to_report(allocated):
+    tool = allocated[0]
+    tool.prepare()
+    spec = next(iter(tool.load().volumes.values()))
+    with spec.image_path.open("r+b") as stream:
+        stream.truncate(spec.max_bytes // 2)
+    assert tool.restore_allocation(spec) == 0
+    assert spec.image_path.stat().st_size == spec.max_bytes // 2
+
+
+def test_restore_keeps_the_data_disk_headroom_and_still_restores_the_rest(allocated, monkeypatch):
+    tool = allocated[0]
+    tool.prepare()
+    first, second = list(tool.load().volumes.values())[:2]
+    punch(first)
+    punch(second)
+    original, asked = si.storage_fit, []
+
+    def fit(pool, plan, inventory, **kwargs):
+        value = original(pool, plan, inventory, **kwargs)
+        if kwargs.get("growth_bytes") is None:
+            return value
+        asked.append(kwargs["growth_bytes"])
+        return replace(value, fits=len(asked) > 1)
+
+    monkeypatch.setattr(si, "storage_fit", fit)
+    blocks = first.image_path.stat().st_blocks
+    doc = tool.prepare()
+    assert len(asked) == 2 and all(about_one_hole(value) for value in asked)
+    assert first.image_path.stat().st_blocks == blocks
+    fully_allocated(second)
+    assert doc["restored"]["spaces"] == 1 and about_one_hole(doc["restored"]["bytes"])
+    assert doc["returncode"] == 2 and doc["verdict"] == "incomplete"
+    assert any(first.slot_id in problem and "must stay free" in problem for problem in doc["problems"])
+
+
+def test_prepare_restores_before_it_mounts_or_measures_the_disk(allocated, monkeypatch):
+    tool = allocated[0]
+    order = []
+    for name in ("restore_allocations", "mount_all", "pool_plan"):
+        original = getattr(si.StorageInitializer, name)
+        monkeypatch.setattr(si.StorageInitializer, name, lambda self, *args, _name=name, _original=original, **kwargs: order.append(_name) or _original(self, *args, **kwargs))
+    tool.prepare()
+    assert order[:3] == ["restore_allocations", "mount_all", "pool_plan"]
+
+
+def test_verify_repair_restores_and_plain_verify_only_reports(verified_operator, monkeypatch):
+    tool, spec, _, _ = verified_operator
+    monkeypatch.setattr(si.os, "posix_fallocate", REAL_FALLOCATE)
+    monkeypatch.setattr(si, "verify_image_extents", REAL_EXTENTS)
+    fd = os.open(spec.image_path, os.O_RDWR)
+    try:
+        REAL_FALLOCATE(fd, 0, spec.max_bytes)
+    finally:
+        os.close(fd)
+    punch(spec)
+    blocks = spec.image_path.stat().st_blocks
+    assert tool.slot_state(spec)["state"] == "not-allocated"
+    assert spec.image_path.stat().st_blocks == blocks
+    row = tool.slot_state(spec, repair=True)
+    assert row["state"] == "repaired" and about_one_hole(row["restored_bytes"])
+    fully_allocated(spec)
+    assert tool.slot_state(spec, repair=True)["state"] == "ok"
+
+
+def test_verify_repair_reports_a_restore_the_disk_refuses(verified_operator, monkeypatch):
+    tool, spec, _, _ = verified_operator
+    monkeypatch.setattr(si.os, "posix_fallocate", REAL_FALLOCATE)
+    monkeypatch.setattr(si, "verify_image_extents", REAL_EXTENTS)
+    fd = os.open(spec.image_path, os.O_RDWR)
+    try:
+        REAL_FALLOCATE(fd, 0, spec.max_bytes)
+    finally:
+        os.close(fd)
+    punch(spec)
+    monkeypatch.setattr(si, "storage_fit", lambda *args, **kwargs: SimpleNamespace(fits=False, headroom_bytes=4 << 30, free_bytes=1 << 30))
+    row = tool.slot_state(spec, repair=True)
+    assert row["state"] == "not-allocated" and "must stay free" in row["detail"]
+    with pytest.raises(si.BackingUnavailable):
+        fully_allocated(spec)
+
+
+def test_verify_document_counts_what_it_restored(verified_operator, monkeypatch):
+    tool, spec, _, _ = verified_operator
+    monkeypatch.setattr(si.os, "posix_fallocate", REAL_FALLOCATE)
+    monkeypatch.setattr(si, "verify_image_extents", REAL_EXTENTS)
+    fd = os.open(spec.image_path, os.O_RDWR)
+    try:
+        REAL_FALLOCATE(fd, 0, spec.max_bytes)
+    finally:
+        os.close(fd)
+    punch(spec)
+    doc = tool.verify([spec.slot_id], repair=True)
+    assert doc["restored"]["spaces"] == 1 and about_one_hole(doc["restored"]["bytes"])
 
 
 def test_second_run_refuses_on_lock_without_reading_inventory(operator, monkeypatch):

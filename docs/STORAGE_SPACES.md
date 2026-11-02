@@ -251,7 +251,9 @@ must exclude their mounted filesystems: FITRIM through a loop device punches hol
 in its backing image and invalidates the physical reservation. Compose-generated
 fstab entries carry `X-fstrim.notrim` for the standard scheduled trim service;
 the standalone helper does not manage host fstab, so its operator must supply an
-equivalent exclusion. Direct trim and `fstrim -a` bypass that fstab marker.
+equivalent exclusion. Direct trim, `fstrim -a` and `guest-fstrim` bypass that fstab
+marker. Preparation and `verify --repair` fill the holes as root; qualification and
+the Gateway never do.
 See the [operator trim policy](../deploy/compose/README.md#fixed-image-trim-policy).
 
 The explicit operator helper uses preinstalled tools and prepares only new
@@ -343,13 +345,16 @@ independent so custom-agent clients retain their existing contract. Off deployme
 report zero native counts; failed projection returns unavailable defaults with
 HTTP 200. No byte capacities appear in this response.
 
-Own files are `not-assigned` while an actual assignable user slot remains,
-`no-seat` when none remains, and `unverified` when an assigned binding cannot
+Own files are `not-assigned` while an assignable user slot or a free seat remains,
+`fault` when the slots left to a seated person failed verification, `no-seat` when
+the accounts hold every seat, and `unverified` when an assigned binding cannot
 prove its filesystem. Account seat occupancy does not imply file assignment.
 Status reads close SQL before filesystem verification and grant no admission;
 each file operation still rechecks authority and provider facts. `/health` adds
 only storage/agent state words, preserving its existing fields. Storage failure
 precedes the `none` agent state. It exposes no counts, paths or exception text.
+Maintenance re-verifies every slot each minute and `storage` reads `incomplete`
+while one fails. That answer comes from memory, so `/health` does no filesystem work.
 
 `storage_spaces.user_spaces: false` refuses generic API creation with HTTP 403.
 It also refuses generic grant additions, changes and removals with HTTP 409

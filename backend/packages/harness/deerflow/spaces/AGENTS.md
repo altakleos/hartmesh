@@ -102,7 +102,8 @@ can run a text chat.
 
 Fixed image mounts share `FIXED_VOLUME_MOUNT_OPTIONS`, including `nodiscard`.
 Operators must exclude them from FITRIM; Compose fstab entries use
-`X-fstrim.notrim`. Keep full physical-allocation and FIEMAP qualification intact.
+`X-fstrim.notrim`. Keep full physical-allocation and FIEMAP qualification intact:
+only root's `prepare` and `verify --repair` refill a hole, never qualification.
 Never refill sparse backings automatically. Native CI proves actual trim of an
 unprotected disposable image and retained allocation of an excluded one.
 

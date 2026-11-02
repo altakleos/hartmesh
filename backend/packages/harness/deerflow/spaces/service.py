@@ -390,6 +390,11 @@ class SpaceFiles:
         excluded = set(unverified).union(*self.bound_slots.values(), *self.unclaimed_slots.values())
         return {slot for slot, spec in self.catalog.volumes.items() if getattr(spec, "kind", None) in (kind, None) and slot not in excluded}
 
+    def failed_slots(self, kind, *, unverified):
+        """A host snapshot of unbound capacity that only its failed proof keeps from use."""
+        bound = set().union(*self.bound_slots.values())
+        return {slot for slot, spec in self.catalog.volumes.items() if getattr(spec, "kind", None) in (kind, None) and slot in unverified and slot not in bound}
+
     async def binding_verified(self, space_id):
         """Project backing facts without holding SQL across filesystem proof."""
         async with self.registry._sf() as session:

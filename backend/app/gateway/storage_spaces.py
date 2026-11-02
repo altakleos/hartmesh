@@ -151,7 +151,7 @@ async def storage_state(app) -> StorageState:
     status = app.state.agent_execution
     if status.storage_reason is not None:
         return StorageState("unavailable", status.storage_reason)
-    if status.fit is not None and any(status.fit.missing.values()):
+    if status.unverified or (status.fit is not None and any(status.fit.missing.values())):
         return StorageState("incomplete")
     return StorageState("ready")
 
@@ -416,6 +416,20 @@ async def _mount_verification_step(app, *, timeout: float) -> bool:
     return True
 
 
+async def _reverify(app):
+    """Keep the one answer current: a trim fails an image at any time, and prepare heals it."""
+    status, files = app.state.agent_execution, app.state.storage_spaces
+    if status.mount_pending or status.mount_reverify or status.mount_verify_task is not None:
+        return
+    errors = await run_file_io(_verify_catalog, files.catalog)
+    errors.update(await files.refresh_bound_volumes())
+    for slot in errors.keys() - status.unverified.keys():
+        logger.warning("storage: space %s unverified (%s)", slot, errors[slot])
+    for slot in status.unverified.keys() - errors.keys():
+        logger.info("storage: space %s verified again", slot)
+    status.unverified = errors
+
+
 def _read_pool(config):
     path = Path(config.inventory_path)
     reason, text = None, None
@@ -572,7 +586,7 @@ async def _startup_lines(app, *, counts=None):
         )
         reserved = sum(spec.max_bytes for spec in files.catalog.volumes.values()) / (1 << 30)
         fit = status.fit
-        if state.state == "incomplete":
+        if fit is not None and any(fit.missing.values()):
             missing = sum(fit.missing.values())
             prepared = "; ".join(f"{kind} {fit.present[kind]} of {fit.required[kind]} prepared" for kind in KINDS)
             explanation = (
@@ -976,6 +990,10 @@ async def _maintenance_step(app, *, timeout: float) -> bool:
             logger.warning("agents: unfinished creation cleanup remains pending (%s)", type(error).__name__)
         if (await storage_state(app)).state in ("off", "unavailable"):
             return
+        try:
+            await _reverify(app)
+        except Exception:
+            logger.exception("storage: verification refresh failed; existing facts are kept")
         runtime = getattr(app.state, "resident_runtime", None)
         if runtime is not None and runtime.coordinator.result is not None:
             try:

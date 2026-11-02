@@ -579,6 +579,140 @@ async def test_public_health_reports_words_only_and_storage_failure_precedes_age
     assert (await health())["agents"] == (await health())["storage"] == "off"
 
 
+def _health(state_app, monkeypatch):
+    from app.gateway import app as app_module
+    from app.gateway.auth import mode
+
+    monkeypatch.setattr(mode, "auth_mode", lambda: "local")
+    monkeypatch.setattr(mode, "registration_state", lambda: "closed")
+    app = app_module.create_app()
+    app.state = state_app.state
+    return next(route.endpoint for route in app.routes if getattr(route, "path", None) == "/health")
+
+
+@pytest.mark.asyncio
+async def test_health_leaves_ready_while_an_image_fails_and_returns_without_a_restart(startup, monkeypatch):
+    from deerflow.spaces.backings import BackingUnavailable
+
+    ss, app, config, sf, catalog, _, _ = startup
+    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    health = _health(app, monkeypatch)
+    assert (await health())["storage"] == "ready"
+    slot, healthy = next(iter(catalog.volumes)), catalog.verify
+
+    def trimmed(checked, **kwargs):
+        if checked == slot:
+            raise BackingUnavailable("Backing image is not exclusive, fixed and fully physically allocated")
+        return healthy(checked, **kwargs)
+
+    monkeypatch.setattr(catalog, "verify", trimmed)
+    await ss._reverify(app)
+    answer = await health()
+    assert answer["storage"] == "incomplete"
+    assert {key: answer[key] for key in ("status", "service", "auth_mode", "registration", "agents")} == {"status": "healthy", "service": "deer-flow-gateway", "auth_mode": "local", "registration": "closed", "agents": "ready"}
+    assert app.state.agent_execution.storage_reason is None, "maintenance must keep running to see the image pass"
+    monkeypatch.setattr(catalog, "verify", healthy)
+    await ss._reverify(app)
+    assert (await health())["storage"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_health_does_no_filesystem_work_of_its_own(startup, monkeypatch):
+    ss, app, config, sf, catalog, _, _ = startup
+    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    health = _health(app, monkeypatch)
+    app.state.agent_execution.unverified = {next(iter(catalog.volumes)): "fixture hole"}
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("a health request must not verify a backing")
+
+    monkeypatch.setattr(catalog, "verify", forbidden)
+    assert (await health())["storage"] == "incomplete"
+
+
+@pytest.mark.asyncio
+async def test_reverify_keeps_a_bound_failure_the_catalog_cannot_see(startup, monkeypatch):
+    ss, app, config, sf, catalog, _, _ = startup
+    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    files, slot = app.state.storage_spaces, next(iter(catalog.volumes))
+    monkeypatch.setattr(files, "refresh_bound_volumes", AsyncMock(return_value={slot: "Backing mount/root incarnation changed"}))
+    await ss._reverify(app)
+    assert app.state.agent_execution.unverified == {slot: "Backing mount/root incarnation changed"}
+
+
+@pytest.mark.asyncio
+async def test_reverify_leaves_the_mount_steps_their_own_answer(startup, monkeypatch):
+    ss, app, config, sf, catalog, _, _ = startup
+    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    status = app.state.agent_execution
+    status.unverified = {"held": "fixture"}
+    monkeypatch.setattr(catalog, "verify", AsyncMock(side_effect=AssertionError("mounts are still being settled")))
+    for flag in ("mount_pending", "mount_reverify"):
+        setattr(status, flag, True)
+        await ss._reverify(app)
+        setattr(status, flag, False)
+    assert status.unverified == {"held": "fixture"}
+
+
+@pytest.mark.asyncio
+async def test_reverify_logs_a_change_once(startup, monkeypatch, caplog):
+    from deerflow.spaces.backings import BackingUnavailable
+
+    ss, app, config, sf, catalog, _, _ = startup
+    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    slot, healthy = next(iter(catalog.volumes)), catalog.verify
+
+    def trimmed(checked, **kwargs):
+        if checked == slot:
+            raise BackingUnavailable("fixture hole")
+        return healthy(checked, **kwargs)
+
+    monkeypatch.setattr(catalog, "verify", trimmed)
+    with caplog.at_level("INFO"):
+        await ss._reverify(app)
+        await ss._reverify(app)
+    assert sum(slot in record.getMessage() and "unverified" in record.getMessage() for record in caplog.records) == 1
+    caplog.clear()
+    monkeypatch.setattr(catalog, "verify", healthy)
+    with caplog.at_level("INFO"):
+        await ss._reverify(app)
+    assert sum(slot in record.getMessage() and "verified again" in record.getMessage() for record in caplog.records) == 1
+
+
+@pytest.mark.asyncio
+async def test_maintenance_refreshes_verification_before_it_assigns(startup, monkeypatch):
+    ss, app, config, sf, _, _, _ = startup
+    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    order = []
+    monkeypatch.setattr(ss, "_reverify", AsyncMock(side_effect=lambda _app: order.append("reverify")))
+    monkeypatch.setattr(ss, "assign_spaces", AsyncMock(side_effect=lambda _app: order.append("assign")))
+    await ss._maintenance_step(app, timeout=5)
+    assert order == ["reverify", "assign"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_refresh_keeps_the_existing_facts_and_maintenance_goes_on(startup, monkeypatch, caplog):
+    ss, app, config, sf, _, _, _ = startup
+    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    assign = AsyncMock()
+    monkeypatch.setattr(ss, "_reverify", AsyncMock(side_effect=RuntimeError("fixture")))
+    monkeypatch.setattr(ss, "assign_spaces", assign)
+    with caplog.at_level("ERROR"):
+        await ss._maintenance_step(app, timeout=5)
+    assign.assert_awaited_once()
+    assert any("verification" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_startup_lines_survive_a_failed_image_with_no_fit(startup):
+    ss, app, config, sf, catalog, _, _ = startup
+    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    status = app.state.agent_execution
+    status.fit, status.unverified = None, {next(iter(catalog.volumes)): "fixture hole"}
+    assert (await ss.storage_state(app)).state == "incomplete"
+    await ss._startup_lines(app)
+
+
 @pytest.mark.asyncio
 async def test_human_directory_rechecks_disabled_and_role_limits():
     from app.gateway.storage_spaces import human_lookup

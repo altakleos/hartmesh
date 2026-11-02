@@ -59,6 +59,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only its own conversation. A set that could be holding storage is refused instead, which
   still closes sandboxes until it is resolved.
 
+### Files
+
+- An image emptied by a disk trim is now restored. Preparation at every start and
+  `verify --repair` fill its holes in place, keep its files and report what they restored,
+  within the usual data-disk headroom. `.48` left such an image refused until an operator
+  repaired it by hand. A trim after start stays refused until the next preparation.
+- Someone with no file space yet is told of a storage fault when free slots fail
+  verification, not asked to buy seats. "No seat" now appears only when the accounts hold
+  every seat.
+- `/health` and the operator `status` read `storage: incomplete`, not `ready`, while an image
+  fails verification, so a rollout waiting for `ready` refuses that tenant. The Gateway now
+  re-verifies every image each minute, and both return to `ready` without a restart.
+- The storage guide now says that `guest-fstrim` bypasses the fstab exclusion, as `fstrim -a`
+  does.
+
 ## [2.2.0+hartmesh.48] - 2026-11-02
 
 ### Telegram bots

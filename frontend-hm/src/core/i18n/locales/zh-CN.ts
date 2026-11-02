@@ -1230,6 +1230,8 @@ export function createZhCN(product: string): Translations {
         administrator
           ? `您的账号无法使用文件：这里的账号数超过了席位数。请联系 ${provider} 增加席位。`
           : "您的账号无法使用文件，因此对话可以继续，但无法使用文件。请联系管理员。",
+      filesFault: (support) =>
+        `存储出现故障，文件暂时不可用，对话可以继续，但无法使用文件。请联系 ${support} 修复。`,
       filesUnavailable:
         "文件暂时不可用。修复前，对话可以继续，但无法使用文件。",
       myFilesUnchecked:

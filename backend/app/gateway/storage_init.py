@@ -590,6 +590,52 @@ sync -f "$(dirname -- "$p")"
         self.layout(spec)
         return spec
 
+    def restore_allocation(self, spec):
+        """Fill what a trim punched in an image, returning the bytes restored.
+
+        posix_fallocate only fills holes, so this keeps the data, needs no detach and can
+        repeat. An image of any other size is left for verification to report, because
+        this call would extend it.
+        """
+        no_symlinks(spec.image_path)
+        try:
+            fd = os.open(spec.image_path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except FileNotFoundError:
+            return 0
+        try:
+            image = os.fstat(fd)
+            if not stat.S_ISREG(image.st_mode) or image.st_nlink != 1 or image.st_size != spec.max_bytes:
+                return 0
+            shortfall = max(0, image.st_size - image.st_blocks * 512)
+            if not shortfall:
+                try:
+                    verify_image_extents(fd, image.st_size)
+                    return 0
+                except BackingUnavailable:
+                    pass
+            fit = storage_fit(self.pool, self.plan, self.load(), growth_bytes=shortfall)
+            if not fit.fits:
+                raise Refused(f"restoring {shortfall / (1 << 30):.1f} GiB would leave {(fit.free_bytes - shortfall) / (1 << 30):.1f} GiB free and {fit.headroom_bytes / (1 << 30):.1f} GiB must stay free")
+            os.posix_fallocate(fd, 0, spec.max_bytes)
+            os.fsync(fd)
+            return max(0, os.fstat(fd).st_blocks - image.st_blocks) * 512
+        finally:
+            os.close(fd)
+
+    def restore_allocations(self, inventory):
+        """One slot that cannot be restored must not stop the rest."""
+        restored, problems = {}, []
+        for spec in inventory.volumes.values():
+            try:
+                count = self.restore_allocation(spec)
+            except (Refused, OSError, BackingUnavailable) as exc:
+                problems.append(f"slot {spec.slot_id} could not be restored: {exc}")
+                continue
+            if count:
+                restored[spec.slot_id] = count
+                print(f"storage-init: restored space {spec.slot_id}, {count / (1 << 20):.1f} MiB", file=sys.stderr, flush=True)
+        return dict(spaces=len(restored), bytes=sum(restored.values())), problems
+
     def prepare(self):
         if self.plan is None:
             return self.off("prepare")
@@ -598,6 +644,8 @@ sync -f "$(dirname -- "$p")"
         if inventory is None:
             inventory = PreparedVolumeCatalog([], data_disk=self.pool, reserve_bytes=RESERVE_BYTES, reserve_inodes=RESERVE_INODES)
             self.publish(inventory)
+        # Before the fit: a hole reads as free disk that the image already owns.
+        restored, restore_problems = self.restore_allocations(inventory)
         mounted = self.mount_all()
         fit, fields = self.pool_plan(inventory)
         if len(inventory.volumes) + sum(fit.missing.values()) > MAX_SPACES:
@@ -605,7 +653,7 @@ sync -f "$(dirname -- "$p")"
         count_before, now = len(inventory.volumes), dict.fromkeys(KINDS, 0)
         previous_slots = set(inventory.volumes)
         new_slots = set()
-        problems = [f"slot {e['slot_id']} did not mount: {e['error']}" for e in mounted["failed"]]
+        problems = [*restore_problems, *(f"slot {e['slot_id']} did not mount: {e['error']}" for e in mounted["failed"])]
         verdict, started = "nothing-to-do", time.monotonic()
         if sum(fit.missing.values()) and not fit.fits:
             verdict = "disk"
@@ -676,7 +724,7 @@ sync -f "$(dirname -- "$p")"
         else:
             note = (
                 f"pool {self.pool}: {len(inventory.volumes)} spaces ({sum(os.path.ismount(s.mount_path) for s in inventory.volumes.values())} mounted), "
-                f"{sum(now.values())} prepared in {seconds:.0f} s, fstab {fstab['entries']} entries; {fields['reserved_bytes'] / (1 << 30):.1f} GiB reserved; "
+                f"{sum(now.values())} prepared in {seconds:.0f} s, {restored['spaces']} restored, fstab {fstab['entries']} entries; {fields['reserved_bytes'] / (1 << 30):.1f} GiB reserved; "
                 f"{fields['free_bytes'] / (1 << 30):.1f} GiB free"
             )
         if problems and verdict != "disk":
@@ -686,6 +734,7 @@ sync -f "$(dirname -- "$p")"
             note,
             2 if verdict in ("disk", "incomplete") else 0,
             prepared_now=now,
+            restored=restored,
             fstab=fstab,
             seconds=seconds,
             verdict=verdict,
@@ -947,12 +996,18 @@ sync -f "$(dirname -- "$p")"
         return doc
 
     def slot_state(self, spec, *, repair=False):
-        row = dict(slot_id=spec.slot_id, kind=spec.kind, state="ok", loop=None, filesystem_uuid=None, image_bytes=None, used_bytes=None, fstab=False, detail=None)
+        row = dict(slot_id=spec.slot_id, kind=spec.kind, state="ok", loop=None, filesystem_uuid=None, image_bytes=None, used_bytes=None, fstab=False, detail=None, restored_bytes=0)
         try:
             row["fstab"] = self.fstab_line(spec) in self.host.run("cat", str(self.fstab_path)).splitlines()
             if not spec.image_path.exists():
                 row["state"] = "image-missing"
                 return row
+            if repair:
+                try:
+                    row["restored_bytes"] = self.restore_allocation(spec)
+                except (Refused, OSError) as exc:
+                    row.update(state="not-allocated", detail=str(exc))
+                    return row
             fd = os.open(spec.image_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
             try:
                 image = os.fstat(fd)
@@ -972,7 +1027,7 @@ sync -f "$(dirname -- "$p")"
                 row["state"] = "uuid-mismatch"
                 return row
             row["loop"] = self.loop(spec.image_path)
-            repaired = False
+            repaired = row["restored_bytes"] > 0
             if not os.path.ismount(spec.mount_path):
                 if not repair:
                     row["state"] = "not-mounted"
@@ -1046,7 +1101,8 @@ sync -f "$(dirname -- "$p")"
         inventory, specs = self.selected(slots)
         rows = [self.slot_state(spec, repair=repair) for spec in specs]
         ok = sum(row["state"] in ("ok", "repaired") for row in rows)
-        return self.document("verify", f"{ok} of {len(rows)} spaces ok", 0 if ok == len(rows) else 2, repair=repair, spaces=rows, ok=ok, total=len(rows))
+        restored = dict(spaces=sum(row["restored_bytes"] > 0 for row in rows), bytes=sum(row["restored_bytes"] for row in rows))
+        return self.document("verify", f"{ok} of {len(rows)} spaces ok", 0 if ok == len(rows) else 2, repair=repair, spaces=rows, ok=ok, total=len(rows), restored=restored)
 
     def off(self, command):
         return dict(command=command, returncode=0, note="Storage Spaces are off (HARTMESH_USERS absent); nothing to do", pool=str(self.pool), problems=[], verdict="nothing-to-do")
@@ -1177,6 +1233,7 @@ def at_start():
                 prepared=None,
                 missing=None,
                 prepared_now=None,
+                restored=None,
                 required_bytes=None,
                 reserved_bytes=None,
                 headroom_bytes=None,

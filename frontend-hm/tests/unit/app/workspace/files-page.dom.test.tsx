@@ -276,7 +276,7 @@ describe("FilesPage", () => {
     rs.restoreAllMocks();
   });
 
-  it.each(["not-assigned", "no-seat", "unverified"])(
+  it.each(["not-assigned", "no-seat", "unverified", "fault"])(
     "keeps Shared usable when personal files are %s",
     (own) => {
       Object.assign(storage, { enabled: true, state: "incomplete", own });
@@ -286,7 +286,9 @@ describe("FilesPage", () => {
           ? enUS.chat.filesPreparing("an administrator")
           : own === "no-seat"
             ? enUS.chat.filesNoSeat(false, "Acme")
-            : enUS.chat.myFilesUnchecked;
+            : own === "fault"
+              ? enUS.chat.filesFault("an administrator")
+              : enUS.chat.myFilesUnchecked;
       expect(screen.getByText(text)).toBeTruthy();
       expect(screen.queryByTestId("my-files-list")).toBeNull();
       openSharedTab();
