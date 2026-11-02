@@ -22,7 +22,7 @@ def native_request(app):
         elif (volume.data_path / "shared").is_dir():
             volume.spec.kind = "company"
     app.state.storage_spaces_enabled = True
-    app.state.agent_execution = SimpleNamespace(storage_reason=None, fit=None)
+    app.state.agent_execution = SimpleNamespace(storage_reason=None, fit=None, unverified={})
     app.add_exception_handler(Refusal, refusal_handler)
     request = Request({"type": "http", "headers": [], "app": app})
     request.state.auth_source = AUTH_SOURCE_SESSION
