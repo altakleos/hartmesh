@@ -18,8 +18,6 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCal
 
 
 async def setup(db, monkeypatch, *, with_threads=False, off_loop=False):
-    # CI's process freezes for seconds at a time, and a freeze spent inside a press reads as a slow database.
-    monkeypatch.setattr("app.telegram_bots.callbacks.PRESS_TIMEOUT_SECONDS", 30.0)
     e = await thread_environment(db, monkeypatch, off_loop=off_loop) if with_threads else await ingress(db, monkeypatch=monkeypatch, lead=True, off_loop=off_loop)
     if with_threads:
         e.services.threads = e.threads
@@ -195,7 +193,6 @@ async def test_callback_ack_can_reach_actual_sdk_without_a_second_metadata_read(
 @pytest.mark.asyncio
 async def test_slow_precheck_still_attempts_one_actual_ack_and_admits_no_later_read(db, monkeypatch):
     e = await setup(db, monkeypatch)
-    monkeypatch.setattr("app.telegram_bots.callbacks.PRESS_TIMEOUT_SECONDS", 2.0)
     entered, release = asyncio.Event(), asyncio.Event()
     fresh_reads, effects = [], []
     captured = e.channel.link

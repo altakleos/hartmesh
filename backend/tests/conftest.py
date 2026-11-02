@@ -6,6 +6,7 @@ issues when unit-testing lightweight config/registry code in isolation.
 
 from __future__ import annotations
 
+import gc
 import importlib.util
 import sys
 from pathlib import Path
@@ -182,3 +183,26 @@ def _auto_user_context(request):
         yield
     finally:
         reset_current_user(token)
+
+
+def _settle_heap() -> None:
+    gc.collect()
+    gc.freeze()
+
+
+def pytest_collection_finish() -> None:
+    # A full GC pass holds the GIL throughout, and what collection built stays referenced to
+    # the end of the session, deselected items included. On CI a pass cost about two seconds,
+    # landing wherever allocation put it: inside a test, against that test's own deadlines.
+    _settle_heap()
+    threshold0, threshold1, _ = gc.get_threshold()
+    gc.set_threshold(threshold0, threshold1, 1_000_000)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    result = yield
+    # Full passes run here, where no test's clock is running.
+    if gc.get_count()[2] >= 200:
+        _settle_heap()
+    return result

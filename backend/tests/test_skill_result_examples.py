@@ -205,7 +205,7 @@ def test_maximum_procedure_long_words_omit_pdf_explicitly_without_clipping_edita
     [
         (b'{"title":"a","title":"b"}', "Duplicate input key"),
         (b'{"value":NaN}', "Non-finite input number"),
-        (b" " * (256 * 1024 + 1), "Input exceeds 256 KiB"),
+        pytest.param(b" " * (256 * 1024 + 1), "Input exceeds 256 KiB", id="over-256-kib"),
         (b"[]", "Input must be an object"),
     ],
 )
