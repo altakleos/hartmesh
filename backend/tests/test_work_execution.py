@@ -1045,3 +1045,33 @@ async def test_http_activation_ceiling_and_lost_launch_receipt_reuse_exact_attem
                 assert response.status_code == 200, response.text
                 assert response.json()["attempt"]["run_id"]
     assert len(calls) == 2 and calls[0] == calls[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("read", ["get", "list"])
+async def test_a_read_during_settlement_shows_a_row_and_its_attempt_from_one_moment(execution, monkeypatch, read):
+    service, admitted, row, _sf = execution
+    scope = await service.reserve(execution=admitted, work_id=row["id"], request=activation(admitted, row))
+    admitted = replace(admitted, work=scope)
+    record = run_record(admitted, scope, status="success")
+    await scope.bind(admitted, record, admitted.thread_incarnation)
+    current = await service.work.get(actor=ALICE, instance_id=admitted.instance.id, work_id=row["id"])
+    await scope.report(admitted, ReportWork(operation_id=operation(), expected_revision=current["revision"], action="outcome", statement="Done."))
+    validate, fired = service.work._validate_snapshot, []
+
+    async def settled_during_the_read(session, snapshot):
+        if not fired:
+            fired.append(True)
+            await scope.finish(admitted, record, settled=True)
+        return await validate(session, snapshot)
+
+    async def seen():
+        if read == "get":
+            return await service.work.get(actor=ALICE, instance_id=admitted.instance.id, work_id=row["id"])
+        return next(item for item in await service.work.list(actor=ALICE, instance_id=admitted.instance.id) if item["id"] == row["id"])
+
+    monkeypatch.setattr(service.work, "_validate_snapshot", settled_during_the_read)
+    during = await seen()
+    assert fired and (during["status"], during["attempt"]["status"]) != ("open", "succeeded"), "The row and its attempt come from one moment, and settling moves them together"
+    settled = await seen()
+    assert (settled["status"], settled["attempt"]["status"]) == ("submitted", "succeeded")

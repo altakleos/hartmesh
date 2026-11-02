@@ -165,19 +165,21 @@ class _RestoredWorker:
         self.observe()
         try:
             if self.record.phase == "prepared":
-                retiring = self.bridge.evidence._retire_restored_resident(self.record, self.permit)
-                self.bridge.qualify(teardown=True)
+                with self.bridge.accounting:
+                    retiring = self.bridge.evidence._retire_restored_resident(self.record, self.permit)
+                    self.bridge.qualify(teardown=True)
                 self.record = retiring
                 self.lifetime.records[retiring.attachment_id] = retiring
                 self.assert_current()
             self.scope.guard_eligibility()
-            try:
-                self.bridge.evidence._finish_restored_resident(self.record, self.permit)
-            finally:
-                if self.permit._finished is not None:
-                    self.bridge.residents._remove_restored(self.record, self.permit)
-                    self.completed = True
-            self.bridge.qualify(teardown=True)
+            with self.bridge.accounting:
+                try:
+                    self.bridge.evidence._finish_restored_resident(self.record, self.permit)
+                finally:
+                    if self.permit._finished is not None:
+                        self.bridge.residents._remove_restored(self.record, self.permit)
+                        self.completed = True
+                self.bridge.qualify(teardown=True)
         except BaseException:
             self.bridge._check_failure_evidence(teardown=True)
             raise

@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 STARTUP_BUDGET_SECONDS = 120
 ADAPTER_LIMIT_SECONDS = 30
 RECHECK_SECONDS = 60
+PENDING_RECHECK_SECONDS = 5
 UNFINISHED_CREATION_SECONDS = 86400
 AGENTS_HOLD_PATH = Path(os.environ.get("HARTMESH_OPERATOR_DIR", "/srv/hartmesh/operator")) / "agents-hold"
 STORAGE_REASONS = ("disk-too-small", "storage-pool-missing", "inventory-unreadable", "host-unqualified", "admission-failed")
@@ -134,6 +135,7 @@ class ExecutionStatus:
     maintenance_task: asyncio.Future | None = None
     company_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     pending_reconcile: list[str] = field(default_factory=list)
+    pending_recheck_seconds: float = PENDING_RECHECK_SECONDS
     attachments_fenced: int = 0
     attempts_settled: int = 0
     agents_ready_reported: bool = False
@@ -947,6 +949,17 @@ async def abandon_unfinished(app) -> int:
     return removed
 
 
+def _recheck_pending_soon(app) -> None:
+    """One workspace a pass left pending refuses every instance until a pass clears it, so the next is not a minute away."""
+    status = app.state.agent_execution
+    wake = getattr(app.state, "storage_recheck_wake", None)
+    if not status.pending_reconcile:
+        status.pending_recheck_seconds = PENDING_RECHECK_SECONDS
+    elif wake is not None and status.pending_recheck_seconds < RECHECK_SECONDS:
+        asyncio.get_running_loop().call_later(status.pending_recheck_seconds, wake.set)
+        status.pending_recheck_seconds *= 2
+
+
 async def _maintenance_step(app, *, timeout: float) -> bool:
     status = app.state.agent_execution
     if getattr(app.state, "storage_spaces", None) is None:
@@ -992,6 +1005,7 @@ async def _maintenance_step(app, *, timeout: float) -> bool:
             logger.exception("storage: operation settlement failed; existing facts are kept")
         if not status.agents_ready_reported and (await execution_state(app)).execution == "ready":
             _agents_ready_line(app)
+        _recheck_pending_soon(app)
 
     if status.maintenance_task is not None and status.maintenance_task.done():
         status.maintenance_task.result()

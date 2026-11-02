@@ -1,11 +1,15 @@
 """Offline primary command doubles exercise the actual durable bridge protocol."""
 
+import ast
 import json
+import threading
+from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace
 
 import pytest
 
+import deerflow
 from deerflow.spaces.docker import StorageHostUnqualified
 from deerflow.spaces.native_create_evidence import ATTEMPT_LABEL, NativeCreateEvidence
 
@@ -284,3 +288,124 @@ def test_postpublication_fsync_failure_restores_pending_capacity_before_readines
     assert bridge.ready and state.pending_for(owner_id="alice")
     with state.lock:
         assert state.extra_slots_locked(starting={}, known_container_ids=set()) == 1
+
+
+def test_a_second_qualifier_waits_for_the_first(fixture):
+    from test_native_teardown_evidence import record
+
+    journal, _state, bridge, _owner = fixture
+    bridge.teardowns.add(journal.begin_teardown(record()))
+    entered, release = threading.Event(), threading.Event()
+    daemon, reads = bridge._check_daemon, []
+
+    def held_daemon_check():
+        if threading.current_thread().name == "first":
+            reads.append(1)
+            if len(reads) == 2:  # Inside qualify, where the first holds its restore tokens.
+                entered.set()
+                assert release.wait(10)
+        daemon()
+
+    bridge._check_daemon = held_daemon_check
+    errors = []
+
+    def refresh():
+        try:
+            bridge.qualify()
+        except BaseException as error:  # noqa: BLE001
+            errors.append(error)
+
+    first = threading.Thread(target=lambda: bridge.qualify(teardown=True), name="first")
+    second = threading.Thread(target=refresh)
+    first.start()
+    assert entered.wait(10)
+    second.start()
+    second.join(0.2)
+    assert second.is_alive(), "A refused refresh closes admission for every sandbox"
+    release.set()
+    first.join(10)
+    second.join(10)
+    assert not errors and bridge.ready
+
+
+def test_a_reader_waits_out_a_publication_instead_of_closing_admission(fixture):
+    from test_native_teardown_evidence import record
+
+    journal, _state, bridge, _owner = fixture
+    published, go = threading.Event(), threading.Event()
+
+    def publisher():
+        with bridge.accounting:
+            saved = journal.begin_teardown(record())
+            published.set()
+            assert go.wait(10)
+            bridge.teardowns.add(saved)
+            bridge.qualify(teardown=True)
+
+    worker = threading.Thread(target=publisher)
+    worker.start()
+    assert published.wait(10)
+    read = []
+    reader = threading.Thread(target=lambda: read.append(bridge.assert_current()))
+    reader.start()
+    reader.join(0.2)
+    assert reader.is_alive(), "Between the two steps the journal is ahead of memory"
+    go.set()
+    worker.join(10)
+    reader.join(10)
+    assert len(read) == 1 and bridge.ready
+
+
+PUBLISHERS = {"begin_teardown", "finish_teardown", "begin_resident", "retire_resident", "finish_resident", "_retire_restored_resident", "_finish_restored_resident"}
+
+
+def test_every_journal_publication_holds_accounting_through_its_restoration():
+    sources = ("community/aio_sandbox/native_teardown_execution.py", "community/aio_sandbox/resident_containment.py", "community/aio_sandbox/resident_preparation.py", "spaces/resident_restoration.py")
+    root = Path(deerflow.__file__).parent
+
+    def called(node):
+        return [item.func.attr for item in ast.walk(node) if isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute)]
+
+    held = []
+    everywhere = []
+    for source in sources:
+        tree = ast.parse((root / source).read_text(encoding="utf-8"))
+        everywhere.extend(name for name in called(tree) if name in PUBLISHERS)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.With) and any(isinstance(item.context_expr, ast.Attribute) and item.context_expr.attr == "accounting" for item in node.items):
+                names = called(node)
+                held.extend(name for name in names if name in PUBLISHERS)
+                assert "qualify" in names, "Its restoration is what ends the window"
+    assert set(everywhere) == PUBLISHERS, "A publisher moved, so this list no longer pins it"
+    assert sorted(held) == sorted(everywhere), "A reader between a publication and its restoration closes admission for everyone"
+
+
+def test_another_threads_publication_is_no_fault_of_the_bridge(fixture):
+    from test_native_teardown_evidence import record
+
+    journal, _state, bridge, _owner = fixture
+    published, go, seen = threading.Event(), threading.Event(), []
+
+    def publisher():
+        with bridge.accounting:
+            saved = journal.begin_teardown(record())
+            published.set()
+            assert go.wait(10)
+            bridge.teardowns.add(saved)
+            bridge.qualify(teardown=True)
+
+    worker = threading.Thread(target=publisher)
+    worker.start()
+    assert published.wait(10)
+    seen.append(bridge.ready)  # A caller here may hold the metadata lock, so it must not wait, and a refusal strands a restricted start.
+    go.set()
+    worker.join(10)
+    assert seen == [True] and bridge.ready
+
+
+def test_a_journal_ahead_of_memory_with_nobody_publishing_is_not_ready(fixture):
+    from test_native_teardown_evidence import record
+
+    journal, _state, bridge, _owner = fixture
+    journal.begin_teardown(record())
+    assert not bridge.ready

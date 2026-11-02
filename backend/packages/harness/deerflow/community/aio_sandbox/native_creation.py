@@ -10,6 +10,7 @@ import re
 from contextlib import nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from threading import RLock
 
 from deerflow.spaces.docker import StorageHostUnqualified
 from deerflow.spaces.native_create_evidence import ATTEMPT_LABEL, MAX_RECORDS, NativeContainerIdentity, NativeCreateAttempt, _unique_object
@@ -225,10 +226,15 @@ class NativeCreateUnconfirmed(StorageHostUnqualified):
 
 
 class NativeCreateBridge:
-    """Owned blocking journal/Docker protocol; never called under metadata locks."""
+    """Owned blocking journal/Docker protocol; never called under metadata locks.
+
+    `accounting` is held across a journal publication and the restoration after it. A reader
+    between the two would find the journal ahead of memory and close admission for everyone.
+    """
 
     def __init__(self, *, evidence, handoffs, check_owner, owner_accepts, check_daemon, admit_native=None):
         self.evidence, self.handoffs = evidence, handoffs
+        self.accounting = RLock()
         self.teardowns = NativeTeardownIndex(daemon_id=handoffs.daemon_id, lock=handoffs.lock)
         self.residents = NativeResidentIndex(daemon_id=handoffs.daemon_id, lock=handoffs.lock)
         self._restored_teardown_revision = None
@@ -240,22 +246,27 @@ class NativeCreateBridge:
 
     @property
     def ready(self):
-        return (
-            self._installed
-            and self.evidence.ready
-            and self.handoffs.ready
-            and self.teardowns.ready
-            and self.residents.ready
-            and self.evidence.teardown_revision == self._restored_teardown_revision
-            and self.evidence.resident_revision == self._restored_resident_revision
-            and self._owner_accepts()
-        )
+        return self._installed and self.evidence.ready and self.handoffs.ready and self.teardowns.ready and self.residents.ready and self._revisions_current() and self._owner_accepts()
+
+    def _revisions_current(self):
+        # Callers may hold the metadata lock, so this never waits. Another thread's
+        # publication is no fault of the bridge, and `assert_current` waits it out.
+        if not self.accounting.acquire(blocking=False):
+            return True
+        try:
+            return self.evidence.teardown_revision == self._restored_teardown_revision and self.evidence.resident_revision == self._restored_resident_revision
+        finally:
+            self.accounting.release()
 
     def invalidate(self):
         """Memory-only admission closure; owned identity/teardown is retained."""
         self._installed = False
 
     def qualify(self, *, teardown=False):
+        with self.accounting:
+            self._qualify(teardown=teardown)
+
+    def _qualify(self, *, teardown):
         token = teardown_token = resident_token = None
         try:
             if teardown and not self._ever_installed:
@@ -315,18 +326,19 @@ class NativeCreateBridge:
         return pending
 
     def _snapshot_pending(self):
-        snapshot = self.evidence.snapshot()
-        if (
-            not self.teardowns.ready
-            or not self.residents.ready
-            or snapshot.teardown_revision != self._restored_teardown_revision
-            or frozenset(snapshot.teardowns) != frozenset(self.teardowns.records())
-            or snapshot.resident_revision != self._restored_resident_revision
-            or frozenset(snapshot.residents) != frozenset(self.residents.records())
-        ):
-            self._installed = False
-            raise _NativeAccountingStale(self)
-        return snapshot.pending_creates(self.evidence.daemon_id)
+        with self.accounting:
+            snapshot = self.evidence.snapshot()
+            if (
+                not self.teardowns.ready
+                or not self.residents.ready
+                or snapshot.teardown_revision != self._restored_teardown_revision
+                or frozenset(snapshot.teardowns) != frozenset(self.teardowns.records())
+                or snapshot.resident_revision != self._restored_resident_revision
+                or frozenset(snapshot.residents) != frozenset(self.residents.records())
+            ):
+                self._installed = False
+                raise _NativeAccountingStale(self)
+            return snapshot.pending_creates(self.evidence.daemon_id)
 
     def assert_candidate_current(self, info, *, teardown=False, known_live=False):
         pending = self.assert_current(teardown=teardown)

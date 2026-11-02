@@ -90,8 +90,9 @@ class ResidentContainmentWorker:
         # Qualify before publication, including a primary already removed.
         reader.qualify_resident_record(record)
         try:
-            retiring = self.bridge.evidence.retire_resident(record)
-            self.bridge.qualify(teardown=True)
+            with self.bridge.accounting:
+                retiring = self.bridge.evidence.retire_resident(record)
+                self.bridge.qualify(teardown=True)
         except BaseException:
             self.bridge._check_failure_evidence(teardown=True)
             raise
@@ -136,13 +137,15 @@ class ResidentContainmentWorker:
             if record.phase == "prepared":
                 # An isolated operator may fence SQL without writing this
                 # journal. The caller admitted its exact fenced SQL first.
-                record = self.bridge.evidence.retire_resident(record)
-                self.bridge.qualify(teardown=True)
+                with self.bridge.accounting:
+                    record = self.bridge.evidence.retire_resident(record)
+                    self.bridge.qualify(teardown=True)
                 self.records[attachment_id] = record
                 record = self._current_record(attachment_id)
-            self.bridge.evidence.finish_resident(record)
-            self.bridge.residents.remove(record)
-            self.bridge.qualify(teardown=True)
+            with self.bridge.accounting:
+                self.bridge.evidence.finish_resident(record)
+                self.bridge.residents.remove(record)
+                self.bridge.qualify(teardown=True)
         except BaseException:
             self.bridge._check_failure_evidence(teardown=True)
             raise

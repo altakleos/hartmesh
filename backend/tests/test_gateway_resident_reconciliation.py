@@ -315,3 +315,28 @@ async def test_waiting_reconcile_rechecks_new_home_activity_before_orphan_contai
             running.task.cancel()
             await asyncio.gather(running.task, return_exceptions=True)
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_run_still_settling_its_attempt_is_no_orphan(execution, fixture, monkeypatch):
+    from test_work_execution import activation, run_record
+
+    service, admitted, row, sf = execution
+    scope = await service.reserve(execution=admitted, work_id=row["id"], request=activation(admitted, row))
+    module, app, host, _attachments, _adapter, claim = await build(execution, fixture, monkeypatch)
+    entry = host.registry.entry(admitted.instance)
+    async with entry.lock:
+        host.registry.associate(admitted.instance, host.registry.retained[claim.id], generation=admitted.home_generation)
+    host.provider.external_changed(lambda: host.admission.open(host.provider))
+    # Its status is terminal, so it left the durable inflight rows, and its task has not settled the attempt yet.
+    run = run_record(admitted, scope, status="success")
+    run.metadata.update(agent_instance_id=admitted.instance.id, agent_work_attempt_id=scope.attempt_id)
+    run.created_at = "2026-10-14T00:00:00Z"
+    await scope.bind(admitted, run, admitted.thread_incarnation)
+    run.task = asyncio.create_task(asyncio.Event().wait())
+    app.state.run_manager._runs[run.run_id] = run
+    try:
+        assert await module.reconcile_residents(app, deadline=time.monotonic() + 10) == [], "One pending workspace refuses every instance until the next pass"
+    finally:
+        run.task.cancel()
+        await asyncio.gather(run.task, return_exceptions=True)

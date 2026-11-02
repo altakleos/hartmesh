@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import replace
@@ -807,3 +808,135 @@ async def test_two_interrupted_sets_complete_individually_and_restart_never_resu
         if replacement_owner is not None:
             replacement_owner.close()
         discard_sandbox_lease_manager(engine.provider)
+
+
+def daemon_reports(engine, status, *, reads=None):
+    """After stop, an auto-removed primary answers inspect with `status` until `reads` runs out."""
+    primary = engine.objects[("container", CID)]
+    primary["HostConfig"]["AutoRemove"] = True
+    view = deepcopy(primary)
+    view["State"].update(Running=False, Status=status)
+    for link in view["NetworkSettings"]["Networks"].values():
+        link.update(NetworkID="", EndpointID="")
+    inspect, name, budget = engine.inspect, primary["Name"][1:], [reads]
+
+    def reported(command, **kwargs):
+        if command[1] == "inspect" and command[-1] in (CID, name) and ("container", CID) not in engine.objects and (budget[0] is None or budget[0] > 0):
+            if budget[0] is not None:
+                budget[0] -= 1
+            return SimpleNamespace(returncode=0, stdout=json.dumps([view]), stderr="")
+        return inspect(command, **kwargs)
+
+    engine.inspect = reported
+    return budget
+
+
+def park(engine):
+    engine.provider._warm_pool["native"] = (engine.info, 0)
+    engine.provider._warm_pool_identity["native"] = engine.info.owner
+
+
+def test_teardown_waits_out_a_stopped_primary_the_daemon_is_still_removing(fixture):
+    engine = Engine(fixture)
+    provider = engine.provider
+    daemon_reports(engine, "removing", reads=6)
+    park(engine)
+    try:
+        assert provider._destroy_warm_entry("native", engine.info, reason="shutdown", still_reapable=lambda: True)
+        assert not engine.objects and engine.bridge.evidence.snapshot().teardowns == (), "A set left half removed keeps its slot and refuses its owner's next sandbox"
+        assert ["docker", "rm", CID] not in engine.calls
+    finally:
+        discard_sandbox_lease_manager(provider)
+
+
+def test_a_removal_that_never_ends_keeps_the_record(fixture, monkeypatch):
+    real_init = NativeResourceSet.__init__
+
+    def short_budget(self, backend, *, guard=None):
+        real_init(self, backend, guard=guard)
+        self.deadline = time.monotonic() + 0.2
+
+    monkeypatch.setattr(NativeResourceSet, "__init__", short_budget)
+    engine = Engine(fixture)
+    provider = engine.provider
+    budget = daemon_reports(engine, "removing")
+    park(engine)
+    try:
+        assert not provider._destroy_warm_entry("native", engine.info, reason="shutdown", still_reapable=lambda: True)
+        assert ("container", PROXY) in engine.objects and len(engine.bridge.evidence.snapshot().teardowns) == 1
+        budget[0] = 0
+    finally:
+        discard_sandbox_lease_manager(provider)
+
+
+def test_a_dead_primary_is_removed_so_its_slot_comes_back(fixture):
+    engine = Engine(fixture)
+    provider = engine.provider
+    primary = engine.objects[("container", CID)]
+    primary["State"].update(Running=False, Status="dead")
+    for link in primary["NetworkSettings"]["Networks"].values():
+        link.update(NetworkID="", EndpointID="")
+    for network in engine.allowed_networks:
+        engine.objects[("network", network)]["Containers"].pop(CID, None)
+    park(engine)
+    try:
+        assert provider._destroy_warm_entry("native", engine.info, reason="cleanup_retry", still_reapable=lambda: True)
+        assert not engine.objects and ["docker", "rm", CID] in engine.calls
+        assert engine.bridge.evidence.snapshot().teardowns == ()
+    finally:
+        discard_sandbox_lease_manager(provider)
+
+
+def test_shutdown_keeps_the_marker_of_a_stop_still_running(fixture):
+    engine = Engine(fixture)
+    provider = engine.provider
+    park(engine)
+    store = provider._ownership
+    assert provider._reserve_local_teardown("native", lambda: True)  # Another thread, past its reservation, with its stop running.
+    assert store.claim("native", for_destroy=True)
+    at_close = []
+    close = store.close
+
+    def observed_close():
+        at_close.append(store.owner("native"))
+        close()
+
+    store.close = observed_close
+    try:
+        provider.shutdown()
+        assert at_close == [store.owner_id], "A peer must not be handed a container whose stop is running"
+    finally:
+        discard_sandbox_lease_manager(provider)
+
+
+def test_shutdown_lets_go_of_a_set_it_could_not_finish(fixture):
+    engine = Engine(fixture)
+    provider = engine.provider
+    budget = daemon_reports(engine, "removing")
+    park(engine)
+    store = provider._ownership
+    at_close = []
+    close = store.close
+
+    def observed_close():
+        at_close.append(store.owner("native"))  # The memory store clears here; Redis keeps the key for its TTL.
+        close()
+
+    store.close = observed_close
+    try:
+        real_init = NativeResourceSet.__init__
+
+        def short_budget(self, backend, *, guard=None):
+            real_init(self, backend, guard=guard)
+            self.deadline = time.monotonic() + 0.2
+
+        NativeResourceSet.__init__ = short_budget
+        try:
+            provider.shutdown()
+        finally:
+            NativeResourceSet.__init__ = real_init
+        assert "native" in provider._warm_pool
+        assert at_close == [None], "A lease left behind refuses the next Gateway's recovery until its TTL"
+        budget[0] = 0
+    finally:
+        discard_sandbox_lease_manager(provider)

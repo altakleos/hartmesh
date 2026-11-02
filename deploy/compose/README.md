@@ -2224,7 +2224,9 @@ workspace attachments and the complete Docker resource census. Unknown
 containers or paired networks keep it closed. Recovery of original resident
 resources uses retained immutable identities and preserves live foreign leases;
 unknown resources and unconfirmed cleanup remain charged.
-The existing maintenance task retries qualification every 60 seconds.
+The existing maintenance task retries qualification every 60 seconds, and sooner
+while a workspace it left pending is keeping execution closed: after 5 seconds,
+then 10, 20 and 40.
 Creating `/srv/hartmesh/operator/agents-hold` refuses new agent execution and
 causes maintenance to contain locally owned workspaces. A foreign Gateway's
 live lease remains protected. Remove the file to lift the hold; qualification

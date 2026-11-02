@@ -114,17 +114,25 @@ class NativeResourceSet:
 
     def _member(self, kind, identity, name, created):
         expected_name = "/" + name if kind == "container" else name
-        for _ in range(2):
+        crossed = 0
+        while True:
             entry, named = self.inspect(kind, identity), self.inspect(kind, name)
             if entry is None and named is None:
                 return None
             if any(value is not None and (value.get("Id") != identity or value.get("Name") != expected_name or value.get("Created") != created) for value in (entry, named)):
                 raise StorageHostUnqualified("Native graph member identity or original name changed")
+            # A stopped --rm container reads `removing` until the daemon finishes. Past
+            # this reader's deadline it stays unqualified, so the record is kept.
+            if kind == "container" and time.monotonic() < self.deadline and any(value is not None and (value.get("State") or {}).get("Status") == "removing" for value in (entry, named)):
+                time.sleep(0.1)
+                continue
             if entry is not None and named is not None:
                 return entry
             # Auto-removal can cross these reads. Recheck both original references
             # under this reader's existing deadline and lifecycle guards.
-        raise StorageHostUnqualified("Native graph member identity or original name changed")
+            crossed += 1
+            if crossed == 2:
+                raise StorageHostUnqualified("Native graph member identity or original name changed")
 
     def inventory_paired(self):
         """All-state immutable facts, including secondaries without a primary."""
@@ -301,7 +309,7 @@ class NativeResourceSet:
     @staticmethod
     def _state(entry):
         state = entry.get("State")
-        if not isinstance(state, dict) or type(state.get("Running")) is not bool or state.get("Status") not in ("created", "running", "exited") or state["Running"] != (state["Status"] == "running"):
+        if not isinstance(state, dict) or type(state.get("Running")) is not bool or state.get("Status") not in ("created", "running", "exited", "dead") or state["Running"] != (state["Status"] == "running"):
             raise StorageHostUnqualified("Native graph has an unknown container state")
         return state["Running"]
 

@@ -229,8 +229,9 @@ def capture_resident_resources(proof, container):
         entries = reader.qualify_resident_record(record)
         if any(value is None for value in entries.values()):
             raise StorageHostUnqualified("Resident original capture requires a complete graph")
-        proof.record = proof.bridge.evidence.begin_resident(record)
-        proof.bridge.qualify()
+        with proof.bridge.accounting:
+            proof.record = proof.bridge.evidence.begin_resident(record)
+            proof.bridge.qualify()
         proof.assert_current()
         if any(value is None for value in reader.qualify_resident_record(proof.record).values()):
             raise StorageHostUnqualified("Resident original graph changed after durable publication")

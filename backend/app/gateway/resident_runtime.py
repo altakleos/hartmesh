@@ -595,7 +595,8 @@ class ResidentRuntime:
                     select(AgentWorkRow.instance_id, AgentWorkAttemptRow.id, AgentWorkAttemptRow.run_id).join(AgentWorkAttemptRow, AgentWorkAttemptRow.work_id == AgentWorkRow.id).where(AgentWorkAttemptRow.status.in_(UNRESOLVED))
                 )
             ).all()
-            live_ids = {record["run_id"] for record in runs}
+            # A run's terminal status comes first, and its own task settles its attempt after that.
+            live_ids = {record["run_id"] for record in runs} | set(self.registry.run_manager.task_runs("agent_work_attempt_id"))
             promised = {reservation.attempt_id for reservation in self.registry.reservations.values() if reservation.attempt_id is not None}
             orphaned = {identifier for identifier, attempt_id, run_id in attempts if run_id not in live_ids and attempt_id not in promised}
             replacements = set((await session.execute(select(StorageHostReplacementRow.old_host_id).where(StorageHostReplacementRow.new_host_id == self.attachments.provider.host_id))).scalars())

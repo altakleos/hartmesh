@@ -665,7 +665,8 @@ class WorkExecution:
                                 raise AgentConflict("Work sources changed")
                             await self._admit(session, execution, parent, row)
                             await self.work._admit_sources(session, execution.requester, parent, [WorkSource.model_validate(s) for s in attempt.candidate.get("sources", [])])
-                        except (AgentDenied, AgentConflict):
+                        except (AgentDenied, AgentConflict) as error:
+                            logger.info("agents: Work outcome stays a candidate attempt=%s reason=%s", attempt.id, type(error).__name__)
                             promote = False
                     if promote:
                         row.outcome = attempt.candidate

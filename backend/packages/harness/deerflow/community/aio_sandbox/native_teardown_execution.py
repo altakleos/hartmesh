@@ -232,10 +232,11 @@ class _Capability:
             if self.completed:
                 raise StorageHostUnqualified("Completed native handoff no longer has exact full-set absence")
         try:
-            saved = self.bridge.evidence.begin_teardown(self.record)
-            self.bind(saved)
-            self.bridge.teardowns.add(saved)
-            self.bridge.qualify(teardown=True)
+            with self.bridge.accounting:
+                saved = self.bridge.evidence.begin_teardown(self.record)
+                self.bind(saved)
+                self.bridge.teardowns.add(saved)
+                self.bridge.qualify(teardown=True)
         except BaseException:
             self.bridge._check_failure_evidence(teardown=True)
             raise
@@ -278,10 +279,11 @@ class _Capability:
             raise StorageHostUnqualified("Original native resource set remains present")
         self.assert_current()
         try:
-            self.bridge.evidence.finish_teardown(self.record)
-            self.bridge.teardowns.remove(self.record)
-            self.info.native_completion = _Completion(self.record, self.bridge.evidence)
-            self.bridge.qualify(teardown=True)
+            with self.bridge.accounting:
+                self.bridge.evidence.finish_teardown(self.record)
+                self.bridge.teardowns.remove(self.record)
+                self.info.native_completion = _Completion(self.record, self.bridge.evidence)
+                self.bridge.qualify(teardown=True)
         except BaseException:
             self.bridge._check_failure_evidence(teardown=True)
             raise
