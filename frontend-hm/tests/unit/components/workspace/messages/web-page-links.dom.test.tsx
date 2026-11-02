@@ -57,6 +57,17 @@ describe("WebPageLinks", () => {
     expect(screen.queryByTestId("web-page-links")).toBeNull();
   });
 
+  it("draws nothing for a page that has an address and no label", () => {
+    const agent: AgentTarget = {
+      kind: "agent",
+      id: "a".repeat(32),
+      name: "Maya",
+      permissions: 6,
+    };
+    show(["access", "agentSettings", "files", "work"], agent);
+    expect(screen.queryByTestId("web-page-links")).toBeNull();
+  });
+
   it("offers an agent's Memory only with the memory ceiling", () => {
     const agent: AgentTarget = {
       kind: "agent",

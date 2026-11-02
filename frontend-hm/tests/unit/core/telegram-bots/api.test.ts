@@ -129,6 +129,28 @@ describe("the telegram api", () => {
     });
   });
 
+  it("carries no body value of the wrong type onto a typed field", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      answer(409, {
+        reason: "bot-linked",
+        webhook_host: 1,
+        own: "yes",
+        agent_name: 2,
+        link_id: {},
+        execution_reason: false,
+      }),
+    );
+    const refusal = (await listTelegramBots().catch(
+      (error: unknown) => error,
+    )) as TelegramRefusal;
+    expect(refusal.webhook_host).toBeUndefined();
+    expect(refusal.own).toBeUndefined();
+    expect(refusal.agent_name).toBeNull();
+    expect(refusal.link_id).toBeNull();
+    expect(refusal.execution_reason).toBeUndefined();
+    expect(telegramRefusalKey(refusal)).toBe("refusal.inUseOther");
+  });
+
   it("a failure without a readable body has no reason", async () => {
     mockedFetch.mockResolvedValueOnce(new Response("gateway", { status: 502 }));
     const refusal = (await listTelegramBots().catch(

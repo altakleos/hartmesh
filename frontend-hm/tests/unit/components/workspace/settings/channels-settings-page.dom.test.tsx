@@ -34,15 +34,14 @@ import { ChannelsSettingsPage } from "@/components/workspace/settings/channels-s
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 
-function renderPage() {
-  return render(
-    <I18nContext.Provider
-      value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
-    >
-      <ChannelsSettingsPage />
-    </I18nContext.Provider>,
-  );
-}
+const page = () => (
+  <I18nContext.Provider
+    value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+  >
+    <ChannelsSettingsPage />
+  </I18nContext.Provider>
+);
+const renderPage = () => render(page());
 
 afterEach(() => {
   cleanup();
@@ -62,5 +61,16 @@ describe("ChannelsSettingsPage", () => {
     renderPage();
     expect(screen.queryByText("the Telegram section")).toBeNull();
     screen.getByText(enUS.settings.channels.disabled);
+  });
+
+  it("keeps the Telegram section mounted when the providers arrive", () => {
+    const { rerender } = renderPage();
+    const section = screen.getByText("the Telegram section");
+    expect(screen.queryByText(enUS.settings.channels.title)).toBeNull();
+
+    state.providers = [{ provider: "slack", enabled: true }];
+    rerender(page());
+    screen.getByText(enUS.settings.channels.title);
+    expect(screen.getByText("the Telegram section")).toBe(section);
   });
 });

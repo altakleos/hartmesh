@@ -183,71 +183,68 @@ describe("the welcome card", () => {
 });
 
 describe("the sidebar row", () => {
-  const text = async (list: BotList) => {
+  // It reads Connect until the list has answered, so each test waits for its own words.
+  const shows = async (list: BotList, words: string) => {
     serve(READY, list);
     renderWithClient(<TelegramSidebarRow />);
-    await settle();
-    return screen.getByRole("button").textContent;
+    await waitFor(() =>
+      expect(screen.getByRole("button").textContent).toBe(words),
+    );
   };
 
   it("reads Connect, the number connected, or the number to check", async () => {
-    expect(await text(listOf([]))).toBe("Connect");
+    await shows(listOf([]), "Connect");
     cleanup();
     clearClients();
 
-    expect(await text(listOf([bot()]))).toBe("1 connected");
+    await shows(listOf([bot()]), "1 connected");
     cleanup();
     clearClients();
 
-    expect(await text(listOf([bot({ state: "held" })]))).toBe("1 to check");
+    await shows(listOf([bot({ state: "held" })]), "1 to check");
     cleanup();
     clearClients();
 
-    expect(
-      await text(
-        listOf([
-          bot({ id: "a", state: "blocked" }),
-          bot({ id: "b", health: "stopped" }),
-          bot({ id: "c" }),
-        ]),
-      ),
-    ).toBe("2 to check");
+    await shows(
+      listOf([
+        bot({ id: "a", state: "blocked" }),
+        bot({ id: "b", health: "stopped" }),
+        bot({ id: "c" }),
+      ]),
+      "2 to check",
+    );
   });
 
   it("says Press Start for a bot waiting for it, not that none is connected", async () => {
-    expect(
-      await text(
-        listOf([
-          bot({
-            state: "waiting_connect",
-            connected_as: null,
-            connect_expires_at: ago(-600),
-          }),
-        ]),
-      ),
-    ).toBe("Press Start");
+    await shows(
+      listOf([
+        bot({
+          state: "waiting_connect",
+          connected_as: null,
+          connect_expires_at: ago(-600),
+        }),
+      ]),
+      "Press Start",
+    );
   });
 
   it("keeps counting a bot as connected while Telegram cannot be reached", async () => {
-    expect(await text(listOf([bot({ health: "unreachable" })]))).toBe(
-      "1 connected",
-    );
+    await shows(listOf([bot({ health: "unreachable" })]), "1 connected");
     cleanup();
     clearClients();
 
-    expect(
-      await text(
-        listOf([
-          bot({ id: "a", health: "unreachable" }),
-          bot({
-            id: "b",
-            state: "waiting_connect",
-            connected_as: null,
-            connect_expires_at: ago(-600),
-          }),
-        ]),
-      ),
-    ).toBe("1 connected");
+    await shows(
+      listOf([
+        bot({ id: "a", health: "unreachable" }),
+        bot({
+          id: "b",
+          state: "waiting_connect",
+          connected_as: null,
+          connect_expires_at: ago(-600),
+        }),
+      ]),
+      "1 connected",
+    );
   });
 
   it("notices a link run out, though no answer changed", async () => {
@@ -258,7 +255,7 @@ describe("the sidebar row", () => {
         connected_as: null,
         connect_expires_at: ago(-2),
       });
-      expect(await text(listOf([running]))).toBe("Press Start");
+      await shows(listOf([running]), "Press Start");
       act(() => {
         rs.advanceTimersByTime(6000);
       });
@@ -271,8 +268,7 @@ describe("the sidebar row", () => {
   it("says Paused while Telegram cannot run, whatever a row says", async () => {
     serve(MISSING, listOf([bot()]));
     renderWithClient(<TelegramSidebarRow />);
-    await settle();
-    expect(screen.getByRole("button").textContent).toBe("Paused");
+    await screen.findByRole("button", { name: "Paused" });
   });
 
   it("opens the section", async () => {

@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import type { ReactNode } from "react";
 
 rs.mock("@/core/api/fetcher", () => ({ fetch: rs.fn() }));
 rs.mock("@/core/config", () => ({ getBackendBaseURL: () => "" }));
@@ -16,6 +24,7 @@ import { fetch } from "@/core/api/fetcher";
 import { useTelegram } from "@/core/features/hooks";
 import {
   telegramBotsQueryPrefix,
+  useRefreshTelegramBots,
   useTelegramBots,
   useTelegramReader,
 } from "@/core/telegram-bots/hooks";
@@ -39,12 +48,20 @@ function Probe() {
   );
 }
 
-function serve(features: () => Response) {
+function serve(features: () => Response, bots: () => unknown = () => list) {
   rs.mocked(fetch).mockImplementation(async (url: string | URL | Request) =>
     (url as string).endsWith("/api/features")
       ? features()
-      : new Response(JSON.stringify(list), { status: 200 }),
+      : new Response(JSON.stringify(bots()), { status: 200 }),
   );
+}
+
+function withClient(client: QueryClient) {
+  return function Wrapper({ children }: { children: ReactNode }) {
+    return (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+  };
 }
 
 function start() {
@@ -52,11 +69,7 @@ function start() {
     defaultOptions: { queries: { retry: false, retryDelay: 0 } },
   });
   clients.push(client);
-  render(
-    <QueryClientProvider client={client}>
-      <Probe />
-    </QueryClientProvider>,
-  );
+  render(<Probe />, { wrapper: withClient(client) });
   return client;
 }
 
@@ -135,15 +148,37 @@ describe("the telegram hooks", () => {
   });
 
   it("keeps each account's list apart and refreshes by the shared prefix", async () => {
-    serve(() => features({ enabled: true, bots: "ready", reason: null }));
+    serve(
+      () => features({ enabled: true, bots: "ready", reason: null }),
+      () => ({
+        ...list,
+        limits: { per_person: auth.user.id === "alice" ? 10 : 20, used: 0 },
+      }),
+    );
     const client = start();
     await waitFor(() => expect(state().bots).toBe(10));
-    expect(
-      client.getQueryData([...telegramBotsQueryPrefix, "alice"]),
-    ).toMatchObject(list);
-    expect(
-      client.getQueriesData({ queryKey: telegramBotsQueryPrefix }),
-    ).toHaveLength(1);
+    const alice = [...telegramBotsQueryPrefix, "alice"];
+    const bob = [...telegramBotsQueryPrefix, "bob"];
+
+    cleanup();
+    auth.user = { id: "bob", system_role: "user" };
+    render(<Probe />, { wrapper: withClient(client) });
+    await waitFor(() => expect(state().bots).toBe(20));
+    expect(client.getQueryData(alice)).toMatchObject({
+      limits: { per_person: 10 },
+    });
+    expect(client.getQueryData(bob)).toMatchObject({
+      limits: { per_person: 20 },
+    });
+
+    const reads = listRequests().length;
+    const { result } = renderHook(() => useRefreshTelegramBots(), {
+      wrapper: withClient(client),
+    });
+    await act(() => result.current());
+    expect(listRequests().length).toBeGreaterThan(reads);
+    // A list nobody shows now is read again when someone next does.
+    expect(client.getQueryState(alice)?.isInvalidated).toBe(true);
   });
 
   it("says who reads a text", async () => {
@@ -152,7 +187,7 @@ describe("the telegram hooks", () => {
         new Response(
           JSON.stringify({
             agents_api: { enabled: true },
-            branding: { provider: { name: "Acme" } },
+            branding: { provider: { display_name: "Acme" } },
           }),
           { status: 200 },
         ),
@@ -160,7 +195,6 @@ describe("the telegram hooks", () => {
     auth.user = { id: "alice", system_role: "admin" };
     start();
     await waitFor(() => expect(state().loading).toBe(false));
-    expect(state().reader.admin).toBe(true);
-    expect(state().reader.provider).toBeTruthy();
+    expect(state().reader).toEqual({ admin: true, provider: "Acme" });
   });
 });

@@ -71,7 +71,7 @@ import {
 import { WorkspaceSettingsDeepLink } from "@/components/workspace/workspace-settings-deep-link";
 import { fetch } from "@/core/api/fetcher";
 import { createEnUS } from "@/core/i18n/locales/en-US";
-import type { BotList } from "@/core/telegram-bots/api";
+import type { BotList, Settings } from "@/core/telegram-bots/api";
 import { telegramTargetOf } from "@/core/telegram-bots/web-pages";
 
 import {
@@ -90,6 +90,16 @@ i18n.t = createEnUS("HartMesh");
 const READY = { enabled: true, bots: "ready", reason: null };
 const LIST = "GET /api/telegram-bots";
 const ADMIN = "GET /api/telegram-bots/admin/summary";
+const SETTINGS: Settings = {
+  timezone: "Europe/Lisbon",
+  locale: "en-US",
+  quiet_enabled: true,
+  quiet_start: "21:00",
+  quiet_end: "07:00",
+  notify: "all",
+  summary_enabled: true,
+  summary_time: "08:00",
+};
 
 function start(
   telegram: unknown,
@@ -407,9 +417,9 @@ describe("the Telegram section", () => {
       addressLands();
       renderOpened();
       render(<WorkspaceSettingsDeepLink />);
+      await waitFor(() => expect(getSettingsDialogSnapshot().open).toBe(true));
       // The router answers before the two lazy chunks that hold the section.
       await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(getSettingsDialogSnapshot().open).toBe(true);
       expect(navigation.replace).not.toHaveBeenCalled();
       start(READY, listOf([]));
       await screen.findByTestId("set-up-for");
@@ -666,6 +676,36 @@ describe("the Telegram section", () => {
     rs.spyOn(Date, "now").mockReturnValue(now + 120_000);
     act(() => (tick as () => void)());
     await screen.findByText("The link expired");
+  });
+
+  it("leaves the settings block and its time zones out of the clock's tick", async () => {
+    const intervals = rs.spyOn(globalThis, "setInterval");
+    // The block lists the zones once each time it renders.
+    const zones = rs.spyOn(Intl, "supportedValuesOf");
+    const now = Date.now();
+    start(
+      READY,
+      listOf(
+        [
+          bot({
+            state: "waiting_connect",
+            connected_as: null,
+            connect_expires_at: new Date(now + 60_000).toISOString(),
+          }),
+        ],
+        { settings: SETTINGS },
+      ),
+    );
+    await screen.findByText("Waiting for you to press Start");
+    await screen.findByText("Messages from your bots");
+    const renders = zones.mock.calls.length;
+    expect(renders).toBeGreaterThan(0);
+    const tick = intervals.mock.calls.find(([, delay]) => delay === 5000)?.[0];
+    rs.spyOn(Date, "now").mockReturnValue(now + 120_000);
+    act(() => (tick as () => void)());
+    // The tick reached the rows, so the section did render again around the block.
+    await screen.findByText("The link expired");
+    expect(zones.mock.calls.length).toBe(renders);
   });
 
   it("Try now calls its route and shows no message", async () => {
