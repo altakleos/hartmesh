@@ -1395,7 +1395,8 @@ Telegram bookkeeping is kept for a limited time: incoming messages for 7 days,
 delivered messages for 30 days, and acts and bot history for 400 days. A delivered
 message that a live button or an unfinished delivery still needs stays until that
 ends. **Try again** works for 7 days, because it resends the incoming message;
-after that the bot says it is no longer waiting. The account command's `disable` reports how many held bindings are Telegram
+after that the bot says it is no longer waiting. These limits keep running while
+Telegram is off or paused. The account command's `disable` reports how many held bindings are Telegram
 bots as `telegram_bots`, and `enable --restore-held` does the same under
 `restored`.
 

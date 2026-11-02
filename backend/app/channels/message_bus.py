@@ -137,6 +137,11 @@ class OutboundMessage:
     created_at: float = field(default_factory=time.time)
 
 
+def chat_in_log(msg: InboundMessage | OutboundMessage) -> str:
+    """How a log line names a chat: a Telegram chat id is the person's own id, and a connection id is nobody's."""
+    return f"connection={msg.connection_id}" if msg.connection_id else f"chat_id={msg.chat_id}"
+
+
 # ---------------------------------------------------------------------------
 # MessageBus
 # ---------------------------------------------------------------------------
@@ -245,9 +250,9 @@ class MessageBus:
 
         if should_warn:
             logger.warning(
-                "[Bus] inbound capacity exhausted: channel=%s, chat_id=%s, capacity=%d, rejected_total=%d",
+                "[Bus] inbound capacity exhausted: channel=%s, %s, capacity=%d, rejected_total=%d",
                 msg.channel_name,
-                msg.chat_id,
+                chat_in_log(msg),
                 self._inbound_queue.maxsize,
                 rejection_count,
             )
@@ -267,9 +272,9 @@ class MessageBus:
             self._inbound_queued += 1
 
         logger.info(
-            "[Bus] inbound enqueued: channel=%s, chat_id=%s, type=%s, queue_size=%d",
+            "[Bus] inbound enqueued: channel=%s, %s, type=%s, queue_size=%d",
             msg.channel_name,
-            msg.chat_id,
+            chat_in_log(msg),
             msg.msg_type.value,
             self._inbound_queue.qsize(),
         )
@@ -353,9 +358,9 @@ class MessageBus:
     async def publish_outbound(self, msg: OutboundMessage) -> None:
         """Dispatch an outbound message to all registered listeners."""
         logger.info(
-            "[Bus] outbound dispatching: channel=%s, chat_id=%s, listeners=%d, text_len=%d",
+            "[Bus] outbound dispatching: channel=%s, %s, listeners=%d, text_len=%d",
             msg.channel_name,
-            msg.chat_id,
+            chat_in_log(msg),
             len(self._outbound_listeners),
             len(msg.text),
         )

@@ -100,7 +100,8 @@ async def test_one_account_two_bots_has_separate_bindings_and_conversation_mappi
     assert await db.connections.get_thread_id(second.connection_id, str(ACCOUNT)) == "b" * 32
     await db.links.remove(first.id, actor_id=first.owner_user_id)
     successor = await bind_link(db, await add_link(db, bot=first.bot_id), message=103, update=203)
-    assert successor.connection_id == first.connection_id, "the legacy connection identity is reused, but its old thread must be gone"
+    assert successor.connection_id != first.connection_id, "a bot added again owes nothing to the one removed"
+    assert [row.thread_id for row in await rows(db, ChannelConversationRow)] == ["b" * 32], "and its old thread is gone"
     assert await db.connections.get_thread_id(successor.connection_id, str(ACCOUNT)) is None
     assert await db.connections.get_thread_id(second.connection_id, str(ACCOUNT)) == "b" * 32
 
@@ -194,12 +195,13 @@ async def test_remove_cleans_historical_unbound_conversations_before_reusing_a_b
     await db.connections.set_thread_id(connection_id=other.connection_id, owner_user_id=other.owner_user_id, provider="telegram", external_conversation_id=str(other.chat_id), thread_id="kept-other-thread")
     assert waiting.connection_id is None
     await db.links.remove(waiting.id, actor_id=waiting.owner_user_id)
+    assert [row.thread_id for row in await rows(db, ChannelConversationRow)] == ["kept-other-thread"]
     rebound = await bind_link(db, await add_link(db, bot=original.bot_id), account=ACCOUNT, message=103, update=203)
-    assert rebound.connection_id == original.connection_id
+    assert rebound.connection_id != original.connection_id
     assert await db.connections.get_thread_id(rebound.connection_id, str(ACCOUNT)) is None
     if changed_accounts:
         new_waiting = await db.links.unbind(rebound, actor_id=rebound.owner_user_id)
         rebound_second = await bind_link(db, new_waiting, account=ACCOUNT + 1, message=104, update=204)
-        assert rebound_second.connection_id == second.connection_id
+        assert rebound_second.connection_id != second.connection_id
         assert await db.connections.get_thread_id(rebound_second.connection_id, str(ACCOUNT + 1)) is None
     assert await db.connections.get_thread_id(other.connection_id, str(other.chat_id)) == "kept-other-thread"

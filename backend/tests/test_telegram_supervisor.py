@@ -178,7 +178,8 @@ async def test_health_failure_unblocks_add_without_constructing_clients(db, monk
     link, token = await credential(db, e.env)
     await e.supervisor.check()
     starting = asyncio.create_task(e.supervisor.start())
-    await e.clock.wait_for_sleep()
+    # The three sweeps sleep first; the fourth is the health wait.
+    await e.clock.wait_for_sleep(4)
     adding = asyncio.create_task(e.supervisor.add(link, token))
     e.clock.advance(60)
     await asyncio.wait_for(asyncio.gather(starting, adding), 2)
@@ -1263,7 +1264,7 @@ async def test_replacement_waits_for_old_sender_and_client_retirement(db, monkey
 async def test_retention_runs_daily_after_an_hour_and_the_smaller_sweeps_hourly(db, monkeypatch):
     e = build(db, monkeypatch)
     periodic: dict = {}
-    monkeypatch.setattr(e.supervisor, "_periodic", lambda operation, seconds, name, *, first_delay=None: periodic.__setitem__(name, (operation, seconds, first_delay)))
+    monkeypatch.setattr(e.supervisor, "_periodic", lambda operation, seconds, name, *, first_delay=None, refused_too=False: periodic.__setitem__(name, (operation, seconds, first_delay)))
     await e.supervisor.start()
     try:
         assert periodic["publication-recovery"][0] == e.supervisor._tick_recovery

@@ -1,14 +1,18 @@
 """Host capability admission at the actual channel-manager entry point."""
 
+import ast
 import asyncio
 import json
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
 
+from app.channels import manager as manager_module
+from app.channels import message_bus as bus_module
 from app.channels.execution import ChannelExecutionBusyError, ChannelExecutionContext, ChannelExecutionProtocolError, ChannelExecutionScope
 from app.channels.manager import ChannelManager, _human_input_message
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus
@@ -292,6 +296,44 @@ async def test_file_preparation_keeps_the_original_destination_and_human_extras(
     assert human["content"] == "prepared with uploaded path"
     assert human["additional_kwargs"] == {"channel_turn_id": e.context.publication_id, "forwarded": [{"from": "sender"}], "original_user_content": "downloaded", "files": [{"filename": "retained"}, {"filename": "uploaded"}]}
     assert (e.outbounds[-1].chat_id, e.outbounds[-1].connection_id, e.outbounds[-1].owner_user_id) == ("chat", "connection", "owner")
+
+
+@pytest.mark.asyncio
+async def test_a_managed_turn_names_its_connection_and_never_the_chat_in_the_log(setup, caplog):
+    """In a private chat the chat id is the person's own Telegram id."""
+    e = setup
+    chat = "7123456789"
+    scope = replace(e.context.scope, chat_id=chat)
+    message = replace(e.message, chat_id=chat, execution_context=ChannelExecutionContext(scope, e.client, e.admission))
+    await e.manager.start()
+    try:
+        with caplog.at_level("DEBUG", logger="app.channels"):
+            await e.manager.bus.publish_inbound(message)
+            await asyncio.wait_for(e.manager.bus.join_inbound(), 2)
+    finally:
+        await e.manager.stop()
+    assert [outbound.text for outbound in e.outbounds] == ["answer"]
+    assert chat not in caplog.text
+    assert "[Bus] inbound enqueued: channel=slack, connection=connection, type=chat" in caplog.text
+    assert "[Manager] received inbound: channel=slack, connection=connection, type=chat" in caplog.text
+    assert "[Bus] outbound dispatching: channel=slack, connection=connection, listeners=" in caplog.text
+
+
+def test_no_log_call_of_the_shared_channel_code_passes_a_chat_id_itself():
+    """Every line goes through `chat_in_log`, including the ones a failure reaches."""
+    for module in (manager_module, bus_module):
+        for node in ast.walk(ast.parse(Path(module.__file__).read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id == "logger":
+                named = [part for argument in node.args for part in ast.walk(argument) if isinstance(part, ast.Attribute) and part.attr == "chat_id"]
+                assert not named, f"{module.__name__}:{node.lineno}"
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_channel_keeps_its_chat_in_the_log(caplog):
+    bus = MessageBus()
+    with caplog.at_level("INFO", logger="app.channels.message_bus"):
+        await bus.publish_inbound(InboundMessage(channel_name="slack", chat_id="C123", user_id="sender", text="hello"))
+    assert "[Bus] inbound enqueued: channel=slack, chat_id=C123, type=chat" in caplog.text
 
 
 @pytest.mark.asyncio

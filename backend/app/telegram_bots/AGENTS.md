@@ -198,21 +198,19 @@ looks for the old link, so a replay never swaps twice; only after commit does
 `adopt_token` restart the client. `telegram_feature` fails closed to the model's
 defaults. Later-stage routes are not declared, so they answer 404 or 405.
 
-`retention.py` runs daily, first an hour after start. Each table is swept in its
-own transaction. Outbox candidates are locked, skipping any row in use, before the
-dependencies are read: a live callback's target or `anchor_outbox_id`, an
-unfinished publication owner's `source_outbox_id`, `outbox_id` and `delivery_ids`
-(it may sit on a consumed callback), an unfinished mark's deliveries, and the
-`reply:<turn>` row of a live anchor's turn, which a form's later steps read by key.
-A new kind of outbox reference must be added there. No extra clock starts when a
-dependency ends. A mark is done only once its deliveries are sent or skipped, so
-inbound retention needs only the open-act check. `retry_message` deliberately gets
-no pin: its mark holds the person's text, so the seven days stand and a later press
-refuses as `stale.not_waiting`. Stage one writes no
-`stop_dispatch`, `continuation`, digest or attempt status message; a stage that
-adds one states its dependency here and in `_pinned_deliveries`. Callbacks and
-pending files sweep hourly on their own tasks, so one failing never skips the
-other.
+`retention.py` runs daily, first an hour after start, whatever stops Telegram: the
+sweeps stay out of `_background`, which a late refusal cancels. Outbox candidates are
+locked, skipping any row in use, before the dependencies are read: a live callback's
+target or `anchor_outbox_id`, an unfinished publication owner's `source_outbox_id`,
+`outbox_id` and `delivery_ids` (it may sit on a consumed callback), an unfinished
+mark's deliveries, and the `reply:<turn>` row of a live anchor's turn, which a form's
+later steps read by key. A new kind of outbox reference must be added there. A mark
+is done once its deliveries are sent or skipped, so inbound retention needs only the
+open-act check. `retry_message` gets no pin: its mark holds the person's text, so
+the seven days stand and a later press refuses as `stale.not_waiting`. A stage that
+writes a `stop_dispatch`, `continuation`, digest or attempt status message states its
+dependency here and in `_pinned_deliveries`. Callbacks and pending files sweep hourly
+on their own tasks, so one failing never skips the other.
 
 `skills.py` answers whether a slash word names a skill, from the owner's own storage
 as the run reads it, off the loop. A skill that can run goes on through `_on_text`
@@ -681,7 +679,8 @@ exact owner-scoped receipt before old-link lookup or remote validation.
 Health cause publication holds a per-link lock before SQL and through commit/
 session cleanup. Install process-local causes only after success; token repair
 uses that same order. `set_health(..., transition=...)` accepts complete absolute
-conflict timestamps and an optional hostname atomically. The future poller owns
-the duration constant and must supply its full window on first active entry.
-Omitting transition metadata preserves the window; explicit null clears the
-hostname. Ending conflict preserves the action pause.
+conflict timestamps and an optional hostname atomically. The poller supplies its
+full window on first active entry. Omitting transition metadata preserves the
+window; explicit null clears the hostname. Ending conflict preserves the action
+pause. `conflict`, `token_rejected`, `stopped` and a conflict's end each write a
+link event.

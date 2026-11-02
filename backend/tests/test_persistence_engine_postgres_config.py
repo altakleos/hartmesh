@@ -25,6 +25,7 @@ def test_postgres_engine_kwargs_include_connection_hardening() -> None:
     assert kwargs["pool_recycle"] == engine_mod.POSTGRES_POOL_RECYCLE_SECONDS
     assert kwargs["connect_args"]["command_timeout"] == engine_mod.POSTGRES_COMMAND_TIMEOUT_SECONDS
     assert kwargs["json_serializer"] is engine_mod._json_serializer
+    assert kwargs["hide_parameters"] is True, "A failed statement must not carry a person's words into a log"
 
 
 def test_database_command_timeout_defaults_to_30_seconds() -> None:
@@ -269,7 +270,7 @@ async def test_init_engine_sqlite_omits_postgres_kwargs_and_keeps_wal_listener(t
         try:
             await engine_mod.init_engine(backend="sqlite", url=url, echo=True, sqlite_dir=str(tmp_path))
 
-            create_engine.assert_called_once_with(url, echo=True, json_serializer=engine_mod._json_serializer)
+            create_engine.assert_called_once_with(url, echo=True, json_serializer=engine_mod._json_serializer, hide_parameters=True)
 
             cursor = MagicMock()
             dbapi_connection = MagicMock()

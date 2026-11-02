@@ -39,6 +39,7 @@ from app.channels.message_bus import (
     MessageBus,
     OutboundMessage,
     ResolvedAttachment,
+    chat_in_log,
 )
 from app.channels.outcomes import CreationRefusal, CreationRefusedMessage, capture_creation_refusal
 from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
@@ -1295,6 +1296,10 @@ async def _ingest_inbound_files_scoped(
     if upload is None:
         uploads_dir, seen_names = await await_drained(asyncio.to_thread(_prepare_uploads_dir))
 
+    def label(file: dict[str, Any], idx: int) -> str:
+        # A managed chat's log promises to leave out what a person named their file.
+        return f"#{idx}" if msg.execution_required else _inbound_file_label(file, idx=idx)
+
     async def tell_write_failed(file: dict[str, Any], error: Exception) -> None:
         handler = INBOUND_FILE_WRITE_FAILED.get(msg.channel_name)
         if handler is not None:
@@ -1338,7 +1343,7 @@ async def _ingest_inbound_files_scoped(
                         logger.warning(
                             "[Manager] failed to read inbound file: channel=%s, file=%s, error=%s",
                             msg.channel_name,
-                            _inbound_file_label(f, idx=idx),
+                            label(f, idx),
                             _reader_error_summary(exc),
                         )
                         continue
@@ -1347,7 +1352,7 @@ async def _ingest_inbound_files_scoped(
                     logger.warning(
                         "[Manager] inbound file reader returned no data: channel=%s, file=%s",
                         msg.channel_name,
-                        _inbound_file_label(f, idx=idx),
+                        label(f, idx),
                     )
                     continue
 
@@ -1358,7 +1363,7 @@ async def _ingest_inbound_files_scoped(
                     try:
                         saved = await upload(filename, data)
                     except ChannelUploadRefused as refused:
-                        logger.warning("[Manager] inbound file refused: channel=%s, file=%s, status=%s", msg.channel_name, _inbound_file_label(f, idx=idx), refused.status)
+                        logger.warning("[Manager] inbound file refused: channel=%s, file=%s, status=%s", msg.channel_name, label(f, idx), refused.status)
                         saved_files[saved_key] = None
                         await tell_write_failed(f, refused)
                         continue
@@ -2191,9 +2196,9 @@ class ChannelManager:
                         continue
                     dedupe_recorded = self._inbound_dedupe_key(msg) is not None
                     logger.info(
-                        "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
+                        "[Manager] received inbound: channel=%s, %s, type=%s, text_len=%d, files=%d",
                         msg.channel_name,
-                        msg.chat_id,
+                        chat_in_log(msg),
                         msg.msg_type.value,
                         len(msg.text or ""),
                         len(msg.files),
@@ -2212,10 +2217,10 @@ class ChannelManager:
                     raise
                 except Exception:
                     logger.exception(
-                        "[Manager] inbound worker %d failed handling channel=%s chat_id=%s",
+                        "[Manager] inbound worker %d failed handling channel=%s %s",
                         worker_index,
                         msg.channel_name,
-                        msg.chat_id,
+                        chat_in_log(msg),
                     )
                     if dedupe_recorded:
                         try:
@@ -2274,9 +2279,9 @@ class ChannelManager:
         is_duplicate = await self._inbound_dedupe_store.try_record(key)
         if is_duplicate:
             logger.info(
-                "[Manager] duplicate inbound ignored: channel=%s, chat_id=%s, message_id=%s",
+                "[Manager] duplicate inbound ignored: channel=%s, %s, message_id=%s",
                 msg.channel_name,
-                msg.chat_id,
+                chat_in_log(msg),
                 key[-1],
             )
         return is_duplicate
@@ -2333,25 +2338,25 @@ class ChannelManager:
             await self._send_error(msg, "Channel execution protocol refused")
         except InvalidChannelSessionConfigError as exc:
             logger.warning(
-                "Invalid channel session config for %s (chat=%s): %s",
+                "Invalid channel session config for %s (%s): %s",
                 msg.channel_name,
-                msg.chat_id,
+                chat_in_log(msg),
                 exc,
             )
             await self._send_error(msg, str(exc))
         except SlashSkillCommandResolutionError as exc:
             logger.warning(
-                "Slash skill command resolution failed for %s (chat=%s): %s",
+                "Slash skill command resolution failed for %s (%s): %s",
                 msg.channel_name,
-                msg.chat_id,
+                chat_in_log(msg),
                 exc,
             )
             await self._send_error(msg, str(exc))
         except Exception:
             logger.exception(
-                "Error handling message from %s (chat=%s)",
+                "Error handling message from %s (%s)",
                 msg.channel_name,
-                msg.chat_id,
+                chat_in_log(msg),
             )
             # Transient/unexpected failure: release the dedupe key so a provider
             # redelivery of the same message can recover instead of being dropped
@@ -2416,9 +2421,9 @@ class ChannelManager:
         bound_identity_rejection: _BoundIdentityRejection,
     ) -> None:
         logger.info(
-            "[Manager] rejecting unbound channel message: channel=%s, chat_id=%s",
+            "[Manager] rejecting unbound channel message: channel=%s, %s",
             msg.channel_name,
-            msg.chat_id,
+            chat_in_log(msg),
         )
         outbound = OutboundMessage(
             channel_name=msg.channel_name,
@@ -2568,7 +2573,7 @@ class ChannelManager:
         thread_id = thread["thread_id"]
         await self._store_thread_id(msg, thread_id)
         self._remember_thread_agent(thread_id, agent_name)
-        logger.info("[Manager] new thread created through Gateway: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
+        logger.info("[Manager] new thread created through Gateway: thread_id=%s for %s topic_id=%s", thread_id, chat_in_log(msg), msg.topic_id)
         return thread_id
 
     async def _get_or_create_thread(self, client, msg: InboundMessage) -> tuple[str, bool]:
@@ -2996,7 +3001,7 @@ class ChannelManager:
             owner_user_id=msg.owner_user_id,
             metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification, turn_artifacts=_current_turn_artifacts(result)),
         )
-        logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
+        logger.info("[Manager] publishing outbound message to bus: channel=%s, %s", msg.channel_name, chat_in_log(msg))
         await self.bus.publish_outbound(outbound)
 
     async def _handle_streaming_chat(

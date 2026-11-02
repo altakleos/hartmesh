@@ -5,14 +5,16 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from _telegram_repository_test_support import add_link, bind_link
+from _telegram_repository_test_support import add_link, bind_link, rows
 from _telegram_repository_test_support import db as db  # noqa: F401
 from sqlalchemy import select
 
 from app.gateway.account_export import telegram_export_document
 from app.telegram_bots import retention
 from app.telegram_bots.callbacks import CallbackRepository
+from app.telegram_bots.links import BotLinkRepository
 from app.telegram_bots.retention import sweep_rows
+from deerflow.persistence.channel_connections.model import ChannelConnectionRow
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkEventRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
 
 NOW = datetime(2026, 10, 27, 12, tzinfo=UTC)
@@ -269,6 +271,112 @@ async def test_callback_sweep_keeps_a_used_row_seven_days_and_any_row_180_days(d
     assert await CallbackRepository(db.sessions, config=db.config).sweep(NOW) == 2
     assert not await exists(db, TelegramCallbackRow, used.id) and not await exists(db, TelegramCallbackRow, aged.id)
     assert await exists(db, TelegramCallbackRow, recent.id) and await exists(db, TelegramCallbackRow, younger.id)
+
+
+@pytest.mark.asyncio
+async def test_removing_a_bot_leaves_no_telegram_identity_of_it_behind(db):
+    link = await bound(db)
+    await db.links.unbind(link, actor_id=link.owner_user_id)
+    await bind_link(db, await db.links.get(link.id), account=7_000_000_002, message=102, update=202)
+    other = await bound(db, owner="owner-b", bot=9_000_000_002, account=7_000_000_003)
+    assert len(await rows(db, ChannelConnectionRow)) == 3
+
+    await db.links.remove(link.id, actor_id=link.owner_user_id)
+
+    left = await rows(db, ChannelConnectionRow)
+    assert [(row.owner_user_id, row.external_account_id, row.status) for row in left] == [(other.owner_user_id, "7000000003", "connected")]
+
+
+@pytest.mark.asyncio
+async def test_removal_reaches_only_this_owners_revoked_identities_of_this_bot(db):
+    link = await bound(db)
+    other_owner = ChannelConnectionRow(id=uuid4().hex, owner_user_id="owner-b", provider="telegram", external_account_id="7000000009", workspace_id=str(link.bot_id), bot_user_id=str(link.bot_id), status="revoked")
+    still_live = ChannelConnectionRow(id=uuid4().hex, owner_user_id=link.owner_user_id, provider="telegram", external_account_id="7000000010", workspace_id=str(link.bot_id), bot_user_id=str(link.bot_id), status="connected")
+    await seed(db, other_owner, still_live)
+
+    await db.links.remove(link.id, actor_id=link.owner_user_id)
+
+    assert {row.external_account_id for row in await rows(db, ChannelConnectionRow)} == {"7000000009", "7000000010"}
+
+
+@pytest.mark.asyncio
+async def test_a_disconnect_keeps_the_id_that_continues_the_conversation_and_drops_the_name(db):
+    link = await bound(db)
+    (before,) = await rows(db, ChannelConnectionRow)
+    assert before.external_account_name is not None
+
+    await db.links.unbind(link, actor_id=link.owner_user_id)
+
+    (after,) = await rows(db, ChannelConnectionRow)
+    assert (after.id, after.status, after.external_account_id, after.external_account_name) == (before.id, "revoked", before.external_account_id, None)
+    back = await bind_link(db, await db.links.get(link.id), message=102, update=202)
+    (reconnected,) = await rows(db, ChannelConnectionRow)
+    assert (back.connection_id, reconnected.status, reconnected.external_account_name) == (before.id, "connected", before.external_account_name)
+
+
+async def link_events(db, link):
+    return [(row.action, row.actor_id) for row in sorted(await rows(db, TelegramBotLinkEventRow), key=lambda row: row.created_at) if row.link_id == link.id and row.action not in {"add", "connect"}]
+
+
+@pytest.mark.asyncio
+async def test_a_bots_history_holds_what_went_wrong_once_each_time_it_changes(db):
+    link = await bound(db)
+    await db.links.set_health(link.id, "conflict", holds=True)
+    await db.links.set_health(link.id, "conflict", holds=True)
+    await db.links.set_health(link.id, "conflict", holds=False)
+    await db.links.set_health(link.id, "stopped", holds=True)
+    await db.links.set_health(link.id, "stopped", holds=True)
+    await db.links.set_health(link.id, "stopped", holds=False)
+    await db.links.set_health(link.id, "token_rejected", holds=True)
+    assert await link_events(db, link) == [("conflict", "system"), ("conflict_ended", "system"), ("stopped", "system"), ("token_rejected", "system")]
+
+
+@pytest.mark.asyncio
+async def test_a_conflict_that_ends_behind_a_worse_fault_still_ends_in_the_history(db):
+    link = await bound(db)
+    await db.links.set_health(link.id, "conflict", holds=True)
+    await db.links.set_health(link.id, "token_rejected", holds=True)
+    assert await link_events(db, link) == [("conflict", "system"), ("token_rejected", "system")]
+    await db.links.set_health(link.id, "conflict", holds=False)
+    assert await link_events(db, link) == [("conflict", "system"), ("token_rejected", "system"), ("conflict_ended", "system")]
+
+
+@pytest.mark.asyncio
+async def test_one_conflict_is_one_row_however_often_a_worse_fault_hides_it(db):
+    link = await bound(db)
+    await db.links.set_health(link.id, "conflict", holds=True)
+    await db.links.set_health(link.id, "secret_unreadable", holds=True)
+    await db.links.set_health(link.id, "secret_unreadable", holds=False)
+    assert (await db.links.get(link.id)).health == "conflict"
+    assert await link_events(db, link) == [("conflict", "system")]
+
+
+@pytest.mark.asyncio
+async def test_a_restart_does_not_lose_the_end_of_a_conflict_a_worse_fault_hides(db):
+    link = await bound(db)
+    await db.links.set_health(link.id, "conflict", holds=True)
+    await db.links.set_health(link.id, "token_rejected", holds=True)
+
+    restarted = BotLinkRepository(db.sessions, db.connections, db.config)
+    await restarted.set_health(link.id, "conflict", holds=False)
+
+    assert await link_events(db, link) == [("conflict", "system"), ("token_rejected", "system"), ("conflict_ended", "system")]
+
+
+@pytest.mark.asyncio
+async def test_a_new_token_ends_a_conflict_in_the_history_too(db):
+    link = await bound(db)
+    await db.links.set_health(link.id, "conflict", holds=True)
+    await db.links.store_token(link.id, "wrapped-new-token", actor_id=link.owner_user_id, expected_revision=link.token_revision)
+    assert await link_events(db, link) == [("conflict", "system"), ("conflict_ended", link.owner_user_id), ("replace_token", link.owner_user_id)]
+
+
+@pytest.mark.asyncio
+async def test_a_passing_outage_is_no_part_of_a_bots_history(db):
+    link = await bound(db)
+    await db.links.set_health(link.id, "unreachable", holds=True)
+    await db.links.set_health(link.id, "unreachable", holds=False)
+    assert await link_events(db, link) == []
 
 
 @pytest.mark.asyncio

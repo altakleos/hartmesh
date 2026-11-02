@@ -13,6 +13,7 @@ from test_telegram_publication_custody import publication_environment as publica
 
 from app.telegram_bots import files as module
 from app.telegram_bots import inbox as inbox_module
+from app.telegram_bots.retention import sweep_pending_files
 from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow, TelegramPendingFileRow
 
 NOW = datetime(2026, 10, 25, 14, tzinfo=UTC)
@@ -107,7 +108,7 @@ async def test_topic_and_expiry_are_selected_before_atomic_take_and_sweep(pendin
         await e.service.add(e.link, row, file)
     _update, target, _file = await e.accepted(823, topic=2)
     assert await e.service.take(e.link, target) == [one]
-    assert await e.service.sweep(NOW) == 1
+    assert await sweep_pending_files(e.sessions, NOW, ttl_hours=e.db.config.files.pending_ttl_hours) == 1
     async with e.sessions() as reader:
         rows = list(await reader.scalars(select(TelegramPendingFileRow)))
         assert [(row.message_id, row.message_thread_id) for row in rows] == [(other.message_id, 3)]
@@ -196,4 +197,4 @@ async def test_expiry_is_measured_after_the_actual_owner_preparation_wait(pendin
             return await actual.check(writer)
 
     assert await e.service.take(e.link, target, guard=DelayedGuard()) == []
-    assert await e.service.sweep(e.now[0]) == 1
+    assert await sweep_pending_files(e.sessions, e.now[0], ttl_hours=e.db.config.files.pending_ttl_hours) == 1
