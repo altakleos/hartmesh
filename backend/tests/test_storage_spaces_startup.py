@@ -200,7 +200,7 @@ async def test_startup_skips_bad_slot_and_keeps_pinned_inventory(startup, monkey
     monkeypatch.setattr(catalog, "verify", verify)
     caplog.set_level(logging.INFO, logger=ss.__name__)
     await ss.initialize_storage_spaces(app, config, session_factory=sf)
-    assert (await ss.storage_state(app)).state == "ready"
+    assert (await ss.storage_state(app)).state == "incomplete"
     assert app.state.agent_execution.unverified == {bad_slot: "fixture mount is missing"}
     assert app.state.storage_spaces.catalog is catalog
     assert bad_slot in app.state.storage_spaces.unclaimed_slots[catalog.volumes[bad_slot].kind]

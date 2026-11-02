@@ -691,6 +691,7 @@ def test_restore_leaves_an_image_of_another_size_for_verification_to_report(allo
     spec = next(iter(tool.load().volumes.values()))
     with spec.image_path.open("r+b") as stream:
         stream.truncate(spec.max_bytes // 2)
+    punch(spec)
     assert tool.restore_allocation(spec) == 0
     assert spec.image_path.stat().st_size == spec.max_bytes // 2
 
