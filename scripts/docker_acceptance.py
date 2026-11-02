@@ -166,7 +166,8 @@ def inspect_image(image: str, *, env: dict[str, str]) -> dict[str, object]:
             "image",
             "inspect",
             "--format",
-            '{{json .Id}} {{json .RepoDigests}} {{if .Config.Labels}}{{json (index .Config.Labels "org.opencontainers.image.revision")}}{{else}}null{{end}}',
+            # Engine 29 fails a template on a missing key, so `.Config.Labels` is read here instead.
+            "{{json .Id}} {{json .RepoDigests}} {{json .Config}}",
             image,
         ],
         cwd=ROOT,
@@ -184,7 +185,7 @@ def inspect_image(image: str, *, env: dict[str, str]) -> dict[str, object]:
         "requested": image,
         "image_id": values[0],
         "repo_digests": values[1] or [],
-        "source_revision": values[2] or None,
+        "source_revision": ((values[2] or {}).get("Labels") or {}).get("org.opencontainers.image.revision") or None,
     }
 
 

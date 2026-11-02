@@ -25,8 +25,7 @@ jobs:
   managed-storage:
     name: Managed storage hard limits (Linux Docker)
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    # Pinned: native containment cannot be confirmed on ubuntu-26.04, where ubuntu-latest is moving.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -83,8 +82,7 @@ jobs:
   acceptance:
     name: Production Docker acceptance (${{ matrix.stores }})
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    # Pinned: the pinned Playwright has no Chromium for ubuntu-26.04, where ubuntu-latest is moving.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     strategy:
       fail-fast: false

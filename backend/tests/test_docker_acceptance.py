@@ -148,6 +148,22 @@ def test_image_mode_requires_both_components():
     assert error.value.code == 2
 
 
+@pytest.mark.parametrize(
+    ("config", "revision"),
+    [
+        ('{"Labels":{"org.opencontainers.image.revision":"abc"},"Env":["SECRET=x"]}', "abc"),
+        ('{"Labels":{"other":"label"}}', None),
+        ('{"Labels":null}', None),
+        ("{}", None),
+        ("null", None),
+    ],
+)
+def test_an_image_without_labels_is_read_on_every_engine(monkeypatch, config, revision):
+    runner = load(ROOT / "scripts/docker_acceptance.py")
+    monkeypatch.setattr(runner.subprocess, "check_output", lambda *args, **kwargs: f'"sha256:id" ["repo@sha256:d"] {config}\n')
+    assert runner.inspect_image("image", env={}) == {"requested": "image", "image_id": "sha256:id", "repo_digests": ["repo@sha256:d"], "source_revision": revision}
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX Docker acceptance runner")
 @pytest.mark.parametrize("failure", [None, "startup", "browser", "interrupt", "inspect"])
 @pytest.mark.parametrize("shared_source", [False, True])

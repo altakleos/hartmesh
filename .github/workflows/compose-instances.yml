@@ -18,8 +18,7 @@ jobs:
   bundle-instances:
     name: Storage and agents in the Compose bundle (Linux Docker)
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    # Pinned: on ubuntu-26.04, where ubuntu-latest is moving, this push to localhost goes over https and fails.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     env:
       C: docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env
@@ -80,15 +79,16 @@ jobs:
           curl -fsS -o /dev/null http://127.0.0.1:18080/health
 
       - name: 6 Build the backend image from this commit
-        run: docker build --build-arg UV_EXTRAS=postgres --tag localhost/hartmesh-backend:ci --file backend/Dockerfile .
+        run: docker build --build-arg UV_EXTRAS=postgres --tag localhost:80/hartmesh-backend:ci --file backend/Dockerfile .
 
       - name: 7 Give the image a digest reference
         run: |
           docker run -d --name ci-registry -p 127.0.0.1:80:5000 registry:2
           for attempt in $(seq 1 20); do curl -fsS http://127.0.0.1/v2/ && break; sleep 0.5; done
-          docker push localhost/hartmesh-backend:ci
-          backend_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' localhost/hartmesh-backend:ci)
-          case "$backend_ref" in localhost/hartmesh-backend@sha256:*) ;; *) echo "unexpected reference: $backend_ref"; exit 1 ;; esac
+          # The containerd image store takes a portless localhost for https, and plain http only with port 80 named.
+          docker push localhost:80/hartmesh-backend:ci
+          backend_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' localhost:80/hartmesh-backend:ci)
+          case "$backend_ref" in localhost:80/hartmesh-backend@sha256:*) ;; *) echo "unexpected reference: $backend_ref"; exit 1 ;; esac
           echo "BACKEND_REF=$backend_ref" >> "$GITHUB_ENV"
           docker run --rm --entrypoint sh "$backend_ref" -c 'set -eu; command -v nsenter; command -v setpriv; docker --version' > "$EVIDENCE/backend-tools.txt"
           cat "$EVIDENCE/backend-tools.txt"
