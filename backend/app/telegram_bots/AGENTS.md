@@ -47,7 +47,10 @@ creates parent, group and controls atomically; exact replay reuses identities.
 The supervisor constructs these services after resolving default repositories.
 
 `human_input.py` composes finite clarification/form/network interactions with the
-existing turn controller and sender; it owns no scheduler. `human_input_source.py`
+existing turn controller and sender; it owns no scheduler. What would answer a card takes
+`_waiting_source`: only Telegram input closes a card, so a newer run in the conversation
+means it went on from the web, and the card refuses. Closing one needs no such check.
+`human_input_source.py`
 qualifies one exact lead/tool request using the persisted document-2 output,
 complete inventory and actual messages. V5 human-input plans freeze that source and their input
 snapshots; every unsent private part rereads source and live scope, including

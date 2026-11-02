@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A long answer no longer holds one of the eight message workers for its whole length, so
   eight long answers no longer leave every other chat waiting.
+- A question or blocked-site card left open while the conversation went on from the web
+  now says it is no longer waiting, instead of starting a run from an old answer.
+- A form shows the context the model gave with its question and the hint it gave for a
+  field. Review lines read alike in Chinese.
+- A preview keeps off a long flood wait, and stops editing a message Telegram can no
+  longer edit, instead of asking again every second.
 - A new conversation no longer stores the person's Telegram id in its metadata, where
   it outlived the bot. Conversations started under `2.2.0+hartmesh.48` keep theirs
   until they are deleted.

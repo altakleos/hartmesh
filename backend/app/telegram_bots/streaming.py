@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 
 from app.telegram_bots.markdown import to_html
 from app.telegram_bots.split import clip_draft, utf16_units, visible_text
@@ -43,6 +44,8 @@ class LivePresentation:
         self._model_span = None
         self._shown_anchor = None
         self._revision = 0
+        self._held_until = 0.0
+        self._gone_anchor = None
 
     def _current(self, *, include_paused=False):
         return not self.closed and (include_paused or not self.paused) and self.is_current() is True and self.channel._callback_current(self.link)
@@ -53,7 +56,16 @@ class LivePresentation:
 
         if not current():
             return None
-        return await self.channel.live_request(self.link, method, is_current=current, protected=self.protected, **kwargs)
+        return await self.channel.live_request(self.link, method, is_current=current, protected=self.protected, on_refused=self._refused, **kwargs)
+
+    def _refused(self, error):
+        """A preview that Telegram turned away waits its time, and a message it cannot edit is left alone."""
+        from app.telegram_bots.adapter import LongRetryAfter
+
+        if isinstance(error, LongRetryAfter):
+            self._held_until = self.channel._time() + error.seconds
+        elif isinstance(error, BadRequest) and any(value in str(error).lower() for value in ("message to edit not found", "message can't be edited", "message cannot be edited")):
+            self._gone_anchor = self._anchor
 
     async def start(self):
         async with self._lock:
@@ -138,7 +150,7 @@ class LivePresentation:
             if not self.started or not self._current():
                 return
             now = self.channel._time()
-            if now - self._last_send < DRAFT_INTERVAL_SECONDS:
+            if now - self._last_send < DRAFT_INTERVAL_SECONDS or now < self._held_until:
                 return
             if not self._dirty and not self._redisplay and (self.mode != "draft" or now - self._last_send < DRAFT_KEEPALIVE_SECONDS):
                 return
@@ -237,6 +249,8 @@ class LivePresentation:
         if html == self._last_html and not final_part:
             self._dirty = self._revision != revision
             return
+        if self._anchor == self._gone_anchor:
+            return  # Asking again cannot bring it back. The next model span plans a new one.
         result = await self._call("edit_message_text", message_id=self._anchor, text=html, parse_mode=ParseMode.HTML, reply_markup={"inline_keyboard": []} if final_part else self._keyboard)
         self._last_send = self.channel._time()
         if result is None or not self._current():

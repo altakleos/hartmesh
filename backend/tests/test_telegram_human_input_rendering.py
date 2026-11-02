@@ -86,6 +86,22 @@ def test_typed_form_field_has_reply_bar_or_skip_but_not_both(required):
     assert all(button["payload"]["revision"] == 3 for button in buttons(view))
 
 
+def test_a_form_shows_what_the_model_said_beside_its_fields():
+    raw = request(version=2, input_mode="form", context="For the <March> invoice", fields=[{"name": "when", "label": "Date", "type": "text", "required": True, "placeholder": "YYYY-MM-DD"}])
+    form = SimpleNamespace(id="a" * 32, field_index=0, revision=1, values={})
+    first = present_form(raw, form, thread_id="render-thread", reply_to_message_id=91, locale="en-US", include_question=True)
+    assert "For the <March> invoice" in text(first) and "YYYY-MM-DD" in text(first)
+    later = present_form(raw, form, thread_id="render-thread", reply_to_message_id=91, locale="en-US")
+    assert "For the <March> invoice" not in text(later) and "YYYY-MM-DD" in text(later), "The context goes with the question, and the hint with its field"
+
+
+def test_form_review_lines_read_alike_in_chinese():
+    fields = [{"name": name, "label": name, "type": "text", "required": True} for name in ("a", "b")]
+    form = SimpleNamespace(id="a" * 32, field_index=1, revision=2, values={"a": "1", "b": "2"})
+    view = present_form(request(version=2, input_mode="form", fields=fields), form, thread_id="render-thread", reply_to_message_id=91, locale="zh-CN", view="review")
+    assert "a：1" in text(view) and "b：2" in text(view)
+
+
 def test_form_review_keeps_all_labels_and_values_with_localized_checkbox():
     raw = request(version=2, input_mode="form", fields=[{"name": "value", "label": "A literal <value>", "type": "text", "required": True}, {"name": "include", "label": "Include it", "type": "checkbox", "required": False}])
     form = SimpleNamespace(id="a" * 32, field_index=2, revision=4, values={"value": "A & B", "include": False})
