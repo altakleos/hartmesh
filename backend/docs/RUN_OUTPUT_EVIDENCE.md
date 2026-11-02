@@ -4,8 +4,8 @@ Run creation accepts an explicit `output_capture: {"version": 1}` capability fro
 the Gateway's own internal callers; anyone else gets 403.
 It requires the actual SQL run repository and durable database event store;
 Memory, JSONL, legacy custom stores and a database factory's Memory fallback do
-not qualify. Omission preserves ordinary behavior. Managed Telegram publication
-and model activation remain separate work.
+not qualify. Omission preserves ordinary behavior. Every managed Telegram turn
+uses it.
 New captured admissions persist their server-owned disconnect mode in
 `output_capture_on_disconnect`; caller kwargs cannot override it. Cold peer
 hydration restores that mode, and captured idempotent reuse requires the same
@@ -207,8 +207,7 @@ authorization failures carry no supported-absence acknowledgement.
 
 Post-response authorization remains inside the existing retained HTTP owner.
 Shutdown drains started codec and SQL cleanup before releasing ownership. These
-read boundaries enable reading independently sealed output. Managed-bot model
-execution and durable publication recovery remain separate work.
+read boundaries are how a managed bot reads independently sealed output.
 
 No schema or configuration version changes are required: the receipt uses the
 existing run kwargs JSON. Schema head remains `0044_telegram_assistant_ids`;

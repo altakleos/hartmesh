@@ -3407,7 +3407,7 @@ With a name, the sentences read "ask Example Hosting"; without one, "ask your se
 
 The evidence tiers establish different facts. Each is recorded separately:
 
-- `managed-storage` runs all 26 required native cases on real loop-mounted ext4
+- `managed-storage` runs all 27 required native cases on real loop-mounted ext4
   filesystems and actual containers, using the resident builder and byte-coherence
   probes. It rejects every skip; directories and engine doubles cannot replace it.
 - `bundle-instances` runs the shipped profile through nginx with all seven keys,
@@ -3450,7 +3450,7 @@ tb() { hm exec -T gateway sh -c 'cd /app/backend && exec setpriv --reuid=1000 --
 
 ### The keys
 
-Four optional keys in the tenant `.env` govern Telegram bots. All four are read by `gateway/render_config.py` at every Gateway start. A value outside the stated range refuses to render, so the Gateway does not start and the journal names the key. An empty value is the same as an absent key. A change takes `hm up -d gateway`.
+Four optional keys in the tenant `.env` govern Telegram bots. All four are read by `gateway/render_config.py` at every Gateway start. A value outside the stated range refuses to render, so the Gateway does not start and the journal names the key. An empty value is the same as an absent key. A change takes `hm up -d gateway`, with the secret in the command's environment, as every `up`.
 
 | Key | Consumed by |
 | --- | --- |
@@ -3494,13 +3494,14 @@ hm logs --no-log-prefix gateway | grep 'telegram: '
 tb status
 ```
 
-The first is the renderer's summary. After the fragment of the storage and the agents, `spaces: …; agents=on`, it carries one of five fragments, the first that applies:
+The first is the renderer's summary. After the fragment of the storage and the agents, `spaces: …; agents=on`, it carries one of six fragments, the first that applies:
 
 | Fragment | Meaning |
 | --- | --- |
 | `telegram=off` | `HARTMESH_TELEGRAM=off`. |
 | `telegram=on, bots cannot be added (HARTMESH_PROVIDER_KEYS_SECRET not set)` | On, and the Gateway's environment holds no secret. |
 | `telegram=on, bots cannot be read (HARTMESH_PROVIDER_KEYS_SECRET is shorter than 32 characters)` | On, and the secret is too short to be used. |
+| `telegram=on, bots cannot be read (HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS is shorter than 32 characters)` | On, and the previous secret of a rotation is too short to be used. |
 | `telegram=on, no link buttons (HARTMESH_PUBLIC_HOST is not a hostname)` | On, and hand-over sentences are sent without a button. |
 | `telegram=on` | On, with link buttons. |
 
@@ -3622,7 +3623,7 @@ It reads the rendered configuration, the row of `telegram_deployment`, the Docke
 Example:
 
 ```json
-{"acts_paused": 1, "attention": [{"acts_paused_since": "2026-11-03T09:14:02+00:00", "agent_kind": "custom_agent", "agent_ref": "reader", "bot_id": 7512345678, "conflict_since": "2026-11-03T09:14:02+00:00", "health": "conflict", "last_error": "Conflict", "last_ok_at": "2026-11-03T09:12:58+00:00", "limited_since": null, "delivery_pending": 0, "delivery_degraded": false, "delivery_failed": 0, "link": "4c1f0a9e2b7d4e6f8a1c3d5e7f9b0a2c", "oldest_open_input_at": null, "open_inputs": 0, "origin": "pasted", "owner": "1f9b6a2c-4d3e-4f5a-8b7c-9d0e1f2a3b4c", "polling_stale": false, "probe_until": "2026-11-04T09:14:02+00:00", "state": "connected", "token": "current", "webhook": false}], "bots": "ready", "by_health": {"agent_unavailable": 0, "conflict": 1, "ok": 11, "policy_off": 0, "secret_unreadable": 0, "stopped": 0, "token_rejected": 0, "unreachable": 0}, "by_kind": {"custom_agent": 7, "instance": 0, "lead_agent": 5}, "by_state": {"blocked": 0, "connected": 11, "held": 0, "waiting_connect": 1}, "command": "status", "enabled": true, "host_id": "7b9c1e6f-4d2a-4c5e-9f0a-1b2c3d4e5f60", "limited": 0, "limits": {"deployment": 100, "per_person": 10}, "links": 12, "note": "telegram on: 12 bot links of 7 people; 1 needs attention; the next start would find polling running", "people": 7, "polling_state": "running", "public_base_url": "https://acme.example.com", "reason": null, "returncode": 0, "secret": "set", "this_host_id": "7b9c1e6f-4d2a-4c5e-9f0a-1b2c3d4e5f60", "tokens": {"current": 12, "previous": 0, "unreadable": 0}, "voice": "openai"}
+{"acts_paused": 1, "attention": [{"acts_paused_since": "2026-11-03T09:14:02+00:00", "agent_kind": "custom_agent", "agent_ref": "reader", "bot_id": 7512345678, "conflict_since": "2026-11-03T09:14:02+00:00", "health": "conflict", "last_error": null, "last_ok_at": "2026-11-03T09:12:58+00:00", "limited_since": null, "delivery_pending": 0, "delivery_degraded": false, "delivery_failed": 0, "link": "4c1f0a9e2b7d4e6f8a1c3d5e7f9b0a2c", "oldest_open_input_at": null, "open_inputs": 0, "origin": "pasted", "owner": "1f9b6a2c-4d3e-4f5a-8b7c-9d0e1f2a3b4c", "polling_stale": false, "probe_until": "2026-11-04T09:14:02+00:00", "state": "connected", "token": "current", "webhook": false}], "bots": "ready", "by_health": {"agent_unavailable": 0, "conflict": 1, "ok": 11, "policy_off": 0, "secret_unreadable": 0, "stopped": 0, "token_rejected": 0, "unreachable": 0}, "by_kind": {"custom_agent": 7, "instance": 0, "lead_agent": 5}, "by_state": {"blocked": 0, "connected": 11, "held": 0, "waiting_connect": 1}, "command": "status", "enabled": true, "host_id": "7b9c1e6f-4d2a-4c5e-9f0a-1b2c3d4e5f60", "limited": 0, "limits": {"deployment": 100, "per_person": 10}, "links": 12, "note": "telegram on: 12 bot links of 7 people; 1 needs attention; the next start would find polling running", "people": 7, "polling_state": "running", "public_base_url": "https://acme.example.com", "reason": null, "returncode": 0, "secret": "set", "this_host_id": "7b9c1e6f-4d2a-4c5e-9f0a-1b2c3d4e5f60", "tokens": {"current": 12, "previous": 0, "unreadable": 0}, "voice": "openai"}
 ```
 
 Refusal, exit 1, beside the common ones: `no account has id <value>`, with `--owner`.
@@ -3749,7 +3750,7 @@ The pause after another program used a bot's token survives both commands (§ "A
 
 ### Turning Telegram off and on
 
-1. Write the key and restart the Gateway, when `ai status` shows `"runs_in_flight": 0`:
+1. Write the key and restart the Gateway, when `ai status` shows `"runs_in_flight": 0`, with the secret in the command's environment, as every `up`. Without it, provider keys set in the product stop opening too:
 
    ```bash
    sed -i '/^HARTMESH_TELEGRAM=/d' /srv/hartmesh/.env
@@ -3781,7 +3782,7 @@ A start with the new value and without the previous one leaves every token unrea
 Two Gateways using the same bot tokens can receive different parts of a person's messages and answer from different copies of the data. A concurrent copy must have Telegram off **before its first boot**, whether it holds one bot or hundreds. A copy includes a snapshot restored onto another VM, a full VM clone and a second stack made from the same data disk. Neither Docker identity nor Telegram polling chooses the intended deployment for the operator.
 
 1. Before a copy that will coexist with its original can start its Gateway, write `HARTMESH_TELEGRAM=off` into the copy's `.env`. For a full VM clone whose containers restart automatically, prevent Docker/container autostart on its first boot, or isolate that guest's outbound network before booting it; keep the isolation until the setting has been written and rendered. Editing `.env` after a normally networked first boot is too late. Start the copy with the setting off and verify `tb status` reports `"reason": "off"`. Its Gateway makes no Telegram call and sends no pending reply or question. The original's `.env` is not changed for this rehearsal.
-2. For a move or disaster recovery in which the copy will replace the original, stop the original's polling first: power it off, or write `HARTMESH_TELEGRAM=off` there and run `hm up -d gateway`. Confirm that it is stopped before enabling Telegram on the replacement. If the old VM's state cannot be established, keep the replacement off while the operator contains the old VM or revokes the affected tokens. A successful poll by the replacement is not confirmation that the original stopped.
+2. For a move or disaster recovery in which the copy will replace the original, stop the original's polling first: power it off, or write `HARTMESH_TELEGRAM=off` there and run `hm up -d gateway`, with the secret in the command's environment. Confirm that it is stopped before enabling Telegram on the replacement. If the old VM's state cannot be established, keep the replacement off while the operator contains the old VM or revokes the affected tokens. A successful poll by the replacement is not confirmation that the original stopped.
 3. If the replacement's Docker engine has another known ID than the one the database recorded, it polls nothing and logs:
 
    ```
@@ -3971,8 +3972,8 @@ hm logs --no-log-prefix gateway | grep ' - telegram_bots '
 | Event | It means | What to do |
 | --- | --- | --- |
 | `supervisor_start`, `supervisor_ready`, `supervisor_stop` | The supervisor read the links, finished the first attempt for each, or stopped. `supervisor_ready` carries `links`, `ok` and `failing`. | Nothing. |
-| `polling_refused` | Nothing polls, for the `reason` printed: `off`, `auth-disabled`, `unbound-allowed`, `run-events-not-db`, `several-workers`, `channel-service-failed`, `gateway-not-ready`, `secret-missing`, `secret-invalid`, `host-changed` or `polled-elsewhere`. It is an error line for every reason but `off`, which is written at INFO. For `polled-elsewhere` it carries how many links were polled, how many answered only 409, and how many people own those. | The row of the same cause in § "Reading the start-up lines". |
-| `bot_start`, `poll_first_ok`, `bot_stop` | One bot started, received its first answer from Telegram, or stopped, with the reason (`removed`, `held`, `token-stored`, `deployment`). | Nothing. |
+| `polling_refused` | Nothing polls, for the `reason` printed: `off`, `auth-disabled`, `unbound-allowed`, `run-events-not-db`, `several-workers`, `channel-service-failed`, `gateway-not-ready`, `secret-missing`, `secret-invalid`, `host-changed` or `polled-elsewhere`. It is an error line, except `off` at INFO and `secret-missing` at WARNING, which is where a tenant stands until the secret is set. For `polled-elsewhere` it carries how many links were polled, how many answered only 409, and how many people own those. | The row of the same cause in § "Reading the start-up lines". |
+| `bot_start`, `poll_first_ok`, `bot_stop` | One bot started, received its first answer from Telegram, or stopped, with the reason (`removed`, `held`, `token-stored`, `deployment`, `policy-off`). | Nothing. |
 | `bot_start_failed` | Telegram could not be asked about one bot, for a cause other than a rejected token, or its first start failed with `cause`. It is tried again, after `retry_in` seconds when Telegram asked for a wait. The other bots go on. A token counts as rejected only after Telegram refused it twice, 30 seconds apart. | If every bot fails: the VM's route to `api.telegram.org`. |
 | `poll_error`, `poll_recovered` | A poll failed; the first of a run is a warning and the rest are written at DEBUG. `poll_recovered` gives how long the run lasted. | A run on one bot with `http=409`: § "A second program uses one bot's token". Runs on every bot with `error=NetworkError`: the network. |
 | `health` | One bot's health changed, `from` one value `to` another, with the reason: `second-poller`, `webhook`, `network`, `invalid-token`, `task-died`, `secret`, `agent`, `probe-ok`, `recovered`. | `to=conflict`: § "A second program uses one bot's token". `to=token_rejected`: the owner pastes a new token. `to=unreachable`: the network; it recovers by itself. `to=stopped`: the next row. `to=secret_unreadable`: § "The secret that protects bot tokens". `to=agent_unavailable`: nothing; what the bot is connected to cannot serve that person now. |
@@ -3998,6 +3999,22 @@ hm logs --no-log-prefix gateway | grep ' - telegram_bots '
 | `updates_dropped` | This process met the broad-conflict condition and dropped the `n` updates held during startup without acknowledging them. It may be the original or a copy. | § "Another deployment polls the same bots". |
 | `host_unreadable` | The Docker engine's ID could not be read within two seconds at a start, so the check for a changed host was skipped and polling began. | `docker info` on the VM; if this VM is a copy, § "A copy of a deployment". |
 | `voice_unqualified` | A listed provider does not qualify for voice notes; `reason` names the provider and the field or variable. Written once per process for each value. | § "The keys", `HARTMESH_TELEGRAM_VOICE`. |
+| `voice_note_failed`, `voice_note_held`, `voice_note_unanswered` | The service refused or could not transcribe a note, or the note could not go on, with the class of `error`. The person is told and the recording is never sent again. `voice_note_unanswered` means even that sentence failed. | Nothing unless it repeats. |
+| `supervisor_check_failed`, `supervisor_start_failed` | The check of the deployment or the start of the bots raised, with the class of `error` and no traceback. Nothing polls, and the sweeps go on. | § "Reading the start-up lines", `channel-service-failed`; report the line if a restart does not clear it. |
+| `claim_recovery_failed` | At a start, deliveries an earlier process left claimed could not be taken back, with `cause`. It is tried again, and the start fails after the last try. | If `supervisor_start_failed` follows, that row. |
+| `copy_latch_write_failed`, `copy_latch_unpersisted` | The pause for `polled-elsewhere` could not be saved. The first is one failed attempt, retried. The second means the Gateway stopped first: that process stayed paused, and the next start decides again. | § "Another deployment polls the same bots". |
+| `poll_death_write_failed`, `poll_restart_write_failed` | A bot's poller ended or was restarting and that could not be written, with `cause`. It is tried again every second. | Nothing unless it repeats; then the database. |
+| `bot_stop_failed`, `bot_retirement_failed`, `profile_removed_failed` | Stopping or retiring a bot failed, or its last profile text could not be set, with the class of `error`. The bot stops either way. | Nothing. |
+| `after_commit_failed` | A change on the web was saved, and what follows it, such as starting the bot, failed. The row's health shows what the bot is doing. | Nothing unless the row says so. |
+| `token_check_failed` | Telegram could not be asked about a pasted token. The person reads that Telegram could not be reached. | Nothing unless it repeats; then the network. |
+| `feature_unavailable` | `/api/features` could not build its `telegram` key, so the web says Telegram is switched off until a read succeeds. | Nothing unless it repeats. |
+| `press_failed` | A button press failed after Telegram was answered, with `kind` and `cause`. The person is told to tap again, or that something went wrong where a saved answer has left its keyboard. | Report the line if it repeats. |
+| `human_input_invalid` | A run's question could not be read, so the chat shows the fixed sentence instead of its buttons. `source` is `ask_clarification`, `sandbox_network` or `unsupported`. | Report the line to the product's maintainers. |
+| `file_read_failed`, `file_write_notice_failed` | A file of a person's message could not be read from Telegram, or the sentence saying a file was not saved could not be written, with the class of `error`. | Nothing unless it repeats. |
+| `skill_lookup_failed` | A slash word could not be checked against the person's skills, with the class of `error`. It answers as a failed message. | Nothing unless it repeats. |
+| `profile_push_failed` | A bot's name, description, commands or picture could not be set. It is retried for 24 hours. | Nothing unless the row says so. |
+| `notice_button` | A once-only sentence went out without its button, because building the address raised, with the class of `error`. A deployment with no public address leaves the button out with no line. | Nothing unless it repeats. |
+| `managed_update_ignored`, `preview_cleanup_unavailable` | Telegram sent an update stage one does not use, or a temporary preview could not be deleted. Both at INFO. | Nothing. |
 
 Lines at DEBUG (`poll`, `conflict_probe`, `offset_confirmed`) appear only when the Gateway's log level is lowered.
 

@@ -3,7 +3,7 @@
 import logging
 import re
 
-from app.telegram_bots.adapter import TOKEN_BODY
+from app.telegram_bots.token_pattern import TOKEN_BODY
 
 LOG_TOKEN_MARK = "<bot token>"
 _TOKEN = re.compile(TOKEN_BODY)

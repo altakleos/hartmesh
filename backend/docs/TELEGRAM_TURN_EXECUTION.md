@@ -1,20 +1,20 @@
-# Callable managed turn execution
+# Managed turn execution
 
-The managed Telegram runtime has an internal callable path for ordinary and
-custom-agent plain-text turns. It uses the existing channel manager and sender.
-It does not install ordinary input handlers,
-queue/Stop controls, file/voice consumers, instance/Work consumers or activation.
-Schema stays `0044_telegram_assistant_ids`, configuration stays 55.
+A Telegram message to the ordinary chat or a custom agent runs through the existing
+channel manager and sender. `ChatTurns` (`app/telegram_bots/turns.py`) owns it from
+the accepted input to its last delivery, with the queue, Stop and Try again. Files,
+voice notes, questions and slash skills join this path; the module guide covers
+them. AI assistants, AI employees and Work are not on it. Schema stays
+`0044_telegram_assistant_ids`, configuration stays 55.
 
 ## Submission and observation
 
 `PublicationCoordinator.dispatch(link, origins, thread_id=...)` consumes complete
 saved `InboxRow` snapshots. The original thread comes from `ThreadCoordinator`
-and gets an authoritative owner/target read before custody. Each input has exact
-`type='text'` plus nonblank text, and a trusted persisted business-route fact:
-`input_profile={"version":1,"kind":"plain_text","forwarded":false}`. The future
-ingress classifier must establish that fact; missing or forwarded input is not
-silently treated as plain text. Actual content and accepted ordering are retained.
+and gets an authoritative owner/target read before custody. `ChatTurns` saves each
+input's `input_profile` as a business-route fact: version 1 `plain_text`, or version 2
+`chat_input` when it carries files or was forwarded. An input without that fact is
+held and never treated as plain text. Actual content and accepted ordering are retained.
 
 The shared message bus reserves capacity before the durable dispatch marker.
 Only the marker winner can synchronously commit its private host-capability
@@ -71,8 +71,11 @@ Fixed sources retain their separate policy; changing a part to look like a fixed
 notice cannot bypass a model basis. Source uncertainty preserves pending delivery
 and acknowledged prefixes, without a replacement answer or model reexecution.
 
-Pending, unavailable, changed, unsupported, incomplete or nonempty inventories
-remain held, including failed/cancelled runs whose inventory is unavailable.
+An inventory holding files goes to the file planner, which delivers them in the same
+conversation. A pending, unavailable, changed, unsupported or incomplete inventory
+plans no reply. A live turn then ends all the same: a failed run tells the chat, and a
+finished run that cannot be planned closes after `queue.max_wait_seconds`. Recovery
+keeps such a group held.
 No scan is fabricated. A chat intentionally admitted without personal files can
 use the generic host-qualified `no_admitted_output_view` variant of document 2.
 It still requires an active human owner, the original live worker scope and
@@ -85,9 +88,9 @@ It attests the managed output view only, not
 filesystem emptiness or absence of other effects. Independent file, artifact and
 structured presentation offers still prevent empty-inventory delivery.
 Feature-off legacy paths retain real scans, and unknown or changed routing stays
-held. This first host adapter conservatively holds an already-initialized
-unsupported provider, or a provider initialized/replaced during the run, even
-when it might have been unused. Model-only runs need no sandbox acquisition.
+held. This host adapter holds an unsupported provider and one replaced during the
+run. A supported provider that starts during the run is no change: its first tool
+call can start it. Model-only runs need no sandbox acquisition.
 The same retained HTTP owner negotiates format 2; old servers can reject the
 original creating POST before run/storage/model effects, without a fallback POST.
 AI-employee Home qualification belongs to the later instance consumer. The V1 fixed
@@ -100,7 +103,7 @@ and sender. Periodic passes process only marked managed publications. Discovery
 uses the saved original thread/publication and the existing exact unique-run
 proof. A missing run ID, empty page, 404, age or absent local task never permits
 another dispatch or proves that an ambiguous creating request cannot commit.
-Unavailable, unsupported and nonempty inventories remain held.
+Unavailable and unsupported inventories remain held.
 
 Startup has a distinct fixed-notice path after the negative copy decision and
 actual channel readiness, before held inputs and create/send admission release.
@@ -147,11 +150,7 @@ logical deadline. No new leaf/ticket/final writer authorization is admitted
 after it. A commit already issued after its valid final fence may settle later;
 that exact operation remains owned through cleanup. Schema remains `0044`.
 
-This is dormant recovery infrastructure, not completed ordinary-chat activation.
-The trusted ingress classifier, queue/Stop/explicit retry controls, drafts and
-other stage-one consumers remain
-separate work. AI-employee Home/Work authority is never inferred from a human
-requester's access.
+AI-employee Home/Work authority is never inferred from a human requester's access.
 
 ## Shutdown
 

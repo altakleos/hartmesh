@@ -23,8 +23,7 @@ requests and task absence do not prove cleanup. Resolve reuse before captured
 replacement refusal. Unseen admission cleanup uses per-call registration evidence,
 never a shared retry flag. Host-only `runs/capture_io.py` owns fresh finite leaves,
 native iterators and cleanup; retirement grants no terminal proof. Preserve the
-one Gateway deadline and exact original-record association. Managed-bot activation
-remains separate. See
+one Gateway deadline and exact original-record association. See
 [output evidence](../../../../docs/RUN_OUTPUT_EVIDENCE.md).
 
 Capture intent2 adds [terminal inventory](../../../../docs/RUN_OUTPUT_INVENTORY.md)

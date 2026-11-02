@@ -1823,6 +1823,13 @@ def test_summary_line_reports_missing_secret(render_config: ModuleType, tmp_path
     assert output.exists() is not check
 
 
+def test_summary_names_a_short_previous_secret_as_the_gateway_will(render_config: ModuleType) -> None:
+    document = {"telegram_bots": {"enabled": True, "public_base_url": "https://tenant.example.com"}}
+    environ = {"HARTMESH_PROVIDER_KEYS_SECRET": "x" * 32, "HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS": "short"}
+    assert render_config.telegram_summary(document, environ) == "telegram=on, bots cannot be read (HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS is shorter than 32 characters); "
+    assert render_config.telegram_summary(document, {**environ, "HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS": "y" * 32}) == "telegram=on; "
+
+
 @pytest.mark.parametrize("host,expected", [("tenant.example.com", "https://tenant.example.com"), ("", None), ("https://tenant.example.com", None), ("localhost:2026", None), ("bad host", None)])
 def test_public_base_url_rendered_from_public_host(render_config: ModuleType, host: str, expected: str | None) -> None:
     environ = {

@@ -2804,8 +2804,8 @@ class ChannelManager:
         await self._publish_execution_result(msg, execution, result)
 
     async def _publish_execution_result(self, msg: InboundMessage, execution: ChannelExecutionContext, result: Any) -> None:
-        # The outbound remains a display/wake hint. This PR establishes no
-        # authoritative final-source ID or durable model-delivery receipt.
+        # The outbound is a display/wake hint: it is no authoritative final
+        # source and no durable model-delivery receipt.
         await _authorize_execution(execution, "run_read")
         text, artifacts = _extract_response_text(result), _extract_artifacts(result)
         turn_artifacts = _current_turn_artifacts(result)

@@ -640,6 +640,8 @@ def telegram_summary(document: Mapping[str, Any], environ: Mapping[str, str]) ->
         return "telegram=on, bots cannot be added (HARTMESH_PROVIDER_KEYS_SECRET not set); "
     if len(secret) < 32:
         return "telegram=on, bots cannot be read (HARTMESH_PROVIDER_KEYS_SECRET is shorter than 32 characters); "
+    if 0 < len(environ.get("HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS", "").strip()) < 32:
+        return "telegram=on, bots cannot be read (HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS is shorter than 32 characters); "
     if document["telegram_bots"]["public_base_url"] is None:
         return "telegram=on, no link buttons (HARTMESH_PUBLIC_HOST is not a hostname); "
     return "telegram=on; "

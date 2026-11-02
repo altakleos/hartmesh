@@ -1286,6 +1286,17 @@ async def test_retention_logs_one_line_of_counts(db, monkeypatch, caplog):
     await e.supervisor.stop()
 
 
+@pytest.mark.parametrize("cause, level", [("off", "INFO"), ("secret-missing", "WARNING"), ("secret-invalid", "ERROR"), ("polled-elsewhere", "ERROR")])
+async def test_a_refusal_is_as_loud_as_it_is_unusual(db, monkeypatch, caplog, cause, level):
+    """Every tenant without the secret passes through one, at every start."""
+    e = build(db, monkeypatch)
+    with caplog.at_level("INFO", logger="app.telegram_bots.supervisor"):
+        e.supervisor._refuse(cause)
+    (line,) = [record for record in caplog.records if "polling_refused" in record.getMessage()]
+    assert line.levelname == level
+    await e.supervisor.stop()
+
+
 async def test_a_failed_job_says_which_job_and_why(db, monkeypatch, caplog):
     e = build(db, monkeypatch)
     failed = asyncio.Event()

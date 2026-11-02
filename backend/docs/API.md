@@ -1231,6 +1231,32 @@ GET /api/threads/{thread_id}/artifacts/{path}
 
 **Response:** File content with appropriate Content-Type. HTML and XML documents (`.html`, `.xml`, `.xhtml`, `.svg`, and other `+xml` types) are always returned as attachments, regardless of `download`, so generated markup never renders in the application origin.
 
+### Telegram Bots
+
+`/api/telegram-bots` is what **Settings → Telegram** calls, for a person's own bots.
+It needs a signed-in browser session, so neither a personal access token nor the
+internal token reaches it, and no response carries a token. A refusal has a `reason`
+word beside its `detail`, except the administrator check of `admin/summary`.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/telegram-bots` | List the caller's bots, their limits and settings |
+| `POST /api/telegram-bots` | Add a bot from a pasted token |
+| `POST /api/telegram-bots/{link_id}/token` | Replace its token, with an `operation_id` that makes a retry safe |
+| `POST /api/telegram-bots/{link_id}/connect` | Get a new connect link |
+| `POST /api/telegram-bots/{link_id}/disconnect` | End its binding and get a new link |
+| `POST /api/telegram-bots/disconnect-all` | End all of the caller's bindings |
+| `POST /api/telegram-bots/{link_id}/acknowledge-conflict` | Say the other program was the caller's |
+| `POST /api/telegram-bots/{link_id}/retry` | Try a stopped bot again, optionally taking a webhook over |
+| `POST /api/telegram-bots/{link_id}/profile` | Apply its name and picture again |
+| `DELETE /api/telegram-bots/{link_id}` | Remove it |
+| `GET`, `PUT /api/telegram-bots/settings` | Read or change the caller's language, time zone, quiet hours, notifications and summary |
+| `GET /api/telegram-bots/admin/summary` | An administrator's counts |
+
+`GET /api/features` carries `telegram`, null where the deployment has no such
+section, with `enabled`, `bots` (`ready` or `unavailable`), `reason`, `voice`
+(`available` or `unavailable`) and `voice_provider`.
+
 ---
 
 ## Error Responses

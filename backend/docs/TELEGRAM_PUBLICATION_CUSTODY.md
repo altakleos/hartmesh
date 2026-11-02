@@ -1,16 +1,16 @@
 # Managed Telegram publication custody
 
-The dormant publication APIs preserve the identity of an accepted input group
-and its primary reply. They provide SQL primitives for the later managed-bot
-dispatcher; ordinary managed-bot conversations remain reserved.
+The publication APIs preserve the identity of an accepted input group and its
+primary reply. They are the SQL primitives under the managed-bot dispatcher
+(`app/telegram_bots/publication.py`), which every Telegram turn goes through.
 
 `reserve_publication` creates the turn, publication and versioned execution
 receipt in one transaction. It accepts saved model-turn routes and freezes the
 human owner, bot, connection, target, original conversation, endpoint, complete
 origins and canonical input digest. Exact replay returns the same identity.
 Existing publications without an execution receipt are refused: a missing run
-ID cannot establish that an earlier dispatch never started. Managed explicit
-retry allocation belongs to the later control-routing implementation.
+ID cannot establish that an earlier dispatch never started. An explicit retry
+reserves a successor publication (`reserve_retry_publication`).
 
 The version-one input digest includes each saved origin, accepted time, sanitized
 input, route, ordered operation IDs and business route basis. Assembly follows
@@ -22,8 +22,8 @@ saved independently.
 `mark_dispatch_started` has one successful winner. Its irreversible marker means
 dispatch may have begun; it does not prove a bus commit or an HTTP request.
 Cancellation, an ambiguous commit, token rotation or restart cannot clear it.
-`bind_publication_run` binds the first exact run only after the saved marker.
-Later callers must supply real execution provenance before using that primitive.
+`bind_publication_run` binds the first exact run only after the saved marker, and
+its callers supply real execution provenance.
 
 Every managed write requires an original captured-attempt guard and current
 durable human/account/connection custody. Owned transactions retain SQL and
@@ -53,7 +53,6 @@ Downgrade to the earlier 64-character column refuses longer retained IDs before
 changing the schema. Other identity widths are unchanged.
 
 The publication DTO and SQL guard do not themselves establish remote run or
-source authority. The later dispatcher must obtain strict owner-scoped proofs,
-account for artifacts and actions, and use the existing sender. This foundation
-installs no dispatcher, restart observer or model-source sender activation and
-makes no exactly-once Telegram delivery guarantee.
+source authority. The dispatcher obtains strict owner-scoped proofs, accounts for
+artifacts and actions, and uses the existing sender. None of this makes an
+exactly-once Telegram delivery guarantee.

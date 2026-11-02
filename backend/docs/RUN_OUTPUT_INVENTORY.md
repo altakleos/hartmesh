@@ -23,7 +23,8 @@ presence advertises protocol support, not a particular run's routing decision.
 The actual first-party SDK assembly issues a host-only profile bound to its
 graph, state schema, normalized middleware and standard `StructuredTool`
 adapters. Unknown middleware, state roles or tool adapters refuse qualification
-before model execution. No observers are required, and unused assembly
+before model execution, and so does an extension that contributes middleware
+(`extensions.middleware_contributors` in `agent.py`). No observers are required, and unused assembly
 descriptors still skip their expensive hashes. Refusal after startup records
 unsupported/failed evidence; it cannot masquerade as an unstarted run.
 
@@ -124,5 +125,5 @@ mode through the same HTTP owner and `get_run_output` method. Both options are
 strict readonly booleans. Unsupported responses cause no downgrade, second POST,
 second client or model retry. Default reads remain version 1, even for a version 2 run.
 
-This prerequisite activates no Telegram dispatcher, sender, feature consumer or
-restart reconciler. Schema stays `0044_telegram_assistant_ids`; config stays 55.
+Every managed Telegram turn reads its answer this way. Schema stays
+`0044_telegram_assistant_ids`; config stays 55.

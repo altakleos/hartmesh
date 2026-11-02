@@ -25,10 +25,11 @@ never derive an action or target from Telegram message text. Compare original
 link/account/chat/topic/generation, anchor, presentation and the complete group.
 Historical aliases route only to a stale guard, never to a new action. Clear
 keyboards explicitly at raw delivery; the SDK omits empty object sequences.
-One two-second logical press budget covers checks and acknowledgement; reserve
-ack time and admit no fresh metadata/action leaf after retirement. The fast fixed
-ack uses only captured transport state and a presentation-only locale cache.
-An already-started SQL unit remains owned through cleanup beyond that budget.
+One two-second press budget covers checks and ack; a slow ack costs no passed
+press. Reserve ack time and admit no fresh metadata/action leaf after retirement.
+The fast fixed ack uses only captured transport state and a presentation-only
+locale cache. An already-started SQL unit remains owned through cleanup beyond
+that budget.
 Past the acknowledgement `_tell_press_failed` owns the outcome: a refusal's key or
 `tap.failed`, as a reply. A spent row or a keyless refusal stays silent, having lost
 to a press that worked or is working. `_source_for` reads the thread to tell a deleted
@@ -329,8 +330,8 @@ Owned SQL units retain execute/fetch/commit/rollback/exit through cancellation.
 atomic route sealing. Exact canonical proof/presentation replay retains actual
 part acknowledgements; changed plans refuse. Frozen visible-text ranges use
 codepoints, while Telegram chunk limits use UTF-16.
-Strict remote source and artifact/action eligibility stay mandatory. Legacy `plan_reply` keeps its
-compatibility semantics. See [publication custody](../../docs/TELEGRAM_PUBLICATION_CUSTODY.md).
+Strict remote source and artifact/action eligibility stay mandatory. See
+[publication custody](../../docs/TELEGRAM_PUBLICATION_CUSTODY.md).
 
 `publication.py` supplies finite callable dispatch/observe/read operations, not an
 input handler or recovery scheduler. Accept only complete saved groups with a

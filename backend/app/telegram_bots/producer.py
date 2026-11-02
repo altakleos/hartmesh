@@ -1,4 +1,4 @@
-"""Reply-only durable delivery. No models, runs, transport or startup are owned here.
+"""Durable reply delivery and its sender. No models, runs or startup are owned here.
 
 Writers lock the binding, then its delivery, inbox identities and callback groups.
 No SQL transaction crosses a transport/authority call. Every worker write is
@@ -1772,7 +1772,7 @@ class Outbox:
             return identity
 
     async def plan_publication_reply(self, record: PublicationRecord, *, output: RunOutputProjection, guard: PublicationGuard) -> str:
-        """Plan proved text only; this dormant writer performs no source HTTP or send."""
+        """Plan proved text only, with no source HTTP or send. No production path calls this."""
         basis, parts = await await_drained(asyncio.to_thread(_prepare_publication_reply, record, output, None))
         return await await_drained(self._write_publication_primary(record, guard=guard, basis=basis, parts=parts))
 
