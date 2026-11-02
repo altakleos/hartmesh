@@ -416,17 +416,37 @@ made an attempt withdraws it when its primary was never sent and its own sidecar
 networks are proved gone; a restored record has no such proof and stays. The exact
 journal stays owned through retry and worker drainage, alongside the pool lock.
 
-Recovering a stuck attempt is manual. A pending record refuses its account, and a
-proxy or network with no sandbox beside it fails the native census for everyone. Stop
-the Gateway first: removing a record under a running Gateway frees nothing, because
-memory keeps it. A record's `name` is `<prefix>-<sandbox id>`, and the proxy and
-networks carry the label `deerflow.sandbox_id=<sandbox id>`, so `docker ps -a` and
+A proxy or network with no sandbox and no record beside it needs no operator, whether
+a crash, a hard reboot or a late Docker effect left it. A native census before a
+Gateway first admits anyone removes it by immutable ID and logs the count found and
+up to six names. A set beside a pending record or a retained workspace claim stays.
+While a durable run lacks its drained owner, every set waits and the census runs
+again before admission opens. A census after that opening leaves every set, because
+a resident that took its slot before admission closed can still be building one.
+Such a set refuses its own conversation, which reads as a mismatch, until the next
+start. One that will not go is tried again then.
+
+This removal reads no lease, so it rests on one Gateway per Docker daemon: a second
+Gateway starting there could remove a set the first is still building. Compose runs
+one.
+
+The census refuses rather than removes a set that could hold a writer: a host mount,
+storage labels, a privileged relay or one with extra capabilities, host namespaces or
+devices, or a running network member other than its own relay. That closes admission
+for everyone, as does a set beside a primary or a retained record, or anything the
+census cannot read. These checks read the set the product builds, and prove nothing
+against someone holding the Docker socket.
+
+Recovering a stuck attempt is manual, because a pending record refuses its account.
+Stop the Gateway first: removing a record under a running Gateway frees nothing,
+because memory keeps it. A record's `name` is `<prefix>-<sandbox id>`, and the proxy
+and networks carry the label `deerflow.sandbox_id=<sandbox id>`, so `docker ps -a` and
 `docker network ls` with `--filter label=deerflow.sandbox_id=<sandbox id>` list them.
-A leftover from a late Docker effect has no record, so filter by the label's key alone
-and look for a proxy or network with no sandbox beside it. If a container with the
-record's `name` exists, stop and keep the record: the request reached Docker and the
-record protects its storage. Otherwise remove the proxy and networks, then the record,
-then start the Gateway.
+A refused set with no record gets the same look: filter by the label's key alone and
+find the proxy or network with no sandbox beside it. If a container with the record's
+`name` exists, stop and keep the record: the request reached Docker and the record
+protects its storage. Otherwise remove the proxy and networks, then the record, then
+start the Gateway.
 
 The same bounded namespace also understands private version-2 teardown records.
 They preserve the original primary, relay and network IDs/names, daemon, opaque

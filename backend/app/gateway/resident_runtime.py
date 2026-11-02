@@ -144,6 +144,7 @@ class ResidentRuntime:
 
         def account():
             from deerflow.community.aio_sandbox.native_resource_set import NativeResourceSet
+            from deerflow.community.aio_sandbox.native_teardown_execution import remove_leftovers
 
             provider.external_changed(provider._require_bootstrap_producers_drained_locked)
             paired = NativeResourceSet(provider._backend, guard=bridge.assert_current).inventory_paired()
@@ -161,8 +162,13 @@ class ResidentRuntime:
             explained = {resource for actual in (*actuals, *residents) for resource in actual.resources}
             explained.update(resource for record in bridge.teardowns._items.values() for resource in record.resources)
             explained.update(resource for record in qualified_resident_records for resource in record.resources)
-            if any(item.fact not in explained for item in paired):
+            unexplained = [item for item in paired if item.fact not in explained]
+            attributed = {actual.sandbox_id for actual in actuals}
+            attributed.update(record.sandbox_id for record in bridge.teardowns._items.values())
+            attributed.update(record.attachment_id for record in qualified_resident_records)
+            if any(item.sandbox_id in attributed for item in unexplained):
                 raise StorageRuntimeUnavailable("Native census retains unexplained paired resources")
+            NativeResourceSet(provider._backend, guard=bridge.assert_current).require_no_writer(unexplained)
             for actual in actuals:
                 info = SandboxInfo(
                     sandbox_id=actual.sandbox_id,
@@ -194,10 +200,25 @@ class ResidentRuntime:
                     raise StorageRuntimeUnavailable("Resident original graph changed during census qualification")
 
             provider.external_changed(capture)
+            postponed = False
+            if unexplained:
+                # A crash, a reboot or one failed start must not close sandboxes for everyone, and
+                # nothing else visits a set with no primary. Only before admission first opens is
+                # nobody building one: after that, a resident past take_slot is no drained producer.
+                # So a pass that postpones for a run's owner must not publish, or the chance is lost.
+                reader = NativeResourceSet(provider._backend, guard=bridge.assert_current)
+                unresolved = bridge.assert_current()
+                first = not self.admission.has_opened()
+                postponed = first and bool(self.foreign_run_blocks)
+                leftovers = []
+                if first and not postponed:
+                    leftovers = [item for item in unexplained if item.sandbox_id not in claims and not any(record.name.endswith("-" + item.sandbox_id) for record in unresolved)]
+                removed = remove_leftovers(reader, leftovers)
+                logger.warning("Native census found %d resources with no sandbox and removed %d: %s", len(unexplained), len(removed), ", ".join(sorted(item.fact.name for item in unexplained)[:6]))
 
             def validate():
                 provider._require_bootstrap_producers_drained_locked()
-                if self.foreign_run_blocks:
+                if self.foreign_run_blocks or postponed:
                     raise StorageRuntimeUnavailable("Durable inflight runs lack their completely drained local owner")
                 if (
                     self.provider is not provider

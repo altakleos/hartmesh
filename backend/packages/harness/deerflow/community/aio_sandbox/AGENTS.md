@@ -13,7 +13,7 @@ unknown failures and errors after entry must never replay containment.
 
 `native_retirement.py` retains reservation through caller work and drained final
 proof; expired scopes refuse. Strict all-prefix/all-state inventory is correlation,
-never cleanup authority. Reuse canonical holder/local/store/heartbeat teardown.
+not cleanup authority, bar a proved leftover. Reuse canonical holder/local/store/heartbeat teardown.
 Qualified open sets use full-ID stop/removal and positive CID+name absence, including
 retries after lost proof. If auto-removal finishes between post-stop inventory
 reads, require fresh CID AND name absence with current host proof and the same
@@ -79,8 +79,17 @@ operational mount projection; trusted integration config/locks/data modes remain
 exact. Missing and foreign attribution refuse completeness;
 never fabricate `mountless_provider=self` for an old container. These seams
 do not certify a complete platform budget alone. Gateway additionally correlates
-all-state resident and paired inventories with full retained SQL mounts; unknown
-secondary resources or preparations without an original CID keep admission closed.
+all-state resident and paired inventories with full retained SQL mounts. A secondary
+attributed to a primary or record but unexplained by it, or a preparation without an
+original CID, keeps admission closed. A failed start, a crash or a hard reboot leaves
+a secondary with neither. It must pass `NativeResourceSet.require_no_writer`: a host
+mount, storage labels, a relay outside `storage_confined` or a foreign running member
+still closes admission. `remove_leftovers` then removes it by immutable ID unless a
+pending record or a claim names it, and a failed removal refuses nobody. The census
+does this rather than a start, because a start cannot reach a set whose id changed,
+like a NoUser chat's after a restart. It is the one destructive scope the census has,
+and only runs before admission first opens: `take_slot` is a resident's last admission
+check, so a later census cannot prove residents drained.
 Tests: `test_bootstrap_sandbox_accounting.py`, `test_bootstrap_primary_inventory.py`.
 
 Full acquire/acquire_async operations register producers before their first await
@@ -160,7 +169,7 @@ the process that made it. `submitted` is written before the runner and lives onl
 memory, so a restored handoff, which has no sandbox id, is refused. The pending record
 keeps the name exclusive while the attempt's own sidecars and networks go, under one
 60-second deadline, and it stays unless their absence is proved, because a leftover
-set reads as a mismatch on that thread's next start and fails the next native census.
+set reads as a mismatch on that thread's next start.
 Withdrawal releases, so it takes teardown authority and works while the runtime closes.
 `LocalContainerBackend._withdraw_unsubmitted` owns this; nothing else clears pending.
 SDK-less quarantine retains actual identity, never a guessed client.

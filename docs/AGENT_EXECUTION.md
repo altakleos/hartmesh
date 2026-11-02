@@ -280,8 +280,12 @@ zero-slot teardown records for managed chats without User storage. Existing
 schema-1 creates and schema-2 teardowns keep their validation rules. Compose
 agent counts now apply when explicitly set. Strict recovery uses retained original
 container, network and backing identities, even when an attachment row is absent
-or fenced. Live leases and unfinished create operations remain protected;
-unexplained resources keep admission closed until their identity is resolved.
+or fenced. Live leases and unfinished create operations remain protected. An
+unexplained primary, or a secondary attributed to a primary or a retained record,
+keeps admission closed until its identity is resolved. A relay or network with
+neither must pass `require_no_writer`. The census before a Gateway first admits
+anyone then removes it, unless a pending record or a workspace claim still names
+it. That removal reads no lease, so it rests on one Gateway per Docker daemon.
 
 ## Instance memory
 

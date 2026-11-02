@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-from deerflow.spaces.docker import StorageHostUnqualified
+from deerflow.spaces.docker import StorageHostUnqualified, storage_confined
 from deerflow.spaces.native_create_evidence import _unique_object
 from deerflow.spaces.native_resident_evidence import NativeResidentRecord
 from deerflow.spaces.native_teardown_evidence import NativeMountlessTeardownRecord, NativeTeardownRecord, NativeTeardownResource
@@ -382,10 +382,41 @@ class NativeResourceSet:
             self._links(primary, {internal_fact.name: internal_fact.identity}, networks)
         if proxy is not None:
             self._labels(proxy, record, "network-proxy", container=True)
-            mounts = proxy.get("Mounts")
-            if not isinstance(mounts, list) or any(not isinstance(mount, dict) or mount.get("Type") != "tmpfs" or mount.get("Source") not in (None, "") for mount in mounts):
-                raise StorageHostUnqualified("Native relay has a host storage mount")
+            self._require_no_host_mount(proxy)
             self._links(proxy, {internal_fact.name: internal_fact.identity, egress_fact.name: egress_fact.identity}, networks)
+
+    @staticmethod
+    def _require_no_host_mount(proxy):
+        mounts = proxy.get("Mounts")
+        if not isinstance(mounts, list) or any(not isinstance(mount, dict) or mount.get("Type") != "tmpfs" or mount.get("Source") not in (None, "") for mount in mounts):
+            raise StorageHostUnqualified("Native relay has a host storage mount")
+
+    def require_no_writer(self, items):
+        """Refuse a relay or network with no primary and no record that could hold storage.
+
+        A failed start, a crash or a hard reboot leaves such a set. A relay and its
+        networks carry no storage by construction, so a host mount, storage
+        attribution, a relay with more reach than ``storage_confined`` allows or a
+        running member other than its own relay is a writer the census cannot account
+        for. This reads the set the product builds. It proves nothing against someone
+        holding the Docker socket, who can start a container this census never lists.
+        """
+        relays = {}
+        for item in items:
+            if item.fact.kind == "container":
+                relays.setdefault(item.sandbox_id, set()).add(item.fact.identity)
+        for item in items:
+            container = item.fact.kind == "container"
+            entry = self.inspect(item.fact.kind, item.fact.identity)
+            if entry is None:
+                continue
+            self._labels(entry, item, item.fact.role, container=container)
+            if container:
+                self._require_no_host_mount(entry)
+                if not storage_confined(entry.get("HostConfig") or {}):
+                    raise StorageHostUnqualified("Native relay is not confined as built")
+            elif set(self._endpoints(entry)) - relays.get(item.sandbox_id, set()):
+                raise StorageHostUnqualified("Native network contains a foreign or absent member")
 
     def capture(self, primary, actual):
         """Fresh complete graph only; never derive members from current configuration."""

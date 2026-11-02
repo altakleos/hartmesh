@@ -18,7 +18,10 @@ from test_native_create_bridge import SLOT
 from test_native_create_bridge import fixture as fixture
 from test_native_create_local_backend import backend
 
+from deerflow.community.aio_sandbox.native_resource_set import NativeResourceSet, PairedResource
+from deerflow.community.aio_sandbox.native_teardown_execution import remove_leftovers
 from deerflow.spaces.docker import StorageHostUnqualified
+from deerflow.spaces.native_teardown_evidence import NativeTeardownResource
 
 IMAGE = os.environ.get("HARTMESH_STORAGE_WRITER_IMAGE")
 LABELS = {"hartmesh.storage.space." + SLOT: "1"}
@@ -82,6 +85,69 @@ def test_a_real_partial_set_goes_and_the_owner_can_start_again(local, sandbox_id
     assert local.journal.pending() == () and not local.state.pending_for(owner_id="alice")
     assert local._restricted_resources_status(sandbox_id) == "missing"
     local._native_creation.require_admissible(name=f"native-{sandbox_id}", owner_id="alice")
+
+
+def _census_items(reader, local, sandbox_id):
+    """What the census reads, for this test's set alone, since a shared daemon holds others."""
+    proxy_name, network_name = local._resource_names(sandbox_id)
+    items = []
+    for kind, role, name in (("container", "network-proxy", proxy_name), ("network", "network", network_name), ("network", "egress-network", local._egress_network_name(sandbox_id))):
+        entry = reader.inspect(kind, name)
+        if entry is not None:
+            items.append(PairedResource(NativeTeardownResource(kind, role, entry["Id"], name, entry["Created"]), sandbox_id, local._network_mode, local._network_policy_digest()))
+    return items
+
+
+def _start_labelled_proxy(local, sandbox_id, *extra):
+    """A relay confined and labelled as the product builds one, holding ``sleep`` in place of its server."""
+    proxy_name, network_name = local._resource_names(sandbox_id)
+    local._create_internal_network(network_name, sandbox_id)
+    local._create_egress_network(local._egress_network_name(sandbox_id), sandbox_id)
+    labels = [item for key, value in local._restricted_labels(sandbox_id, "network-proxy").items() for item in ("--label", f"{key}={value}")]
+    confinement = ("--cap-drop=ALL", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m")
+    started = _docker("run", "-d", "--rm", "--pull=never", "--name", proxy_name, "--network", network_name, *confinement, *labels, *extra, IMAGE, "sleep", "300")
+    assert started.returncode == 0, started.stderr
+
+
+def test_a_real_leftover_is_proved_to_hold_no_writer(local, sandbox_id):
+    local._network_mode, local._network_config = "blocked", {"mode": "blocked"}
+    _start_labelled_proxy(local, sandbox_id)
+    reader = NativeResourceSet(local)
+    reader.require_no_writer(_census_items(reader, local, sandbox_id))
+
+
+@pytest.mark.parametrize("fault", ["host-mount", "privileged", "stranger-on-the-network"])
+def test_a_real_leftover_that_could_hold_a_writer_is_refused(local, sandbox_id, tmp_path, fault):
+    local._network_mode, local._network_config = "blocked", {"mode": "blocked"}
+    extra = {"host-mount": ("-v", f"{tmp_path}:/data"), "privileged": ("--privileged",)}
+    _start_labelled_proxy(local, sandbox_id, *extra.get(fault, ()))
+    stranger = f"withdraw-stranger-{sandbox_id}"
+    if fault == "stranger-on-the-network":
+        started = _docker("run", "-d", "--rm", "--pull=never", "--name", stranger, "--network", local._resource_names(sandbox_id)[1], IMAGE, "sleep", "300")
+        assert started.returncode == 0, started.stderr
+    try:
+        reader = NativeResourceSet(local)
+        with pytest.raises(StorageHostUnqualified):
+            reader.require_no_writer(_census_items(reader, local, sandbox_id))
+    finally:
+        _docker("rm", "-f", stranger)
+
+
+@pytest.mark.parametrize("left", ["networks", "relay-and-networks"])
+def test_a_real_leftover_is_removed_by_the_census(local, sandbox_id, left):
+    """A hard reboot removes a running ``--rm`` relay and keeps the networks; a crash keeps both."""
+    local._network_mode, local._network_config = "blocked", {"mode": "blocked"}
+    proxy_name, network_name = local._resource_names(sandbox_id)
+    _start_labelled_proxy(local, sandbox_id)
+    if left == "networks":
+        assert _docker("rm", "-f", proxy_name).returncode == 0
+    reader = NativeResourceSet(local)
+    items = _census_items(reader, local, sandbox_id)
+    assert len(items) == (2 if left == "networks" else 3)
+    reader.require_no_writer(items)
+    assert set(remove_leftovers(reader, items)) == set(items)
+    assert not _exists("container", proxy_name) and not _exists("network", network_name) and not _exists("network", local._egress_network_name(sandbox_id))
+    assert local._restricted_resources_status(sandbox_id) == "missing", "The conversation's next start finds nothing in its way"
 
 
 def test_a_set_it_cannot_prove_gone_keeps_the_owner_refused(local, sandbox_id, monkeypatch):
