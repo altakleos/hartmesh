@@ -670,33 +670,41 @@ test.describe("Telegram bots", () => {
   });
 
   test("administrator sees counts and no username", async ({ page }) => {
-    await mockTelegram(page);
+    await mockTelegram(page, { bots: [bot()] });
     await page.goto(DEEP_LINK);
-    await expect(
-      page.getByText(
-        strings.admin.counts({
-          bots: 3,
-          people: 2,
-          polling: 2,
-          failing: 1,
-          held: 0,
-        }),
-      ),
-    ).toBeVisible();
+    const counts = page.getByText(
+      strings.admin.counts({
+        bots: 3,
+        people: 2,
+        polling: 2,
+        failing: 1,
+        held: 0,
+      }),
+    );
+    await expect(counts).toBeVisible();
     await expect(
       page.getByText(strings.admin.limits({ perPerson: 10, limit: 100 })),
     ).toBeVisible();
     await expect(
       page.getByText(/one of the AI services already used here/),
     ).toBeVisible();
+    // The person's own row shows the username; the block around the counts must not.
+    await expect(page.getByText("@fixture_bot")).toBeVisible();
+    await expect(counts.locator("..")).not.toContainText("@");
   });
 
   test("no features answer: nothing renders", async ({ page }) => {
     await mockTelegram(page, { telegram: null });
+    const answered = page.waitForResponse("**/api/features");
     await page.goto(DEEP_LINK);
+    await answered;
+    await expect(
+      page.getByText(enUS.settings.channels.description),
+    ).toBeVisible();
     await expect(section(page)).toHaveCount(0);
     await expect(page.getByTestId("telegram-welcome-card")).toHaveCount(0);
     await page.keyboard.press("Escape");
+    await expect(page.getByRole("textbox").first()).toBeVisible();
     await expect(page.getByTestId("telegram-welcome-card")).toHaveCount(0);
   });
 

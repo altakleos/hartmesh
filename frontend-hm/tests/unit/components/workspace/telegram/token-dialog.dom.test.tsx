@@ -67,7 +67,9 @@ function start(answer: () => Response) {
     </>,
   );
   const sent = () => calls.filter(({ url }) => url.endsWith("/token"));
-  return { sent };
+  const features = () =>
+    calls.filter(({ url }) => url === "/api/features").length;
+  return { sent, features };
 }
 
 const field = () => screen.getByLabelText<HTMLInputElement>("Bot token");
@@ -376,9 +378,12 @@ describe("the token dialog", () => {
   });
 
   it("closes for a refusal of the whole section and reads the features again", async () => {
-    start(() => refusal(409, "secret-missing"));
+    const { features } = start(() => refusal(409, "secret-missing"));
+    await waitFor(() => expect(features()).toBeGreaterThan(0));
+    const reads = features();
     paste(tokenA);
     await waitFor(() => expect(onClose).toHaveBeenCalled());
+    await waitFor(() => expect(features()).toBeGreaterThan(reads));
   });
 
   it("names the target's kind when the server cannot name a deleted one", async () => {

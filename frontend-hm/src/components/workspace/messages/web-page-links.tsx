@@ -13,6 +13,15 @@ import {
   webPageHref,
 } from "@/core/telegram-bots/web-pages";
 
+/**
+ * What can reach this list. The server refuses the other four outside an AI
+ * assistant's or AI employee's conversation, and those have no such tool yet.
+ */
+type OfferedWebPageKey = Exclude<
+  WebPageKey,
+  "access" | "agentSettings" | "files" | "work"
+>;
+
 /** The pages a turn offered, once the turn has ended, so a link never moves. */
 export function WebPageLinks({
   keys,
@@ -25,7 +34,7 @@ export function WebPageLinks({
   const pathname = usePathname();
   const { user } = useAuth();
   const labels = t.telegramBots.webPage;
-  const label: Partial<Record<WebPageKey, string>> = {
+  const label: Record<OfferedWebPageKey, string> = {
     memory: labels.memory,
     conversations: labels.conversations,
     addAssistant: labels.addAssistant,
@@ -35,16 +44,16 @@ export function WebPageLinks({
     scheduled: labels.scheduled,
     account: labels.account,
   };
+  const offered = (key: WebPageKey): key is OfferedWebPageKey => key in label;
 
-  const links = keys.flatMap((key) => {
+  const links = keys.filter(offered).flatMap((key) => {
     const hidden =
       (key === "addEmployee" && user?.system_role !== "admin") ||
       (key === "memory" &&
         target.kind === "agent" &&
         !hasCeiling(user?.permissions, "memory:read"));
     const href = hidden ? null : webPageHref(key, target, pathname);
-    const text = label[key];
-    return href && text ? [{ key, href, text }] : [];
+    return href ? [{ key, href, text: label[key] }] : [];
   });
 
   if (links.length === 0) {

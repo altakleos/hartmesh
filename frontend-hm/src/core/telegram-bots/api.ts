@@ -129,22 +129,16 @@ export class TelegramRefusal extends Error {
     this.status = status;
     this.reason = typeof body.reason === "string" ? body.reason : null;
     this.detail = typeof body.detail === "string" ? body.detail : null;
-    Object.assign(
-      this,
-      Object.fromEntries(
-        (
-          [
-            "webhook_host",
-            "own",
-            "agent_name",
-            "link_id",
-            "execution_reason",
-          ] as const
-        )
-          .filter((key) => key in body)
-          .map((key) => [key, body[key]]),
-      ),
-    );
+    this.webhook_host =
+      typeof body.webhook_host === "string" ? body.webhook_host : undefined;
+    this.own = typeof body.own === "boolean" ? body.own : undefined;
+    this.agent_name =
+      typeof body.agent_name === "string" ? body.agent_name : null;
+    this.link_id = typeof body.link_id === "string" ? body.link_id : null;
+    this.execution_reason =
+      typeof body.execution_reason === "string"
+        ? body.execution_reason
+        : undefined;
   }
 }
 

@@ -647,16 +647,13 @@ describe("the set-up dialog", () => {
           refusal(409, "polled-elsewhere"),
       },
     });
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Get a new link" }),
-    );
+    const features = () =>
+      calls.filter(({ url }) => url === "/api/features").length;
+    const renew = await screen.findByRole("button", { name: "Get a new link" });
+    const reads = features();
+    fireEvent.click(renew);
     await screen.findByText(/several bots conflict with another program/);
-    const reads = calls.filter(({ url }) => url === "/api/features").length;
-    await waitFor(() =>
-      expect(
-        calls.filter(({ url }) => url === "/api/features").length,
-      ).toBeGreaterThan(reads - 1),
-    );
+    await waitFor(() => expect(features()).toBeGreaterThan(reads));
   });
 
   it("says when too many links are waiting", async () => {

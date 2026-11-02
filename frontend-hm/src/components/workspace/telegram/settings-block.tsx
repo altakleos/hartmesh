@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 
 import {
   Select,
@@ -40,7 +40,12 @@ export function timeZonesWith(current: string): string[] {
 
 type Field = "locale" | "timezone";
 
-export function TelegramSettingsBlock({ settings }: { settings: Settings }) {
+/** Memoised because it draws every time zone and the section's clock ticks around it. */
+export const TelegramSettingsBlock = memo(function TelegramSettingsBlock({
+  settings,
+}: {
+  settings: Settings;
+}) {
   const { t } = useI18n();
   const strings = t.telegramBots;
   const refresh = useRefreshTelegramBots();
@@ -156,4 +161,4 @@ export function TelegramSettingsBlock({ settings }: { settings: Settings }) {
       <p className="text-muted-foreground text-xs">{strings.prefs.inChat}</p>
     </section>
   );
-}
+});
