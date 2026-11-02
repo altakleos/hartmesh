@@ -18,6 +18,7 @@ from test_telegram_bot_handlers import message as sdk_message
 from test_telegram_chat_turns import controlled_execution, message
 from test_telegram_supervisor import _supervisor_logging as _supervisor_logging
 
+from app.telegram_bots.callbacks import Prompts
 from app.telegram_bots.turns import _Guard
 from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
 
@@ -667,21 +668,69 @@ async def run_sender(s, sender, ticks=3):
         s.e.clock.advance(2)
 
 
-async def test_a_reply_whose_source_is_gone_fails_and_the_next_one_goes_out(db, monkeypatch, tmp_path, caplog):
+@pytest.mark.parametrize("gone", ["its output", "its conversation"])
+async def test_a_reply_whose_source_is_gone_ends_says_so_and_the_next_one_goes_out(db, monkeypatch, tmp_path, caplog, gone):
     s = await stack(db, monkeypatch, tmp_path)
     try:
         turn, sender = await waiting_reply(s, 10501)
-        s.gateway.runs[turn.record.publication_id]["output"] = None
+        if gone == "its output":
+            s.gateway.runs[turn.record.publication_id]["output"] = None
+        else:
+            s.gateway.deleted.add(turn.record.scope.thread_id)
         for _ in range(4):
             s.e.request.enqueue("sendMessage", result={"message_id": 900, "date": 1_893_456_000, "chat": {"id": s.e.link.chat_id, "type": "private"}, "text": "x"})
         with caplog.at_level(logging.WARNING):
             await run_sender(s, sender, ticks=4)
         states = await delivery_states(s)
-        assert states["reply"].state == "failed"
-        assert "delivery.failed" in await planned_keys(s)
+        assert (states["reply"].state, states["reply"].skip_reason) == ("skipped", "source-gone"), "No retry can send it, so it is not left waiting for one"
+        assert (await mark(s, 10501)).state == "done", "The message has had its ending"
+        keys = await planned_keys(s)
+        assert "delivery.gone" in keys and "delivery.failed" not in keys
+        assert states["delivery_gone_notice"].state == "sent", "The person reads what happened to it"
+        async with s.db.sessions() as session:
+            assert not list(await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.kind == "delivery_retry"))), "Retry delivery could only fail the same way"
         assert any(row.state == "sent" and row.dedupe_key.endswith("later-notice") for row in states.values())
         assert f"delivery_source_gone link={s.e.link.id} delivery={states['reply'].id}" in caplog.text
         assert "send_failed" not in caplog.text, "Nothing was sent, so nothing about the bot's sending failed"
+        await sender.stop()
+    finally:
+        await s.close()
+
+
+async def test_what_hung_on_a_reply_ends_with_it(db, monkeypatch, tmp_path):
+    s = await stack(db, monkeypatch, tmp_path)
+    try:
+        turn, sender = await waiting_reply(s, 10505)
+        link, reply = s.e.link, (await delivery_states(s))["reply"]
+
+        def control(identity, kind, payload, message_id):
+            return TelegramCallbackRow(
+                id=identity * 32,
+                group_id=identity.upper() * 32,
+                link_id=link.id,
+                chat_id=link.chat_id,
+                binding_generation=link.binding_generation,
+                message_id=message_id,
+                kind=kind,
+                target_kind="outbox",
+                target_id=reply.id,
+                payload=payload,
+                created_at=s.e.clock.now(),
+            )
+
+        async with s.db.sessions.begin() as session:
+            session.add_all([control("a", "delivery_retry", {"outbox_id": reply.id}, 800), control("b", "prompt", {"anchor_outbox_id": reply.id}, None), control("c", "prompt", {"anchor_outbox_id": "another-row"}, None)])
+        s.gateway.runs[turn.record.publication_id]["output"] = None
+        for _ in range(4):
+            s.e.request.enqueue("sendMessage", result={"message_id": 900, "date": 1_893_456_000, "chat": {"id": link.chat_id, "type": "private"}, "text": "x"})
+        await run_sender(s, sender, ticks=3)
+        async with s.db.sessions() as session:
+            controls = {row.id[0]: row for row in await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.id.in_(["a" * 32, "b" * 32, "c" * 32])))}
+            cleanup = await session.scalar(select(TelegramOutboxRow.id).where(TelegramOutboxRow.dedupe_key == f"notice:repair-cleanup:{reply.id}:{'A' * 32}"))
+        assert controls["a"].closed_reason == "done" and cleanup is not None, "Retry delivery could only do nothing, so its button goes"
+        assert controls["b"].closed_reason == "discarded", "Its question was never shown, and nothing else would close it"
+        assert controls["c"].consumed_at is None, "Another row's question is not this row's to close"
+        assert (await Prompts(s.services.callbacks).current(link, link.chat_id, None)).id == "c" * 32, "The next message does not answer a question nobody saw"
         await sender.stop()
     finally:
         await s.close()

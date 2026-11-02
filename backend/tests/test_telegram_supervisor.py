@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import secrets
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -878,6 +879,7 @@ async def test_actual_sdk_conflict_notices_render_brand_variant_and_throttle(db,
         await e.supervisor._notice(channel, "link.conflict", throttle=True)
         await e.supervisor._notice(channel, "link.conflict", throttle=True)
         notice_reply(e.normal, link, message=902)
+        channel.link = await db.links.update(link.id, acts_paused_since=link.created_at)
         await e.supervisor._notice(channel, "link.conflict_over", throttle=True)
         calls = [call for call in e.normal.calls if call.endpoint == "sendMessage"]
         assert len(calls) == 2
@@ -906,6 +908,63 @@ async def test_a_conflict_notice_offers_the_settings_page_while_there_is_somethi
         assert ("reply_markup" in sent) is offered
         if offered:
             assert sent["reply_markup"]["inline_keyboard"][0][0] == {"text": "Open Telegram settings", "url": "https://example.test/settings"}
+    finally:
+        await e.supervisor.stop()
+
+
+@pytest.mark.parametrize("paused", [False, True])
+async def test_the_end_of_a_conflict_names_the_pause_only_while_there_is_one(db, monkeypatch, paused):
+    e, link, held = await running_one(db, monkeypatch, connected=True)
+    try:
+        channel = e.supervisor.channel(link.id)
+        if paused:
+            channel.link = await db.links.update(link.id, acts_paused_since=link.created_at)
+        notice_reply(e.normal, link)
+        await e.supervisor._notice(channel, "link.conflict_over")
+        sent = next(call for call in e.normal.calls if call.endpoint == "sendMessage").parameters["text"]
+        assert "This chat works again" in sent
+        assert ("stays paused" in sent) is paused, "With no pause left, a sentence about one would send the person looking for it"
+    finally:
+        await e.supervisor.stop()
+
+
+@pytest.mark.parametrize(("other_fault", "told"), [(None, True), ("agent_unavailable", False)], ids=["nothing else is wrong", "another fault remains"])
+async def test_the_end_of_a_conflict_is_told_only_when_the_chat_works_again(db, monkeypatch, other_fault, told):
+    e, link, held = await running_one(db, monkeypatch, connected=True)
+    try:
+        notices = []
+        monkeypatch.setattr(e.supervisor, "_schedule_notice", lambda channel, key, **options: notices.append(key))
+        poll = e.supervisor._polls[link.id]
+        await poll.on_health("conflict", True)
+        if other_fault is not None:
+            await db.links.set_health(link.id, other_fault, holds=True)
+        await poll.on_health("conflict", False)
+        assert notices == ["link.conflict", "link.conflict_over"] if told else notices == ["link.conflict"], "The next message would answer that the agent is gone"
+    finally:
+        await e.supervisor.stop()
+
+
+async def test_a_state_line_names_what_changed_the_state(db, monkeypatch, caplog):
+    e, link, held = await running_one(db, monkeypatch, connected=True)
+    try:
+        lines = []
+        transitions = [
+            ("waiting_connect", "connected", "bound"),
+            ("connected", "blocked", "forbidden"),
+            ("blocked", "connected", "inbound"),
+            ("connected", "held", "held"),
+            ("held", "connected", "restored"),
+            ("connected", "waiting_connect", "disconnected"),
+            ("blocked", "waiting_connect", "disconnected"),
+            ("held", "waiting_connect", "disconnected"),
+        ]
+        for before, after, _reason in transitions:
+            e.supervisor._rows[link.id] = replace(link, state=before)
+            with caplog.at_level("INFO", logger="app.telegram_bots.supervisor"):
+                caplog.clear()
+                e.supervisor._observe(replace(link, state=after), reason="unused")
+            lines.append(next(line for line in caplog.messages if "telegram_bots state " in line))
+        assert [line.split("reason=")[1] for line in lines] == [reason for *_states, reason in transitions]
     finally:
         await e.supervisor.stop()
 

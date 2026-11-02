@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Telegram bots
+
+- A new conversation no longer stores the person's Telegram id in its metadata, where
+  it outlived the bot. Conversations started under `2.2.0+hartmesh.48` keep theirs
+  until they are deleted.
+- A reply whose answer is gone ends and says so, with no Retry delivery that could only
+  fail the same way, and its message is settled. This covers a reply planned before its
+  conversation was deleted on the web, which used to wait for ever.
+- A message whose conversation was deleted before it had an ending now gets a sentence
+  saying so, instead of being held with none. Try again, or a typed answer to a question,
+  in a deleted conversation says the same instead of repeating an error.
+- A bot connected after its custom agent was deleted says so at once, instead of saying
+  nothing until the next message.
+- The end of a conflict names the pause only while there is one, and is not told while
+  another fault keeps the chat from working.
+- A file the person was told about keeps that outcome across busy and capacity retries,
+  so a later attempt cannot make the notice false or send it twice.
+- The `state` log line reads `bound` or `disconnected` for those changes, not `inbound`.
+
 ## [2.2.0+hartmesh.48] - 2026-11-02
 
 ### Telegram bots
@@ -28,7 +47,7 @@ AI service refuses the account, the chat says so and whom to ask.
 The bundle README gains the section "Telegram bots".
 
 **Voice notes leave the deployment.** With `HARTMESH_TELEGRAM_VOICE` at its default
-`auto`, a voice note goes to OpenAI or Google when the deployment already offers that
+`auto`, a voice note goes to OpenAI or Google Gemini when the deployment already offers that
 provider's models at the provider's own address, after the person agrees once to the
 named service. The recording is held in memory only. Write
 `HARTMESH_TELEGRAM_VOICE=off` when recordings must never leave the deployment.
@@ -43,8 +62,9 @@ different accounts can reuse a chat-local message id on one bot;
 `0044_telegram_assistant_ids` widens the nullable assistant-message id on that table
 from 64 characters to text. No other existing table or column changes. Normal Gateway
 bootstrap applies them on SQLite and PostgreSQL. The downgrade refuses while a bot
-link, a bot event, an act from a chat or an outbox row is on record, and `0043` and
-`0044` refuse a downgrade that would collapse or truncate retained ids.
+link, a bot event, an act from a chat, an outbox row, an instance's Telegram policy or
+an addition of an AI assistant is on record, and `0043` and `0044` refuse a downgrade
+that would collapse or truncate retained ids.
 
 A release without these migrations does not start on a database this release
 migrated. Roll back by restoring a snapshot of the data disk taken before the upgrade.

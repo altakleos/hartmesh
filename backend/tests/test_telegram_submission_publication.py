@@ -1,6 +1,7 @@
 """Actual SQL/card ownership and bus input; remote source proofs are explicit seeds."""
 
 from copy import deepcopy
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -13,7 +14,7 @@ from test_telegram_publication_coordinator import coordinator_environment as coo
 
 from app.telegram_bots.callbacks import CallbackRepository, Prompts
 from app.telegram_bots.inbox import CALLBACK_PUBLICATION_KEY
-from app.telegram_bots.threads import ThreadCoordinator
+from app.telegram_bots.threads import ThreadCoordinator, ThreadPreparationFailure
 from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramInboundMarkRow
 
 
@@ -191,6 +192,27 @@ async def test_typed_other_keeps_actual_new_message_and_original_thread_after_ne
         assert sent.text == origin.sanitized_input["text"] and sent.metadata["human_message_kwargs"]["human_input_response"] == response
         assert sent.execution_context.thread_id == e.thread_id
         assert not any(method == "POST" for method, _, _ in e.requests)
+    finally:
+        await threads.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_typed_answer_in_a_deleted_conversation_is_a_failure_no_retry_can_lift(submission_environment, monkeypatch):
+    e = submission_environment
+    origin = await e.add_origin(message_id=805, text="My actual typed answer")
+    prompt = await e.prompts.open(e.link, "clarify_other", {"thread_id": e.thread_id, "request_id": e.response["request_id"]}, chat_id=e.link.chat_id, message_thread_id=None, message_id=None)
+    async with e.callbacks.writer(e.link, e.guard) as writer:
+        await e.prompts.attach(e.link, prompt, outbox_id=e.card, guard=e.guard, session=writer)
+    response = {key: value for key, value in e.response.items() if key != "option_id"}
+    response.update(response_kind="text", value="My actual typed answer")
+    stage = await e.inbox.stage_submission(e.link, source_outbox_id=e.card, response=response, origin=origin, prompt_id=prompt, guard=e.guard)
+    asked = httpx.Request("GET", "http://gateway.test/threads/" + e.thread_id)
+    monkeypatch.setattr(e.http, "get_thread", AsyncMock(side_effect=httpx.HTTPStatusError("deleted", request=asked, response=httpx.Response(404, request=asked))))
+    threads = ThreadCoordinator(links=e.db.links, authority=e.live.authority, client=e.http, channel=lambda _id: e.current[0], send_allowed=lambda: e.creating[0], outbox=e.outbox, product_name="HartMesh")
+    try:
+        with pytest.raises(ThreadPreparationFailure) as failure:
+            await threads.ensure_submission_thread(e.link, stage)
+        assert failure.value.kind == "conversation_deleted"
     finally:
         await threads.stop()
 

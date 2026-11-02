@@ -114,8 +114,6 @@ def _render(
             template += variants["waiting"]  # Chinese sentences take no space between them.
     if key == "privacy.full" and values.get("transcriber") is not None:
         template += "\n\n" + texts["privacy.voice"]
-    if key == "chat.restarted" and values.get("kept") is False:
-        template = variants["no_message"]
     if values.get("voice_enabled") is False:
         template = variants.get("no_voice", template)
 

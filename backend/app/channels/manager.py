@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 import logging
 import math
 import mimetypes
@@ -30,7 +29,7 @@ from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
 from app.channels.execution import ChannelExecutionBusyError, ChannelExecutionContext, ChannelExecutionProtocolError, ChannelOperation, ChannelUploadRefused
-from app.channels.inbound_files import InboundFileLease, inbound_file_context
+from app.channels.inbound_files import InboundFileLease, inbound_file_context, saved_file_key
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
     PENDING_CLARIFICATION_METADATA_KEY,
@@ -1275,9 +1274,9 @@ async def _ingest_inbound_files_scoped(
     """Save a message's files where its run will find them.
 
     `upload` hands each one to the route the web uses, which knows the conversation's storage, and
-    `saved_files` keeps what it answered, None for a refusal, so that each file has one outcome however
-    many attempts the message takes: no second copy, and no notice a later attempt makes untrue.
-    Without `upload` they are written under the thread's own directory.
+    `saved_files` keeps what it answered, None for a refusal or a file its channel told the person about,
+    so that each file has one outcome however many attempts the message takes: no second copy, and no
+    notice a later attempt makes untrue. Without `upload` they are written under the thread's own directory.
     """
     if not msg.files:
         return []
@@ -1314,7 +1313,7 @@ async def _ingest_inbound_files_scoped(
         for idx, f in enumerate(msg.files):
             if not isinstance(f, dict):
                 continue
-            saved_key = json.dumps({key: value for key, value in f.items() if key != INBOUND_FILE_CONTENT_KEY}, sort_keys=True) if upload is not None else None
+            saved_key = saved_file_key(f) if upload is not None else None
             if saved_key in saved_files:
                 if saved_files[saved_key] is not None:
                     created.append(saved_files[saved_key])

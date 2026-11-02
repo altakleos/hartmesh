@@ -90,6 +90,20 @@ _LINES = {
 _REFUSAL_LEVELS = {"off": logging.INFO, "secret-missing": logging.WARNING}
 
 
+def _state_reason(before: str, after: str) -> str:
+    if after == "waiting_connect":
+        return "disconnected"  # From any state, so what it left says nothing.
+    if after == "held":
+        return "held"
+    if before == "held":
+        return "restored"
+    if after == "blocked":
+        return "forbidden"
+    if before == "blocked":
+        return "inbound"
+    return "bound"
+
+
 class TelegramSupervisor:
     def __init__(
         self,
@@ -207,7 +221,7 @@ class TelegramSupervisor:
         if before.health != saved.health:
             self._event("health", link=saved, level=logging.INFO if saved.health == "ok" else logging.WARNING, **{"from": before.health, "to": saved.health, "reason": reason})
         if before.state != saved.state:
-            self._event("state", link=saved, **{"from": before.state, "to": saved.state, "reason": "held" if saved.state == "held" else "restored" if before.state == "held" else "forbidden" if saved.state == "blocked" else "inbound"})
+            self._event("state", link=saved, **{"from": before.state, "to": saved.state, "reason": _state_reason(before.state, saved.state)})
 
     def _refuse(self, cause: str, **observations) -> None:
         self._cause, self._ready, self._send_ready = cause, False, False
@@ -846,8 +860,11 @@ class TelegramSupervisor:
                 )
                 self._observe(saved, reason=reason)
                 channel.link = saved
-            if cause == "conflict":
-                self._schedule_notice(channel, "link.conflict" if holds else "link.conflict_over", throttle=True)
+            if cause == "conflict" and holds:
+                self._schedule_notice(channel, "link.conflict", throttle=True)
+            elif cause == "conflict":
+                if saved.health == "ok":  # With another fault left, the chat does not work again yet.
+                    self._schedule_notice(channel, "link.conflict_over", throttle=True)
             elif not holds and cause == "unreachable" and poll.back_online_due:
                 self._schedule_notice(channel, "link.back_online", throttle=True)
 
@@ -1339,10 +1356,10 @@ class TelegramSupervisor:
             preferences = await await_drained(self.settings.get(link.owner_user_id))
             quiet = await await_drained(asyncio.to_thread(silent_now, link, preferences, self.config, self._clock())) if preferences is not None else True
             context = SendContext(link_id=link.id, chat_id=link.chat_id, binding_generation=link.binding_generation, token_revision=channel.transport_revision, purpose="optional")
-            render_key = key
+            render_key, paused = key, channel.link.acts_paused_since is not None
             if key == "link.conflict_over":
-                render_key += ".chat" if link.agent_kind == "lead_agent" else ".custom_agent"
-            button = await self._settings_button(link) if key == "link.conflict" or key == "link.conflict_over" and channel.link.acts_paused_since is not None else None
+                render_key += (".chat" if link.agent_kind == "lead_agent" else ".custom_agent") if paused else ".plain"
+            button = await self._settings_button(link) if key == "link.conflict" or key == "link.conflict_over" and paused else None
             message = await asyncio.wait_for(channel.send_notice(render_key, context=context, silent=silent or quiet, button=button, product=product_name(self._app_config)), STOP_TIMEOUT_SECONDS)
             self._event("notice", link=link, key=key, result="sent" if message is not None else "failed")
         except asyncio.CancelledError:

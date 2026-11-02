@@ -9,6 +9,7 @@ import pytest
 
 from app.channels import manager
 from app.channels.execution import ChannelUploadRefused
+from app.channels.inbound_files import saved_file_key
 from app.channels.message_bus import INBOUND_FILE_CONTENT_KEY, InboundMessage
 from deerflow.uploads import manager as uploads
 
@@ -69,6 +70,48 @@ async def test_a_refused_file_stays_refused_so_its_notice_stays_true(monkeypatch
     assert await manager._ingest_inbound_files("thread", message(), upload=upload, saved_files=kept) == []
     assert await manager._ingest_inbound_files("thread", message(), upload=upload, saved_files=kept) == []
     assert reads == ["input.csv"] and told == [503], "One notice, and no attempt that could make it false"
+
+
+@pytest.mark.asyncio
+async def test_a_file_its_channel_told_the_person_about_is_not_read_again(monkeypatch):
+    reads, kept = [], {}
+
+    async def reader(file, client):
+        reads.append(file["filename"])
+        kept[saved_file_key(file)] = None  # What a channel does when it plans the notice.
+
+    async def upload(filename, data):
+        raise AssertionError("Nothing was read")
+
+    def message():
+        return InboundMessage(channel_name="upload-test", chat_id="chat", user_id="platform-person", text="A message", files=[{"filename": "input.csv"}])
+
+    monkeypatch.setitem(manager.INBOUND_FILE_READERS, "upload-test", reader)
+    assert await manager._ingest_inbound_files("thread", message(), upload=upload, saved_files=kept) == []
+    assert await manager._ingest_inbound_files("thread", message(), upload=upload, saved_files=kept) == []
+    assert reads == ["input.csv"], "The person read that this file was not saved, and its Try again is how it comes back"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [True, False], ids=["read raised", "reader returned nothing"])
+async def test_a_file_nobody_was_told_about_is_read_again(monkeypatch, fails):
+    reads, kept = [], {}
+
+    async def reader(file, client):
+        reads.append(file["filename"])
+        if fails:
+            raise OSError("synthetic")
+
+    async def upload(filename, data):
+        raise AssertionError("Nothing was read")
+
+    def message():
+        return InboundMessage(channel_name="upload-test", chat_id="chat", user_id="platform-person", text="A message", files=[{"filename": "input.csv"}])
+
+    monkeypatch.setitem(manager.INBOUND_FILE_READERS, "upload-test", reader)
+    assert await manager._ingest_inbound_files("thread", message(), upload=upload, saved_files=kept) == []
+    assert await manager._ingest_inbound_files("thread", message(), upload=upload, saved_files=kept) == []
+    assert reads == ["input.csv", "input.csv"], "A read that a retiring check gave up is no outcome, and the run must not silently go without the file"
 
 
 @pytest.mark.asyncio
