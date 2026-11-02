@@ -337,6 +337,17 @@ async def test_an_ordinary_channel_keeps_its_chat_in_the_log(caplog):
 
 
 @pytest.mark.asyncio
+async def test_a_managed_stream_spends_nothing_per_frame(setup, monkeypatch):
+    """The facade reads its own authority, and the driver has its own clock."""
+    e = setup
+    monkeypatch.setattr(e.manager, "_channel_supports_streaming", lambda _channel: True)
+    e.stream.parts = iter(SimpleNamespace(event="messages-tuple", data=[{"type": "AIMessageChunk", "id": "m", "content": text}, {}], id=None) for text in ("one ", "two ", "three"))
+    await e.manager._handle_chat(e.message)
+    assert [(outbound.text, outbound.is_final) for outbound in e.outbounds] == [("one two three", True)]
+    assert e.admission.calls.count("run_read") == 2, "Before and after the answer's files, and no more"
+
+
+@pytest.mark.asyncio
 async def test_actual_worker_reports_required_context_refusal_without_default_client(setup):
     e = setup
     e.message.execution_context = None

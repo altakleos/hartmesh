@@ -3522,9 +3522,14 @@ plugins:
 #     config:
 #       label: example                    # extension-private values, if any
 
-# Managed Telegram bots (reserved; the connection flow is not yet offered).
-# An absent section returns disabled defaults. An enabled section alone does
-# not start a supervisor in this release.
+# Managed Telegram bots, one for each chat a person connects. With no such
+# section nothing about Telegram runs. With one, the Gateway starts a supervisor,
+# which polls only where authentication is on, `channel_connections` requires a
+# bound identity, `run_events.backend` is `db`, `GATEWAY_WORKERS` is 1 and
+# HARTMESH_PROVIDER_KEYS_SECRET is set; otherwise it logs why and stays off.
+# Reserved, with no effect in this release: `files.retry_seconds`, `intents`,
+# `producer`, `assign`, `acts`, and in `outbox` every key but `max_attempts` and
+# `recent_act_seconds`.
 # telegram_bots:
 #   enabled: true
 #   public_base_url: null

@@ -72,6 +72,7 @@ class _OutputViewScope:
         from deerflow.sandbox.sandbox_provider import get_initialized_sandbox_provider
         from deerflow.spaces.chat_bridge import get_chat_storage_host
 
+        provider = get_initialized_sandbox_provider()
         if (
             not self.open
             or request.prepared is not self.prepared
@@ -85,20 +86,21 @@ class _OutputViewScope:
             or self.host is None
             or getattr(self.app.state, "chat_storage_host", None) is not self.host
             or get_chat_storage_host() is not self.host
-            or get_initialized_sandbox_provider() is not self.provider
+            # None at admission is no pin: the turn's first tool call can start it.
+            or (self.provider is not None and provider is not self.provider)
         ):
             raise OutputEvidenceError() from None
         with self.host._lock:
             if self.host._closed:
                 raise OutputEvidenceError() from None
-        if self.provider is not None:
+        if provider is not None:
             # Only this concrete adapter refreshes every actual managed use
             # against the pinned routing and its retained-client incarnation.
             # An actual initialized instance already loaded its concrete
             # modules; refusing another provider must not cold-import them.
             provider_type = getattr(sys.modules.get("deerflow.community.aio_sandbox.aio_sandbox_provider"), "AioSandboxProvider", None)
             backend_type = getattr(sys.modules.get("deerflow.community.aio_sandbox.local_backend"), "LocalContainerBackend", None)
-            if provider_type is None or type(self.provider) is not provider_type or backend_type is None or type(self.provider._backend) is not backend_type or self.provider._storage_host() is not self.host:
+            if provider_type is None or type(provider) is not provider_type or backend_type is None or type(provider._backend) is not backend_type or provider._storage_host() is not self.host:
                 raise OutputEvidenceError() from None
 
     async def check_owner(self):

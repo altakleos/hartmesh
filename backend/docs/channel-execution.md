@@ -29,6 +29,13 @@ read/write timeouts 300 seconds. Streams use public SDK decoding without reconne
 Post-response authorization runs inside the same retained owner task or stream
 pump. Closing an iterator drains that check; a closed iterator cannot yield a
 late part. Delivery also rechecks current read authority after its final await.
+A stream frame reads what this process holds every time and takes the full check
+at most once a second (`FRAME_AUTHORIZE_SECONDS`), because that check is about ten
+SQL statements and a frame can arrive thirty times a second. A revocation only the
+database knows therefore stops a stream within a second. Until then a frame can only
+feed the preview of the chat already reading that turn, and each preview send has
+its own check of the owner, the ceilings and the link. A final answer takes the full
+delivery check.
 
 Closing run admission blocks new creating dispatch only. A dispatched wait or
 stream retains read authorization through manager drain. Preparation borrows the
@@ -110,7 +117,8 @@ Output negotiation adds no database migration or configuration setting.
 
 ## Output and inventory negotiation
 
-Creating requests may select `output_capture: {"version": 1}` for sealed text or
+Only the Gateway's own internal callers may select output capture; anyone else
+gets 403. Creating requests may select `output_capture: {"version": 1}` for sealed text or
 `{"version": 2}` for text plus terminal inventory document1. These exact existing
 encodings remain the defaults. The explicit request
 `{"version": 2, "inventory_document_version": 2}` selects document2; the selector

@@ -11,7 +11,13 @@ _TOKEN = re.compile(TOKEN_BODY)
 
 class BotTokenLogFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
+        try:
+            message = record.getMessage()
+        except Exception:
+            # This filter sits on every logger, so a malformed call anywhere would
+            # raise into its caller. And what cannot be read cannot be cleaned.
+            message = "Unreadable log call"
+            record.msg, record.args = message, None
         if (record.name == "telegram" or record.name.startswith("telegram.")) and message.startswith("Error while parsing updates"):
             return False
         sanitized = _TOKEN.sub(LOG_TOKEN_MARK, message)

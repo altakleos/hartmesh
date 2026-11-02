@@ -194,6 +194,31 @@ async def test_join_drops_a_queued_part_after_original_read_permission_retires()
         await owner.stop()
 
 
+async def test_a_joined_stream_takes_one_full_check_for_the_frames_of_one_second(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.channels import execution_client
+
+    monkeypatch.setattr(execution_client, "time", SimpleNamespace(monotonic=lambda: 100.0))
+
+    def respond(request):
+        if request.url.path.endswith("/join"):
+            data = "".join(f"id: {number}-0\nevent: custom\ndata: {json.dumps({'number': number})}\n\n" for number in range(1, 6))
+            return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, content=data.encode())
+        return httpx.Response(200, json=run_row(), headers=ACK)
+
+    client, owner, admission, _ = facade(respond)
+    stream = client.join_run("run")
+    try:
+        await anext(stream)
+        read_before_the_frames_settle = admission.calls.count("run_read")
+        assert [(await anext(stream)).data["number"] for _ in range(4)] == [2, 3, 4, 5]
+        assert admission.calls.count("run_read") == read_before_the_frames_settle == 4, "Two for the run's read, one to dispatch, one for all five frames"
+    finally:
+        await stream.aclose()
+        await owner.stop()
+
+
 @pytest.mark.parametrize("result", ["matched", "absent", "foreign", "metadata", "missing_ack", "unsupported", "legacy_miss"])
 async def test_indexed_lookup_is_exact_read_only_and_never_pages_or_creates(result):
     calls = []

@@ -1,6 +1,7 @@
 # Durable run output evidence
 
-Run creation accepts an explicit `output_capture: {"version": 1}` capability.
+Run creation accepts an explicit `output_capture: {"version": 1}` capability from
+the Gateway's own internal callers; anyone else gets 403.
 It requires the actual SQL run repository and durable database event store;
 Memory, JSONL, legacy custom stores and a database factory's Memory fallback do
 not qualify. Omission preserves ordinary behavior. Managed Telegram publication

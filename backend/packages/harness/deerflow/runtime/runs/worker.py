@@ -1322,6 +1322,16 @@ async def _run_agent(
         # newly executed model failure or human cancellation.
         outcome = record.status
         cancelled = execution_cancelled or record.abort_event.is_set()
+
+        async def optional_write(write, what: str) -> None:
+            """Neither proof reads these, so as on the ordinary path, a failure costs no answer."""
+            try:
+                await write
+            except CaptureIOClosed:
+                raise
+            except Exception:
+                logger.warning("Failed to record %s for run %s (non-fatal)", what, run_id, exc_info=True)
+
         try:
             if io_retired():
                 if journal is not None:
@@ -1363,7 +1373,7 @@ async def _run_agent(
             if subagent_events is not None:
                 await subagent_events.flush()
             if pre_run_workspace_snapshot is not None:
-                await record_workspace_changes(event_store, thread_id, run_id, pre_run_workspace_snapshot, user_id=workspace_changes_user_id, extra_excluded_dir_names=workspace_excluded_dir_names)
+                await optional_write(record_workspace_changes(event_store, thread_id, run_id, pre_run_workspace_snapshot, user_id=workspace_changes_user_id, extra_excluded_dir_names=workspace_excluded_dir_names), "workspace changes")
             # Quiesce stops callbacks and drains ALL admitted flush/progress
             # work. Its frozen summaries remain available after detachment.
             await journal.quiesce_output_capture(flush=True)
@@ -1386,7 +1396,7 @@ async def _run_agent(
             if started and checkpointer is not None and outcome == RunStatus.success:
                 created = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
                 updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
-                await _persist_run_duration(checkpointer=checkpointer, thread_id=thread_id, run_id=run_id, duration_seconds=max(0, int((updated - created).total_seconds())))
+                await optional_write(_persist_run_duration(checkpointer=checkpointer, thread_id=thread_id, run_id=run_id, duration_seconds=max(0, int((updated - created).total_seconds()))), "the run duration")
             receipt = output_capture.receipt(status=outcome, cancelled=cancelled)
             if isinstance(receipt, TextOutputReceipt):
                 audit = await read_durable_output_source(event_store, receipt=receipt)

@@ -2784,11 +2784,10 @@ class ChannelManager:
         current_message_id = None
         buffers: dict[str, str] = {}
         last_values = None
-        last_published_text = ""
-        last_published_at = 0.0
         try:
+            # Each frame was authorized as it was read, and nothing here reaches a
+            # person: the owner's driver reads the run by its own clock.
             async for part in stream:
-                await _authorize_execution(execution, "run_read")
                 if part.event in MESSAGE_STREAM_EVENTS:
                     text, current_message_id = _accumulate_stream_text(buffers, current_message_id, part.data)
                     if text:
@@ -2797,22 +2796,6 @@ class ChannelManager:
                     last_values = part.data
                     if _has_current_turn_clarification(last_values):
                         latest_text = _extract_response_text(last_values) or latest_text
-                now = time.monotonic()
-                if latest_text and latest_text != last_published_text and (not last_published_text or now - last_published_at >= STREAM_UPDATE_MIN_INTERVAL_SECONDS or len(latest_text) - len(last_published_text) >= STREAM_UPDATE_MIN_CHARS):
-                    await self.bus.publish_outbound(
-                        OutboundMessage(
-                            channel_name=msg.channel_name,
-                            chat_id=execution.chat_id,
-                            thread_id=execution.thread_id,
-                            text=latest_text + " ▉",
-                            is_final=False,
-                            thread_ts=msg.thread_ts,
-                            connection_id=execution.connection_id,
-                            owner_user_id=execution.owner_user_id,
-                            metadata=_response_metadata(msg.metadata),
-                        )
-                    )
-                    last_published_text, last_published_at = latest_text, now
         finally:
             # Do not rely on generator GC, nor shield an entire model stream.
             # Repeated cancellation still joins the one owned iterator close.

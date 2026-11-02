@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -19,6 +20,8 @@ from app.gateway.channel_execution import CHANNEL_EXECUTION_BUSY_CODE, CHANNEL_E
 from app.gateway.run_output import OUTPUT_INVENTORY_REQUIRE_HEADER, OUTPUT_INVENTORY_VERSION_HEADER, RunOutputProjection, RunOutputProjectionV2
 from deerflow.runtime.runs.output import OUTPUT_CAPTURE_KEY, capture_intent_to_dict
 from deerflow.utils.file_io import await_drained
+
+FRAME_AUTHORIZE_SECONDS = 1.0
 
 
 def _refuse():
@@ -122,7 +125,7 @@ class _FacadeStream:
                     body=body,
                     headers=headers,
                     before_dispatch=lambda: self._facade._authorize("run_create"),
-                    after_response=lambda: self._facade._authorize("run_read"),
+                    after_response=self._facade._authorize_frame,
                 )
                 self._kwargs = None
             part = await anext(self._inner)
@@ -183,7 +186,7 @@ class _JoinedRunStream(_FacadeStream):
                     path=self._facade._thread_path + "/runs/" + quote(self._run_id, safe="") + "/join",
                     after_event_id=self._after_event_id,
                     before_dispatch=lambda: self._facade._authorize("run_read"),
-                    after_response=lambda: self._facade._authorize("run_read"),
+                    after_response=self._facade._authorize_frame,
                 )
             part = await anext(self._inner)
             self._facade._check_current("run_read")
@@ -339,6 +342,7 @@ class ChannelExecutionFacade:
         _identity(scope.thread_id)
         self._owner, self._scope, self._admission, self._capture_output, self._capture_inventory = owner, scope, admission, capture_output, capture_inventory
         self._inventory_document_version = inventory_document_version
+        self._frame_authorized_at: float | None = None
         self._thread_path = "threads/" + quote(scope.thread_id, safe="")
         self.threads, self.runs = _Threads(self), _Runs(self)
 
@@ -366,6 +370,21 @@ class ChannelExecutionFacade:
             self._check_current(operation)
         except Exception:
             _refuse()
+
+    async def _authorize_frame(self):
+        """Read authority for a stream frame, which can arrive thirty times a second.
+
+        The full check is about ten SQL statements, so it runs at most once a
+        second. What this process already holds is read on every frame. Until a
+        revocation shows, a frame can only feed the preview of the chat already
+        reading that turn, whose sends recheck the owner, the ceilings and the link.
+        """
+        now = time.monotonic()
+        if self._frame_authorized_at is not None and now - self._frame_authorized_at < FRAME_AUTHORIZE_SECONDS:
+            self._check_current("run_read")
+            return
+        self._frame_authorized_at = now
+        await self._authorize("run_read")
 
     def _check_current(self, operation):
         try:

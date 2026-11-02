@@ -6,6 +6,7 @@ from app.telegram_bots import deployment
 from app.telegram_bots.config import TelegramBotsConfig
 from deerflow.config.app_config import AppConfig
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+from deerflow.config.run_events_config import RunEventsConfig
 
 
 @pytest.fixture(autouse=True)
@@ -14,8 +15,27 @@ def authenticated_environment(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
-def app(*, enabled=True, bound=True):
-    return AppConfig.model_construct(channel_connections=ChannelConnectionsConfig(enabled=enabled, require_bound_identity=bound))
+def app(*, enabled=True, bound=True, events="db"):
+    return AppConfig.model_construct(channel_connections=ChannelConnectionsConfig(enabled=enabled, require_bound_identity=bound), run_events=RunEventsConfig(backend=events))
+
+
+@pytest.mark.parametrize("events", ["memory", "jsonl"])
+def test_a_turn_that_could_not_be_proved_refuses_at_start(events):
+    """Each turn would be refused its output evidence, one message at a time."""
+    assert deployment.static_cause(TelegramBotsConfig(), app(events=events), {"HARTMESH_PROVIDER_KEYS_SECRET": "x" * 32}) == "run-events-not-db"
+    assert deployment.feature_reason("run-events-not-db") == "misconfigured"
+
+
+@pytest.mark.parametrize("workers", [{"GATEWAY_WORKERS": "2"}, {"WEB_CONCURRENCY": "3"}, {"GATEWAY_WORKERS": "", "WEB_CONCURRENCY": "2"}])
+def test_several_workers_would_each_poll_every_bot(workers):
+    secret = {"HARTMESH_PROVIDER_KEYS_SECRET": "x" * 32}
+    assert deployment.static_cause(TelegramBotsConfig(), app(), {**secret, **workers}) == "several-workers"
+    assert deployment.feature_reason("several-workers") == "misconfigured"
+
+
+@pytest.mark.parametrize("workers", [{}, {"GATEWAY_WORKERS": "1"}, {"GATEWAY_WORKERS": "01"}, {"GATEWAY_WORKERS": " "}, {"GATEWAY_WORKERS": ""}, {"GATEWAY_WORKERS": "1", "WEB_CONCURRENCY": "4"}])
+def test_one_worker_reads_as_the_gateway_reads_it(workers):
+    assert deployment.static_cause(TelegramBotsConfig(), app(), {"HARTMESH_PROVIDER_KEYS_SECRET": "x" * 32, **workers}) is None
 
 
 @pytest.mark.parametrize(
