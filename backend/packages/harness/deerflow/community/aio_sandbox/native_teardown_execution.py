@@ -1,6 +1,7 @@
 """Cleanup-only host capabilities around canonical fences and durable evidence."""
 
 import logging
+import subprocess
 import time
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
@@ -84,6 +85,32 @@ def recover_teardowns(provider):
         logger.warning("Ordinary native teardown reconciliation is unqualified: %s", type(exc).__name__)
     finally:
         _NATIVE_SLOT_INVENTORY_DEADLINE.reset(token)
+
+
+def remove_leftovers(reader, items):
+    """Remove proved members by immutable ID, relays before their networks.
+
+    Only the census calls this, with admission closed and every producer drained. A
+    member that will not go costs only its conversation, and the next census tries again.
+    """
+    removed = []
+    for item in sorted(items, key=lambda item: item.fact.kind):
+        remaining = reader.deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        reader.guard()
+        command = ["docker", *(["rm", "--force"] if item.fact.kind == "container" else ["network", "rm"]), item.fact.identity]
+        try:
+            result = reader.backend._run(command, capture_output=True, text=True, timeout=min(15, remaining))
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.warning("Native leftover %s stays: %s", item.fact.name, type(exc).__name__)
+            continue
+        if result.returncode:
+            logger.warning("Native leftover %s stays: docker exited %d", item.fact.name, result.returncode)
+            continue
+        removed.append(item)
+    reader.guard()
+    return tuple(removed)
 
 
 @dataclass(frozen=True)

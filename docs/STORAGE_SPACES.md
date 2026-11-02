@@ -417,15 +417,20 @@ networks are proved gone; a restored record has no such proof and stays. The exa
 journal stays owned through retry and worker drainage, alongside the pool lock.
 
 A proxy or network with no sandbox and no record beside it needs no operator, whether
-a crash, a hard reboot or a late Docker effect left it. The native census logs the
-count and up to six names, and that conversation's next start removes the set and
-starts afresh. The set is refused rather than removed if it could hold a writer: a
-host mount, storage labels, a relay confined less than the product builds it, or a
-running network member other than its own relay. That also closes admission for
-everyone at the next census, as does a set beside a primary or a retained record, or
-anything the census cannot read. These checks read the set the product builds, and
-prove nothing against someone holding the Docker socket. A leftover nobody returns to
-stays until it is removed by hand, holding its two networks.
+a crash, a hard reboot or a late Docker effect left it. The native census removes it
+by immutable ID and logs the count and up to six names. The census runs at every
+Gateway start, with admission closed and every start and teardown drained under the
+pool lock, so nothing can still be using the set. A set beside a pending record or a
+retained workspace claim stays. One that appears while the Gateway runs refuses its
+own conversation, which reads as a mismatch, until the next census. One that will not
+go is tried again then.
+
+The census refuses rather than removes a set that could hold a writer: a host mount,
+storage labels, a privileged relay or one with extra capabilities, host namespaces or
+devices, or a running network member other than its own relay. That closes admission
+for everyone, as does a set beside a primary or a retained record, or anything the
+census cannot read. These checks read the set the product builds, and prove nothing
+against someone holding the Docker socket.
 
 Recovering a stuck attempt is manual, because a pending record refuses its account.
 Stop the Gateway first: removing a record under a running Gateway frees nothing,

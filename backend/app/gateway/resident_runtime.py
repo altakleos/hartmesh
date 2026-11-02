@@ -144,6 +144,7 @@ class ResidentRuntime:
 
         def account():
             from deerflow.community.aio_sandbox.native_resource_set import NativeResourceSet
+            from deerflow.community.aio_sandbox.native_teardown_execution import remove_leftovers
 
             provider.external_changed(provider._require_bootstrap_producers_drained_locked)
             paired = NativeResourceSet(provider._backend, guard=bridge.assert_current).inventory_paired()
@@ -168,10 +169,15 @@ class ResidentRuntime:
             if any(item.sandbox_id in attributed for item in unexplained):
                 raise StorageRuntimeUnavailable("Native census retains unexplained paired resources")
             if unexplained:
-                # A crash, a reboot or one failed start must not close sandboxes for everyone.
-                # The conversation's next start clears the set; a pending record keeps refusing its owner.
-                NativeResourceSet(provider._backend, guard=bridge.assert_current).require_no_writer(unexplained)
-                logger.warning("Native census left %d resources with no sandbox in place: %s", len(unexplained), ", ".join(sorted(item.fact.name for item in unexplained)[:6]))
+                # A crash, a reboot or one failed start must not close sandboxes for everyone, and
+                # nothing else visits a set with no primary. Admission is closed and producers are
+                # drained, so only a pending record or a workspace claim can still want this set.
+                reader = NativeResourceSet(provider._backend, guard=bridge.assert_current)
+                reader.require_no_writer(unexplained)
+                unresolved = bridge.assert_current()
+                leftovers = [item for item in unexplained if item.sandbox_id not in claims and not any(record.name.endswith("-" + item.sandbox_id) for record in unresolved)]
+                removed = remove_leftovers(reader, leftovers)
+                logger.warning("Native census found %d resources with no sandbox and removed %d: %s", len(unexplained), len(removed), ", ".join(sorted(item.fact.name for item in unexplained)[:6]))
             for actual in actuals:
                 info = SandboxInfo(
                     sandbox_id=actual.sandbox_id,

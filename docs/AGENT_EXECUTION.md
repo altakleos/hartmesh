@@ -283,8 +283,8 @@ container, network and backing identities, even when an attachment row is absent
 or fenced. Live leases and unfinished create operations remain protected. An
 unexplained primary, or a secondary attributed to a primary or a retained record,
 keeps admission closed until its identity is resolved. A relay or network with
-neither is logged once it passes `require_no_writer`, and that conversation's next
-start removes it.
+neither must pass `require_no_writer`, and the census then removes it, unless a
+pending record or a workspace claim still names it.
 
 ## Instance memory
 

@@ -166,8 +166,8 @@ chat and resident primaries plus relay/network resources independently of name
 prefix. Exact SQL CID/host/full mounts cover residents; an unexplained primary, or
 a secondary attributed to a primary or retained record, refuses publication. A
 failed start, a crash or a hard reboot leaves a secondary with neither. It must pass
-`require_no_writer`, which reads the set the product builds, then it is logged, and
-that conversation's next start removes it. Preparations without an original CID remain charged
+`require_no_writer`, which reads the set the product builds, then the census removes
+it by immutable ID unless a pending record or a claim still names it. Preparations without an original CID remain charged
 and cannot be contained merely from an empty listing. Strict durable actorless
 resident orphan cleanup remains a separate follow-up before count activation.
 

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from deerflow.spaces.docker import StorageHostUnqualified, storage_confined
 from deerflow.spaces.native_create_evidence import _unique_object
 from deerflow.spaces.native_resident_evidence import NativeResidentRecord
-from deerflow.spaces.native_teardown_evidence import NativeMountlessTeardownRecord, NativeTeardownRecord, NativeTeardownResource, _timestamp
+from deerflow.spaces.native_teardown_evidence import NativeMountlessTeardownRecord, NativeTeardownRecord, NativeTeardownResource
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +136,8 @@ class NativeResourceSet:
 
     def inventory_paired(self):
         """All-state immutable facts, including secondaries without a primary."""
+        from deerflow.spaces.native_teardown_evidence import _timestamp
+
         result = []
         for kind in ("container", "network"):
             selectors = (
@@ -162,41 +164,22 @@ class NativeResourceSet:
                 entry = self.inspect(kind, identifier)
                 if entry is None:
                     raise StorageHostUnqualified("A listed paired resource disappeared during census")
-                item = self._paired(kind, entry)
-                if item is not None:
-                    result.append(item)
+                labels = entry.get("Config", {}).get("Labels") if kind == "container" else entry.get("Labels")
+                if not isinstance(labels, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in labels.items()):
+                    raise StorageHostUnqualified("Paired census has invalid labels")
+                role = labels.get("deerflow.role")
+                if kind == "container" and role in {"sandbox", "resident"}:
+                    continue
+                if role not in ({"network-proxy"} if kind == "container" else {"network", "egress-network"}):
+                    raise StorageHostUnqualified("Paired census contains an unexplained resource role")
+                sandbox_id, mode, digest = (labels.get(key) for key in ("deerflow.sandbox_id", "deerflow.network_mode", "deerflow.network_policy_digest"))
+                if not isinstance(sandbox_id, str) or not 1 <= len(sandbox_id) <= 256 or any(ord(char) < 32 for char in sandbox_id) or mode not in {"blocked", "allowlist"} or not _hex(digest) or not _timestamp(entry.get("Created")):
+                    raise StorageHostUnqualified("Paired census has unknown original policy or creation")
+                fact = NativeTeardownResource(kind, role, identifier, entry["Name"].removeprefix("/"), entry["Created"])
+                result.append(PairedResource(fact, sandbox_id, mode, digest))
         if time.monotonic() >= self.deadline:
             raise StorageHostUnqualified("Paired resource census arrived after its budget")
         return tuple(result)
-
-    @staticmethod
-    def _paired(kind, entry):
-        """A relay's or network's facts, or None for a container that is neither."""
-        labels = entry.get("Config", {}).get("Labels") if kind == "container" else entry.get("Labels")
-        if not isinstance(labels, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in labels.items()):
-            raise StorageHostUnqualified("Paired census has invalid labels")
-        role = labels.get("deerflow.role")
-        if kind == "container" and role in {"sandbox", "resident"}:
-            return None
-        if role not in ({"network-proxy"} if kind == "container" else {"network", "egress-network"}):
-            raise StorageHostUnqualified("Paired census contains an unexplained resource role")
-        sandbox_id, mode, digest = (labels.get(key) for key in ("deerflow.sandbox_id", "deerflow.network_mode", "deerflow.network_policy_digest"))
-        if not isinstance(sandbox_id, str) or not 1 <= len(sandbox_id) <= 256 or any(ord(char) < 32 for char in sandbox_id) or mode not in {"blocked", "allowlist"} or not _hex(digest) or not _timestamp(entry.get("Created")):
-            raise StorageHostUnqualified("Paired census has unknown original policy or creation")
-        return PairedResource(NativeTeardownResource(kind, role, entry["Id"], entry["Name"].removeprefix("/"), entry["Created"]), sandbox_id, mode, digest)
-
-    def named_set(self, sandbox_id, names):
-        """What these names hold now, refused unless each is this sandbox's own relay or network."""
-        items = []
-        for kind, name in names:
-            entry = self.inspect(kind, name)
-            if entry is None:
-                continue
-            item = self._paired(kind, entry)
-            if item is None or item.sandbox_id != sandbox_id:
-                raise StorageHostUnqualified("Another resource holds a name of this native set")
-            items.append(item)
-        return tuple(items)
 
     def qualify_resident_graph(self, primary, *, attachment_id, network_mode, policy_digest, resources):
         """Shared graph rules without inventing a chat owner or teardown permit."""
@@ -409,14 +392,14 @@ class NativeResourceSet:
             raise StorageHostUnqualified("Native relay has a host storage mount")
 
     def require_no_writer(self, items):
-        """Refuse a relay or network with no primary and no record that is not as built.
+        """Refuse a relay or network with no primary and no record that could hold storage.
 
         A failed start, a crash or a hard reboot leaves such a set. A relay and its
         networks carry no storage by construction, so a host mount, storage
-        attribution, an unconfined relay or a running member other than its own relay
-        is a writer the census cannot account for. This reads the set the product
-        builds. It proves nothing against someone holding the Docker socket, who can
-        start a stopped member or a container this census never lists.
+        attribution, a relay with more reach than ``storage_confined`` allows or a
+        running member other than its own relay is a writer the census cannot account
+        for. This reads the set the product builds. It proves nothing against someone
+        holding the Docker socket, who can start a container this census never lists.
         """
         relays = {}
         for item in items:

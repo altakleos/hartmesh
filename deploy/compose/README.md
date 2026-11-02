@@ -2221,9 +2221,9 @@ and support Files, Work, Memory, Access and Settings.
 **Qualification and operator hold.** With managed storage enabled, the Gateway
 keeps execution closed until it has reconciled durable run ownership, retained
 workspace attachments and the complete Docker resource census. A proxy or
-network with no sandbox and no record does not keep it closed: the census logs
-the set, and that conversation's next start removes it. Other unknown containers
-or paired networks do, as does a set that could hold storage. Recovery of
+network with no sandbox and no record does not keep it closed: the census
+removes it and logs what it removed. Other unknown containers or paired
+networks do, as does a set that could hold storage. Recovery of
 original resident resources uses retained immutable identities and preserves
 live foreign leases; other unknown resources and unconfirmed cleanup remain charged.
 The existing maintenance task retries qualification every 60 seconds, and sooner

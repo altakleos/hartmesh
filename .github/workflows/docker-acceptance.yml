@@ -65,7 +65,7 @@ jobs:
           tree = ET.parse(sys.argv[1])
           cases = tree.findall(".//testcase")
           names = [case.get("name") for case in cases]
-          required = {'test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol', 'test_host_containment_removes_the_real_container_and_the_next_run_attaches_afresh', 'test_scheduled_trim_preserves_reserved_images_and_unprotected_control_loses_allocation', 'test_a_real_partial_set_goes_and_the_owner_can_start_again', 'test_a_real_leftover_goes_when_its_conversation_starts_again[networks]', 'test_a_real_leftover_goes_when_its_conversation_starts_again[relay-and-networks]'}
+          required = {'test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol', 'test_host_containment_removes_the_real_container_and_the_next_run_attaches_afresh', 'test_scheduled_trim_preserves_reserved_images_and_unprotected_control_loses_allocation', 'test_a_real_partial_set_goes_and_the_owner_can_start_again', 'test_a_real_leftover_is_removed_by_the_census[networks]', 'test_a_real_leftover_is_removed_by_the_census[relay-and-networks]'}
           assert len(names) == len(set(names)) and required <= set(names), "Required native storage cases were not collected exactly once"
           assert len(cases) >= 29, "Required managed-storage, trim and instance AIO cases were not collected"
           assert not tree.findall(".//skipped"), "Managed-storage merge qualification cannot skip"

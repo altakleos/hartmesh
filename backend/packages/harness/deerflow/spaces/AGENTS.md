@@ -37,7 +37,7 @@ owner closes, retaining current owner/daemon proof and closed creation readiness
 This permission grants no resource effect or new runtime installation.
 
 Gateway census includes immutable resident primaries and actual paired resources.
-Unknown or untracked graphs close admission; census grants no destructive scope.
+Unknown graphs close admission; census removes only a proved leftover.
 `DockerStorageAdapter._cleanup_resident` remains best effort and its normal return
 never certifies graph absence. Private `resident_recovery.py` grants explicit
 host recovery only from an original v5 graph and a trusted borrowed-session

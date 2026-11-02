@@ -1,6 +1,8 @@
 """Gateway census proof uses retained native identities, with fake Docker only."""
 
 import json
+import subprocess
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -81,9 +83,10 @@ async def test_untracked_resident_cannot_publish_a_false_empty_baseline(fixture)
         provider._end_bootstrap_accounting(permit)
 
 
-def with_relay(local, *, sandbox_id="orphan", mounts=(), labels=None, proxy="f" * 64, name="orphan-proxy", created="2026-10-01T12:00:00Z"):
+def with_relay(local, *, sandbox_id="orphan", mounts=(), labels=None, proxy="f" * 64, name="orphan-proxy", created="2026-10-01T12:00:00Z", removal=0):
     """One more relay the census finds, by default with no primary and no record behind it."""
     original = local._runtime_runner
+    local.removed = getattr(local, "removed", [])
     entry = {
         "Id": proxy,
         "Name": "/" + name,
@@ -98,13 +101,18 @@ def with_relay(local, *, sandbox_id="orphan", mounts=(), labels=None, proxy="f" 
             return SimpleNamespace(returncode=0, stdout="\n".join(filter(None, (original(command, **kwargs).stdout, proxy))), stderr="")
         if command[1:3] == ["inspect", proxy]:
             return SimpleNamespace(returncode=0, stdout=json.dumps([entry]), stderr="")
+        if command[1:4] == ["rm", "--force", proxy]:
+            local.removed.append(proxy)
+            if isinstance(removal, Exception):
+                raise removal
+            return SimpleNamespace(returncode=removal, stdout="", stderr="")
         return original(command, **kwargs)
 
     local._runtime_runner = run
 
 
 @pytest.mark.anyio
-async def test_a_leftover_with_no_primary_refuses_nobody(fixture, caplog):
+async def test_a_leftover_with_no_primary_goes_and_refuses_nobody(fixture, caplog):
     host, provider, admission, local, _calls = runtime(fixture)
     with_relay(local)
     permit = provider._begin_bootstrap_accounting(admission)
@@ -114,15 +122,34 @@ async def test_a_leftover_with_no_primary_refuses_nobody(fixture, caplog):
         provider.external_changed(lambda: proof.require_current_locked(provider, permit))
     finally:
         provider._end_bootstrap_accounting(permit)
+    assert local.removed == ["f" * 64]
     (message,) = [record.getMessage() for record in caplog.records if "no sandbox" in record.getMessage()]
-    assert "orphan-proxy" in message
+    assert "orphan-proxy" in message and "removed 1" in message
 
 
 @pytest.mark.anyio
-async def test_a_leftover_beside_a_pending_record_refuses_only_that_account(fixture):
+@pytest.mark.parametrize("removal", [1, subprocess.TimeoutExpired("docker", 15), OSError("Docker went away")], ids=["refused", "timed-out", "unreachable"])
+async def test_a_leftover_that_will_not_go_still_refuses_nobody(fixture, caplog, removal):
+    host, provider, admission, local, _calls = runtime(fixture)
+    with_relay(local, removal=removal)
+    permit = provider._begin_bootstrap_accounting(admission)
+    try:
+        with caplog.at_level("WARNING"):
+            proof = await host.account_native(permit)
+        provider.external_changed(lambda: proof.require_current_locked(provider, permit))
+    finally:
+        provider._end_bootstrap_accounting(permit)
+    (message,) = [record.getMessage() for record in caplog.records if "no sandbox" in record.getMessage()]
+    assert "removed 0" in message
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("prefix", ["current", "older"])
+async def test_a_set_beside_a_pending_record_stays_and_refuses_only_that_account(fixture, prefix):
     host, provider, admission, local, _calls = runtime(fixture)
     bridge = provider._native_creation
-    bridge.evidence.begin(owner_id="alice", thread_id="chat", name=f"{local._container_prefix}-orphan", slots=(SLOT,))
+    local._container_prefix = "current"
+    bridge.evidence.begin(owner_id="alice", thread_id="chat", name=f"{prefix}-orphan", slots=(SLOT,))
     bridge.qualify()
     with_relay(local)
     permit = provider._begin_bootstrap_accounting(admission)
@@ -130,9 +157,30 @@ async def test_a_leftover_beside_a_pending_record_refuses_only_that_account(fixt
         await host.account_native(permit)
     finally:
         provider._end_bootstrap_accounting(permit)
+    assert local.removed == []
     with pytest.raises(StorageHostUnqualified):
-        bridge.require_admissible(name=f"{local._container_prefix}-other", owner_id="alice")
-    bridge.require_admissible(name=f"{local._container_prefix}-other", owner_id="bob")
+        bridge.require_admissible(name="current-other", owner_id="alice")
+    bridge.require_admissible(name="current-other", owner_id="bob")
+
+
+@pytest.mark.anyio
+async def test_a_set_under_a_workspace_claim_stays(fixture):
+    host, provider, admission, local, _calls = runtime(fixture)
+    with_relay(local)
+    host.registry.retained["orphan"] = SimpleNamespace(container_id="c" * 64, host_id="daemon-A", resources=())
+    host.recover_originals = AsyncMock(return_value=[])
+
+    @asynccontextmanager
+    async def session():
+        yield SimpleNamespace(scalars=AsyncMock(return_value=SimpleNamespace(all=lambda: [])))
+
+    host.app.state.agent_instances._sf = session
+    permit = provider._begin_bootstrap_accounting(admission)
+    try:
+        await host.account_native(permit)
+    finally:
+        provider._end_bootstrap_accounting(permit)
+    assert local.removed == []
 
 
 @pytest.mark.anyio
@@ -152,6 +200,7 @@ async def test_a_leftover_that_could_hold_a_writer_still_closes_admission(fixtur
             await host.account_native(permit)
     finally:
         provider._end_bootstrap_accounting(permit)
+    assert local.removed == []
 
 
 @pytest.mark.anyio
@@ -164,6 +213,7 @@ async def test_an_unexplained_relay_beside_a_primary_still_closes_admission(fixt
             await host.account_native(permit)
     finally:
         provider._end_bootstrap_accounting(permit)
+    assert local.removed == []
 
 
 @pytest.mark.anyio
@@ -194,10 +244,11 @@ async def test_a_retained_record_keeps_its_sandbox_strict(fixture, monkeypatch, 
             await host.account_native(permit)
     finally:
         provider._end_bootstrap_accounting(permit)
+    assert local.removed == []
 
 
 @pytest.mark.anyio
-async def test_only_what_nothing_explains_is_held_to_the_proof(fixture, monkeypatch):
+async def test_only_what_nothing_explains_is_proved_and_removed(fixture, monkeypatch):
     from test_native_teardown_evidence import STAMP, record
 
     from deerflow.community.aio_sandbox.native_resource_set import NativeResourceSet
@@ -217,6 +268,7 @@ async def test_only_what_nothing_explains_is_held_to_the_proof(fixture, monkeypa
     finally:
         provider._end_bootstrap_accounting(permit)
     assert [item.fact.identity for item in proved] == ["a" * 64]
+    assert local.removed == ["a" * 64]
 
 
 @pytest.mark.anyio
