@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.48] - 2026-11-02
+
 ### Telegram bots
 
 Each person can connect a Telegram bot of their own to the ordinary chat and to each
