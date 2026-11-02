@@ -1,5 +1,6 @@
 """Offline operator behavior; syscall doubles do not qualify native enforcement."""
 
+import errno
 import hashlib
 import json
 import os
@@ -22,6 +23,21 @@ MOUNT_FACTS = si.StorageInitializer.mounted_image_facts
 MOUNT_ROOT_FACTS = si.StorageInitializer._mounted_root_facts
 REAL_FALLOCATE = os.posix_fallocate
 REAL_EXTENTS = si.verify_image_extents
+REAL_FSTAT = os.fstat
+
+
+def kernel_extents(fd, size):
+    """FIEMAP where the filesystem has it; tmpfs has none, and some runners mount /tmp on it.
+
+    SEEK_HOLE cannot stand in, because it reports fallocated, unwritten ranges as holes.
+    """
+    try:
+        REAL_EXTENTS(fd, size)
+    except si.BackingUnavailable as exc:
+        if not isinstance(exc.__cause__, OSError) or exc.__cause__.errno != errno.EOPNOTSUPP:
+            raise
+        if REAL_FSTAT(fd).st_blocks * 512 < size:
+            raise si.BackingUnavailable("Backing image has holes") from exc
 
 
 @pytest.mark.parametrize("argv", [[], ["unknown"], ["resize"], ["forget"]])
@@ -607,7 +623,7 @@ HOLE = 1 << 20
 def allocated(operator, monkeypatch):
     """Real allocation on real files: the kernel answers, and only the mount stays a double."""
     monkeypatch.setattr(si.os, "posix_fallocate", REAL_FALLOCATE)
-    monkeypatch.setattr(si, "verify_image_extents", REAL_EXTENTS)
+    monkeypatch.setattr(si, "verify_image_extents", kernel_extents)
     return operator
 
 
@@ -619,7 +635,7 @@ def punch(spec):
 def fully_allocated(spec):
     fd = os.open(spec.image_path, os.O_RDONLY)
     try:
-        REAL_EXTENTS(fd, spec.max_bytes)
+        kernel_extents(fd, spec.max_bytes)
     finally:
         os.close(fd)
 
@@ -753,7 +769,7 @@ def test_prepare_restores_before_it_mounts_or_measures_the_disk(allocated, monke
 def test_verify_repair_restores_and_plain_verify_only_reports(verified_operator, monkeypatch):
     tool, spec, _, _ = verified_operator
     monkeypatch.setattr(si.os, "posix_fallocate", REAL_FALLOCATE)
-    monkeypatch.setattr(si, "verify_image_extents", REAL_EXTENTS)
+    monkeypatch.setattr(si, "verify_image_extents", kernel_extents)
     fd = os.open(spec.image_path, os.O_RDWR)
     try:
         REAL_FALLOCATE(fd, 0, spec.max_bytes)
@@ -772,7 +788,7 @@ def test_verify_repair_restores_and_plain_verify_only_reports(verified_operator,
 def test_verify_repair_reports_a_restore_the_disk_refuses(verified_operator, monkeypatch):
     tool, spec, _, _ = verified_operator
     monkeypatch.setattr(si.os, "posix_fallocate", REAL_FALLOCATE)
-    monkeypatch.setattr(si, "verify_image_extents", REAL_EXTENTS)
+    monkeypatch.setattr(si, "verify_image_extents", kernel_extents)
     fd = os.open(spec.image_path, os.O_RDWR)
     try:
         REAL_FALLOCATE(fd, 0, spec.max_bytes)
@@ -789,7 +805,7 @@ def test_verify_repair_reports_a_restore_the_disk_refuses(verified_operator, mon
 def test_verify_document_counts_what_it_restored(verified_operator, monkeypatch):
     tool, spec, _, _ = verified_operator
     monkeypatch.setattr(si.os, "posix_fallocate", REAL_FALLOCATE)
-    monkeypatch.setattr(si, "verify_image_extents", REAL_EXTENTS)
+    monkeypatch.setattr(si, "verify_image_extents", kernel_extents)
     fd = os.open(spec.image_path, os.O_RDWR)
     try:
         REAL_FALLOCATE(fd, 0, spec.max_bytes)
