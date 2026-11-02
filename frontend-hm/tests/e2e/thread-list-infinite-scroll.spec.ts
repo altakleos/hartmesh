@@ -26,6 +26,10 @@ const THREADS = Array.from({ length: TOTAL_THREADS }, (_, i) => {
 
 const FIRST_PAGE_LAST = `Conversation ${String(PAGE_SIZE).padStart(3, "0")}`;
 const SECOND_PAGE_FIRST = `Conversation ${String(PAGE_SIZE + 1).padStart(3, "0")}`;
+// From 60 rows the list is virtual (thread-list-virtualizer.tsx): only rows
+// near the scroll position exist, and the 51st need not be one of them. Any
+// row past the first page proves the next page arrived.
+const PAST_FIRST_PAGE = /^Conversation (?!0[0-4]\d|050)\d{3}$/;
 
 test.describe("Thread list infinite scroll (issue #3482)", () => {
   test("chats list page loads more threads when scrolling to the bottom", async ({
@@ -48,7 +52,7 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
     const sentinel = page.getByTestId("chats-page-sentinel");
     await sentinel.scrollIntoViewIfNeeded();
 
-    await expect(main.getByText(SECOND_PAGE_FIRST)).toBeVisible({
+    await expect(main.getByText(PAST_FIRST_PAGE).first()).toBeVisible({
       timeout: 15_000,
     });
   });
@@ -71,7 +75,7 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
     const sentinel = page.getByTestId("recent-chat-list-sentinel");
     await sentinel.scrollIntoViewIfNeeded();
 
-    await expect(page.getByText(SECOND_PAGE_FIRST).first()).toBeVisible({
+    await expect(page.getByText(PAST_FIRST_PAGE).first()).toBeVisible({
       timeout: 15_000,
     });
   });
