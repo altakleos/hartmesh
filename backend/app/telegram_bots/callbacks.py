@@ -6,7 +6,7 @@ import asyncio
 import json
 import re
 from collections.abc import Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
@@ -1097,8 +1097,11 @@ class CallbackHandler:
         deadline, active = loop.time() + PRESS_TIMEOUT_SECONDS, [True]
         captured = captured_link or channel.link
 
+        def same_link():
+            return all(getattr(channel.link, key) == getattr(captured, key) for key in _SCOPE)
+
         def current():
-            return active[0] and loop.time() < deadline and all(getattr(channel.link, key) == getattr(captured, key) for key in _SCOPE)
+            return active[0] and loop.time() < deadline and same_link()
 
         async def checks():
             if not current():
@@ -1165,12 +1168,12 @@ class CallbackHandler:
                     key = "tap.failed"
             # One acknowledgement attempt; later results/refusals are ordinary
             # replies supplied by the host execute collaborator.
-            try:
+            with suppress(TimeoutError):
                 async with asyncio.timeout_at(deadline):
                     await channel.answer_callback_ack(query.id, key, captured_link=captured, deadline=deadline)
-            except TimeoutError:
-                active[0] = False
-            if row is not None and current():
+            # The deadline was for the checks and this answer. A press that passed them still
+            # stands if Telegram was slow, and `execute` checks again what it acts on.
+            if row is not None and same_link():
                 await self.execute(channel, row)
         finally:
             active[0] = False
