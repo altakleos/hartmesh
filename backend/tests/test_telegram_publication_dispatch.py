@@ -56,7 +56,8 @@ async def require_real_lock_wait(e, backend_pid):
     deadline = asyncio.get_running_loop().time() + 3
     while True:
         async with e.sessions() as observer:
-            waiting = await observer.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=:pid AND NOT granted)"), {"pid": backend_pid[0]})
+            # The latest: a guard reads the same row first, on another connection, and takes no lock.
+            waiting = await observer.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=:pid AND NOT granted)"), {"pid": backend_pid[-1]})
         if waiting is True:
             return
         assert asyncio.get_running_loop().time() < deadline, "Actual PostgreSQL request never entered its held row-lock wait"

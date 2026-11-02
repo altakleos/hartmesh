@@ -2353,6 +2353,8 @@ class OutboxSender:
                     if row is None:
                         continue
                     decision = await self._eligibility(binding, row, None)
+                    if decision.decision == "wait":
+                        continue  # A blocked bot's rows come back every second, with nothing to write.
                     claim = uuid4().hex
                     async with self._claim_writer(link_id, claim) as (session, current):
                         saved = await session.get(TelegramOutboxRow, row.id, with_for_update=True)
@@ -2365,8 +2367,6 @@ class OutboxSender:
                             continue
                         if decision.decision == "skip":
                             await self._skip(session, saved, decision.reason)
-                            continue
-                        if decision.decision == "wait":
                             continue
                         busy = await session.scalar(select(TelegramOutboxRow.id).where(TelegramOutboxRow.link_id == link_id, TelegramOutboxRow.state == "sending").limit(1))
                         if busy is not None:
@@ -2442,10 +2442,18 @@ class OutboxSender:
                     await self._complete(session, saved)
                     return
                 # Pacing belongs to the destination, including other deliveries
-                # and ambiguous attempts, and survives replacement/restart.
-                plans = await session.scalars(select(TelegramOutboxRow.parts).where(TelegramOutboxRow.link_id == link_id, TelegramOutboxRow.binding_generation == generation))
+                # and ambiguous attempts, and survives replacement/restart. A row
+                # closed for over a second has nothing left to pace, and stays for 30 days.
+                now = self.outbox.clock()
+                plans = await session.scalars(
+                    select(TelegramOutboxRow.parts).where(
+                        TelegramOutboxRow.link_id == link_id,
+                        TelegramOutboxRow.binding_generation == generation,
+                        or_(TelegramOutboxRow.closed_at.is_(None), TelegramOutboxRow.closed_at > now - timedelta(seconds=1)),
+                    )
+                )
                 last = max((datetime.fromisoformat(stamp) for parts in plans for value in parts for stamp in [value.get("dispatched_at") or value.get("sent_at")] if stamp), default=None)
-                if last is not None and last + timedelta(seconds=1) > self.outbox.clock():
+                if last is not None and last + timedelta(seconds=1) > now:
                     self._pending(saved)
                     saved.not_before = last + timedelta(seconds=1)
                     return
@@ -2665,11 +2673,19 @@ class OutboxSender:
         await self.outbox.inbox.settle_deliveries(link_id=row.link_id, session=session)
         groups = {part.get("callback_group_id") for part in current_parts} - {None}
         callbacks = list(
-            await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.link_id == row.link_id, TelegramCallbackRow.binding_generation == row.binding_generation).order_by(TelegramCallbackRow.id).with_for_update())
+            await session.scalars(
+                select(TelegramCallbackRow)
+                .where(
+                    TelegramCallbackRow.link_id == row.link_id,
+                    TelegramCallbackRow.binding_generation == row.binding_generation,
+                    TelegramCallbackRow.consumed_at.is_(None),
+                    or_(TelegramCallbackRow.group_id.in_(sorted(groups)), TelegramCallbackRow.kind == "delivery_retry"),
+                )
+                .order_by(TelegramCallbackRow.id)
+                .with_for_update()
+            )
         )
         for callback in callbacks:
-            if callback.consumed_at is not None:
-                continue
             if callback.group_id in groups and row.message_id is not None:
                 anchor = row.message_id
                 if row.payload.get("reply_basis", {}).get("version") in {6, 7}:

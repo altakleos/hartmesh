@@ -191,11 +191,10 @@ async def _agent_name(request: Request, link) -> str | None:
 async def _bot(request: Request, link) -> dict:
     links = _links(request)
     now = datetime.now(UTC)
-    delivery = (TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.binding_generation == link.binding_generation)
+    open_rows = TelegramOutboxRow.state.in_(("pending", "sending"))
+    counts = select(func.count().filter(open_rows), func.count().filter(open_rows, TelegramOutboxRow.degraded_at.is_not(None)), func.count().filter(TelegramOutboxRow.state == "failed"))
     async with links.session_factory() as session:
-        waiting = await session.scalar(select(func.count()).select_from(TelegramOutboxRow).where(*delivery, TelegramOutboxRow.state.in_(("pending", "sending"))))
-        degraded = await session.scalar(select(func.count()).select_from(TelegramOutboxRow).where(*delivery, TelegramOutboxRow.state.in_(("pending", "sending")), TelegramOutboxRow.degraded_at.is_not(None)))
-        failed = await session.scalar(select(func.count()).select_from(TelegramOutboxRow).where(*delivery, TelegramOutboxRow.state == "failed"))
+        waiting, degraded, failed = (await session.execute(counts.where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.binding_generation == link.binding_generation))).one()
     return {
         "id": link.id,
         "bot_id": link.bot_id,

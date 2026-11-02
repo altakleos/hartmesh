@@ -820,6 +820,10 @@ class CallbackRepository:
             async with self._writer() as session:
                 rows = list(await session.scalars(select(TelegramCallbackRow).order_by(TelegramCallbackRow.id).with_for_update()))
                 pending_groups = {row.group_id for row in rows if callback_publication_pending(row.payload)}
+                anchors = sorted({anchor for row in rows if row.group_id not in pending_groups and type(anchor := row.payload.get("anchor_outbox_id")) is str})
+                unsettled = set()
+                for start in range(0, len(anchors), 500):
+                    unsettled.update(await session.scalars(select(TelegramOutboxRow.id).where(TelegramOutboxRow.id.in_(anchors[start : start + 500]), TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
                 removed = 0
                 for row in rows:
                     if row.group_id in pending_groups:
@@ -829,8 +833,8 @@ class CallbackRepository:
                         continue
                     if row.kind == "prompt" and row.consumed_at is None and row.expires_at is not None and _aware(now) >= _aware(row.expires_at):
                         row.consumed_at, row.closed_reason = now, "expired"
-                    anchor = await session.get(TelegramOutboxRow, row.payload.get("anchor_outbox_id")) if type(row.payload.get("anchor_outbox_id")) is str else None
-                    if anchor is not None and anchor.state in {"pending", "sending", "failed"}:
+                    anchor = row.payload.get("anchor_outbox_id")
+                    if type(anchor) is str and anchor in unsettled:
                         continue
                     closed = row.consumed_at or row.expires_at
                     if age >= timedelta(days=self.config.callbacks.max_age_days) or row.kind != "prompt" and closed is not None and _aware(now) - _aware(closed) >= timedelta(days=self.config.callbacks.sweep_after_days):

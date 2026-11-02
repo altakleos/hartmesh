@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import Session
 from telegram.error import BadRequest
 
+from app.telegram_bots.callbacks import CallbackRepository
 from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryEligibility, DeliveryRetry, Outbox, OutboxSender, PartReceipt, PermanentDeliveryError, SourceUnavailable, TransientDeliveryError
 from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramOutboxRow
 
@@ -314,6 +315,74 @@ async def test_pacing_applies_between_distinct_reply_rows(db):
     await sender.tick()
     await sender.drain()
     assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_pacing_reads_no_row_that_closed_over_a_second_ago(db):
+    """A person's history stays for 30 days, and each part sent used to load all of it."""
+    link, clock, outbox = await setup(db)
+    await outbox.add(link, dedupe_key="notice:retained", class_="reply", payload={"parts": [{"kind": "text", "source_ref": {"key": "chat.restarted", "values": {}}}]})
+    async with db.sessions.begin() as session:
+        row = await session.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.dedupe_key == "notice:retained"))
+        parts = [dict(part, dispatched_at=clock().isoformat()) for part in row.parts]  # Would pace if it were read.
+        row.state, row.closed_at, row.parts = "sent", clock() - timedelta(seconds=2), parts
+    sent = []
+
+    async def send(link, row, part):
+        sent.append(row.id)
+        return [602]
+
+    sender = OutboxSender(outbox, run_id="process", deliver_part=transport(db, send), eligibility=allowed)
+    await sender.tick()
+    await sender.drain()
+    assert len(sent) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [[], "text", 7, {"anchor_outbox_id": ["a-list"]}, {"anchor_outbox_id": {"a": "dict"}}])
+async def test_one_malformed_control_does_not_stop_the_sweep(db, payload):
+    link, clock, _outbox = await setup(db)
+    old = clock() - timedelta(days=db.config.callbacks.max_age_days + 1)
+
+    def control(identity, payload):
+        return TelegramCallbackRow(
+            id=identity * 32, group_id=identity * 32, link_id=link.id, chat_id=link.chat_id, binding_generation=link.binding_generation, kind="back", target_kind="outbox", target_id="row", payload=payload, created_at=old
+        )
+
+    async with db.sessions.begin() as session:
+        session.add_all([control("a", payload), control("b", {})])
+    await CallbackRepository(db.sessions, config=db.config).sweep(clock())
+    assert "b" * 32 not in [row.id for row in await rows(db, TelegramCallbackRow)], "The rest of the deployment's controls are still swept"
+
+
+@pytest.mark.asyncio
+async def test_a_row_that_must_wait_opens_no_writer(db):
+    """A blocked bot's rows come back every second, inside the one tick that serves every bot."""
+    _link, _clock, outbox = await setup(db)
+
+    async def waiting(link, row, part):
+        return DeliveryEligibility.wait()
+
+    async def nothing(**kwargs):
+        raise AssertionError("A row that must wait is not sent")
+
+    sender = OutboxSender(outbox, run_id="process", deliver_part=nothing, eligibility=waiting)
+    opened = []
+    claim_writer = sender._claim_writer
+    sender._claim_writer = lambda *args: (opened.append(args), claim_writer(*args))[1]
+    assert await sender.tick() == 0
+    assert not opened
+
+
+@pytest.mark.asyncio
+async def test_a_guard_waits_for_no_writer(db):
+    """A poll cycle guards six times, and on PostgreSQL each one locked every link of its owner."""
+    link, _clock, _outbox = await setup(db)
+    async with db.links._owner_writer(link.owner_user_id):
+        guarded = await asyncio.wait_for(db.links.update_if_current(link.id, token_revision=link.token_revision), 2)
+    assert guarded is not None and guarded.id == link.id
+    assert await db.links.update_if_current(link.id, token_revision=link.token_revision + 1) is None, "A guard still refuses an old token"
+    assert await db.links.update_if_current("no-such-link", token_revision=1) is None
 
 
 @pytest.mark.asyncio

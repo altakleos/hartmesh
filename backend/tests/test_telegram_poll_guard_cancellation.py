@@ -2,6 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import aiosqlite
 import pytest
@@ -43,8 +44,7 @@ async def sqlite_links(tmp_path):
         await engine.dispose()
 
 
-@pytest.mark.parametrize("transactional", [False, True], ids=["owner-read", "locked-read"])
-async def test_retirement_drains_native_select_cursor_before_independent_writer(sqlite_links, monkeypatch, transactional):
+async def test_retirement_drains_native_select_cursor_before_independent_writer(sqlite_links, monkeypatch):
     db = sqlite_links
     first_reply, release_sql, entered_sql, cursor_cancelled, cursor_closed = (asyncio.Event() for _ in range(5))
     accepted = []
@@ -63,6 +63,7 @@ async def test_retirement_drains_native_select_cursor_before_independent_writer(
     retiring = None
     try:
         await e.supervisor.check()
+        monkeypatch.setattr(e.supervisor.profile_sync, "push_owed", AsyncMock())  # It guards through the same channel, and this holds the poller's guard.
         await e.supervisor.start()
         transport = e.channels.created[link.id]
         await wait_until(lambda: len(transport.updates.calls) == 1)
@@ -86,7 +87,7 @@ async def test_retirement_drains_native_select_cursor_before_independent_writer(
             result = await execute(connection, function, *args, **kwargs)
             if native_cursor and getattr(function, "__name__", "") == "close" and getattr(function, "__self__", None) is native_cursor[0]:
                 cursor_closed.set()
-            if not native_cursor and asyncio.current_task() in guarded_tasks and getattr(function, "__name__", "") == "execute" and args and str(args[0]).lstrip().upper().startswith("SELECT") and connection.in_transaction is transactional:
+            if not native_cursor and asyncio.current_task() in guarded_tasks and getattr(function, "__name__", "") == "execute" and args and str(args[0]).lstrip().upper().startswith("SELECT"):
                 native_cursor.append(function.__self__)
                 entered_sql.set()
                 try:

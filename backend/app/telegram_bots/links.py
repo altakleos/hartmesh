@@ -763,6 +763,11 @@ class BotLinkRepository:
                 facts[key] = value.astimezone(UTC)
             if key == "last_error" and value is not None and (not isinstance(value, str) or len(value) > 500 or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*(?: [a-z][a-z0-9_-]*)?", value)):
                 raise ValueError("invalid-error-classification")
+        if not facts:
+            # A guard writes nothing, and a poll cycle guards six times, so it waits for no writer.
+            async with self.session_factory() as session:
+                row = await session.get(TelegramBotLinkRow, link_id)
+                return _snapshot(row) if row is not None and row.token_revision == token_revision else None
         try:
             owner = await self._owner_of(link_id)
         except ValueError:
@@ -773,9 +778,8 @@ class BotLinkRepository:
                 return None
             for key, value in facts.items():
                 setattr(row, key, value)
-            if facts:
-                row.updated_at = _now()
-                await session.flush()
+            row.updated_at = _now()
+            await session.flush()
             return _snapshot(row)
 
     async def _end_codes(self, session: AsyncSession, link_id: str, owner: str) -> None:
