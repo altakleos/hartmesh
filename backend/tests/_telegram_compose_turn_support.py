@@ -498,6 +498,15 @@ async def drive_message(e, monkeypatch, tmp_path, *, prompts=("What is two plus 
                 finished.set()
 
         boot.service.bus.subscribe_outbound(outbound)
+        start_run = manager._start_execution_run
+
+        async def run_then_note(*args):
+            try:
+                await start_run(*args)
+            finally:
+                finished.set()  # This transport hands the stream back only once the run has ended.
+
+        monkeypatch.setattr(manager, "_start_execution_run", run_then_note)
         await storage.__aenter__()
         try:
             await supervisor.check()

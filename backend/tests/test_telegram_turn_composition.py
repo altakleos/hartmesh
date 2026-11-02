@@ -256,15 +256,22 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
         manager = ChannelManager(boot.service.bus, channel_store, connection_repo=db.connections, langgraph_url="http://gateway.test/api", gateway_url=owner.gateway_url, max_concurrency=1)
         boot.service.manager = manager
         final, model_entered, model_release = asyncio.Event(), asyncio.Event(), asyncio.Event()
-        frames = []
         model_inputs = []
 
         async def outbound(message):
-            frames.append(message)
             if message.is_final:
                 final.set()
 
         boot.service.bus.subscribe_outbound(outbound)
+        start_run = manager._start_execution_run
+
+        async def run_then_note(*args):
+            try:
+                await start_run(*args)
+            finally:
+                final.set()  # This transport hands the stream back only once the run has ended.
+
+        monkeypatch.setattr(manager, "_start_execution_run", run_then_note)
         original_generate = type(model)._agenerate
         thread_id = None
 
@@ -401,7 +408,6 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
                 return
             if case == "no_user_uncertain":
                 app.state.storage_spaces_enabled = True
-            assert any(message.text == ANSWER for message in frames if message.is_final)
             if case in {"recovery_text", "recovery_custom_text"}:
                 # Recreate only the recovery/coordinator/source consumer. The
                 # worker's real durable SQL seal/event/pair survives; no remote

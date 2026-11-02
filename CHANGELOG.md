@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram bots
 
+- A long answer no longer holds one of the eight message workers for its whole length, so
+  eight long answers no longer leave every other chat waiting.
 - A new conversation no longer stores the person's Telegram id in its metadata, where
   it outlived the bot. Conversations started under `2.2.0+hartmesh.48` keep theirs
   until they are deleted.

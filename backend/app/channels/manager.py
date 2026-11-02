@@ -2759,11 +2759,7 @@ class ChannelManager:
                 on_completion=None,
                 headers={"Idempotency-Key": execution.publication_id},
             )
-            if self._channel_supports_streaming(msg.channel_name):
-                await self._handle_execution_stream(msg, execution, kwargs)
-            else:
-                result = await execution.client.runs.wait(execution.thread_id, execution.assistant_id, **kwargs)
-                await self._publish_execution_result(msg, execution, result)
+            await self._start_execution_run(execution, kwargs)
         except ChannelExecutionBusyError as error:
             await self._release_inbound_dedupe_key(msg)
             await _authorize_execution(execution, "run_read")
@@ -2775,57 +2771,21 @@ class ChannelManager:
         finally:
             self._finish_serialized_thread_run(channel_name=msg.channel_name, thread_id=execution.thread_id, state=serial_state, lock_acquired=serial_lock_acquired)
 
-    async def _handle_execution_stream(self, msg: InboundMessage, execution: ChannelExecutionContext, kwargs: dict[str, Any]) -> None:
+    async def _start_execution_run(self, execution: ChannelExecutionContext, kwargs: dict[str, Any]) -> None:
+        """Hold a worker until the run shows, not until it ends.
+
+        The first frame proves the run exists, and `on_disconnect="continue"` keeps it going
+        with nobody reading. The owner's driver reads it by its own clock, and a run that
+        holds a worker for its whole length would hold every chat behind eight long answers.
+        """
         stream = execution.client.runs.stream(execution.thread_id, execution.assistant_id, **kwargs, stream_mode=list(STREAM_MODES))
         if not callable(getattr(stream, "aclose", None)):
             raise ChannelExecutionProtocolError()
-        latest_text = ""
-        current_message_id = None
-        buffers: dict[str, str] = {}
-        last_values = None
         try:
-            # Each frame was authorized as it was read, and nothing here reaches a
-            # person: the owner's driver reads the run by its own clock.
-            async for part in stream:
-                if part.event in MESSAGE_STREAM_EVENTS:
-                    text, current_message_id = _accumulate_stream_text(buffers, current_message_id, part.data)
-                    if text:
-                        latest_text = text
-                elif part.event == "values" and isinstance(part.data, (dict, list)):
-                    last_values = part.data
-                    if _has_current_turn_clarification(last_values):
-                        latest_text = _extract_response_text(last_values) or latest_text
+            await anext(stream, None)
         finally:
-            # Do not rely on generator GC, nor shield an entire model stream.
-            # Repeated cancellation still joins the one owned iterator close.
+            # Do not rely on generator GC. Repeated cancellation still joins the one owned close.
             await await_drained(stream.aclose())
-        result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
-        await self._publish_execution_result(msg, execution, result)
-
-    async def _publish_execution_result(self, msg: InboundMessage, execution: ChannelExecutionContext, result: Any) -> None:
-        # The outbound is a display/wake hint: it is no authoritative final
-        # source and no durable model-delivery receipt.
-        await _authorize_execution(execution, "run_read")
-        text, artifacts = _extract_response_text(result), _extract_artifacts(result)
-        turn_artifacts = _current_turn_artifacts(result)
-        text, attachments = await await_drained(asyncio.to_thread(_prepare_artifact_delivery, execution.thread_id, text, artifacts, user_id=execution.owner_user_id))
-        await _authorize_execution(execution, "run_read")
-        if not text:
-            text = _format_artifact_text([attachment.virtual_path for attachment in attachments]) if attachments else "(No response from agent)"
-        await self.bus.publish_outbound(
-            OutboundMessage(
-                channel_name=msg.channel_name,
-                chat_id=execution.chat_id,
-                thread_id=execution.thread_id,
-                text=text,
-                artifacts=artifacts,
-                attachments=attachments,
-                thread_ts=msg.thread_ts,
-                connection_id=execution.connection_id,
-                owner_user_id=execution.owner_user_id,
-                metadata=_response_metadata(msg.metadata, pending_clarification=_has_current_turn_clarification(result), turn_artifacts=turn_artifacts),
-            )
-        )
 
     async def _handle_chat_on_thread(
         self,

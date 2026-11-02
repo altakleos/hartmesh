@@ -1018,6 +1018,7 @@ class ChatTurns:
                 await self._observe(turn, lambda: self._complete(turn))
             return
         watcher = display = None
+        next_watch = 0
         try:
             while self._current(turn):
                 record = turn.record
@@ -1025,12 +1026,15 @@ class ChatTurns:
                     await self._view(turn)
                     if turn.presentation is not None:
                         display = self._spawn(self._display_loop(turn, turn.presentation), channel=turn.channel, turn=turn)
-                if watcher is None or watcher.done():
+                if watcher is None or watcher.done() and asyncio.get_running_loop().time() >= next_watch:
                     watcher = self._spawn(
                         self.observer.watch(record, turn.link, on_preview=lambda value: self._preview(turn, value), on_line=lambda key, values: self._activity(turn, key, values), turn_done=turn.done),
                         channel=turn.channel,
                         turn=turn,
                     )
+                    # The end of its stream is the first sign of the run's end, so nobody waits for the next tick.
+                    watcher.add_done_callback(lambda _done: turn.wake.set())
+                    next_watch = asyncio.get_running_loop().time() + 1
                 if turn.stop_requested:
                     await self._observe(turn, lambda: self._request_stop(turn))
                     if turn.done.is_set():
@@ -1165,11 +1169,13 @@ class ChatTurns:
                             raise _TurnStalled()
                 self._report_wait(turn, run, self.services.publications.worker_state(record) if run is None else None)
                 if run is None and failure is None and self._run_is_not_coming(turn, record):
-                    # The watcher polls for the run, so look once more before calling it gone.
+                    # The watcher polls for the run, so look once more before calling it gone. Only an
+                    # answer that there is none says so: a failed read of a started run gets the longer clock.
                     located = await self._observe(turn, lambda: self.services.publications.locate_run(record, turn.link, max_pages=8))
-                    if located is None or located.state != "matched":
+                    if located is not None and located.state == "matched":
+                        turn.quiet_since = None
+                    elif located is None or located.state == "pending" or self._overdue(turn):
                         raise _TurnStalled()
-                    turn.quiet_since = None
                 turn.wake.clear()
                 try:
                     await asyncio.wait_for(turn.wake.wait(), 1)

@@ -509,8 +509,7 @@ async def test_custom_scope_fills_missing_wire_selection_from_its_captured_targe
         await owner.stop()
 
 
-@pytest.mark.parametrize("streaming", [False, True])
-async def test_manager_owned_http_actual_gateway_admission_and_checkpoint_without_model(gateway_environment, monkeypatch, tmp_path, streaming):
+async def test_manager_owned_http_actual_gateway_admission_and_checkpoint_without_model(gateway_environment, monkeypatch, tmp_path):
     from fastapi import FastAPI
     from test_channel_execution_checkpoint import _checkpoint_captured_input
     from test_threads_router import _RawStateAccessor
@@ -556,7 +555,6 @@ async def test_manager_owned_http_actual_gateway_admission_and_checkpoint_withou
     client = ChannelExecutionFacade(owner, scope=scope, admission=admission)
     bus = MessageBus()
     manager = ChannelManager(bus, ChannelStore(str(tmp_path / "manager.json")))
-    monkeypatch.setattr(manager, "_channel_supports_streaming", lambda _channel: streaming)
 
     def no_default():
         raise AssertionError("A required publication cannot select the ordinary client")
@@ -577,7 +575,7 @@ async def test_manager_owned_http_actual_gateway_admission_and_checkpoint_withou
         creating_call = next(request for request in calls if request.method == "POST")
         assert creating_call.headers["Idempotency-Key"] == PUBLICATION
         assert creating_call.headers["Cookie"] == "csrf_token=" + creating_call.headers["X-CSRF-Token"]
-        assert creating_call.url.path.endswith("/stream" if streaming else "/wait")
+        assert creating_call.url.path.endswith("/stream")
         assert (await client.find_publication_run()).row["run_id"] == record.run_id
         snapshot = await _checkpoint_captured_input(e, captured)
         visible = [message for message in snapshot.values["messages"] if message.type == "human" and not message.additional_kwargs.get("hide_from_ui")]

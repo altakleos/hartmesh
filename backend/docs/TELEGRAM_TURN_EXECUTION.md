@@ -163,4 +163,6 @@ outer grace; already-admitted native cleanup may outlast a logical deadline.
 Final stop drains the recovery service before the coordinator and shared HTTP
 owner. Failed recovery cleanup retains those dependencies and the listener for
 retry. There is no additional after-manager observation pass or shutdown grace;
-late durable results wait for the next startup.
+late durable results wait for the next startup. A worker lets go of a run at its first
+frame, so a manager with an empty queue stops at once, and a run still going then is
+recovery's to end.

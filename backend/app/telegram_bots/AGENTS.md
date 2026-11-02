@@ -49,8 +49,7 @@ The supervisor constructs these services after resolving default repositories.
 `human_input.py` composes finite clarification/form/network interactions with the
 existing turn controller and sender; it owns no scheduler. `human_input_source.py`
 qualifies one exact lead/tool request using the persisted document-2 output,
-complete inventory and actual messages. Manager `turn_artifacts` are bounded
-presentation hints only. V5 human-input plans freeze that source and their input
+complete inventory and actual messages. V5 human-input plans freeze that source and their input
 snapshots; every unsent private part rereads source and live scope, including
 inside the SDK limiter. Recovery passes its original read guard into the same
 planner. Fixed navigation can close scoped metadata without reading old private
@@ -230,10 +229,14 @@ show a torn block. Telegram ignores entities past 100 in a message, so nothing c
 over a whole answer. A saved part is recomputed before each send, so a render change
 strands unsent rows: `_saved_part` ends them as `SourceGone`.
 
-A message waiting for its run is not on that clock. The worker reports through
+A manager worker holds a message only until its run's first frame, because the run goes on
+with `on_disconnect="continue"` and the driver reads it itself. Eight workers therefore
+bound how many runs start at once, not how many answers run, and the end of a run reaches
+the driver through its watcher. A message waiting for its run is not on that clock. The worker reports through
 `ChannelExecutionContext.progress`, so `worker_state` tells a wait for a worker, however
 long, from a message nobody holds. Once a worker lets go a run shows within
-`RUN_SHOWS_SECONDS` or never will, and it ends under the closed proof `no_run`. Stop
+`RUN_SHOWS_SECONDS` or never will, and it ends under the closed proof `no_run` once a read
+answers that there is none; a failing read gets the ordinary clock. Stop
 fences the message, so one still `queued` gets the same short limit. A fence cannot
 recall a POST already sent, so a `taken` message is waited for even after Stop, and
 `observe(closing=)` answers pending until its worker lets go. A chat starved of workers
@@ -345,7 +348,7 @@ The generic `channels.execution_client.ChannelExecutionFacade` borrows this owne
 it validates the detached JSON snapshot actually encoded, original scope, strict
 read acknowledgements and progressing run/event cursors. Neither metadata nor a
 raw stream frame becomes a server receipt or proof of final output.
-Creating waits/streams use explicit continue-on-disconnect and 5/300 timeouts;
+The creating stream uses explicit continue-on-disconnect and 5/300 timeouts;
 reads retain 30 seconds. There is no automatic POST/reconnect after ambiguity.
 The one-slot public-SSE pump and responses retain cancellation/failed-close
 ownership. Post-response authorization runs inside that same retained operation

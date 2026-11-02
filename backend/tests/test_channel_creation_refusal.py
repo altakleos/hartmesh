@@ -3,6 +3,7 @@
 import copy
 import importlib
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
@@ -43,8 +44,7 @@ def test_wording_attribute_impostors_and_retired_attempts_cannot_issue_refusals(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [False, True])
-async def test_actual_facade_busy_keeps_original_scope_and_emits_one_host_refusal(setup, monkeypatch, streaming):
+async def test_actual_facade_busy_keeps_original_scope_and_emits_one_host_refusal(setup, monkeypatch):
     e = setup
     calls = []
 
@@ -57,7 +57,6 @@ async def test_actual_facade_busy_keeps_original_scope_and_emits_one_host_refusa
     owner = GatewayClientOwner(gateway_url="https://gateway.example", langgraph_url="https://runtime.example/prefix/api", transport=httpx.MockTransport(respond))
     scope = replace(e.context.scope, endpoint_id=owner.endpoint_id)
     e.message.execution_context = ChannelExecutionContext(scope, ChannelExecutionFacade(owner, scope=scope, admission=e.admission), e.admission)
-    monkeypatch.setattr(e.manager, "_channel_supports_streaming", lambda _channel: streaming)
     lookup = AsyncMock(return_value="a-later-conversation")
     monkeypatch.setattr(e.manager, "_lookup_thread_id", lookup)
     try:
@@ -76,7 +75,6 @@ async def test_actual_facade_busy_keeps_original_scope_and_emits_one_host_refusa
 async def test_model_quoting_busy_sentence_does_not_issue_creation_refusal(setup):
     e = setup
     e.message.metadata["creation_refusal"] = {"code": "thread_busy"}
-    e.client.runs.wait.return_value = {"messages": [{"type": "ai", "content": THREAD_BUSY_MESSAGE}]}
+    e.stream.parts = iter([SimpleNamespace(event="values", data={"messages": [{"type": "ai", "content": THREAD_BUSY_MESSAGE}]}, id=None)])
     await e.manager._handle_chat(e.message)
-    assert len(e.outbounds) == 1 and e.outbounds[0].text == THREAD_BUSY_MESSAGE
-    assert not isinstance(e.outbounds[0], api().CreationRefusedMessage)
+    assert not e.outbounds, "A run that started made no refusal, whatever it says"
