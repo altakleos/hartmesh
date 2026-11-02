@@ -13,7 +13,7 @@ function randomCharacters(length: number): string {
   ).join("");
 }
 
-/** The same rule the server follows for a bot it creates. */
+/** A free name to offer for a new bot: letters and digits of the target's name, then random ones. */
 export function suggestUsername(target: AgentTarget): string {
   if (target.kind === "chat") {
     return `chat_${randomCharacters(6)}_bot`;

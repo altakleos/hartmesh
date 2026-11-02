@@ -265,19 +265,6 @@ async def saved_action(e, *, kind, target_kind=None, target_id=None, payload=Non
 
 
 @pytest.mark.asyncio
-async def test_dismiss_consumes_saved_group_and_edits_only_its_actual_anchor(command_environment):
-    e = command_environment
-    selected = await saved_action(e, kind="dismiss")
-    await e.commands.execute(e.channel, selected, query_id="dismiss-query")
-    async with e.sessions() as session:
-        result = await session.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.dedupe_key == "notice:callback:" + selected.id))
-        assert result.parts[0]["kind"] == "edit" and result.parts[0]["target_message_id"] == 501
-        assert result.parts[0]["source_ref"] == {"key": "tap.failed", "values": {}}
-        assert result.payload["product_keyboard_basis"] == []
-    assert (await e.callbacks.get(selected.id)).closed_reason == "done"
-
-
-@pytest.mark.asyncio
 async def test_delivery_retry_only_requeues_its_saved_current_target_without_consuming_action(command_environment):
     e = command_environment
     target = await e.outbox.plan_product(e.link, source_id="retry-target", parts=[{"kind": "text", "source_ref": {"key": "tap.failed", "values": {}}}])

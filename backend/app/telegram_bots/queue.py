@@ -82,7 +82,6 @@ class _Turn:
     current: InboundMessage
     waiting: list[QueuedInput] = field(default_factory=list)
     callback_id: str | None = None
-    retrying: bool = False
     cancelled: bool = False
 
 
@@ -185,13 +184,12 @@ class ChatQueue:
             _refuse()
         # The controller owns retry timing and authorized successor creation.
         # Holding a refused current turn never releases its following messages.
-        turn.retrying = True
 
     def cancel_wait(self, link, topic):
         turn = self._find(link, topic)
         if turn is None:
             return False
-        turn.cancelled, turn.retrying = True, False
+        turn.cancelled = True
         turn.waiting.clear()
         return True
 

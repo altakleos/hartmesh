@@ -890,7 +890,7 @@ async def test_supervisor_preserves_the_real_stranger_charge_across_rotation_and
 
     from _telegram_bot_test_support import RecordingRequest
     from test_telegram_supervisor import build as supervisor_build
-    from test_telegram_supervisor import credential
+    from test_telegram_supervisor import credential, replace_token
 
     from app.telegram_bots.adapter import TelegramBotChannel
 
@@ -931,7 +931,7 @@ async def test_supervisor_preserves_the_real_stranger_charge_across_rotation_and
         assert await first.handle_update(Update.de_json(update_payload(580, text="Synthetic stranger"), first.bot)) is True
         await asyncio.gather(*tuple(first._ingress_tasks))
         assert [call.endpoint for call in normal.calls] == ["getMe", "sendMessage"]
-        await e.supervisor.replace_token(link, str(link.bot_id) + ":" + secrets.token_urlsafe(30), actor_id=link.owner_user_id)
+        await replace_token(e, link, str(link.bot_id) + ":" + secrets.token_urlsafe(30))
         second, normal = created[-1]
         assert second is not first and first.services.strangers is second.services.strangers is e.supervisor.strangers
         assert await second.handle_update(Update.de_json(update_payload(581, text="Same stranger"), second.bot)) is True

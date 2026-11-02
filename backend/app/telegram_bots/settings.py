@@ -202,18 +202,6 @@ def in_quiet_hours(now: datetime, settings: PersonSettings) -> bool:
     return start <= minute < end
 
 
-_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
-_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
-
-
-def format_time(moment: datetime, settings: PersonSettings, now: datetime | None = None) -> str:
-    local = local_now(settings, moment)
-    clock = f"{local.hour:02}:{local.minute:02}"
-    if local.date() == local_now(settings, now).date():
-        return clock
-    return f"{_WEEKDAYS[local.weekday()]} {local.day} {_MONTHS[local.month - 1]}, {clock}"
-
-
 def silent_now(link: BotLink, settings: PersonSettings, config: TelegramBotsConfig, now: datetime | None = None) -> bool:
     moment = _aware(now if now is not None else datetime.now(UTC))
     if not in_quiet_hours(moment, settings):

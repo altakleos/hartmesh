@@ -25,21 +25,6 @@ STORAGE_REFERENCE_WORDS: Mapping[str, str] = MappingProxyType(
     }
 )
 
-# Legacy display vocabulary and source pins only. A matching sentence grants
-# neither creating-refusal provenance nor permission to retry a publication.
-MANAGER_SENTENCES: Mapping[str, str] = MappingProxyType(
-    {
-        "This conversation is already processing another request. Please wait for it to finish and try again.": "busy.thread",
-        "Connect this channel from Settings in the web app, complete the in-channel connect step, then send your message again.": "access.off",
-        "Channel connection verification is temporarily unavailable. Please try again later or contact your administrator.": "error.generic",
-        "An internal error occurred. Please try again.": "error.generic",
-        "This conversation has an invalid stored agent selection. Use /agent use <name> to start a valid conversation.": "error.generic",
-        "An error occurred while processing your request. Please try again.": "error.generic",
-        "(No response from agent)": "error.generic",
-        "Channel execution protocol refused": "error.generic",
-    }
-)
-
 
 @dataclass(frozen=True)
 class TurnFailure:

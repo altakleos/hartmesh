@@ -133,6 +133,25 @@ async def credential(db, env, *, bot=9_000_000_001):
     return link, token
 
 
+async def replace_token(e, link, token):
+    """What the replacement route does once Telegram has named the token's bot."""
+    supervisor = e.supervisor
+    async with supervisor.token_operation(link.id):
+        same = await supervisor.token_matches(link, token)
+        comparison = {"token_changed": same is False, "expected_token_revision": link.token_revision} if same is not None else {}
+        receipt = await supervisor.links.replace_from_token(
+            owner_user_id=link.owner_user_id,
+            old_link_id=link.id,
+            operation_id=secrets.token_hex(16),
+            request_digest=secrets.token_hex(32),
+            validated_bot={"id": link.bot_id, "username": link.bot_username, **comparison},
+            encrypted_token=await supervisor.encrypt_token(link.bot_id, token),
+        )
+        successor = await supervisor.links.get(receipt["new_link_id"])
+        await supervisor.adopt_token(successor, token, old_link_id=receipt["old_link_id"])
+    return await supervisor.links.get(successor.id)
+
+
 async def test_check_has_no_bot_calls_and_publishes_current(db, monkeypatch):
     from app.telegram_bots.supervisor import current
 

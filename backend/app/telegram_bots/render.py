@@ -1,15 +1,8 @@
-"""Pure fixed-text rendering and complete preview presentation plans.
+"""Pure fixed-text rendering. The outbox owns acknowledgements and callback authority."""
 
-Plans contain presentation only. The future outbox owns durable acknowledgements,
-binding/revision checks and callback authority; a caller's message IDs are never
-authorization to execute an action.
-"""
-
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping
 from html import escape
 from string import Formatter
-from types import MappingProxyType
 from typing import Any
 
 from .texts import FIRST_KEYS, catalog, forms, words
@@ -167,90 +160,3 @@ def render_plain(
 ) -> str:
     """Apply the same forms and title limits, preserving literal value characters."""
     return _render(key, locale, html=False, reader_is_supervisor=reader_is_supervisor, reader_is_administrator=reader_is_administrator, custody=custody, topics_hint=topics_hint, values=values)
-
-
-def _freeze(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
-    if isinstance(value, (tuple, list)):
-        return tuple(_freeze(item) for item in value)
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    raise TypeError("preview basis must contain JSON-compatible values")
-
-
-@dataclass(frozen=True)
-class PreviewPart:
-    html: str
-    silent: bool
-    protected: bool
-    controls_allowed: bool
-
-
-@dataclass(frozen=True)
-class PreviewPlan:
-    """Stable presentation snapshot for a future durable outbox writer.
-
-    ``basis`` holds the canonical basis/revisions supplied by its owner. ``parts``
-    has no keyboards. ``next_part`` consumes that owner's trusted saved prefix
-    acknowledgements; it checks shape only and confers no callback authority.
-    Persist the plan and receipt mapping before transport; failed parts reuse it.
-    """
-
-    parts: tuple[str, ...]
-    basis: Mapping[str, Any]
-    silent: bool
-    protected: bool
-
-    def next_part(self, acknowledged_message_ids: Sequence[int]) -> PreviewPart | None:
-        if len(acknowledged_message_ids) > len(self.parts) or any(type(message_id) is not int or message_id <= 0 for message_id in acknowledged_message_ids) or len(set(acknowledged_message_ids)) != len(acknowledged_message_ids):
-            raise ValueError("expected an ordered prefix of saved part acknowledgements")
-        index = len(acknowledged_message_ids)
-        if index == len(self.parts):
-            return None
-        final = index == len(self.parts) - 1
-        return PreviewPart(self.parts[index], self.silent if final else True, self.protected, final)
-
-
-def render_preview(
-    key: str,
-    locale: str,
-    *,
-    heading: str,
-    basis: Mapping[str, Any],
-    silent: bool = False,
-    protected: bool = False,
-    limit: int = 4096,
-    **values: Any,
-) -> PreviewPlan:
-    """Plan the full escaped preview, reserving each repeated header's UTF-16 units.
-
-    Canonical fields have no presentation cap. The heading alone is navigation
-    text. Earlier parts are silent and only the final part may carry controls.
-    Outbox/callback code must still verify the saved basis, delivery and binding.
-    """
-    from .split import split_html, utf16_units, visible_text
-
-    if type(limit) is not int or not 0 < limit <= 4096:
-        raise ValueError("preview limit must be between 1 and 4096 UTF-16 units")
-    body = render(key, locale, **values)
-    if not body.strip():
-        raise ValueError("a complete preview must have visible content")
-    heading = heading.split("\n", 1)[0]
-    # The complete count affects header width. Increase the reservation until it
-    # covers the actual count; no canonical value is cut to obtain convergence.
-    expected_parts = 1
-    while True:
-        suffix = render_plain("preview.part_header", locale, heading="", part=expected_parts, parts=expected_parts)
-        title = _clip(heading, max(0, FIRST_LINE_MAX - len(suffix)), at_word=True)
-        header = render("preview.part_header", locale, heading=title, part=expected_parts, parts=expected_parts)
-        budget = limit - utf16_units(visible_text(header)) - 1
-        if budget <= 0:
-            raise ValueError("preview limit cannot fit the product heading and content")
-        chunks = split_html(body, limit=budget)
-        count = len(chunks)
-        if count <= expected_parts:
-            break
-        expected_parts = count
-    parts = tuple(render("preview.part_header", locale, heading=title, part=index, parts=count) + "\n" + chunk for index, chunk in enumerate(chunks, start=1))
-    return PreviewPlan(parts, _freeze(basis), silent, protected)

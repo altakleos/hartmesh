@@ -37,7 +37,6 @@ async def test_bot_link_projection_excludes_token_and_is_frozen(db):
     with pytest.raises(FrozenInstanceError):
         link.id = "changed"
     assert await db.links.get_by_bot(link.bot_id) == link
-    assert await db.links.list_for_agent(link.agent_kind, link.agent_ref) == [link]
 
 
 async def test_bot_id_unique_per_deployment(db):

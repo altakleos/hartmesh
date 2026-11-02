@@ -9,7 +9,7 @@ from _run_output_capture_test_support import capture_environment as capture_envi
 from _run_output_capture_test_support import output_store as output_store  # noqa: F401
 from _run_output_capture_test_support import put_messages
 from langchain_core.messages import AIMessage, HumanMessage
-from test_channel_execution_client import PUBLICATION, Admission, creating
+from test_channel_execution_client import PUBLICATION, Admission, answered, create
 from test_output_inventory import inventory_document
 from test_output_inventory_execution_client import inventory_projection
 from test_run_output_capture_admission import admission as admission  # noqa: F401
@@ -142,13 +142,13 @@ async def test_selector_two_requires_inventory_and_is_readonly():
 @pytest.mark.parametrize("status", [200, 422, 503])
 async def test_explicit_creation_is_one_original_post_without_downgrade(status):
     calls = []
-    client, owner = client_for(lambda request: calls.append(request) or httpx.Response(status, json={}))
+    client, owner = client_for(lambda request: calls.append(request) or (answered() if status == 200 else httpx.Response(status, json={})))
     try:
         if status == 200:
-            await client.runs.wait("thread", "lead_agent", **creating())
+            await create(client)
         else:
             with pytest.raises(ChannelExecutionProtocolError):
-                await client.runs.wait("thread", "lead_agent", **creating())
+                await create(client)
         assert len(calls) == 1 and calls[0].method == "POST"
         assert json.loads(calls[0].content)["output_capture"] == INTENT
     finally:

@@ -5,7 +5,7 @@ import threading
 
 import httpx
 import pytest
-from test_channel_execution_client import creating, facade
+from test_channel_execution_client import ACK, creating, facade, row
 from test_channel_http_owner import RecordingStream
 
 from app.channels import execution_client
@@ -52,12 +52,12 @@ async def test_snapshot_fresh_headers_json_and_public_sse_decoder_workers_stay_o
         calls.append(request)
         if request.url.path.endswith("/stream"):
             return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, stream=response)
-        return httpx.Response(200, json={"messages": []})
+        return httpx.Response(200, json=row(), headers=ACK)
 
     client, owner, _, _ = facade(respond)
     stream = None
     try:
-        await client.runs.wait("thread", "lead_agent", **creating())
+        await client.get_run("run")
         stream = client.runs.stream("thread", "lead_agent", **creating())
         part = await anext(stream)
         assert part.event == "values"

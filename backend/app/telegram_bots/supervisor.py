@@ -1253,27 +1253,6 @@ class TelegramSupervisor:
             self._event("bot_stop", link=channel.link, reason=reason, took_ms=round((self._time() - began) * 1000))
         return channel
 
-    async def replace_token(self, link: BotLink, token: str, *, actor_id: str) -> BotLink:
-        # The caller validates bot identity; this owned plaintext comparison is
-        # the only basis for clearing a conflict pause on a changed credential.
-        stored, revision = await self.links.token(link.id)
-        if revision != link.token_revision:
-            raise ValueError("token-changed")
-        cipher = await asyncio.to_thread(token_cipher, self._environ)
-        try:
-            old = await asyncio.to_thread(unwrap_token, cipher, link.bot_id, stored)
-        except Exception:
-            old = None
-        changed = old is not None and old.key != token
-        action = "retry" if old is not None and not changed else "replace_token"
-        encrypted = await asyncio.to_thread(wrap_token, cipher, link.bot_id, token)
-        saved = await self.links.store_token(link.id, encrypted, actor_id=actor_id, action=action, expected_revision=revision, expected_encrypted_token=stored, token_changed=changed)
-        await self._retire(link.id, reason="token-stored")
-        self._rows[link.id] = saved
-        if await self._available():
-            await self._launch(saved, token)
-        return await self.links.get(link.id)
-
     async def retry(self, link_id: str, *, take_over_webhook: bool = False) -> BotLink:
         link = await self.links.get(link_id)
         if link is None:
@@ -1399,7 +1378,6 @@ class TelegramSupervisor:
             try:
                 await self.links.remove(link_id, actor_id=actor_id, action=action)
                 self._rows.pop(link_id, None)
-                self.strangers.forget_bot(link.bot_id)
             finally:
                 async with self._locks[link_id]:
                     if self._channels.get(link_id) is channel:
@@ -1430,11 +1408,9 @@ class TelegramSupervisor:
         live = {row.id: row for row in rows}
         for identity in tuple(self._channels):
             if identity not in live:
-                bot_id = self._channels[identity].link.bot_id
                 await self._retire(identity, reason="removed")
                 self._rows.pop(identity, None)
                 self._unsupported.discard(identity)
-                self.strangers.forget_bot(bot_id)
         # Failed targeted retirement keeps clients owned until a later drain
         # succeeds. Never close them while their delivery worker remains live.
         for channel in tuple(self._retiring_channels):

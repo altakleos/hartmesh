@@ -558,9 +558,6 @@ class BotLinkRepository:
     async def list_for_owner(self, owner_user_id: str) -> list[BotLink]:
         return await self._list(TelegramBotLinkRow.owner_user_id == owner_user_id)
 
-    async def list_for_agent(self, agent_kind: str, agent_ref: str) -> list[BotLink]:
-        return await self._list(TelegramBotLinkRow.agent_kind == agent_kind, TelegramBotLinkRow.agent_ref == agent_ref)
-
     async def list_all(self) -> list[BotLink]:
         return await self._list()
 
@@ -1468,7 +1465,7 @@ class BotLinkRepository:
         ``token_changed`` is a caller's plaintext comparison, never a comparison
         of randomized ciphertexts. It requires its captured token revision.
         """
-        if action not in {"replace_token", "managed_token", "rewrap", "retry"}:
+        if action not in {"replace_token", "managed_token", "rewrap"}:
             raise ValueError("invalid-token-action")
         async with self._health_lock(link_id):
             async with self._owner_writer(await self._owner_of(link_id)) as session:

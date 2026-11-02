@@ -10,7 +10,7 @@ from _telegram_bot_test_support import RecordingRequest
 from _telegram_repository_test_support import db as db
 from sqlalchemy import select
 from test_telegram_supervisor import _supervisor_logging as _supervisor_logging
-from test_telegram_supervisor import build, credential, running_one
+from test_telegram_supervisor import build, credential, replace_token, running_one
 
 from app.channels.message_bus import OutboundMessage
 from app.telegram_bots.cipher import token_cipher, unwrap_token, wrap_token
@@ -183,12 +183,16 @@ async def test_token_replacement_clears_pause_only_with_positive_plaintext_proof
     if old_state == "unreadable":
         link = await db.links.store_token(link.id, "unreadable-fixture", actor_id=link.owner_user_id)
     link = await db.links.set_health(link.id, "conflict", holds=True)
+    if old_state == "same":
+        # The route takes the same token back only from a bot that needs one, and the pause outlives the conflict.
+        link = await db.links.set_health(link.id, "token_rejected", holds=True)
+        assert link.health == "token_rejected"
     assert link.acts_paused_since is not None
     candidate = original_token if old_state == "same" else str(link.bot_id) + ":" + secrets.token_urlsafe(30)
     e.normal.enqueue_get_me(bot_id=link.bot_id)
     poll = e.updates.enqueue("getUpdates", result=[], release=asyncio.Event())
     try:
-        result = await e.supervisor.replace_token(link, candidate, actor_id=link.owner_user_id)
+        result = await replace_token(e, link, candidate)
         await asyncio.wait_for(poll.started.wait(), 3)
         assert result.token_revision == link.token_revision + 1
         assert result.acts_paused_since == (None if old_state == "different" else link.acts_paused_since)
@@ -215,7 +219,7 @@ async def test_token_comparison_losing_cas_never_retires_current_successor(db, m
 
     monkeypatch.setattr(module, "unwrap_token", stalled_comparison)
     proposed = str(link.bot_id) + ":" + secrets.token_urlsafe(30)
-    replacing = asyncio.create_task(e.supervisor.replace_token(link, proposed, actor_id=link.owner_user_id))
+    replacing = asyncio.create_task(replace_token(e, link, proposed))
     try:
         assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 3), 4)
         winner_token = str(link.bot_id) + ":" + secrets.token_urlsafe(30)

@@ -33,13 +33,13 @@ sorted inbox rows; no writer crosses a network, bus or model call. The final
 attempt check follows the last awaited human-authority read. SQL commit and an
 external process fence are separate systems.
 
-`plan_publication_reply` joins the saved publication to a complete output
-projection and its exact source receipt. It freezes the source digest and a
-versioned HTML presentation, including contiguous codepoint ranges in the
+`plan_verified_publication_reply` joins the saved publication to a complete
+output projection and its exact source receipt. It freezes the source digest and
+a versioned HTML presentation, including contiguous codepoint ranges in the
 rendered visible text. It retains the original source identity rather than
 substituting a digest of rendered text. Closed fixed failure/cancellation
 dispositions use the same primary identity, `reply:<turn_id>`, without inventing
-an assistant-message ID. The cancellation text makes no queue-removal claim.
+an assistant-message ID.
 
 Exact primary replay preserves saved part IDs and delivery acknowledgements.
 Changed proof, source, presentation or completion intent refuses reuse. Primary

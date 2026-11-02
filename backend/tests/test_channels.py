@@ -5835,6 +5835,14 @@ class TestExtractArtifacts:
         assert _extract_artifacts(result) == ["/mnt/user-data/outputs/plan.md"]
 
 
+def test_response_metadata_keeps_the_inbound_fields_and_leaves_them_unchanged():
+    from app.channels.manager import _response_metadata
+
+    base = {"event_id": "actual", "other": {"nested": True}}
+    assert _response_metadata(base) == {"event_id": "actual", "other": {"nested": True}}
+    assert base == {"event_id": "actual", "other": {"nested": True}}
+
+
 class TestFormatArtifactText:
     def test_single_artifact(self):
         from app.channels.manager import _format_artifact_text

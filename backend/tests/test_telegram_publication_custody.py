@@ -1,8 +1,4 @@
-"""Managed publication custody over actual SQL and prepared live-human authority.
-
-The new API-availability failures are feature scaffolds, not defects in the
-compatible legacy bind_turn/publish/bind_run contract.
-"""
+"""Managed publication custody over actual SQL and prepared live-human authority."""
 
 import asyncio
 import dataclasses
@@ -127,19 +123,6 @@ def expected_input_digest(origins):
     return hashlib.sha256(wire).hexdigest()
 
 
-async def test_legacy_group_and_explicit_publication_compatibility_control(publication_environment):
-    e = publication_environment
-    await e.inbox.bind_turn(e.origins, turn_id="a" * 32, thread_id=e.thread_id)
-    stored = await saved_origins(e)
-    first = stored[0].route_basis["current_publication_id"]
-    await e.inbox.bind_run(turn_id="a" * 32, publication_id=first, run_id="legacy-first-run")
-    second = await e.inbox.publish(stored, event_id="m701:r1", expected_publication_id=first)
-    await e.inbox.bind_run(turn_id="a" * 32, publication_id=second, run_id="legacy-second-run")
-    assert (await saved_origins(e))[0].run_id == "legacy-second-run"
-    with pytest.raises(ValueError):
-        await e.inbox.bind_run(turn_id="a" * 32, publication_id=first, run_id="late-old-run")
-
-
 async def test_existing_route_preserves_json_boolean_distinction_control(publication_environment):
     e = publication_environment
     row = e.origins[0]
@@ -174,17 +157,34 @@ async def test_reserve_freezes_complete_scope_input_and_sorted_origins(publicati
     saved = await saved_origins(e)
     assert all(row.turn_id == record.turn_id and row.thread_id == e.thread_id for row in saved)
     assert all(row.route_basis["publications"] == saved[0].route_basis["publications"] for row in saved)
+    assert [row.grouped_message_ids for row in saved] == [[702], [701]]
     assert await e.reserve() == record
 
 
 async def test_new_managed_reserve_never_adopts_receiptless_legacy_publication(publication_environment):
     e = publication_environment
-    await e.inbox.bind_turn(e.origins, turn_id="b" * 32, thread_id=e.thread_id)
+    turn = "b" * 32
+    publication = hashlib.sha256((turn + ":m701").encode()).hexdigest()[:32]
+    async with e.sessions.begin() as session:
+        for row in await session.scalars(select(TelegramInboundMarkRow).where(TelegramInboundMarkRow.link_id == e.link.id, TelegramInboundMarkRow.message_id.in_([701, 702]))):
+            row.turn_id, row.thread_id, row.state = turn, e.thread_id, "dispatched"
+            row.grouped_message_ids = [702] if row.message_id == 701 else [701]
+            row.route_basis = {**row.route_basis, "publications": [{"publication_id": publication, "event_id": "m701", "run_id": None}], "current_publication_id": publication}
     before = await saved_origins(e)
     assert before[0].run_id is None and before[0].state == "dispatched"
     with pytest.raises(ValueError):
-        await e.reserve()
+        await e.reserve(before)
     assert await saved_origins(e) == before
+
+
+async def test_a_reserved_group_cannot_be_extended_or_taken_in_part(publication_environment):
+    e = publication_environment
+    third = await e.add_origin(message_id=703, update_id=1703, text="Third accepted input")
+    record = await e.reserve()
+    for origins in ((*e.origins, third), e.origins[:1]):
+        with pytest.raises(ValueError):
+            await e.reserve(origins)
+    assert await e.reserve() == record
 
 
 async def test_concurrent_first_reservations_fix_one_identity(publication_environment):
@@ -199,8 +199,11 @@ async def test_legacy_explicit_retry_cannot_be_upgraded_to_a_managed_marker(publ
     e = publication_environment
     record = await e.reserve()
     await e.inbox.mark_dispatch_started(record, guard=e.guard_factory())
-    fresh = await saved_origins(e)
-    retry = await e.inbox.publish(fresh, event_id="m701:r1", expected_publication_id=record.publication_id)
+    retry = hashlib.sha256((record.turn_id + ":m701:r1").encode()).hexdigest()[:32]
+    async with e.sessions.begin() as session:
+        for row in await session.scalars(select(TelegramInboundMarkRow).where(TelegramInboundMarkRow.turn_id == record.turn_id)):
+            history = [*row.route_basis["publications"], {"publication_id": retry, "event_id": "m701:r1", "run_id": None}]
+            row.route_basis = {**row.route_basis, "publications": history, "current_publication_id": retry}
     assert retry != record.publication_id
     with pytest.raises(ValueError):
         await e.reserve()

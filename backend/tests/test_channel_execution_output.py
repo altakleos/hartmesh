@@ -8,8 +8,7 @@ import httpx
 import pytest
 from _telegram_repository_test_support import db as db
 from sqlalchemy import select
-from test_channel_execution_client import PUBLICATION, Admission, creating
-from test_channel_http_owner import RecordingStream
+from test_channel_execution_client import PUBLICATION, Admission, answered, create, creating
 
 from app.channels.execution import ChannelExecutionProtocolError, ChannelExecutionScope
 from app.channels.execution_client import ChannelExecutionFacade
@@ -30,26 +29,12 @@ def client_for(respond, *, capture_output=_DEFAULT):
     return client, owner, admission, scope
 
 
-@pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("capture_output", [pytest.param(_DEFAULT, id="default"), False, True])
-async def test_host_capture_option_controls_the_actual_detached_post(streaming, capture_output):
+async def test_host_capture_option_controls_the_actual_detached_post(capture_output):
     calls = []
-    response = RecordingStream(block=False)
-
-    def respond(request):
-        calls.append(request)
-        return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, stream=response) if streaming else httpx.Response(200, json={})
-
-    client, owner, _, _ = client_for(respond, capture_output=capture_output)
+    client, owner, _, _ = client_for(lambda request: calls.append(request) or answered(), capture_output=capture_output)
     try:
-        if streaming:
-            stream = client.runs.stream("thread", "lead_agent", **creating())
-            try:
-                await anext(stream)
-            finally:
-                await stream.aclose()
-        else:
-            await client.runs.wait("thread", "lead_agent", **creating())
+        await create(client)
         assert len(calls) == 1
         wire = json.loads(calls[0].content)
         if capture_output is True:
@@ -62,12 +47,12 @@ async def test_host_capture_option_controls_the_actual_detached_post(streaming, 
 
 async def test_provider_metadata_cannot_activate_default_capture():
     calls = []
-    client, owner, _, _ = client_for(lambda request: calls.append(request) or httpx.Response(200, json={}))
+    client, owner, _, _ = client_for(lambda request: calls.append(request) or answered())
     payload = creating()
     payload["metadata"]["output_capture"] = {"version": 1}
     payload["context"] = {"capture_output": True, "output_capture": {"version": 1}}
     try:
-        await client.runs.wait("thread", "lead_agent", **payload)
+        await create(client, **payload)
         assert "output_capture" not in json.loads(calls[0].content)
     finally:
         await owner.stop()
@@ -83,34 +68,26 @@ async def test_capture_option_requires_a_literal_bool_before_transport(value):
 
 async def test_capture_option_is_readonly_and_provider_metadata_cannot_disable_it():
     calls = []
-    client, owner, _, _ = client_for(lambda request: calls.append(request) or httpx.Response(200, json={}), capture_output=True)
+    client, owner, _, _ = client_for(lambda request: calls.append(request) or answered(), capture_output=True)
     try:
         with pytest.raises(AttributeError):
             client.capture_output = False
         assert client.capture_output is True
         payload = creating()
         payload["config"] = {"output_capture": None, "context": {"capture_output": False}}
-        await client.runs.wait("thread", "lead_agent", **payload)
+        await create(client, **payload)
         assert json.loads(calls[0].content)["output_capture"] == {"version": 1}
     finally:
         await owner.stop()
 
 
-@pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("status", [422, 503])
-async def test_failed_capture_negotiation_never_retries_an_ordinary_creating_post(streaming, status):
+async def test_failed_capture_negotiation_never_retries_an_ordinary_creating_post(status):
     calls = []
     client, owner, _, _ = client_for(lambda request: calls.append(request) or httpx.Response(status, json={"detail": "Synthetic unsupported capture"}), capture_output=True)
     try:
         with pytest.raises(ChannelExecutionProtocolError, match="^Channel execution protocol refused$"):
-            if streaming:
-                stream = client.runs.stream("thread", "lead_agent", **creating())
-                try:
-                    await anext(stream)
-                finally:
-                    await stream.aclose()
-            else:
-                await client.runs.wait("thread", "lead_agent", **creating())
+            await create(client)
         assert len(calls) == 1 and calls[0].method == "POST"
         assert json.loads(calls[0].content)["output_capture"] == {"version": 1}
     finally:

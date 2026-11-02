@@ -1,7 +1,6 @@
 """Reply plans are real SQL transactions and keep exact delivery identities."""
 
 import asyncio
-import hashlib
 from copy import deepcopy
 from datetime import UTC, datetime
 
@@ -10,7 +9,8 @@ from _telegram_repository_test_support import add_link, bind_link, rows
 from _telegram_repository_test_support import db as db
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import DBAPIError
-from telegram import Chat, Message, Update, User
+from test_telegram_publication_custody import publication_environment as publication_environment
+from test_telegram_publication_primary import _managed_turn, _primary, _terminal_run, projection
 
 from app.telegram_bots.producer import Outbox
 from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
@@ -28,20 +28,6 @@ async def connected(db):
     return link
 
 
-async def model_turn(db, link, *, topic=None):
-    repo = Outbox(db.sessions).inbox
-    marks = []
-    for message_id in (102, 103):
-        message = Message(message_id, datetime.now(UTC), Chat(link.chat_id, "private"), from_user=User(link.telegram_user_id, "Fixture", False), text="synthetic turn", message_thread_id=topic)
-        mark, _ = await repo.accept(link, Update(message_id + 100, message=message), sanitized_input={"text": "synthetic turn"})
-        marks.append(await repo.route(mark, kind="chat", target_id="thread-original", basis={"conversation_id": "thread-original"}, operation_ids=["a" * 32]))
-    await repo.bind_turn(marks, turn_id="a" * 32, thread_id="thread-original")
-    publication = hashlib.sha256((("a" * 32) + ":m102").encode()).hexdigest()[:32]
-    await repo.bind_run(turn_id="a" * 32, publication_id=publication, run_id="run-exact")
-    source = {"thread_id": "thread-original", "run_id": "run-exact", "publication_id": publication, "assistant_message_id": "assistant-exact", "message_ids": [102, 103]}
-    return marks, source
-
-
 @pytest.mark.asyncio
 async def test_borrowed_delivery_plan_rolls_back_with_caller(db):
     link = await connected(db)
@@ -55,46 +41,36 @@ async def test_borrowed_delivery_plan_rolls_back_with_caller(db):
 
 
 @pytest.mark.asyncio
-async def test_reply_plan_dedupes_and_freezes_grouped_sources(db):
-    link = await connected(db)
-    outbox = Outbox(db.sessions)
-    marks, source = await model_turn(db, link, topic=77)
-    plan_id = await outbox.plan_reply(link, turn_id="a" * 32, source=source, parts=[text_part(), text_part("hello.privacy")], inbox_rows=marks)
-    saved = next(row for row in await rows(db, TelegramOutboxRow) if row.id == plan_id)
+async def test_reply_plan_dedupes_and_freezes_grouped_sources(publication_environment):
+    e = publication_environment
+    record = await _managed_turn(e, [await e.add_origin(message_id=message, update_id=message + 1000, topic=77) for message in (711, 712)])
+    outbox = Outbox(e.sessions)
+    output = projection(record, text="synthetic answer " * 400)
+    plan_id = await outbox.plan_verified_publication_reply(record, output=output, guard=e.guard_factory())
+    saved = await _primary(e.db, plan_id)
     original = deepcopy(saved.parts)
-    assert [part["ordinal"] for part in original] == [0, 1]
-    assert len({part["part_id"] for part in original}) == 2
-    assert saved.payload["source"] == source
+    assert len(original) > 1 and [part["ordinal"] for part in original] == list(range(len(original)))
+    assert len({part["part_id"] for part in original}) == len(original)
+    assert saved.payload["source"] == saved.payload["reply_basis"]["outcome"]
     assert saved.message_thread_id == 77
-    assert await outbox.plan_reply(link, turn_id="a" * 32, source=source, parts=[text_part()], inbox_rows=marks) == plan_id
-    assert next(row for row in await rows(db, TelegramOutboxRow) if row.id == plan_id).parts == original
-    for mark in await rows(db, TelegramInboundMarkRow):
-        if mark.message_id != 101:
-            assert mark.delivery_ids == [plan_id] and mark.outbox_id == plan_id
-            assert mark.route_complete and mark.state == "reply_pending"
+    assert await outbox.plan_verified_publication_reply(record, output=output, guard=e.guard_factory()) == plan_id
+    assert (await _primary(e.db, plan_id)).parts == original
+    marks = [mark for mark in await rows(e.db, TelegramInboundMarkRow) if mark.turn_id == record.turn_id]
+    assert len(marks) == 2
+    assert all(mark.delivery_ids == [plan_id] and mark.outbox_id == plan_id and mark.route_complete and mark.state == "reply_pending" for mark in marks)
 
 
 @pytest.mark.asyncio
-async def test_old_publication_output_cannot_seal_current_turn(db):
-    link = await connected(db)
-    outbox = Outbox(db.sessions)
-    marks, old_source = await model_turn(db, link)
-    current = await outbox.inbox.publish(marks, event_id="m102:r1", expected_publication_id=old_source["publication_id"])
-    await outbox.inbox.bind_run(turn_id="a" * 32, publication_id=current, run_id="new-run")
-    with pytest.raises(ValueError, match="reply-source-conflict"):
-        await outbox.plan_reply(link, turn_id="a" * 32, source=old_source, parts=[text_part()], inbox_rows=marks)
-    assert len(await rows(db, TelegramOutboxRow)) == 1
-    assert all(not mark.route_complete for mark in await rows(db, TelegramInboundMarkRow) if mark.message_id != 101)
-
-
-@pytest.mark.asyncio
-async def test_concurrent_final_frames_commit_one_complete_plan(db):
-    link = await connected(db)
-    outbox = Outbox(db.sessions)
-    marks, source = await model_turn(db, link)
-    identities = await asyncio.gather(*(outbox.plan_reply(link, turn_id="a" * 32, source=source, parts=[text_part()], inbox_rows=marks) for _ in range(4)))
-    assert len(set(identities)) == 1 and len(await rows(db, TelegramOutboxRow)) == 2
-    assert all(mark.delivery_ids == identities[:1] and mark.route_complete for mark in await rows(db, TelegramInboundMarkRow) if mark.message_id != 101)
+async def test_old_publication_output_cannot_seal_current_turn(publication_environment):
+    e = publication_environment
+    old = await _managed_turn(e)
+    current = await e.inbox.reserve_retry_publication(old, terminal=_terminal_run(old, reason="sandbox_capacity_exceeded"), guard=e.guard_factory())
+    assert current.publication_id != old.publication_id
+    output = projection(old)
+    with pytest.raises(ValueError):
+        await Outbox(e.sessions).plan_verified_publication_reply(old, output=output, guard=e.guard_factory())
+    assert len(await rows(e.db, TelegramOutboxRow)) == 1
+    assert all(not mark.route_complete for mark in await rows(e.db, TelegramInboundMarkRow) if mark.turn_id == old.turn_id)
 
 
 @pytest.mark.asyncio

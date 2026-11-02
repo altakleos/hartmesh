@@ -71,13 +71,13 @@ def test_fenced_code_without_language_maps_to_pre():
 
 
 def test_unclosed_fence_in_partial_text_is_closed():
-    html = to_html("```python\nx < 2", partial=True).html
+    html = to_html("```python\nx < 2").html
     assert html == '<pre><code class="language-python">x &lt; 2</code></pre>'
     _Markup(html)
 
 
 def test_unbalanced_emphasis_in_partial_text_renders_as_text():
-    assert to_html("**still writing", partial=True).html == "**still writing"
+    assert to_html("**still writing").html == "**still writing"
 
 
 def test_heading_becomes_bold_line():
@@ -246,13 +246,13 @@ def test_plain_fallback_strips_tags_and_unescapes():
 def test_status_line_is_italic_and_last():
     # The streaming caller appends the product-owned activity text. Conversion
     # must retain that position and formatting while the answer is partial.
-    rendered = to_html("Partial answer\n\n*Reading report.csv…*", partial=True)
+    rendered = to_html("Partial answer\n\n*Reading report.csv…*")
     assert rendered.html.endswith("\n\n<i>Reading report.csv…</i>")
 
 
 @pytest.mark.parametrize("source", ["**a `b` c** " * 110, "> a\n>\n> ```py\n> b\n> ```", "<details>\n> quoted\n</details>"])
 def test_complex_nesting_remains_valid(source):
-    _Markup(to_html(source, partial=True).html)
+    _Markup(to_html(source).html)
 
 
 def test_code_block_separators_stay_outside_pre():
@@ -301,7 +301,7 @@ def test_details_preserves_text_after_the_closing_tag(source):
     ],
 )
 def test_unclosed_details_cannot_capture_content_outside_its_container(source):
-    rendered = to_html(source, partial=True)
+    rendered = to_html(source)
     assert rendered.plain.count("Outside") == 1
     assert rendered.plain.count("Body") == 1
     if source.endswith("</details>"):

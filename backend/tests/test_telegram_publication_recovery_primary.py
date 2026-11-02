@@ -94,26 +94,19 @@ async def test_marker_winner_cannot_be_reclassified_by_stale_unmarked_snapshot(r
     assert all("publication_recovery" not in row.route_basis for row in await recovery_rows(e, original))
 
 
-@pytest.mark.parametrize("writer", ["reserve", "marker", "bind", "legacy_bind_turn", "legacy_bind", "legacy_publish"])
+@pytest.mark.parametrize("writer", ["reserve", "marker", "bind"])
 async def test_closed_publication_cannot_be_reopened_by_any_old_writer(recovery_environment, monkeypatch, writer):
     e = recovery_environment
     record = await e.reserve()
     async with restart_attempt(e, monkeypatch, record) as (issued, attempt):
         identity = await Outbox(e.sessions).plan_restart_before_dispatch(record, ticket=attempt.ticket, guard=attempt.fixed_guard)
-    saved = await recovery_rows(e, record)
     with pytest.raises(ValueError):
         if writer == "reserve":
             await e.reserve()
         elif writer == "marker":
             await e.inbox.mark_dispatch_started(record, guard=e.guard_factory())
-        elif writer == "bind":
-            await e.inbox.bind_publication_run(record, run_id="late-run", guard=e.guard_factory())
-        elif writer == "legacy_bind_turn":
-            await e.inbox.bind_turn(saved, turn_id=record.turn_id, thread_id=record.scope.thread_id)
-        elif writer == "legacy_bind":
-            await e.inbox.bind_run(turn_id=record.turn_id, publication_id=record.publication_id, run_id="late-run")
         else:
-            await e.inbox.publish(saved, event_id=record.event_id + ":r1", expected_publication_id=record.publication_id)
+            await e.inbox.bind_publication_run(record, run_id="late-run", guard=e.guard_factory())
     assert all(row.outbox_id == identity and row.run_id is None for row in await recovery_rows(e, record))
 
 
@@ -527,25 +520,18 @@ async def test_original_navigation_and_fixed_source_survive_config_change(recove
         producer.validate_restart_reply_basis(corrupt)
 
 
-@pytest.mark.parametrize("writer", ["reserve", "marker", "bind", "legacy_bind_turn", "legacy_bind", "legacy_publish"])
+@pytest.mark.parametrize("writer", ["reserve", "marker", "bind"])
 async def test_corrupt_recovery_state_refuses_old_writers_without_repair(recovery_environment, monkeypatch, writer):
     e = recovery_environment
     record = await e.reserve()
     async with e.sessions.begin() as session:
         for row in await session.scalars(select(TelegramInboundMarkRow).where(TelegramInboundMarkRow.turn_id == record.turn_id)):
             row.route_basis = {**row.route_basis, "publication_recovery": None}
-    saved = await recovery_rows(e, record)
     with pytest.raises(ValueError):
         if writer == "reserve":
             await e.reserve()
         elif writer == "marker":
             await e.inbox.mark_dispatch_started(record, guard=e.guard_factory())
-        elif writer == "bind":
-            await e.inbox.bind_publication_run(record, run_id="late-run", guard=e.guard_factory())
-        elif writer == "legacy_bind_turn":
-            await e.inbox.bind_turn(saved, turn_id=record.turn_id, thread_id=record.scope.thread_id)
-        elif writer == "legacy_bind":
-            await e.inbox.bind_run(turn_id=record.turn_id, publication_id=record.publication_id, run_id="late-run")
         else:
-            await e.inbox.publish(saved, event_id=record.event_id + ":r1", expected_publication_id=record.publication_id)
+            await e.inbox.bind_publication_run(record, run_id="late-run", guard=e.guard_factory())
     assert all(row.route_basis["publication_recovery"] is None and not row.route_complete and row.run_id is None for row in await recovery_rows(e, record))

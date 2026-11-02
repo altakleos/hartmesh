@@ -129,7 +129,7 @@ async def test_host_scope_mismatch_refuses_before_thread_or_run(setup, attribute
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing", ["get", "wait", "stream", "async-stream"])
+@pytest.mark.parametrize("missing", ["get", "stream", "async-stream"])
 async def test_incomplete_or_wrong_shape_facade_refuses_before_any_http(setup, missing):
     e = setup
     if missing == "get":

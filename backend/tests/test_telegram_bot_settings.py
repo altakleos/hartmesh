@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from app.telegram_bots.config import TelegramBotsConfig
-from app.telegram_bots.settings import PersonSettings, SettingsRepository, format_time, in_quiet_hours, local_now, silent_now
+from app.telegram_bots.settings import PersonSettings, SettingsRepository, in_quiet_hours, local_now, silent_now
 from deerflow.persistence.base import Base
 from deerflow.persistence.telegram_bots.model import TelegramPersonSettingsRow
 
@@ -278,14 +278,6 @@ def test_quiet_hours_follow_both_repetitions_of_a_dst_hour():
     assert not in_quiet_hours(datetime(2026, 11, 1, 7, 0, tzinfo=UTC), value)
 
 
-@pytest.mark.parametrize("locale", ["en-US", "zh-CN"])
-def test_format_time_compares_local_dates_and_uses_deterministic_day_names(locale):
-    value = settings(timezone="Asia/Shanghai", locale=locale)
-    assert format_time(datetime(2026, 10, 16, 16, 15, tzinfo=UTC), value, NOW) == "00:15"
-    assert format_time(datetime(2026, 10, 16, 10, 0, tzinfo=UTC), value, NOW) == "Fri 16 Oct, 18:00"
-    assert format_time(datetime(2026, 10, 18, 1, 5, tzinfo=UTC), value, NOW) == "Sun 18 Oct, 09:05"
-
-
 @pytest.mark.parametrize("seconds,expected", [(None, True), (1801, True), (1800, False), (1799, False), (0, False), (-1, False)])
 def test_silent_now_honors_null_old_recent_and_future_activity(seconds, expected):
     moment = NOW.replace(hour=23)
@@ -306,5 +298,3 @@ def test_clock_helpers_reject_naive_caller_timestamps():
     value = settings(timezone="UTC")
     with pytest.raises(ValueError):
         local_now(value, NOW.replace(tzinfo=None))
-    with pytest.raises(ValueError):
-        format_time(NOW.replace(tzinfo=None), value, NOW)

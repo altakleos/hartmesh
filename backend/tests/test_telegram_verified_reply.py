@@ -10,24 +10,11 @@ from types import SimpleNamespace
 import pytest
 from _telegram_repository_test_support import db as db  # noqa: F401
 from sqlalchemy import select
-from test_output_inventory import inventory_document
 from test_telegram_publication_custody import publication_environment as publication_environment
-from test_telegram_publication_primary import _managed_turn, _output, _primary
+from test_telegram_publication_primary import _managed_turn, _primary, projection
 
-from app.gateway.run_output import RunOutputProjectionV2
 from app.telegram_bots.producer import Outbox, OutboxItem, freeze_reply_presentation
 from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow, TelegramOutboxRow
-from deerflow.runtime.runs.output_inventory import build_event_inventory_evidence, output_receipt_digest
-
-
-def projection(record, *, text="**synthetic answer**", coverage="complete"):
-    output = _output(record, text=text)
-    receipt = output.output_evidence
-    document = inventory_document(owner_user_id=receipt.owner_user_id, thread_id=receipt.thread_id, run_id=receipt.run_id, input_message_id=receipt.input_message_id, output_receipt_sha256=output_receipt_digest(receipt))
-    if coverage != "complete":
-        document.update(coverage="incomplete", reason="scan_incomplete", observed_items=document.pop("items"))
-    evidence = build_event_inventory_evidence(receipt, status="success", inventory_event_seq=9, document=document)
-    return RunOutputProjectionV2.model_validate({"version": 2, "output": output, "inventory": {"state": "matched", "evidence": evidence, "document": document, "reason": None}})
 
 
 def synthetic_item(record, output):
@@ -114,7 +101,10 @@ async def test_verified_primary_refuses_partial_or_changed_or_v1_adoption(public
     box = Outbox(e.sessions)
     output = projection(record)
     if change == "legacy":
-        await box.plan_publication_reply(record, output=output.output, guard=e.guard_factory())
+        identity = await box.plan_verified_publication_reply(record, output=output, guard=e.guard_factory())
+        async with e.sessions.begin() as session:
+            row = await session.get(TelegramOutboxRow, identity)
+            row.payload = {**row.payload, "reply_basis": {**row.payload["reply_basis"], "version": 1}}
     elif change == "source":
         await box.plan_verified_publication_reply(record, output=output, guard=e.guard_factory())
         output = projection(record, text="different synthetic answer")

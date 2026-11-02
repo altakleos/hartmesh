@@ -74,16 +74,24 @@ async def setup(db):
     return link, clock, calls, inbox, outbox, sender
 
 
-async def turn(inbox, link):
+async def turn(db, inbox, link):
     value = Update(202, message=Message(102, datetime(2030, 1, 1, tzinfo=UTC), Chat(link.chat_id, "private"), from_user=User(link.telegram_user_id, "Fixture", False), text="synthetic input"))
     mark, _ = await inbox.accept(link, value, sanitized_input={"text": "synthetic input"})
     mark = await inbox.route(mark, kind="chat", target_id="original-thread", basis={"thread_id": "original-thread"}, operation_ids=[uuid4().hex])
     turn_id = uuid4().hex
-    await inbox.bind_turn([mark], turn_id=turn_id, thread_id="original-thread")
+    async with db.sessions.begin() as session:
+        saved = await session.get(TelegramInboundMarkRow, (link.id, mark.message_id, mark.chat_id))
+        saved.turn_id, saved.thread_id, saved.state = turn_id, "original-thread", "dispatched"
     mark, _ = await inbox.accept(link, value, sanitized_input={"text": "synthetic input"})
-    publication = mark.route_basis["current_publication_id"]
-    await inbox.bind_run(turn_id=turn_id, publication_id=publication, run_id="original-run")
-    return mark, turn_id, {"thread_id": "original-thread", "run_id": "original-run", "publication_id": publication, "assistant_message_id": "exact-assistant"}
+    return mark, turn_id
+
+
+async def final(outbox, inbox, link, mark, turn_id, session):
+    """A primary as the publication writers leave it: planned and registered in one writer."""
+    await outbox.add(link, dedupe_key=f"reply:{turn_id}", class_="reply", payload={"parts": [part()]}, session=session)
+    identity = await session.scalar(select(TelegramOutboxRow.id).where(TelegramOutboxRow.dedupe_key == f"reply:{turn_id}"))
+    await inbox.register_delivery([mark], outbox_id=identity, primary=True, finish=True, session=session)
+    return identity
 
 
 async def writer(db, link):
@@ -124,7 +132,7 @@ async def test_delivery_uses_public_detached_link_snapshot_without_credentials(d
 async def test_primary_reply_cannot_complete_an_input_with_a_pending_auxiliary_plan(db):
     link, clock, calls, inbox, outbox, sender = await setup(db)
     await flush(db, sender, clock)
-    mark, turn_id, source = await turn(inbox, link)
+    mark, turn_id = await turn(db, inbox, link)
     # Deliberately retain this snapshot across the auxiliary plan. Registration
     # of the final reply must merge the current SQL references, not overwrite it.
     async with await writer(db, link) as session:
@@ -133,7 +141,9 @@ async def test_primary_reply_cannot_complete_an_input_with_a_pending_auxiliary_p
         auxiliary_id = auxiliary.id
         await inbox.register_delivery([mark], outbox_id=auxiliary_id, session=session)
         await session.commit()
-    primary_id = await outbox.plan_reply(link, turn_id=turn_id, source=source, parts=[part()], inbox_rows=[mark])
+    async with await writer(db, link) as session:
+        primary_id = await final(outbox, inbox, link, mark, turn_id, session)
+        await session.commit()
     clock.advance()  # Respect the preceding welcome's per-link pacing window.
     await sender.tick()
     await sender.drain()
@@ -149,9 +159,9 @@ async def test_primary_reply_cannot_complete_an_input_with_a_pending_auxiliary_p
 async def test_caller_rollback_reverts_final_plan_and_input_completion_together(db):
     link, clock, calls, inbox, outbox, sender = await setup(db)
     await flush(db, sender, clock)
-    mark, turn_id, source = await turn(inbox, link)
+    mark, turn_id = await turn(db, inbox, link)
     async with await writer(db, link) as session:
-        delivery_id = await outbox.plan_reply(link, turn_id=turn_id, source=source, parts=[part()], inbox_rows=[mark], session=session)
+        delivery_id = await final(outbox, inbox, link, mark, turn_id, session)
         assert (await session.get(TelegramInboundMarkRow, (link.id, mark.message_id, mark.chat_id))).route_complete
         await session.rollback()
     assert await snapshot(db, TelegramOutboxRow, delivery_id) is None

@@ -121,7 +121,6 @@ export class TelegramRefusal extends Error {
   readonly own?: boolean;
   readonly agent_name?: string | null;
   readonly link_id?: string | null;
-  readonly execution_reason?: string;
 
   constructor(status: number, body: Record<string, unknown>) {
     super(typeof body.reason === "string" ? body.reason : "telegram-refusal");
@@ -135,10 +134,6 @@ export class TelegramRefusal extends Error {
     this.agent_name =
       typeof body.agent_name === "string" ? body.agent_name : null;
     this.link_id = typeof body.link_id === "string" ? body.link_id : null;
-    this.execution_reason =
-      typeof body.execution_reason === "string"
-        ? body.execution_reason
-        : undefined;
   }
 }
 

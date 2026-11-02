@@ -423,7 +423,7 @@ async def delivery(db, fixture, *, edit=None, topic=None, protected=False, reply
     elif edit is None:
         identity = await fixture.channel.send_text("hello.privacy", source_id="transport-test", thread=topic, reply_to=reply)
     else:
-        identity = await fixture.channel.edit_text(edit, "hello.privacy", source_id="transport-test")
+        identity = await fixture.services.outbox.plan_product(fixture.link, source_id="transport-test", parts=[{"kind": "edit", "source_ref": {"key": "hello.privacy", "values": {}}, "target_message_id": edit}])
 
     async def permitted(link, item, part):
         return DeliveryEligibility.allow(protect_content=protected)

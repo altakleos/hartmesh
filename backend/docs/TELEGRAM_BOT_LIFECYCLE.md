@@ -173,8 +173,8 @@ glyph and is left to right. Keep the Python and web colour rule in step.
 
 ## Strangers
 
-`strangers.py` separates touch-only LRU recency from bounded unexpired reply
-charges. The supervisor owns one ledger through adapter/token replacement and
-bot removal/re-add. Forgetting recency never replenishes the 24-hour pair,
-per-bot hourly or global per-sender bad-code allowance. Overflow suppresses a
-notice instead of evicting a live charge; all state resets on process restart.
+`strangers.py` keeps bounded unexpired reply charges. The supervisor owns one
+ledger through adapter/token replacement and bot removal/re-add, and neither
+replenishes the 24-hour pair, per-bot hourly or global per-sender bad-code
+allowance. Overflow suppresses a notice instead of evicting a live charge; all
+state resets on process restart.

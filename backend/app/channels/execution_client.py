@@ -251,41 +251,6 @@ class _Runs:
     def __init__(self, facade):
         self._facade = facade
 
-    async def wait(
-        self,
-        thread_id: str,
-        assistant_id: str,
-        *,
-        input: dict,
-        config: dict | None = None,
-        context: dict | None = None,
-        metadata: dict | None = None,
-        multitask_strategy="reject",
-        channel_execution: Mapping[str, JsonValue],
-        on_disconnect="continue",
-        on_completion=None,
-        headers: Mapping[str, str] | None = None,
-    ) -> JsonValue:
-        f = self._facade
-        body, headers = await f._creating(
-            thread_id,
-            assistant_id,
-            dict(input=input, config=config, context=context, metadata=metadata, multitask_strategy=multitask_strategy, channel_execution=channel_execution, on_disconnect=on_disconnect, on_completion=on_completion, headers=headers),
-        )
-        response = await f._owner.request_json(
-            operation="run_create",
-            owner_user_id=f.scope.owner_user_id,
-            method="POST",
-            path=f._thread_path + "/runs/wait",
-            body=body,
-            headers=headers,
-            before_dispatch=lambda: f._authorize("run_create"),
-            after_response=lambda: f._authorize("run_read"),
-        )
-        f._creating_status(response)
-        f._check_current("run_read")
-        return response.body
-
     def stream(
         self,
         thread_id: str,
@@ -668,23 +633,3 @@ class ChannelExecutionFacade:
         if result["has_more"] and not data:
             _refuse()
         return ValidatedMessagePage(tuple(MappingProxyType(row) for row in data), result["has_more"], data[0]["seq"] if data and result["has_more"] else None, data[-1]["seq"] if data and result["has_more"] else None)
-
-    async def find_publication_run(self) -> ValidatedRun | None:
-        before, match, seen = None, None, set()
-        while True:
-            page = await self.list_runs_page(before=before)
-            for run in page.data:
-                identity = run.row["run_id"]
-                if identity in seen:
-                    _refuse()
-                seen.add(identity)
-                proof = run.receipt
-                if proof is not None and proof.publication_id == self.scope.publication_id and proof.assistant_id == self.scope.assistant_id and proof.agent_name == self.scope.agent_name:
-                    if match is not None:
-                        _refuse()
-                    match = run
-            if not page.has_more:
-                return match
-            if page.next_before is None or before is not None and page.next_before.key >= before.key:
-                _refuse()
-            before = page.next_before

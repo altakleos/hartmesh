@@ -207,22 +207,6 @@ class ChannelExecutionThreads(Protocol):
 
 
 class ChannelExecutionRuns(Protocol):
-    async def wait(
-        self,
-        thread_id: str,
-        assistant_id: str,
-        *,
-        input: dict,
-        config: dict | None = None,
-        context: dict | None = None,
-        metadata: dict | None = None,
-        multitask_strategy: Literal["reject"] = "reject",
-        channel_execution: Mapping[str, JsonValue],
-        on_disconnect: Literal["continue"] = "continue",
-        on_completion: None = None,
-        headers: Mapping[str, str] | None = None,
-    ) -> JsonValue: ...
-
     def stream(
         self,
         thread_id: str,

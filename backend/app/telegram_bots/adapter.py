@@ -57,7 +57,6 @@ if TYPE_CHECKING:
     from app.telegram_bots.settings import SettingsRepository
 
 LIMITER_HOLD_MAX_SECONDS = 5
-SEND_RETRY_AFTER_MAX_SECONDS = 60
 EDIT_HASHES_PER_BOT = 256
 MEDIA_UNSUPPORTED_EVERY_SECONDS = 60
 AGENT_OFF_EVERY_SECONDS = 3600
@@ -710,8 +709,6 @@ class TelegramBotChannel(TelegramChannel):
         if not self._send_allowed() or self._stopping or self._services.channel(link.id) is not self or link.health not in {"ok", "agent_unavailable"}:
             raise ApplicationHandlerStop
         user, chat = update.effective_user, update.effective_chat
-        if user is not None and type(user.id) is int and user.id > 0:
-            self._services.strangers.touch(link.bot_id, user.id, self._time())
         if update.api_kwargs.get("stopped_message_generation") is not None:
             turns = getattr(self._services, "turns", None)
             if turns is not None and link.state == "connected":
@@ -990,7 +987,7 @@ class TelegramBotChannel(TelegramChannel):
             self._spawn_ingress(self._tell_agent_gone(saved))
         self._classified(update, remember=True)
 
-    async def _fixed_reply(self, update, key, word, *, prepared=None):
+    async def _fixed_reply(self, update, key, word):
         link, message = self._admission(update).link, update.message
         await self._services.prepare_live_owner(link.owner_user_id)
         if not await self._input_current(link):
@@ -1003,7 +1000,7 @@ class TelegramBotChannel(TelegramChannel):
             self._classified(update, remember=True)
             return
         if row.route_kind is None:
-            values = prepared or await self._services.prepare_ingress_values(link)
+            values = await self._services.prepare_ingress_values(link)
             if not await self._input_current(link):
                 return
             source_values = (
@@ -1508,11 +1505,6 @@ class TelegramBotChannel(TelegramChannel):
         if reply_to is not None:
             part["reply_to_message_id"] = reply_to
         return await self._services.outbox.plan_product(_captured_link or self.link, source_id=source_id, parts=[part], inbox_rows=inbox_rows, finish_route=finish_route, message_thread_id=thread)
-
-    async def edit_text(self, message_id: int, key: str, *, source_id: str, buttons=None, inbox_rows: Sequence[InboxRow] = (), **values) -> str:
-        if buttons is not None:
-            raise ValueError("unimplemented-callback-authority")
-        return await self._services.outbox.plan_product(self.link, source_id=source_id, parts=[{"kind": "edit", "source_ref": {"key": key, "values": values}, "target_message_id": message_id}], inbox_rows=inbox_rows)
 
     async def _render_source(self, link: BotLink, source: dict, *, plain: bool = False) -> str:
         from app.telegram_bots.producer import PermanentDeliveryError
