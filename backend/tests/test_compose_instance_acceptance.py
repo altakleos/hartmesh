@@ -963,7 +963,7 @@ def test_release_seat_frees_the_seat_and_empties_the_users_space(compose, sessio
             for reference in (identity, name):
                 result = compose.invoke(["docker", *(["network"] if kind == "network" else []), "inspect", reference], check=False)
                 absent = (
-                    ("Error: No such object: " + reference, "Error response from daemon: No such container: " + reference)
+                    ("Error: No such object: " + reference, "error: no such object: " + reference, "Error response from daemon: No such container: " + reference)
                     if kind == "container"
                     else ("Error: No such network: " + reference, "Error response from daemon: network " + reference + " not found")
                 )

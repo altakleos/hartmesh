@@ -24,8 +24,7 @@ permissions:
 jobs:
   e2e-tests:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
-    # Pinned: the pinned Playwright has no Chromium for ubuntu-26.04, where ubuntu-latest is moving.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
 
     steps:

@@ -900,7 +900,7 @@ def _native(backing, program: str, *, readonly: bool = False):
         containment["confirmed"] = False
         subprocess.run(["docker", "rm", "-f", name], check=False, capture_output=True, timeout=30)
         probe = subprocess.run(["docker", "inspect", name], check=False, capture_output=True, text=True, timeout=15)
-        if probe.returncode != 1 or "No such object" not in probe.stderr:
+        if probe.returncode != 1 or probe.stderr.strip() not in ("Error: No such object: " + name, "error: no such object: " + name, "Error response from daemon: No such container: " + name):
             pytest.fail("Native writer containment could not be confirmed; preserve the backing")
         containment["confirmed"] = True
 
