@@ -79,8 +79,12 @@ operational mount projection; trusted integration config/locks/data modes remain
 exact. Missing and foreign attribution refuse completeness;
 never fabricate `mountless_provider=self` for an old container. These seams
 do not certify a complete platform budget alone. Gateway additionally correlates
-all-state resident and paired inventories with full retained SQL mounts; unknown
-secondary resources or preparations without an original CID keep admission closed.
+all-state resident and paired inventories with full retained SQL mounts. A secondary
+attributed to a primary or record but unexplained by it, or a preparation without an
+original CID, keeps admission closed. A secondary with neither is a failed start's
+remains: `NativeResourceSet.require_no_writer` proves it holds no storage, then it is
+logged and left, because refusing everyone for it protects nothing. A host mount,
+storage labels or a foreign network member fails that proof and still closes admission.
 Tests: `test_bootstrap_sandbox_accounting.py`, `test_bootstrap_primary_inventory.py`.
 
 Full acquire/acquire_async operations register producers before their first await
@@ -160,7 +164,7 @@ the process that made it. `submitted` is written before the runner and lives onl
 memory, so a restored handoff, which has no sandbox id, is refused. The pending record
 keeps the name exclusive while the attempt's own sidecars and networks go, under one
 60-second deadline, and it stays unless their absence is proved, because a leftover
-set reads as a mismatch on that thread's next start and fails the next native census.
+set reads as a mismatch on that thread's next start.
 Withdrawal releases, so it takes teardown authority and works while the runtime closes.
 `LocalContainerBackend._withdraw_unsubmitted` owns this; nothing else clears pending.
 SDK-less quarantine retains actual identity, never a guessed client.

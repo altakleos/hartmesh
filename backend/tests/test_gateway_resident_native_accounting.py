@@ -1,5 +1,6 @@
 """Gateway census proof uses retained native identities, with fake Docker only."""
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -11,6 +12,7 @@ from test_native_slot_inventory import CID, SLOT
 from deerflow.agent_instances.residents import ResidentRegistry
 from deerflow.sandbox.admission import ProviderAdmission
 from deerflow.sandbox.exceptions import SandboxRuntimeAdmissionError
+from deerflow.spaces.docker import StorageHostUnqualified
 from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
 
 
@@ -79,18 +81,16 @@ async def test_untracked_resident_cannot_publish_a_false_empty_baseline(fixture)
         provider._end_bootstrap_accounting(permit)
 
 
-@pytest.mark.anyio
-async def test_secondary_without_a_primary_remains_a_native_accounting_blocker(fixture):
-    import json
-
-    host, provider, admission, local, _calls = runtime(fixture)
+def with_relay(local, *, sandbox_id="orphan", mounts=(), labels=None):
+    """One relay the census finds, by default with no primary and no record behind it."""
     original = local._runtime_runner
     proxy = "f" * 64
     entry = {
         "Id": proxy,
         "Name": "/orphan-proxy",
         "Created": "2026-10-01T12:00:00Z",
-        "Config": {"Labels": {"deerflow.role": "network-proxy", "deerflow.sandbox_id": "orphan", "deerflow.network_mode": "allowlist", "deerflow.network_policy_digest": "8" * 64}},
+        "Mounts": list(mounts),
+        "Config": {"Labels": {"deerflow.role": "network-proxy", "deerflow.sandbox_id": sandbox_id, "deerflow.network_mode": "allowlist", "deerflow.network_policy_digest": "8" * 64, **(labels or {})}},
     }
 
     def run(command, **kwargs):
@@ -101,6 +101,97 @@ async def test_secondary_without_a_primary_remains_a_native_accounting_blocker(f
         return original(command, **kwargs)
 
     local._runtime_runner = run
+
+
+@pytest.mark.anyio
+async def test_a_leftover_with_no_primary_refuses_nobody(fixture, caplog):
+    host, provider, admission, local, _calls = runtime(fixture)
+    with_relay(local)
+    permit = provider._begin_bootstrap_accounting(admission)
+    try:
+        with caplog.at_level("WARNING"):
+            proof = await host.account_native(permit)
+        provider.external_changed(lambda: proof.require_current_locked(provider, permit))
+    finally:
+        provider._end_bootstrap_accounting(permit)
+    (message,) = [record.getMessage() for record in caplog.records if "no sandbox" in record.getMessage()]
+    assert "orphan-proxy" in message
+
+
+@pytest.mark.anyio
+async def test_a_leftover_beside_a_pending_record_refuses_only_that_account(fixture):
+    host, provider, admission, local, _calls = runtime(fixture)
+    bridge = provider._native_creation
+    bridge.evidence.begin(owner_id="alice", thread_id="chat", name=f"{local._container_prefix}-orphan", slots=(SLOT,))
+    bridge.qualify()
+    with_relay(local)
+    permit = provider._begin_bootstrap_accounting(admission)
+    try:
+        await host.account_native(permit)
+    finally:
+        provider._end_bootstrap_accounting(permit)
+    with pytest.raises(StorageHostUnqualified):
+        bridge.require_admissible(name=f"{local._container_prefix}-other", owner_id="alice")
+    bridge.require_admissible(name=f"{local._container_prefix}-other", owner_id="bob")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "shape,message",
+    [
+        ({"mounts": [{"Type": "bind", "Source": "/pool/slot", "Destination": "/data", "RW": True}]}, "host storage mount"),
+        ({"labels": {"hartmesh.storage.space." + SLOT: "1"}}, "storage writer attribution"),
+    ],
+)
+async def test_a_leftover_that_could_hold_a_writer_still_closes_admission(fixture, shape, message):
+    host, provider, admission, local, _calls = runtime(fixture)
+    with_relay(local, **shape)
+    permit = provider._begin_bootstrap_accounting(admission)
+    try:
+        with pytest.raises(StorageHostUnqualified, match=message):
+            await host.account_native(permit)
+        with pytest.raises(SandboxRuntimeAdmissionError):
+            admission.require(provider)
+    finally:
+        provider._end_bootstrap_accounting(permit)
+
+
+@pytest.mark.anyio
+async def test_an_unexplained_relay_beside_a_primary_still_closes_admission(fixture):
+    host, provider, admission, local, _calls = runtime(fixture)
+    with_relay(local, sandbox_id="native")
+    permit = provider._begin_bootstrap_accounting(admission)
+    try:
+        with pytest.raises(StorageRuntimeUnavailable, match="unexplained paired"):
+            await host.account_native(permit)
+        with pytest.raises(SandboxRuntimeAdmissionError):
+            admission.require(provider)
+    finally:
+        provider._end_bootstrap_accounting(permit)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("kind", ["teardown", "resident"])
+async def test_a_retained_record_keeps_its_sandbox_strict(fixture, monkeypatch, kind):
+    from deerflow.community.aio_sandbox.native_resource_set import NativeResourceSet
+
+    host, provider, admission, local, _calls = runtime(fixture)
+    bridge = provider._native_creation
+    if kind == "teardown":
+        from test_native_teardown_evidence import record
+
+        saved = record()
+        bridge.evidence.begin_teardown(saved)
+        sandbox_id = saved.sandbox_id
+    else:
+        from test_native_resident_evidence import record
+
+        saved = record()
+        bridge.evidence.begin_resident(saved)
+        sandbox_id = saved.attachment_id
+        monkeypatch.setattr(NativeResourceSet, "qualify_resident_record", lambda _reader, _record: None)
+    bridge.qualify()
+    with_relay(local, sandbox_id=sandbox_id)
     permit = provider._begin_bootstrap_accounting(admission)
     try:
         with pytest.raises(StorageRuntimeUnavailable, match="unexplained paired"):

@@ -2,6 +2,7 @@
 
 import json
 from copy import deepcopy
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -9,9 +10,9 @@ from test_native_slot_inventory import CID, SLOT, entry
 from test_native_teardown_evidence import STAMP
 
 from deerflow.community.aio_sandbox.local_backend import _native_inspection
-from deerflow.community.aio_sandbox.native_resource_set import NativeResourceSet
+from deerflow.community.aio_sandbox.native_resource_set import NativeResourceSet, PairedResource
 from deerflow.spaces.docker import StorageHostUnqualified
-from deerflow.spaces.native_teardown_evidence import NativeTeardownRecord
+from deerflow.spaces.native_teardown_evidence import NativeTeardownRecord, NativeTeardownResource
 
 PROXY, INTERNAL, EGRESS, DIGEST = "f" * 64, "1" * 64, "2" * 64, "8" * 64
 
@@ -82,6 +83,65 @@ def topology(*, running=True):
 def capture(reader, primary, actual):
     digest, resources = reader.capture(primary, actual)
     return NativeTeardownRecord("e" * 32, actual.daemon_id, *actual.owner, actual.sandbox_id, actual.slots, SLOT, actual.container_id, actual.container_name, actual.created_at, actual.network_mode, digest, resources)
+
+
+def leftover(objects, *, sandbox_id="native"):
+    """The set as a failed start leaves it: no primary, and its relay and networks as they stood."""
+    objects.pop(("container", CID))
+    for key in (("network", INTERNAL), ("network", EGRESS)):
+        objects[key]["Containers"].pop(CID, None)
+    facts = (("container", "network-proxy", PROXY, "retained-proxy"), ("network", "network", INTERNAL, "retained-internal"), ("network", "egress-network", EGRESS, "retained-egress"))
+    return tuple(PairedResource(NativeTeardownResource(kind, role, identity, name, STAMP), sandbox_id, "allowlist", DIGEST) for kind, role, identity, name in facts)
+
+
+def test_a_set_with_no_primary_can_be_proved_to_hold_no_writer():
+    reader, _primary, _actual, objects, calls = topology()
+    reader.require_no_writer(leftover(objects))
+    assert all("inspect" in command for command in calls)
+
+
+def test_a_part_of_the_set_already_gone_proves_nothing_against_it():
+    reader, _primary, _actual, objects, _calls = topology()
+    items = leftover(objects)
+    del objects[("container", PROXY)]
+    for key in (("network", INTERNAL), ("network", EGRESS)):
+        objects[key]["Containers"].clear()
+    reader.require_no_writer(items)
+
+
+@pytest.mark.parametrize(
+    "fault,message",
+    [
+        ("host-mount", "host storage mount"),
+        ("volume", "host storage mount"),
+        ("storage-label", "storage writer attribution"),
+        ("owner-label", "storage writer attribution"),
+        ("other-sandbox", "attribution differs"),
+        ("foreign-member", "foreign or absent member"),
+        ("another-sets-relay", "foreign or absent member"),
+    ],
+)
+def test_a_set_that_could_hold_a_writer_is_refused(fault, message):
+    reader, _primary, _actual, objects, _calls = topology()
+    items = leftover(objects)
+    proxy, internal = objects[("container", PROXY)], objects[("network", INTERNAL)]
+    if fault == "host-mount":
+        proxy["Mounts"] = [{"Type": "bind", "Source": "/pool/slot", "Destination": "/data", "RW": True}]
+    elif fault == "volume":
+        proxy["Mounts"] = [{"Type": "volume", "Name": "data", "Destination": "/data"}]
+    elif fault == "storage-label":
+        proxy["Config"]["Labels"]["hartmesh.storage.space." + SLOT] = "1"
+    elif fault == "owner-label":
+        proxy["Config"]["Labels"]["deerflow.owner_user_id"] = "alice"
+    elif fault == "other-sandbox":
+        proxy["Config"]["Labels"]["deerflow.sandbox_id"] = "other"
+    elif fault == "foreign-member":
+        internal["Containers"]["a" * 64] = {"Name": "writer", "EndpointID": "6" * 64}
+    else:
+        proxy["Config"]["Labels"]["deerflow.sandbox_id"] = "other"
+        items = (replace(items[0], sandbox_id="other"), *items[1:])
+    with pytest.raises(StorageHostUnqualified, match=message):
+        reader.require_no_writer(items)
 
 
 @pytest.mark.parametrize("kind,identity", [("container", PROXY), ("network", INTERNAL), ("network", EGRESS)])

@@ -163,8 +163,11 @@ inflight rows and never infer foreign lease takeover from census membership.
 drain. It reads every durable inflight Run, including unexpired leases; failed
 inventory never becomes an empty success. Bounded all-state census includes native
 chat and resident primaries plus relay/network resources independently of name
-prefix. Exact SQL CID/host/full mounts cover residents; an unexplained primary or
-secondary refuses publication. Preparations without an original CID remain charged
+prefix. Exact SQL CID/host/full mounts cover residents; an unexplained primary, or
+a secondary attributed to a primary or retained record, refuses publication. A
+secondary with neither is a failed start's remains: `require_no_writer` proves it
+holds no storage, and it is logged and left in place, costing only its own
+conversation. Preparations without an original CID remain charged
 and cannot be contained merely from an empty listing. Strict durable actorless
 resident orphan cleanup remains a separate follow-up before count activation.
 

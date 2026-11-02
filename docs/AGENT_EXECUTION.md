@@ -280,8 +280,10 @@ zero-slot teardown records for managed chats without User storage. Existing
 schema-1 creates and schema-2 teardowns keep their validation rules. Compose
 agent counts now apply when explicitly set. Strict recovery uses retained original
 container, network and backing identities, even when an attachment row is absent
-or fenced. Live leases and unfinished create operations remain protected;
-unexplained resources keep admission closed until their identity is resolved.
+or fenced. Live leases and unfinished create operations remain protected. An
+unexplained primary, or a secondary attributed to a primary or a retained record,
+keeps admission closed until its identity is resolved. A relay or network with
+neither is logged and left in place once it is proved to hold no writer.
 
 ## Instance memory
 

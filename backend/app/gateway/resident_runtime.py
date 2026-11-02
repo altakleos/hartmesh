@@ -161,8 +161,17 @@ class ResidentRuntime:
             explained = {resource for actual in (*actuals, *residents) for resource in actual.resources}
             explained.update(resource for record in bridge.teardowns._items.values() for resource in record.resources)
             explained.update(resource for record in qualified_resident_records for resource in record.resources)
-            if any(item.fact not in explained for item in paired):
+            unexplained = [item for item in paired if item.fact not in explained]
+            attributed = {actual.sandbox_id for actual in actuals} | {actual.attachment_id for actual in residents}
+            attributed.update(record.sandbox_id for record in bridge.teardowns._items.values())
+            attributed.update(record.attachment_id for record in qualified_resident_records)
+            if any(item.sandbox_id in attributed for item in unexplained):
                 raise StorageRuntimeUnavailable("Native census retains unexplained paired resources")
+            if unexplained:
+                # One failed start's remains must not close sandboxes for everyone. They
+                # cost their own conversation, and a pending record still refuses its owner.
+                NativeResourceSet(provider._backend, guard=bridge.assert_current).require_no_writer(unexplained)
+                logger.warning("Native census left %d resources with no sandbox in place: %s", len(unexplained), ", ".join(sorted(item.fact.name for item in unexplained)[:6]))
             for actual in actuals:
                 info = SandboxInfo(
                     sandbox_id=actual.sandbox_id,

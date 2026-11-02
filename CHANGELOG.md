@@ -52,6 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   used to leave a record that refused the person every sandbox for good, and its proxy and
   networks behind. A record already left by an earlier version stays until an operator
   removes it, because nothing proves its container was never requested.
+- A proxy or network left behind by a failed sandbox start no longer stops sandboxes for
+  everyone at the next check. It costs its own conversation and is logged by name, unless
+  it could be holding storage, which still closes sandboxes until it is resolved.
 
 ## [2.2.0+hartmesh.48] - 2026-11-02
 

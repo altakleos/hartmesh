@@ -382,10 +382,37 @@ class NativeResourceSet:
             self._links(primary, {internal_fact.name: internal_fact.identity}, networks)
         if proxy is not None:
             self._labels(proxy, record, "network-proxy", container=True)
-            mounts = proxy.get("Mounts")
-            if not isinstance(mounts, list) or any(not isinstance(mount, dict) or mount.get("Type") != "tmpfs" or mount.get("Source") not in (None, "") for mount in mounts):
-                raise StorageHostUnqualified("Native relay has a host storage mount")
+            self._require_no_host_mount(proxy)
             self._links(proxy, {internal_fact.name: internal_fact.identity, egress_fact.name: egress_fact.identity}, networks)
+
+    @staticmethod
+    def _require_no_host_mount(proxy):
+        mounts = proxy.get("Mounts")
+        if not isinstance(mounts, list) or any(not isinstance(mount, dict) or mount.get("Type") != "tmpfs" or mount.get("Source") not in (None, "") for mount in mounts):
+            raise StorageHostUnqualified("Native relay has a host storage mount")
+
+    def require_no_writer(self, items):
+        """Prove paired resources with no primary and no record cannot be holding storage.
+
+        Such a set is a failed start's remains, and it costs only its own conversation.
+        A relay and its networks carry no storage by construction, so a host mount,
+        storage attribution or a member other than its own relay is a writer this
+        census cannot see, and that still closes admission.
+        """
+        relays = {}
+        for item in items:
+            if item.fact.kind == "container":
+                relays.setdefault(item.sandbox_id, set()).add(item.fact.identity)
+        for item in items:
+            container = item.fact.kind == "container"
+            entry = self.inspect(item.fact.kind, item.fact.identity)
+            if entry is None:
+                continue
+            self._labels(entry, item, item.fact.role, container=container)
+            if container:
+                self._require_no_host_mount(entry)
+            elif set(self._endpoints(entry)) - relays.get(item.sandbox_id, set()):
+                raise StorageHostUnqualified("Native network contains a foreign or absent member")
 
     def capture(self, primary, actual):
         """Fresh complete graph only; never derive members from current configuration."""

@@ -417,8 +417,11 @@ networks are proved gone; a restored record has no such proof and stays. The exa
 journal stays owned through retry and worker drainage, alongside the pool lock.
 
 Recovering a stuck attempt is manual. A pending record refuses its account, and a
-proxy or network with no sandbox beside it fails the native census for everyone. Stop
-the Gateway first: removing a record under a running Gateway frees nothing, because
+proxy or network with no sandbox beside it refuses its own conversation, which reads
+as a mismatch on its next start. The native census logs such a set by name and leaves
+it in place. It closes admission for everyone only if the set could hold a writer: a
+host mount, storage labels, or a network member other than its own relay. Stop the
+Gateway first: removing a record under a running Gateway frees nothing, because
 memory keeps it. A record's `name` is `<prefix>-<sandbox id>`, and the proxy and
 networks carry the label `deerflow.sandbox_id=<sandbox id>`, so `docker ps -a` and
 `docker network ls` with `--filter label=deerflow.sandbox_id=<sandbox id>` list them.
