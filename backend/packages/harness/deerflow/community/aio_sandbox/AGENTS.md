@@ -81,10 +81,14 @@ never fabricate `mountless_provider=self` for an old container. These seams
 do not certify a complete platform budget alone. Gateway additionally correlates
 all-state resident and paired inventories with full retained SQL mounts. A secondary
 attributed to a primary or record but unexplained by it, or a preparation without an
-original CID, keeps admission closed. A secondary with neither is a failed start's
-remains: `NativeResourceSet.require_no_writer` proves it holds no storage, then it is
-logged and left, because refusing everyone for it protects nothing. A host mount,
-storage labels or a foreign network member fails that proof and still closes admission.
+original CID, keeps admission closed. A failed start, a crash or a hard reboot leaves
+a secondary with neither. `NativeResourceSet.require_no_writer` checks it is as built,
+then it is logged, because refusing everyone for it protects nothing. A host mount,
+storage labels, an unconfined relay or a foreign running member fails and still closes
+admission. `LocalContainerBackend._remove_leftover_set` clears a passing set at that
+conversation's next start, because nothing else visits a set with no primary. It is
+managed-pool only: there every start is recorded before its first effect, so a set
+with no primary and no record is nobody's. Unmanaged, a rolling peer may own it.
 Tests: `test_bootstrap_sandbox_accounting.py`, `test_bootstrap_primary_inventory.py`.
 
 Full acquire/acquire_async operations register producers before their first await
@@ -163,8 +167,7 @@ reserved, with one exception. An attempt that never sent its primary is withdraw
 the process that made it. `submitted` is written before the runner and lives only in
 memory, so a restored handoff, which has no sandbox id, is refused. The pending record
 keeps the name exclusive while the attempt's own sidecars and networks go, under one
-60-second deadline, and it stays unless their absence is proved, because a leftover
-set reads as a mismatch on that thread's next start.
+60-second deadline, and it stays unless their absence is proved.
 Withdrawal releases, so it takes teardown authority and works while the runtime closes.
 `LocalContainerBackend._withdraw_unsubmitted` owns this; nothing else clears pending.
 SDK-less quarantine retains actual identity, never a guessed client.

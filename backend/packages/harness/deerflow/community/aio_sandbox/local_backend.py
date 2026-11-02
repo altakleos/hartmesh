@@ -1456,6 +1456,30 @@ class LocalContainerBackend(SandboxBackend):
         except RuntimeError:
             return False
 
+    def _remove_leftover_set(self, sandbox_id: str, container_name: str, owner_labels: dict[str, str] | None) -> bool:
+        """Clear a relay or networks nobody owns, or this conversation stays refused for good.
+
+        A crash, a hard reboot or a late Docker effect leaves them with no primary, and
+        nothing else ever visits a set with no primary. A managed pool has one owner, which
+        records every start before its first effect. ``create`` has just shown no record
+        holds this name, and this worker holds the sandbox's starting reservation, so the
+        set is nobody's. Outside a managed pool none of that holds, so it stays refused.
+        """
+        bridge = self._managed_native_bridge(owner_labels)
+        if bridge is None:
+            return False
+        from .native_resource_set import NativeResourceSet
+
+        reader = NativeResourceSet(self, guard=bridge.assert_current)
+        if reader.inspect("container", container_name) is not None:
+            return False
+        proxy_name, network_name = self._resource_names(sandbox_id)
+        names = (("container", proxy_name), ("network", network_name), ("network", self._egress_network_name(sandbox_id)))
+        reader.require_no_writer(reader.named_set(sandbox_id, names))
+        removed = self._remove_partial_set(sandbox_id)
+        logger.warning("Leftover set of sandbox %s %s", sandbox_id, "removed" if removed else "could not be removed")
+        return removed
+
     def prepare_resident(self, sandbox_id, container_name, extra_mounts, labels):
         """Prepare one stopped workspace through the existing native builder."""
         from .resident_preparation import capture_resident_resources, resident_submission
@@ -1525,7 +1549,7 @@ class LocalContainerBackend(SandboxBackend):
         resource_status = self._restricted_resources_status(sandbox_id) if start else self._resident_resources_status(sandbox_id, container_name)
         if not start and resource_status != "missing":
             raise StorageHostUnqualified("Resident preparation refuses an existing or unconfirmed resource set")
-        if resource_status == "mismatch":
+        if resource_status == "mismatch" and not self._remove_leftover_set(sandbox_id, container_name, owner_labels):
             # Enumeration/provisioning is deliberately non-destructive. A
             # mismatched set can still belong to a live Gateway from an older
             # rolling-deployment revision, so only the provider may replace it

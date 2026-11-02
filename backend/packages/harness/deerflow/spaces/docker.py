@@ -46,6 +46,25 @@ class StorageHostUnqualified(StorageAdapterUnsupported):
     """Static host/provider configuration cannot support native attachments."""
 
 
+def storage_confined(host):
+    """Whether a container's HostConfig keeps it to what it was given."""
+    capabilities = {str(c).upper().removeprefix("CAP_") for c in host.get("CapAdd") or []}
+    permitted = {"CHOWN", "FOWNER", "SETUID", "SETGID", "DAC_OVERRIDE"}
+    return not (
+        host.get("Privileged") is not False
+        or "ALL" not in {str(c).upper() for c in host.get("CapDrop") or []}
+        or capabilities - permitted
+        or not any(str(value) in ("no-new-privileges", "no-new-privileges:true") for value in host.get("SecurityOpt") or [])
+        or host.get("PidMode") not in ("", "private")
+        or host.get("IpcMode") not in ("", "private")
+        or host.get("NetworkMode") == "host"
+        or host.get("Devices")
+        or host.get("DeviceRequests")
+        or host.get("DeviceCgroupRules")
+        or (host.get("RestartPolicy") or {}).get("Name") not in ("", "no")
+    )
+
+
 _PROBE_LOCKS = {}
 _PROBE_LOCKS_GUARD = threading.Lock()
 
@@ -344,21 +363,7 @@ class DockerStorageAdapter:
                     raise StorageAdapterUnsupported("Environment carries an undeclared storage identity")
             if any(key in labels for key in ("deerflow.owner_user_id", "deerflow.thread_id", "hartmesh.chat.storage")):
                 raise StorageAdapterUnsupported("Resident environment carries a chat identity")
-        capabilities = {str(c).upper().removeprefix("CAP_") for c in host.get("CapAdd") or []}
-        permitted = {"CHOWN", "FOWNER", "SETUID", "SETGID", "DAC_OVERRIDE"}
-        if (
-            host.get("Privileged") is not False
-            or "ALL" not in {str(c).upper() for c in host.get("CapDrop") or []}
-            or capabilities - permitted
-            or not any(str(value) in ("no-new-privileges", "no-new-privileges:true") for value in host.get("SecurityOpt") or [])
-            or host.get("PidMode") not in ("", "private")
-            or host.get("IpcMode") not in ("", "private")
-            or host.get("NetworkMode") == "host"
-            or host.get("Devices")
-            or host.get("DeviceRequests")
-            or host.get("DeviceCgroupRules")
-            or (host.get("RestartPolicy") or {}).get("Name") not in ("", "no")
-        ):
+        if not storage_confined(host):
             raise StorageAdapterUnsupported("Prepared environment cannot establish storage confinement")
         mounts = entry.get("Mounts")
         expected = {(v.source, v.destination, v.writable) for v in plan.views}

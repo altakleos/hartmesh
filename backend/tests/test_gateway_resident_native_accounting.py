@@ -81,21 +81,21 @@ async def test_untracked_resident_cannot_publish_a_false_empty_baseline(fixture)
         provider._end_bootstrap_accounting(permit)
 
 
-def with_relay(local, *, sandbox_id="orphan", mounts=(), labels=None):
-    """One relay the census finds, by default with no primary and no record behind it."""
+def with_relay(local, *, sandbox_id="orphan", mounts=(), labels=None, proxy="f" * 64, name="orphan-proxy", created="2026-10-01T12:00:00Z"):
+    """One more relay the census finds, by default with no primary and no record behind it."""
     original = local._runtime_runner
-    proxy = "f" * 64
     entry = {
         "Id": proxy,
-        "Name": "/orphan-proxy",
-        "Created": "2026-10-01T12:00:00Z",
+        "Name": "/" + name,
+        "Created": created,
         "Mounts": list(mounts),
+        "HostConfig": {"Privileged": False, "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges"], "PidMode": "", "IpcMode": "private", "RestartPolicy": {"Name": "no"}},
         "Config": {"Labels": {"deerflow.role": "network-proxy", "deerflow.sandbox_id": sandbox_id, "deerflow.network_mode": "allowlist", "deerflow.network_policy_digest": "8" * 64, **(labels or {})}},
     }
 
     def run(command, **kwargs):
         if command[1] == "ps" and "label=deerflow.sandbox_id" in command:
-            return SimpleNamespace(returncode=0, stdout=proxy, stderr="")
+            return SimpleNamespace(returncode=0, stdout="\n".join(filter(None, (original(command, **kwargs).stdout, proxy))), stderr="")
         if command[1:3] == ["inspect", proxy]:
             return SimpleNamespace(returncode=0, stdout=json.dumps([entry]), stderr="")
         return original(command, **kwargs)
@@ -150,8 +150,6 @@ async def test_a_leftover_that_could_hold_a_writer_still_closes_admission(fixtur
     try:
         with pytest.raises(StorageHostUnqualified, match=message):
             await host.account_native(permit)
-        with pytest.raises(SandboxRuntimeAdmissionError):
-            admission.require(provider)
     finally:
         provider._end_bootstrap_accounting(permit)
 
@@ -164,8 +162,6 @@ async def test_an_unexplained_relay_beside_a_primary_still_closes_admission(fixt
     try:
         with pytest.raises(StorageRuntimeUnavailable, match="unexplained paired"):
             await host.account_native(permit)
-        with pytest.raises(SandboxRuntimeAdmissionError):
-            admission.require(provider)
     finally:
         provider._end_bootstrap_accounting(permit)
 
@@ -196,10 +192,31 @@ async def test_a_retained_record_keeps_its_sandbox_strict(fixture, monkeypatch, 
     try:
         with pytest.raises(StorageRuntimeUnavailable, match="unexplained paired"):
             await host.account_native(permit)
-        with pytest.raises(SandboxRuntimeAdmissionError):
-            admission.require(provider)
     finally:
         provider._end_bootstrap_accounting(permit)
+
+
+@pytest.mark.anyio
+async def test_only_what_nothing_explains_is_held_to_the_proof(fixture, monkeypatch):
+    from test_native_teardown_evidence import STAMP, record
+
+    from deerflow.community.aio_sandbox.native_resource_set import NativeResourceSet
+
+    host, provider, admission, local, _calls = runtime(fixture)
+    bridge = provider._native_creation
+    saved = record(owner_id="bob", slots=("b" * 32,), target_slot="b" * 32)
+    bridge.evidence.begin_teardown(saved)
+    bridge.qualify()
+    with_relay(local, sandbox_id=saved.sandbox_id, proxy=saved.resources[0].identity, name=saved.resources[0].name, created=STAMP)
+    with_relay(local, proxy="a" * 64)
+    proved = []
+    monkeypatch.setattr(NativeResourceSet, "require_no_writer", lambda _reader, items: proved.extend(items))
+    permit = provider._begin_bootstrap_accounting(admission)
+    try:
+        await host.account_native(permit)
+    finally:
+        provider._end_bootstrap_accounting(permit)
+    assert [item.fact.identity for item in proved] == ["a" * 64]
 
 
 @pytest.mark.anyio

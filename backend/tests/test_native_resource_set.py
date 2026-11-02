@@ -30,7 +30,7 @@ def topology(*, running=True):
         "Name": "/retained-proxy",
         "Created": STAMP,
         "Config": {"Labels": {**labels, "deerflow.role": "network-proxy"}},
-        "HostConfig": {"NetworkMode": "retained-egress", "AutoRemove": True},
+        "HostConfig": {"NetworkMode": "retained-egress", "AutoRemove": True, "Privileged": False, "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges"], "PidMode": "", "IpcMode": "private", "RestartPolicy": {"Name": "no"}},
         "State": {"Running": True, "Status": "running"},
         "Mounts": [],
         "NetworkSettings": {
@@ -117,15 +117,40 @@ def test_a_part_of_the_set_already_gone_proves_nothing_against_it():
         ("storage-label", "storage writer attribution"),
         ("owner-label", "storage writer attribution"),
         ("other-sandbox", "attribution differs"),
+        ("network-storage-label", "storage writer attribution"),
         ("foreign-member", "foreign or absent member"),
+        ("foreign-egress-member", "foreign or absent member"),
         ("another-sets-relay", "foreign or absent member"),
+        ("privileged", "not confined"),
+        ("capability", "not confined"),
+        ("device", "not confined"),
+        ("host-pid", "not confined"),
+        ("host-ipc", "not confined"),
+        ("no-host-config", "not confined"),
     ],
 )
 def test_a_set_that_could_hold_a_writer_is_refused(fault, message):
     reader, _primary, _actual, objects, _calls = topology()
     items = leftover(objects)
     proxy, internal = objects[("container", PROXY)], objects[("network", INTERNAL)]
-    if fault == "host-mount":
+    host = proxy["HostConfig"]
+    if fault == "privileged":
+        host["Privileged"] = True
+    elif fault == "capability":
+        host["CapAdd"] = ["SYS_ADMIN"]
+    elif fault == "device":
+        host["Devices"] = [{"PathOnHost": "/dev/sda", "PathInContainer": "/dev/sda", "CgroupPermissions": "rwm"}]
+    elif fault == "host-pid":
+        host["PidMode"] = "host"
+    elif fault == "host-ipc":
+        host["IpcMode"] = "host"
+    elif fault == "no-host-config":
+        del proxy["HostConfig"]
+    elif fault == "network-storage-label":
+        internal["Labels"]["hartmesh.storage.space." + SLOT] = "1"
+    elif fault == "foreign-egress-member":
+        objects[("network", EGRESS)]["Containers"]["a" * 64] = {"Name": "writer", "EndpointID": "6" * 64}
+    elif fault == "host-mount":
         proxy["Mounts"] = [{"Type": "bind", "Source": "/pool/slot", "Destination": "/data", "RW": True}]
     elif fault == "volume":
         proxy["Mounts"] = [{"Type": "volume", "Name": "data", "Destination": "/data"}]
@@ -142,6 +167,32 @@ def test_a_set_that_could_hold_a_writer_is_refused(fault, message):
         items = (replace(items[0], sandbox_id="other"), *items[1:])
     with pytest.raises(StorageHostUnqualified, match=message):
         reader.require_no_writer(items)
+
+
+NAMES = (("container", "retained-proxy"), ("network", "retained-internal"), ("network", "retained-egress"))
+
+
+def test_a_set_read_by_name_is_what_those_names_hold():
+    reader, _primary, _actual, objects, _calls = topology()
+    expected = leftover(objects)
+    del objects[("network", EGRESS)]
+    assert reader.named_set("native", NAMES) == expected[:2]
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["labelled-for-another-sandbox", "a-primary-under-the-relays-name"],
+)
+def test_a_name_held_by_anything_else_is_refused(fault):
+    reader, _primary, _actual, objects, _calls = topology()
+    leftover(objects)
+    labels = objects[("container", PROXY)]["Config"]["Labels"]
+    if fault == "labelled-for-another-sandbox":
+        labels["deerflow.sandbox_id"] = "other"
+    else:
+        labels["deerflow.role"] = "sandbox"
+    with pytest.raises(StorageHostUnqualified, match="holds a name"):
+        reader.named_set("native", NAMES)
 
 
 @pytest.mark.parametrize("kind,identity", [("container", PROXY), ("network", INTERNAL), ("network", EGRESS)])

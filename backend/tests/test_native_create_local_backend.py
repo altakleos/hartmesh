@@ -157,6 +157,127 @@ def test_a_restricted_failure_before_the_primary_costs_one_attempt_not_the_owner
     bridge.require_admissible(name="native-a", owner_id="alice")
 
 
+def with_leftover(local, *, primary=False, relay=None, removable=True):
+    """The set as a crash leaves it, answered the way Docker answers ``inspect``."""
+    proxy_name, network_name = local._resource_names("a")
+    labels = {"deerflow.sandbox_id": "a", "deerflow.network_mode": "allowlist", "deerflow.network_policy_digest": "8" * 64}
+    objects = {
+        ("container", proxy_name): {
+            "Id": "f" * 64,
+            "Name": "/" + proxy_name,
+            "Created": "2026-10-01T12:00:00Z",
+            "Mounts": [],
+            "HostConfig": {"Privileged": False, "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges"], "PidMode": "", "IpcMode": "private", "RestartPolicy": {"Name": "no"}},
+            "Config": {"Labels": {**labels, "deerflow.role": "network-proxy"}},
+            **(relay or {}),
+        },
+        ("network", network_name): {"Id": "1" * 64, "Name": network_name, "Created": "2026-10-01T12:00:00Z", "Labels": {**labels, "deerflow.role": "network"}, "Containers": {}},
+        ("network", local._egress_network_name("a")): {"Id": "2" * 64, "Name": local._egress_network_name("a"), "Created": "2026-10-01T12:00:00Z", "Labels": {**labels, "deerflow.role": "egress-network"}, "Containers": {}},
+    }
+    if primary:
+        objects[("container", "native-a")] = {"Id": "c" * 64, "Name": "/native-a", "Created": "2026-10-01T12:00:00Z", "Mounts": [], "Config": {"Labels": {**labels, "deerflow.role": "sandbox"}}}
+    local.leftover = objects
+
+    def run(command, **kwargs):
+        kind, reference = ("network", command[3]) if command[1] == "network" else ("container", command[2])
+        found = [entry for (entry_kind, name), entry in objects.items() if entry_kind == kind and reference in (name, entry["Id"])]
+        if found:
+            return SimpleNamespace(returncode=0, stdout=json.dumps(found), stderr="")
+        return SimpleNamespace(returncode=1, stdout="[]", stderr=("Error: No such object: " if kind == "container" else "Error: No such network: ") + reference)
+
+    def cleanup(sandbox_id, *, stop_sandbox=True):
+        local.seen["cleanup"].append(local.journal.pending())
+        if removable:
+            objects.clear()
+
+    local._runtime_runner = run
+    local._restricted_resources_status = Mock(side_effect=lambda *args, **kwargs: "mismatch" if objects else "missing")
+    local._cleanup_restricted_resources = Mock(side_effect=cleanup)
+
+
+def start_with_leftover(fixture, monkeypatch, **shape):
+    journal, _state, bridge, _owner = fixture
+    local = restricted(bridge, monkeypatch, journal)
+    local.journal = journal
+    with_leftover(local, **shape)
+    return local
+
+
+LABELS_OF_A_CHAT = {"hartmesh.storage.space." + SLOT: "1"}
+
+
+def test_a_conversation_clears_its_leftover_and_starts_afresh(fixture, monkeypatch):
+    local = start_with_leftover(fixture, monkeypatch)
+    with pytest.raises(StorageHostUnqualified):
+        local.create("chat", "a", user_id="alice", storage_labels=LABELS_OF_A_CHAT)
+    assert local.seen["cleanup"] == [()], "Nobody's set goes with no record, and the set is gone before the attempt"
+    assert len(local.seen["effect"]) == 1 and len(local.seen["effect"][0]) == 1, "The fresh start records itself and takes its first effect"
+
+
+def test_a_primary_beside_the_set_is_not_a_leftover(fixture, monkeypatch):
+    local = start_with_leftover(fixture, monkeypatch, primary=True)
+    with pytest.raises(RuntimeError, match="ownership-fenced replacement"):
+        local.create("chat", "a", user_id="alice", storage_labels=LABELS_OF_A_CHAT)
+    assert not local.seen["cleanup"] and not local.seen["effect"]
+
+
+@pytest.mark.parametrize(
+    "relay,message",
+    [
+        ({"Mounts": [{"Type": "bind", "Source": "/pool/slot", "Destination": "/data", "RW": True}]}, "host storage mount"),
+        ({"HostConfig": {"Privileged": True}}, "not confined"),
+        ({"Config": {"Labels": {"deerflow.sandbox_id": "other", "deerflow.role": "network-proxy", "deerflow.network_mode": "allowlist", "deerflow.network_policy_digest": "8" * 64}}}, "holds a name"),
+    ],
+)
+def test_a_leftover_that_fails_the_proof_stays_and_refuses(fixture, monkeypatch, relay, message):
+    local = start_with_leftover(fixture, monkeypatch, relay=relay)
+    with pytest.raises(StorageHostUnqualified, match=message):
+        local.create("chat", "a", user_id="alice", storage_labels=LABELS_OF_A_CHAT)
+    assert not local.seen["cleanup"] and not local.seen["effect"] and local.journal.pending() == ()
+
+
+def test_a_leftover_that_will_not_go_keeps_the_conversation_refused(fixture, monkeypatch):
+    local = start_with_leftover(fixture, monkeypatch, removable=False)
+    with pytest.raises(RuntimeError, match="ownership-fenced replacement"):
+        local.create("chat", "a", user_id="alice", storage_labels=LABELS_OF_A_CHAT)
+    assert local.seen["cleanup"] and not local.seen["effect"] and local.journal.pending() == ()
+
+
+def test_outside_a_managed_pool_the_set_stays_the_providers_to_replace(fixture, monkeypatch):
+    local = start_with_leftover(fixture, monkeypatch)
+    local._managed_native_required = False
+    with pytest.raises(RuntimeError, match="ownership-fenced replacement"):
+        local.create("chat", "a", user_id="alice", storage_labels=LABELS_OF_A_CHAT)
+    assert not local.seen["cleanup"]
+
+
+def test_a_pending_record_keeps_its_set(fixture, monkeypatch):
+    journal, _state, bridge, _owner = fixture
+    local = start_with_leftover(fixture, monkeypatch)
+    journal.begin(owner_id="bob", thread_id="chat", name="native-a", slots=(SLOT,))
+    bridge.qualify()
+    with pytest.raises(StorageHostUnqualified, match="unresolved"):
+        local.create("chat", "a", user_id="alice", storage_labels=LABELS_OF_A_CHAT)
+    assert not local.seen["cleanup"]
+
+
+def test_a_runtime_that_stops_being_current_removes_nothing(fixture, monkeypatch):
+    _journal, _state, bridge, _owner = fixture
+    local = start_with_leftover(fixture, monkeypatch)
+    calls = iter(((),))
+
+    def current():
+        try:
+            return next(calls)
+        except StopIteration:
+            raise StorageHostUnqualified("Runtime closed") from None
+
+    monkeypatch.setattr(bridge, "assert_current", current)
+    with pytest.raises(StorageHostUnqualified):
+        local.create("chat", "a", user_id="alice", storage_labels=LABELS_OF_A_CHAT)
+    assert not local.seen["cleanup"]
+
+
 def test_a_set_that_never_appeared_needs_no_cleanup(fixture, monkeypatch):
     journal, state, bridge, _owner = fixture
     local = restricted(bridge, monkeypatch, journal)

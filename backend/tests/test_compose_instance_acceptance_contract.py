@@ -257,6 +257,8 @@ def test_native_storage_gate_requires_resident_and_trim_cases():
         "test_host_containment_removes_the_real_container_and_the_next_run_attaches_afresh",
         "test_scheduled_trim_preserves_reserved_images_and_unprotected_control_loses_allocation",
         "test_a_real_partial_set_goes_and_the_owner_can_start_again",
+        "test_a_real_leftover_goes_when_its_conversation_starts_again[networks]",
+        "test_a_real_leftover_goes_when_its_conversation_starts_again[relay-and-networks]",
     ):
         assert repr(name) in source
     assert "len(names) == len(set(names))" in source

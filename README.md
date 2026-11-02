@@ -699,11 +699,12 @@ create for the same account or container name. A start that fails before its
 container request was sent removes its sidecars and networks and withdraws its
 record, so the person's next try normally starts afresh. If Docker cannot confirm
 they are gone, or the Gateway dies part way, the record stays and refuses that
-account. A Docker command that timed out can also leave a proxy or network behind
-after the check, which refuses that one conversation. Neither stops anyone else: the
-native census logs a set with no sandbox and leaves it in place, unless the set could
-be holding storage, which refuses everyone until it is resolved. Recovery is manual;
-see [the steps](docs/STORAGE_SPACES.md#qualified-linux-backing). Cancellation retains
+account. A Docker command that timed out, a crash or a hard reboot can also leave a
+proxy or network with no sandbox beside it. That costs nobody else: the native census
+logs the set, and that conversation's next start removes it and starts afresh. A set
+that could be holding storage is refused instead, which stops everyone at the next
+census until it is resolved. Recovering a stuck record is manual; see
+[the steps](docs/STORAGE_SPACES.md#qualified-linux-backing). Cancellation retains
 verified containers for fenced cleanup. Operators must otherwise preserve the
 directory alongside the pool; unsafe or unknown evidence refuses admission.
 The journal also retains private teardown records for restricted sandboxes.

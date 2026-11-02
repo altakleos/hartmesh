@@ -18,9 +18,8 @@ from test_native_create_bridge import SLOT
 from test_native_create_bridge import fixture as fixture
 from test_native_create_local_backend import backend
 
-from deerflow.community.aio_sandbox.native_resource_set import NativeResourceSet, PairedResource
+from deerflow.community.aio_sandbox.native_resource_set import NativeResourceSet
 from deerflow.spaces.docker import StorageHostUnqualified
-from deerflow.spaces.native_teardown_evidence import NativeTeardownResource
 
 IMAGE = os.environ.get("HARTMESH_STORAGE_WRITER_IMAGE")
 LABELS = {"hartmesh.storage.space." + SLOT: "1"}
@@ -86,22 +85,19 @@ def test_a_real_partial_set_goes_and_the_owner_can_start_again(local, sandbox_id
     local._native_creation.require_admissible(name=f"native-{sandbox_id}", owner_id="alice")
 
 
-def _census_items(reader, local, sandbox_id):
-    """Facts built from the daemon's own answers, for this test's set alone."""
+def _set_on_the_daemon(reader, local, sandbox_id):
     proxy_name, network_name = local._resource_names(sandbox_id)
-    digest = local._network_policy_digest()
-    items = []
-    for kind, role, name in (("container", "network-proxy", proxy_name), ("network", "network", network_name)):
-        entry = reader.inspect(kind, name)
-        items.append(PairedResource(NativeTeardownResource(kind, role, entry["Id"], name, entry["Created"]), sandbox_id, local._network_mode, digest))
-    return items
+    return reader.named_set(sandbox_id, (("container", proxy_name), ("network", network_name), ("network", local._egress_network_name(sandbox_id))))
 
 
 def _start_labelled_proxy(local, sandbox_id, *extra):
+    """A relay confined and labelled as the product builds one, holding ``sleep`` in place of its server."""
     proxy_name, network_name = local._resource_names(sandbox_id)
     local._create_internal_network(network_name, sandbox_id)
+    local._create_egress_network(local._egress_network_name(sandbox_id), sandbox_id)
     labels = [item for key, value in local._restricted_labels(sandbox_id, "network-proxy").items() for item in ("--label", f"{key}={value}")]
-    started = _docker("run", "-d", "--rm", "--pull=never", "--name", proxy_name, "--network", network_name, *labels, *extra, IMAGE, "sleep", "300")
+    confinement = ("--cap-drop=ALL", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m")
+    started = _docker("run", "-d", "--rm", "--pull=never", "--name", proxy_name, "--network", network_name, *confinement, *labels, *extra, IMAGE, "sleep", "300")
     assert started.returncode == 0, started.stderr
 
 
@@ -109,13 +105,14 @@ def test_a_real_leftover_is_proved_to_hold_no_writer(local, sandbox_id):
     local._network_mode, local._network_config = "blocked", {"mode": "blocked"}
     _start_labelled_proxy(local, sandbox_id)
     reader = NativeResourceSet(local)
-    reader.require_no_writer(_census_items(reader, local, sandbox_id))
+    reader.require_no_writer(_set_on_the_daemon(reader, local, sandbox_id))
 
 
-@pytest.mark.parametrize("fault", ["host-mount", "stranger-on-the-network"])
+@pytest.mark.parametrize("fault", ["host-mount", "privileged", "stranger-on-the-network"])
 def test_a_real_leftover_that_could_hold_a_writer_is_refused(local, sandbox_id, tmp_path, fault):
     local._network_mode, local._network_config = "blocked", {"mode": "blocked"}
-    _start_labelled_proxy(local, sandbox_id, *(("-v", f"{tmp_path}:/data") if fault == "host-mount" else ()))
+    extra = {"host-mount": ("-v", f"{tmp_path}:/data"), "privileged": ("--privileged",)}
+    _start_labelled_proxy(local, sandbox_id, *extra.get(fault, ()))
     stranger = f"withdraw-stranger-{sandbox_id}"
     if fault == "stranger-on-the-network":
         started = _docker("run", "-d", "--rm", "--pull=never", "--name", stranger, "--network", local._resource_names(sandbox_id)[1], IMAGE, "sleep", "300")
@@ -123,9 +120,45 @@ def test_a_real_leftover_that_could_hold_a_writer_is_refused(local, sandbox_id, 
     try:
         reader = NativeResourceSet(local)
         with pytest.raises(StorageHostUnqualified):
-            reader.require_no_writer(_census_items(reader, local, sandbox_id))
+            reader.require_no_writer(_set_on_the_daemon(reader, local, sandbox_id))
     finally:
         _docker("rm", "-f", stranger)
+
+
+@pytest.mark.parametrize("left", ["networks", "relay-and-networks"])
+def test_a_real_leftover_goes_when_its_conversation_starts_again(local, sandbox_id, left):
+    """A hard reboot removes a running ``--rm`` relay and keeps the networks; a crash keeps both."""
+    local._network_mode, local._network_config = "blocked", {"mode": "blocked"}
+    proxy_name, network_name = local._resource_names(sandbox_id)
+    egress_name = local._egress_network_name(sandbox_id)
+    _start_labelled_proxy(local, sandbox_id)
+    if left == "networks":
+        assert _docker("rm", "-f", proxy_name).returncode == 0
+    identity = _docker("network", "inspect", "--format", "{{.Id}}", network_name).stdout
+    fresh = []
+
+    def fail_on_the_fresh_proxy(*args, **kwargs):
+        fresh.append((_exists("container", proxy_name), _docker("network", "inspect", "--format", "{{.Id}}", network_name).stdout))
+        raise RuntimeError("Proxy reported no address")
+
+    local._start_network_proxy = fail_on_the_fresh_proxy
+    with pytest.raises(StorageHostUnqualified):
+        local.create("chat", sandbox_id, user_id="alice", storage_labels=LABELS)
+
+    (relay_remained, fresh_identity) = fresh[0]
+    assert not relay_remained and fresh_identity and fresh_identity != identity, "The start built its own set"
+    assert not _exists("container", proxy_name) and not _exists("network", network_name) and not _exists("network", egress_name)
+    assert local.journal.pending() == ()
+
+
+def test_a_real_leftover_that_fails_the_proof_stays(local, sandbox_id, tmp_path):
+    local._network_mode, local._network_config = "blocked", {"mode": "blocked"}
+    proxy_name, _network_name = local._resource_names(sandbox_id)
+    _start_labelled_proxy(local, sandbox_id, "-v", f"{tmp_path}:/data")
+    with pytest.raises(StorageHostUnqualified, match="host storage mount"):
+        local.create("chat", sandbox_id, user_id="alice", storage_labels=LABELS)
+    assert _exists("container", proxy_name)
+    assert local.journal.pending() == ()
 
 
 def test_a_set_it_cannot_prove_gone_keeps_the_owner_refused(local, sandbox_id, monkeypatch):
