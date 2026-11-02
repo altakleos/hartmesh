@@ -293,6 +293,19 @@ def test_withdrawal_removes_a_pending_attempt_durably(pool):
         second.close()
 
 
+def test_withdrawal_is_durable_before_it_reports_success(pool, monkeypatch):
+    store = evidence(pool)
+    try:
+        attempt = begin(store)
+        steps, unlink, fsync = [], os.unlink, os.fsync
+        monkeypatch.setattr(os, "unlink", lambda *args, **kwargs: (steps.append("unlink"), unlink(*args, **kwargs))[1])
+        monkeypatch.setattr(os, "fsync", lambda descriptor: (steps.append("fsync"), fsync(descriptor))[1])
+        store.withdraw(attempt)
+        assert steps == ["unlink", "fsync"]
+    finally:
+        store.close()
+
+
 def test_withdrawal_of_a_mountless_attempt_removes_it(pool):
     store = evidence(pool)
     try:

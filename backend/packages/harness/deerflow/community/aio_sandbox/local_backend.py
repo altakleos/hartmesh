@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 _AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
 _NATIVE_SLOT_INVENTORY_DEADLINE = ContextVar("native_slot_inventory_deadline", default=None)
 _PARTIAL_SET_PASSES = 3
+_PARTIAL_SET_SECONDS = 60
 
 
 def _native_creation_diagnostic(error: NativeCreateUnconfirmed, *, withdrawn: bool = False) -> str:
@@ -1429,15 +1430,22 @@ class LocalContainerBackend(SandboxBackend):
         """The set was absent before this attempt, so these names are its own.
 
         A stopped ``--rm`` proxy keeps its networks until the daemon has finished
-        removing it, so one pass can leave them behind.
+        removing it, so one pass can leave them behind. A failed start used to
+        return at once, so all of this shares one deadline.
         """
-        for attempt in range(_PARTIAL_SET_PASSES):
-            if attempt:
-                time.sleep(1)
-            self._cleanup_restricted_resources(sandbox_id, stop_sandbox=False)
-            if self._restricted_resources_status(sandbox_id) == "missing":
-                return True
-        return False
+        inherited = _NATIVE_SLOT_INVENTORY_DEADLINE.get()
+        deadline = time.monotonic() + _PARTIAL_SET_SECONDS
+        token = _NATIVE_SLOT_INVENTORY_DEADLINE.set(min(deadline, inherited) if inherited is not None else deadline)
+        try:
+            for attempt in range(_PARTIAL_SET_PASSES):
+                if attempt:
+                    time.sleep(1)
+                if self._restricted_resources_status(sandbox_id) == "missing":
+                    return True
+                self._cleanup_restricted_resources(sandbox_id, stop_sandbox=False)
+            return self._restricted_resources_status(sandbox_id) == "missing"
+        finally:
+            _NATIVE_SLOT_INVENTORY_DEADLINE.reset(token)
 
     def prepare_resident(self, sandbox_id, container_name, extra_mounts, labels):
         """Prepare one stopped workspace through the existing native builder."""

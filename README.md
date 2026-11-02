@@ -696,12 +696,16 @@ views and temporary probes. Managed native chats now record each container reque
 before submission and verify its actual Docker identity before acknowledging it.
 Unresolved requests survive restart, reserve capacity and block another native
 create for the same account or container name. A start that fails before its
-container request was sent takes its sidecars and networks away and ends there, so
-the person's next try starts afresh; if Docker cannot confirm they are gone, or the
-Gateway stops part way, the record stays and refuses that account until an operator
-removes it. Cancellation retains verified
-containers for fenced cleanup. Operators must preserve the directory alongside
-the pool; unsafe or unknown evidence refuses admission.
+container request was sent removes its sidecars and networks and withdraws its
+record, so the person's next try normally starts afresh. If Docker cannot confirm
+they are gone, or the Gateway dies part way, the record stays and refuses that
+account, and a leftover proxy or network also fails the next start's native census,
+which refuses everyone. A Docker command that timed out can leave the same leftover
+by taking effect after the check. To recover, stop the Gateway, confirm no container
+of that name exists, remove the leftover proxy and networks, then remove the record.
+Cancellation retains verified containers for fenced cleanup. Operators must otherwise
+preserve the directory alongside the pool; unsafe or unknown evidence refuses
+admission.
 The journal also retains private teardown records for restricted sandboxes.
 Unresolved records reserve capacity and fence matching owners, names and target
 slots while positively unrelated work remains admissible.

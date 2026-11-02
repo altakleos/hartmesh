@@ -156,10 +156,12 @@ accounting or closes admission. Pending denies guessed adoption/replacement/remo
 known exact returned or live tracked IDs may use canonical fenced cleanup.
 Confirmed absence retires acknowledged handoffs only; unacknowledged evidence stays
 reserved, with one exception. An attempt that never sent its primary is withdrawn by
-the process that made it: `submitted` is written before the runner and lives only in
-memory, so a restored record can never qualify. The pending record keeps the name
-exclusive while the attempt's own sidecars and networks go, and it stays unless their
-absence is proved, because a leftover set makes the next start read as a mismatch.
+the process that made it. `submitted` is written before the runner and lives only in
+memory, so a restored handoff, which has no sandbox id, is refused. The pending record
+keeps the name exclusive while the attempt's own sidecars and networks go, under one
+60-second deadline, and it stays unless their absence is proved, because a leftover
+set reads as a mismatch on that thread's next start and stops the next boot's census.
+Withdrawal releases, so it takes teardown authority and works while the runtime closes.
 `LocalContainerBackend._withdraw_unsubmitted` owns this; nothing else clears pending.
 SDK-less quarantine retains actual identity, never a guessed client.
 Unconfirmed create warnings expose bounded cause types, source locations, errno,

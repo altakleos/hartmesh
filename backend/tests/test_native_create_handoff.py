@@ -126,6 +126,18 @@ def test_a_withdrawn_attempt_can_never_submit():
         result.withdrawn(handoff)
 
 
+def test_a_restored_record_proves_nothing_about_submission():
+    result = state()
+    record = attempt()
+    token = result.begin_restore()
+    result.finish_restore(token, (record,))
+    restored = result._items[record.id]
+    assert restored.submitted is False, "Memory cannot know what a former process sent"
+    with pytest.raises(StorageHostUnqualified):
+        result.require_unsubmitted(restored)
+    assert count(result) == 1 and result.pending_for(owner_id="alice")
+
+
 @pytest.mark.parametrize("step", ["submitted", "verified"])
 def test_a_request_past_its_submission_cannot_be_withdrawn(step):
     result = state()
