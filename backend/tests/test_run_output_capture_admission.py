@@ -20,7 +20,7 @@ from test_gateway_services import _make_start_run_request
 
 from app.gateway import agent_conversations, chat_storage, services
 from app.gateway.auth.models import User
-from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
+from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION
 from app.gateway.run_models import RunCreateRequest
 from deerflow.config import app_config as app_config_module
 from deerflow.config.app_config import AppConfig, set_app_config
@@ -56,7 +56,7 @@ async def admission(output_store, monkeypatch):
     threads = ThreadMetaRepository(e.sf)
     thread_id = "capture-admission"
     await threads.create(thread_id, assistant_id="lead_agent", user_id=OWNER_ID)
-    request = _make_start_run_request(manager, thread_store=threads, auth_source=AUTH_SOURCE_SESSION)
+    request = _make_start_run_request(manager, thread_store=threads, auth_source=AUTH_SOURCE_INTERNAL)
     request.state.user = owner
     request.app.state.project_repo = ProjectRepository(e.sf)
     request.app.state.stream_bridge = bridge = MemoryStreamBridge()
@@ -122,6 +122,19 @@ async def test_capture_refuses_actual_memory_source_before_preparation(admission
     with pytest.raises(HTTPException) as failure:
         await launched(e, future_internal_capture())
     assert failure.value.status_code == 503
+    assert e.preparations == [] and e.inputs == []
+    assert await e.repository.list_by_thread(e.thread_id, user_id=OWNER_ID) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", [AUTH_SOURCE_SESSION, None])
+async def test_capture_is_the_gateways_own_to_ask_for(admission, source):
+    """A public field, so without this any signed-in caller could write a row of any version."""
+    e = admission
+    e.request.state.auth_source = source
+    with pytest.raises(HTTPException) as failure:
+        await launched(e, captured())
+    assert failure.value.status_code == 403
     assert e.preparations == [] and e.inputs == []
     assert await e.repository.list_by_thread(e.thread_id, user_id=OWNER_ID) == []
 
@@ -205,7 +218,13 @@ async def test_actual_creating_post_refuses_unsupported_authorities_before_prepa
     monkeypatch.setattr(services, "ensure_checkpoint_history_seeded", no_effect)
     monkeypatch.setattr(chat_storage, "prepare_chat_request", no_effect)
     e.request.app.state.storage_spaces_enabled = True
-    app = make_authed_test_app(user_factory=lambda: e.owner, bind_current_user=True, signed_in=True)
+    app = make_authed_test_app(user_factory=lambda: e.owner, bind_current_user=True)
+
+    @app.middleware("http")
+    async def as_the_gateway_itself(request, call_next):
+        request.state.auth_source = AUTH_SOURCE_INTERNAL
+        return await call_next(request)
+
     for name, value in vars(e.request.app.state).items():
         setattr(app.state, name, value)
     app.include_router(thread_runs.router)

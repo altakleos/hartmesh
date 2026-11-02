@@ -4,6 +4,7 @@ import asyncio
 import json
 import threading
 from dataclasses import replace
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -242,6 +243,54 @@ async def test_a_queued_stream_part_rechecks_current_read_authority_before_hando
         assert response.closed
     finally:
         await stream.aclose()
+        await owner.stop()
+
+
+async def test_frames_of_one_second_share_one_full_check(monkeypatch):
+    from app.channels import execution_client
+
+    monkeypatch.setattr(execution_client, "time", SimpleNamespace(monotonic=lambda: 100.0))
+    response = RecordingStream(data=b"".join(b'event: values\ndata: {"part":%d}\n\n' % number for number in range(1, 6)))
+    client, owner, admission, _ = facade(lambda request: httpx.Response(200, headers={"Content-Type": "text/event-stream"}, stream=response))
+    stream = client.runs.stream("thread", "lead_agent", **creating())
+    try:
+        assert [(await anext(stream)).data["part"] for _ in range(5)] == [1, 2, 3, 4, 5]
+        assert admission.calls == ["run_create", "run_read"]
+    finally:
+        await stream.aclose()
+        await owner.stop()
+
+
+async def test_a_revocation_only_the_database_knows_stops_frames_within_a_second(monkeypatch):
+    from app.channels import execution_client
+
+    clock = [100.0]
+    monkeypatch.setattr(execution_client, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    client, owner, admission, _ = facade(lambda request: httpx.Response(200))
+
+    async def revoked(operation):
+        raise ChannelExecutionProtocolError()
+
+    try:
+        await client._authorize_frame()
+        admission.authorize = revoked
+        clock[0] += 0.9
+        await client._authorize_frame()
+        clock[0] += 0.1
+        with pytest.raises(ChannelExecutionProtocolError):
+            await client._authorize_frame()
+    finally:
+        await owner.stop()
+
+
+async def test_a_revocation_held_in_memory_stops_the_next_frame():
+    client, owner, admission, _ = facade(lambda request: httpx.Response(200))
+    try:
+        await client._authorize_frame()
+        admission.permitted.remove("run_read")
+        with pytest.raises(ChannelExecutionProtocolError):
+            await client._authorize_frame()
+    finally:
         await owner.stop()
 
 

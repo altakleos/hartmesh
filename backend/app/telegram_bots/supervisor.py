@@ -76,6 +76,8 @@ _LINES = {
     "off": "telegram: off (HARTMESH_TELEGRAM=off)",
     "auth-disabled": "telegram: not started (authentication is disabled)",
     "unbound-allowed": "telegram: not started (channel_connections.enabled and channel_connections.require_bound_identity must both be true)",
+    "run-events-not-db": "telegram: not started (run_events.backend must be db, or no answer can be proved before it is sent)",
+    "several-workers": "telegram: not started (the Gateway must run one worker, because every worker would poll every bot)",
     "secret-missing": "telegram: not started (HARTMESH_PROVIDER_KEYS_SECRET is not set)",
     "secret-invalid": "telegram: not started (HARTMESH_PROVIDER_KEYS_SECRET is shorter than 32 characters)",
     "host-changed": "telegram: paused (host-changed); run python -m app.telegram_bots.cli adopt",

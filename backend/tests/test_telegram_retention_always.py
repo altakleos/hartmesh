@@ -53,7 +53,7 @@ def refused_supervisor(db, monkeypatch, clock, *, config, environ, verdict=None)
         SimpleNamespace(state=SimpleNamespace()),
         config=config,
         channel_service=SimpleNamespace(bus=MessageBus(), manager=manager),
-        app_config=SimpleNamespace(channel_connections=SimpleNamespace(enabled=True, require_bound_identity=True)),
+        app_config=SimpleNamespace(channel_connections=SimpleNamespace(enabled=True, require_bound_identity=True), run_events=SimpleNamespace(backend="db")),
         environ=environ,
         copy_guard=None if verdict is None else Verdict(verdict),
         clock=clock.now,

@@ -102,6 +102,30 @@ def test_library_request_and_error_records_remain_visible_without_the_token(name
     assert secret not in value.getMessage() and LOG_TOKEN_MARK in value.getMessage()
 
 
+class Unprintable:
+    def __repr__(self):
+        raise ValueError("no")
+
+
+@pytest.mark.parametrize("message, make_args", [("nothing to fill", lambda secret: (secret,)), ("%r", lambda secret: (Unprintable(),))])
+def test_a_malformed_call_stays_off_its_caller_and_prints_nothing_it_was_given(message, make_args):
+    """Installed on every tenant, so this reaches every logger of the Gateway."""
+    entry = record("anywhere", message, make_args(token()))
+    assert BotTokenLogFilter().filter(entry) is True
+    assert entry.getMessage() == "Unreadable log call"
+
+
+def test_a_malformed_call_still_has_its_traceback_cleaned():
+    secret = token()
+    try:
+        raise RuntimeError("failed for " + secret)
+    except RuntimeError:
+        entry = record("anywhere", "%s and %s", ("only one",), sys.exc_info())
+    assert BotTokenLogFilter().filter(entry) is True
+    printed = logging.Formatter().format(entry)
+    assert secret not in printed and LOG_TOKEN_MARK in printed
+
+
 def test_installer_reaches_root_and_nonpropagating_handlers_idempotently(restore_filters):
     root = logging.getLogger()
     isolated = logging.getLogger("telegram-filter-isolated-" + uuid4().hex)

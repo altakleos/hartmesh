@@ -255,6 +255,9 @@ ui:
         it. Start by telling me what is in it.
 
 # Telegram bots (README, "Telegram bots"). Renderer-owned values stay out of here.
+# Reserved, with no effect in this release: `files.retry_seconds`, `intents`,
+# `producer`, `assign`, `acts`, and in `outbox` every key but `max_attempts` and
+# `recent_act_seconds`.
 telegram_bots:
   reconcile_interval_seconds: 30
   conflict_probe_seconds: 30

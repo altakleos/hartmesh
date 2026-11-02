@@ -3,6 +3,7 @@
 Directory-backed fixtures test admission and routing, never native disk limits.
 """
 
+import sys
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -127,6 +128,44 @@ async def test_host_qualification_refuses_changed_or_copied_authority(account_st
                 if change == "scope_closed":
                     with paths_scope(prepared.paths), pytest.raises(OutputEvidenceError):
                         await lease.confirm(request)
+    finally:
+        owner.retire()
+        await owner.drain()
+        reset_current_user(token)
+
+
+@pytest.mark.asyncio
+async def test_a_provider_that_starts_during_a_turn_does_not_cost_its_answer(account_storage, monkeypatch):
+    """Lazily created by the turn's first tool call, it is no change of authority."""
+    from types import SimpleNamespace
+
+    from deerflow.sandbox import sandbox_provider
+
+    class Provider:
+        pass
+
+    class Backend:
+        pass
+
+    app, repo, _sf, _files, _catalog, _company = account_storage
+    user = await repo.create_user(User(email="started-view@example.com"))
+    monkeypatch.setattr(sandbox_provider, "get_initialized_sandbox_provider", lambda: None)
+    monkeypatch.setitem(sys.modules, "deerflow.community.aio_sandbox.aio_sandbox_provider", SimpleNamespace(AioSandboxProvider=Provider))
+    monkeypatch.setitem(sys.modules, "deerflow.community.aio_sandbox.local_backend", SimpleNamespace(LocalContainerBackend=Backend))
+    token = set_current_user(user)
+    owner = CaptureIOOwner()
+    try:
+        with capture_io_scope(owner), storage_credential_scope(True):
+            async with chat_storage.chat_storage_lifecycle(app, enabled=True):
+                async with app.state.chat_storage_scope(user_id=str(user.id), thread_id="chat-a") as prepared:
+                    request = request_for(prepared, owner, str(user.id))
+                    lease = await app.state.qualify_output_view(request)
+                    assert lease is not None
+                    started = Provider()
+                    started._backend, started._storage_host = Backend(), lambda: app.state.chat_storage_host
+                    monkeypatch.setattr(sandbox_provider, "get_initialized_sandbox_provider", lambda: started)
+                    assert (await lease.confirm(request)).kind == "no_admitted_output_view"
+                    lease.retire()
     finally:
         owner.retire()
         await owner.drain()

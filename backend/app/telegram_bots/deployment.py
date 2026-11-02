@@ -40,6 +40,8 @@ _REASONS = {
     "off": "off",
     "auth-disabled": "misconfigured",
     "unbound-allowed": "misconfigured",
+    "run-events-not-db": "misconfigured",
+    "several-workers": "misconfigured",
     "secret-missing": "secret-missing",
     "secret-invalid": "secret-invalid",
     "host-changed": "host-changed",
@@ -47,6 +49,14 @@ _REASONS = {
     "channel-service-failed": "misconfigured",
     "gateway-not-ready": "misconfigured",
 }
+
+
+def _workers(environ: Mapping[str, str]) -> int:
+    """As the channel routes read it: `WEB_CONCURRENCY` is Uvicorn's own fallback."""
+    try:
+        return int(environ.get("GATEWAY_WORKERS") or environ.get("WEB_CONCURRENCY") or "1")
+    except ValueError:
+        return 1
 
 
 def static_cause(config: TelegramBotsConfig, app_config: AppConfig, environ: Mapping[str, str]) -> str | None:
@@ -63,6 +73,10 @@ def static_cause(config: TelegramBotsConfig, app_config: AppConfig, environ: Map
         token_cipher(environ)
     except WrappingKeyInvalid:
         return "secret-invalid"
+    if app_config.run_events.backend != "db":
+        return "run-events-not-db"
+    if _workers(environ) > 1:
+        return "several-workers"
     return None
 
 

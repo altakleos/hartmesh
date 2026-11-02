@@ -2340,6 +2340,7 @@ class RunManager:
 
         async def own_admission():
             failed = False
+            refused = False
             invoked = False
             try:
                 with self._capture_control(lifetime=lifetime):
@@ -2347,8 +2348,10 @@ class RunManager:
                     return await admission
             except CaptureIOClosed:
                 raise
-            except Exception:
+            except Exception as error:
                 failed = True
+                # A definite refusal left no row, so nothing can come back for this.
+                refused = isinstance(error, ConflictError)
                 if registration is not None and registration[1] is not _AdmissionStage.reused and not lifetime.owner.retired:
                     with self._capture_control(lifetime=lifetime):
                         if registration[1] is _AdmissionStage.constructed:
@@ -2361,7 +2364,7 @@ class RunManager:
                     admission.close()
                 reused = registration is not None and registration[1] is _AdmissionStage.reused
                 if failed or reused:
-                    await self._finish_capture_lifetime(lifetime, discard=reused)
+                    await self._finish_capture_lifetime(lifetime, discard=reused or refused)
 
         try:
             return await await_drained(own_admission())
@@ -3142,7 +3145,9 @@ class RunManager:
             try:
                 await self._renew_leases()
             except CaptureIOClosed:
-                return
+                # One run retiring ends nothing here; every other lease needs this loop.
+                if self._capture_admissions_sealed:
+                    return
             except Exception:
                 logger.warning("Heartbeat renewal cycle failed", exc_info=True)
 
@@ -3268,7 +3273,8 @@ class RunManager:
                             reason="The durable store rejected lease renewal for this worker.",
                         )
             except CaptureIOClosed:
-                raise
+                # This run's own owner retired mid-call. The next run owes its renewal.
+                continue
             except Exception:
                 if confirmed_deadline <= datetime.now(UTC):
                     await self._mark_ownership_lost(

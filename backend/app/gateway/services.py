@@ -1931,6 +1931,8 @@ async def _start_run(
 
     capture_intent = None
     if capture_requested:
+        if getattr(request.state, "auth_source", None) != AUTH_SOURCE_INTERNAL:
+            raise HTTPException(403, "Output capture requires a trusted internal caller")
         try:
             run_mgr = get_run_manager(request)
             run_ctx = get_run_context(request)
