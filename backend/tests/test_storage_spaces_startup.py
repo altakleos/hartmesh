@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import threading
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -635,9 +636,76 @@ async def test_reverify_keeps_a_bound_failure_the_catalog_cannot_see(startup, mo
     ss, app, config, sf, catalog, _, _ = startup
     await ss.initialize_storage_spaces(app, config, session_factory=sf)
     files, slot = app.state.storage_spaces, next(iter(catalog.volumes))
-    monkeypatch.setattr(files, "refresh_bound_volumes", AsyncMock(return_value={slot: "Backing mount/root incarnation changed"}))
+    monkeypatch.setattr(files, "bound_volume_errors", AsyncMock(return_value={slot: "Backing mount/root incarnation changed"}))
     await ss._reverify(app)
     assert app.state.agent_execution.unverified == {slot: "Backing mount/root incarnation changed"}
+
+
+@pytest.mark.asyncio
+async def test_reverify_does_not_wait_for_an_open_admission(startup):
+    """Every minute must not queue behind file work, or lock the rows chat turns admit."""
+    from _storage_spaces_test_support import ALICE
+
+    from deerflow.spaces.contract import Custody, MutationMode, Permission
+
+    ss, app, config, sf, _, _, _ = startup
+    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    files = app.state.storage_spaces
+    space = await files.assign(kind="user", actor=ALICE, name="User fixture", custody=Custody.personal(ALICE), mode=MutationMode.NATIVE)
+    async with files.registry.admitted(actor=ALICE, requests={space: (Permission.READ, None)}):
+        await asyncio.wait_for(ss._reverify(app), timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_bound_volume_errors_match_what_a_refresh_reports(startup, monkeypatch):
+    from _storage_spaces_test_support import ALICE
+
+    from deerflow.spaces.backings import BackingUnavailable
+    from deerflow.spaces.contract import Custody, MutationMode
+
+    ss, app, config, sf, catalog, _, _ = startup
+    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    files = app.state.storage_spaces
+    await files.assign(kind="user", actor=ALICE, name="User fixture", custody=Custody.personal(ALICE), mode=MutationMode.NATIVE)
+    slot = next(slot for slot, spec in catalog.volumes.items() if spec.kind == "user")
+    assert await files.bound_volume_errors() == {}
+
+    def trimmed(*_args, **_kwargs):
+        raise BackingUnavailable("fixture hole")
+
+    monkeypatch.setattr(catalog, "verify", trimmed)
+    errors = await files.bound_volume_errors()
+    assert errors[slot] == "fixture hole" and errors == await files.refresh_bound_volumes()
+
+
+@pytest.mark.asyncio
+async def test_a_hung_filesystem_does_not_stop_maintenance_and_its_answer_lands_later(startup, monkeypatch, caplog):
+    from deerflow.spaces.backings import BackingUnavailable
+
+    ss, app, config, sf, catalog, _, _ = startup
+    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    status, slot, healthy = app.state.agent_execution, next(iter(catalog.volumes)), catalog.verify
+    gate = threading.Event()
+
+    def hung(checked, **kwargs):
+        gate.wait(20)
+        if checked == slot:
+            raise BackingUnavailable("fixture hole")
+        return healthy(checked, **kwargs)
+
+    monkeypatch.setattr(catalog, "verify", hung)
+    try:
+        with caplog.at_level("WARNING"):
+            await ss._reverify(app, timeout=0.01)
+        owned = status.mount_verify_task
+        assert owned is not None and status.unverified == {}
+        assert any("did not finish" in record.getMessage() for record in caplog.records)
+        await ss._reverify(app, timeout=0.01)
+        assert status.mount_verify_task is owned, "a pass must not start a second one beside it"
+    finally:
+        gate.set()
+    await ss._reverify(app)
+    assert status.mount_verify_task is None and slot in status.unverified
 
 
 @pytest.mark.asyncio

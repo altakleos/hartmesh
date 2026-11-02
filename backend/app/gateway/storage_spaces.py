@@ -416,13 +416,32 @@ async def _mount_verification_step(app, *, timeout: float) -> bool:
     return True
 
 
-async def _reverify(app):
-    """Keep the one answer current: a trim fails an image at any time, and prepare heals it."""
-    status, files = app.state.agent_execution, app.state.storage_spaces
-    if status.mount_pending or status.mount_reverify or status.mount_verify_task is not None:
-        return
+async def _failures_now(app):
+    files = app.state.storage_spaces
     errors = await run_file_io(_verify_catalog, files.catalog)
-    errors.update(await files.refresh_bound_volumes())
+    errors.update(await files.bound_volume_errors())
+    return errors
+
+
+async def _reverify(app, *, timeout=ADAPTER_LIMIT_SECONDS):
+    """Keep the one answer current: a trim fails an image at any time, and prepare heals it.
+
+    A filesystem that hangs must not stop the rest of maintenance, so the answer stands
+    until the owned task returns.
+    """
+    status = app.state.agent_execution
+    if status.mount_pending or status.mount_reverify:
+        return
+    if status.mount_verify_task is None:
+        status.mount_verify_task = asyncio.ensure_future(_failures_now(app))
+        status.mount_verify_task.add_done_callback(_observe)
+    task = status.mount_verify_task
+    done, _ = await asyncio.wait({task}, timeout=timeout)
+    if not done:
+        logger.warning("storage: verification did not finish in %s s; existing facts are kept", timeout)
+        return
+    status.mount_verify_task = None
+    errors = task.result()
     for slot in errors.keys() - status.unverified.keys():
         logger.warning("storage: space %s unverified (%s)", slot, errors[slot])
     for slot in status.unverified.keys() - errors.keys():

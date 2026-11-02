@@ -2339,13 +2339,14 @@ the QEMU guest agent's `guest-fstrim` and direct `fstrim <Space mountpoint>` rea
 mount table rather than fstab, so they bypass the exclusion. `nodiscard` prevents
 online discard when blocks are freed; it does not block an explicit FITRIM request.
 
-Normal preparation, which runs at every start, and `si verify --repair` restore a
-trimmed image. They fill its holes in place, on a mounted image and with its files
-intact, within the same data-disk headroom as any growth, and report the spaces and
-bytes as `restored` in their document. A slot the disk cannot restore is listed in
-`problems` and stays refused. `fstab-sync` repairs nothing, the Gateway cannot write
-the images, and qualification never silently refills one, so an image trimmed after
-start stays refused until the next preparation.
+Normal preparation, which runs at `hm up`, and `si verify --repair` restore a trimmed
+image. They fill its holes in place, on a mounted image and with its files intact,
+within the same data-disk headroom as any growth, and report the spaces and bytes as
+`restored` in their document. A slot the disk cannot restore stays refused, and says
+why in `problems` from preparation or in the slot's `detail` from `verify`. A reboot
+or a Gateway restart does not run preparation. `fstab-sync` repairs nothing, the
+Gateway cannot write the images, and qualification never silently refills one, so an
+image trimmed after `hm up` stays refused until the next one or a `verify --repair`.
 
 Until then `/health` reads `"storage": "incomplete"`, which refuses a rollout that
 waits for `ready`, and someone with no file space yet is told of a storage fault

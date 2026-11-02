@@ -299,12 +299,12 @@ async def _feature_owner(request):
 
 
 def _unassigned(files, seats, unverified):
-    """Seats are only blamed when the accounts hold them all; a failed slot is a fault to fix."""
+    """Anyone signed in is counted, so a seat can only be what is missing past the limit."""
     if files.assignable_slots("user", unverified=unverified):
         return "not-assigned"
-    if seats.free >= 0 and files.failed_slots("user", unverified=unverified):
-        return "fault"
-    return "no-seat" if seats.free <= 0 else "not-assigned"
+    if seats.free < 0:
+        return "no-seat"
+    return "fault" if files.failed_slots("user", unverified=unverified) else "not-assigned"
 
 
 async def _storage_features(request, config):

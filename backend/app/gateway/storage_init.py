@@ -618,7 +618,9 @@ sync -f "$(dirname -- "$p")"
                 raise Refused(f"restoring {shortfall / (1 << 30):.1f} GiB would leave {(fit.free_bytes - shortfall) / (1 << 30):.1f} GiB free and {fit.headroom_bytes / (1 << 30):.1f} GiB must stay free")
             os.posix_fallocate(fd, 0, spec.max_bytes)
             os.fsync(fd)
-            return max(0, os.fstat(fd).st_blocks - image.st_blocks) * 512
+            restored = max(0, os.fstat(fd).st_blocks - image.st_blocks) * 512
+            print(f"storage-init: restored space {spec.slot_id}, {restored / (1 << 20):.1f} MiB", file=sys.stderr, flush=True)
+            return restored
         finally:
             os.close(fd)
 
@@ -633,7 +635,6 @@ sync -f "$(dirname -- "$p")"
                 continue
             if count:
                 restored[spec.slot_id] = count
-                print(f"storage-init: restored space {spec.slot_id}, {count / (1 << 20):.1f} MiB", file=sys.stderr, flush=True)
         return dict(spaces=len(restored), bytes=sum(restored.values())), problems
 
     def prepare(self):

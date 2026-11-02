@@ -683,6 +683,9 @@ def test_a_restored_image_is_logged(allocated, capsys):
     capsys.readouterr()
     tool.prepare()
     assert f"restored space {spec.slot_id}" in capsys.readouterr().err
+    punch(spec)
+    tool.restore_allocation(spec)
+    assert f"restored space {spec.slot_id}" in capsys.readouterr().err
 
 
 def test_restore_leaves_an_image_of_another_size_for_verification_to_report(allocated):

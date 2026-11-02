@@ -61,13 +61,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Files
 
-- An image emptied by a disk trim is now restored. Preparation at every start and
+- An image emptied by a disk trim is now restored. Preparation, which runs at `hm up`, and
   `verify --repair` fill its holes in place, keep its files and report what they restored,
   within the usual data-disk headroom. `.48` left such an image refused until an operator
-  repaired it by hand. A trim after start stays refused until the next preparation.
-- Someone with no file space yet is told of a storage fault when free slots fail
-  verification, not asked to buy seats. "No seat" now appears only when the accounts hold
-  every seat.
+  repaired it by hand. A reboot or a Gateway restart does not run preparation, so an image
+  trimmed after `hm up` stays refused until the next one or a `verify --repair`.
+- Someone with no file space yet is told of a storage fault when user slots fail
+  verification, not asked to buy seats. "No seat" now appears only when there are more
+  accounts than seats.
 - `/health` and the operator `status` read `storage: incomplete`, not `ready`, while an image
   fails verification, so a rollout waiting for `ready` refuses that tenant. The Gateway now
   re-verifies every image each minute, and both return to `ready` without a restart.

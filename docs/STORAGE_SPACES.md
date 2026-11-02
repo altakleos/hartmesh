@@ -345,10 +345,12 @@ independent so custom-agent clients retain their existing contract. Off deployme
 report zero native counts; failed projection returns unavailable defaults with
 HTTP 200. No byte capacities appear in this response.
 
-Own files are `not-assigned` while an assignable user slot or a free seat remains,
-`fault` when the slots left to a seated person failed verification, `no-seat` when
-the accounts hold every seat, and `unverified` when an assigned binding cannot
-prove its filesystem. Account seat occupancy does not imply file assignment.
+Own files are `not-assigned` while an assignable user slot remains or a seated person
+waits for one, `no-seat` when there are more accounts than seats, `fault` when nothing
+is assignable and a user slot failed verification, and `unverified` when an assigned
+binding cannot prove its filesystem. Every unreleased account counts as seated, so
+someone signed in holds a seat unless there are more accounts than seats. Account
+seat occupancy does not imply file assignment.
 Status reads close SQL before filesystem verification and grant no admission;
 each file operation still rechecks authority and provider facts. `/health` adds
 only storage/agent state words, preserving its existing fields. Storage failure
