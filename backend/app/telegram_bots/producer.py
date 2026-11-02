@@ -31,12 +31,12 @@ from app.telegram_bots.api_logging import log_call_failure
 from app.telegram_bots.config import TelegramBotsConfig
 from app.telegram_bots.links import BotLink
 from app.telegram_bots.token_pattern import TOKEN_IN_TEXT
-from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
+from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow, TelegramOutboxRow
 from deerflow.runtime.runs.terminal import failure_chain
 from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
-    from app.gateway.run_output import RunOutputProjection, RunOutputProjectionV2
+    from app.gateway.run_output import RunOutputProjectionV2
     from app.telegram_bots.inbox import PublicationRecord, RestartClosure
     from app.telegram_bots.links import PublicationGuard
 
@@ -44,7 +44,6 @@ logger = logging.getLogger(__name__)
 OUTBOX_SEND_CONCURRENCY = 8
 DELIVERY_RETRY_FIRST_SECONDS = 5
 DELIVERY_RETRY_CAP_SECONDS = 300
-ESSENTIAL_DELIVERY_CLASSES = frozenset({"reply", "question", "result", "interrupt", "progress", "service", "reminder"})
 _KINDS = frozenset({"text", "document", "photo", "album", "edit", "card"})
 _FINAL_PARTS = frozenset({"sent", "unavailable", "retired"})
 _STATUS_KEYS = frozenset({"access.agent_off", "agent.paused", "agent.retired", "unavailable.fix", "unavailable.off", "unavailable.paused", "unavailable.moved", "unavailable.files_unchecked", "refused.interrupted", "custom_agent.deleted"})
@@ -179,19 +178,14 @@ _TURN_OUTCOME_KEYS = frozenset(
         "chat.conversation_deleted",
         "chat.files_full",
         "refused.interrupted",
-        "refused.restarting",
-        "refused.files_busy",
-        "start.ws_failed",
         "busy.queued",
         "busy.thread",
-        "busy.starting_elsewhere",
-        "busy.two_conversations",
     }
 )
 _NO_RUN_KEYS = frozenset({"error.generic", "busy.cancelled", "chat.restarted"})
 _UNDELIVERABLE_KEYS = frozenset({"answer.on_web", "error.generic"})
 _DELETED_SOURCE = {"key": "chat.conversation_deleted", "values": {}}
-INPUT_OUTCOME_KEYS = (_TURN_OUTCOME_KEYS - {"answer.on_web", "busy.queued", "busy.thread", "busy.starting_elsewhere", "busy.two_conversations"}) | {"custom_agent.deleted", "busy.followup_full", "voice.failed"}
+INPUT_OUTCOME_KEYS = (_TURN_OUTCOME_KEYS - {"answer.on_web", "busy.queued", "busy.thread"}) | {"custom_agent.deleted", "busy.followup_full", "voice.failed"}
 
 
 @dataclass(frozen=True)
@@ -303,15 +297,6 @@ def _item(row: TelegramOutboxRow) -> OutboxItem:
     return OutboxItem(**{name: deepcopy(getattr(row, name)) for name in OutboxItem.__dataclass_fields__})
 
 
-def _same_fixed_source(left, right, depth: int = 0) -> bool:
-    """Compare the small fixed-notice echo without JSON bool/int coercion."""
-    if depth > 16 or type(left) is not type(right):
-        return False
-    if type(left) is dict:
-        return left.keys() == right.keys() and all(_same_fixed_source(left[key], right[key], depth + 1) for key in left)
-    return type(left) in {str, int, bool, type(None)} and left == right
-
-
 def uses_model_source(item: OutboxItem) -> bool:
     """A fixed-looking part cannot downgrade a saved model primary's source."""
     source = item.payload.get("source")
@@ -323,28 +308,7 @@ def uses_model_source(item: OutboxItem) -> bool:
             return False
         except ValueError:
             return True
-    if "reply_basis" not in item.payload:
-        return False
-    basis = item.payload["reply_basis"]
-    if type(basis) is not dict or type(basis.get("version")) is not int or basis["version"] != 1:
-        return True
-    outcome = basis.get("outcome")
-    if type(outcome) is not dict or outcome.get("kind") not in {"sealed_failed", "sealed_cancelled"}:
-        return True
-    if not _same_fixed_source(source, outcome):
-        return True
-    projection = outcome.get("projection")
-    reason = "failed" if outcome["kind"] == "sealed_failed" else "cancelled"
-    return not (
-        type(projection) is dict
-        and type(projection.get("version")) is int
-        and projection["version"] == 1
-        and projection.get("state") == "unavailable"
-        and projection.get("reason") == reason
-        and type(projection.get("output_evidence")) is dict
-        and projection["output_evidence"].get("kind") == "unavailable"
-        and projection["output_evidence"].get("reason") == reason
-    )
+    return "reply_basis" in item.payload
 
 
 @dataclass(frozen=True)
@@ -631,32 +595,6 @@ def freeze_reply_presentation(text: str, *, text_sha256: str) -> FrozenReplyPres
         raise ValueError("invalid-publication-presentation") from None
 
 
-def _detached_output(value: RunOutputProjection) -> RunOutputProjection:
-    from app.gateway.run_output import RunOutputProjection
-
-    try:
-        if type(value) is not RunOutputProjection:
-            raise ValueError
-        return RunOutputProjection.model_validate(value.model_dump(mode="python"))
-    except Exception:
-        raise ValueError("publication-source-conflict") from None
-
-
-@dataclass(frozen=True)
-class PrimaryTurnNotice:
-    kind: Literal["sealed_failed", "sealed_cancelled"]
-    output: RunOutputProjection
-
-    def __post_init__(self) -> None:
-        if type(self.kind) is not str or self.kind not in {"sealed_failed", "sealed_cancelled"}:
-            raise ValueError("publication-source-conflict")
-        output = _detached_output(self.output)
-        reason = "failed" if self.kind == "sealed_failed" else "cancelled"
-        if output.state != "unavailable" or output.reason != reason or output.output_evidence.kind != "unavailable":
-            raise ValueError("publication-source-conflict")
-        object.__setattr__(self, "output", output)
-
-
 def _publication_identity(record: PublicationRecord) -> dict:
     from app.telegram_bots.inbox import PublicationRecord
 
@@ -688,46 +626,6 @@ def _guard_publication_link(record, guard):
         return link
     except Exception:
         raise ValueError("publication-source-conflict") from None
-
-
-def _prepare_publication_reply(record: PublicationRecord, output: RunOutputProjection | None, notice: PrimaryTurnNotice | None) -> tuple[dict, list[dict]]:
-    identity = _publication_identity(record)
-    scope = identity["scope"]
-    if notice is None:
-        output = _detached_output(output)
-        if output.state != "complete":
-            raise ValueError("publication-source-conflict")
-        presentation = freeze_reply_presentation(output.source.text, text_sha256=output.output_evidence.text_sha256)
-        parts = [
-            {
-                "kind": "text",
-                "source_ref": {"assistant_message_id": output.output_evidence.assistant_message_id, "thread_id": output.thread_id, "run_id": output.run_id, "range": {"basis": "telegram-visible-v1", "start": chunk.start, "end": chunk.end}},
-                "html": chunk.html,
-                "visible_text": chunk.visible_text,
-            }
-            for chunk in presentation.chunks
-        ]
-        outcome = {"kind": "model_text", "projection": output.model_dump(mode="json", exclude={"source"})}
-        frozen = presentation.to_json()
-    else:
-        if type(notice) is not PrimaryTurnNotice:
-            raise ValueError("publication-source-conflict")
-        notice = PrimaryTurnNotice(notice.kind, notice.output)
-        output = notice.output
-        key = {"sealed_failed": "error.generic", "sealed_cancelled": "run.cancelled"}[notice.kind]
-        parts = [{"kind": "text", "source_ref": {"key": key, "values": {}}}]
-        outcome = {"kind": notice.kind, "projection": output.model_dump(mode="json"), "source_ref": parts[0]["source_ref"]}
-        frozen = None
-    if output is not None and (output.owner_user_id, output.thread_id, output.channel_execution.publication_id, output.channel_execution.assistant_id, output.channel_execution.agent_name) != (
-        scope["owner_user_id"],
-        scope["thread_id"],
-        identity["publication_id"],
-        scope["assistant_id"],
-        scope["agent_name"],
-    ):
-        raise ValueError("publication-source-conflict")
-    basis = _safe_json({"version": 1, "publication": identity, "outcome": outcome, "presentation": frozen, "parts": parts, "finish_route": True})
-    return basis, parts
 
 
 def keyboard_cleanup_row(callback, *, owner_user_id: str, now: datetime, dedupe_key: str | None = None) -> TelegramOutboxRow:
@@ -1736,61 +1634,6 @@ class Outbox:
             row.parts = parts
             return True
 
-    async def plan_reply(self, link: BotLink, *, turn_id: str, source: dict, parts: list[dict], inbox_rows: Sequence, session: AsyncSession | None = None) -> str:
-        source = _safe_json(source)
-        if "delivery_kind" in source:
-            raise ValueError("reserved-status-notice")
-        async with self._writer(link.id, session=session) as (writer, binding):
-            # Lock the exact existing delivery before its input group. A late
-            # final from a previous publication cannot seal the current retry.
-            await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == f"reply:{turn_id}").with_for_update())
-            marks = list(
-                await writer.scalars(
-                    select(TelegramInboundMarkRow)
-                    .where(TelegramInboundMarkRow.link_id == link.id, TelegramInboundMarkRow.turn_id == turn_id)
-                    .order_by(TelegramInboundMarkRow.message_id, TelegramInboundMarkRow.chat_id)
-                    .with_for_update()
-                    .execution_options(populate_existing=True)
-                )
-            )
-            identities = {(row.link_id, row.message_id, row.chat_id) for row in inbox_rows}
-            if not marks or len(identities) != len(inbox_rows) or identities != {(row.link_id, row.message_id, row.chat_id) for row in marks}:
-                raise ValueError("reply-source-conflict")
-            for mark in marks:
-                publication = mark.route_basis.get("current_publication_id")
-                entry = next((entry for entry in mark.route_basis.get("publications", []) if entry.get("publication_id") == publication), None)
-                if (
-                    mark.thread_id is None
-                    or mark.run_id is None
-                    or source.get("thread_id") != mark.thread_id
-                    or source.get("run_id") != mark.run_id
-                    or publication is None
-                    or source.get("publication_id") != publication
-                    or entry is None
-                    or entry.get("run_id") != mark.run_id
-                    or not isinstance(source.get("assistant_message_id"), str)
-                    or not source["assistant_message_id"]
-                    or mark.assistant_message_id not in (None, source["assistant_message_id"])
-                    or "message_ids" in source
-                    and set(source["message_ids"]) != {row.message_id for row in marks}
-                ):
-                    raise ValueError("reply-source-conflict")
-            identity, _ = await self._add(link, dedupe_key=f"reply:{turn_id}", class_="reply", payload={"source": deepcopy(source), "parts": parts}, session=writer, message_thread_id=inbox_rows[0].message_thread_id if inbox_rows else None)
-            await self.inbox.register_delivery(inbox_rows, outbox_id=identity, primary=True, finish=True, session=writer)
-            for mark in marks:
-                mark.assistant_message_id = source["assistant_message_id"]
-            return identity
-
-    async def plan_publication_reply(self, record: PublicationRecord, *, output: RunOutputProjection, guard: PublicationGuard) -> str:
-        """Plan proved text only, with no source HTTP or send. No production path calls this."""
-        basis, parts = await await_drained(asyncio.to_thread(_prepare_publication_reply, record, output, None))
-        return await await_drained(self._write_publication_primary(record, guard=guard, basis=basis, parts=parts))
-
-    async def plan_publication_notice(self, record: PublicationRecord, *, notice: PrimaryTurnNotice, guard: PublicationGuard) -> str:
-        """Seal one trusted fixed outcome, without inventing an assistant identity."""
-        basis, parts = await await_drained(asyncio.to_thread(_prepare_publication_reply, record, None, notice))
-        return await await_drained(self._write_publication_primary(record, guard=guard, basis=basis, parts=parts))
-
     async def plan_verified_publication_reply(self, record: PublicationRecord, *, output: RunOutputProjectionV2, guard: PublicationGuard) -> str:
         """Plan strict complete-empty V2 text; legacy bases are never adopted."""
 
@@ -1914,28 +1757,24 @@ class Outbox:
         if type(link) is not BotLink or link.id != scope["link_id"] or any(getattr(link, name) != scope[name] for name in fields):
             raise ValueError("publication-source-conflict")
         dedupe = f"reply:{basis['publication']['turn_id']}"
-        if basis["version"] in {2, 4, 6}:
-            from app.telegram_bots.links import prepare_publication_guard
+        from app.telegram_bots.links import prepare_publication_guard
 
-            await prepare_publication_guard(guard)
+        await prepare_publication_guard(guard)
         async with self._writer(link.id) as (writer, _):
             await guard.check(writer)
             existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == dedupe).with_for_update().execution_options(populate_existing=True))
             fresh, rows = await self.inbox.lock_publication(record, session=writer)
-            if basis["version"] in {2, 4, 6}:
-                # The host DTO sorts origin identities, not arrival order.
-                # Resolve the original reply anchor from the locked saved rows.
-                anchor = min(rows, key=lambda row: (row.accepted_at, row.update_id, row.message_id)).message_id
-                parts = [{**part, "reply_to_message_id": anchor} for part in parts]
-                basis = {**basis, "parts": parts}
+            # The host DTO sorts origin identities, not arrival order.
+            # Resolve the original reply anchor from the locked saved rows.
+            anchor = min(rows, key=lambda row: (row.accepted_at, row.update_id, row.message_id)).message_id
+            parts = [{**part, "reply_to_message_id": anchor} for part in parts]
+            basis = {**basis, "parts": parts}
             if _canonical_primary(_publication_identity(fresh)) != _canonical_primary(basis["publication"]):
                 raise ValueError("publication-source-conflict")
             if basis["version"] == 6:
                 basis = {**basis, "inputs": await self.inbox.snapshot_publication_inputs(fresh, session=writer)}
             outcome = basis["outcome"]
-            projection = outcome["projection"]
-            if basis["version"] in {2, 4, 6}:
-                projection = projection["output"]
+            projection = outcome["projection"]["output"]
             if fresh.dispatch_started is not True or fresh.run_id is None or fresh.run_id != projection["run_id"]:
                 raise ValueError("publication-source-conflict")
             assistant = projection["output_evidence"]["assistant_message_id"] if outcome["kind"] == "model_text" or basis["version"] == 6 and projection["state"] == "complete" else None

@@ -3,24 +3,23 @@
 import asyncio
 import secrets
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 from _telegram_bot_test_support import ManualClock, RecordingRequest
 from _telegram_repository_test_support import db as db  # noqa: F401
 from sqlalchemy import select
 from test_telegram_publication_custody import publication_environment as publication_environment
-from test_telegram_publication_primary import _managed_turn, _output
+from test_telegram_publication_primary import _managed_turn
 from test_telegram_verified_reply import projection
 
 from app.telegram_bots.adapter import TelegramBotChannel
 from app.telegram_bots.model_source import ModelSource
-from app.telegram_bots.producer import Outbox, OutboxSender, PrimaryTurnNotice
+from app.telegram_bots.producer import Outbox, OutboxSender
 from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["valid", "changed-after-prefix", "retired-token", "part-fixed-injection", "claimed-callback", "claimed-media", "claimed-contradiction", "claimed-missing-basis", "legacy-fixed"])
+@pytest.mark.parametrize("mode", ["valid", "changed-after-prefix", "retired-token", "part-fixed-injection", "claimed-callback", "claimed-media", "claimed-contradiction", "claimed-missing-basis"])
 async def test_actual_sender_rereads_each_model_part_and_preserves_prefix(publication_environment, monkeypatch, mode):
     e = publication_environment
     record = await _managed_turn(e)
@@ -32,11 +31,7 @@ async def test_actual_sender_rereads_each_model_part_and_preserves_prefix(public
         request.enqueue("sendMessage", result={"message_id": 501 + number, "date": 1_893_456_000, "chat": {"id": e.link.chat_id, "type": "private"}, "text": "Recorded model text"})
     monkeypatch.setattr("deerflow.config.agents_config.load_agent_config", lambda *args, **kwargs: SimpleNamespace(name=e.link.agent_ref))
     box = Outbox(e.sessions, clock=clock.now)
-    if mode == "legacy-fixed":
-        identity = await box.plan_publication_notice(record, notice=PrimaryTurnNotice("sealed_failed", _output(record, reason="failed")), guard=e.guard_factory())
-        monkeypatch.setattr("app.gateway.authz.resolve_route_permissions", AsyncMock(return_value=[]))
-    else:
-        identity = await box.plan_verified_publication_reply(record, output=output, guard=e.guard_factory())
+    identity = await box.plan_verified_publication_reply(record, output=output, guard=e.guard_factory())
     async with e.sessions.begin() as session:
         for row in await session.scalars(select(TelegramOutboxRow)):
             if row.id != identity:
@@ -113,10 +108,7 @@ async def test_actual_sender_rereads_each_model_part_and_preserves_prefix(public
         async with e.sessions() as session:
             saved = await session.get(TelegramOutboxRow, identity)
         sent = [call for call in request.calls if call.endpoint == "sendMessage"]
-        if mode == "legacy-fixed":
-            assert len(sent) == 1 and not reads
-            assert saved.state == "sent" and saved.parts[0]["source_ref"] == {"key": "error.generic", "values": {}}
-        elif mode == "claimed-media":
+        if mode == "claimed-media":
             assert not sent and not reads and len(saved.parts) == 1 and "unavailable_reason" not in saved.parts[0]
         elif mode in {"claimed-callback", "claimed-contradiction", "claimed-missing-basis"}:
             assert not sent and not reads and (saved.state, saved.skip_reason) == ("skipped", "source-gone"), "A saved part that does not validate never will, so it ends"

@@ -835,14 +835,6 @@ def _assembled_model_name(agent_result: Any) -> str | None:
     return None
 
 
-def _assembled_inventory_profile(agent_result):
-    try:
-        from deerflow.agents.lead_agent.agent import LeadAgentAssembly
-    except Exception:
-        return None
-    return agent_result.inventory_profile if isinstance(agent_result, LeadAgentAssembly) else None
-
-
 class _SubagentEventBuffer:
     """Buffer subagent ``task_*`` step events and flush them in one locked batch (#3779).
 
@@ -1778,7 +1770,7 @@ async def _run_agent(
             with phase_span(TurnPhase.AGENT_BUILD):
                 agent_result = await run_assembly(agent_factory, **agent_factory_kwargs)
             agent = _agent_graph(agent_result)
-            if inventory_capture is not None and not inventory_capture.qualify(_assembled_inventory_profile(agent_result), agent):
+            if inventory_capture is not None and not inventory_capture.qualify(getattr(agent_result, "inventory_profile", None), agent):
                 raise OutputEvidenceError()
 
         # Assembly resolves request, agent, and authorization fallbacks. Trace the

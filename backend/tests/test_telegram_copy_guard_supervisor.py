@@ -7,7 +7,7 @@ import pytest
 from _telegram_bot_test_support import RecordingRequest, update_payload
 from _telegram_repository_test_support import db as db
 from test_telegram_supervisor import _supervisor_logging as _supervisor_logging
-from test_telegram_supervisor import build, credential
+from test_telegram_supervisor import build, credential, replace_token
 
 from app.telegram_bots.adapter import TelegramBotChannel
 from app.telegram_bots.deployment import CopyGuard
@@ -670,7 +670,7 @@ async def test_false_decision_does_not_reopen_after_new_token_observations(db, m
         assert e.supervisor.send_allowed()
         mode[0] = "conflict"
         for link in links:
-            await e.supervisor.replace_token(await db.links.get(link.id), str(link.bot_id) + ":" + secrets.token_urlsafe(30), actor_id=link.owner_user_id)
+            await replace_token(e, await db.links.get(link.id), str(link.bot_id) + ":" + secrets.token_urlsafe(30))
         await poll_results(e, links)
         assert e.supervisor.copy_guard.broad_conflict(e.supervisor._startup_links, e.supervisor._copy_results())
         assert e.supervisor._copy_task is decision_task and decision_task.done()

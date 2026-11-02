@@ -376,20 +376,3 @@ class ThreadCoordinator:
         if self._stop_task is None or self._stop_task.done() and not self._stopped:
             self._stop_task = asyncio.create_task(self._finish_stop(), name="telegram-thread-preparation-cleanup")
         await asyncio.shield(self._stop_task)
-
-
-def _coordinator() -> ThreadCoordinator:
-    from app.telegram_bots.supervisor import current
-
-    supervisor = current()
-    if supervisor is None or supervisor.threads is None:
-        raise RuntimeError("thread-preparation-unavailable")
-    return supervisor.threads
-
-
-async def ensure_thread(link, inbound, *, origin) -> str:
-    return await _coordinator().ensure_thread(link, inbound, origin=origin)
-
-
-async def new_conversation(link, *, origin) -> str:
-    return await _coordinator().new_conversation(link, origin=origin)

@@ -147,13 +147,13 @@ class PendingFiles:
         self.config = config or TelegramBotsConfig()
         self.clock = clock or (lambda: datetime.now(UTC))
 
-    async def add(self, link, row, file, *, agent_file_path=None, guard=None, session=None):
+    async def add(self, link, row, file, *, guard=None, session=None):
         from copy import deepcopy
 
         from app.telegram_bots.inbox import InboxRow, chat_input_parts
         from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow, TelegramPendingFileRow
 
-        if type(file) is not dict or agent_file_path is not None and (type(agent_file_path) is not str or not agent_file_path or len(agent_file_path) > 1024):
+        if type(file) is not dict:
             raise ValueError("pending-file-conflict") from None
         file = deepcopy(file)
         guard = guard or self.guard_factory(link)
@@ -189,7 +189,7 @@ class PendingFiles:
                     "mime_type": file["mime_type"],
                     "size": -1 if file["size"] is None else file["size"],
                     "is_image": file["type"] == "image",
-                    "agent_file_path": agent_file_path,
+                    "agent_file_path": None,
                 }
                 existing = await writer.get(TelegramPendingFileRow, (link.id, mark.message_id), with_for_update=True, populate_existing=True)
                 if existing is not None:

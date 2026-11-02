@@ -1283,20 +1283,21 @@ async def test_lost_dispatch_result_observes_and_stops_original_run_without_seco
                 received.append(message.metadata["channel_turn_id"])
                 e.bus.inbound_task_done()
             context = messages[-1].execution_context
+            stream = context.client.runs.stream(
+                context.thread_id,
+                context.assistant_id,
+                input={"messages": [{"type": "human", "content": messages[-1].text}]},
+                config={},
+                context={},
+                metadata={"channel_turn_id": context.publication_id},
+                multitask_strategy="reject",
+                channel_execution={"version": 1, "publication_id": context.publication_id},
+                on_disconnect="continue",
+                on_completion=None,
+                headers={"Idempotency-Key": context.publication_id},
+            )
             try:
-                await context.client.runs.wait(
-                    context.thread_id,
-                    context.assistant_id,
-                    input={"messages": [{"type": "human", "content": messages[-1].text}]},
-                    config={},
-                    context={},
-                    metadata={"channel_turn_id": context.publication_id},
-                    multitask_strategy="reject",
-                    channel_execution={"version": 1, "publication_id": context.publication_id},
-                    on_disconnect="continue",
-                    on_completion=None,
-                    headers={"Idempotency-Key": context.publication_id},
-                )
+                await anext(stream)
             except ChannelExecutionBusyError as error:
                 await context.admission.authorize("run_read")
                 proof = capture_creation_refusal(context, error)
@@ -1309,6 +1310,8 @@ async def test_lost_dispatch_result_observes_and_stops_original_run_without_seco
                 )
             else:
                 raise AssertionError("The actual captured facade must reject the creating request with typed busy")
+            finally:
+                await stream.aclose()
             dispatched.set()
             return result
         dispatched.set()
@@ -1323,7 +1326,7 @@ async def test_lost_dispatch_result_observes_and_stops_original_run_without_seco
             return httpx.Response(202)
         if request.url.path.endswith("/join"):
             return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, content=b"")
-        if refusal_case and request.method == "POST" and request.url.path.endswith("/runs/wait"):
+        if refusal_case and request.method == "POST" and request.url.path.endswith("/runs/stream"):
             return httpx.Response(409, json={"detail": {"code": CHANNEL_EXECUTION_BUSY_CODE}})
         if len(captured) > 1 and request.method == "GET" and request.headers.get("idempotency-key") == captured[-1].publication_id:
             observed_current.set()

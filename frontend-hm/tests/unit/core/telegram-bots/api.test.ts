@@ -110,7 +110,6 @@ describe("the telegram api", () => {
         own: true,
         agent_name: "Maya",
         link_id: "link",
-        execution_reason: "operator-hold",
       }),
     );
     const refusal = (await listTelegramBots().catch(
@@ -125,7 +124,6 @@ describe("the telegram api", () => {
       own: true,
       agent_name: "Maya",
       link_id: "link",
-      execution_reason: "operator-hold",
     });
   });
 
@@ -137,7 +135,6 @@ describe("the telegram api", () => {
         own: "yes",
         agent_name: 2,
         link_id: {},
-        execution_reason: false,
       }),
     );
     const refusal = (await listTelegramBots().catch(
@@ -147,7 +144,6 @@ describe("the telegram api", () => {
     expect(refusal.own).toBeUndefined();
     expect(refusal.agent_name).toBeNull();
     expect(refusal.link_id).toBeNull();
-    expect(refusal.execution_reason).toBeUndefined();
     expect(telegramRefusalKey(refusal)).toBe("refusal.inUseOther");
   });
 

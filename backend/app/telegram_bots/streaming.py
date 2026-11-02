@@ -113,7 +113,7 @@ class LivePresentation:
         return self.mode == "draft" and self.started and self._current() and type(chat_id) is int and chat_id == self.link.chat_id and type(draft_id) is int and draft_id == self.draft_id
 
     def _render(self, raw):
-        html = to_html(raw, partial=True).html if raw else ""
+        html = to_html(raw).html if raw else ""
         if self._activity:
             line = "<i>" + self._activity + "</i>"
             budget = 4096 - utf16_units(visible_text(self._activity)) - (1 if html else 0)
@@ -122,12 +122,12 @@ class LivePresentation:
 
     def _fit(self, start, end, raw):
         limit = 4096 - utf16_units(visible_text(self._activity)) - (1 if self._activity else 0)
-        units = utf16_units(to_html(raw, partial=True).plain)
+        units = utf16_units(to_html(raw).plain)
         while units > limit and raw:
             # In proportion: a labelled table renders longer than its source, so a fixed step shows rows and takes them back.
             raw = raw[: min(len(raw) - 1, len(raw) * limit // units)]
             end = start + len(raw)
-            units = utf16_units(to_html(raw, partial=True).plain)
+            units = utf16_units(to_html(raw).plain)
         return start, end, raw
 
     def _shown(self, preview, *, start, end, part_id, index, message_id=None):
@@ -243,7 +243,7 @@ class LivePresentation:
         begin, end, value = slices[0] if slices else (start, start, "")
         begin, end, value = self._fit(begin, end, value)
         final_part = len(slices) > 1
-        html = self._render(value) if not final_part else to_html(value, partial=True).html
+        html = self._render(value) if not final_part else to_html(value).html
         if not html:
             return
         if html == self._last_html and not final_part:

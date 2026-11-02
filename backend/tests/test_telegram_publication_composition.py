@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
-from _run_output_store_test_support import RAW_OWNER
+from _telegram_ingress_test_support import install_live_owner
 from _telegram_repository_test_support import code_of, rows, welcome
 from _telegram_repository_test_support import db as db
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
@@ -21,6 +21,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from telegram import Chat, Message, Update, User
 from test_telegram_publication_custody import publication_environment as publication_environment
+from test_telegram_publication_primary import verified
 
 from app.gateway.channel_execution import ChannelExecutionReceipt
 from app.gateway.run_output import RunOutputProjection
@@ -47,15 +48,16 @@ LONG_SDK_ID = "provider-message-" + "opaque-identity-" * 32
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sdk_id", ["sdk-message", LONG_SDK_ID], ids=["short-id", "long-id"])
 async def test_genuine_worker_assistant_id_survives_primary_planning(db, monkeypatch, sdk_id):
-    await db.settings.ensure(RAW_OWNER, timezone="UTC", locale="en-US")
+    live = await install_live_owner(db, monkeypatch)
+    await db.settings.ensure(live.id, timezone="UTC", locale="en-US")
     link = await db.links.add(
-        owner_user_id=RAW_OWNER,
+        owner_user_id=live.id,
         agent_kind="lead_agent",
         agent_ref="lead_agent",
         bot_id=9_000_000_001,
         bot_username="fixture_publication_bot",
         encrypted_token="wrapped-fixture-publication",
-        actor_id=RAW_OWNER,
+        actor_id=live.id,
     )
     code = code_of(await db.links.mint_code(link))
     link = await db.links.bind(
@@ -72,18 +74,17 @@ async def test_genuine_worker_assistant_id_survives_primary_planning(db, monkeyp
     update = Update(202, message=Message(102, link.created_at, Chat(link.chat_id, "private"), from_user=User(link.telegram_user_id, "Fixture", False), text="Original SDK question"))
     mark, _ = await inbox.accept(link, update, sanitized_input={"text": update.message.text})
     mark = await inbox.route(mark, kind="turn", target_id=link.agent_ref, basis={"kind": link.agent_kind, "target": link.agent_ref}, operation_ids=[])
-    turn_id, thread_id = uuid4().hex, uuid4().hex
-    await inbox.bind_turn([mark], turn_id=turn_id, thread_id=thread_id)
-    mark, _ = await inbox.accept(link, update, sanitized_input={"text": "ignored redelivery"})
-    publication_id = mark.route_basis["current_publication_id"]
+    thread_id = uuid4().hex
+    guard = db.links.publication_guard(link, check_live_owner=await live.authority.prepare_live_owner(live.id), check_attempt_current=lambda: True)
+    record = await inbox.reserve_publication(link, [mark], thread_id=thread_id, endpoint_id="e" * 64, guard=guard)
+    assert await inbox.mark_dispatch_started(record, guard=guard) is True
 
-    async with captured_projection(db, monkeypatch, link=link, thread_id=thread_id, publication_id=publication_id, sdk_id=sdk_id, input_text=update.message.text) as projection:
-        await inbox.bind_run(turn_id=turn_id, publication_id=publication_id, run_id=projection.run_id)
+    async with captured_projection(db, monkeypatch, link=link, thread_id=thread_id, publication_id=record.publication_id, sdk_id=sdk_id, input_text=update.message.text) as projection:
+        bound = await inbox.bind_publication_run(record, run_id=projection.run_id, guard=guard)
         outbox = Outbox(db.sessions, inbox=inbox)
         before_ids = {row.id for row in await rows(db, TelegramOutboxRow)}
-        source = {"thread_id": thread_id, "run_id": projection.run_id, "publication_id": publication_id, "assistant_message_id": projection.output_evidence.assistant_message_id}
         try:
-            identity = await outbox.plan_reply(link, turn_id=turn_id, source=source, parts=[{"kind": "text", "source_ref": {key: source[key] for key in ("thread_id", "run_id", "assistant_message_id")}}], inbox_rows=[mark])
+            identity = await outbox.plan_verified_publication_reply(bound, output=verified(projection), guard=guard)
         except DBAPIError as error:
             # A capacity failure must roll back the primary and route together.
             assert db.dialect == "postgres" and getattr(error.orig, "sqlstate", None) == "22001"
@@ -166,8 +167,8 @@ async def test_managed_primary_consumes_actual_worker_proof_and_completes_origin
     async with captured_projection(e.db, monkeypatch, link=e.link, thread_id=e.thread_id, publication_id=record.publication_id, sdk_id=LONG_SDK_ID, input_text="\n".join(row.sanitized_input["text"] for row in e.origins)) as projection:
         bound = await e.inbox.bind_publication_run(record, run_id=projection.run_id, guard=guard)
         outbox = Outbox(e.sessions, inbox=e.inbox)
-        identity = await outbox.plan_publication_reply(bound, output=projection, guard=guard)
-        assert await outbox.plan_publication_reply(record, output=projection, guard=guard) == identity
+        identity = await outbox.plan_verified_publication_reply(bound, output=verified(projection), guard=guard)
+        assert await outbox.plan_verified_publication_reply(record, output=verified(projection), guard=guard) == identity
         saved = [row for row in await rows(e.db, TelegramInboundMarkRow) if row.turn_id == record.turn_id]
         assert len(saved) == len(record.origins) == 2
         assert all(row.assistant_message_id == LONG_SDK_ID and row.outbox_id == identity and row.route_complete and row.state == "reply_pending" for row in saved)

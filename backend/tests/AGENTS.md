@@ -68,8 +68,8 @@ assistant-message ID to Text. Exercise actual legal long SDK IDs through worker
 events/sealing and primary planning on both dialects, old-to-new migration and a
 downgrade refusal before DDL when longer IDs are retained.
 
-Presentation tests use explicit route-table expectations, both locale catalogs,
-UTF-16 boundaries and canonical preview reconstruction. Provider tests use fake
+Presentation tests use explicit route-table expectations, both locale catalogs
+and UTF-16 boundaries. Provider tests use fake
 clients or actual SDKs over socket-free mock transports, including timeout,
 cancellation, endpoint/key capture and context-scoped payload-log suppression.
 Keep recorded credentials synthetic and test artifacts on disk.
@@ -78,7 +78,7 @@ Ingress tests run the real Application and recorded SDK through the ordered gate
 Prove swallowed handler/SQL failures retain PollTask's suffix, while fixed replies
 commit their route and delivery before acknowledgment. Token/stranger input must
 reach no inbox, hash, bus or file consumer. Ledger churn, removal/re-add and
-rotation retain bounded unexpired allowances independently of LRU recency.
+rotation retain bounded unexpired allowances.
 Bind/unblock tests use fresh derived account access and exact captured SQL scope.
 URL fallback tests retain part/source/claim identity, compose with plain fallback
 and preserve unrelated 429/pacing floors through reconnect.

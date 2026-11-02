@@ -22,8 +22,8 @@ Texts live under `telegramBots` as dotted keys, and `telegramText` resolves them
 text that says whom to ask takes the reader's role, because no text sends a user to
 the provider.
 
-`TOKEN_BODY`, `pictureOf`, `displayNameOf` and `suggestUsername` mirror server rules
-and are pinned on both sides.
+`TOKEN_BODY`, `pictureOf` and `displayNameOf` mirror server rules and are pinned on
+both sides.
 
 Tokens: keep the two calls that carry a token as plain `api.ts` calls, never
 mutations, because the query library would keep the token as its variables. Call

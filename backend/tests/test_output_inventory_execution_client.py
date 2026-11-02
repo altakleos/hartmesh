@@ -5,9 +5,8 @@ import json
 
 import httpx
 import pytest
-from test_channel_execution_client import PUBLICATION, Admission, creating
+from test_channel_execution_client import PUBLICATION, Admission, answered, create
 from test_channel_execution_output import projection
-from test_channel_http_owner import RecordingStream
 from test_output_inventory import inventory_document
 
 from app.channels.execution import ChannelExecutionProtocolError, ChannelExecutionScope
@@ -36,26 +35,12 @@ def client_for(respond, *, capture_inventory=True, capture_output=True):
     return client, owner, admission
 
 
-@pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("inventory", [False, True])
-async def test_mode_controls_detached_creating_intent_and_never_retries(streaming, inventory):
+async def test_mode_controls_detached_creating_intent_and_never_retries(inventory):
     calls = []
-    response = RecordingStream(block=False)
-
-    def respond(request):
-        calls.append(request)
-        return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, stream=response) if streaming else httpx.Response(200, json={})
-
-    client, owner, _ = client_for(respond, capture_inventory=inventory)
+    client, owner, _ = client_for(lambda request: calls.append(request) or answered(), capture_inventory=inventory)
     try:
-        if streaming:
-            stream = client.runs.stream("thread", "lead_agent", **creating())
-            try:
-                await anext(stream)
-            finally:
-                await stream.aclose()
-        else:
-            await client.runs.wait("thread", "lead_agent", **creating())
+        await create(client)
         assert len(calls) == 1 and calls[0].method == "POST"
         assert json.loads(calls[0].content)["output_capture"] == {"version": 2 if inventory else 1}
     finally:
@@ -121,7 +106,7 @@ async def test_refused_v2_creating_call_has_no_downgrade(status):
     client, owner, _ = client_for(lambda request: calls.append(request) or httpx.Response(status, json={"detail": "unsupported"}))
     try:
         with pytest.raises(ChannelExecutionProtocolError):
-            await client.runs.wait("thread", "lead_agent", **creating())
+            await create(client)
         assert len(calls) == 1 and json.loads(calls[0].content)["output_capture"] == {"version": 2}
     finally:
         await owner.stop()

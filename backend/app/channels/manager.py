@@ -13,7 +13,6 @@ import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import contextmanager
-from copy import deepcopy
 from dataclasses import dataclass, replace
 from html import escape
 from pathlib import Path
@@ -664,22 +663,10 @@ def _has_current_turn_clarification(result: dict | list) -> bool:
     return False
 
 
-TURN_ARTIFACTS_MAX = 8
-
-
-def _current_turn_artifacts(result: dict | list) -> list[dict[str, Any]]:
-    found = [message["artifact"] for message in _current_turn_messages(result) if message.get("type") == "tool" and isinstance(message.get("artifact"), dict)]
-    selected = found if len(found) <= TURN_ARTIFACTS_MAX else [*found[: TURN_ARTIFACTS_MAX - 1], found[-1]]
-    return deepcopy(selected)
-
-
-def _response_metadata(base_metadata: dict[str, Any], *, pending_clarification: bool = False, turn_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def _response_metadata(base_metadata: dict[str, Any], *, pending_clarification: bool = False) -> dict[str, Any]:
     metadata = _slim_metadata(base_metadata)
-    metadata.pop("turn_artifacts", None)
     if pending_clarification:
         metadata[PENDING_CLARIFICATION_METADATA_KEY] = True
-    if turn_artifacts:
-        metadata["turn_artifacts"] = deepcopy(turn_artifacts)
     return metadata
 
 
@@ -961,7 +948,7 @@ def _capture_execution(msg: InboundMessage) -> ChannelExecutionContext | None:
     if (msg.owner_user_id, msg.connection_id, msg.chat_id) != (context.owner_user_id, context.connection_id, context.chat_id):
         raise ChannelExecutionProtocolError()
     try:
-        methods = (context.admission.authorize, context.admission.current, context.client.threads.get, context.client.runs.wait, context.client.runs.stream)
+        methods = (context.admission.authorize, context.admission.current, context.client.threads.get, context.client.runs.stream)
         if not all(callable(method) for method in methods) or inspect.iscoroutinefunction(context.client.runs.stream):
             raise ChannelExecutionProtocolError()
     except Exception:
@@ -2941,7 +2928,7 @@ class ChannelManager:
             thread_ts=msg.thread_ts,
             connection_id=msg.connection_id,
             owner_user_id=msg.owner_user_id,
-            metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification, turn_artifacts=_current_turn_artifacts(result)),
+            metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, %s", msg.channel_name, chat_in_log(msg))
         await self.bus.publish_outbound(outbound)
@@ -3074,7 +3061,7 @@ class ChannelManager:
                     thread_ts=msg.thread_ts,
                     connection_id=msg.connection_id,
                     owner_user_id=msg.owner_user_id,
-                    metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification, turn_artifacts=_current_turn_artifacts(result)),
+                    metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
                 )
             )
             if stream_error is not None:

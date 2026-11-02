@@ -1,7 +1,7 @@
 """Single-owner polling with durable admission and captured-token fencing.
 
-No task is started by this module. The future supervisor owns lifecycle/death
-policy; expected Telegram failures stay local and product exceptions escape.
+No task is started by this module. The supervisor owns lifecycle/death policy;
+expected Telegram failures stay local and product exceptions escape.
 """
 
 from __future__ import annotations

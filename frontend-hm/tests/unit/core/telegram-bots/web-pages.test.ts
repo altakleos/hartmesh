@@ -3,7 +3,6 @@ import { describe, expect, it } from "@rstest/core";
 import {
   type AgentTarget,
   isWebPageKey,
-  parseTelegramTarget,
   serverTargetOf,
   telegramTargetOf,
   webPageHref,
@@ -18,7 +17,7 @@ const targets: AgentTarget[] = [
 ];
 
 describe("telegram targets", () => {
-  it("a target is written and read back, and holds no colon", () => {
+  it("a target is written with no colon", () => {
     expect(targets.map(telegramTargetOf)).toEqual([
       "chat",
       "custom_agent.research-helper",
@@ -27,27 +26,6 @@ describe("telegram targets", () => {
     expect(targets.some((item) => telegramTargetOf(item).includes(":"))).toBe(
       false,
     );
-    expect(parseTelegramTarget("chat")).toEqual({ kind: "chat" });
-    expect(parseTelegramTarget("custom_agent.research-helper")).toEqual({
-      kind: "custom_agent",
-      name: "research-helper",
-    });
-    expect(parseTelegramTarget(`agent.${id}`)).toEqual({ kind: "agent", id });
-  });
-
-  it("a malformed value gives null", () => {
-    for (const value of [
-      null,
-      "",
-      "chats",
-      "custom_agent.",
-      "custom_agent.a b",
-      "custom_agent.a.b",
-      "agent.short",
-      `agent.${"z".repeat(32)}`,
-    ]) {
-      expect(parseTelegramTarget(value)).toBeNull();
-    }
   });
 
   it("names a target as the server does", () => {

@@ -456,7 +456,7 @@ class _Renderer:
         self.writer.gap()
 
 
-def to_html(text: str, *, partial: bool = False) -> Rendered:
+def to_html(text: str) -> Rendered:
     """Render complete or growing Markdown, always emitting balanced safe HTML.
 
     CommonMark already closes unfinished fences and retains unmatched emphasis

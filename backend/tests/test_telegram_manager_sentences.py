@@ -123,7 +123,7 @@ def test_only_the_original_opaque_creating_refusal_selects_thread_waiting():
 
 def test_every_selected_fixed_key_exists_in_both_catalogs_and_is_not_a_startup_claim():
     module = errors()
-    keys = set(module.RUN_STOP_REASONS.values()) | set(module.MANAGER_SENTENCES.values()) | {"error.generic", "busy.thread"}
+    keys = set(module.RUN_STOP_REASONS.values()) | {"error.generic", "busy.thread"}
     for locale in ["en", "zh-CN"]:
         assert keys <= catalog(locale).keys()
     assert module.RUN_STOP_REASONS["orphan_recovered"] == "refused.interrupted"
@@ -150,6 +150,5 @@ def test_upstream_literals_unchanged():
         tree = ast.parse(textwrap.dedent(inspect.getsource(getattr(manager.ChannelManager, name))))
         strings = [node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and type(node.value) is str]
         assert all(strings.count(sentence) == 1 for sentence in sentences), name
-    assert set(errors().MANAGER_SENTENCES) == set(expected.values()) | {sentence for sentences in inline.values() for sentence in sentences}
     assert manager._format_artifact_text(["/mnt/user-data/outputs/one.txt"]) == "Created File: 📎 one.txt"
     assert manager._format_artifact_text(["/mnt/user-data/outputs/one.txt", "/mnt/user-data/outputs/two.txt"]) == "Created Files: 📎 one.txt、two.txt"

@@ -2,8 +2,7 @@
 
 import asyncio
 import dataclasses
-import hashlib
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -13,6 +12,8 @@ from _telegram_repository_test_support import db as db
 from sqlalchemy import event, select, text, update
 from sqlalchemy.orm import Session
 from telegram import Chat, Message, Update, User
+from test_telegram_publication_custody import publication_environment as publication_environment
+from test_telegram_publication_primary import _primary, projection
 
 from app.telegram_bots.inbox import InboxRepository, InboxRow
 from app.telegram_bots.producer import Outbox
@@ -49,6 +50,17 @@ async def accepted(repo, link, *, message=102, update_id=202, topic=None, payloa
 async def routed(repo, link, *, message=102, update_id=202, topic=None, basis=None, payload=None, **kwargs):
     mark = await accepted(repo, link, message=message, update_id=update_id, topic=topic, payload=payload, **kwargs)
     return await repo.route(mark, kind="chat", target_id="original-thread", basis=basis or {"conversation_id": "original-thread"}, operation_ids=["a" * 32])
+
+
+async def turn_origin(e, *, message, update_id, basis=None, payload=None, **kwargs):
+    mark = (await e.inbox.accept(e.link, incoming(message=message, update_id=update_id, account=e.link.chat_id, **kwargs), sanitized_input=payload or {"text": "synthetic accepted text"}))[0]
+    return await e.inbox.route(mark, kind="turn", target_id=e.link.agent_ref, basis=basis or {"conversation_id": "original-thread"}, operation_ids=[])
+
+
+async def dispatched(db, marks):
+    """Leave marks as a reservation does; these tests are about the delivery that follows."""
+    async with db.sessions() as session, session.begin():
+        await session.execute(update(TelegramInboundMarkRow).where(TelegramInboundMarkRow.message_id.in_([mark.message_id for mark in marks])).values(turn_id="a" * 32, thread_id="original-thread", state="dispatched"))
 
 
 async def plan(db, link, *, state="pending", identity=None):
@@ -182,8 +194,14 @@ async def test_old_replay_returns_original_basis_without_reviving_an_ended_gener
     await db.links.unbind(link, actor_id=link.owner_user_id)
     replay, created = await repo.accept(link, incoming(), sanitized_input={"text": "new request"})
     assert replay == dataclasses.replace(mark, route_complete=True, state="done", closed_at=replay.closed_at) and created is False
-    with pytest.raises(ValueError, match="link-changed"):
-        await repo.bind_turn([replay], turn_id="a" * 32, thread_id="new-thread")
+    later = await plan(db, link)
+    session = await writer(db)
+    try:
+        with pytest.raises(ValueError, match="inbox-route-complete"):
+            await repo.register_delivery([replay], outbox_id=later, session=session)
+    finally:
+        await session.rollback()
+        await session.close()
 
 
 async def test_same_message_id_in_a_new_chat_preserves_both_tombstones(db):
@@ -255,34 +273,18 @@ async def test_immutable_basis_compares_json_types_without_conflating_true_and_o
         await repo.route(mark, kind="prompt", target_id="saved-prompt", basis={"revision": True}, operation_ids=[])
 
 
-async def test_group_basis_does_not_merge_json_boolean_with_numeric_revision(db):
-    repo, link = await setup(db)
-    first = await routed(repo, link, basis={"revision": 1})
-    second = await routed(repo, link, message=103, update_id=203, basis={"revision": True})
+async def test_group_basis_does_not_merge_json_boolean_with_numeric_revision(publication_environment):
+    e = publication_environment
+    first = await turn_origin(e, message=801, update_id=1801, basis={"revision": 1})
+    second = await turn_origin(e, message=802, update_id=1802, basis={"revision": True})
     with pytest.raises(ValueError, match="inbox-group-conflict"):
-        await repo.bind_turn([first, second], turn_id="a" * 32, thread_id="original-thread")
-
-
-async def test_bind_turn_persists_exact_group_and_initial_publication_before_dispatch(db):
-    repo, link = await setup(db)
-    first = await routed(repo, link)
-    second = await routed(repo, link, message=103, update_id=203)
-    await repo.bind_turn([first, second], turn_id="a" * 32, thread_id="original-thread")
-    publication = hashlib.sha256(("a" * 32 + ":m102").encode()).hexdigest()[:32]
-    saved = [(await repo.accept(link, incoming(message=m, update_id=u), sanitized_input={}))[0] for m, u in [(102, 202), (103, 203)]]
-    for mark in saved:
-        assert (mark.turn_id, mark.thread_id, mark.state) == ("a" * 32, "original-thread", "dispatched")
-        assert mark.route_basis == {"conversation_id": "original-thread", "current_publication_id": publication, "publications": [{"publication_id": publication, "event_id": "m102", "run_id": None}]}
-        assert mark.grouped_message_ids == ([103] if mark.message_id == 102 else [102])
-    await repo.bind_turn([first, second], turn_id="a" * 32, thread_id="original-thread")
-    with pytest.raises(ValueError, match="inbox-turn-conflict"):
-        await repo.bind_turn([first], turn_id="b" * 32, thread_id="later-thread")
+        await e.reserve((first, second))
 
 
 @pytest.mark.parametrize("difference", ["topic", "basis", "reply", "prompt", "album"])
-async def test_grouping_rejects_incompatible_captured_scope(db, difference):
-    repo, link = await setup(db)
-    first = await routed(repo, link)
+async def test_grouping_rejects_incompatible_captured_scope(publication_environment, difference):
+    e = publication_environment
+    first = await turn_origin(e, message=801, update_id=1801)
     kwargs = (
         {"topic": 99}
         if difference == "topic"
@@ -294,58 +296,10 @@ async def test_grouping_rejects_incompatible_captured_scope(db, difference):
         if difference == "prompt"
         else {"payload": {"text": "text", "media_group_id": "album-1"}, "album": "album-1"}
     )
-    second = await routed(repo, link, message=103, update_id=203, **kwargs)
+    second = await turn_origin(e, message=802, update_id=1802, **kwargs)
     with pytest.raises(ValueError, match="inbox-group-conflict"):
-        await repo.bind_turn([first, second], turn_id="a" * 32, thread_id="original-thread")
-    assert all(row.turn_id is None for row in await rows(db, TelegramInboundMarkRow))
-
-
-async def test_publication_retry_is_explicit_idempotent_and_fences_old_run_observers(db):
-    repo, link = await setup(db)
-    mark = await routed(repo, link)
-    turn = "a" * 32
-    await repo.bind_turn([mark], turn_id=turn, thread_id="original-thread")
-    first = hashlib.sha256((turn + ":m102").encode()).hexdigest()[:32]
-    await repo.bind_run(turn_id=turn, publication_id=first, run_id="run-one")
-    second = await repo.publish([mark], event_id="m102:r1", expected_publication_id=first)
-    assert second == hashlib.sha256((turn + ":m102:r1").encode()).hexdigest()[:32]
-    assert await repo.publish([mark], event_id="m102:r1", expected_publication_id=first) == second
-    assert (await repo.accept(link, incoming(), sanitized_input={}))[0].run_id is None
-    with pytest.raises(ValueError, match="inbox-publication-conflict"):
-        await repo.bind_run(turn_id=turn, publication_id=first, run_id="late-old-run")
-    with pytest.raises(ValueError, match="inbox-publication-conflict"):
-        await repo.publish([mark], event_id="m102:r2", expected_publication_id=first)
-    await repo.bind_run(turn_id=turn, publication_id=second, run_id="run-two")
-    saved = (await repo.accept(link, incoming(), sanitized_input={}))[0]
-    assert saved.run_id == "run-two" and saved.thread_id == "original-thread"
-    assert [p["run_id"] for p in saved.route_basis["publications"]] == ["run-one", "run-two"]
-    with pytest.raises(ValueError, match="inbox-run-conflict"):
-        await repo.bind_run(turn_id=turn, publication_id=second, run_id="unrelated-run")
-
-
-async def test_retry_event_sequence_and_interrupted_turn_cannot_be_overridden(db):
-    repo, link = await setup(db)
-    mark = await routed(repo, link)
-    await repo.bind_turn([mark], turn_id="a" * 32, thread_id="original-thread")
-    initial = hashlib.sha256(("a" * 32 + ":m102").encode()).hexdigest()[:32]
-    for event_id in ("m102:r2", "m999:r1", "cother-callback"):
-        with pytest.raises(ValueError, match="inbox-publication-conflict"):
-            await repo.publish([mark], event_id=event_id, expected_publication_id=initial)
-    async with db.sessions() as session, session.begin():
-        await session.execute(update(TelegramInboundMarkRow).where(TelegramInboundMarkRow.message_id == 102).values(state="interrupted"))
-    with pytest.raises(ValueError, match="inbox-route-complete"):
-        await repo.publish([mark], event_id="m102:r1", expected_publication_id=initial)
-
-
-async def test_joined_group_cannot_be_extended_or_partially_republished(db):
-    repo, link = await setup(db)
-    first, second, third = [await routed(repo, link, message=102 + n, update_id=202 + n) for n in range(3)]
-    await repo.bind_turn([first, second], turn_id="a" * 32, thread_id="original-thread")
-    with pytest.raises(ValueError, match="inbox-turn-conflict"):
-        await repo.bind_turn([first, second, third], turn_id="a" * 32, thread_id="original-thread")
-    initial = hashlib.sha256(("a" * 32 + ":m102").encode()).hexdigest()[:32]
-    with pytest.raises(ValueError, match="inbox-group-conflict"):
-        await repo.publish([first], event_id="m102:r1", expected_publication_id=initial)
+        await e.reserve((first, second))
+    assert all(row.turn_id is None for row in await rows(e.db, TelegramInboundMarkRow))
 
 
 async def test_finish_waits_for_every_delivery_and_failed_delivery_stays_unresolved(db):
@@ -399,15 +353,15 @@ async def test_empty_route_finishes_but_dispatched_model_needs_its_final_plan(db
     await repo.finish_route(finished)
     assert (await repo.accept(link, incoming(), sanitized_input={}))[0].state == "done"
     pending = await routed(repo, link, message=103, update_id=203)
-    await repo.bind_turn([pending], turn_id="a" * 32, thread_id="original-thread")
+    await dispatched(db, [pending])
     with pytest.raises(ValueError, match="inbox-route-unfinished"):
         await repo.finish_route(pending)
 
 
-async def test_final_registration_seals_all_joined_sources_and_prevents_republication(db):
+async def test_final_registration_seals_all_joined_sources_and_takes_no_later_delivery(db):
     repo, link = await setup(db)
     marks = [await routed(repo, link, message=102 + n, update_id=202 + n) for n in range(2)]
-    await repo.bind_turn(marks, turn_id="a" * 32, thread_id="original-thread")
+    await dispatched(db, marks)
     delivery = await plan(db, link, state="sent")
     session = await writer(db)
     try:
@@ -418,10 +372,14 @@ async def test_final_registration_seals_all_joined_sources_and_prevents_republic
     finally:
         await session.close()
     assert all(mark.state == "done" and mark.route_complete and mark.outbox_id == delivery for mark in await rows(db, TelegramInboundMarkRow) if mark.message_id in (102, 103))
-    with pytest.raises(ValueError, match="inbox-route-complete"):
-        await repo.bind_turn(marks, turn_id="a" * 32, thread_id="original-thread")
-    with pytest.raises(ValueError, match="inbox-route-complete"):
-        await repo.publish(marks, event_id="m102:r1", expected_publication_id=hashlib.sha256(("a" * 32 + ":m102").encode()).hexdigest()[:32])
+    later = await plan(db, link, state="sent")
+    session = await writer(db)
+    try:
+        with pytest.raises(ValueError, match="inbox-route-complete"):
+            await repo.register_delivery(marks, outbox_id=later, session=session)
+    finally:
+        await session.rollback()
+        await session.close()
 
 
 async def test_borrowed_registration_and_finish_are_rollback_safe_and_never_commit(db, monkeypatch):
@@ -559,66 +517,54 @@ async def test_delivery_topic_fallback_settles_without_rewriting_captured_source
 
 
 @pytest.mark.parametrize("settled", [False, True])
-async def test_plan_reply_replay_reuses_attached_delivery_after_authorized_topic_relocation(db, settled):
-    repo, link = await setup(db)
-    mark = await routed(repo, link, topic=99)
-    turn_id = "a" * 32
-    await repo.bind_turn([mark], turn_id=turn_id, thread_id="original-thread")
-    current = (await repo.accept(link, incoming(topic=99), sanitized_input={}))[0]
-    publication_id = current.route_basis["current_publication_id"]
-    await repo.bind_run(turn_id=turn_id, publication_id=publication_id, run_id="original-run")
-    source = {"thread_id": "original-thread", "run_id": "original-run", "publication_id": publication_id, "assistant_message_id": "exact-assistant"}
-    parts = [{"kind": "text", "source_ref": {"key": "chat.restarted", "values": {"product": "HartMesh"}}}]
-    outbox = Outbox(db.sessions, inbox=repo)
-    delivery = await outbox.plan_reply(link, turn_id=turn_id, source=source, parts=parts, inbox_rows=[mark])
+async def test_primary_replay_reuses_attached_delivery_after_authorized_topic_relocation(publication_environment, settled):
+    e = publication_environment
+    origin = await turn_origin(e, message=801, update_id=1801, topic=99)
+    record = await e.reserve((origin,))
+    assert await e.inbox.mark_dispatch_started(record, guard=e.guard_factory()) is True
+    await e.inbox.bind_publication_run(record, run_id="managed-primary-run", guard=e.guard_factory())
+    output = projection(record)
+    outbox = Outbox(e.sessions, inbox=e.inbox)
+    delivery = await outbox.plan_verified_publication_reply(record, output=output, guard=e.guard_factory())
+    parts = (await _primary(e.db, delivery)).parts
     claim_owner, claim_id = uuid4().hex, uuid4().hex
-    session = await writer(db)
+    session = await writer(e.db)
     try:
         await session.execute(update(TelegramOutboxRow).where(TelegramOutboxRow.id == delivery).values(state="sending", claim_owner=claim_owner, claim_id=claim_id, claimed_at=NOW))
         await session.commit()
     finally:
         await session.close()
-    await outbox.replace_presentation(link, delivery, expected_version=0, claim_owner=claim_owner, claim_id=claim_id, reason="topic-missing", parts=parts, message_thread_id=None)
+    await outbox.replace_presentation(e.link, delivery, expected_version=0, claim_owner=claim_owner, claim_id=claim_id, reason="topic-missing", parts=parts, message_thread_id=None)
     if settled:
-        session = await writer(db)
+        session = await writer(e.db)
         try:
             await session.execute(update(TelegramOutboxRow).where(TelegramOutboxRow.id == delivery).values(state="sent"))
-            await repo.settle_deliveries(link_id=link.id, session=session)
+            await e.inbox.settle_deliveries(link_id=e.link.id, session=session)
             await session.commit()
         finally:
             await session.close()
-    before = (await repo.accept(link, incoming(topic=99), sanitized_input={}))[0]
-    saved = next(row for row in await rows(db, TelegramOutboxRow) if row.id == delivery)
+    replayed = incoming(message=801, update_id=1801, account=e.link.chat_id, topic=99)
+    before = (await e.inbox.accept(e.link, replayed, sanitized_input={}))[0]
+    saved = await _primary(e.db, delivery)
     assert saved.message_thread_id is None and saved.payload["replacement_reason"] == "topic-missing" and saved.payload["presentation_version"] == 1
     original_part_ids = [part["part_id"] for part in saved.parts]
-    assert await outbox.plan_reply(link, turn_id=turn_id, source=source, parts=parts, inbox_rows=[mark]) == delivery
-    after = (await repo.accept(link, incoming(topic=99), sanitized_input={}))[0]
+    assert await outbox.plan_verified_publication_reply(record, output=output, guard=e.guard_factory()) == delivery
+    after = (await e.inbox.accept(e.link, replayed, sanitized_input={}))[0]
     assert after == before
     assert after.message_thread_id == 99 and after.delivery_ids == [delivery] and after.outbox_id == delivery
     assert after.state == ("done" if settled else "reply_pending")
-    assert len(await rows(db, TelegramOutboxRow)) == 2
-    saved = next(row for row in await rows(db, TelegramOutboxRow) if row.id == delivery)
+    assert len(await rows(e.db, TelegramOutboxRow)) == 2
+    saved = await _primary(e.db, delivery)
     assert saved.message_thread_id is None and [part["part_id"] for part in saved.parts] == original_part_ids
-    for foreign_scope in ({"binding_generation": link.binding_generation + 1}, {"chat_id": ACCOUNT + 1}, {"owner_user_id": "other-owner"}):
-        session = await writer(db)
+    for foreign_scope in ({"binding_generation": e.link.binding_generation + 1}, {"chat_id": ACCOUNT + 1}, {"owner_user_id": "other-owner"}):
+        session = await writer(e.db)
         try:
             await session.execute(update(TelegramOutboxRow).where(TelegramOutboxRow.id == delivery).values(**foreign_scope))
             with pytest.raises(ValueError, match="inbox-delivery-conflict"):
-                await repo.register_delivery([mark], outbox_id=delivery, primary=True, finish=True, session=session)
+                await e.inbox.register_delivery([origin], outbox_id=delivery, primary=True, finish=True, session=session)
         finally:
             await session.rollback()
             await session.close()
-
-
-async def test_leftovers_keep_all_unfinished_ages_and_preserve_original_thread(db):
-    repo, link = await setup(db)
-    old = await routed(repo, link)
-    await repo.bind_turn([old], turn_id="a" * 32, thread_id="original-thread")
-    async with db.sessions() as session, session.begin():
-        await session.execute(update(TelegramInboundMarkRow).where(TelegramInboundMarkRow.message_id == 102).values(accepted_at=NOW - timedelta(days=20)))
-    saved = await repo.leftovers(before=NOW)
-    assert len(saved) == 1 and saved[0].message_id == old.message_id and saved[0].thread_id == "original-thread"
-    assert await repo.leftovers(before=NOW - timedelta(days=30)) == []
 
 
 async def test_writer_locks_parent_before_reading_inbox_and_sqlite_reserves_before_any_read(db):

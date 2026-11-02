@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.telegram_bots import authority
-from app.telegram_bots.render import render, render_plain, render_preview
+from app.telegram_bots.render import render, render_plain
 
 
 @pytest.mark.parametrize("locale,administrator", [("en", "an administrator"), ("zh-CN", "管理员")])
@@ -85,20 +85,6 @@ async def test_administrator_lookup_reads_current_account_and_role_limit(monkeyp
     assert all(call.args == ("owner",) for call in provider.get_user.await_args_list)
 
 
-def test_preview_plan_captures_immutable_basis_and_rejects_invalid_receipts():
-    basis = {"revision": 2, "nested": {"notes": ["canonical"]}}
-    plan = render_preview("clarify.options", "en", heading="Question", basis=basis, silent=True, text="hello")
-    basis["nested"]["notes"].append("changed")
-    assert plan.basis["nested"]["notes"] == ("canonical",)
-    with pytest.raises(TypeError):
-        plan.basis["revision"] = 3
-    assert plan.next_part(()).silent
-    with pytest.raises(ValueError):
-        plan.next_part((0,))
-    with pytest.raises(ValueError):
-        plan.next_part((1, 1))
-
-
 def test_forms_support_reader_custody_supervisor_and_topics_without_later_catalog_keys(monkeypatch):
     import app.telegram_bots.render as module
 
@@ -145,24 +131,3 @@ def test_delivery_failure_catalog_keeps_exact_sentences_and_renderer_only_adds_l
     assert catalog("en")["delivery.failed"] == english
     assert render("delivery.failed", "en").replace("\n", " ") == english
     assert render("delivery.failed", "zh-CN").replace("\n", "") == catalog("zh-CN")["delivery.failed"]
-
-
-def test_preview_keeps_all_canonical_field_types_and_escapes_values(monkeypatch):
-    import app.telegram_bots.render as module
-    from app.telegram_bots.split import visible_text
-
-    field_names = ("objective_full", "success_criteria", "question", "options", "decision", "note", "evidence", "report", "comments")
-    template = "\n".join("{" + name + "}" for name in field_names)
-    original_catalog = module.catalog
-    monkeypatch.setattr(module, "catalog", lambda locale: original_catalog(locale) | {"test.canonical": template})
-    fields = {name: name + " 😀 <&> " * 500 for name in field_names}
-    plan = render_preview("test.canonical", "en", heading="Review\nextra heading", basis={"version": 3}, **fields)
-    assert "".join(visible_text(part).split("\n", 1)[1] for part in plan.parts) == "\n".join(fields.values())
-    assert all("&lt;&amp;&gt;" in part for part in plan.parts)
-    assert all("extra heading" not in part for part in plan.parts)
-
-
-@pytest.mark.parametrize("bad_text", ["", "   ", "\n"])
-def test_blank_preview_is_refused_before_any_controls_exist(bad_text):
-    with pytest.raises(ValueError):
-        render_preview("clarify.options", "en", heading="Question", basis={}, text=bad_text)

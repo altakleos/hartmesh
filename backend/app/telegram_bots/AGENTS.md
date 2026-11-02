@@ -16,8 +16,7 @@ Product text lives in `texts/` in English and Chinese; keep stage-one keys equal
 and copy English wording from the design. `render` escapes values; `render_plain`
 preserves them for plain labels/alerts. `markdown` accepts only Telegram markup,
 and `split` counts visible UTF-16 units while retaining balanced tags and complete
-canonical content. Preview rendering is presentation only: durable receipts,
-callback authority and execution gating belong to their owning writers.
+canonical content.
 `KEYBOARDS` supplies fixed, closed descriptions for current settings, help and
 new-conversation controls. `callbacks.py` owns canonical layout, saved authority,
 group adoption and prompt scope. Callback data carries only `h1:<random row id>`;
@@ -316,7 +315,7 @@ after its final awaited authority read. Flush mutations before that final guard;
 only commit follows. Keep link/custody -> primary outbox -> sorted inbox order.
 Borrowed publication lookup returns a fresh record and detached complete rows.
 Owned SQL units retain execute/fetch/commit/rollback/exit through cancellation.
-`plan_publication_reply` and closed fixed notices share `reply:<turn_id>` and
+`plan_verified_publication_reply` and closed fixed notices share `reply:<turn_id>` and
 atomic route sealing. Exact canonical proof/presentation replay retains actual
 part acknowledgements; changed plans refuse. Frozen visible-text ranges use
 codepoints, while Telegram chunk limits use UTF-16.
@@ -335,7 +334,8 @@ Owned reserve/marker/bind and verified-primary operations invoke optional public
 `prepare_publication_guard` after codecs, immediately before opening their writer;
 borrowed checks retain same-engine account/custody and no provider work. This is a
 point-in-time policy fence, not cross-system policy atomicity. V2 primary bases
-retain both proofs, inventory and frozen presentation; V1 is never adopted as V2.
+retain both proofs, inventory and frozen presentation; another saved basis is
+never adopted.
 The existing sender borrows `ModelSource` and rereads every unsent model part.
 Part shape cannot turn a model basis into a fixed source. Unknown/nonempty output
 stays held. Phase one closes creating/sending but retains authorized final reads

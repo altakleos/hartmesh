@@ -271,16 +271,10 @@ class CallbackCommands:
                 if selected.kind == "web_list":
                     key, values = "web.list", {"product": self.services.product_name}
                     part = {"kind": "text", "source_ref": {"key": key, "values": values}, "reply_to_message_id": row.message_id}
-                elif selected.kind == "dismiss":
-                    parent = await writer.get(TelegramOutboxRow, group.anchor_outbox_id)
-                    source = parent.payload["product_basis"]["parts"][-1]["source_ref"]
-                    part = {"kind": "edit", "target_message_id": row.message_id, "source_ref": source, "remove_keyboard": True}
                 else:
                     part = {"kind": "text", "reply_to_message_id": row.message_id, "source_ref": {"key": "tap.failed", "values": {}}}
                     keyboard = []
-                source_id = "callback:" + row.id if selected.kind == "dismiss" else self._source_id(selected, selected.kind, query_id)
+                source_id = self._source_id(selected, selected.kind, query_id)
                 await self.services.outbox.plan_product_keyboard(link, source_id=source_id, parts=[part], keyboard=keyboard, callbacks=self.services.callbacks, guard=guard, message_thread_id=row.message_thread_id, session=writer)
-                if selected.kind == "dismiss":
-                    await self.services.callbacks.consume_group(group, reason="done", session=writer)
             await writer.flush()
             await guard.check(writer)

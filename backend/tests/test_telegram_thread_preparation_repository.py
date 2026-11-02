@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from telegram import Chat, Message, Update, User
 
 from app.telegram_bots.authority import AccessOff
-from app.telegram_bots.inbox import InboxRepository
+from app.telegram_bots.inbox import InboxRepository, InboxRow
 from deerflow.config.auth_config import LOCAL_ACCOUNT_ISSUER
 from deerflow.persistence.channel_connections.model import ChannelConnectionRow, ChannelConversationRow
 from deerflow.persistence.telegram_bots.model import TelegramAccountRow, TelegramBotLinkRow, TelegramInboundMarkRow
@@ -32,10 +32,10 @@ async def setup(db, monkeypatch):
     return link, InboxRepository(db.sessions), await owner.authority.prepare_live_owner(owner.id)
 
 
-async def origin(inbox, link, *, message=301, purpose="ensure"):
+async def origin(inbox, link, *, message=301, purpose="ensure", kind=None):
     value = Update(message + 100, message=Message(message, NOW, Chat(link.chat_id, "private"), from_user=User(link.telegram_user_id, "Fixture", False), text="safe turn"))
     accepted, _ = await inbox.accept(link, value, sanitized_input={"text": "safe turn"})
-    return await inbox.route(accepted, kind="chat" if purpose == "ensure" else "command", target_id=link.agent_ref, basis={"purpose": purpose}, operation_ids=[])
+    return await inbox.route(accepted, kind=kind or ("chat" if purpose == "ensure" else "command"), target_id=link.agent_ref, basis={"purpose": purpose}, operation_ids=[])
 
 
 async def reserve(db, link, mark, checker, *, purpose="ensure", endpoint=ENDPOINT, current=lambda: True):
@@ -74,18 +74,20 @@ async def test_reservation_reuses_uuid_and_preserves_business_route_and_grouping
     replay = await inbox.route(first, kind="chat", target_id=link.agent_ref, basis={"purpose": "ensure"}, operation_ids=[])
     assert replay.route_basis["thread_preparation"]["creation_id"] == prepared.creation_id
     assert replay.sanitized_input == first.sanitized_input
-    await inbox.bind_turn([replay, second], turn_id="c" * 32, thread_id="selected")
+    inbox._group([replay, second])  # A preparation receipt is not part of what a group shares.
 
 
 async def test_distinct_preparations_do_not_split_joined_publication_comparisons(db, monkeypatch):
     link, inbox, checker = await setup(db, monkeypatch)
-    first, second = await origin(inbox, link), await origin(inbox, link, message=302)
+    first, second = await origin(inbox, link, kind="turn"), await origin(inbox, link, message=302, kind="turn")
     prepared = [await reserve(db, link, mark, checker) for mark in (first, second)]
     assert prepared[0].creation_id != prepared[1].creation_id
-    await inbox.bind_turn([first, second], turn_id="c" * 32, thread_id="selected")
-    publication = (await inbox.route(first, kind="chat", target_id=link.agent_ref, basis={"purpose": "ensure"}, operation_ids=[])).route_basis["current_publication_id"]
-    await inbox.bind_run(turn_id="c" * 32, publication_id=publication, run_id="run-one")
-    assert await inbox.publish([first, second], event_id="m301:r1", expected_publication_id=publication) != publication
+    origins = [await inbox.route(mark, kind="turn", target_id=link.agent_ref, basis={"purpose": "ensure"}, operation_ids=[]) for mark in (first, second)]
+    guard = db.links.publication_guard(link, check_live_owner=checker, check_attempt_current=lambda: True)
+    record = await inbox.reserve_publication(link, origins, thread_id="selected", endpoint_id=ENDPOINT, guard=guard)
+    saved = [row for row in await rows(db, TelegramInboundMarkRow) if row.message_id in {301, 302}]
+    # Replay compares every member's publication basis, which holds each one's own receipt.
+    assert await inbox.reserve_publication(link, [InboxRow.from_row(row) for row in saved], thread_id="selected", endpoint_id=ENDPOINT, guard=guard) == record
     marks = [row for row in await rows(db, TelegramInboundMarkRow) if row.message_id in {301, 302}]
     assert {row.route_basis["thread_preparation"]["creation_id"] for row in marks} == {item.creation_id for item in prepared}
 

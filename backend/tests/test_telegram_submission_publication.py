@@ -165,7 +165,7 @@ async def test_changed_stored_response_cannot_reuse_its_input_digest(submission_
         payload[CALLBACK_PUBLICATION_KEY]["submission"]["text"] = "A different answer"
         row.payload = payload
     with pytest.raises(ValueError):
-        await e.inbox.read_publication_submission(record, guard=e.guard)
+        await e.inbox.read_publication_message(record, guard=e.guard)
     assert e.bus.inbound_queue.empty()
 
 

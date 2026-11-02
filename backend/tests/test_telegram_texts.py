@@ -5,7 +5,7 @@ from string import Formatter
 
 import pytest
 
-from app.telegram_bots.render import render_plain, render_preview
+from app.telegram_bots.render import render_plain
 from app.telegram_bots.texts import FIRST_KEYS, catalog
 
 STAGE_ONE_KEYS = frozenset(
@@ -15,7 +15,7 @@ STAGE_ONE_KEYS = frozenset(
     activity.read activity.write activity.edit activity.list activity.command activity.search activity.fetch
     activity.browser activity.image activity.subtask activity.present activity.work activity.other answer.thinking
     busy.followup busy.followup_full busy.queued busy.cancelled busy.gave_up busy.thread error.generic refused.interrupted
-    chat.restarted chat.conversation_deleted chat.files_full run.cancelled stop.answer stop.nothing stop.failed file.saved_ask_plain file.saved_ask_photo
+    chat.restarted chat.conversation_deleted chat.files_full stop.answer stop.nothing stop.failed file.saved_ask_plain file.saved_ask_photo
     file.saved_ask_many answer.on_web file.too_large_in file.not_saved file.own_full file.own_preparing file.own_no_seat file.own_unchecked file.own_unavailable
     file.too_large_out file.out_failed voice.unavailable voice.too_long voice.daily_limit voice.first_notice
     voice.agreed voice.not_used voice.writing voice.heard voice.failed voice.unclear media.unsupported
@@ -26,7 +26,7 @@ STAGE_ONE_KEYS = frozenset(
     link.conflict_over.plain link.conflict_over.chat link.conflict_over.custom_agent link.limited link.back_online link.removed access.off
     access.back custom_agent.deleted unavailable.ask_admin unavailable.next unavailable.reference
     stale.other_person stale.not_waiting tap.failed form.required delivery.failed delivery.gone prompt.closed prompt.unavailable
-    prompt.discarded preview.part_header profile.name.chat profile.short.chat profile.short.custom_agent
+    prompt.discarded profile.name.chat profile.short.chat profile.short.custom_agent
     profile.description.chat profile.description.custom_agent profile.removed
     web.list web.memory web.conversations web.conversation web.addAssistant web.addEmployee web.telegram
     web.timezone web.scheduled web.account web.fileTooLarge web.resultTooLarge
@@ -47,12 +47,6 @@ def test_text_catalog_locales_have_equal_keys():
 def test_chat_texts_never_say_i():
     forbidden = re.compile(r"\b(?:I|I'm|I'll|I've|me|my)\b", re.I)
     assert not [(key, text) for key, text in catalog("en").items() if not key.startswith("label.") and forbidden.search(text)]
-
-
-@pytest.mark.parametrize("locale,expected", [("en", "This request was cancelled."), ("zh-CN", "此次请求已取消。")])
-def test_sealed_cancellation_text_does_not_claim_queue_removal(locale, expected):
-    assert render_plain("run.cancelled", locale) == expected
-    assert catalog(locale)["run.cancelled"] != catalog(locale)["busy.cancelled"]
 
 
 @pytest.mark.parametrize(
@@ -111,26 +105,3 @@ def test_no_text_sends_a_user_to_the_provider():
             text = render_plain(key, locale, **values)
             assert "SERVICE-PROVIDER" not in text
             assert "storage-missing" not in text
-
-
-@pytest.mark.parametrize("locale", ["en", "zh-CN"])
-def test_complete_actionable_previews_split_with_controls_last(locale):
-    from app.telegram_bots.split import utf16_units, visible_text
-
-    question = "Question <&> 😀 " * 400
-    full_options = "\n".join(f"{n}. complete option {n} " + "choice " * 150 for n in range(1, 5))
-    canonical = question + "\n" + full_options
-    plan = render_preview("clarify.options", locale, heading="A long title " * 20, basis={"revision": 7}, protected=True, text=canonical)
-    assert len(plan.parts) >= 3
-    assert "".join(visible_text(part).split("\n", 1)[1] for part in plan.parts) == canonical
-    assert all(utf16_units(visible_text(part)) <= 4096 for part in plan.parts)
-    for index in range(len(plan.parts)):
-        part = plan.next_part(tuple(range(1, index + 1)))
-        assert part.html == plan.parts[index]
-        assert part.protected
-        assert part.controls_allowed is (index == len(plan.parts) - 1)
-        assert part.silent is (index != len(plan.parts) - 1)
-        assert len(visible_text(part.html).split("\n", 1)[0]) <= 60
-    assert plan.next_part(tuple(range(1, len(plan.parts) + 1))) is None
-    assert plan.next_part(()) == plan.next_part(())
-    assert plan.basis == {"revision": 7}

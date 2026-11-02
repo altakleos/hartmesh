@@ -701,20 +701,3 @@ class GatewayClientOwner:
         if self._stop_task is None or self._stop_task.done() and not self._closed:
             self._stop_task = asyncio.create_task(self._finish_stop(), name="telegram-thread-client-cleanup")
         await asyncio.shield(self._stop_task)
-
-
-def gateway_client() -> GatewayClientOwner:
-    from app.telegram_bots.supervisor import current
-
-    supervisor = current()
-    if supervisor is None or supervisor.thread_client is None:
-        raise RuntimeError("thread-client-unavailable")
-    return supervisor.thread_client
-
-
-def gateway_url() -> str:
-    return gateway_client().gateway_url
-
-
-def owner_headers(owner_user_id: str) -> dict[str, str]:
-    return gateway_client().owner_headers(owner_user_id)

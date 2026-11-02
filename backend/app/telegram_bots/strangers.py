@@ -1,7 +1,7 @@
-"""Bounded process-local observation and disposable-notice allowances.
+"""Bounded process-local disposable-notice allowances.
 
-Only the Gateway loop calls this await-free object. Observation eviction and
-transport retirement never replenish an unexpired reply allowance.
+Only the Gateway loop calls this await-free object. Removing a bot or replacing
+its transport never replenishes an unexpired reply allowance.
 """
 
 import math
@@ -16,7 +16,6 @@ _HOUR = 3600
 
 class StrangerLedger:
     def __init__(self) -> None:
-        self._recent: OrderedDict[tuple[int, int], None] = OrderedDict()
         self._pairs: OrderedDict[tuple[int, int], float] = OrderedDict()
         self._bots: OrderedDict[int, deque[float]] = OrderedDict()
         self._bad_codes: OrderedDict[int, deque[float]] = OrderedDict()
@@ -26,14 +25,6 @@ class StrangerLedger:
     def _validate(bot_id: int, telegram_user_id: int, now: float) -> None:
         if any(type(value) is not int or value <= 0 for value in (bot_id, telegram_user_id)) or type(now) not in (int, float) or not math.isfinite(now):
             raise ValueError("invalid-stranger-observation")
-
-    def touch(self, bot_id: int, telegram_user_id: int, now: float) -> None:
-        self._validate(bot_id, telegram_user_id, now)
-        key = bot_id, telegram_user_id
-        self._recent[key] = None
-        self._recent.move_to_end(key)
-        if len(self._recent) > STRANGER_MAP_MAX:
-            self._recent.popitem(last=False)
 
     def _prune(self, now: float) -> None:
         if now < self._charge_time:
@@ -84,10 +75,3 @@ class StrangerLedger:
         window.append(now)
         self._bad_codes.move_to_end(telegram_user_id)
         return True
-
-    def forget_bot(self, bot_id: int) -> None:
-        if type(bot_id) is not int or bot_id <= 0:
-            raise ValueError("invalid-stranger-observation")
-        for key in tuple(self._recent):
-            if key[0] == bot_id:
-                del self._recent[key]

@@ -718,7 +718,7 @@ def _restart_closure(record: PublicationRecord, rows: Sequence[InboxRow | Telegr
     return fact
 
 
-RecoveryHold = Literal["legacy", "invalid_group", "incomplete_group", "group_too_large", "unsupported_input", "stale_scope"]
+RecoveryHold = Literal["invalid_group", "incomplete_group", "group_too_large", "unsupported_input", "stale_scope"]
 
 
 @dataclass(frozen=True)
@@ -2052,11 +2052,6 @@ class InboxRepository:
                         raise ValueError("publication-conflict") from None
                     self._prepublication_members(marks)
                     turn_id = uuid4().hex
-                    if session.get_bind().dialect.name == "postgresql":
-                        key = int.from_bytes(hashlib.sha256(("telegram-inbox-turn:" + turn_id).encode()).digest()[:8], signed=True)
-                        await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
-                    if await self._turn(session, turn_id):
-                        raise ValueError("publication-conflict") from None
                     ordered = sorted(marks, key=lambda mark: (_time(mark.accepted_at), mark.update_id, mark.message_id))
                     event_id = f"m{ordered[0].message_id}"
                     record = PublicationRecord(expected, turn_id, self._publication(turn_id, event_id), event_id, tuple(_publication_origin(mark) for mark in marks), 1, _publication_input(marks), False, None)
@@ -2204,11 +2199,6 @@ class InboxRepository:
         result = {"version": 1, "inputs": _saved_inputs(tuple(_snapshot(mark) for mark in marks)), "submission": submission}
         validate_publication_inputs(fresh, result)
         return result
-
-    async def read_publication_submission(self, record: PublicationRecord, *, guard: PublicationGuard) -> tuple[str, dict]:
-        """Preserve the existing response-only accessor's return contract."""
-        text, kwargs, _files = await self.read_publication_message(record, guard=guard)
-        return text, kwargs
 
     async def read_publication_message(self, record: PublicationRecord, *, guard: PublicationGuard):
         """Reconstruct model text/response/files from its actual input owner."""
@@ -2578,13 +2568,7 @@ class InboxRepository:
                 raise ValueError("publication-conflict") from None
             try:
                 basis = delivery.payload["reply_basis"]
-                if (
-                    type(basis) is not dict
-                    or type(basis["version"]) is not int
-                    or basis["version"] not in {1, 2, 4, 5, 6, 7}
-                    or basis["finish_route"] is not True
-                    or _canonical(basis["publication"]) != _canonical(_publication_identity(fresh))
-                ):
+                if type(basis) is not dict or type(basis["version"]) is not int or basis["version"] not in {2, 4, 5, 6, 7} or basis["finish_route"] is not True or _canonical(basis["publication"]) != _canonical(_publication_identity(fresh)):
                     raise ValueError
                 outcome = basis["outcome"]
                 kind = outcome["kind"]
@@ -2663,13 +2647,6 @@ class InboxRepository:
                         or projection["output_evidence"]["assistant_message_id"] != assistant_message_id
                         or assistant_message_id is None
                     ):
-                        raise ValueError
-                elif kind == "model_text":
-                    projection = outcome["projection"]
-                    if not fresh.dispatch_started or fresh.run_id is None or projection["run_id"] != fresh.run_id or projection["output_evidence"]["assistant_message_id"] != assistant_message_id or assistant_message_id is None:
-                        raise ValueError
-                elif kind in {"sealed_failed", "sealed_cancelled"}:
-                    if assistant_message_id is not None or not fresh.dispatch_started or fresh.run_id is None or outcome["projection"]["run_id"] != fresh.run_id:
                         raise ValueError
                 else:
                     raise ValueError
@@ -3003,124 +2980,9 @@ class InboxRepository:
             await session.flush()
             return _snapshot(mark)
 
-    async def bind_turn(self, rows: Sequence[InboxRow], *, turn_id: str, thread_id: str) -> None:
-        link_id = self._requested(rows)
-        _identifier(turn_id, 32, "invalid-inbox-turn")
-        _identifier(thread_id, 64, "invalid-inbox-turn")
-        async with self._transaction() as session:
-            link = await self._link(session, link_id)
-            if session.get_bind().dialect.name == "postgresql":
-                # The schema intentionally has no single-row turn parent. Fence
-                # concurrent attempts to reuse a turn id on different links.
-                key = int.from_bytes(hashlib.sha256(("telegram-inbox-turn:" + turn_id).encode()).digest()[:8], signed=True)
-                await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
-            marks = await self._rows(session, rows)
-            self._group(marks)
-            if any("publication_recovery" in mark.route_basis for mark in marks):
-                raise ValueError("inbox-publication-conflict") from None
-            for mark in marks:
-                self._current(link, mark)
-            if any(mark.route_complete or mark.state == "interrupted" for mark in marks):
-                raise ValueError("inbox-route-complete")
-            existing_links = list(await session.scalars(select(TelegramInboundMarkRow.link_id).where(TelegramInboundMarkRow.turn_id == turn_id).distinct()))
-            if any(existing_link != link_id for existing_link in existing_links):
-                raise ValueError("inbox-turn-conflict")
-            existing = await self._turn(session, turn_id)
-            if existing or any(mark.turn_id is not None for mark in marks):
-                if {_identity(mark) for mark in existing} != {_identity(mark) for mark in marks} or any(mark.turn_id != turn_id or mark.thread_id != thread_id for mark in marks):
-                    raise ValueError("inbox-turn-conflict")
-                return
-            ordered = sorted(marks, key=lambda mark: (_time(mark.accepted_at), mark.update_id, mark.message_id))
-            event_id = f"m{ordered[0].message_id}"
-            publication_id = self._publication(turn_id, event_id)
-            publications = [{"publication_id": publication_id, "event_id": event_id, "run_id": None}]
-            for mark in marks:
-                mark.turn_id, mark.thread_id, mark.state = turn_id, thread_id, "dispatched"
-                mark.grouped_message_ids = [other.message_id for other in ordered if other is not mark]
-                mark.route_basis = {**deepcopy(mark.route_basis), "publications": deepcopy(publications), "current_publication_id": publication_id}
-
     @staticmethod
     def _publication(turn_id: str, event_id: str) -> str:
         return hashlib.sha256((turn_id + ":" + event_id).encode()).hexdigest()[:32]
-
-    async def publish(self, rows: Sequence[InboxRow], *, event_id: str, expected_publication_id: str) -> str:
-        """Persist an explicit next retry, or replay that same current intent.
-
-        Telegram redelivery uses accept/bind_turn; it cannot allocate a retry.
-        The caller supplies the stored current publication as a comparison fence.
-        """
-        link_id = self._requested(rows)
-        _identifier(event_id, 96, "invalid-inbox-publication")
-        async with self._transaction() as session:
-            link = await self._link(session, link_id)
-            marks = await self._rows(session, rows)
-            self._group(marks)
-            if any("publication_recovery" in mark.route_basis for mark in marks):
-                raise ValueError("inbox-publication-conflict") from None
-            if marks[0].turn_id is None:
-                raise ValueError("inbox-publication-conflict")
-            group = await self._turn(session, marks[0].turn_id)
-            if {_identity(mark) for mark in group} != {_identity(mark) for mark in marks}:
-                raise ValueError("inbox-group-conflict")
-            for mark in marks:
-                self._current(link, mark)
-            if any(mark.route_complete or mark.state == "interrupted" for mark in marks):
-                raise ValueError("inbox-route-complete")
-            basis = marks[0].route_basis
-            if any(_canonical(_publication_basis(mark)) != _canonical(_publication_basis(marks[0])) for mark in marks):
-                raise ValueError("inbox-publication-conflict")
-            publications = deepcopy(basis.get("publications", []))
-            current = basis.get("current_publication_id")
-            for saved in publications:
-                if saved["event_id"] == event_id:
-                    if saved["publication_id"] != current:
-                        raise ValueError("inbox-publication-conflict")
-                    return current
-            if not publications or current != expected_publication_id or event_id != f"{publications[0]['event_id']}:r{len(publications)}":
-                raise ValueError("inbox-publication-conflict")
-            publication_id = self._publication(marks[0].turn_id, event_id)
-            publications.append({"publication_id": publication_id, "event_id": event_id, "run_id": None})
-            for mark in marks:
-                mark.route_basis = {**deepcopy(mark.route_basis), "publications": deepcopy(publications), "current_publication_id": publication_id}
-                mark.run_id, mark.assistant_message_id = None, None
-                mark.state = "dispatched"
-            return publication_id
-
-    async def bind_run(self, *, turn_id: str, publication_id: str, run_id: str) -> None:
-        _identifier(run_id, 64, "invalid-inbox-run")
-        async with self._transaction() as session:
-            # Discovery is read-only. Authority is checked again after taking
-            # the one parent lock and then the sorted group rows.
-            links = list(await session.scalars(select(TelegramInboundMarkRow.link_id).where(TelegramInboundMarkRow.turn_id == turn_id).distinct()))
-            if len(links) != 1:
-                raise ValueError("inbox-publication-conflict")
-            link = await self._link(session, links[0])
-            marks = await self._turn(session, turn_id)
-            if not marks:
-                raise ValueError("inbox-publication-conflict")
-            self._group(marks)
-            if any("publication_recovery" in mark.route_basis for mark in marks):
-                raise ValueError("inbox-publication-conflict") from None
-            if any(_canonical(_publication_basis(mark)) != _canonical(_publication_basis(marks[0])) for mark in marks):
-                raise ValueError("inbox-publication-conflict")
-            for mark in marks:
-                self._current(link, mark)
-                if mark.route_basis.get("current_publication_id") != publication_id:
-                    raise ValueError("inbox-publication-conflict")
-                if mark.run_id not in (None, run_id):
-                    raise ValueError("inbox-run-conflict")
-                if mark.route_complete and mark.run_id != run_id:
-                    raise ValueError("inbox-route-complete")
-            publications = deepcopy(marks[0].route_basis.get("publications", []))
-            entry = next((item for item in publications if item["publication_id"] == publication_id), None)
-            if entry is None:
-                raise ValueError("inbox-publication-conflict")
-            if entry["run_id"] not in (None, run_id):
-                raise ValueError("inbox-run-conflict")
-            entry["run_id"] = run_id
-            for mark in marks:
-                mark.run_id = run_id
-                mark.route_basis = {**deepcopy(mark.route_basis), "publications": deepcopy(publications)}
 
     async def register_delivery(self, rows: Sequence[InboxRow], *, outbox_id: str, primary: bool = False, finish: bool = False, session: AsyncSession) -> None:
         """Attach a plan in its caller's transaction, then recompute completion."""
@@ -3232,17 +3094,6 @@ class InboxRepository:
             if required and len(deliveries) == len(required) and all(item.binding_generation == owner.binding_generation and item.chat_id == owner.chat_id and item.state in {"sent", "skipped"} for item in deliveries):
                 data.update(state="done", closed_at=_now().isoformat())
                 owner.payload = {**deepcopy(owner.payload), CALLBACK_PUBLICATION_KEY: data}
-
-    async def leftovers(self, *, before: datetime) -> list[InboxRow]:
-        if not isinstance(before, datetime):
-            raise ValueError("invalid-inbox-cutoff")
-        async with self.session_factory() as session:
-            marks = await session.scalars(
-                select(TelegramInboundMarkRow)
-                .where(TelegramInboundMarkRow.accepted_at < _time(before), TelegramInboundMarkRow.state != "done", TelegramInboundMarkRow.outbox_id.is_(None))
-                .order_by(TelegramInboundMarkRow.accepted_at, TelegramInboundMarkRow.link_id, TelegramInboundMarkRow.update_id)
-            )
-            return [_snapshot(mark) for mark in marks]
 
     async def prepublication_page(self, *, after: PrepublicationCursor | None = None, limit: int = 32, max_origins: int = 64, link_id: str | None = None) -> PrepublicationPage:
         """Read bounded actual input owners; never create a missing route/profile.
@@ -3374,28 +3225,6 @@ class InboxRepository:
                     groups.append((RecoveryCursor(link_id, turn_id), len(members) > max_origins, tuple(_snapshot(row) for row in members) if len(members) <= max_origins else ()))
 
             def decode() -> tuple[RecoveryEntry, ...]:
-                def legacy(rows) -> bool:
-                    try:
-                        for row in rows:
-                            if type(row.route_basis) is not dict:
-                                return False
-                            history = row.route_basis.get("publications")
-                            if type(history) is not list or not history:
-                                return False
-                            for item in history:
-                                if type(item) is not dict or set(item) != {"publication_id", "event_id", "run_id"}:
-                                    return False
-                                _publication_text(item["event_id"], 96)
-                                if item["publication_id"] != self._publication(row.turn_id, item["event_id"]):
-                                    return False
-                                if item["run_id"] is not None:
-                                    _publication_text(item["run_id"], 64)
-                            if row.route_basis.get("current_publication_id") != history[-1]["publication_id"]:
-                                return False
-                        return True
-                    except (AttributeError, KeyError, TypeError, ValueError):
-                        return False
-
                 entries = []
                 for key, overflow, rows in groups:
                     if key.owner_callback_id is not None:
@@ -3415,7 +3244,7 @@ class InboxRepository:
                     try:
                         record = self._publication_record(rows)
                     except ValueError:
-                        entries.append(RecoveryEntry(key, None, rows, "legacy" if legacy(rows) else "invalid_group"))
+                        entries.append(RecoveryEntry(key, None, rows, "invalid_group"))
                         continue
                     if (
                         any(row.route_complete or row.outbox_id is not None or row.assistant_message_id is not None or row.state not in {"dispatched", "reply_pending"} for row in rows)

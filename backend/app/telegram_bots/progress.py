@@ -480,19 +480,6 @@ class RunObserver:
             state.stop_decisions[stop_id] = "unknown"
             return "unknown"
 
-    async def freeze_stopped(self, record, current_link):
-        state = self._state(record, current_link)
-        if not state.stop_accepted or state.record.run_id is None:
-            _refuse()
-        facade = await self._facade(state)
-        output = await facade.get_run_output(state.record.run_id)
-        self._check(state)
-        if output is None or output.output.state != "unavailable" or output.output.reason != "cancelled":
-            _refuse()
-        return _issue_stopped_preview(
-            publication_identity=publication_identity(state.record), run_id=state.record.run_id, stop_id=state.stop_id, segments=tuple(state.shown.values()), check_current=lambda: self._current(state) and state.stop_accepted
-        )
-
     def freeze_shown(self, record, current_link):
         state = self._state(record, current_link)
         if state.record.run_id is None:

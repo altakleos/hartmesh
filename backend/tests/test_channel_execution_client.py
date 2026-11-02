@@ -63,17 +63,30 @@ def creating():
     return dict(input={"messages": [{"role": "user", "content": "synthetic input"}]}, metadata={"channel_turn_id": PUBLICATION}, channel_execution={"version": 1, "publication_id": PUBLICATION}, headers={"Idempotency-Key": PUBLICATION})
 
 
+def answered():
+    return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, content=b'event: values\ndata: {"part":1}\n\n')
+
+
+async def create(client, assistant="lead_agent", **payload):
+    """One creating POST, read to its first frame as the manager reads it."""
+    stream = client.runs.stream("thread", assistant, **(payload or creating()))
+    try:
+        return await anext(stream)
+    finally:
+        await stream.aclose()
+
+
 @pytest.mark.parametrize("assistant,agent,supported", [("custom-agent", None, False), ("lead_agent", None, True), ("lead_agent", "custom-agent", True)])
 async def test_v1_facade_requires_a_supported_canonical_factory_before_any_post(assistant, agent, supported):
     from app.channels.execution_client import ChannelExecutionFacade
 
     calls = []
-    owner = GatewayClientOwner(gateway_url="https://gateway.example", langgraph_url="https://runtime.example/prefix/api", transport=httpx.MockTransport(lambda request: calls.append(request) or httpx.Response(200, json={})))
+    owner = GatewayClientOwner(gateway_url="https://gateway.example", langgraph_url="https://runtime.example/prefix/api", transport=httpx.MockTransport(lambda request: calls.append(request) or answered()))
     scope = ChannelExecutionScope(PUBLICATION, "human", "connection", "chat", "thread", owner.endpoint_id, assistant, agent)
 
     async def execute():
         client = ChannelExecutionFacade(owner, scope=scope, admission=Admission())
-        return await client.runs.wait("thread", assistant, **creating())
+        return await create(client, assistant)
 
     try:
         if supported:
@@ -89,23 +102,23 @@ async def test_v1_facade_requires_a_supported_canonical_factory_before_any_post(
         await owner.stop()
 
 
-async def test_wait_sends_typed_snapshot_with_original_target_and_explicit_retention_policy():
+async def test_creating_stream_sends_typed_snapshot_with_original_target_and_explicit_retention_policy():
     calls = []
 
     def respond(request):
         calls.append(request)
-        return httpx.Response(200, json={"messages": []})
+        return answered()
 
     client, owner, admission, scope = facade(respond)
     try:
-        assert await client.runs.wait("thread", "lead_agent", **creating()) == {"messages": []}
+        assert (await create(client)).data == {"part": 1}
         (request,) = calls
         body = json.loads(request.content)
         assert body["channel_execution"] == {"version": 1, "publication_id": PUBLICATION}
         assert body["on_disconnect"] == "continue" and body.get("on_completion") is None
         assert body["assistant_id"] == "lead_agent"
         assert request.headers["Idempotency-Key"] == PUBLICATION
-        assert request.url.path == "/prefix/api/threads/thread/runs/wait"
+        assert request.url.path == "/prefix/api/threads/thread/runs/stream"
         assert admission.calls == ["run_create", "run_read"]
     finally:
         await owner.stop()
@@ -159,17 +172,6 @@ async def test_exact_run_rejects_malformed_or_retargeted_server_evidence(changes
         await owner.stop()
 
 
-async def test_known_other_publication_and_ordinary_runs_are_nonmatches_not_new_submissions():
-    calls = []
-    payload = {"data": [row("b", publication="b" * 32), row("a", kwargs={})], "has_more": False, "next_before_created_at": None, "next_before_run_id": None}
-    client, owner, _, _ = facade(lambda request: calls.append(request) or httpx.Response(200, json=payload, headers=ACK))
-    try:
-        assert await client.find_publication_run() is None
-        assert len(calls) == 1 and calls[0].method == "GET"
-    finally:
-        await owner.stop()
-
-
 @pytest.mark.parametrize(
     "payload",
     [
@@ -184,26 +186,18 @@ async def test_bad_run_cursor_or_page_cannot_be_exhausted_as_absence(payload):
     client, owner, _, _ = facade(lambda request: httpx.Response(200, json=payload, headers=ACK))
     try:
         with pytest.raises(ChannelExecutionProtocolError):
-            await client.find_publication_run()
+            await client.list_runs_page()
     finally:
         await owner.stop()
 
 
 @pytest.mark.parametrize("detail,busy", [({"detail": {"code": "thread_busy"}}, True), ({"detail": "busy"}, False), ({"detail": {"code": "idempotency_mismatch"}}, False), ({"detail": {"code": "thread_busy", "extra": True}}, False)])
-@pytest.mark.parametrize("streaming", [False, True])
-async def test_only_exact_typed_conflict_is_busy(detail, busy, streaming):
+async def test_only_exact_typed_conflict_is_busy(detail, busy):
     calls = []
     client, owner, _, _ = facade(lambda request: calls.append(request) or httpx.Response(409, json=detail))
     try:
         with pytest.raises(ChannelExecutionBusyError if busy else ChannelExecutionProtocolError):
-            if streaming:
-                stream = client.runs.stream("thread", "lead_agent", **creating())
-                try:
-                    await anext(stream)
-                finally:
-                    await stream.aclose()
-            else:
-                await client.runs.wait("thread", "lead_agent", **creating())
+            await create(client)
         assert len(calls) == 1
     finally:
         await owner.stop()
@@ -310,9 +304,9 @@ async def test_mutable_caller_target_cannot_replace_the_validated_wire_snapshot(
 
     monkeypatch.setattr(module, "_snapshot", snapshot)
     calls = []
-    client, owner, _, _ = facade(lambda request: calls.append(request) or httpx.Response(200, json={}))
+    client, owner, _, _ = facade(lambda request: calls.append(request) or answered())
     payload = creating() | {"context": {field: original_value}}
-    operation = asyncio.create_task(client.runs.wait("thread", "lead_agent", **payload))
+    operation = asyncio.create_task(create(client, **payload))
     try:
         assert await asyncio.to_thread(entered.wait, 3)
         payload["context"][field] = changed_value
@@ -356,22 +350,6 @@ async def test_read_authority_is_rechecked_after_the_actual_json_decoder_wait(mo
     finally:
         release.set()
         await asyncio.gather(operation, return_exceptions=True)
-        await owner.stop()
-
-
-async def test_duplicate_publication_matches_across_complete_pages_refuse():
-    calls = []
-    pages = [
-        {"data": [row("b")], "has_more": True, "next_before_created_at": STAMP, "next_before_run_id": "b"},
-        {"data": [row("a")], "has_more": False},
-    ]
-    client, owner, _, _ = facade(lambda request: calls.append(request) or httpx.Response(200, json=pages.pop(0), headers=ACK))
-    try:
-        with pytest.raises(ChannelExecutionProtocolError):
-            await client.find_publication_run()
-        assert len(calls) == 2 and all(request.method == "GET" for request in calls)
-        assert calls[-1].url.params["before_run_id"] == "b"
-    finally:
         await owner.stop()
 
 
@@ -426,7 +404,7 @@ async def test_facade_reads_actual_strict_routes_and_stores_with_session_auth_st
     try:
         exact = await client.get_run("actual-run")
         assert exact.receipt.publication_id == PUBLICATION
-        assert (await client.find_publication_run()).row["run_id"] == "actual-run"
+        assert (await client.list_runs_page()).data[0].row["run_id"] == "actual-run"
         page = await client.list_run_messages("actual-run")
         assert len(page.data) == 1 and page.data[0]["content"]["id"] == "stored-message"
         assert await client.get_run("missing-run") is None
@@ -436,10 +414,10 @@ async def test_facade_reads_actual_strict_routes_and_stores_with_session_auth_st
 
 async def test_conflicting_target_on_the_config_root_is_refused_before_http():
     calls = []
-    client, owner, _, _ = facade(lambda request: calls.append(request) or httpx.Response(200, json={}))
+    client, owner, _, _ = facade(lambda request: calls.append(request) or answered())
     try:
         with pytest.raises(ChannelExecutionProtocolError):
-            await client.runs.wait("thread", "lead_agent", **(creating() | {"config": {"agent_name": "other-target"}}))
+            await create(client, **(creating() | {"config": {"agent_name": "other-target"}}))
         assert not calls
     finally:
         await owner.stop()
@@ -459,12 +437,12 @@ async def test_additive_row_owner_fields_cannot_contradict_the_scoped_acknowledg
 @pytest.mark.parametrize("nested", [False, True])
 async def test_detached_creating_tree_refuses_conflicting_human_and_routing_scope(field, value, nested):
     calls = []
-    client, owner, _, _ = facade(lambda request: calls.append(request) or httpx.Response(200, json={}))
+    client, owner, _, _ = facade(lambda request: calls.append(request) or answered())
     carrier = {field: value}
     payload = creating() | ({"config": {"context": {"metadata": carrier}}} if nested else {"context": carrier})
     try:
         with pytest.raises(ChannelExecutionProtocolError):
-            await client.runs.wait("thread", "lead_agent", **payload)
+            await create(client, **payload)
         assert not calls
     finally:
         await owner.stop()
@@ -487,7 +465,7 @@ async def test_canonical_custom_receipt_accepts_only_recognized_requested_aliase
     try:
         if valid:
             assert (await client.get_run("run")).receipt.agent_name == "custom-agent"
-            assert (await client.find_publication_run()).row["run_id"] == "run"
+            assert (await client.list_runs_page()).data[0].row["run_id"] == "run"
         else:
             with pytest.raises(ChannelExecutionProtocolError):
                 await client.get_run("run")
@@ -500,10 +478,10 @@ async def test_custom_scope_fills_missing_wire_selection_from_its_captured_targe
     from app.channels.execution_client import ChannelExecutionFacade
 
     calls = []
-    _, owner, admission, scope = facade(lambda request: calls.append(request) or httpx.Response(200, json={}))
+    _, owner, admission, scope = facade(lambda request: calls.append(request) or answered())
     client = ChannelExecutionFacade(owner, scope=replace(scope, agent_name="custom-agent"), admission=admission)
     try:
-        await client.runs.wait("thread", "lead_agent", **creating())
+        await create(client)
         assert json.loads(calls[0].content)["context"] == {"agent_name": "custom-agent"}
     finally:
         await owner.stop()
@@ -576,7 +554,7 @@ async def test_manager_owned_http_actual_gateway_admission_and_checkpoint_withou
         assert creating_call.headers["Idempotency-Key"] == PUBLICATION
         assert creating_call.headers["Cookie"] == "csrf_token=" + creating_call.headers["X-CSRF-Token"]
         assert creating_call.url.path.endswith("/stream")
-        assert (await client.find_publication_run()).row["run_id"] == record.run_id
+        assert (await client.list_runs_page()).data[0].row["run_id"] == record.run_id
         snapshot = await _checkpoint_captured_input(e, captured)
         visible = [message for message in snapshot.values["messages"] if message.type == "human" and not message.additional_kwargs.get("hide_from_ui")]
         assert len(visible) == 1 and visible[0].additional_kwargs["channel_turn_id"] == PUBLICATION
@@ -596,14 +574,17 @@ async def test_close_owns_the_actual_post_response_sql_admission_before_any_late
     def respond(request):
         if streaming:
             return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, stream=response)
-        return httpx.Response(200, json={"synthetic": "result"})
+        return httpx.Response(200, json=row(), headers=ACK)
 
     client, owner, admission, _ = facade(respond)
     actual = admission.authorize
+    reads = []
 
     async def authorize(operation):
         await actual(operation)
-        if operation == "run_read":
+        reads.append(operation)
+        # A plain read authorizes before it dispatches too. The admission under test comes after the response.
+        if operation == "run_read" and (streaming or reads.count("run_read") == 2):
             async with db.sessions() as session:
                 await session.execute(select(1))
                 entered.set()
@@ -612,7 +593,7 @@ async def test_close_owns_the_actual_post_response_sql_admission_before_any_late
 
     admission.authorize = authorize
     stream = client.runs.stream("thread", "lead_agent", **creating()) if streaming else None
-    reading = asyncio.create_task(anext(stream) if streaming else client.runs.wait("thread", "lead_agent", **creating()))
+    reading = asyncio.create_task(anext(stream) if streaming else client.get_run("run"))
     closing = None
     try:
         await asyncio.wait_for(entered.wait(), 3)
