@@ -2731,6 +2731,8 @@ export function createEnUS(product: string): Translations {
         title: ({ name }) => `Connect ${name} to Telegram`,
         intro: ({ name }) =>
           `${name} gets a bot in your Telegram: a chat that answers only you. You create the bot with BotFather, Telegram's own tool. This takes about a minute.`,
+        fault:
+          "This bot cannot connect right now. What it needs is in your Telegram settings.",
         onPhone: "Telegram only on your phone? Do this set-up there.",
         onPhoneLink: "Continue on your phone",
         onPhoneQr:

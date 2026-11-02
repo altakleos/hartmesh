@@ -132,7 +132,7 @@ export function TelegramBotsSection() {
       </header>
       {data === undefined && !list.isError ? (
         <p className="text-muted-foreground text-sm">{t.common.loading}</p>
-      ) : list.isError ? (
+      ) : data === undefined ? (
         <div className="space-y-2">
           <p className="text-sm">{strings.unavailable.loadError}</p>
           <Button

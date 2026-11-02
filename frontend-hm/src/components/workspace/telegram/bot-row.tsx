@@ -44,6 +44,8 @@ import { useTelegramFailure } from "./use-telegram-failure";
 
 const NAME_MAX = 64;
 const MENU_HIDDEN_ROWS = new Set([1, 5]);
+/** A button holds its words on one line, and a name can be long enough to leave the row. */
+const WRAPS = "h-auto min-h-8 max-w-full py-1 whitespace-normal";
 
 function menuOf(bot: Bot, row: number): TelegramKey[] {
   const live = !MENU_HIDDEN_ROWS.has(row);
@@ -165,13 +167,13 @@ export function TelegramBotRow({
 
   return (
     <li
-      className="flex items-start gap-3 rounded-lg border p-3"
+      className="flex flex-wrap items-start gap-3 rounded-lg border p-3 [overflow-wrap:anywhere]"
       data-telegram-row={view.row}
       data-telegram-target={telegramTargetOf(target)}
       tabIndex={-1}
     >
       <BotPicture target={target} />
-      <div className="min-w-0 flex-1 space-y-1">
+      <div className="min-w-32 flex-1 space-y-1">
         <div className="font-medium break-words">{name}</div>
         {Array.from(name).length > NAME_MAX ? (
           <p className="text-muted-foreground text-xs">
@@ -212,11 +214,17 @@ export function TelegramBotRow({
           </p>
         ) : null}
       </div>
-      <div className="flex shrink-0 flex-col items-end gap-2 sm:flex-row sm:items-center">
+      <div className="flex max-w-full flex-wrap items-center gap-2">
         {view.buttons.map((key) => {
           const href = linkOf(key);
           return href ? (
-            <Button key={key} asChild size="sm" variant="outline">
+            <Button
+              key={key}
+              asChild
+              size="sm"
+              variant="outline"
+              className={WRAPS}
+            >
               <a href={href} target="_blank" rel="noopener noreferrer">
                 {label(key)}
               </a>
@@ -227,6 +235,7 @@ export function TelegramBotRow({
               type="button"
               size="sm"
               variant="outline"
+              className={WRAPS}
               disabled={busy || (key === "action.connect" && !!disabledBecause)}
               aria-describedby={
                 key === "action.connect" && disabledBecause

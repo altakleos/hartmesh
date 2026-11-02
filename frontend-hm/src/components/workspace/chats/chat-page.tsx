@@ -31,6 +31,7 @@ import {
   SidecarProvider,
   SidecarTrigger,
 } from "@/components/workspace/sidecar";
+import { TelegramWelcomeCard } from "@/components/workspace/telegram/welcome-card";
 import { ThreadBackgroundTasks } from "@/components/workspace/thread-background-tasks";
 import { ThreadScheduledTasksLink } from "@/components/workspace/thread-scheduled-tasks-link";
 import { ThreadSubagentBatches } from "@/components/workspace/thread-subagent-batches";
@@ -792,6 +793,11 @@ export default function ChatPage() {
                             !hasTodos && (
                               <Welcome mode={settings.context.mode} />
                             )
+                          }
+                          extraFooter={
+                            isWelcomeMode &&
+                            !hasGoal &&
+                            !hasTodos && <TelegramWelcomeCard />
                           }
                           disabled={
                             isMock ||

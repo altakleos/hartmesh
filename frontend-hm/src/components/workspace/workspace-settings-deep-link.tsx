@@ -8,6 +8,7 @@ import {
   type SettingsSectionId,
   useSettingsDialog,
 } from "./settings";
+import { getSettingsDialogSnapshot } from "./settings/settings-dialog-store";
 
 const SETTINGS_SECTIONS = new Set<SettingsSectionId>([
   "account",
@@ -51,7 +52,9 @@ export function WorkspaceSettingsDeepLink() {
   }, [searchParams]);
 
   useEffect(() => {
-    if (open || !openedFromDeepLinkRef.current) {
+    // The live store, not `open`: in the first commit `open` is still false, and
+    // stripping then would take a Telegram target from a section not yet mounted.
+    if (getSettingsDialogSnapshot().open || !openedFromDeepLinkRef.current) {
       return;
     }
     openedFromDeepLinkRef.current = false;

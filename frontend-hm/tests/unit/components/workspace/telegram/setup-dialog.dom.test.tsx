@@ -3,6 +3,7 @@ import {
   act,
   cleanup,
   fireEvent,
+  render,
   screen,
   waitFor,
 } from "@testing-library/react";
@@ -18,6 +19,11 @@ const page = rs.hoisted(() => ({
 }));
 const toast = rs.hoisted(() => ({ success: rs.fn(), error: rs.fn() }));
 const i18n = rs.hoisted(() => ({ t: {} as unknown }));
+const navigation = rs.hoisted(() => ({ push: rs.fn() }));
+rs.mock("next/navigation", () => ({
+  usePathname: () => "/workspace/chats/new",
+  useRouter: () => ({ push: navigation.push }),
+}));
 rs.mock("@/core/auth/AuthProvider", () => ({ useAuth: () => auth }));
 rs.mock("sonner", () => ({ toast }));
 rs.mock("@/core/agents/hooks", () => ({
@@ -54,7 +60,11 @@ rs.mock("@/components/ui/select", () => ({
 }));
 
 import { TelegramSetupDialog } from "@/components/workspace/telegram/setup-dialog";
-import { resetTelegramPageState } from "@/components/workspace/telegram/setup-dialog-store";
+import {
+  openTelegramSetup,
+  resetTelegramPageState,
+  useTelegramPageState,
+} from "@/components/workspace/telegram/setup-dialog-store";
 import { fetch } from "@/core/api/fetcher";
 import { createEnUS } from "@/core/i18n/locales/en-US";
 import type { Bot, BotList, Settings } from "@/core/telegram-bots/api";
@@ -121,6 +131,11 @@ function start({ list = () => listOf([]), telegram, routes }: Start = {}) {
         ({ url, method }) => url === "/api/telegram-bots" && method === "POST",
       ),
   };
+}
+
+function OpenedSetup() {
+  const { setup } = useTelegramPageState();
+  return <output data-testid="opened">{setup ? "open" : "closed"}</output>;
 }
 
 const field = async () => screen.findByLabelText<HTMLInputElement>("Bot token");
@@ -400,6 +415,71 @@ describe("the set-up dialog", () => {
     });
     expect(reads()).toBeGreaterThan(before);
     screen.getByText(/Connected as Rosa/);
+  });
+
+  it.each([
+    [
+      "a conflict",
+      { health: "conflict", connect_expires_at: null },
+      /Another program is using this bot's token/,
+    ],
+    [
+      "a stop",
+      { health: "stopped" },
+      /This bot stopped after an internal error/,
+    ],
+    [
+      "a refused token",
+      { health: "token_rejected" },
+      /Telegram no longer accepts this bot's token/,
+    ],
+  ])(
+    "says why a bot cannot hear Start after %s",
+    async (_name, fault, sentence) => {
+      openTelegramSetup({ kind: "chat" });
+      render(<OpenedSetup />);
+      start({ list: () => listOf([waiting(fault)]) });
+      await screen.findByText(sentence);
+      expect(screen.queryByText(/Waiting for you to press Start/)).toBeNull();
+      expect(screen.queryByTestId("qr")).toBeNull();
+      fireEvent.click(
+        screen.getByRole("button", { name: "Open Telegram settings" }),
+      );
+      expect(screen.getByTestId("opened").textContent).toBe("closed");
+      expect(navigation.push).toHaveBeenCalledWith(
+        "/workspace/chats/new?settings=channels&telegram=chat",
+      );
+    },
+  );
+
+  it("says why from the section's notice when Telegram itself is stopped", async () => {
+    start({
+      list: () => listOf([waiting()]),
+      telegram: { bots: "unavailable", reason: "polled-elsewhere" },
+    });
+    await screen.findByText(/several bots conflict with another program/);
+    expect(screen.queryByText("Paused")).toBeNull();
+  });
+
+  it("leaves a bot being prepared on its steps", async () => {
+    start({
+      list: () =>
+        listOf([waiting({ profile_synced: false, created_at: ago(5) })]),
+    });
+    await screen.findByText("3. Open the chat and press Start");
+    expect(screen.queryByText(/This bot cannot connect/)).toBeNull();
+  });
+
+  it("notices a fault clearing behind a link that expired", async () => {
+    let fault: Partial<Bot> = { health: "conflict" };
+    start({
+      list: () => listOf([waiting({ connect_expires_at: ago(60), ...fault })]),
+    });
+    await screen.findByText(/Another program is using this bot's token/);
+    fault = {};
+    await screen.findByText("This link has expired.", undefined, {
+      timeout: 4000,
+    });
   });
 
   it("offers Open chat for a waiting bot with no address in this page", async () => {
