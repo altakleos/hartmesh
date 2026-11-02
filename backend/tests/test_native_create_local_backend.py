@@ -117,27 +117,118 @@ def test_managed_nouser_create_retains_pending_on_uncertain_primary(fixture, mon
     local.discover.assert_not_called()
 
 
-def test_restricted_early_failure_retains_pending_before_sidecar_effect_and_never_guesses_cleanup(fixture, monkeypatch):
-    journal, state, bridge, _owner = fixture
+def restricted(bridge, monkeypatch, journal):
+    """A backend whose first network effect fails, recording the journal at each step."""
     local = backend(bridge)
     local._network_mode, local._network_config = "isolated", {"mode": "isolated"}
     local._restricted_resources_status = Mock(return_value="missing")
-    local._cleanup_restricted_resources = Mock(side_effect=AssertionError("Unknown native set cleanup guessed names"))
     local._create_egress_network = Mock(side_effect=AssertionError("First network failure should stop provisioning"))
     monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda **kwargs: 19080)
-    observed = []
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.time.sleep", lambda seconds: None)
+    local.seen = {"effect": [], "cleanup": []}
 
     def fail_first_effect(*args):
-        (pending,) = journal.pending()
-        observed.append(pending)
+        local.seen["effect"].append(journal.pending())
         raise RuntimeError("Network outcome unconfirmed")
 
+    def cleanup(sandbox_id, *, stop_sandbox=True):
+        assert stop_sandbox is False, "An attempt that sent no primary has no primary to stop"
+        local.seen["cleanup"].append(journal.pending())
+
     local._create_internal_network = fail_first_effect
+    local._cleanup_restricted_resources = Mock(side_effect=cleanup)
+    return local
+
+
+def test_a_restricted_failure_before_the_primary_costs_one_attempt_not_the_owner(fixture, monkeypatch):
+    journal, state, bridge, _owner = fixture
+    local = restricted(bridge, monkeypatch, journal)
     with pytest.raises(StorageHostUnqualified):
         local.create("chat", "a", user_id="alice", storage_labels={"hartmesh.storage.space." + SLOT: "1"})
-    assert len(observed) == 1 and len(journal.pending()) == 1
+    (seen,) = local.seen["effect"]
+    assert len(seen) == 1, "The record precedes every sidecar and network effect"
+    assert local.seen["cleanup"] == [seen], "The record holds the name while the set goes"
+    assert journal.pending() == () and not state.pending_for(owner_id="alice")
+    with state.lock:
+        assert state.extra_slots_locked(starting={}, known_container_ids=set()) == 0
+    bridge.require_admissible(name="native-a", owner_id="alice")
+
+
+def test_a_proxy_still_being_removed_is_waited_out(fixture, monkeypatch):
+    journal, state, bridge, _owner = fixture
+    local = restricted(bridge, monkeypatch, journal)
+    local._restricted_resources_status = Mock(side_effect=["missing", "mismatch", "missing"])
+    with pytest.raises(StorageHostUnqualified):
+        local.create("chat", "a", user_id="alice", storage_labels={"hartmesh.storage.space." + SLOT: "1"})
+    assert local._cleanup_restricted_resources.call_count == 2
+    assert journal.pending() == () and not state.pending_for(owner_id="alice")
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["still-there", "unreadable", "cleanup-timeout"],
+)
+def test_a_set_not_proved_gone_keeps_the_attempt_reserved(fixture, monkeypatch, fault):
+    journal, state, bridge, _owner = fixture
+    local = restricted(bridge, monkeypatch, journal)
+    if fault == "still-there":
+        local._restricted_resources_status = Mock(side_effect=["missing", "mismatch", "mismatch", "mismatch"])
+    elif fault == "unreadable":
+        local._restricted_resources_status = Mock(side_effect=["missing", RuntimeError("daemon unavailable")])
+    else:
+        local._cleanup_restricted_resources = Mock(side_effect=subprocess.TimeoutExpired("docker", 15))
+    with pytest.raises(StorageHostUnqualified):
+        local.create("chat", "a", user_id="alice", storage_labels={"hartmesh.storage.space." + SLOT: "1"})
+    assert len(journal.pending()) == 1 and state.pending_for(owner_id="alice")
+
+
+def test_a_restricted_failure_after_the_primary_is_sent_stays_reserved_and_removes_nothing(fixture, monkeypatch):
+    journal, state, bridge, _owner = fixture
+    local = restricted(bridge, monkeypatch, journal)
+    local._create_internal_network = local._create_egress_network = Mock()
+    local._start_network_proxy = Mock(return_value="172.20.0.2")
+    local._runtime_runner = Mock(side_effect=subprocess.CalledProcessError(125, ["docker"], stderr="uncertain result"))
+    with pytest.raises(StorageHostUnqualified):
+        local.create("chat", "a", user_id="alice", storage_labels={"hartmesh.storage.space." + SLOT: "1"})
+    local._runtime_runner.assert_called_once()
     local._cleanup_restricted_resources.assert_not_called()
-    assert state.pending_for(owner_id="alice")
+    assert len(journal.pending()) == 1 and state.pending_for(owner_id="alice")
+
+
+def test_an_open_mode_failure_before_the_primary_is_withdrawn_without_touching_docker(fixture, monkeypatch):
+    journal, state, bridge, _owner = fixture
+    local = backend(bridge)
+    local._cleanup_restricted_resources = Mock(side_effect=AssertionError("Open mode has no sidecars"))
+    local._runtime_runner = Mock(side_effect=AssertionError("No primary may be sent"))
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda **kwargs: 19080)
+    monkeypatch.setattr(state, "record_submission", Mock(side_effect=OSError("before the primary")))
+    with pytest.raises(StorageHostUnqualified):
+        local.create("chat", "a", user_id="alice", storage_labels={"hartmesh.storage.space." + SLOT: "1"})
+    assert journal.pending() == () and not state.pending_for(owner_id="alice")
+
+
+def test_a_lost_owner_keeps_the_attempt_even_with_no_primary_sent(fixture, monkeypatch):
+    journal, state, bridge, owner = fixture
+    local = restricted(bridge, monkeypatch, journal)
+
+    def lose_ownership(*args):
+        owner.live = False
+        raise RuntimeError("Network outcome unconfirmed")
+
+    local._create_internal_network = lose_ownership
+    with pytest.raises(StorageHostUnqualified):
+        local.create("chat", "a", user_id="alice", storage_labels={"hartmesh.storage.space." + SLOT: "1"})
+    assert len(journal.pending()) == 1 and state.pending_for(owner_id="alice")
+
+
+def test_the_warning_says_whether_the_attempt_was_withdrawn(fixture, monkeypatch, caplog):
+    journal, _state, bridge, _owner = fixture
+    local = restricted(bridge, monkeypatch, journal)
+    with caplog.at_level("WARNING"), pytest.raises(StorageHostUnqualified):
+        local.create("chat", "a", user_id="alice", storage_labels={"hartmesh.storage.space." + SLOT: "1"})
+    (message,) = [record.getMessage() for record in caplog.records if "Managed native sandbox creation unconfirmed:" in record.getMessage()]
+    details = json.loads(message.split(": ", 1)[1])
+    assert details["primary_submitted"] is False and details["withdrawn"] is True
 
 
 def test_unconfirmed_creation_logs_origin_and_errno_without_exception_payload(fixture, monkeypatch, caplog):

@@ -695,7 +695,11 @@ Preparation also publishes a private `.native-creates` directory outside storage
 views and temporary probes. Managed native chats now record each container request
 before submission and verify its actual Docker identity before acknowledging it.
 Unresolved requests survive restart, reserve capacity and block another native
-create for the same account or container name. Cancellation retains verified
+create for the same account or container name. A start that fails before its
+container request was sent takes its sidecars and networks away and ends there, so
+the person's next try starts afresh; if Docker cannot confirm they are gone, or the
+Gateway stops part way, the record stays and refuses that account until an operator
+removes it. Cancellation retains verified
 containers for fenced cleanup. Operators must preserve the directory alongside
 the pool; unsafe or unknown evidence refuses admission.
 The journal also retains private teardown records for restricted sandboxes.

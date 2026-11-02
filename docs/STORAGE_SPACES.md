@@ -411,7 +411,9 @@ repair; interrupted staging directories and existing bytes are preserved.
 Managed native chat creation uses version-1 bounded single-link 0600 records
 containing immutable attempt, daemon, container name, owner/thread and exact slot
 correlation facts; these facts grant no authority. Qualification restores retained
-pending capacity before orphan reconciliation or native publication. The exact
+pending capacity before orphan reconciliation or native publication. The process that
+made an attempt withdraws it when its primary was never sent and its own sidecars and
+networks are proved gone; a restored record has no such proof and stays. The exact
 journal stays owned through retry and worker drainage, alongside the pool lock.
 
 The same bounded namespace also understands private version-2 teardown records.

@@ -225,6 +225,51 @@ def test_callback_failure_after_pending_publication_submits_nothing(fixture, mon
     assert state.pending_for(owner_id="alice")
 
 
+def test_an_attempt_that_sent_nothing_is_withdrawn_and_frees_its_owner(fixture):
+    journal, state, bridge, _owner = fixture
+    handoff = bridge.begin(name="native-a", labels=LABELS)
+    bridge.withdraw(handoff)
+    assert journal.pending() == () and not state.pending_for(owner_id="alice")
+    bridge.require_admissible(name="native-a", owner_id="alice")
+    runner, calls, _observed = engine(journal)
+    assert bridge.submit(name="native-a", labels=LABELS, command=command(), runner=runner) == CONTAINER
+    assert len(calls) == 2
+
+
+def test_a_withdrawn_handoff_cannot_send_its_primary(fixture):
+    journal, _state, bridge, _owner = fixture
+    handoff = bridge.begin(name="native-a", labels=LABELS)
+    bridge.withdraw(handoff)
+    runner, calls, _observed = engine(journal)
+    with pytest.raises(StorageHostUnqualified):
+        bridge.submit(name="native-a", labels=LABELS, command=command(), runner=runner, handoff=handoff)
+    assert calls == [] and journal.pending() == ()
+
+
+def test_a_sent_primary_can_never_be_withdrawn(fixture):
+    journal, state, bridge, _owner = fixture
+    handoff = bridge.begin(name="native-a", labels=LABELS)
+    runner, _calls, observed = engine(journal, error=RuntimeError("uncertain"))
+    with pytest.raises(StorageHostUnqualified):
+        bridge.submit(name="native-a", labels=LABELS, command=command(), runner=runner, handoff=handoff)
+    with pytest.raises(StorageHostUnqualified):
+        bridge.withdraw(handoff)
+    assert journal.pending() == (observed[0],) and state.pending_for(owner_id="alice")
+
+
+@pytest.mark.parametrize("fault", ["owner", "daemon"])
+def test_withdrawal_needs_the_current_owner_and_daemon(fixture, fault):
+    journal, state, bridge, owner = fixture
+    handoff = bridge.begin(name="native-a", labels=LABELS)
+    if fault == "owner":
+        owner.live = False
+    else:
+        owner.daemon = "daemon-B"
+    with pytest.raises(StorageHostUnqualified):
+        bridge.withdraw(handoff)
+    assert len(journal.pending()) == 1 and state.pending_for(owner_id="alice")
+
+
 def test_same_handoff_cannot_resubmit_an_unreturned_primary_command(fixture):
     journal, _state, bridge, _owner = fixture
     handoff = bridge.begin(name="native-a", labels=LABELS)

@@ -155,7 +155,13 @@ lock encloses journal/Docker/store IO. Partial journal publication restores pend
 accounting or closes admission. Pending denies guessed adoption/replacement/removal;
 known exact returned or live tracked IDs may use canonical fenced cleanup.
 Confirmed absence retires acknowledged handoffs only; unacknowledged evidence stays
-reserved. SDK-less quarantine retains actual identity, never a guessed client.
+reserved, with one exception. An attempt that never sent its primary is withdrawn by
+the process that made it: `submitted` is written before the runner and lives only in
+memory, so a restored record can never qualify. The pending record keeps the name
+exclusive while the attempt's own sidecars and networks go, and it stays unless their
+absence is proved, because a leftover set makes the next start read as a mismatch.
+`LocalContainerBackend._withdraw_unsubmitted` owns this; nothing else clears pending.
+SDK-less quarantine retains actual identity, never a guessed client.
 Unconfirmed create warnings expose bounded cause types, source locations, errno,
 return code and retained attempt/submission facts. Never log exception messages,
 subprocess argv/output, environment or relay tokens at this boundary.

@@ -154,6 +154,19 @@ class NativeCreateHandoffs:
             handoff.submitted = True
             self._touch(handoff.attempt)
 
+    def require_unsubmitted(self, handoff):
+        with self.lock:
+            self._current(handoff)
+            if handoff.submitted or handoff.verified is not None or handoff.acknowledged:
+                raise StorageHostUnqualified("A submitted native request cannot be withdrawn")
+
+    def withdrawn(self, handoff):
+        """Its journal record is gone. An older snapshot must not bring it back."""
+        with self.lock:
+            self._current(handoff)
+            self._items.pop(handoff.attempt.id)
+            self._touch(handoff.attempt)
+
     def record_acknowledged(self, handoff):
         with self.lock:
             self._current(handoff)
@@ -416,6 +429,17 @@ class NativeCreateBridge:
         except Exception as exc:
             self._check_failure_evidence()
             raise NativeCreateUnconfirmed(handoff) from exc
+
+    def withdraw(self, handoff):
+        """Drop an attempt that never sent its primary, so no container of it can exist.
+
+        `submitted` is written before the runner is called and lives only in this
+        process, so a record restored after a restart can never come here.
+        """
+        self.assert_current()
+        self.handoffs.require_unsubmitted(handoff)
+        self.evidence.withdraw(handoff.attempt)
+        self.handoffs.withdrawn(handoff)
 
     def submit(self, *, name, labels, command, runner, handoff=None):
         try:

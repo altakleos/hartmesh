@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run still settling its attempt no longer leaves one pending.
 - Reading a Work item while its attempt settles no longer pairs the settled attempt with
   the item's earlier status.
+- A sandbox start that fails before its container was requested, such as a network that
+  could not be created, costs that one try. It used to leave a record that refused the
+  person every sandbox for good. A record already left by an earlier version stays until
+  an operator removes it, because nothing proves its container was never requested.
 
 ## [2.2.0+hartmesh.48] - 2026-11-02
 
