@@ -12,6 +12,7 @@ class ProviderAdmission:
         self._lock = threading.Lock()
         self._provider = None
         self._ready = False
+        self._opened = False
         self._sealed = False
         self._revision = 0
 
@@ -27,8 +28,13 @@ class ProviderAdmission:
         with self._lock:
             if self._sealed or self._provider is not provider or provider is None:
                 raise SandboxRuntimeAdmissionError("Sandbox lifecycle cannot open this provider")
-            self._ready = True
+            self._ready = self._opened = True
             self._revision += 1
+
+    def has_opened(self):
+        """Whether anyone could have been admitted; closing again does not undo that."""
+        with self._lock:
+            return self._opened
 
     def require(self, provider):
         with self._lock:

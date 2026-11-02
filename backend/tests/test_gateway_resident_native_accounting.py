@@ -128,6 +128,70 @@ async def test_a_leftover_with_no_primary_goes_and_refuses_nobody(fixture, caplo
 
 
 @pytest.mark.anyio
+async def test_a_leftover_on_a_running_gateway_stays_and_refuses_nobody(fixture, caplog):
+    """A resident that took its slot before admission closed could still be building this set."""
+    host, provider, admission, local, _calls = runtime(fixture)
+    with_relay(local)
+    admission.open(provider)
+    admission.close()
+    permit = provider._begin_bootstrap_accounting(admission)
+    try:
+        with caplog.at_level("WARNING"):
+            proof = await host.account_native(permit)
+        provider.external_changed(lambda: proof.require_current_locked(provider, permit))
+    finally:
+        provider._end_bootstrap_accounting(permit)
+    assert local.removed == []
+    (message,) = [record.getMessage() for record in caplog.records if "no sandbox" in record.getMessage()]
+    assert "orphan-proxy" in message and "removed 0" in message
+
+
+@pytest.mark.anyio
+async def test_a_leftover_stays_while_durable_runs_lack_their_owner(fixture):
+    host, provider, admission, local, _calls = runtime(fixture)
+    with_relay(local)
+    host.inventory_runs = AsyncMock(side_effect=lambda: setattr(host, "foreign_run_blocks", frozenset({"run"})))
+    permit = provider._begin_bootstrap_accounting(admission)
+    try:
+        proof = await host.account_native(permit)
+        with pytest.raises(StorageRuntimeUnavailable, match="Durable inflight"):
+            provider.external_changed(lambda: proof.require_current_locked(provider, permit))
+    finally:
+        provider._end_bootstrap_accounting(permit)
+    assert local.removed == []
+
+
+@pytest.mark.anyio
+async def test_a_census_that_cannot_finish_removes_nothing(fixture):
+    host, provider, admission, local, _calls = runtime(fixture)
+    with_relay(local)
+    provider._adoptable_after_grace = lambda *_args: False
+    permit = provider._begin_bootstrap_accounting(admission)
+    try:
+        with pytest.raises(StorageHostUnqualified, match="live owner"):
+            await host.account_native(permit)
+    finally:
+        provider._end_bootstrap_accounting(permit)
+    assert local.removed == []
+
+
+@pytest.mark.anyio
+async def test_the_removal_stops_with_the_runtime(fixture, monkeypatch):
+    from deerflow.community.aio_sandbox import native_teardown_execution
+
+    host, provider, admission, local, _calls = runtime(fixture)
+    with_relay(local)
+    guards = []
+    monkeypatch.setattr(native_teardown_execution, "remove_leftovers", lambda reader, items: guards.append(reader.guard) or ())
+    permit = provider._begin_bootstrap_accounting(admission)
+    try:
+        await host.account_native(permit)
+    finally:
+        provider._end_bootstrap_accounting(permit)
+    assert guards == [provider._native_creation.assert_current]
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("removal", [1, subprocess.TimeoutExpired("docker", 15), OSError("Docker went away")], ids=["refused", "timed-out", "unreachable"])
 async def test_a_leftover_that_will_not_go_still_refuses_nobody(fixture, caplog, removal):
     host, provider, admission, local, _calls = runtime(fixture)
@@ -161,6 +225,22 @@ async def test_a_set_beside_a_pending_record_stays_and_refuses_only_that_account
     with pytest.raises(StorageHostUnqualified):
         bridge.require_admissible(name="current-other", owner_id="alice")
     bridge.require_admissible(name="current-other", owner_id="bob")
+
+
+@pytest.mark.anyio
+async def test_a_writer_beside_a_pending_record_still_closes_admission(fixture):
+    host, provider, admission, local, _calls = runtime(fixture)
+    bridge = provider._native_creation
+    bridge.evidence.begin(owner_id="alice", thread_id="chat", name="current-orphan", slots=(SLOT,))
+    bridge.qualify()
+    with_relay(local, mounts=[{"Type": "bind", "Source": "/pool/slot", "Destination": "/data", "RW": True}])
+    permit = provider._begin_bootstrap_accounting(admission)
+    try:
+        with pytest.raises(StorageHostUnqualified, match="host storage mount"):
+            await host.account_native(permit)
+    finally:
+        provider._end_bootstrap_accounting(permit)
+    assert local.removed == []
 
 
 @pytest.mark.anyio

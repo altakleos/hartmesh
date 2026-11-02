@@ -231,6 +231,15 @@ def test_removal_keeps_to_the_readers_budget():
     assert commands == []
 
 
+def test_a_removal_gets_no_more_than_the_budget_left():
+    reader, _primary, _actual, objects, _calls = topology()
+    timeouts = []
+    reader.backend._run = lambda _command, **kwargs: timeouts.append(kwargs["timeout"]) or SimpleNamespace(returncode=0, stdout="", stderr="")
+    reader.deadline = time.monotonic() + 5
+    remove_leftovers(reader, leftover(objects))
+    assert timeouts and max(timeouts) <= 5
+
+
 def test_a_runtime_that_stops_being_current_stops_the_removal():
     reader, _primary, _actual, objects, _calls = topology()
     items = leftover(objects)

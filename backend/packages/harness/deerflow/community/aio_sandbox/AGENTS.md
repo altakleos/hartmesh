@@ -88,7 +88,8 @@ still closes admission. `remove_leftovers` then removes it by immutable ID unles
 pending record or a claim names it, and a failed removal refuses nobody. The census
 does this rather than a start, because a start cannot reach a set whose id changed,
 like a NoUser chat's after a restart. It is the one destructive scope the census has,
-and it rests on admission being closed with every producer drained.
+and only runs before admission first opens: `take_slot` is a resident's last admission
+check, so a later census cannot prove residents drained.
 Tests: `test_bootstrap_sandbox_accounting.py`, `test_bootstrap_primary_inventory.py`.
 
 Full acquire/acquire_async operations register producers before their first await

@@ -90,8 +90,8 @@ def recover_teardowns(provider):
 def remove_leftovers(reader, items):
     """Remove proved members by immutable ID, relays before their networks.
 
-    Only the census calls this, with admission closed and every producer drained. A
-    member that will not go costs only its conversation, and the next census tries again.
+    Only the census calls this, before its Gateway has admitted anyone. A member that
+    will not go costs only its conversation, and the next start tries again.
     """
     removed = []
     for item in sorted(items, key=lambda item: item.fact.kind):
@@ -109,7 +109,6 @@ def remove_leftovers(reader, items):
             logger.warning("Native leftover %s stays: docker exited %d", item.fact.name, result.returncode)
             continue
         removed.append(item)
-    reader.guard()
     return tuple(removed)
 
 

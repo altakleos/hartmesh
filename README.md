@@ -700,11 +700,10 @@ container request was sent removes its sidecars and networks and withdraws its
 record, so the person's next try normally starts afresh. If Docker cannot confirm
 they are gone, or the Gateway dies part way, the record stays and refuses that
 account. A Docker command that timed out, a crash or a hard reboot can also leave a
-proxy or network with no sandbox beside it. The native census, which runs whenever the
-Gateway starts, removes it, so a restart clears these before anyone is affected. One
-that appears while the Gateway runs refuses only its own conversation until then. A
-set that could be holding storage is refused instead, which stops everyone until it
-is resolved. Recovering a stuck record is manual; see
+proxy or network with no sandbox and no record beside it. The native census removes it
+when the Gateway next starts, before anyone is admitted. Until then it refuses only
+its own conversation. A set that could be holding storage is refused instead, which
+stops everyone until it is resolved. Recovering a stuck record is manual; see
 [the steps](docs/STORAGE_SPACES.md#qualified-linux-backing). Cancellation retains
 verified containers for fenced cleanup. Operators must otherwise preserve the
 directory alongside the pool; unsafe or unknown evidence refuses admission.

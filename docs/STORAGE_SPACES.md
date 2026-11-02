@@ -417,13 +417,18 @@ networks are proved gone; a restored record has no such proof and stays. The exa
 journal stays owned through retry and worker drainage, alongside the pool lock.
 
 A proxy or network with no sandbox and no record beside it needs no operator, whether
-a crash, a hard reboot or a late Docker effect left it. The native census removes it
-by immutable ID and logs the count and up to six names. The census runs at every
-Gateway start, with admission closed and every start and teardown drained under the
-pool lock, so nothing can still be using the set. A set beside a pending record or a
-retained workspace claim stays. One that appears while the Gateway runs refuses its
-own conversation, which reads as a mismatch, until the next census. One that will not
-go is tried again then.
+a crash, a hard reboot or a late Docker effect left it. The first native census after
+a Gateway starts removes it by immutable ID, before that Gateway has admitted anyone,
+and logs the count found and up to six names. A set beside a pending record or a
+retained workspace claim stays, and so does every set while a durable run lacks its
+drained owner. A later census leaves them all, because a resident that took its slot
+before admission closed can still be building one. Such a set refuses its own
+conversation, which reads as a mismatch, until the next start. One that will not go
+is tried again then.
+
+This removal reads no lease, so it rests on one Gateway per Docker daemon: a second
+Gateway starting there could remove a set the first is still building. Compose runs
+one.
 
 The census refuses rather than removes a set that could hold a writer: a host mount,
 storage labels, a privileged relay or one with extra capabilities, host namespaces or
