@@ -7,6 +7,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from test_agent_instances import instances as instances
+from test_storage_spaces_startup import _without_background_passes
 from test_storage_spaces_startup import startup as startup
 
 from app.gateway.deps import get_config
@@ -159,7 +160,7 @@ async def test_features_do_not_project_a_person_from_unsupported_identity(startu
     [
         pytest.param(9, "user", False, "fault", id="free-seats-and-a-failed-slot"),
         pytest.param(0, "user", False, "fault", id="this-person-holds-the-last-seat-and-its-slot-failed"),
-        pytest.param(0, "user", True, "fault", id="a-failed-slot-still-bound-to-someone-who-left"),
+        pytest.param(0, "user", True, "fault", id="a-failed-slot-still-bound-to-someone"),
         pytest.param(-1, "user", False, "no-seat", id="more-accounts-than-seats-beside-a-failed-slot"),
         pytest.param(-1, None, False, "no-seat", id="more-accounts-than-seats"),
         pytest.param(0, None, False, "not-assigned", id="this-person-holds-the-last-seat-and-a-release-is-pending"),
@@ -173,7 +174,7 @@ async def test_seats_are_blamed_only_when_they_are_taken(startup, monkeypatch, f
     from deerflow.spaces.contract import Custody, MutationMode
 
     ss, app, config, sf, catalog, _, _ = startup
-    await ss.initialize_storage_spaces(app, config, session_factory=sf)
+    await _without_background_passes(ss, app, config, sf)
     files = app.state.storage_spaces
     slots = {spec.kind: slot for slot, spec in catalog.volumes.items()}
     original = ss.allowance

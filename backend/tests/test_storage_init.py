@@ -688,6 +688,21 @@ def test_a_restored_image_is_logged(allocated, capsys):
     assert f"restored space {spec.slot_id}" in capsys.readouterr().err
 
 
+def test_an_image_that_gained_nothing_is_not_logged_as_restored(allocated, monkeypatch, capsys):
+    """Extents can fail for a reason allocation cannot fix, such as a shared extent."""
+    tool = allocated[0]
+    tool.prepare()
+    spec = next(iter(tool.load().volumes.values()))
+
+    def refused(*_args):
+        raise si.BackingUnavailable("shared extent")
+
+    monkeypatch.setattr(si, "verify_image_extents", refused)
+    capsys.readouterr()
+    assert tool.restore_allocation(spec) == 0
+    assert "restored space" not in capsys.readouterr().err
+
+
 def test_restore_leaves_an_image_of_another_size_for_verification_to_report(allocated):
     tool = allocated[0]
     tool.prepare()

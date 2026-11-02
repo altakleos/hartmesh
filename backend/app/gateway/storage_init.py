@@ -619,7 +619,8 @@ sync -f "$(dirname -- "$p")"
             os.posix_fallocate(fd, 0, spec.max_bytes)
             os.fsync(fd)
             restored = max(0, os.fstat(fd).st_blocks - image.st_blocks) * 512
-            print(f"storage-init: restored space {spec.slot_id}, {restored / (1 << 20):.1f} MiB", file=sys.stderr, flush=True)
+            if restored:
+                print(f"storage-init: restored space {spec.slot_id}, {restored / (1 << 20):.1f} MiB", file=sys.stderr, flush=True)
             return restored
         finally:
             os.close(fd)
