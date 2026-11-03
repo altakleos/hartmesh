@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.49] - 2026-11-03
+
 ### Telegram bots
 
 - A long answer no longer holds one of the eight message workers for its whole length, so
@@ -74,6 +76,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-verifies every image each minute, and both return to `ready` without a restart.
 - The storage guide now says that `guest-fstrim` bypasses the fstab exclusion, as `fstrim -a`
   does.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.48. The database head stays at
+`0044_telegram_assistant_ids`, and the configuration version stays at 55.
 
 ## [2.2.0+hartmesh.48] - 2026-11-02
 
