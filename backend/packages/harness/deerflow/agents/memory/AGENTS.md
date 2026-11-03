@@ -88,6 +88,8 @@ It captures `user_id` when it enqueues work.
 This identity survives the background timer boundary.
 
 `memory.mode: tool` registers the four memory tools.
+
+DeerMem debounces each `(thread_id, user_id, agent_name)` on monotonic deadlines; other conversations cannot reset it. Same-key coalescing keeps the first arrival; `backend_config.max_wait_seconds` (default 300) caps deferral. One timer, one serial consumer; flushes and emergency snapshots are eligible at once. Tests: `tests/test_memory_queue_deadlines.py` (fake clock).
 The model chooses when to search or change facts.
 Tool mode still uses `MemoryMiddleware` for passive writes on supported remote backends.
 
