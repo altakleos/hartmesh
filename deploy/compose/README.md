@@ -1136,6 +1136,12 @@ differs on purpose because the VM's host firewall is the front door and admits
 only the platform's front-door proxies. No other compose service publishes a
 port (`docker compose ps` shows one `PORTS` entry).
 
+From the guest, ask `http://localhost:2026`, not `http://127.0.0.1:2026`.
+nginx answers a `GET` or `HEAD` whose host is `127.0.0.1` or `[::1]` with a
+301 to `localhost` on the same port, so a browser session stays in one cookie
+jar. `curl -fsS` does not follow it and prints the redirect page. The front
+door forwards the public host name, so it never meets the redirect.
+
 An AI agent workspace and its relay publish no host port: the Gateway reaches
 them through `docker exec`. Each ordinary chat sandbox does publish one host port by design: its proxy's under
 `allowlist`, its own under `open`. Those bind the daemon's host-gateway
@@ -1775,7 +1781,7 @@ the files have stopped moving, and a snapshot or byte-exact comparison taken
 in that window catches a document mid-write. Ask first, from the guest:
 
 ```sh
-curl -fsS http://127.0.0.1:2026/api/memory/writers
+curl -fsS http://localhost:2026/api/memory/writers
 ```
 
 Take the snapshot when `idle` is `true`. Anything else — buffered work, a

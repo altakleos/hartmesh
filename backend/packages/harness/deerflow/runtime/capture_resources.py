@@ -347,6 +347,20 @@ class OwnedCheckpointSaver(_Facade, BaseCheckpointSaver):
     def config_specs(self):
         return self._inner.config_specs
 
+    @property
+    def source_saver(self):
+        """The saver owning the authoritative rows, through a cache wrapper.
+
+        Checkpoint retention resolves storage through this public contract;
+        without it, retention refuses the facade as an unsupported saver.
+        """
+        return getattr(self._inner, "source_saver", self._inner)
+
+    async def ainvalidate_history_cache(self, thread_id):
+        """Purge a wrapped history cache before its source rows change."""
+        if callable(getattr(self._inner, "ainvalidate_history_cache", None)):
+            await self._async("ainvalidate_history_cache", thread_id)
+
     def get_next_version(self, current, channel):
         return self._inner.get_next_version(current, channel)
 

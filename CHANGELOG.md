@@ -19,7 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `auth.local.throttle_storage` setting is not adopted, and a config that sets it still
   loads.
 - HartMesh keeps its own account-disable model. Upstream's admin user-management HTTP
-  routes are not mounted.
+  routes are not mounted, and `GET /api/v1/auth/me` does not carry upstream's
+  `disabled` flag: a turned-off account is refused at sign-in, so the flag would always
+  read false.
+- nginx now answers a `GET` or `HEAD` on `127.0.0.1` or `[::1]` with a redirect to
+  `localhost` on the same port, so a browser session is not split across two cookie
+  jars. On a tenant VM, ask `http://localhost:2026` from the guest, or pass `curl -L`. A
+  front door that forwards the public host name is unaffected.
+- Checkpoint retention now runs on HartMesh's Gateway checkpointer. Before this, every
+  run admission logged "checkpoint retention requires a supported storage saver" and
+  left the trailing run-history checkpoint in place.
 - `/health/ready` reports upstream's `stream_bridge` and `provisioner` verdicts next to
   HartMesh's `redis` verdict. The provisioner verdict never fails readiness.
 - The Gateway refuses to start when `projects.summaries_enabled` and

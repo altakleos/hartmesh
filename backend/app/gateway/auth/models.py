@@ -55,7 +55,9 @@ class UserResponse(BaseModel):
     id: str
     email: str
     system_role: str = Field(..., min_length=1)
-    disabled: bool = False
+    # No ``disabled`` flag: HartMesh refuses a disabled account at sign-in, so
+    # every /me answer would report false, and the upstream admin user list
+    # that read it is not adopted. frontend-hm's synthetic user pins this shape.
     needs_setup: bool = False
     oauth_provider: str | None = Field(None, description="OAuth/SSO provider ID if the user logged in via SSO (e.g. 'keycloak')")
     permissions: list[str] | None = Field(

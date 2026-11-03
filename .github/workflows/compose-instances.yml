@@ -174,7 +174,8 @@ jobs:
           grep -F 'storage: storage-init mount-all exit 0 in ' "$EVIDENCE/gateway-start.log" | grep -F '(9 spaces: 0 mounted now, 9 already mounted, 0 failed)'
           grep -F 'storage: ready (9 spaces prepared, 9 verified; users 0 of 3 seats' "$EVIDENCE/gateway-start.log" | grep -F 'runtime hartmesh-ci)'
           grep -F 'storage: company space created (' "$EVIDENCE/gateway-start.log"
-          curl -fsS http://127.0.0.1:2026/health | jq -e '.storage == "ready" and (.agents == "none" or .agents == "ready")'
+          # nginx 301s a GET on 127.0.0.1 to localhost (#6156); ask the canonical host.
+          curl -fsS http://localhost:2026/health | jq -e '.storage == "ready" and (.agents == "none" or .agents == "ready")'
           test "$($C exec -T gateway id -u):$($C exec -T --user 1000 gateway id -u):$($C exec -T --user 1000 gateway id -g)" = "0:1000:0"
 
       - name: 12 Run prepare by hand, which finds nothing to do
@@ -187,7 +188,7 @@ jobs:
         run: |
           env PYTHONPATH="$PWD" PYTHON_DOTENV_DISABLED=1 \
             HARTMESH_REQUIRE_BUNDLE_INSTANCES=1 \
-            HARTMESH_BUNDLE_URL=http://127.0.0.1:2026 \
+            HARTMESH_BUNDLE_URL=http://localhost:2026 \
             HARTMESH_BUNDLE_PROJECT_DIR=/opt/hartmesh \
             HARTMESH_BUNDLE_ENV_FILE=/srv/hartmesh/.env \
             HARTMESH_BUNDLE_ADMIN_EMAIL=admin@example.com \
