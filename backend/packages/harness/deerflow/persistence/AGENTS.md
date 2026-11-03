@@ -17,6 +17,8 @@ hide a foreign lease. The public RunStore remains unchanged.
 
 Postgres bootstrap owns its session-scoped advisory lock until `pg_advisory_unlock` completes. Drain that unlock across host cancellation before leaving the SQLAlchemy connection context; repeated cancellation must not return a pooled session while it still holds the bootstrap mutex. Ordinary database errors remain best-effort and are logged.
 
+`init_engine` auto-creates a Postgres database only on SQLSTATE `3D000`. Missing relations, columns and roles also "do not exist"; a `CREATE DATABASE` retry would mask them.
+
 When `database.postgres_schema` is configured, both async ORM connections and the synchronous SQLAlchemy connections used by DB-backed custom agents and managed subagents must use the same `search_path`; preserve this invariant when adding another persistence entry point.
 
 Every JSON column write goes through `dumps_json_safe` (`json_compat.py`): non-finite floats normalize to `None` because PostgreSQL jsonb rejects the bare `NaN`/`Infinity` token (SQLite would silently accept it). The shared async engine and sync agent-storage engine wire it on both SQLite and PostgreSQL; keep new JSON-writing persistence entry points on it too.
