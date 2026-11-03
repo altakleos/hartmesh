@@ -50,8 +50,6 @@ Workspace prewarm checks `sandbox:execute` before provider lookup/scheduling,
 using the shared request authorization helper off-loop. Denial returns 202
 with `scheduled: false, reason: forbidden`; thread ownership still applies.
 
-Upload, delete and shelf-attach 500s name the file, not the cause; `OSError` host paths stay in the log.
-
 Thread `owner_user_id` comes only from stored `user_id` across create/replay/race,
 GET/search/PATCH/move; checkpoint-only ownership stays unknown.
 GET's opt-in bool `X-DeerFlow-Require-Thread-Binding` requires `agent_conversations`:
@@ -62,6 +60,7 @@ compatibility. Create's default null binding proves nothing about actual binding
 and rendered `artifacts`, `todos` and non-null `goal`. Keep the API channel
 serializer and explicit projection; expose no internal sandbox state. Empty lists
 are meaningful; omit absent/null goals to preserve frontend local overrides.
+Upload, shelf-attach, agent, profile and agent-config errors use fixed text; host paths stay in logs.
 
 Artifacts, Files and Shared stream MIME sniffing/metadata/ranges from one safely
 opened descriptor. Preflight paths determine HTTP errors, never permission to

@@ -526,6 +526,12 @@ via `config.configurable.thread_id` to keep conversation history.
 
 Base URL: `/api`
 
+### Custom Agent errors
+
+**Error behavior:**
+- `/api/agents` and `/api/user-profile` routes answer unexpected failures with a fixed `500` detail such as `{"detail": "Failed to get agent"}`; an unparsable agent `config.yaml` or a filesystem error names host paths, so the full exception stays in server logs
+- Scheduled-task create and update return 422 with a fixed message when the selected agent's config cannot be loaded
+
 ### Models
 
 #### List Models
