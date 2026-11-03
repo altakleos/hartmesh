@@ -14,6 +14,7 @@ injected onto the updater so no network is needed.
 from __future__ import annotations
 
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,16 @@ from deerflow.agents.memory.backends.deermem.deermem.core.message_processing imp
 )
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage
 from deerflow.agents.memory.manager import MemoryCallbacks
+
+
+def _days_ago(days: int) -> str:
+    return (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# hybrid-v1 scores freshness against the wall clock, so the fixtures' "recent" and
+# "stale" timestamps must be relative to it; fixed dates silently age out.
+RECENT = _days_ago(7)
+STALE = _days_ago(670)
 
 
 @pytest.fixture
@@ -605,7 +616,7 @@ def test_hybrid_capacity_keeps_recent_confirmation_over_stale_confidence(deermem
                         "content": f"high {index}",
                         "category": "preference",
                         "confidence": 0.99,
-                        "createdAt": "2026-08-12T00:00:00Z",
+                        "createdAt": RECENT,
                     }
                     for index in range(8)
                 ],
@@ -614,15 +625,15 @@ def test_hybrid_capacity_keeps_recent_confirmation_over_stale_confidence(deermem
                     "content": "stale high confidence",
                     "category": "preference",
                     "confidence": 0.9,
-                    "createdAt": "2025-01-01T00:00:00Z",
+                    "createdAt": STALE,
                 },
                 {
                     "id": "confirmed_recently",
                     "content": "recently confirmed preference",
                     "category": "preference",
                     "confidence": 0.7,
-                    "createdAt": "2025-01-01T00:00:00Z",
-                    "lastConfirmedAt": "2026-08-12T00:00:00Z",
+                    "createdAt": STALE,
+                    "lastConfirmedAt": RECENT,
                 },
             ],
         },
@@ -662,7 +673,7 @@ def test_hybrid_import_applies_same_capacity_policy(deermem_data_dir):
                         "content": f"high {index}",
                         "category": "preference",
                         "confidence": 0.99,
-                        "createdAt": "2026-08-12T00:00:00Z",
+                        "createdAt": RECENT,
                     }
                     for index in range(8)
                 ],
@@ -671,22 +682,22 @@ def test_hybrid_import_applies_same_capacity_policy(deermem_data_dir):
                     "content": "stale high confidence",
                     "category": "preference",
                     "confidence": 0.9,
-                    "createdAt": "2025-01-01T00:00:00Z",
+                    "createdAt": STALE,
                 },
                 {
                     "id": "confirmed_recently",
                     "content": "recently confirmed preference",
                     "category": "preference",
                     "confidence": 0.7,
-                    "createdAt": "2025-01-01T00:00:00Z",
-                    "lastConfirmedAt": "2026-08-12T00:00:00Z",
+                    "createdAt": STALE,
+                    "lastConfirmedAt": RECENT,
                 },
                 {
                     "id": "new_context",
                     "content": "new useful context",
                     "category": "context",
                     "confidence": 0.8,
-                    "createdAt": "2026-08-12T00:00:00Z",
+                    "createdAt": RECENT,
                 },
             ],
         },
@@ -717,7 +728,7 @@ def test_hybrid_capacity_reserves_correction_and_writes_audit(deermem_data_dir):
                     "content": f"preference {index}",
                     "category": "preference",
                     "confidence": 0.99,
-                    "createdAt": "2026-08-12T00:00:00Z",
+                    "createdAt": RECENT,
                 }
                 for index in range(10)
             ],
@@ -756,7 +767,7 @@ def test_confidence_policy_shadow_does_not_change_actual_selection(deermem_data_
                 "content": f"high {index}",
                 "category": "preference",
                 "confidence": 0.99,
-                "createdAt": "2026-08-12T00:00:00Z",
+                "createdAt": RECENT,
             }
             for index in range(8)
         ],
@@ -765,15 +776,15 @@ def test_confidence_policy_shadow_does_not_change_actual_selection(deermem_data_
             "content": "stale high confidence",
             "category": "preference",
             "confidence": 0.9,
-            "createdAt": "2025-01-01T00:00:00Z",
+            "createdAt": STALE,
         },
         {
             "id": "confirmed_recently",
             "content": "recently confirmed preference",
             "category": "preference",
             "confidence": 0.7,
-            "createdAt": "2025-01-01T00:00:00Z",
-            "lastConfirmedAt": "2026-08-12T00:00:00Z",
+            "createdAt": STALE,
+            "lastConfirmedAt": RECENT,
         },
     ]
     dm.import_memory({"user": {}, "history": {}, "facts": facts}, user_id="u1")

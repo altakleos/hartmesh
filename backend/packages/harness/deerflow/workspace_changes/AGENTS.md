@@ -54,3 +54,34 @@ delivery interval and can now be handed over. `abefore_agent` clears any old
 same-run baseline before capture; failed resumes must not reuse an interrupted
 snapshot. `test_output_snapshot_handoff.py` counts actual scanner traversals
 through a compiled graph and compares receipts with independent capture.
+
+## Snapshot cancellation (`recorder.py`)
+
+The scanner opens the lexical root with `files.store.open_directory_source`,
+uses descriptor-relative `fwalk`, and opens each regular file once with no-follow.
+Metadata, sample, digest and text come from that file; per-file reads stay bounded
+and size/mtime changes make enumeration incomplete. Symlinks remain metadata-only
+stubs. Unsupported safe reads must not be reported as complete delivery evidence.
+
+After `_prepare_capture()` hands off roots, cancellation must drain text scans
+(`include_text=True`) before removing the cache the worker may still access.
+Metadata scans (`include_text=False`) own no cache: cancel promptly, let the worker
+continue, and consume/log its outcome in a completion callback. Prepare-stage
+cancellation retains its handoff/reclaim path. Regressions in
+`tests/blocking_io/test_workspace_changes_cancellation.py` must cover prompt
+metadata cancellation and text-cache drain/cleanup.
+
+## Gateway workspace change review
+
+`packages/harness/deerflow/workspace_changes/` captures a pre-run and post-run snapshot of the thread-owned `workspace` and
+`outputs` directories. `runtime/runs/worker.py` performs the filesystem scan via
+`asyncio.to_thread` and writes a `workspace_changes` event with category
+`workspace` when changes exist. Uploads are intentionally excluded. Text diffs
+are size-limited; binary, large, and sensitive-looking paths are persisted as
+metadata only. Internal process-feedback directories never count as changes:
+the scanner's `EXCLUDED_DIR_NAMES` drops `BROWSER_FRAMES_DIRNAME` (transient
+browser screenshots) and `TOOL_RESULTS_DIRNAME` (the tool-output budget
+middleware's default externalization subdir, `constants.py` is the shared
+source of truth for both writers and the scanner), and the worker threads the
+configured `tool_output.storage_subdir` through the snapshot capture as an
+extra excluded dir name so custom storage locations stay excluded too.

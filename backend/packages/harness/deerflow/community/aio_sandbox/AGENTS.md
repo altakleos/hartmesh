@@ -218,6 +218,18 @@ shutdown close admission and drain the worker before serializer/store teardown.
 Capacity, ownership, failed-destroy quarantine and unclaimed reaping still use
 the ordinary provider lifecycle. Regressions: `test_sandbox_prewarm.py`.
 
+## Network policy
+
+Restricted AIO keeps sandboxes internal; a per-sandbox, ICC-disabled sidecar
+handles egress and its token-authenticated API relay. Parse headers strictly;
+reject policy-denied names before DNS and try all validated answers. Claim the
+oldest unsurfaced denial; subagent/non-interactive runs drain and deny. Approvals
+never replay tools; policy labels fence reuse. CONNECT/SNI cannot inspect
+encrypted authority. Discovery and enumeration are read-only, including on a
+policy or network-mode mismatch; only the provider may replace it after the
+orphan grace, local teardown reservation, and cross-instance teardown lease.
+Destroy the sandbox, sidecar, and both networks together.
+
 ## Stdin contracts per transport
 
 AIO has two distinct stdin contracts: the persistent `/v1/shell` transport is a
