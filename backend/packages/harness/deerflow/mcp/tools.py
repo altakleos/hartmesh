@@ -966,9 +966,14 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
                         return []
                 return await discovery
             except Exception as e:
+                # Never interpolate ``e`` nor attach its traceback: ``ExtensionsConfig``
+                # resolves ``$VAR`` before validation, so a discovery error message can
+                # embed a resolved-credential request URL. Keep the server name and the
+                # exception type for diagnosis.
                 logger.warning(
-                    f"Skipping MCP server '{server_name}' after tool discovery failed: {e}",
-                    exc_info=True,
+                    "Skipping MCP server '%s' after tool discovery failed (%s)",
+                    server_name,
+                    type(e).__name__,
                 )
                 return []
 
@@ -1052,5 +1057,7 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
     except McpTaskConfigurationError:
         raise
     except Exception as e:
-        logger.error(f"Failed to load MCP tools: {e}", exc_info=True)
+        # Only the exception type is logged: the message/traceback can carry a
+        # resolved-credential request URL (see the per-server discovery handler).
+        logger.error("Failed to load MCP tools (%s)", type(e).__name__)
         return []
