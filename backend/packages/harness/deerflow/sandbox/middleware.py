@@ -12,7 +12,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command, Overwrite
 
-from deerflow.agent_instances.runtime import check_network_decision, network_card_allowed, network_denial_artifact
+from deerflow.agent_instances.runtime import check_network_decision, current_environment, network_card_allowed, network_denial_artifact
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
@@ -42,6 +42,18 @@ _NETWORK_POLICY_DECISIONS = frozenset({"deny", "allow_temporary", "allow_sandbox
 
 def _network_approval_is_non_interactive(context: Mapping[str, object]) -> bool:
     return network_card_allowed(context) is False or not resolve_run_interaction_policy({"context": context}).allows_clarification
+
+
+def _run_started_its_workspace() -> bool:
+    """An AI agent's run starts its workspace before the graph does.
+
+    The conversation's saved id may be missing or name a replaced workspace. Settle
+    it here, once: the agent's Home has no host copy, so a tool such as view_image
+    needs the current id, and parallel tools must not each replace a stale one in
+    the same step, which the sandbox reducer refuses.
+    """
+    environment = current_environment()
+    return environment is not None and environment.provider is not None
 
 
 class SandboxMiddlewareState(AgentState):
@@ -239,7 +251,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         # Preserve lazy initialization for threads that use the shared view.
         # A policy-scoped view is acquired eagerly so an old shared-view
         # sandbox cannot survive into this run through checkpoint state.
-        if self._lazy_init and projection is None:
+        if self._lazy_init and projection is None and not _run_started_its_workspace():
             # Bind the execution lease only when a sandbox-backed tool actually
             # touches the persisted sandbox. Runs that only answer or return a
             # terminal Command must not leave an unused owner behind when the
@@ -364,7 +376,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         )
         owner_id = ensure_sandbox_lease_owner(runtime.context)
 
-        if self._lazy_init and projection is None:
+        if self._lazy_init and projection is None and not _run_started_its_workspace():
             return await super().abefore_agent(state, runtime)
 
         existing_sandbox_id = self._read_sandbox_id_from_state(state)

@@ -1,10 +1,11 @@
 """A photo in an AI assistant or AI employee conversation reaches the model.
 
 The agent's Home is only reachable through its workspace, which the run starts
-before the first model call. Until a workspace tool has run, the conversation has
-no saved workspace id, or has one from a replaced workspace. The real execution,
-provider, lease and middleware run here; the workspace is a stand-in that reads
-the Home directory, as its mount does.
+before the graph. A conversation may have no saved workspace id yet, or one from
+a replaced workspace. A real graph runs the sandbox and image middleware, the
+image tool and the thread-state reducers over a real AI assistant execution, with
+two photos viewed in one step. The workspace is a stand-in that reads the Home
+directory, as its mount does.
 """
 
 import asyncio
@@ -12,27 +13,58 @@ import base64
 from types import SimpleNamespace
 
 import pytest
+from _agent_e2e_helpers import FakeToolCallingModel
 from _storage_spaces_test_support import ALICE, operation
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain.agents import create_agent
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from sqlalchemy import select
 from test_agent_conversations import conversations
 from test_agent_instances import create
 from test_agent_instances import instances as instances
-from test_view_image_middleware import _image_urls, _model_request, _view_image_call
 
 import deerflow.sandbox.tools  # noqa: F401  # bind the real authorization gate before anything patches it
 from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY
 from deerflow.agent_instances.runtime import InstanceSandboxProvider, execution_scope
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+from deerflow.agents.thread_state import ThreadState
 from deerflow.persistence.spaces.files import SpaceBackingRow
-from deerflow.sandbox.lease import ensure_sandbox_lease_owner, get_sandbox_lease_manager
+from deerflow.sandbox.lease import release_sandbox_execution_lease_async
 from deerflow.sandbox.middleware import SandboxMiddleware
-from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.tools.builtins.view_image_tool import view_image_tool
 
-JPEG = b"\xff\xd8\xff\xe0" + b"stone" * 8
+PHOTOS = {"stone.jpg": b"\xff\xd8\xff\xe0" + b"stone" * 8, "geode.jpg": b"\xff\xd8\xff\xe0" + b"geode" * 8}
 UPLOAD = "/mnt/user-data/uploads/stone.jpg"
+JPEG = PHOTOS["stone.jpg"]
 CURRENT = "attachment-now"
+
+
+class RecordingModel(FakeToolCallingModel):
+    """Answers from a script and keeps what each model call was sent."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        object.__setattr__(self, "received", [])
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.received.append(list(messages))
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+def _viewing_both_photos():
+    calls = [{"name": "view_image", "id": "call-" + name, "args": {"image_path": "/mnt/user-data/uploads/" + name}} for name in PHOTOS]
+    return RecordingModel(responses=[AIMessage(content="", tool_calls=calls), AIMessage(content="An amethyst and a geode.")])
+
+
+def _graph(model):
+    return create_agent(model=model, tools=[view_image_tool], middleware=[SandboxMiddleware(), ViewImageMiddleware()], state_schema=ThreadState)
+
+
+def _image_urls(messages):
+    return [block["image_url"]["url"] for message in messages if isinstance(message, HumanMessage) and isinstance(message.content, list) for block in message.content if isinstance(block, dict) and block.get("type") == "image_url"]
+
+
+def _data_url(content):
+    return "data:image/jpeg;base64," + base64.b64encode(content).decode()
 
 
 class Workspace:
@@ -60,62 +92,46 @@ async def _agent_chat(instances):
         backing = await session.scalar(select(SpaceBackingRow).where(SpaceBackingRow.space_id == instance.home_id))
     home = instances[3].verified[backing.slot_id].data_path
     (home / "uploads").mkdir(exist_ok=True)
-    (home / "uploads" / "stone.jpg").write_bytes(JPEG)
+    for name, content in PHOTOS.items():
+        (home / "uploads" / name).write_bytes(content)
     return execution, home
 
 
-async def _view_then_answer(execution, home, saved, *, sync):
-    """One tool call and the model call after it, as the graph runs them."""
+async def _turn(execution, home, saved, *, sync):
+    """One turn as the worker runs it: the workspace is started before the graph."""
     context = {AGENT_EXECUTION_CONTEXT_KEY: execution, "thread_id": execution.thread_id, "user_id": ALICE.subject_id}
-    owner_id = ensure_sandbox_lease_owner(context)
-    state = {"thread_data": execution.thread_paths, "messages": [], **saved}
-    runtime = SimpleNamespace(context=context, state=state, config={})
-    request = SimpleNamespace(runtime=runtime, tool_call=_view_image_call("call-image", UPLOAD))
-    seen = []
-
-    async def model(model_request):
-        seen.append(model_request)
-        return AIMessage(content="An amethyst geode.")
-
+    model = _viewing_both_photos()
+    graph = _graph(model)
+    inputs = {"messages": [HumanMessage(content="What are these?")], "thread_data": execution.thread_paths, **saved}
+    config = {"configurable": {"thread_id": execution.thread_id}}
     with execution_scope(execution) as environment:
         environment.provider = InstanceSandboxProvider(execution, Workspace(home))
         try:
             if sync:
-                # A synchronous tool runs off the authority loop, as a graph worker thread does.
-                result = await asyncio.to_thread(SandboxMiddleware().wrap_tool_call, request, lambda call: view_image_tool.func(runtime=call.runtime, image_path=UPLOAD, tool_call_id="call-image"))
+                # A synchronous graph runs off the authority loop, as embedded callers do.
+                state = await asyncio.to_thread(graph.invoke, inputs, config, context=context)
             else:
-
-                async def handler(call):
-                    return await view_image_tool.coroutine(call.runtime, UPLOAD, "call-image")
-
-                result = await SandboxMiddleware().awrap_tool_call(request, handler)
-            assert result.update["messages"][0].content == "Successfully read image"
-            sandbox, _ = unwrap_sandbox(result.update.get("sandbox"))
-            assert sandbox == {"sandbox_id": CURRENT}
-            assert result.update["viewed_images"][UPLOAD]["source_sandbox_id"] == CURRENT
-            messages = [AIMessage(content="", tool_calls=[_view_image_call("call-image", UPLOAD)]), ToolMessage(content="Successfully read image", tool_call_id="call-image")]
-            model_request = _model_request(messages, result.update["viewed_images"])
-            model_request.state.update(thread_data=execution.thread_paths, sandbox=sandbox)
-            model_request.runtime.context = context
-            await ViewImageMiddleware().awrap_model_call(model_request, model)
+                state = await graph.ainvoke(inputs, config, context=context)
         finally:
-            await get_sandbox_lease_manager(environment.provider).release_async(owner_id)
-    return _image_urls(seen[0])
+            await release_sandbox_execution_lease_async(context)
+    return state, model
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
 @pytest.mark.parametrize(
     "saved",
-    [{}, {"sandbox": {"sandbox_id": "attachment-replaced"}}],
-    ids=["new-conversation", "workspace-replaced"],
+    [{}, {"sandbox": {"sandbox_id": "attachment-replaced"}}, {"sandbox": {"sandbox_id": CURRENT}}],
+    ids=["new-conversation", "workspace-replaced", "workspace-current"],
 )
-async def test_a_photo_reaches_the_model_before_any_workspace_tool_has_run(instances, saved, sync):
+async def test_two_photos_reach_the_model_whatever_workspace_the_conversation_saved(instances, saved, sync):
     execution, home = await _agent_chat(instances)
 
-    urls = await _view_then_answer(execution, home, saved, sync=sync)
+    state, model = await _turn(execution, home, saved, sync=sync)
 
-    assert urls == ["data:image/jpeg;base64," + base64.b64encode(JPEG).decode()]
+    assert [message.content for message in state["messages"] if isinstance(message, ToolMessage)] == ["Successfully read image"] * 2
+    assert state["sandbox"] == {"sandbox_id": CURRENT}
+    assert sorted(_image_urls(model.received[1])) == sorted(_data_url(content) for content in PHOTOS.values())
 
 
 class RefusingProvider:
@@ -145,6 +161,8 @@ async def test_an_ordinary_chat_reads_its_host_copy_without_starting_a_sandbox(t
     monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_baseline_sandbox_provider", lambda **kwargs: provider)
     runtime = SimpleNamespace(state={"thread_data": thread_data}, context={"thread_id": "thread-1"}, config={})
 
+    assert await SandboxMiddleware().abefore_agent({"messages": [], "thread_data": thread_data}, runtime) is None
+    assert await asyncio.to_thread(SandboxMiddleware().before_agent, {"messages": [], "thread_data": thread_data}, runtime) is None
     results = [
         await view_image_tool.coroutine(runtime, UPLOAD, "call-async"),
         await asyncio.to_thread(view_image_tool.func, runtime=runtime, image_path=UPLOAD, tool_call_id="call-sync"),
