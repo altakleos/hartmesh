@@ -2,7 +2,6 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { afterEach, beforeEach, expect, test, rs } from "@rstest/core";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
-
 const state = rs.hoisted(() => ({
   select: rs.fn(),
   setOpen: rs.fn(),

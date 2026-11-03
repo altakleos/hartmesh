@@ -688,7 +688,6 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             return False
         return self._backend.decide_network_policy_request(sandbox_id, request_id, decision)
 
-
     # ── Cross-instance ownership leases ───────────────────────────────────
 
     def _publish_ownership(self, sandbox_id: str) -> None:

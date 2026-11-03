@@ -38,7 +38,10 @@ const contributions = z
       transport: z.string().nullable().optional(),
       title: z.string(),
       description: z.string(),
-      settings: z.record(z.string(), z.union([z.boolean(), z.number(), z.string()])),
+      settings: z.record(
+        z.string(),
+        z.union([z.boolean(), z.number(), z.string()]),
+      ),
       artifact_presentations: z
         .array(
           z
