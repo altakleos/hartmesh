@@ -78,6 +78,18 @@ def _is_file_not_found_error(error: BaseException) -> bool:
     return False
 
 
+def read_host_image(actual_path: str | Path) -> bytes:
+    """Read a host copy, through the run's pinned Space when it has one."""
+    from deerflow.config.paths import get_paths
+    from deerflow.spaces.chat_paths import ChatStoragePaths
+
+    paths = get_paths()
+    if isinstance(paths, ChatStoragePaths):
+        return paths.read_user_file(actual_path, max_bytes=_MAX_IMAGE_BYTES)
+    with open(actual_path, "rb") as stream:
+        return stream.read()
+
+
 def _read_verified_host_copy(
     actual_path: str | Path,
     *,
@@ -93,7 +105,7 @@ def _read_verified_host_copy(
         size = path.stat().st_size
         if size != expected_size or size > _MAX_IMAGE_BYTES:
             return None
-        data = path.read_bytes()
+        data = read_host_image(path)
     except OSError:
         return None
     if len(data) != size:
@@ -246,8 +258,7 @@ def _view_image_authorized(runtime: Runtime, image_path: str, tool_call_id: str)
             )
 
         try:
-            with open(actual_path, "rb") as f:
-                image_data = f.read()
+            image_data = read_host_image(actual_path)
         except Exception as e:
             return Command(
                 update={"messages": [ToolMessage(f"Error reading image file: {_sanitize_image_error(e, thread_data)}", tool_call_id=tool_call_id)]},

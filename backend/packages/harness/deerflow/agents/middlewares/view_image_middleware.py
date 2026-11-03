@@ -149,6 +149,8 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         checkpoints additionally verify the exact SHA-256 before a synchronized
         host copy can stand in for bytes from an earlier sandbox generation.
         """
+        from deerflow.tools.builtins.view_image_tool import read_host_image
+
         try:
             file_path = Path(actual_path)
             if not file_path.exists() or not file_path.is_file():
@@ -156,8 +158,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             current_size = file_path.stat().st_size
             if current_size != expected_size or current_size > _MAX_IMAGE_BYTES:
                 return None
-            with open(file_path, "rb") as f:
-                image_bytes = f.read()
+            image_bytes = read_host_image(file_path)
             return cls._encode_image_bytes(
                 image_bytes,
                 mime_type,
