@@ -208,6 +208,9 @@ def test_convert_messages_ai_with_tool_calls():
 def test_convert_messages_tool_message(call_id, caplog):
     model = _make_model()
     tool_msg = ToolMessage(content="result data", tool_call_id=call_id)
+    # Only the conversion is under test: drop what building the model logged
+    # (an INFO credential line, captured whenever the suite runs at INFO).
+    caplog.clear()
     with caplog.at_level(logging.WARNING, logger="deerflow.models.openai_codex_provider"):
         _, items = model._convert_messages([tool_msg])
     assert items[0]["type"] == "function_call_output"
@@ -269,6 +272,7 @@ def test_convert_messages_omits_tool_results_with_blank_call_ids(blank_id, conte
         AIMessage(content="Done."),
     ]
 
+    caplog.clear()  # only the conversion's records, not the model construction's
     with caplog.at_level(logging.WARNING, logger="deerflow.models.openai_codex_provider"):
         instructions, items = model._convert_messages(messages)
 
