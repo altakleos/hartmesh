@@ -4,7 +4,12 @@ import { z } from "zod";
 
 export const userSchema = z.object({
   id: z.string(),
-  email: z.string().email(),
+  // Plain string: the backend owns address validation (pydantic EmailStr at
+  // registration, the IdP for OIDC) and accepts forms zod's email() rejects,
+  // such as `a&b@example.com`, `a@b.c` and Unicode addresses. Re-checking them
+  // here turned those accounts' sessions into gateway_unavailable. Empty is
+  // invalid backend-side.
+  email: z.string().min(1),
   system_role: z.enum(["admin", "user"]),
   needs_setup: z.boolean().optional().default(false),
   oauth_provider: z.string().nullable().optional().default(null),
