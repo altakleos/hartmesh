@@ -687,3 +687,35 @@ batch owner checks before enabling batches (l).
 **Order of work:** land Phase 0 (this branch) on `main` first — the skill-review
 waiver must be in the trusted base before the merge PR — then trim the AGENTS.md
 chains below budget (§5.4), then the step-1 merge on its own branch.
+
+---
+
+## Appendix E — Phase 1 status: guidance trim (2026-11-03)
+
+Phase 0 merged as #362. Step 5 of §7 (AGENTS.md below budget) is done on
+`claude/zen-ramanujan-vekdgx`.
+
+**Method.** For every guidance file, the merged size was estimated as upstream's
+`b537d9c` file, plus every byte HartMesh added since the merge base `67db3d8`,
+minus base lines HartMesh removed that upstream left untouched (the merge applies
+those removals). Chains sum the estimates of their ancestors, as
+`scripts/check_agent_guidance.py` does. The §5.4 table above used a blind
+`git merge-file --union` and did not credit removals, so it overstates some rows.
+
+**What moved.** Only paragraphs that are HartMesh-only, or base text upstream left
+unchanged with an unchanged line between it and any upstream edit, so the trim adds
+no merge conflicts. Text moved verbatim into `*-guidance-details.md` files
+(upstream's #7522 naming; none collide with upstream's files), the benchmark guide
+`backend/scripts/benchmark/README.md`, and the AIO-sandbox and workspace-changes
+guides. Each source keeps a one-line pointer with the rule's gist.
+
+| Estimate after the step-1 merge | Before trim | After trim |
+|---|---|---|
+| Files or chains over the hard limit | 16 | 0 |
+| Worst file / chain | middlewares chain +16.8 KB | all ≥ 2 KiB under, except `frontend-hm/AGENTS.md` (HartMesh-only, −679 B, not touched by the merge) |
+
+A blind union still overflows (routers chain +19.4 KB, middlewares chain
++21.1 KB, skills file +11.0 KB) because it keeps both versions of every paragraph
+both sides rewrote; upstream's own chains are already at 88–98 KB at `b537d9c`.
+Resolve those conflicts by choosing one version per paragraph, and move any new
+upstream detail into the matching details file rather than back into the guide.

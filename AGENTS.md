@@ -76,13 +76,10 @@ deer-flow/
 └── docs/                           # Cross-cutting docs, plans, and design notes
 ```
 
-Third-party extensions come from the operator-controlled `plugins:` list in
-`config.yaml`, never API-writable `extensions_config.json`: they import code
-with Gateway privileges and must be trusted. They contribute middleware,
-lifecycle observers, Gateway services, routers and experimental full-stack
-plugins. Manage them with `deerflow extensions` or `make extension-*`; restart
-required. See [the extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md).
-The upstream reference manual is under `frontend/src/content/{en,zh}/harness/extensions/`.
+Third-party extensions come only from the operator-controlled `plugins:` list in
+`config.yaml`, never `extensions_config.json`; they run trusted code with Gateway
+privileges and need a restart. See [the extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md)
+and [details](docs/repository-guidance-details.md#third-party-extensions).
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
@@ -90,17 +87,9 @@ servers + skills). Both real files are gitignored and may be edited at runtime v
 Gateway API. Config schema and resolution order are documented in
 [backend/AGENTS.md](backend/AGENTS.md).
 
-Skill review: `skills/public/skill-reviewer/` is the read-only reviewer using
-`review_skill_package` and `contracts/skill_review/`. Model-visible data is
-compact and tag-neutralized; raw payloads stay in artifacts. See the backend
-guide for activation and skill-creator boundaries.
-
-CI waivers (`.github/skill-review-waivers.v1.json`, enforced by
-`scripts/review_changed_public_skills.py`) come only from the trusted base
-manifest, bind one error to its file SHA-256 and expiry, stay visible, and never
-waive blockers. An entry may preapprove future full-file hashes, effective once
-that manifest lands in the trusted base. Merge the waiver before changing the
-skill, then promote the consumed hash to `file_sha256`.
+Skill review (`skills/public/skill-reviewer/`) and its CI waivers
+(`.github/skill-review-waivers.v1.json`: trusted base only, never for blockers):
+[details](docs/repository-guidance-details.md#skill-review-and-ci-waivers).
 
 Scheduled tasks use a persisted, lease-fenced queue and non-interactive runs.
 Lifecycle, authorization and concurrency rules live in [backend/AGENTS.md](backend/AGENTS.md).
@@ -116,12 +105,7 @@ make support-bundle  # Generate redacted troubleshooting summary, AI issue draft
 make config      # Generate local config files from the examples
 make check       # Check that required tools are installed
 make install     # Install all dependencies (frontend + backend + pre-commit hooks)
-make extension-install SOURCE=...  # Install and enable a trusted Python extension
-make extension-upgrade SOURCE=...  # Replace an installed extension and keep its config
-make extension-list                # List configured Python extensions
-make extension-enable NAME=...     # Enable an installed extension (restart required)
-make extension-disable NAME=...    # Disable without uninstalling (restart required)
-make extension-remove NAME=...     # Remove package and config entry (restart required)
+make extension-install SOURCE=...  # Manage trusted extensions; every target: docs/repository-guidance-details.md
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
 make start       # Start all services in production mode (local, optimized); SKIP_FRONTEND_BUILD=1 reuses the last frontend build
 make stop        # Stop all running services
@@ -159,11 +143,7 @@ cd frontend-hm && pnpm test   # Unit tests
 Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and `frontend-hm/`
 (`pnpm`) = per-module work.**
 
-HartMesh host calls use `scripts/pnpm.py --project frontend-hm --`: it prefers
-direct pnpm, falls back to Corepack, and resolves executable paths before
-changing to that project. The no-selector form retains `frontend/` for upstream
-compatibility. `make frontend-config` initializes the product's ignored `.env`,
-preserving an existing destination or migrating the old app's settings.
+HartMesh host pnpm calls and `make frontend-config`: [details](docs/repository-guidance-details.md#hartmesh-pnpm-wrapper).
 
 ### Prerequisites before `make dev`
 

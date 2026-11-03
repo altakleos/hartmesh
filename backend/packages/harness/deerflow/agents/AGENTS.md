@@ -39,27 +39,11 @@ same resulting prompt. Empty overlays preserve bytes.
   `_messages_delta_reducer` is also linear, but intentionally omits some of
   those public `add_messages` semantics and cannot be substituted directly.
 
-**Runtime Configuration** (via `config.configurable`):
-- `thinking_enabled` - Enable model's extended thinking
-- `model_name` - Select specific LLM model
-- `is_plan_mode` - Enable TodoList middleware
-- `subagent_enabled` - Enable task delegation tool
-- `max_concurrent_subagents` - Per-response `task` call concurrency limit (clamped by `SubagentLimitMiddleware`)
-- `max_total_subagents` - Per-run total delegation cap override (unset/`null` uses `subagents.max_total_per_run`, clamped to 1-50)
-  Gateway and `DeerFlowClient.stream()` always provide the runtime `run_id`; custom
-  graph integrations must do the same. If it is absent, enforcement deliberately
-  counts the thread's full delegation ledger (fail-restrictive) and emits a warning.
+`config.configurable` runtime keys (thinking, model, plan mode, subagent limits):
+[details](../../../../docs/harness-guidance-details.md#agent-runtime-configuration).
 
-**Direct subagent runtime**: `create_deerflow_agent(..., subagent_runtime=runtime)`
-accepts one caller-owned `deerflow.subagents.SubagentRuntime` per application capacity
-boundary. Tools, limits, controller, durable submitter and feature policy share its
-snapshot. For a task repository, `await runtime.start()` (or `async with`) before
-building graphs and `stop()` at shutdown. The factory rejects a stopped worker;
-already-bound task tools also fail unavailable, never falling back to a global
-submitter. The factory creates no SQL infrastructure, renders no caller-owned
-`system_prompt` and mounts no Gateway API/UI. Full middleware takeover cannot
-combine with this runtime; direct callers/custom subagent middleware own prompt
-call-policy wording.
+Direct `create_deerflow_agent(..., subagent_runtime=...)` callers own one started
+`SubagentRuntime` per capacity boundary: [details](../../../../docs/harness-guidance-details.md#direct-subagent-runtime).
 
 Work attempts use `autonomous` interaction mode, so `ask_clarification` is never
 offered. `runtime_scope.py::ASSIGNMENT_QUESTION_RULE` directs `report_work` with
