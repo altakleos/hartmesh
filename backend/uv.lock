@@ -812,7 +812,7 @@ wheels = [
 
 [[package]]
 name = "deer-flow"
-version = "2.2.0+hartmesh.48"
+version = "2.2.0+hartmesh.49"
 source = { virtual = "." }
 dependencies = [
     { name = "bcrypt" },
