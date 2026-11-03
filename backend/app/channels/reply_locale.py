@@ -1,4 +1,4 @@
-"""Language and wording of the replies the host itself writes in IM chats.
+"""Language and wording of the replies DeerFlow itself writes in IM chats.
 
 Host replies (the ``/connect`` handshake below, ``/goal`` in
 ``goal_status.py``) use the binding owner's web UI language (the ``locale``
@@ -78,14 +78,14 @@ _PROVIDER_NAMES: dict[str, dict[str, str]] = {
 # ``{provider}`` is the platform's name. The English wording predates the table.
 CONNECT_REPLY_TEXT: dict[str, dict[str, str]] = {
     "en-US": {
-        "connected": "{provider} is connected to your account.",
+        "connected": "{provider} connected to DeerFlow.",
         "invalid_code": "{provider} connection code is invalid or expired.",
         "invalid_link": "{provider} connection link is invalid or expired.",
         "incomplete": "{provider} connection could not be completed from this message.",
         "private_chat_only": "Please send the connection code in a private chat with the bot.",
     },
     "zh-CN": {
-        "connected": "{provider} 已连接到你的账号。",
+        "connected": "{provider} 已连接到 DeerFlow。",
         "invalid_code": "{provider} 绑定码无效或已过期。",
         "invalid_link": "{provider} 绑定链接无效或已过期。",
         "incomplete": "无法通过这条消息完成 {provider} 绑定。",

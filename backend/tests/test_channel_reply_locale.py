@@ -89,7 +89,7 @@ _ENGLISH_NAMES = {"buzz": "Buzz", "dingtalk": "DingTalk", "discord": "Discord", 
 @pytest.mark.parametrize("provider", _PROVIDERS)
 def test_english_connect_replies_are_unchanged(provider):
     name = _ENGLISH_NAMES[provider]
-    assert connect_reply_text("connected", provider=provider, locale="en-US") == f"{name} is connected to your account."
+    assert connect_reply_text("connected", provider=provider, locale="en-US") == f"{name} connected to DeerFlow."
     assert connect_reply_text("invalid_code", provider=provider, locale="en-US") == f"{name} connection code is invalid or expired."
     assert connect_reply_text("incomplete", provider=provider, locale="en-US") == f"{name} connection could not be completed from this message."
     assert connect_reply_text("invalid_link", provider="telegram", locale="en-US") == "Telegram connection link is invalid or expired."
@@ -97,8 +97,8 @@ def test_english_connect_replies_are_unchanged(provider):
 
 
 def test_chinese_connect_replies_space_latin_names_only():
-    assert connect_reply_text("connected", provider="feishu", locale="zh-CN") == "飞书已连接到你的账号。"
-    assert connect_reply_text("connected", provider="slack", locale="zh-CN") == "Slack 已连接到你的账号。"
+    assert connect_reply_text("connected", provider="feishu", locale="zh-CN") == "飞书已连接到 DeerFlow。"
+    assert connect_reply_text("connected", provider="slack", locale="zh-CN") == "Slack 已连接到 DeerFlow。"
     assert connect_reply_text("invalid_code", provider="wecom", locale="zh-CN") == "企业微信绑定码无效或已过期。"
     assert connect_reply_text("invalid_code", provider="qq", locale="zh-CN") == "QQ 绑定码无效或已过期。"
     assert connect_reply_text("incomplete", provider="dingtalk", locale="zh-CN") == "无法通过这条消息完成钉钉绑定。"

@@ -147,7 +147,7 @@ _HUMAN_MESSAGE_ID_NAMESPACE = uuid.UUID("5b7c1e0e-8f5a-4d43-9a63-0c5b2f1d7e21")
 # active run: the redelivery's input differs (re-ingested attachments get new
 # names), or the run is live on a peer whose stream this instance cannot read.
 _ADMITTED_RUN_CONFLICT_DETAILS = ("Idempotency-Key already used", "is not active on this worker and cannot be streamed")
-ALREADY_ADMITTED_MESSAGE = "This message is already being processed. Its answer will appear in this conversation in the web app."
+ALREADY_ADMITTED_MESSAGE = "This message is already being processed. Its answer will appear in this conversation in DeerFlow."
 _LIVE_RUN_STATUSES = frozenset({"pending", "running"})
 
 

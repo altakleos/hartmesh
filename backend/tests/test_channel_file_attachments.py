@@ -946,8 +946,7 @@ class TestBaseChannelOnOutbound:
         feedback = ch.sent_messages[-1]
         assert "1/2" in feedback.text
         assert "fail.txt" in feedback.text and "ok.txt" not in feedback.text
-        # The notice says where the files are (HartMesh does not name a product here).
-        assert "web app" in feedback.text
+        assert "DeerFlow" in feedback.text
         assert "private upload details" not in feedback.text
         assert feedback.attachments == []
         assert f1.exists() and f2.exists()
@@ -995,8 +994,7 @@ class TestBaseChannelOnOutbound:
         assert channel.sent_messages[0].text.index(expected) < channel.sent_messages[0].text.index(text)
         assert all(a.filename in channel.sent_messages[0].text for a in msg.attachments)
         assert all(channel.sent_messages[0].text.count(a.filename) == 1 for a in msg.attachments)
-        # The notice says where the files are (HartMesh does not name a product here).
-        assert any(place in channel.sent_messages[0].text for place in ("web app", "网页会话"))
+        assert "DeerFlow" in channel.sent_messages[0].text
         assert not channel.sent_files
         assert msg.text == original_text and len(msg.attachments) == 2
 

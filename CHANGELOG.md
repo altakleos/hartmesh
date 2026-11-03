@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   incomplete. Before this, such a file failed the run's output delivery check.
 - Scheduler reconciliation no longer finalizes an occurrence whose worker in this process
   is still releasing its sandbox, so capacity is not freed early.
+- New IM replies from upstream keep upstream's wording, which names DeerFlow. These are
+  the connect reply, the attachment-failure notices, the "already being processed" notice
+  and the QQ truncation marker. HartMesh's existing connection-required notices are
+  unchanged.
 
 ### Schema changes
 

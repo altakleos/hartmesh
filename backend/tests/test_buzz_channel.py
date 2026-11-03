@@ -667,7 +667,7 @@ def test_connect_success_sends_confirmation_reply():
     events = _events_of(transport)
     assert len(events) == 1
     assert events[0]["kind"] == 9
-    assert events[0]["content"] == "Buzz is connected to your account."
+    assert events[0]["content"] == "Buzz connected to DeerFlow."
     assert ["p", NEWCOMER] in events[0]["tags"]
     assert captured == []  # still never published as a chat message
 
@@ -695,7 +695,7 @@ def test_connect_repo_error_sends_error_reply_and_does_not_crash():
 @pytest.mark.parametrize(
     ("repo_kwargs", "expected"),
     [
-        ({"states": {"tok-1": "owner-zh"}}, "Buzz 已连接到你的账号。"),
+        ({"states": {"tok-1": "owner-zh"}}, "Buzz 已连接到 DeerFlow。"),
         ({}, "Buzz 绑定码无效或已过期。"),
         ({"raise_on_consume": True}, "无法通过这条消息完成 Buzz 绑定。"),
     ],

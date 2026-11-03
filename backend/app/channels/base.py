@@ -42,14 +42,14 @@ def attachment_delivery_text(msg: OutboundMessage, failed: list[ResolvedAttachme
     first_line = next((line for line in msg.text.splitlines() if line.strip()), "")
     chinese = locale.lower().startswith("zh") if isinstance(locale, str) else any("\u4e00" <= char <= "\u9fff" for char in first_line)
     if unsupported:
-        return "当前渠道不支持发送附件。请到网页会话下载文件。" if chinese else "This channel does not support sending files. Open the conversation in the web app to download them."
+        return "当前渠道不支持发送附件。请到 DeerFlow 会话下载文件。" if chinese else "This channel does not support sending files. Open the DeerFlow conversation to download them."
     filenames = "\n".join("- " + " ".join(attachment.filename.split()) for attachment in failed)
     sent = len(msg.attachments) - len(failed)
     if chinese:
         status = f"已发送 {sent}/{len(msg.attachments)} 个附件，以下附件未能发送：" if sent else "附件未能发送："
-        return f"{status}\n{filenames}\n文件仍保留在网页会话中，可前往下载。"
+        return f"{status}\n{filenames}\n文件仍保留在 DeerFlow 会话中，可前往下载。"
     status = f"Sent {sent}/{len(msg.attachments)} files. These files could not be sent:" if sent else "These files could not be sent in this chat:"
-    return f"{status}\n{filenames}\nThe files remain available in the conversation in the web app."
+    return f"{status}\n{filenames}\nThe files remain available in the DeerFlow conversation."
 
 
 class ChannelUnavailable(Exception):

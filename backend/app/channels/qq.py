@@ -39,7 +39,7 @@ MAX_CACHED_MESSAGES = 2048
 INBOUND_BUFFER_SIZE = 64
 START_TIMEOUT = 30.0
 RECONNECT_DELAY = 1.0
-TRUNCATION_MARKER = "\n[Reply truncated; see the conversation in the web app for the full response.]"
+TRUNCATION_MARKER = "\n[Reply truncated; see DeerFlow for the full response.]"
 
 
 class QQAPIError(RuntimeError):
