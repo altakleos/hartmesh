@@ -111,7 +111,9 @@ async def test_the_heartbeat_outlives_a_retired_owner_and_ends_with_admissions(o
     manager._heartbeat_stop = asyncio.Event()
     cycles = []
 
-    async def renew():
+    async def renew(*, wait=True):
+        # Upstream's heartbeat renews with ``wait=False``; a stand-in that
+        # rejects it would fail every cycle inside the loop's own guard.
         cycles.append(len(cycles))
         if len(cycles) == 2:
             manager.seal_capture_io_admissions()

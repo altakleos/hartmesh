@@ -6944,6 +6944,7 @@ async def test_instance_child_receives_host_capability_and_discloses_inherited_f
 
     provider = InstanceSandboxProvider(bound, SimpleNamespace(id="qualified-native"))
     graph = SimpleNamespace(astream=stream)
+
     async def create_agent(*args, **kwargs):
         # ``_create_agent`` is async upstream (declared-tool authorization).
         return graph

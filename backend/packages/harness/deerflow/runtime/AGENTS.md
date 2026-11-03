@@ -191,9 +191,10 @@ Unmet goals stand down on run-level token/loop hard stops and retain the origina
 Worker's confirmed ACK; row reads never grant it. Renew leases through receipt,
 rollback and finalization barriers; lost or expired authority fences writes.
 Drain owned finalizers across cancellation. Post-terminal work runs in the
-worker's `run-finalization-*` task (`RunRecord.finalization_task`). It holds the
-worker's host authority for finalizing-run reservations, and a fence cancels it,
-never the worker awaiting it. Read the [terminal ownership contract](../../../../docs/runtime-guidance-details.md#deferred-terminal-commits-and-lease-ownership)
+worker's `run-finalization-*` task (`RunRecord.finalization_task`), created in
+the worker's own context so scoped context variables reset on exit. It holds the
+worker's host authority for finalizing-run reservations. Only a fence cancels it,
+never the worker awaiting it, and a fenced finalizer still closes the stream. Read the [terminal ownership contract](../../../../docs/runtime-guidance-details.md#deferred-terminal-commits-and-lease-ownership)
 before changing terminal commits, renewal, rollback or shutdown.
 
 Archive membership uses `runs/delivery.py::presented_paths`: tagged tool paths
