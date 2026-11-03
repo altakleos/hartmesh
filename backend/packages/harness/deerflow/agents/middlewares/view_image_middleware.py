@@ -316,6 +316,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                     }
                 )
             else:
+                logger.warning("Viewed image %s was withheld from the model: unavailable, changed or not this run's", image_path)
                 content_blocks.append({"type": "text", "text": f"  (file unavailable or changed: {image_path})"})
 
         return content_blocks
@@ -378,6 +379,23 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         context = getattr(request.runtime, "context", None)
         return context if isinstance(context, Mapping) else {}
 
+    @staticmethod
+    def _root_belongs_to_run(root: Path, root_name: str, thread_id: str, user_id: str) -> bool:
+        """Bind a stored root to this run, whichever layout its paths use.
+
+        A managed conversation keeps its roots in the person's Space, so only the
+        run's own admitted paths can say which root is its own. They refuse
+        another owner, and a run with no personal Space has no root to match.
+        """
+        from deerflow.config.paths import get_paths
+        from deerflow.spaces.chat_paths import ChatStoragePaths
+
+        paths = get_paths()
+        if isinstance(paths, ChatStoragePaths):
+            expected = paths.thread_data(thread_id, user_id=user_id).get(f"{root_name}_path")
+            return expected is not None and root == Path(expected).resolve()
+        return root.parts[-6:] == ("users", user_id, "threads", thread_id, "user-data", root_name)
+
     @classmethod
     def _host_path_matches_request(cls, request: ModelRequest, image_path: str, actual_path: str) -> bool:
         """Bind a stored host copy to the authenticated run's user and thread."""
@@ -413,8 +431,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 root_path = thread_data.get(f"{root_name}_path")
                 if not isinstance(root_path, str) or not root_path:
                     return False
-                root = Path(root_path).resolve()
-                if root.parts[-6:] != ("users", user_id, "threads", thread_id, "user-data", root_name):
+                if not cls._root_belongs_to_run(Path(root_path).resolve(), root_name, thread_id, user_id):
                     return False
                 validate_local_tool_path(image_path, thread_data, read_only=True)
                 expected_path = Path(resolve_and_validate_user_data_path(image_path, thread_data))

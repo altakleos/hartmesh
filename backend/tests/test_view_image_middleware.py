@@ -763,3 +763,116 @@ def test_custom_base_host_copy_rejects_unscoped_thread_data_root(tmp_path, monke
     }
 
     assert _image_urls(ViewImageMiddleware()._inject(request)) == []
+
+
+_PIXEL = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+_UPLOAD = "/mnt/user-data/uploads/stone.png"
+
+
+def _managed_view_request(tmp_path, monkeypatch):
+    """A conversation in a person's Space, viewed with no sandbox running yet.
+
+    Its roots are ``<space>/conversations/<thread>/user-data/<root>``, not
+    ``users/<id>/threads/<id>/user-data/<root>``.
+    """
+    from deerflow.authz import sandbox_authz
+    from deerflow.config.paths import paths_scope
+    from deerflow.spaces.chat_paths import ChatStoragePaths
+    from deerflow.tools.builtins.view_image_tool import _view_image_authorized
+
+    monkeypatch.setattr(sandbox_authz, "authorize_sandbox_execution", lambda **kwargs: None)
+    monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda sandbox_id: None))
+    paths = ChatStoragePaths(Paths(tmp_path / "legacy"), user_id="user-test", user=SimpleNamespace(data_path=tmp_path / "space" / "data"))
+    thread_data = paths.thread_data("thread-test", user_id="user-test")
+    actual_path = Path(thread_data["uploads_path"]) / "stone.png"
+    actual_path.parent.mkdir(parents=True)
+    actual_path.write_bytes(_PIXEL)
+    context = {"user_id": "user-test", "thread_id": "thread-test"}
+    with paths_scope(paths):
+        result = _view_image_authorized(SimpleNamespace(state={"thread_data": thread_data}, context=context), _UPLOAD, "call-image")
+    assert result.update["messages"][0].content == "Successfully read image"
+    messages = [
+        AIMessage(content="", tool_calls=[_view_image_call("call-image", _UPLOAD)]),
+        ToolMessage(content="Successfully read image", tool_call_id="call-image"),
+    ]
+    request = _model_request(messages, result.update["viewed_images"])
+    request.state["thread_data"] = thread_data
+    request.runtime.context = context
+    return request, paths, "data:image/png;base64," + base64.b64encode(_PIXEL).decode("ascii")
+
+
+def test_managed_conversation_upload_reaches_sync_model(tmp_path, monkeypatch):
+    from deerflow.config.paths import paths_scope
+
+    request, paths, expected = _managed_view_request(tmp_path, monkeypatch)
+    prepared: list[ModelRequest] = []
+
+    with paths_scope(paths):
+        ViewImageMiddleware().wrap_model_call(request, lambda value: prepared.append(value) or AIMessage(content="ok"))
+
+    assert _image_urls(prepared[0]) == [expected]
+
+
+@pytest.mark.anyio
+async def test_managed_conversation_upload_reaches_async_model(tmp_path, monkeypatch):
+    """The Gateway's path: the read runs in a worker, which must inherit the run's paths."""
+    from deerflow.config.paths import paths_scope
+
+    request, paths, expected = _managed_view_request(tmp_path, monkeypatch)
+    prepared: list[ModelRequest] = []
+
+    async def handler(value: ModelRequest) -> AIMessage:
+        prepared.append(value)
+        return AIMessage(content="ok")
+
+    with paths_scope(paths):
+        await ViewImageMiddleware().awrap_model_call(request, handler)
+
+    assert _image_urls(prepared[0]) == [expected]
+
+
+@pytest.mark.parametrize(("user_id", "thread_id"), [("other-user", "thread-test"), ("user-test", "other-thread"), ("user-test", None)])
+def test_managed_upload_still_requires_matching_user_and_thread(tmp_path, monkeypatch, user_id, thread_id):
+    from deerflow.config.paths import paths_scope
+
+    request, paths, _ = _managed_view_request(tmp_path, monkeypatch)
+    request.runtime.context = {"user_id": user_id, "thread_id": thread_id}
+
+    with paths_scope(paths):
+        assert _image_urls(ViewImageMiddleware()._inject(request)) == []
+
+
+def test_managed_upload_rejects_a_root_from_another_conversation(tmp_path, monkeypatch):
+    """A checkpoint's thread_data grants nothing, even inside the same person's Space."""
+    from deerflow.config.paths import paths_scope
+
+    request, paths, _ = _managed_view_request(tmp_path, monkeypatch)
+    other = Path(paths.thread_data("other-thread", user_id="user-test")["uploads_path"])
+    other.mkdir(parents=True)
+    (other / "stone.png").write_bytes(_PIXEL)
+    request.state["thread_data"] = {**request.state["thread_data"], "uploads_path": str(other)}
+    request.state["viewed_images"][_UPLOAD] = {**request.state["viewed_images"][_UPLOAD], "actual_path": str(other / "stone.png")}
+
+    with paths_scope(paths):
+        assert _image_urls(ViewImageMiddleware()._inject(request)) == []
+
+
+def test_managed_upload_is_refused_outside_the_runs_own_paths(tmp_path, monkeypatch):
+    from deerflow.config.paths import paths_scope
+    from deerflow.spaces.chat_paths import ChatStoragePaths
+
+    request, _, _ = _managed_view_request(tmp_path, monkeypatch)
+
+    assert _image_urls(ViewImageMiddleware()._inject(request)) == []
+    with paths_scope(ChatStoragePaths(Paths(tmp_path / "legacy"), user_id="user-test")):
+        assert _image_urls(ViewImageMiddleware()._inject(request)) == []
+
+
+def test_an_image_withheld_from_the_model_is_logged(tmp_path, monkeypatch, caplog):
+    """The tool has already said it succeeded, so nothing else would record this."""
+    request, _, _ = _managed_view_request(tmp_path, monkeypatch)
+
+    with caplog.at_level("WARNING"):
+        ViewImageMiddleware()._inject(request)
+
+    assert any(_UPLOAD in record.getMessage() for record in caplog.records)

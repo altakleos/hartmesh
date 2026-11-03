@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Files
+
+- A vision model now sees an image uploaded to a conversation with managed storage, on the
+  web and on Telegram. The tool reported success, but with no sandbox running yet the image
+  was withheld from the model, which then said it could not load it. A withheld image is now
+  logged.
+
 ## [2.2.0+hartmesh.49] - 2026-11-03
 
 ### Telegram bots
