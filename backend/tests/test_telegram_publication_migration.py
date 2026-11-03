@@ -33,7 +33,10 @@ def test_migration_is_appended_and_changes_only_assistant_representation():
 
     module = migration()
     script = ScriptDirectory(str(_MIGRATIONS_DIR))
-    assert script.get_heads() == [REVISION]
+    # Later revisions (the appended upstream import) may advance the head;
+    # test_migration_chain_head pins it. This revision stays in the one line.
+    assert len(script.get_heads()) == 1
+    assert REVISION in {revision.revision for revision in script.walk_revisions()}
     assert module.down_revision == PREVIOUS
     column = TelegramInboundMarkRow.__table__.c.assistant_message_id
     assert isinstance(column.type, sa.Text) and column.nullable is True

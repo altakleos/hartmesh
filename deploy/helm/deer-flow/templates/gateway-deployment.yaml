@@ -35,7 +35,7 @@ spec:
       # shutdown_flush_timeout_seconds (default 30s): ~61s -- plus buffer, or
       # K8s SIGKILLs the memory drain mid-flight (values.yaml
       # gateway.terminationGracePeriodSeconds). K8s defaults to 30s.
-      terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds | default 90 }}
+      terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds | default 100 }}
       securityContext:
         # Non-root: the gateway image has no USER directive and would otherwise
         # run as root. uid/gid 1000; fsGroup 1000 so the .deer-flow PVC is

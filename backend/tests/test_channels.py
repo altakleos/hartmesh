@@ -11122,7 +11122,8 @@ class TestSlackAllowedUsers:
             channel._handle_message_event(event)
 
         # A scalar is one entry under the shared allowlist contract, not a misconfiguration.
-        assert caplog.records == []
+        # (Warnings only: another test may have left the bus logger at INFO.)
+        assert [record for record in caplog.records if record.levelno >= logging.WARNING] == []
         channel._loop.call_soon_threadsafe.assert_called_once()
         inbound = bus.get_inbound_nowait()
         assert inbound.user_id == "123456"

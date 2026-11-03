@@ -203,7 +203,7 @@ def test_real_compose_still_loads_env_files_that_exist(tmp_path, variant: str):
     assert result.returncode == 0, result.stderr
     services = json.loads(result.stdout)["services"]
     for service_name, path in EXPECTED_ENV_FILES.items():
-        key, value = ("FRONTEND_ENV_PROBE", "from-frontend-env") if path.startswith("../frontend/") else ("ROOT_ENV_PROBE", "from-root-env")
+        key, value = ("FRONTEND_ENV_PROBE", "from-frontend-env") if path.startswith("../frontend-hm/") else ("ROOT_ENV_PROBE", "from-root-env")
         assert services[service_name]["environment"].get(key) == value, f"{variant} {service_name} must still load {path}"
 
 

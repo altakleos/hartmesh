@@ -403,8 +403,12 @@ async def _seed_model_schema_without_version_row(engine, schema: str) -> None:
         await conn.run_sync(Base.metadata.create_all)
 
 
-async def _seed_model_schema_with_text_token_usage(engine, schema: str) -> None:
-    await _seed_model_schema_without_version_row(engine, schema)
+async def _seed_baseline_with_text_token_usage(engine, schema: str) -> None:
+    # HartMesh's storage and agent revisions validate an existing table's shape
+    # and refuse a model-shaped one (see the refusal test below), so the real
+    # drift is seeded on a pre-alembic baseline instead: 0002's safe_add_column
+    # then meets the TEXT column the way the database spells it.
+    await _seed_at_revision(BASELINE, drop_version_row=True)(engine, schema)
     async with engine.begin() as conn:
         await conn.execute(sa.text("ALTER TABLE runs DROP COLUMN token_usage_by_model"))
         await conn.execute(sa.text("ALTER TABLE runs ADD COLUMN token_usage_by_model TEXT NOT NULL DEFAULT '{}'"))
@@ -418,8 +422,7 @@ async def _seed_model_schema_with_text_token_usage(engine, schema: str) -> None:
         pytest.param(_seed_at_revision(BASELINE, drop_version_row=True), [], id="pre_alembic_baseline"),
         # 0025 re-runs 0023's ``safe_add_column`` for ``runs.change_seq``.
         pytest.param(_seed_at_revision("0022_scheduled_occurrence_seq", drop_version_row=False), [], id="upgrade_across_change_seq_repair"),
-        pytest.param(_seed_model_schema_without_version_row, [], id="model_schema_without_version_row"),
-        pytest.param(_seed_model_schema_with_text_token_usage, ["runs.token_usage_by_model"], id="real_drift_only"),
+        pytest.param(_seed_baseline_with_text_token_usage, ["runs.token_usage_by_model"], id="real_drift_only"),
     ],
 )
 async def test_bootstrap_warns_only_on_columns_that_really_drift(
@@ -439,6 +442,26 @@ async def test_bootstrap_warns_only_on_columns_that_really_drift(
         assert await _alembic_version(engine) == HEAD
         warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and r.name == "deerflow.persistence.migrations._helpers"]
         assert [m.removeprefix("safe_add_column: ").split(" ", 1)[0] for m in warned] == expected_drift, f"unexpected drift warnings: {warned!r}"
+    finally:
+        if schema:
+            async with engine.begin() as conn:
+                await conn.execute(sa.text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await engine.dispose()
+
+
+@asyncio_test
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+async def test_an_unversioned_model_shaped_schema_is_refused_not_stamped(tmp_path: Path, backend: str) -> None:
+    """Upstream's legacy branch absorbs a model-shaped schema with no version row
+    (a create_all that committed before its stamp). HartMesh's revisions refuse
+    to stamp an existing table they cannot prove is their own shape, so the start
+    fails closed and names the table instead of guessing which revision it is at.
+    """
+    engine, schema = await _drift_engine(tmp_path, backend)
+    try:
+        await _seed_model_schema_without_version_row(engine, schema)
+        with pytest.raises(RuntimeError, match="preserve data and reconcile its shape before upgrading"):
+            await bootstrap_schema(engine, backend=backend, postgres_schema=schema)
     finally:
         if schema:
             async with engine.begin() as conn:

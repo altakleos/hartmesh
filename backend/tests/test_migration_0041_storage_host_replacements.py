@@ -110,7 +110,12 @@ async def test_upgrade_retry_and_unused_downgrade_match_frozen_and_cold_shapes(d
     async with engine.connect() as connection:
         assert await connection.run_sync(shape) == before
 
-    # The empty-database bootstrap creates these models directly, then stamps head.
+    # The empty-database bootstrap creates these models directly, then stamps
+    # head. Later revisions (the appended upstream import adds users.disabled)
+    # also shape these tables, so the cold models are compared with head.
+    await asyncio.to_thread(command.upgrade, config, "head")
+    async with engine.connect() as connection:
+        upgraded = await connection.run_sync(shape)
     async with engine.begin() as connection:
 
         def cold(c):

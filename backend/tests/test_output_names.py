@@ -92,6 +92,9 @@ async def test_screenshot_retries_a_held_timestamp_fallback(tmp_path, monkeypatc
     manager = MagicMock()
     manager.get_session.return_value = session
     runtime = SimpleNamespace(context={"thread_id": "thread-1"}, state={"thread_data": {"outputs_path": str(tmp_path)}})
+    # No Gateway chat-storage host and Storage Spaces off: HartMesh's writer
+    # falls back to the thread's outputs directory, the path this test covers.
+    monkeypatch.setattr("deerflow.spaces.chat_screenshots.get_app_config", lambda: SimpleNamespace(storage_spaces=SimpleNamespace(enabled=False)))
     with patch.object(browser_automation_tools, "get_browser_session_manager", return_value=manager), patch.object(browser_automation_tools, "_get_tool_config", return_value={}):
         result = await browser_automation_tools.browser_screenshot_tool.coroutine(runtime=runtime, tool_call_id="t1", filename="report.png")
 

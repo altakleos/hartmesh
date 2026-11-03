@@ -24,7 +24,8 @@ PARKED = "0028_parked_attempts"
 SCHEDULER = "0029_scheduler_agent_tasks"
 CLAIM_TOKENS = "0030_notification_claim_tokens"
 HEAD = bootstrap._get_head_revision()
-PREVIOUS = "0026_mcp_task_lease_tokens"
+# HartMesh appends upstream's chain after its own published head (plan §5.3).
+PREVIOUS = "0044_telegram_assistant_ids"
 TABLE = "notification_deliveries"
 
 

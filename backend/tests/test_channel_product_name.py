@@ -23,6 +23,9 @@ def _started_config(monkeypatch, app_config) -> dict:
 
     monkeypatch.setattr("deerflow.reflection.resolve_class", lambda path, base_class=None: StubChannel)
     service = ChannelService(channels_config={}, app_config=app_config)
+    # start() marks the service running before it starts channels; a channel is
+    # never started into a stopped service.
+    service._running = True
     assert asyncio.run(service._start_channel("dingtalk", {"client_id": "x", "client_secret": "y"}))
     return captured
 

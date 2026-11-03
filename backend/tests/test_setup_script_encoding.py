@@ -19,12 +19,13 @@ ENCODINGS = ["ascii", "cp1252", "cp936", "utf-8"]
 def setup_checkout(tmp_path: Path) -> Path:
     scripts = tmp_path / "scripts"
     scripts.mkdir()
-    for name in ("doctor.py", "setup_wizard.py"):
+    # HartMesh's wizard seeds frontend-hm/.env through scripts/frontend_env.py.
+    for name in ("doctor.py", "setup_wizard.py", "frontend_env.py"):
         shutil.copyfile(REPO_ROOT / "scripts" / name, scripts / name)
     shutil.copytree(REPO_ROOT / "scripts" / "wizard", scripts / "wizard")
     (tmp_path / ".env.example").write_text("# test environment\n", encoding="utf-8")
-    (tmp_path / "frontend").mkdir()
-    (tmp_path / "frontend" / ".env.example").write_text("# frontend environment\n", encoding="utf-8")
+    (tmp_path / "frontend-hm").mkdir()
+    (tmp_path / "frontend-hm" / ".env.example").write_text("# frontend environment\n", encoding="utf-8")
     return tmp_path
 
 
@@ -121,7 +122,7 @@ def test_interactive_setup_completes_with_restricted_stdout(setup_checkout: Path
     assert "make doctor" in result.stdout
     assert (setup_checkout / "config.yaml").is_file()
     assert "OPENAI_API_KEY=test-api-key" in (setup_checkout / ".env").read_text(encoding="utf-8")
-    assert (setup_checkout / "frontend" / ".env").read_bytes() == (setup_checkout / "frontend" / ".env.example").read_bytes()
+    assert (setup_checkout / "frontend-hm" / ".env").read_bytes() == (setup_checkout / "frontend-hm" / ".env.example").read_bytes()
     if encoding == "utf-8":
         assert "✓" in result.stdout
         assert "· Writing configuration" in result.stdout

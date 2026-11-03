@@ -15,9 +15,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def config_checkout(tmp_path: Path) -> Path:
     scripts_dir = tmp_path / "scripts"
     scripts_dir.mkdir()
-    (tmp_path / "frontend").mkdir()
+    # HartMesh's product UI is frontend-hm/, and configure.py seeds its .env
+    # through scripts/frontend_env.py.
+    (tmp_path / "frontend-hm").mkdir()
     shutil.copyfile(REPO_ROOT / "scripts" / "configure.py", scripts_dir / "configure.py")
-    for template in ("config.example.yaml", ".env.example", "frontend/.env.example"):
+    shutil.copyfile(REPO_ROOT / "scripts" / "frontend_env.py", scripts_dir / "frontend_env.py")
+    for template in ("config.example.yaml", ".env.example", "frontend-hm/.env.example"):
         (tmp_path / template).write_text(f"template: {template}\n", encoding="utf-8")
     return tmp_path
 
@@ -40,7 +43,7 @@ def test_configure_succeeds_with_restricted_stdout_encoding(config_checkout: Pat
     for template, generated in (
         ("config.example.yaml", "config.yaml"),
         (".env.example", ".env"),
-        ("frontend/.env.example", "frontend/.env"),
+        ("frontend-hm/.env.example", "frontend-hm/.env"),
     ):
         assert (config_checkout / generated).read_bytes() == (config_checkout / template).read_bytes()
 
@@ -63,7 +66,7 @@ def test_configure_preserves_existing_configuration(config_checkout: Path, confi
     assert "configuration file already exists" in result.stdout
     assert config_path.read_text(encoding="utf-8") == "existing: true\n"
     assert not (config_checkout / ".env").exists()
-    assert not (config_checkout / "frontend" / ".env").exists()
+    assert not (config_checkout / "frontend-hm" / ".env").exists()
 
 
 def test_configure_help_prints_usage_without_generating_files(config_checkout: Path):
@@ -81,7 +84,7 @@ def test_configure_help_prints_usage_without_generating_files(config_checkout: P
     assert "Cross-platform config bootstrap script for DeerFlow." in result.stdout
     assert not (config_checkout / "config.yaml").exists()
     assert not (config_checkout / ".env").exists()
-    assert not (config_checkout / "frontend" / ".env").exists()
+    assert not (config_checkout / "frontend-hm" / ".env").exists()
 
 
 def test_configure_rejects_unknown_flags_without_generating_files(config_checkout: Path):
@@ -98,4 +101,4 @@ def test_configure_rejects_unknown_flags_without_generating_files(config_checkou
     assert "unrecognized arguments" in result.stderr
     assert not (config_checkout / "config.yaml").exists()
     assert not (config_checkout / ".env").exists()
-    assert not (config_checkout / "frontend" / ".env").exists()
+    assert not (config_checkout / "frontend-hm" / ".env").exists()

@@ -76,7 +76,8 @@ def _write_sandbox(root: Path, *, sources: str, lock: str, lock_name: str = "dee
     """A repo-shaped tree with every version source at ``sources`` and the lock at ``lock``."""
     (root / "scripts").mkdir(parents=True)
     (root / "backend").mkdir()
-    (root / "frontend").mkdir()
+    # HartMesh versions its product UI, not the pinned upstream frontend/ snapshot.
+    (root / "frontend-hm").mkdir()
     (root / "deploy" / "helm" / "deer-flow").mkdir(parents=True)
     shutil.copy2(REPO_ROOT / "scripts" / "verify_versions.sh", root / "scripts" / "verify_versions.sh")
 
@@ -85,7 +86,7 @@ def _write_sandbox(root: Path, *, sources: str, lock: str, lock_name: str = "dee
         f'version = 1\n\n[[package]]\nname = "{lock_name}"\nversion = "{lock}"\nsource = {{ virtual = "." }}\n',
         encoding="utf-8",
     )
-    (root / "frontend" / "package.json").write_text(f'{{\n  "name": "deer-flow-frontend",\n  "version": "{sources}"\n}}\n', encoding="utf-8")
+    (root / "frontend-hm" / "package.json").write_text(f'{{\n  "name": "deer-flow-frontend",\n  "version": "{sources}"\n}}\n', encoding="utf-8")
     (root / "deploy" / "helm" / "deer-flow" / "Chart.yaml").write_text(
         f'apiVersion: v2\nname: deer-flow\nversion: {sources}\nappVersion: "{sources}"\n',
         encoding="utf-8",

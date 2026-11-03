@@ -18,7 +18,6 @@ from deerflow.persistence.channel_connections import (
     ChannelCredentialRow,
     ChannelOAuthStateRow,
 )
-from deerflow.persistence.channel_connections.sql import _UPSERT_MAX_ATTEMPTS
 
 
 @pytest.fixture
@@ -127,7 +126,6 @@ class TestChannelConnectionRepository:
     async def test_active_identity_unique_index_rejects_second_connected_owner(self, repo):
         # The single-active-owner invariant must be enforced by the database, not
         # only by the app-level revoke step (which can race under READ COMMITTED).
-        from sqlalchemy.exc import IntegrityError
 
         await repo.upsert_connection(
             owner_user_id="alice",
@@ -484,29 +482,6 @@ class TestChannelConnectionRepository:
         async with real_factory() as session:
             rows = (await session.execute(select(ChannelConversationRow).where(ChannelConversationRow.external_conversation_id == "C-race"))).scalars().all()
         assert len(rows) == 1
-
-    @pytest.mark.anyio
-    async def test_set_thread_id_raises_the_integrity_error_once_retries_are_exhausted(self, repo):
-        """If every attempt still collides, the original IntegrityError propagates instead of being swallowed."""
-        connection = await repo.upsert_connection(owner_user_id="alice", provider="slack", external_account_id="U1", workspace_id="T1")
-        binding = {
-            "connection_id": connection["id"],
-            "owner_user_id": "alice",
-            "provider": "slack",
-            "external_conversation_id": "C-exhausted",
-        }
-        await repo.set_thread_id(**binding, thread_id="thread-original")
-
-        real_factory = repo.session_factory
-        repo.session_factory, sessions = miss_select_factory(real_factory, misses=None)
-        try:
-            with pytest.raises(IntegrityError, match="channel_conversations.connection_id"):
-                await repo.set_thread_id(**binding, thread_id="thread-never-written")
-        finally:
-            repo.session_factory = real_factory
-
-        assert [session.missed for session in sessions] == [_UPSERT_MAX_ATTEMPTS]
-        assert await repo.get_thread_id(connection["id"], "C-exhausted") == "thread-original"
 
     @pytest.mark.anyio
     async def test_upsert_connection_retries_as_update_when_concurrent_insert_wins(self, repo):

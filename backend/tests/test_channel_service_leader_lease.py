@@ -489,6 +489,9 @@ async def test_gateway_lifespan_passes_the_gate_signal_and_the_run_worker_id():
     startup_config.log_level = "INFO"
     startup_config.memory.enabled = False
     startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+    # HartMesh's lifespan opens Storage Spaces only when enabled (it needs a
+    # durable database); a bare mock would read as enabled.
+    startup_config.storage_spaces.enabled = False
     captured = {}
 
     async def fake_start(_startup_config, **kwargs):

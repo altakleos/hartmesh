@@ -93,8 +93,9 @@ def _render_through_docker_start(tmp_path: Path, env_file: str, shell_value: str
     """
     docker_dir = tmp_path / "docker"
     shutil.copytree(REPO_ROOT / "docker", docker_dir)
-    (tmp_path / "frontend").mkdir()
-    (tmp_path / "frontend" / ".env").write_text("", encoding="utf-8")
+    # HartMesh's compose stack builds and configures frontend-hm/.
+    (tmp_path / "frontend-hm").mkdir()
+    (tmp_path / "frontend-hm" / ".env").write_text("", encoding="utf-8")
     (tmp_path / ".env").write_text(env_file, encoding="utf-8")
     (tmp_path / "config.yaml").write_text("sandbox:\n  use: deerflow.sandbox.local:LocalSandboxProvider\n", encoding="utf-8")
     (tmp_path / "extensions_config.json").write_text("{}", encoding="utf-8")

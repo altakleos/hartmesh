@@ -23,6 +23,8 @@ HOOKS_BOUNDED_BY_SHUTDOWN_HOOK_TIMEOUT: tuple[str, ...] = (
     "startup trash sweep",
     "notification delivery worker stop",
     "channel service stop",
+    # HartMesh: the Telegram supervisor's stop, between its two shutdown phases.
+    "Telegram supervisor stop",
     "scheduled task service stop",
     "subagent batch service stop",
     "browser session close",

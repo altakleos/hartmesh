@@ -67,7 +67,7 @@ class TestCheckPnpm:
         stderr = "诊断详情 ".encode() + b"\xff\n"
         runner = tmp_path / "pnpm runner.py"
         runner.write_text(
-            f"import os, sys\nassert os.getcwd() == {str(tmp_path)!r}\nassert sys.argv[1:] == ['-v']\nsys.stdout.buffer.write({stdout!r})\nsys.stderr.buffer.write({stderr!r})\nsys.exit({returncode})\n",
+            f"import os, sys\nassert os.getcwd() == {str(tmp_path)!r}\nassert sys.argv[1:] == ['--project', 'frontend-hm', '--', '-v']\nsys.stdout.buffer.write({stdout!r})\nsys.stderr.buffer.write({stderr!r})\nsys.exit({returncode})\n",
             encoding="utf-8",
         )
         monkeypatch.setattr(doctor, "PNPM_SCRIPT_PATH", runner)

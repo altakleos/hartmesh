@@ -302,6 +302,11 @@ def render_compose_config(tmp_path, monkeypatch, *, keys, tweak=None):
     for module, name in ((memory_config, "_memory_config"), (agents_api_config, "_agents_api_config"), (stream_bridge_config, "_stream_bridge_config")):
         monkeypatch.setattr(module, name, getattr(module, name))
     app_config.reset_app_config()
+    # The rendered DATABASE_URL is a synthetic, unreachable Postgres: the turn
+    # runs on the harness's own engine. Upstream's skill-enrollment probe
+    # (deerflow.skills.mutations.enrollment, covered by test_skill_sdk_enrollment)
+    # would open that URL on every skill load and refuse them all.
+    monkeypatch.setattr("deerflow.skills.mutations.guard.require_unenrolled", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
     monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
 
