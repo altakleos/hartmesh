@@ -39,3 +39,17 @@ explicit None, raw owner filtering and ordinary results/errors. Driver tests
 prove independent UPDATE/COMMIT/readback and cursor closure: DELETE can retain a
 read lock after cancellation; production WAL's successful writer is a distinct
 control, not evidence of the same lock failure.
+
+
+
+
+
+
+
+Expired-launch scans select candidates, not ownership. After taking the parent
+and occurrence locks, recheck launch status and lease expiry before recovery.
+A busy launch may have requeued and a manual trigger reclaimed the same row
+while recovery waited; the new claim can have the same process owner. Preserve
+its full row and execution-budget slot. A lease equal to scan time is still live;
+missing or strictly older leases remain recoverable.
+
