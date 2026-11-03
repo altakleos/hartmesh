@@ -979,6 +979,8 @@ A temporary connection or session-check failure preserves unsaved workspace edit
 
 Local password changes invalidate prior browser sessions using an atomic database version increment. If credentials change during a password request, it returns a conflict and asks the user to sign in again. Login hash upgrades preserve concurrent account changes and session revocations.
 
+OIDC/SSO authorization endpoints may include provider query parameters such as `?prompt=login`. The sign-in redirect preserves those parameters when adding the login request, including for configured `authorization_endpoint` overrides.
+
 DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser-facing scheme and origin behind a proxy. The bundled nginx sets `X-Forwarded-Proto`, but preserves an upstream HTTPS value and does not overwrite every forwarded header. Configure the outer trusted proxy to replace or strip client-supplied forwarding headers before traffic reaches DeerFlow.
 
 > [!IMPORTANT]
