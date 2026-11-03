@@ -1855,8 +1855,8 @@ def test_show_web_page_tool_in_template(render_config: ModuleType) -> None:
     assert resolve_variable(entry["use"]).name == "show_web_page"
 
 
-def test_config_version_is_55() -> None:
-    assert yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))["config_version"] == yaml.safe_load(_example_config())["config_version"] == 55
+def test_config_version_is_65() -> None:
+    assert yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))["config_version"] == yaml.safe_load(_example_config())["config_version"] == 65
 
 
 def test_rendered_bundle_section_validates(render_config: ModuleType) -> None:

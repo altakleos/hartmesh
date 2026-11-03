@@ -20,7 +20,6 @@ import secrets
 
 import bcrypt
 
-_CURRENT_VERSION = 2
 _PREFIX_V2 = "$dfv2$"
 _PREFIX_V1 = "$dfv1$"
 

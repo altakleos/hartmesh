@@ -21,14 +21,16 @@ from app.gateway.conversation_access import conversation_references_enabled
 from app.gateway.customer_administration import request_customer_administration_policy, resolve_customer_management_actor
 from app.gateway.deps import get_config, get_current_user_from_request
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
-from app.gateway.knowledge_scope_admission import RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
+from app.gateway.routers.thread_activity import thread_activity_available
 from app.gateway.run_models import MAX_CONVERSATION_REFERENCES
 from app.telegram_bots.router import telegram_feature
 from deerflow.config.app_config import AppConfig
 from deerflow.config.tenant_bundle import MAX_COMPANY_NAME_CHARS, MAX_SUPPORT_URL_CHARS, TenantBundle, configured_tenant_bundle
 from deerflow.config.ui_config import MAX_STARTER_PROMPT_CHARS, MAX_STARTER_TITLE_CHARS, MAX_STARTERS, UiConfig
 from deerflow.features.resources import StorageFeatureLinkRow
+from deerflow.knowledge.providers import get_knowledge_capabilities
 from deerflow.persistence.agent_instances.model import AgentInstanceRow
+from deerflow.scheduler.runtime import scheduler_tools_enabled
 from deerflow.subagents.capacity import configured_subagent_max_running
 from deerflow.utils.file_io import run_file_io
 
@@ -104,11 +106,11 @@ class ConversationReferencesFeature(BaseModel):
 
 
 class KnowledgeBaseFeature(BaseModel):
-    """Availability of RAGFlow retrieval scope selection in chat."""
+    """Availability of capability-driven retrieval scope selection in chat."""
 
     scope_selection_enabled: bool = Field(
         ...,
-        description="Whether chat may select a per-message RAGFlow retrieval scope",
+        description="Whether chat may select a per-message knowledge retrieval scope",
     )
 
 
@@ -204,6 +206,22 @@ async def _customer_administration_feature(request: Request, config: AppConfig) 
     )
 
 
+class ScheduledTasksFeature(BaseModel):
+    """Availability of scheduled tasks in this Gateway process."""
+
+    available: bool = Field(..., description="Whether the scheduled-task APIs have persistence (tasks can be listed and managed)")
+    running: bool = Field(..., description="Whether this process's scheduler poller is running, so tasks run on schedule and new tasks can be created")
+    tool_enabled: bool = Field(..., description="Whether chats can create and manage tasks and scheduled runs can stop their own schedule")
+    min_interval_seconds: int = Field(..., description="Shortest interval and earliest one-time delay, in seconds")
+    group_notifications: bool = Field(..., description="Whether scheduled tasks support explicitly selected group notifications")
+
+
+class ThreadActivityFeature(BaseModel):
+    """Availability of the activity feed and per-user read markers."""
+
+    available: bool = Field(..., description="Whether GET /api/thread-activity, POST /api/threads/{thread_id}/read and the thread search `unread` field work (SQL persistence)")
+
+
 class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
@@ -221,6 +239,8 @@ class FeaturesResponse(BaseModel):
     ui: UiFeature
     branding: BrandingFeature
     telegram: TelegramFeature | None = None
+    scheduled_tasks: ScheduledTasksFeature
+    thread_activity: ThreadActivityFeature
 
 
 @router.get(
@@ -270,8 +290,11 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
             max_references=MAX_CONVERSATION_REFERENCES,
         ),
         knowledge_base=KnowledgeBaseFeature(
-            scope_selection_enabled=_knowledge_scope_selection_enabled(config),
+            scope_selection_enabled=_knowledge_scope_selection_enabled(config, getattr(request.app.state, "extensions", None)),
         ),
+        scheduled_tasks=_scheduled_tasks_feature(request, config),
+        # Startup-scoped: the read repository exists only with SQL persistence.
+        thread_activity=ThreadActivityFeature(available=thread_activity_available(request.app.state)),
         # Presentation the frontend cannot decide for itself: the profile is
         # the deployment's choice and the starters are its words. Read through
         # `get_config`, so an edit reaches the next page load; the bundle is
@@ -356,10 +379,27 @@ def _ui_feature(ui: UiConfig, bundle: TenantBundle) -> UiFeature:
     )
 
 
-def _knowledge_scope_selection_enabled(config: AppConfig) -> bool:
-    """Fail closed unless the effective knowledge_search entry is RAGFlow."""
+def _scheduled_tasks_feature(request: Request, config: AppConfig) -> ScheduledTasksFeature:
+    # Repository and service are startup-scoped (same rationale as mcp_tasks):
+    # report what this process actually started.
+    state = request.app.state
+    service = getattr(state, "scheduled_task_service", None)
+    running = bool(getattr(service, "is_running", False))
+    scheduler = getattr(config, "scheduler", None)
+    repository_available = getattr(state, "scheduled_task_repo", None) is not None
+    return ScheduledTasksFeature(
+        available=repository_available,
+        running=running,
+        tool_enabled=running and scheduler_tools_enabled(config),
+        min_interval_seconds=int(getattr(scheduler, "min_once_delay_seconds", 60)),
+        group_notifications=repository_available and bool(getattr(getattr(config, "channel_connections", None), "enabled", False)),
+    )
+
+
+def _knowledge_scope_selection_enabled(config: AppConfig, extensions=None) -> bool:
+    """Selection UI requires both a catalog and dataset filtering."""
     settings = config.knowledge_base
     if not settings.enabled or not settings.scope_selection_enabled:
         return False
-    tool = config.get_tool_config("knowledge_search")
-    return tool is not None and tool.use == RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
+    capabilities = get_knowledge_capabilities(config, extensions=extensions)
+    return capabilities.supports("catalog") and capabilities.supports("dataset_filter")

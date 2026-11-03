@@ -496,7 +496,7 @@ async def test_manager_owned_http_actual_gateway_admission_and_checkpoint_withou
     from app.channels.execution_client import ChannelExecutionFacade
     from app.channels.manager import ChannelManager
     from app.channels.message_bus import InboundMessage, MessageBus
-    from app.channels.store import ChannelStore
+    from app.channels.store import JsonChannelStore
     from app.gateway.auth_middleware import AuthMiddleware
     from app.gateway.csrf_middleware import CSRFMiddleware
     from app.gateway.routers import thread_runs, threads
@@ -532,7 +532,7 @@ async def test_manager_owned_http_actual_gateway_admission_and_checkpoint_withou
     admission = Admission()
     client = ChannelExecutionFacade(owner, scope=scope, admission=admission)
     bus = MessageBus()
-    manager = ChannelManager(bus, ChannelStore(str(tmp_path / "manager.json")))
+    manager = ChannelManager(bus, JsonChannelStore(str(tmp_path / "manager.json")))
 
     def no_default():
         raise AssertionError("A required publication cannot select the ordinary client")

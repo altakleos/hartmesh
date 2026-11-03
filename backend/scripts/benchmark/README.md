@@ -62,3 +62,9 @@ uv run python scripts/benchmark/concurrency/run_concurrency_bench.py \
   --backend sqlite --workers 2,4,8,16 --ops-per-worker 50 --read-ratio 0.7
 uv run pytest tests/test_bench_concurrency.py tests/test_bench_worker.py -q
 ```
+
+## Sandbox
+
+Sandbox benchmarks reuse production lifecycle. Reject negative/NaN timing values
+before provider creation, export no secrets, and fail on final cleanup errors.
+See [the sandbox benchmark README](sandbox/README.md) for supported options and tests.

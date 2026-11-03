@@ -21,7 +21,7 @@ from app.gateway.channel_execution import CHANNEL_EXECUTION_REQUEST_HEADER, CHAN
 from app.gateway.internal_auth import create_internal_auth_headers, get_internal_user
 from app.gateway.routers import thread_runs
 from deerflow.persistence.base import Base
-from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
 from deerflow.persistence.run.model import RunChangeClockRow, RunRow
 from deerflow.persistence.run.sql import RunRepository
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
@@ -51,7 +51,7 @@ class ContextProbe:
 @pytest_asyncio.fixture
 async def sql_read_environment(gateway_environment):
     e = gateway_environment
-    tables = [RunEventRow.__table__, RunRow.__table__, RunChangeClockRow.__table__, ThreadMetaRow.__table__]
+    tables = [RunEventRow.__table__, RunEventThreadSeqRow.__table__, RunRow.__table__, RunChangeClockRow.__table__, ThreadMetaRow.__table__]
     async with e.engine.begin() as connection:
         if e.dialect == "sqlite":
             await connection.execute(text("BEGIN"))

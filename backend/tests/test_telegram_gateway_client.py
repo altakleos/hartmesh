@@ -13,9 +13,9 @@ pytestmark = pytest.mark.asyncio
 async def test_public_manager_exposes_independently_resolved_runtime_url(tmp_path):
     from app.channels.manager import ChannelManager
     from app.channels.message_bus import MessageBus
-    from app.channels.store import ChannelStore
+    from app.channels.store import JsonChannelStore
 
-    manager = ChannelManager(MessageBus(), ChannelStore(str(tmp_path / "channels.json")), langgraph_url="https://runtime.example/root/api", gateway_url="https://gateway.example/other")
+    manager = ChannelManager(MessageBus(), JsonChannelStore(str(tmp_path / "channels.json")), langgraph_url="https://runtime.example/root/api", gateway_url="https://gateway.example/other")
     assert manager.langgraph_url == "https://runtime.example/root/api"
     assert manager.gateway_url == "https://gateway.example/other"
     with pytest.raises(AttributeError):

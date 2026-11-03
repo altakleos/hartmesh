@@ -159,7 +159,7 @@ Your config.yaml (version %d) is outdated — the latest version is %d. Run `mak
 | --- | --- | --- | --- |
 | `GET /api/threads/{thread_id}` | `get_thread` | 在 `404 Thread <id> not found` 之前检查 | `threads:1276,1291-1292,1298-1299,1303` |
 | `GET /api/threads/{thread_id}/state` | `get_thread_state` | | `threads:1446,1454-1455,1458-1459` |
-| `POST /api/threads/{thread_id}/state` | `update_thread_state` | 调用方传入的 `checkpoint_id` 若比 head 更旧，会作为一次增量分叉被直接应用，没有线性化 —— 见[分叉会被接受，而不是被拒绝](/docs/harness/checkpoints/resume-and-rollback#分叉会被接受而不是被拒绝) | `threads:1495,1559-1560` |
+| `POST /api/threads/{thread_id}/state` | `update_thread_state` | 调用方传入的 `checkpoint_id` 若比 head 更旧，会作为一次增量分叉被直接应用，没有线性化 —— 见[分叉会被接受，而不是被拒绝](/docs/harness/checkpoints/resume-and-rollback#forks-are-accepted-not-refused) | `threads:1495,1559-1560` |
 | `POST /api/threads/{thread_id}/history` | `get_thread_history` | | `threads:1695,1715-1716,1907-1908` |
 | `POST /api/threads/{thread_id}/branches` | `branch_thread` → `_branch_thread_with_reservation` | detail 中的线程 id 是源线程；无测试覆盖该路由 | `threads:953,231-232,298-299,1105-1106` |
 | `POST /api/threads/{thread_id}/compact` | `compact_thread` | 压缩被禁用时同样返回 `409`；无测试覆盖该路由 | `threads:1399,1413-1414,1429-1430,1431-1432` |
@@ -170,8 +170,10 @@ Your config.yaml (version %d) is outdated — the latest version is %d. Run `mak
 | --- | --- | --- | --- |
 | `POST /api/threads/{thread_id}/runs` | `200` run 记录，无前置门禁 —— 但当线程的 run event 流为空时，`ensure_checkpoint_history_seeded` 会先在 `start_run` 内物化头部，此时返回 `500` | run 记录稍后变为 `status: error`，`error` 为不匹配原文 | `thread_runs:945-960`、`worker:1018-1030,1044-1047`、`worker:1450-1462`、`services:1503-1520,2055` |
 | `POST /api/threads/{thread_id}/runs/stream` | `200` `text/event-stream` | 一帧 `event: error`，其 `data` 为 `{"message": <不匹配原文>, "name": "CheckpointModeMismatchError"}` | `worker:1466-1472`、`services:2374-2378` |
-| `POST /api/threads/{thread_id}/runs/wait` | `200` JSON，从不返回 `409` | `{"status": "error", "error": "Thread requires delta mode; materialize and convert its checkpoints before using full mode."}` | `thread_runs:1018-1076` |
-| `POST /api/runs/stream`、`POST /api/runs/wait`（无状态） | 同上 | 同样的 `{"status", "error"}` 载荷 | `runs:59-91` |
+| `POST /api/threads/{thread_id}/runs/wait` | `200` JSON，从不返回 `409` | `{"status": "error", "error": "Thread requires delta mode; materialize and convert its checkpoints before using full mode.", "__error__": {"error": "RunError", "message": "Thread requires delta mode; materialize and convert its checkpoints before using full mode."}}` | `thread_runs:1018-1076` |
+| `POST /api/runs/stream`、`POST /api/runs/wait`（无状态） | 同上 | 同样的 SSE 错误帧或 wait `{"status", "error", "__error__"}` 载荷 | `runs:59-91` |
+
+wait 响应仍为 HTTP `200`。Python SDK 默认使用 `raise_error=True`，识别到 `__error__` 后会抛出异常，消息为 `RunError: <不匹配文本>`；传入 `raise_error=False` 才会返回 JSON 响应体，供调用者读取 `status`、`error` 和 `__error__`。
 
 ### 未做模式映射的路由
 

@@ -1,4 +1,4 @@
-"""SkillToolPolicyMiddleware: the order a report's first sandbox work takes.
+"""SkillLoadOrderMiddleware: the order a report's first sandbox work takes.
 
 Released-profile report chats (v2.1.0+hartmesh.34, four fresh chats) read
 business-report's ``SKILL.md`` and, in three of them, chose an upload
@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
-from test_skill_tool_policy_middleware import (
+from test_skill_load_order_middleware import (
     _SLASH_SOURCE_OWNER_TOKEN,
     _bash_call,
     _completed_read,
@@ -359,11 +359,11 @@ def test_every_sandbox_tool_says_it_works_in_the_sandbox():
 
 def test_a_subagent_is_not_held_to_a_first_command():
     """It sees only its own messages, so a build the lead already delivered would be run again."""
-    from test_skill_tool_policy_middleware import _SLASH_SOURCE_OWNER_TOKEN as token
+    from test_skill_load_order_middleware import _SLASH_SOURCE_OWNER_TOKEN as token
 
-    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
+    from deerflow.agents.middlewares.skill_load_order_middleware import SkillLoadOrderMiddleware
 
-    middleware = SkillToolPolicyMiddleware(slash_source_owner_token=token, first_command_order=False)
+    middleware = SkillLoadOrderMiddleware(slash_source_owner_token=token, first_command_order=False)
     middleware._storage = _middleware([_report_skill()])._storage
 
     assert _runs(middleware, _request(_bash_call(_PROBE, "inspect-2"), earlier=_loaded()))

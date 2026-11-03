@@ -8,9 +8,9 @@ a reader can verify what it got back. Contract: `storage/contract.py`
 Operator-facing behaviour and the producer migration plan: `docs/blob-storage.md`.
 Factory: `storage/manager.py`.
 
-**Disabled by default**: `blob_storage.enabled` is `false`, and no producer has
-been migrated, so an untouched deployment behaves exactly as before. Producers
-call `get_blob_store_if_enabled()` and keep their existing local-path code for the
+**Disabled by default**: `blob_storage.enabled` is `false`, so an untouched
+deployment behaves exactly as before. Migrated producers call
+`get_blob_store_if_enabled()` and keep their existing local-path code for the
 `None` case; only a caller that genuinely requires the store uses
 `get_blob_store()`, which raises `BlobNotConfiguredError` when it is disabled.
 Both accessors are exported from this package — prefer
@@ -20,6 +20,36 @@ cached store, so hot-reloaded `blob_storage` edits take effect on new accesses.
 Replaced stores stay open for callers that already hold them and are closed by
 `reset_blob_store()`; changing a root requires preserving existing blob refs
 and coordinating deployment instances.
+
+`view_image_tool` is the first migrated producer: it persists validated image
+bytes as `kind="viewed-image"`, checkpoints the JSON-safe ref beside
+`actual_path`, and treats any store initialization or write failure as a failed
+tool call rather than claiming cross-instance durability. `ViewImageMiddleware` accepts a
+ref only when its kind, digest, size and content type agree with the separately
+recorded image metadata; reads are blob-first and retain the existing
+sandbox/host compatibility path as fallback after any store failure. The
+thread artifact GET route also resolves the checkpoint-bound image ref when the
+reader Gateway cannot find the local file; it confines this fallback to the
+authorized thread and exact virtual path and verifies the bytes before serving.
+The blob fallback reuses `require_permission` with `require_existing=True`
+before the off-loop store probe, including trusted internal owners. A disabled
+store skips accessor construction/checkpoint reads; reuse the returned store
+for the blob read. Unexpected failures warn with only the exception type and
+still fall back to 404. Local-file reads keep legacy missing-row access.
+MIME detection runs off-loop even on a cold
+reader. Regression coverage uses the decorated artifact route with a real
+thread store and the strict blocking-I/O suite with an uninitialized MIME DB.
+Other artifact and IM-channel reads still use their existing local-path flow.
+
+`ToolOutputBudgetMiddleware` is a migrated producer for host-externalized
+results. It persists exact UTF-8 bytes as `kind="tool-output"`, checkpoints a
+versioned ref beside the virtual path, and restores the file atomically under
+the current thread outputs before a model can follow that path. The ref's kind,
+content type, digest, size, storage subdirectory, and confined virtual path are
+validated before a store read or host write. A configured-store write failure
+or output above the 64 MiB producer cap falls back inline, capped at 30,000
+characters or a lower configured fallback; non-mounted sandbox externalization
+remains outside this host-blob flow.
 
 **Layout** (local_fs, the default)::
 
@@ -43,8 +73,8 @@ backend name == `blob_storage.backend` value:
 3. Keep the portability rule: a backend talks to the host through the method
    arguments and its `backend_config` dict only. The single `deerflow` import a
    backend folder needs is the contract line importing `BlobStore`, so a
-   third-party backend can live outside this tree and be selected with a dotted
-   path (`pkg.mod.Class` or `pkg.mod:Class`).
+   third-party backend can live outside this tree and be selected with an import
+   path (`module.Class` or `module:Class`, including single-file modules).
 4. Reject an unusable config by raising; a store that silently starts on a
    different root or backend strands previously written content.
 5. Add the backend's semantics tests to `backend/tests/test_blob_store.py`; the

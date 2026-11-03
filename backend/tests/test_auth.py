@@ -1,8 +1,8 @@
 """Tests for authentication module: JWT, password hashing, AuthContext, and authz decorators."""
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import bcrypt
 import pytest
@@ -425,7 +425,14 @@ def test_sqlite_round_trip_new_fields():
     asyncio.run(_run())
 
 
-def test_user_repository_lists_registered_user_ids(tmp_path):
+@pytest.mark.parametrize(
+    ("second_created_delta", "expected_ids"),
+    [
+        pytest.param(timedelta(seconds=1), (UUID(int=2), UUID(int=1)), id="creation-time-first"),
+        pytest.param(timedelta(0), (UUID(int=1), UUID(int=2)), id="id-breaks-time-tie"),
+    ],
+)
+def test_user_repository_lists_registered_user_ids(tmp_path, second_created_delta, expected_ids):
     import asyncio
 
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
@@ -440,10 +447,14 @@ def test_user_repository_lists_registered_user_ids(tmp_path):
         )
         try:
             repo = SQLiteUserRepository(get_session_factory())
-            first = await repo.create_user(User(email="first@test.com", password_hash="hash"))
-            second = await repo.create_user(User(email="second@test.com", password_hash="hash"))
+            assert await repo.list_user_ids() == []
+            created_at = datetime(2026, 1, 1, tzinfo=UTC)
+            # Reverse stored UUID string order relative to insertion order so both sort keys matter.
+            # The ID tie-break is lexical; canonical UUID strings preserve UUID integer order.
+            await repo.create_user(User(id=UUID(int=2), email="first@test.com", password_hash="hash", created_at=created_at))
+            await repo.create_user(User(id=UUID(int=1), email="second@test.com", password_hash="hash", created_at=created_at + second_created_delta))
 
-            assert await repo.list_user_ids() == [str(first.id), str(second.id)]
+            assert await repo.list_user_ids() == [str(user_id) for user_id in expected_ids]
         finally:
             await close_engine()
 
@@ -1213,6 +1224,7 @@ def test_login_local_broken_config_fails_closed_before_authenticate(monkeypatch)
     previously the first request per address was verified before the counter
     could refuse it.
     """
+
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -1271,7 +1283,8 @@ def test_local_auth_throttle_config_validation():
 # ── Client IP extraction ─────────────────────────────────────────────────
 
 
-def test_get_client_ip_direct_connection_no_proxy(monkeypatch):
+@pytest.mark.asyncio
+async def test_get_client_ip_direct_connection_no_proxy(monkeypatch):
     """Direct mode (no AUTH_TRUSTED_PROXIES): use TCP peer regardless of X-Real-IP."""
     monkeypatch.delenv("AUTH_TRUSTED_PROXIES", raising=False)
     from app.gateway.routers.auth import _get_client_ip
@@ -1279,10 +1292,11 @@ def test_get_client_ip_direct_connection_no_proxy(monkeypatch):
     req = MagicMock()
     req.client.host = "203.0.113.42"
     req.headers = {}
-    assert _get_client_ip(req) == "203.0.113.42"
+    assert await _get_client_ip(req) == "203.0.113.42"
 
 
-def test_get_client_ip_x_real_ip_ignored_when_no_trusted_proxy(monkeypatch):
+@pytest.mark.asyncio
+async def test_get_client_ip_x_real_ip_ignored_when_no_trusted_proxy(monkeypatch):
     """X-Real-IP is silently ignored if AUTH_TRUSTED_PROXIES is unset.
 
     This closes the bypass where any client could rotate X-Real-IP per
@@ -1294,10 +1308,11 @@ def test_get_client_ip_x_real_ip_ignored_when_no_trusted_proxy(monkeypatch):
     req = MagicMock()
     req.client.host = "127.0.0.1"
     req.headers = {"x-real-ip": "203.0.113.42"}
-    assert _get_client_ip(req) == "127.0.0.1"
+    assert await _get_client_ip(req) == "127.0.0.1"
 
 
-def test_get_client_ip_x_real_ip_honored_from_trusted_proxy(monkeypatch):
+@pytest.mark.asyncio
+async def test_get_client_ip_x_real_ip_honored_from_trusted_proxy(monkeypatch):
     """X-Real-IP is honored when the TCP peer matches AUTH_TRUSTED_PROXIES."""
     monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "10.0.0.0/8")
     from app.gateway.routers.auth import _get_client_ip
@@ -1305,10 +1320,11 @@ def test_get_client_ip_x_real_ip_honored_from_trusted_proxy(monkeypatch):
     req = MagicMock()
     req.client.host = "10.5.6.7"  # in trusted CIDR
     req.headers = {"x-real-ip": "203.0.113.42"}
-    assert _get_client_ip(req) == "203.0.113.42"
+    assert await _get_client_ip(req) == "203.0.113.42"
 
 
-def test_get_client_ip_x_real_ip_rejected_from_untrusted_peer(monkeypatch):
+@pytest.mark.asyncio
+async def test_get_client_ip_x_real_ip_rejected_from_untrusted_peer(monkeypatch):
     """X-Real-IP is rejected when the TCP peer is NOT in the trusted list."""
     monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "10.0.0.0/8")
     from app.gateway.routers.auth import _get_client_ip
@@ -1316,10 +1332,11 @@ def test_get_client_ip_x_real_ip_rejected_from_untrusted_peer(monkeypatch):
     req = MagicMock()
     req.client.host = "8.8.8.8"  # NOT in trusted CIDR
     req.headers = {"x-real-ip": "203.0.113.42"}  # client trying to spoof
-    assert _get_client_ip(req) == "8.8.8.8"
+    assert await _get_client_ip(req) == "8.8.8.8"
 
 
-def test_get_client_ip_xff_never_honored(monkeypatch):
+@pytest.mark.asyncio
+async def test_get_client_ip_xff_never_honored(monkeypatch):
     """X-Forwarded-For is never used; only X-Real-IP from a trusted peer."""
     monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "10.0.0.0/8")
     from app.gateway.routers.auth import _get_client_ip
@@ -1327,21 +1344,32 @@ def test_get_client_ip_xff_never_honored(monkeypatch):
     req = MagicMock()
     req.client.host = "10.0.0.1"
     req.headers = {"x-forwarded-for": "198.51.100.5"}  # no x-real-ip
-    assert _get_client_ip(req) == "10.0.0.1"
+    assert await _get_client_ip(req) == "10.0.0.1"
 
 
-def test_get_client_ip_invalid_trusted_proxy_entry_skipped(monkeypatch, caplog):
-    """Garbage entries in AUTH_TRUSTED_PROXIES are warned and skipped."""
-    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "not-an-ip,10.0.0.0/8")
+@pytest.mark.asyncio
+async def test_get_client_ip_invalid_trusted_proxy_entry_skipped(monkeypatch, caplog):
+    """Garbage entries in AUTH_TRUSTED_PROXIES are warned and skipped.
+
+    ``10.0.0`` is neither an IP nor a hostname (numeric last label), so it is
+    not handed to the resolver, which would read it as ``10.0.0.0``.
+    """
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "not an ip,10.0.0,10.0.0.0/8")
     from app.gateway.routers.auth import _get_client_ip
 
     req = MagicMock()
     req.client.host = "10.5.6.7"
     req.headers = {"x-real-ip": "203.0.113.42"}
-    assert _get_client_ip(req) == "203.0.113.42"  # valid entry still works
+    with caplog.at_level("WARNING", logger="app.gateway.routers.auth"):
+        assert await _get_client_ip(req) == "203.0.113.42"  # valid entry still works
+    assert [r.getMessage() for r in caplog.records] == [
+        "AUTH_TRUSTED_PROXIES: ignoring invalid entry 'not an ip'",
+        "AUTH_TRUSTED_PROXIES: ignoring invalid entry '10.0.0'",
+    ]
 
 
-def test_get_client_ip_no_client_returns_unknown(monkeypatch):
+@pytest.mark.asyncio
+async def test_get_client_ip_no_client_returns_unknown(monkeypatch):
     """No request.client → 'unknown' marker (no crash)."""
     monkeypatch.delenv("AUTH_TRUSTED_PROXIES", raising=False)
     from app.gateway.routers.auth import _get_client_ip
@@ -1349,7 +1377,235 @@ def test_get_client_ip_no_client_returns_unknown(monkeypatch):
     req = MagicMock()
     req.client = None
     req.headers = {}
-    assert _get_client_ip(req) == "unknown"
+    assert await _get_client_ip(req) == "unknown"
+
+
+@pytest.fixture
+def _proxy_host_cache():
+    from app.gateway.routers import auth as auth_router
+
+    auth_router._trusted_proxy_host_cache.clear()
+    auth_router._trusted_proxy_host_inflight.clear()
+    yield auth_router._trusted_proxy_host_cache
+    auth_router._trusted_proxy_host_cache.clear()
+    auth_router._trusted_proxy_host_inflight.clear()
+
+
+def _fake_getaddrinfo(monkeypatch, answers):
+    """Replace the resolver; ``answers`` is consumed one lookup at a time (an exception is raised)."""
+    import socket
+
+    calls = []
+
+    def getaddrinfo(host, *args, **kwargs):
+        calls.append(host)
+        answer = answers[len(calls) - 1]
+        if isinstance(answer, BaseException):
+            raise answer
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 0)) for address in answer]
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    return calls
+
+
+def _proxied_request(peer: str, real_ip: str | None = "203.0.113.42"):
+    req = MagicMock()
+    req.client.host = peer
+    req.headers = {"x-real-ip": real_ip} if real_ip else {}
+    return req
+
+
+@pytest.mark.asyncio
+async def test_get_client_ip_hostname_entry_trusts_its_resolved_address(monkeypatch, _proxy_host_cache):
+    """A proxy without a fixed address (the compose ``nginx`` service) is named by hostname."""
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "localhost")
+    from app.gateway.routers.auth import _get_client_ip
+
+    assert await _get_client_ip(_proxied_request("127.0.0.1")) == "203.0.113.42"
+    assert await _get_client_ip(_proxied_request("10.9.9.9")) == "10.9.9.9"  # not what it resolves to
+
+
+@pytest.mark.asyncio
+async def test_get_client_ip_unresolvable_hostname_trusts_nothing_and_is_cached(monkeypatch, caplog, _proxy_host_cache):
+    import socket
+
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "nginx")
+    calls = _fake_getaddrinfo(monkeypatch, [socket.gaierror(socket.EAI_NONAME, "Name or service not known")])
+    from app.gateway.routers.auth import _get_client_ip
+
+    with caplog.at_level("WARNING", logger="app.gateway.routers.auth"):
+        assert await _get_client_ip(_proxied_request("172.18.0.5")) == "172.18.0.5"
+        assert await _get_client_ip(_proxied_request("172.18.0.5")) == "172.18.0.5"
+    # The failure is cached: an unauthenticated flood cannot drive one lookup per request.
+    assert calls == ["nginx"]
+    assert "could not resolve 'nginx'" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_get_client_ip_hostname_is_re_resolved_after_its_ttl(monkeypatch, _proxy_host_cache):
+    """A restarted proxy container comes back on a new address."""
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "nginx")
+    calls = _fake_getaddrinfo(monkeypatch, [["172.18.0.5"], ["172.18.0.9"]])
+    from app.gateway.routers.auth import _get_client_ip
+
+    assert await _get_client_ip(_proxied_request("172.18.0.5")) == "203.0.113.42"
+    assert await _get_client_ip(_proxied_request("172.18.0.9")) == "172.18.0.9"  # still cached
+    _, addresses = _proxy_host_cache["nginx"]
+    _proxy_host_cache["nginx"] = (0.0, addresses)  # TTL elapsed
+    assert await _get_client_ip(_proxied_request("172.18.0.9")) == "203.0.113.42"
+    assert calls == ["nginx", "nginx"]
+
+
+def _gated_getaddrinfo(monkeypatch, address: str):
+    """A resolver that blocks in its executor thread until released, like DNS timing out."""
+    import socket
+    import threading
+
+    calls = []
+    entered, release = threading.Event(), threading.Event()
+
+    def getaddrinfo(host, *args, **kwargs):
+        calls.append(host)
+        entered.set()
+        assert release.wait(5), "the gated resolver was never released"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    return calls, entered, release
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cache_misses_share_one_lookup(monkeypatch, _proxy_host_cache):
+    """A burst on an expired entry while DNS is slow costs one resolver call, not one per request."""
+    import asyncio
+
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "nginx")
+    calls, entered, release = _gated_getaddrinfo(monkeypatch, "172.18.0.5")
+    from app.gateway.routers.auth import _get_client_ip
+
+    burst = [asyncio.create_task(_get_client_ip(_proxied_request("172.18.0.5"))) for _ in range(20)]
+    assert await asyncio.to_thread(entered.wait, 5)
+    release.set()
+
+    assert await asyncio.gather(*burst) == ["203.0.113.42"] * 20
+    assert calls == ["nginx"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_request_does_not_cancel_the_shared_lookup(monkeypatch, _proxy_host_cache):
+    """The request that started the lookup disconnecting must not fail the requests that joined it."""
+    import asyncio
+    from ipaddress import ip_address
+
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "nginx")
+    calls, entered, release = _gated_getaddrinfo(monkeypatch, "172.18.0.5")
+    from app.gateway.routers.auth import _get_client_ip
+
+    owner = asyncio.create_task(_get_client_ip(_proxied_request("172.18.0.5")))
+    assert await asyncio.to_thread(entered.wait, 5)
+    joiner = asyncio.create_task(_get_client_ip(_proxied_request("172.18.0.5")))
+    await asyncio.sleep(0)  # the joiner is now waiting on the same lookup
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+    release.set()
+
+    assert await joiner == "203.0.113.42"
+    assert calls == ["nginx"]
+    assert _proxy_host_cache["nginx"][1] == frozenset({ip_address("172.18.0.5")})
+
+
+@pytest.mark.asyncio
+async def test_get_client_ip_without_x_real_ip_never_resolves(monkeypatch, _proxy_host_cache):
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "nginx")
+    calls = _fake_getaddrinfo(monkeypatch, [])
+    from app.gateway.routers.auth import _get_client_ip
+
+    assert await _get_client_ip(_proxied_request("172.18.0.5", real_ip=None)) == "172.18.0.5"
+    assert calls == []
+
+
+@pytest.fixture
+def memory_throttle_store():
+    """A fresh HartMesh memory throttle store installed as the router's store."""
+    from app.gateway.auth import login_throttle
+
+    store = login_throttle.MemoryLoginThrottleStore()
+    login_throttle.set_login_throttle_store(store, signature=("memory",))
+    try:
+        yield store
+    finally:
+        login_throttle.set_login_throttle_store(None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("trusted_proxies", "recorded_source"), [("localhost", "198.51.100.7"), (None, "127.0.0.1")])
+async def test_login_failure_source_is_the_client_behind_a_proxy_named_by_hostname(monkeypatch, memory_throttle_store, _proxy_host_cache, trusted_proxies, recorded_source):
+    """Behind the bundled nginx every login arrives from the proxy's address.
+
+    The account lock does not depend on it, but the per-source spray guard
+    does: unless the proxy is trusted, every client shares the proxy's source
+    bucket (the ``None`` case); naming the proxy by hostname keys the source by
+    ``X-Real-IP``.
+    """
+    import httpx
+
+    from app.gateway.auth.login_throttle import source_key
+    from app.gateway.routers import auth as auth_router
+
+    class _WrongPassword:
+        async def authenticate(self, credentials):
+            return None
+
+    monkeypatch.setattr(auth_router, "get_local_provider", lambda: _WrongPassword())
+    if trusted_proxies is None:
+        monkeypatch.delenv("AUTH_TRUSTED_PROXIES", raising=False)
+    else:
+        monkeypatch.setenv("AUTH_TRUSTED_PROXIES", trusted_proxies)
+    app = FastAPI()
+    app.include_router(auth_router.router)
+
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))  # the proxy's socket
+    async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+        response = await client.post("/api/v1/auth/login/local", data={"username": "user@example.com", "password": "wrong"}, headers={"X-Real-IP": "198.51.100.7"})
+
+    assert response.status_code == 401
+    assert set(memory_throttle_store._source_windows) == {source_key(recorded_source)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forwarded_allow_ips", ["127.0.0.1", "172.18.0.5"], ids=["uvicorn-default", "aligned-with-nginx"])
+async def test_login_failure_source_through_uvicorn_proxy_headers(monkeypatch, memory_throttle_store, _proxy_host_cache, forwarded_allow_ips):
+    """Uvicorn's ProxyHeadersMiddleware runs before the app and may rewrite the peer.
+
+    With its default (only 127.0.0.1 trusted) the compose Gateway still sees the
+    nginx container as the peer and takes X-Real-IP; with FORWARDED_ALLOW_IPS
+    aligned to nginx, Uvicorn already replaced the peer with the client from
+    X-Forwarded-For. Either way the spray guard counts the browser's address.
+    """
+    import httpx
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+    from app.gateway.auth.login_throttle import source_key
+    from app.gateway.routers import auth as auth_router
+
+    class _WrongPassword:
+        async def authenticate(self, credentials):
+            return None
+
+    monkeypatch.setattr(auth_router, "get_local_provider", lambda: _WrongPassword())
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "nginx")
+    _fake_getaddrinfo(monkeypatch, [["172.18.0.5"]])
+    app = FastAPI()
+    app.include_router(auth_router.router)
+    transport = httpx.ASGITransport(app=ProxyHeadersMiddleware(app, trusted_hosts=forwarded_allow_ips), client=("172.18.0.5", 50000))
+    # What docker/nginx/nginx.conf sends for a browser at 198.51.100.7 that forged both headers.
+    headers = {"X-Real-IP": "198.51.100.7", "X-Forwarded-For": "203.0.113.99, 198.51.100.7"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+        response = await client.post("/api/v1/auth/login/local", data={"username": "user@example.com", "password": "wrong"}, headers=headers)
+    assert response.status_code == 401
+    # Never nginx's address, never the forged entry.
+    assert set(memory_throttle_store._source_windows) == {source_key("198.51.100.7")}
 
 
 # ── Common-password blocklist ────────────────────────────────────────────────

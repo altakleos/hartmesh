@@ -95,7 +95,7 @@ async def test_actual_manager_drains_a_dispatched_wait_before_supervisor_closes_
     from app.channels.execution_client import ChannelExecutionFacade
     from app.channels.manager import ChannelManager
     from app.channels.message_bus import InboundMessage
-    from app.channels.store import ChannelStore
+    from app.channels.store import JsonChannelStore
 
     e = build(db, monkeypatch)
     entered, release = asyncio.Event(), asyncio.Event()
@@ -110,7 +110,7 @@ async def test_actual_manager_drains_a_dispatched_wait_before_supervisor_closes_
         return httpx.Response(200, json={"thread_id": "original", "owner_user_id": "human", "agent_instance": None, "metadata": {"channel_agent_name": "lead_agent"}})
 
     manager = ChannelManager(
-        e.service.bus, ChannelStore(str(tmp_path / "channels.json")), connection_repo=db.connections, langgraph_url="https://runtime.example/api", gateway_url="https://gateway.example", max_concurrency=1, shutdown_grace_period_seconds=3
+        e.service.bus, JsonChannelStore(str(tmp_path / "channels.json")), connection_repo=db.connections, langgraph_url="https://runtime.example/api", gateway_url="https://gateway.example", max_concurrency=1, shutdown_grace_period_seconds=3
     )
     e.service.manager = manager
     client = GatewayClientOwner(gateway_url=manager.gateway_url, langgraph_url=manager.langgraph_url, transport=httpx.MockTransport(respond))

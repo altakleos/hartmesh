@@ -190,13 +190,12 @@ def _render_skill_metadata(skills: list, container_base_path: str) -> str:
     blocks: list[str] = []
     for s in skills:
         mutability = "[custom, editable]" if s.category == SkillCategory.CUSTOM else "[built-in]"
-        # `()` is an explicit empty allowlist — the policy middleware strips every
-        # business tool for it — so only an omitted field (`None`) means unrestricted.
-        # `(all)` describes this skill's own frontmatter, not the enforced union: once
-        # any loaded skill declares allowed-tools,
-        # ``allowed_tool_names_for_skills`` (tool_policy.py) gives a `None` skill no
-        # tools, so a mixed set can render `(all)` while the middleware restricts it.
-        tools_line = "(all)" if s.allowed_tools is None else (", ".join(s.allowed_tools) or "(none)")
+        # allowed-tools is compatibility metadata copied from other agent
+        # frameworks; it never filters, grants, or denies tools in DeerFlow.
+        # "(not declared)" only means the field was omitted; "(empty
+        # declaration)" only means it was declared empty. Agent
+        # assembly/execution authorization owns the actual permission ceiling.
+        tools_line = "(not declared)" if s.allowed_tools is None else (", ".join(s.allowed_tools) or "(empty declaration)")
         location = s.get_container_file_path(container_base_path)
         # The directory, stated separately, because it is what a skill's own
         # command examples are written against and ``Location`` is the file
@@ -210,7 +209,7 @@ def _render_skill_metadata(skills: list, container_base_path: str) -> str:
         tools = html.escape(tools_line, quote=False)
         loc = html.escape(location, quote=False)
         directory = html.escape(directory, quote=False)
-        blocks.append(f"## Skill: {name}\n- Description: {description} {mutability}\n- Allowed tools: {tools}\n- Location: {loc}\n- Directory: {directory}")
+        blocks.append(f"## Skill: {name}\n- Description: {description} {mutability}\n- Allowed tools (compatibility metadata, not enforced): {tools}\n- Location: {loc}\n- Directory: {directory}")
     return "\n\n".join(blocks)
 
 
@@ -248,6 +247,8 @@ You have access to skills that provide optimized workflows for specific tasks.
 **Explicit Slash Skill Activation:**
 - If the user starts a request with `/<skill-name>`, that skill was explicitly requested.
 - The runtime injects the activated skill content; do not call `read_file` for that SKILL.md again unless the injected skill references supporting resources you need.
+
+**Allowed tools:** A skill's `allowed-tools` metadata is compatibility information for other agent frameworks. It never restricts or grants tools here; your tools are controlled by DeerFlow's Agent configuration and authorization.
 {evolution}
 <skill_index>
 {names}

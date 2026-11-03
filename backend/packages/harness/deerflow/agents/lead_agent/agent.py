@@ -40,6 +40,7 @@ from deerflow.agents.middlewares.clarification_middleware import ClarificationMi
 from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+from deerflow.agents.middlewares.model_content_compatibility_middleware import ModelContentCompatibilityMiddleware
 from deerflow.agents.middlewares.model_length_finish_reason_middleware import ModelLengthFinishReasonMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
@@ -47,7 +48,8 @@ from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummari
 from deerflow.agents.middlewares.terminal_response_middleware import TerminalResponseMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
-from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
+from deerflow.agents.middlewares.token_usage_middleware import CompletedSubagentUsageMiddleware, TokenUsageMiddleware
+from deerflow.agents.middlewares.tool_declarations import layer_one_outcome, narrow_declared_tools, verify_declared_tool_view
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.output_inventory_profile import TerminalPresentationProfile
@@ -74,6 +76,7 @@ from deerflow.runtime.checkpoint_mode import (
     frozen_checkpoint_channel_mode,
     inject_checkpoint_mode,
 )
+from deerflow.scheduler.runtime import SCHEDULER_CAPABILITY_CONTEXT_KEY, is_scheduler_capability
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import configured_subagent_max_running
 from deerflow.tracing import build_tracing_callbacks
@@ -481,6 +484,7 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 # MemoryMiddleware queues conversation for memory update (after TitleMiddleware)
 # ViewImageMiddleware should be before ClarificationMiddleware to inject image details before LLM
 # ToolErrorHandlingMiddleware should be before ClarificationMiddleware to convert tool exceptions to ToolMessages
+# ModelContentCompatibilityMiddleware sanitizes model-incompatible URL content blocks in the request view; register near the end so it sees the near-final message list
 # ClarificationMiddleware should be last to intercept clarification requests after model calls
 def build_middlewares(
     config: RunnableConfig,
@@ -594,28 +598,25 @@ def build_middlewares(
         )
     )
 
-    # Observe the final tool_search Command after every inner policy/result
+    # Observe the final tool_search Command after every inner result
     # transformer has run. Tool wrappers are first-in-list outermost, so this
-    # must be registered before SkillToolPolicyMiddleware.
+    # must be registered before the deferred filter below.
     if deferred_setup is not None and deferred_setup.deferred_names:
         from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
 
         middlewares.append(DeferredToolPromotionAuditMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
 
-    # Enabled skills are only discoverable metadata. Apply allowed-tools at
-    # runtime after explicit slash activation or an actual skill-file load.
-    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
+    # Skills are discoverable metadata, not tool authority (#6935); this only
+    # orders their work: a call chosen beside a skill's first SKILL.md read, or
+    # sandbox work before a declared first command, is returned as not_run.
+    from deerflow.agents.middlewares.skill_load_order_middleware import SkillLoadOrderMiddleware
 
     middlewares.append(
-        SkillToolPolicyMiddleware(
+        SkillLoadOrderMiddleware(
             available_skills=available_skills,
             app_config=resolved_app_config,
             user_id=user_id,
             slash_source_owner_token=slash_source_owner_token,
-            # Persisted skill_context entries are re-authorized against the
-            # skill:activate decision before their allowed-tools apply (the
-            # policy may have changed since the entry was stamped).
-            skill_authorization=skill_authorization,
         )
     )
 
@@ -706,8 +707,8 @@ def build_middlewares(
 
     # Hide deferred tool schemas from model binding until tool_search promotes them.
     # The lead deferred set + catalog hash come from the full build-time MCP
-    # catalog; SkillToolPolicyMiddleware separately filters model visibility,
-    # tool_search results, and execution for the active skill at runtime.
+    # catalog. Skill `allowed-tools` is compatibility metadata only; agent
+    # assembly/execution authorization owns the permission ceiling.
     if deferred_setup is not None and deferred_setup.deferred_names:
         from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
 
@@ -747,6 +748,21 @@ def build_middlewares(
         from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
 
         middlewares.append(TokenBudgetMiddleware.from_config(token_budget_config))
+
+    # https://docs.langchain.com/oss/python/langchain/middleware/custom#execution-order
+    # Backfill only completed child usage before budget enforcement. Keep
+    # current-step attribution after the guards that can change tool calls.
+    if token_budget_config.enabled and resolved_app_config.token_usage.enabled:
+        middlewares.append(CompletedSubagentUsageMiddleware())
+
+    # Downgrade persisted URL-sourced file/image blocks (pre-fix MCP
+    # ResourceLink results) that the Chat Completions serializer rejects, so
+    # threads bricked before the conversion-layer fix heal at read time.
+    # Request view only: state and checkpoints are never written. Appended
+    # after every built-in content transform so it sanitizes the near-final
+    # message list, and outer of the MODEL_PHYSICAL extension anchor so
+    # extensions placed there keep their final-request guarantee.
+    middlewares.append(ModelContentCompatibilityMiddleware())
 
     # Inject custom middlewares before ClarificationMiddleware
     if custom_middlewares:
@@ -911,6 +927,8 @@ _INVENTORY_STATE_KEYS = _PRESENTATION_STATE_KEYS | frozenset(
         "task_notes",
         "task_history",
         "summary_text",
+        # Written by the worker after goal evaluation, not by the model: auxiliary, never a presentation fragment.
+        "goal_outcome",
     }
 )
 
@@ -948,7 +966,7 @@ def _qualify_inventory_profile(graph, *, state_schema, middlewares, tools, mode,
     from deerflow.agents.middlewares.runtime_delivery_middleware import RuntimeDeliveryMiddleware
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
-    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
+    from deerflow.agents.middlewares.skill_load_order_middleware import SkillLoadOrderMiddleware
     from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
     from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
@@ -968,6 +986,7 @@ def _qualify_inventory_profile(graph, *, state_schema, middlewares, tools, mode,
         ArtifactCaptureMiddleware,
         ArtifactResolutionMiddleware,
         ClarificationMiddleware,
+        CompletedSubagentUsageMiddleware,
         DanglingToolCallMiddleware,
         DeerFlowSummarizationMiddleware,
         DeferredToolFilterMiddleware,
@@ -981,6 +1000,7 @@ def _qualify_inventory_profile(graph, *, state_schema, middlewares, tools, mode,
         LoopDetectionMiddleware,
         McpRoutingMiddleware,
         MemoryMiddleware,
+        ModelContentCompatibilityMiddleware,
         ModelLengthFinishReasonMiddleware,
         PiiRedactionMiddleware,
         ProviderRefusalMiddleware,
@@ -990,7 +1010,7 @@ def _qualify_inventory_profile(graph, *, state_schema, middlewares, tools, mode,
         SandboxAuditMiddleware,
         SandboxMiddleware,
         SkillActivationMiddleware,
-        SkillToolPolicyMiddleware,
+        SkillLoadOrderMiddleware,
         SubagentLimitMiddleware,
         SystemMessageCoalescingMiddleware,
         TerminalResponseMiddleware,
@@ -1087,7 +1107,9 @@ def _complete_assembly(
             mode=inventory_mode,
             extensions=resolved_extensions,
         )
-    if not resolved_extensions.has_agent_assembly_observers:
+    from deerflow.runtime.assembly_evidence import capture_requested
+
+    if not resolved_extensions.has_agent_assembly_observers and not capture_requested():
         return LeadAgentAssembly(graph=graph, descriptor=None, effective_model=effective_model, inventory_profile=inventory_profile)
 
     from deerflow.agents.assembly_descriptor import build_assembly_descriptor
@@ -1175,6 +1197,13 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
     is_bootstrap = cfg.get("is_bootstrap", False)
     interaction_policy = resolve_run_interaction_policy(config)
     non_interactive = not interaction_policy.allows_clarification
+    # The live host capability never comes from checkpoint-configurable data.
+    # HartMesh instance (AI employee) runs never get it: Work has no policy for
+    # an employee creating scheduled tasks.
+    runtime_context = config.get("context")
+    scheduler_capability = runtime_context.get(SCHEDULER_CAPABILITY_CONTEXT_KEY) if isinstance(runtime_context, Mapping) else None
+    if is_bootstrap or cfg.get("is_subagent") or instance_execution or not is_scheduler_capability(scheduler_capability) or scheduler_capability.mode != interaction_policy.mode.value:
+        scheduler_capability = None
     agent_name = instance_execution.definition.config["name"] if instance_execution else validate_agent_name(cfg.get("agent_name"))
 
     if instance_execution:
@@ -1270,7 +1299,17 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
 
     # Phase 3: enforce model:use authorization. On deny, fall back to the first
     # allowed model (graceful) rather than crashing the run (RFC §9).
-    model_name = _authorize_model_name(model_name, context=cfg, app_config=resolved_app_config)
+    explicit_selection = cfg.get("model_selection_requested")
+    if explicit_selection is not None:
+        from deerflow.models.selection import authorize_selected_model
+
+        if not isinstance(explicit_selection, str) or explicit_selection != requested_model_name:
+            raise ValueError("An explicit model selection must carry the same model_name.")
+        if explicit_selection != model_name:
+            raise ValueError("The explicitly selected model is not configured.")
+        authorize_selected_model(model_name, context=cfg, app_config=resolved_app_config)
+    else:
+        model_name = _authorize_model_name(model_name, context=cfg, app_config=resolved_app_config)
 
     model_config = resolved_app_config.get_model_config(model_name)
 
@@ -1387,6 +1426,7 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
             context=cfg,
             app_config=resolved_app_config,
         )
+        layer_one = layer_one_outcome(authorization_candidates, authorized_tools)
         configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
         late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
         final_tools, setup = assemble_deferred_tools(configured_tools, enabled=resolved_app_config.tool_search.enabled)
@@ -1416,6 +1456,13 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
             skill_authorization=skill_authorization,
             subagent_execution_capacity=subagent_execution_capacity,
         )
+        middlewares, declared_authorized = narrow_declared_tools(
+            middlewares,
+            outcome=layer_one,
+            context=cfg,
+            app_config=resolved_app_config,
+            authorization_provider=_authz_provider,
+        )
         system_prompt = apply_prompt_template(
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
@@ -1443,6 +1490,7 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
             bash_available=has_bash_tool(authorized_tools),
         )
         graph_middlewares = normalize_middleware_state_schemas(middlewares, mode)
+        verify_declared_tool_view(graph_middlewares, authorized_names=declared_authorized)
         state_schema = get_thread_state_schema(mode)
         graph = create_agent(
             model=chat_model,
@@ -1525,6 +1573,7 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         mcp_plugins=getattr(agent_config, "mcp_plugins", None),
         subagent_enabled=subagent_enabled,
         include_conversation_reader=callable(cfg.get(CONVERSATION_READER_CONTEXT_KEY)) and not bool(cfg.get("is_subagent")),
+        **({"scheduler_capability": scheduler_capability} if scheduler_capability is not None else {}),
         app_config=resolved_app_config,
         chat_model=chat_model,
     )
@@ -1536,6 +1585,14 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
             from deerflow.agent_instances.work_tools import read_work_context, report_work
 
             raw_tools.extend([read_work_context, report_work])
+    selected_child_model = cfg.get("subagent_model_name")
+    if selected_child_model is not None:
+        from deerflow.models.selection import authorize_selected_model, bind_selected_task_model
+
+        if not subagent_enabled or not isinstance(selected_child_model, str):
+            raise ValueError("A child model selection requires enabled subagents and a configured model name.")
+        authorize_selected_model(selected_child_model, context=cfg, app_config=resolved_app_config)
+        raw_tools = bind_selected_task_model(raw_tools, selected_child_model)
     configured_tools = raw_tools + extra_tools
     configured_tools = [tool for tool in configured_tools if tool.name not in interaction_policy.disabled_tool_names]
     authorization_candidates = [*configured_tools]
@@ -1551,6 +1608,7 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         context=cfg,
         app_config=resolved_app_config,
     )
+    layer_one = layer_one_outcome(authorization_candidates, authorized_tools)
     configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
     late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
     final_tools, setup = assemble_deferred_tools(configured_tools, enabled=resolved_app_config.tool_search.enabled)
@@ -1580,6 +1638,13 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         from deerflow.agent_instances.middleware import InstanceAuthorityMiddleware
 
         middlewares.insert(0, InstanceAuthorityMiddleware(require_memory_audience=memory_enabled))
+    middlewares, declared_authorized = narrow_declared_tools(
+        middlewares,
+        outcome=layer_one,
+        context=cfg,
+        app_config=resolved_app_config,
+        authorization_provider=_authz_provider,
+    )
     system_prompt = apply_prompt_template(
         subagent_enabled=subagent_enabled,
         max_concurrent_subagents=max_concurrent_subagents,
@@ -1600,6 +1665,7 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         runtime_scope=build_runtime_scope(execution=instance_execution, tools=authorized_tools, memory_enabled=memory_enabled and resolved_app_config.memory.enabled),
     )
     graph_middlewares = normalize_middleware_state_schemas(middlewares, mode)
+    verify_declared_tool_view(graph_middlewares, authorized_names=declared_authorized)
     state_schema = get_thread_state_schema(mode)
     graph = create_agent(
         model=chat_model,

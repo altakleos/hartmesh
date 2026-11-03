@@ -17,6 +17,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.config.credentials_key import CredentialsCipher
 from deerflow.persistence.channel_connections.model import (
     ChannelConnectionRow,
     ChannelConversationRow,
@@ -41,27 +42,29 @@ _UPSERT_MAX_ATTEMPTS = 3
 HELD_STATUS = "held"
 
 
-class ChannelCredentialCipher:
-    """Encrypts provider credentials before they are persisted."""
+class ChannelCredentialCipher(CredentialsCipher):
+    """Historical constructors for the channel-credentials cipher.
+
+    Production passes the deployment cipher from
+    ``deerflow.config.credentials_key`` (``DEER_FLOW_CREDENTIALS_KEY``); this
+    subclass only keeps the earlier API: a single ``Fernet`` and ``from_key``'s
+    SHA-256 passphrase derivation. New values carry ``fernet:v2:``; the
+    ``fernet:v1:`` values it wrote before remain readable under the same key.
+    """
 
     def __init__(self, fernet: Fernet) -> None:
-        self._fernet = fernet
+        super().__init__([fernet])
 
     @classmethod
     def from_key(cls, key: str) -> ChannelCredentialCipher:
         digest = hashlib.sha256(key.encode("utf-8")).digest()
         return cls(Fernet(base64.urlsafe_b64encode(digest)))
 
-    def encrypt_text(self, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return "fernet:v1:" + self._fernet.encrypt(value.encode("utf-8")).decode("ascii")
+    def encrypt_text(self, value: str | None) -> str | None:  # type: ignore[override]  # historical None passthrough
+        return None if value is None else super().encrypt_text(value)
 
-    def decrypt_text(self, value: str | None) -> str | None:
-        if value is None:
-            return None
-        token = value.removeprefix("fernet:v1:")
-        return self._fernet.decrypt(token.encode("ascii")).decode("utf-8")
+    def decrypt_text(self, value: str | None) -> str | None:  # type: ignore[override]  # historical None passthrough
+        return None if value is None else super().decrypt_text(value)
 
 
 class ChannelConnectionRepository:
@@ -71,7 +74,7 @@ class ChannelConnectionRepository:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         *,
-        cipher: ChannelCredentialCipher | None = None,
+        cipher: CredentialsCipher | None = None,
     ) -> None:
         self.session_factory = session_factory
         self._cipher = cipher
@@ -101,6 +104,11 @@ class ChannelConnectionRepository:
         if self._cipher is None:
             raise RuntimeError("channel connection encryption key is required")
         return self._cipher.encrypt_text(value)
+
+    def _decrypt_optional_secret(self, value: str | None) -> str | None:
+        if value is None or self._cipher is None:
+            return None
+        return self._cipher.decrypt_text(value)
 
     @staticmethod
     def _connection_to_dict(row: ChannelConnectionRow) -> dict[str, Any]:
@@ -278,6 +286,49 @@ class ChannelConnectionRepository:
             await session.commit()
             return len(connection_ids)
 
+    async def store_connection_context(
+        self,
+        connection_id: str,
+        *,
+        owner_user_id: str,
+        provider: str,
+        external_account_id: str,
+        workspace_id: str | None,
+        extra: dict[str, Any],
+    ) -> bool:
+        """Merge private context only while the captured binding is still connected."""
+        if self._cipher is None:
+            raise RuntimeError("channel connection encryption key is required")
+        async with self.session_factory() as session:
+            # The guarded write locks the parent on both SQLite and PostgreSQL.
+            # Transfer/disconnect must finish before this check or wait until
+            # our credential write commits, then revoke and delete it normally.
+            result = await session.execute(
+                update(ChannelConnectionRow)
+                .where(
+                    ChannelConnectionRow.id == connection_id,
+                    ChannelConnectionRow.owner_user_id == owner_user_id,
+                    ChannelConnectionRow.provider == provider,
+                    ChannelConnectionRow.external_account_id == self._normalize_optional_identity(external_account_id),
+                    ChannelConnectionRow.workspace_id == self._normalize_optional_identity(workspace_id),
+                    ChannelConnectionRow.status == "connected",
+                )
+                .values(updated_at=ChannelConnectionRow.updated_at)
+            )
+            if result.rowcount != 1:
+                return False
+            row = await session.get(ChannelCredentialRow, connection_id)
+            if row is None:
+                row = ChannelCredentialRow(connection_id=connection_id)
+                session.add(row)
+            previous = self._decrypt_optional_secret(row.encrypted_extra_json)
+            merged = json.loads(previous) if previous else {}
+            merged.update(extra)
+            row.encrypted_extra_json = self._encrypt_optional_secret(json.dumps(merged, ensure_ascii=False))
+            row.version = (row.version or 0) + 1
+            await session.commit()
+            return True
+
     async def store_credentials(
         self,
         connection_id: str,
@@ -296,12 +347,12 @@ class ChannelConnectionRepository:
             if row is None:
                 row = ChannelCredentialRow(connection_id=connection_id)
                 session.add(row)
-            row.encrypted_access_token = self._cipher.encrypt_text(access_token)
-            row.encrypted_refresh_token = self._cipher.encrypt_text(refresh_token)
+            row.encrypted_access_token = self._encrypt_optional_secret(access_token)
+            row.encrypted_refresh_token = self._encrypt_optional_secret(refresh_token)
             row.token_type = token_type
             row.expires_at = expires_at
             row.refresh_expires_at = refresh_expires_at
-            row.encrypted_extra_json = self._cipher.encrypt_text(json.dumps(extra or {}, ensure_ascii=False))
+            row.encrypted_extra_json = self._encrypt_optional_secret(json.dumps(extra or {}, ensure_ascii=False))
             row.version = (row.version or 0) + 1
             await session.commit()
 
@@ -313,11 +364,11 @@ class ChannelConnectionRepository:
             if row is None:
                 return None
             try:
-                extra_raw = self._cipher.decrypt_text(row.encrypted_extra_json)
+                extra_raw = self._decrypt_optional_secret(row.encrypted_extra_json)
                 return {
                     "connection_id": row.connection_id,
-                    "access_token": self._cipher.decrypt_text(row.encrypted_access_token),
-                    "refresh_token": self._cipher.decrypt_text(row.encrypted_refresh_token),
+                    "access_token": self._decrypt_optional_secret(row.encrypted_access_token),
+                    "refresh_token": self._decrypt_optional_secret(row.encrypted_refresh_token),
                     "token_type": row.token_type,
                     "expires_at": self._coerce_datetime(row.expires_at),
                     "refresh_expires_at": self._coerce_datetime(row.refresh_expires_at),
@@ -561,6 +612,12 @@ class ChannelConnectionRepository:
         thread_id: str,
         external_topic_id: str | None = None,
     ) -> None:
+        """Bind a conversation to ``thread_id``, creating or replacing its row (``/new``).
+
+        One atomic upsert on the natural key: two writers binding the same new
+        conversation cannot both insert, and the row ID changes on every
+        rebinding so it stays a replacement token (A -> B -> A).
+        """
         topic_id = external_topic_id or ""
         async with self.session_factory() as session:
             dialect = session.get_bind().dialect.name
@@ -591,6 +648,60 @@ class ChannelConnectionRepository:
                 )
             )
             await session.commit()
+
+    async def claim_thread_id(
+        self,
+        *,
+        connection_id: str,
+        owner_user_id: str,
+        provider: str,
+        external_conversation_id: str,
+        thread_id: str,
+        external_topic_id: str | None = None,
+    ) -> str:
+        """Bind a conversation to ``thread_id`` unless it is bound already; return its thread.
+
+        The first binding of a conversation, unlike ``set_thread_id``'s
+        rebinding (``/new``): two Gateway instances that both created a thread
+        for one new conversation must converge on one of them. A single
+        ``INSERT ... ON CONFLICT DO NOTHING`` lets the first writer win, and
+        the SELECT in the same transaction returns whichever row won (Postgres
+        READ COMMITTED reads the peer's committed row; SQLite serializes
+        writers).
+        """
+        topic_id = external_topic_id or ""
+        async with self.session_factory() as session:
+            dialect = session.get_bind().dialect.name
+            insert = {"postgresql": postgres_insert, "sqlite": sqlite_insert}.get(dialect)
+            if insert is None:
+                raise ValueError("unsupported channel database")
+            if dialect == "postgresql":
+                # Same parent-before-mapping lock order as ``set_thread_id``.
+                await session.scalar(select(ChannelConnectionRow.id).where(ChannelConnectionRow.id == connection_id).with_for_update(read=True, key_share=True))
+            await session.execute(
+                insert(ChannelConversationRow)
+                .values(
+                    id=self._new_id(),
+                    connection_id=connection_id,
+                    owner_user_id=owner_user_id,
+                    provider=provider,
+                    external_conversation_id=external_conversation_id,
+                    external_topic_id=topic_id,
+                    thread_id=thread_id,
+                )
+                .on_conflict_do_nothing(index_elements=["connection_id", "external_conversation_id", "external_topic_id"])
+            )
+            bound = (
+                await session.execute(
+                    select(ChannelConversationRow.thread_id).where(
+                        ChannelConversationRow.connection_id == connection_id,
+                        ChannelConversationRow.external_conversation_id == external_conversation_id,
+                        ChannelConversationRow.external_topic_id == topic_id,
+                    )
+                )
+            ).scalar_one()
+            await session.commit()
+            return bound
 
     async def get_thread_id(
         self,

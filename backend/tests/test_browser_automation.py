@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import ipaddress
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -25,7 +26,31 @@ from deerflow.community.browser_automation.session import (
     BrowserSessionManager,
     PageSnapshot,
     SnapshotElement,
+    browser_multi_worker_error,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_worker_env(monkeypatch):
+    """Keep the suite independent of the invoking shell's worker count.
+
+    ``WEB_CONCURRENCY`` is a common ambient convention on uvicorn/gunicorn/PaaS hosts,
+    and either spelling now decides whether process-local browser sessions are refused.
+    The tests that exercise the refusal set the spelling they mean to exercise.
+    """
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+
+
+@pytest.fixture
+def public_dns():
+    """Keep mocked tool calls offline while exercising the real URL safety check."""
+    with patch(
+        "deerflow.community.browser_automation.tools._resolve_host_addresses",
+        return_value=[ipaddress.ip_address("93.184.216.34")],
+    ):
+        yield
+
 
 PlaywrightTimeoutError = type(
     "TimeoutError",
@@ -76,6 +101,7 @@ class TestBrowserTools:
         manager.get_session.return_value = session
         return patch.object(tools, "get_browser_session_manager", return_value=manager), manager
 
+    @pytest.mark.usefixtures("public_dns")
     async def test_navigate_returns_snapshot(self):
         session = MagicMock()
         session.navigate = AsyncMock(return_value=_snapshot())
@@ -92,6 +118,7 @@ class TestBrowserTools:
         session.navigate.assert_awaited_once_with("https://example.com")
         manager.get_session.assert_called_once()
 
+    @pytest.mark.usefixtures("public_dns")
     async def test_navigate_emits_screenshot_artifact_and_browser_view(self, tmp_path):
         outputs = tmp_path / "outputs"
         outputs.mkdir()
@@ -119,6 +146,7 @@ class TestBrowserTools:
         assert meta["url"] == "https://example.com/"
         assert meta["title"] == "Example"
 
+    @pytest.mark.usefixtures("public_dns")
     async def test_navigate_screenshot_failure_does_not_break_action(self, tmp_path):
         outputs = tmp_path / "outputs"
         outputs.mkdir()
@@ -559,7 +587,7 @@ async def test_ensure_page_serializes_concurrent_rebuilds():
     browser.is_connected.return_value = True
     browser.new_context = AsyncMock(return_value=context)
 
-    async def launch(*, headless):
+    async def launch(*, headless, proxy):
         launch_started.set()
         await release_launch.wait()
         return browser
@@ -582,7 +610,7 @@ async def test_ensure_page_serializes_concurrent_rebuilds():
         release_launch.set()
 
         assert await asyncio.wait_for(asyncio.gather(first, second), timeout=1.0) == [page, page]
-    chromium.launch.assert_awaited_once_with(headless=True)
+    chromium.launch.assert_awaited_once_with(headless=True, proxy=None)
     browser.new_context.assert_awaited_once()
     context.new_page.assert_awaited_once()
 
@@ -874,9 +902,20 @@ class TestSessionManager:
 
     async def test_get_session_rejects_runtime_multi_worker_browser_use(self, monkeypatch):
         monkeypatch.setenv("GATEWAY_WORKERS", "2")
+        monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
         manager = BrowserSessionManager()
 
         with pytest.raises(RuntimeError, match="process-local"):
+            manager.get_session("thread-a")
+
+    async def test_get_session_rejects_worker_count_from_the_uvicorn_fallback(self, monkeypatch):
+        # backend/Dockerfile and scripts/serve.sh start uvicorn with no --workers, so
+        # WEB_CONCURRENCY is what really decides the process count here too.
+        monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+        monkeypatch.setenv("WEB_CONCURRENCY", "2")
+        manager = BrowserSessionManager()
+
+        with pytest.raises(RuntimeError, match=r"WEB_CONCURRENCY=2 cannot enable agentic browser tools"):
             manager.get_session("thread-a")
 
     async def test_cdp_requires_explicit_unguarded_trust_opt_in(self):
@@ -940,7 +979,60 @@ class TestSessionManager:
         assert session.active_refs == 0
 
 
-def test_resolve_session_always_reads_browser_navigate_config():
+@pytest.mark.parametrize(
+    ("gateway_workers", "web_concurrency", "expected"),
+    [
+        pytest.param(None, "4", 4, id="uvicorn-fallback-counts"),
+        pytest.param("2", None, 2, id="documented-knob-counts"),
+        pytest.param("1", "4", 1, id="documented-knob-wins-when-both-set"),
+        pytest.param("  ", "3", 3, id="blank-is-unset"),
+        pytest.param("abc", "4", 4, id="unparsable-knob-does-not-mask-the-fallback"),
+        pytest.param(None, None, 1, id="nothing-set"),
+        pytest.param(None, "auto", 1, id="uvicorn_rejects_it_so_stay_inert"),
+    ],
+)
+def test_worker_count_resolution_reads_both_spellings(monkeypatch, gateway_workers, web_concurrency, expected):
+    for name, value in (("GATEWAY_WORKERS", gateway_workers), ("WEB_CONCURRENCY", web_concurrency)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+    assert session_mod._worker_count_from_env()[0] == expected
+
+
+def test_worker_count_error_names_the_variable_that_set_the_count(monkeypatch):
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+
+    error = browser_multi_worker_error()
+
+    assert error is not None
+    assert error.startswith("WEB_CONCURRENCY=4 ")
+    assert "Set WEB_CONCURRENCY=1" in error
+
+
+def test_worker_count_error_names_the_fallback_for_a_passed_in_count(monkeypatch):
+    # The Gateway startup gate resolves the count and calls this with the number only;
+    # the refusal still has to name the knob the operator set, or its advice would
+    # silence the gate while uvicorn keeps starting the extra processes.
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+
+    assert browser_multi_worker_error(4).startswith("WEB_CONCURRENCY=4 ")
+
+
+def test_worker_count_error_keeps_naming_the_documented_knob_when_passed_in(monkeypatch):
+    # With neither spelling in the environment there is nothing to attribute the count
+    # to, so a passed-in number keeps naming GATEWAY_WORKERS as it always has.
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+
+    assert browser_multi_worker_error(3).startswith("GATEWAY_WORKERS=3 ")
+
+
+@pytest.mark.asyncio
+async def test_resolve_session_always_reads_browser_navigate_config():
     """Launch config is deterministic regardless of which tool runs first.
 
     ``get_session`` caches per thread and ignores launch params for later
@@ -966,7 +1058,12 @@ def test_resolve_session_always_reads_browser_navigate_config():
         def get_session(self, thread_id, **kwargs):
             captured.update(kwargs)
             captured["thread_id"] = thread_id
-            return MagicMock()
+            session = MagicMock()
+            session.snapshot = AsyncMock(side_effect=RuntimeError("stop after launch"))
+            return session
+
+        def release_session(self, thread_id, session):
+            pass
 
     with (
         patch.object(tools, "_get_tool_config", lambda name: configs.get(name, {})),
@@ -974,7 +1071,7 @@ def test_resolve_session_always_reads_browser_navigate_config():
     ):
         # Even when a NON-navigate tool resolves the session, launch config comes
         # from browser_navigate.
-        tools._resolve_session(_runtime(), "browser_snapshot")
+        await tools.browser_snapshot_tool.coroutine(runtime=_runtime(), tool_call_id="call-1")
 
     assert captured["headless"] is False
     assert captured["timeout_ms"] == 12345

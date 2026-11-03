@@ -204,6 +204,7 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                             record.stop_reason = row.get("stop_reason")
                             record.updated_at = row["updated_at"]
                             record.terminal_confirmed = True
+                            _acknowledge_upstream_terminal(manager, record)
                             if wanted is not None:
                                 record.kwargs = deepcopy(row["kwargs"])
                         return StatusFinalization(finalized=True, output_receipt_confirmed=output_confirmed, inventory_evidence_confirmed=inventory_confirmed)
@@ -279,6 +280,7 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                             record.stop_reason = saved_reason
                             record.updated_at = datetime.now(UTC).isoformat()
                             record.terminal_confirmed = True
+                            _acknowledge_upstream_terminal(manager, record)
                             if wanted is not None:
                                 record.kwargs = {**record.kwargs, OUTPUT_EVIDENCE_KEY: wanted_json}
                                 if wants_inventory:
@@ -320,3 +322,16 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
             unconfirmed = unconfirmed and deadline is not None and deadline > datetime.now(UTC)
         await manager._mark_ownership_lost(record, reason=UNCONFIRMED_ERROR, require_active=False, terminal_write_unconfirmed=unconfirmed)
         return StatusFinalization(finalized=False)
+
+
+def _acknowledge_upstream_terminal(manager, record) -> None:
+    """Mirror a confirmed fenced terminal into the manager's terminal ACK.
+
+    HartMesh's ``finalize_owned`` CAS is the terminal authority for stores that
+    support terminal recovery; the manager's heartbeat, barrier and completion
+    paths read ``terminal_commit_proof``. Without this ACK they would treat a
+    durably finalized run as unconfirmed. Caller holds ``manager._lock``.
+    """
+    acknowledge = getattr(manager, "_acknowledge_terminal", None)
+    if acknowledge is not None:
+        acknowledge(record, manager._terminal_outcome(record), record.terminal_status_revision)

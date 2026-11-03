@@ -18,19 +18,33 @@ predicate.
 
 ## Health and readiness
 
-Port 8001: `/health` is liveness; `/health/ready` checks
-ORM, startup checkpointer/Store and required Redis. Failures return 503; memory
-is `not_configured`. Redis probes reuse the startup bridge and live login
-store, coalesce before off-thread config reads, cache for one second and bound
-waiters to 2s. Drain workers before readmission; close
-readiness before auth/runtime clients. Omit probe error details.
-`GATEWAY_ENABLE_DOCS=false` hides `/docs`, `/redoc` and `/openapi.json`.
+FastAPI listens on 8001. `GET /health` is liveness; `GET /health/ready` concurrently
+probes startup snapshots of ORM, checkpointer/Store and stream bridge
+(`StreamBridge.ping()`) under one deadline and per-kind gates. Unreachable or
+unresolved gating backends return 503; `memory` reports `not_configured`;
+provisioner `/health` is report-only. See `health.py`. `GATEWAY_ENABLE_DOCS=false`
+disables `/docs`, `/redoc` and `/openapi.json`.
 
 ## Browser transport and credentials
 
-CORS defaults to same-origin through nginx:2026. Split-origin/port-forwarded browsers require exact `GATEWAY_CORS_ORIGINS`, read by both `CORSMiddleware` and `CSRFMiddleware` to align CORS/auth checks. Expose `Content-Location` through `CORS_EXPOSED_HEADERS` (`csrf_middleware.py`): creating routes return the run ID there; it is not CORS-safelisted. The SDK resolves run metadata only from that header; hiding it breaks `useStream.onCreated` and thread-gated actions.
+CORS defaults to same-origin behind nginx on 2026. Split-origin and port-forwarded
+browser clients must set exact `GATEWAY_CORS_ORIGINS`, shared by `CORSMiddleware`
+and `CSRFMiddleware`. Expose `Content-Location` through `CORS_EXPOSED_HEADERS`
+(`csrf_middleware.py`): run-creating routes put the run ID there, and the LangGraph
+SDK uses only that header for run metadata. Without exposure, JS cannot read it,
+breaking `useStream.onCreated` and thread-gated actions.
 
-Browser sessions use `app.gateway.auth.session_cookie`. Persist `HttpOnly access_token` only for HTTPS/trusted-forwarded HTTPS, direct-host localhost HTTP or operator opt-in; public HTTP uses session cookies. A `HttpOnly` preference cookie preserves `remember_me` across reissues. Handlers stamp final `max_age` on `request.state`; CSRF mirrors it, including password/OIDC reissues. Logout clears all auth cookies and suppresses CSRF reissue. Never store passwords.
+Browser sessions belong to `app.gateway.auth.session_cookie`. Login's `remember_me`
+flag never stores passwords. `SessionCookiePolicy` persists `HttpOnly access_token`
+only for HTTPS/trusted-forwarded HTTPS, direct-host localhost HTTP, or explicit
+operator opt-in; public HTTP otherwise uses session cookies. Session creators set
+final `max_age` on `request.state`; CSRF mirrors it across login, password changes
+and OIDC callbacks. A small `HttpOnly` preference cookie preserves the choice.
+Logout clears auth cookies and suppresses CSRF re-issue.
+
+OIDC redirects retain existing endpoint query bytes (RFC 6749 section 3.1).
+Malformed IdP bodies raise `OIDCError` (502/`sso_failed`).
+`tests/test_oidc_auth.py` pins query, state-cookie, nonce and PKCE agreement.
 
 Personal Access Tokens (`app.gateway.auth.pat`, `Authorization: Bearer dfp_...`) run as their owning user: an invalid Bearer is a hard 401 with no cookie fallback, which keeps `CSRFMiddleware`'s Bearer skip safe (origin checks still run). Scopes narrow within the allowlisted threads/runs/projects routes (including `POST /api/threads/{id}/move`); every other authenticated route 403s PAT callers (admin included). PAT management and `/change-password` require session auth; only SHA-256 digests are stored (`0017`).
 
@@ -111,6 +125,6 @@ the caller omits `model_name`. Suggestions check admission before their
 best-effort LLM error handler: explicit denies return 403 without invoking the
 model, while provider failures honor `authorization.fail_closed`.
 
-`authz.py::resolve_route_permissions()` serves HTTP middleware, decorators and Live Browser WebSocket admission. It evaluates registered permissions asynchronously as `resource="route"`, targeting full `resource:action` strings. `AuthContext` caches HTTP decisions; provider errors follow `authorization.fail_closed` per permission. Disabled authorization returns all permissions without a provider. Owner/admin checks remain independent. Live requires `threads:write` with `is_internal=False` after login/Origin checks but before acceptance, owner lookup, or session acquisition; denial closes 4403, unexpected setup errors close 4501, cancellation propagates. Checks are admission-only; restart Gateway to close old connections. Tests: `test_authorization_route_permissions.py`, `test_browser_readonly_security.py`, `test_auth.py`, `test_auth_middleware.py` in `tests/`.
+`authz.py::resolve_route_permissions()` is shared by HTTP, decorator-only auth, and Live Browser WebSocket admission. It evaluates full `resource:action` targets; provider errors follow `authorization.fail_closed`, while disabled authorization preserves legacy permissions. Owner/admin checks stay separate. Live requires `threads:write` with `is_internal=False` after login/Origin checks; denial closes 4403 and setup errors close 4501. Admission is connection-scoped. On disconnect, Live drains owned `stop_screencast()` cleanup before releasing the session lease. Tests: `test_authorization_route_permissions.py`, `test_browser_readonly_security.py`, `test_auth.py`, `test_auth_middleware.py`.
 
 Skill listing authorization mirrors the models pattern: `routers/skills.py` routes resolve `(provider, principal)` through `authz.py::resolve_skill_authorization()` — a thin sibling of `resolve_model_authorization`, both delegating to the shared `_resolve_route_scoped_authorization` core — and the shared `_filter_visible_skills` helper filters the user-scoped catalog (public + caller's custom skills) through `filter_resources(principal, "skill", ...)` by name. Three user-facing surfaces apply it: `GET /api/skills` (the frontend skill list / slash-command autocomplete), `GET /api/skills/custom`, and `GET /api/skills/{name}` — the detail endpoint returns the standard 404 for an invisible skill so it cannot become an existence oracle the filtered list closed (`get_model`'s 403 is an execution decision via `authorize("model", "use")`, which has no skills equivalent in this layer). Anonymous callers are unfiltered (mirroring `list_models`), and provider resolution/decision errors follow `authorization.fail_closed` (fail-closed → empty listing / 404, fail-open → full listing). Skill management endpoints (`install`/`upload`/`reload`/custom-skill CRUD) stay `require_admin_user`-gated, and runtime activation authorization is a separate layer. The built-in RBAC provider maps this to the per-role `skills` policy key. Tests: `tests/test_skills_listing_authorization.py`.

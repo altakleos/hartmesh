@@ -340,7 +340,7 @@ def test_temp_creation_and_cleanup_within_mutation(tmp_path, monkeypatch, user_s
     active = False
 
     @contextmanager
-    def locked():
+    def locked(*, names=()):
         nonlocal active
         assert not root.exists()
         active = True
@@ -445,6 +445,39 @@ def test_required_secrets_normalization_and_invalid_warning(package):
     manifest = export.export_manifest(storage, "sample")
     assert manifest["requirements"]["required_secrets"] == [{"name": "API_KEY", "optional": False}, {"name": "OPTIONAL_KEY", "optional": True}]
     assert any(warning["code"] == "skill_export_invalid_declaration" for warning in manifest["warnings"])
+
+
+@requires_safe_capture
+def test_duplicate_required_secrets_keep_first_position_and_required_wins(package):
+    storage, root = package
+    (root / "SKILL.md").write_text(
+        "---\nname: sample\ndescription: Example\nrequired-secrets:\n  - name: ERP_TOKEN\n    optional: true\n  - ERP_TOKEN\n  - name: OTHER_TOKEN\n    optional: true\n---\n",
+        encoding="utf-8",
+    )
+    manifest = export.export_manifest(storage, "sample")
+    # The manifest must agree with the runtime parser: an earlier optional
+    # declaration cannot hide a later required one (issue #7568).
+    assert manifest["requirements"]["required_secrets"] == [
+        {"name": "ERP_TOKEN", "optional": False},
+        {"name": "OTHER_TOKEN", "optional": True},
+    ]
+
+
+@requires_safe_capture
+def test_non_boolean_optional_blocks_export_instead_of_coercing(package):
+    storage, root = package
+    (root / "SKILL.md").write_text(
+        '---\nname: sample\ndescription: Example\nrequired-secrets:\n  - name: ERP_TOKEN\n    optional: "false"\n---\n',
+        encoding="utf-8",
+    )
+    manifest = export.export_manifest(storage, "sample")
+    # validate_skill_frontmatter_text gates the dedup loop, so the optional read
+    # never sees a string: the package is refused rather than reported with the
+    # truthy-string coercion (optional=True) that would disagree with
+    # parse_required_secrets' fail-closed read.
+    assert manifest["can_export"] is False
+    assert manifest["requirements"]["required_secrets"] is None
+    assert any(blocker["code"] == "skill_export_invalid_frontmatter" for blocker in manifest["blockers"])
 
 
 @requires_safe_capture

@@ -165,9 +165,9 @@ async def stack(db, monkeypatch, tmp_path, *, with_worker=True):
 
 def start_worker(s):
     from app.channels.manager import ChannelManager
-    from app.channels.store import ChannelStore
+    from app.channels.store import JsonChannelStore
 
-    manager = ChannelManager(s.bus, ChannelStore(s.tmp_path / f"store-{len(s.workers)}.json"), langgraph_url="https://gateway.example/api", gateway_url="https://gateway.example")
+    manager = ChannelManager(s.bus, JsonChannelStore(s.tmp_path / f"store-{len(s.workers)}.json"), langgraph_url="https://gateway.example/api", gateway_url="https://gateway.example")
     manager._running = True
     s.workers.append(asyncio.create_task(manager._worker_loop(0), name="test-manager-worker"))
 

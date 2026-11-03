@@ -868,7 +868,7 @@ def test_lock_scope_resolves_overwrite_wrapped_sandbox():
         ("write_file", "", "0 lines"),
         ("str_replace", "line1\nline2\n", "2 lines"),
         # Exotic separators: \f and \u2028 are NOT line boundaries in LocalSandbox
-        # (Python text-mode iterates only \n/\r\n/\r), so count must match LocalSandbox.
+        # (it ends lines only at \n), so count must match LocalSandbox.
         ("write_file", "x\fx\n", "1 line"),
         ("write_file", "x\u2028x\n", "1 line"),
     ],
@@ -957,6 +957,9 @@ class TestStampingGateBugFix:
             pytest.param("a\n\nb\n", {"start_line": 2, "end_line": 2}, id="both_bounds"),
             pytest.param("a\n\n", {"start_line": 2}, id="start_only"),
             pytest.param("\nb\n", {"end_line": 1}, id="end_only"),
+            pytest.param("a\r\n\r\nb\r\n", {"start_line": 2, "end_line": 2}, id="crlf_both_bounds"),
+            pytest.param("a\r\n\r\n", {"start_line": 2}, id="crlf_start_only"),
+            pytest.param("\r\nb\r\n", {"end_line": 1}, id="crlf_end_only"),
         ],
     )
     def test_blank_line_range_stamps_full_hash_and_allows_write(self, tmp_path, monkeypatch, content, line_range):

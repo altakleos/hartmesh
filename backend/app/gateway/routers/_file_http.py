@@ -100,6 +100,13 @@ class DescriptorFileResponse(FileResponse):
         # enclosing ASGI finally also closes after preparation failure.
         self.stat_result = os.fstat(self._fd)
         self.set_stat_headers(self.stat_result)
+        # Starlette's validator is mtime+size, and sandbox syncs can replace a
+        # same-size file while preserving its mtime. A file that is not hashed
+        # below gets an identity validator instead, so a range cannot splice two
+        # generations; the prefix keeps it distinct from a content digest.
+        st = self.stat_result
+        identity = f"{st.st_dev}:{st.st_ino}:{st.st_ctime_ns}:{st.st_mtime_ns}:{st.st_size}"
+        self.headers["etag"] = f'"stat-{hashlib.sha256(identity.encode("ascii")).hexdigest()}"'
         if not self._metadata_only and not self._stream and self._hash_max_bytes is not None and self.stat_result.st_size <= self._hash_max_bytes:
             # An editable artifact's digest and ranges must describe the same
             # captured bytes even if its open inode is subsequently rewritten.
@@ -119,6 +126,11 @@ class DescriptorFileResponse(FileResponse):
         self.media_type = mime_type or "application/octet-stream"
         self.headers["content-type"] = self.media_type + (f"; charset={self.charset}" if self.media_type.startswith("text/") else "")
         self.headers["content-disposition"] = _build_content_disposition("attachment" if force_download else "inline", Path(self.path).name)
+
+    def _should_use_range(self, http_if_range: str) -> bool:
+        # Last-Modified is not a strong validator here (see the ETag above): a
+        # date-form If-Range must get the full file, never a range.
+        return http_if_range == self.headers["etag"]
 
     def _open_descriptor(self) -> int:
         """Default no-follow store; resource adapters supply confined descriptors."""

@@ -94,6 +94,37 @@ def test_missing_auth_context_does_not_grant_access():
     assert exc.value.status_code == 403
 
 
+@pytest.mark.asyncio
+async def test_scheduled_reader_uses_explicit_owner_without_http_authority():
+    from app.gateway.conversation_access import prepare_scheduled_conversation_reader
+
+    _, events, threads, manager, _ = _setup()
+    config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}, "tools": [{"name": "read_conversation", "group": "conversation", "use": "deerflow.tools.conversation:read_conversation"}]})
+    context = SimpleNamespace(event_store=events, thread_store=threads)
+    await threads.create("owned", user_id="alice")
+    await threads.create("foreign", user_id="bob")
+    await threads.create("shared", user_id=None)
+    await _put(events, "previous report", thread="owned")
+    reader, ids = prepare_scheduled_conversation_reader(["owned", "foreign", "shared"], owner_user_id="alice", run_context=context, run_manager=manager, app_config=config)
+    assert ids == ("owned", "foreign", "shared")
+    assert json.loads(await reader(thread_id="owned"))["messages"][0]["text"] == "previous report"
+    for target in ("foreign", "shared", "unlisted"):
+        assert json.loads(await reader(thread_id=target))["status"] == "unavailable"
+    await threads.delete("owned", user_id="alice")
+    assert json.loads(await reader(thread_id="owned"))["status"] == "unavailable"
+    config.tools = []
+    assert prepare_scheduled_conversation_reader(["owned"], owner_user_id="alice", run_context=context, run_manager=manager, app_config=config) is None
+
+
+def test_scheduled_reader_rejects_urls_and_missing_owner():
+    from app.gateway.conversation_access import prepare_scheduled_conversation_reader
+
+    config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}, "tools": [{"name": "read_conversation", "group": "conversation", "use": "deerflow.tools.conversation:read_conversation"}]})
+    for references, owner in ((["https://example.com/workspace/chats/source"], "alice"), (["source"], "")):
+        with pytest.raises(ValueError):
+            prepare_scheduled_conversation_reader(references, owner_user_id=owner, run_context=SimpleNamespace(), run_manager=AsyncMock(), app_config=config)
+
+
 def test_reader_pages_visible_text_and_keeps_source_unchanged():
     async def exercise():
         prepare, events, threads, manager, _ = _setup()
@@ -195,6 +226,11 @@ def test_start_run_installs_fresh_capability_without_persisting_it(monkeypatch):
         empty = await services.start_run(RunCreateRequest(input={"messages": None}, conversation_references=["source"]), "empty-input", request)
         await empty.task
         assert callable(captured[3]["ctx"].conversation_reader)
+        static_resume = await services.start_run(RunCreateRequest(input=None, conversation_references=["source"]), "static-resume", request)
+        await static_resume.task
+        assert callable(captured[4]["ctx"].conversation_reader)
+        assert captured[4]["graph_input"] is None
+        assert static_resume.kwargs["input"] is None
         with pytest.raises(HTTPException) as invalid:
             await services.start_run(RunCreateRequest(input={"messages": "bad input"}, conversation_references=["source"]), "invalid-input", request)
         assert invalid.value.status_code == 422

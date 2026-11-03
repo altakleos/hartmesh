@@ -4,6 +4,7 @@ import fnmatch
 import hashlib
 import os
 import stat
+import tempfile
 from codecs import BOM_UTF16_BE, BOM_UTF16_LE, getincrementaldecoder
 from dataclasses import dataclass
 from pathlib import Path
@@ -211,7 +212,8 @@ def scan_workspace_roots(
                 directories += 1
                 if directories > max(1, resolved_limits.max_scanned_files):
                     return result(incomplete=True)
-                dirnames[:] = [dirname for dirname in dirnames if dirname not in excluded_dir_names]
+                # Sorted so truncation at the scan limits picks the same files every run.
+                dirnames[:] = [dirname for dirname in sorted(dirnames) if dirname not in excluded_dir_names]
                 for filename in sorted(filenames):
                     if scanned >= resolved_limits.max_scanned_files:
                         return result(incomplete=True)
@@ -219,6 +221,10 @@ def scan_workspace_roots(
                     host_file = root.host_path / dirpath / filename
                     try:
                         metadata = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        # Deleted after the directory listing: there is nothing
+                        # left to record, and the rest of the scan stays complete.
+                        continue
                     except OSError:
                         truncated = True
                         continue
@@ -240,12 +246,28 @@ def scan_workspace_roots(
                         continue
                     if snapshot is not None:
                         files[snapshot.path] = snapshot
-                    else:
+                    elif not _vanished(filename, directory_fd):
                         truncated = True
         finally:
             os.close(root_fd)
 
     return result(incomplete=truncated)
+
+
+def _vanished(filename: str, directory_fd: int) -> bool:
+    """Whether an entry that could not be snapshotted is simply gone.
+
+    A scratch file removed between the listing and its read is not a scan
+    failure: other records and produced-output detection must survive it.
+    Any other reason the entry could not be read still truncates the scan.
+    """
+    try:
+        os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def _snapshot_file(
@@ -387,10 +409,35 @@ def _snapshot_symlink(root: WorkspaceRoot, host_file: Path, *, directory_fd: int
     )
 
 
+def _publish_text_atomically(path: Path, content: str) -> None:
+    """Publish text through a temporary file so a partial write cannot survive.
+
+    ``newline="\\n"`` keeps the publication byte-exact on every host: the
+    default text-mode translation would rewrite a decoded CRLF snapshot's
+    ``\\n`` characters into ``os.linesep`` on Windows, turning ``\\r\\n``
+    content into ``\\r\\r\\n`` bytes that every later reader serves verbatim
+    as the file's text.
+    """
+    fd, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            Path(temporary).unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def _cache_text_file(text: str, virtual_path: str, cache_dir: Path) -> Path:
+    """Cache decoded text atomically; the caller serves this path as file content."""
     cache_name = hashlib.sha256(virtual_path.encode("utf-8")).hexdigest()
     target = cache_dir / cache_name
-    target.write_text(text, encoding="utf-8")
+    _publish_text_atomically(target, text)
     return target
 
 

@@ -10,7 +10,7 @@ from deerflow.community.search_time_range import SearchTimeRange
 from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
-from .searxng_client import SearxngClient
+from .searxng_client import SearxngClient, SearxngResponseError
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,21 @@ def _search_slots() -> asyncio.Semaphore:
     return slots
 
 
+def _unexpected_format_error(query: str) -> str:
+    """Report a malformed instance payload without echoing the payload.
+
+    A SearXNG instance that answers HTTP 200 with an error page, a non-list
+    ``results`` container, or a non-empty list holding no objects is not an
+    empty search: "No results found" would tell the agent the query legitimately
+    matched nothing.
+
+    The query is echoed back on purpose, matching the sibling providers, so the
+    agent can tell which search the error belongs to; only the payload is
+    withheld.
+    """
+    return json.dumps({"error": "SearXNG returned an unexpected response format", "query": query}, ensure_ascii=False)
+
+
 def _get_tool_config(tool_name: str) -> dict | None:
     """Get tool config extras safely, returning None if not configured."""
     config = get_app_config().get_tool_config(tool_name)
@@ -51,16 +66,22 @@ def _get_tool_config(tool_name: str) -> dict | None:
     return extras if extras is not None else {}
 
 
-def _get_searxng_client(tool_name: str = "web_search") -> SearxngClient:
-    cfg = _get_tool_config(tool_name)
+_UNSET = object()
+
+
+def _get_searxng_client(tool_name: str = "web_search", cfg: dict | None = _UNSET) -> SearxngClient:
+    """Build a SearXNG client, from ``cfg`` when the caller already read it."""
+    if cfg is _UNSET:
+        cfg = _get_tool_config(tool_name)
     base_url = "http://localhost:8088"
     if cfg is not None:
         base_url = cfg.get("base_url", base_url)
     return SearxngClient(base_url=base_url)
 
 
-def _configured_max_results(tool_name: str, default: int = 5) -> int:
-    cfg = _get_tool_config(tool_name)
+def _configured_max_results(tool_name: str, default: int = 5, cfg: dict | None = _UNSET) -> int:
+    if cfg is _UNSET:
+        cfg = _get_tool_config(tool_name)
     if cfg is None:
         return default
     raw = cfg.get("max_results", default)
@@ -104,9 +125,11 @@ async def web_search_tool(query: str, time_range: SearchTimeRange | None = None)
         time_range: Optional relative publication/update window. Use only when the request requires recent results.
     """
     # Configuration errors are ours and raise; only the service's failure
-    # becomes the sentence below.
-    max_results = _configured_max_results("web_search")
-    client = _get_searxng_client("web_search")
+    # becomes the sentence below. Config resolution stats and hashes the config
+    # files, so read it once off the event loop and build everything from it.
+    cfg = await asyncio.to_thread(_get_tool_config, "web_search")
+    max_results = _configured_max_results("web_search", cfg=cfg)
+    client = _get_searxng_client("web_search", cfg)
     search_kwargs: dict[str, object] = {"max_results": max_results}
     if time_range is not None:
         search_kwargs["time_range"] = time_range
@@ -114,6 +137,8 @@ async def web_search_tool(query: str, time_range: SearchTimeRange | None = None)
     try:
         async with _search_slots():
             results = await client.search(query, **search_kwargs)
+    except SearxngResponseError:
+        return _unexpected_format_error(query)
     except Exception as e:
         # The person asked a question and is waiting. A raw exception here
         # reads to the model as something to retry or apologize for, and it
@@ -171,9 +196,10 @@ async def image_search_tool(query: str, max_results: int | None = None) -> str:
         query: Search keywords describing the images you want to find. Be specific for better results (e.g., "Japanese woman street photography 1990s" instead of just "woman").
         max_results: Maximum number of images to return. Defaults to the deployment's configured limit.
     """
-    configured = _configured_max_results("image_search")
+    cfg = await asyncio.to_thread(_get_tool_config, "image_search")
+    configured = _configured_max_results("image_search", cfg=cfg)
     limit = configured if max_results is None else max(1, min(int(max_results), configured))
-    client = _get_searxng_client("image_search")
+    client = _get_searxng_client("image_search", cfg)
 
     try:
         async with _search_slots():

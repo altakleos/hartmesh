@@ -24,7 +24,7 @@ from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION
 from app.gateway.run_models import RunCreateRequest
 from deerflow.config import app_config as app_config_module
 from deerflow.config.app_config import AppConfig, set_app_config
-from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
 from deerflow.persistence.projects import ProjectRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta import ThreadMetaRepository, ThreadMetaRow
@@ -45,7 +45,7 @@ async def admission(output_store, monkeypatch):
     async with e.engine.begin() as connection:
         if e.dialect == "sqlite":
             await connection.execute(text("BEGIN"))
-        await connection.run_sync(lambda sync: RunEventRow.metadata.create_all(sync, tables=[RunEventRow.__table__, ThreadMetaRow.__table__]))
+        await connection.run_sync(lambda sync: RunEventRow.metadata.create_all(sync, tables=[RunEventRow.__table__, RunEventThreadSeqRow.__table__, ThreadMetaRow.__table__]))
     config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
     for name in ("_app_config", "_app_config_path", "_app_config_mtime", "_app_config_signature", "_app_config_is_custom"):
         monkeypatch.setattr(app_config_module, name, getattr(app_config_module, name))

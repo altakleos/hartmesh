@@ -4,8 +4,8 @@
 # Sources checked:
 #   deploy/helm/deer-flow/Chart.yaml   — version + appVersion
 #   backend/pyproject.toml             — version
-#   backend/uv.lock                    — deer-flow root package version
-#   frontend-hm/package.json              — version
+#   frontend-hm/package.json           — version
+#   backend/uv.lock                    — root package version (compared, then `uv lock --check`)
 #
 # Usage:
 #   scripts/verify_versions.sh             # all sources must be mutually equal
@@ -14,7 +14,7 @@
 # Exit status is 0 when consistent, 1 otherwise. The release workflows
 # (.github/workflows/chart.yaml and container.yaml) call this on v* tags — via
 # the reusable .github/workflows/verify-versions.yml — to gate publishing when
-# a version source was forgotten.
+# a version source was forgotten. Requires `uv` on PATH for the lock check.
 
 set -uo pipefail
 
@@ -35,30 +35,21 @@ done
 CHART_VERSION=$(awk '/^version:/ {print $2; exit}' "$CHART")
 APP_VERSION=$(awk '/^appVersion:/ {gsub(/"/, ""); print $2; exit}' "$CHART")
 PY_VERSION=$(awk -F'"' '/^version[[:space:]]*=/ {print $2; exit}' "$PYPROJECT")
-LOCK_VERSION=$(awk -F'"' '
-  /^\[\[package\]\]$/ {
-    if (name == "deer-flow") {
-      print version
-      found = 1
-      exit
-    }
-    name = ""
-    version = ""
-    next
-  }
-  /^name[[:space:]]*=/ { name = $2 }
-  /^version[[:space:]]*=/ { version = $2 }
-  END {
-    if (!found && name == "deer-flow") print version
-  }
-' "$UV_LOCK")
 JS_VERSION=$(grep -m1 '"version"' "$PACKAGE" | awk -F'"' '{print $4}')
+PY_NAME=$(awk -F'"' '/^name[[:space:]]*=/ {print $2; exit}' "$PYPROJECT")
+LOCK_VERSION=$(awk -v name="$PY_NAME" '
+  /^\[\[package\]\]/ { root = 0 }
+  $0 == "name = \"" name "\"" { root = 1 }
+  root && /^version = / { gsub(/"/, "", $3); print $3; exit }
+' "$UV_LOCK")
+# Compared below in uv's spelling, then `uv lock --check` confirms the whole lock.
+[ -n "$LOCK_VERSION" ] || LOCK_VERSION="(root entry not found; 'uv lock --check' is authoritative)"
 
 printf 'Chart.yaml version:     %s\n' "$CHART_VERSION"
 printf 'Chart.yaml appVersion:  %s\n' "$APP_VERSION"
 printf 'backend/pyproject.toml: %s\n' "$PY_VERSION"
+printf 'frontend-hm/package.json: %s\n' "$JS_VERSION"
 printf 'backend/uv.lock:        %s\n' "$LOCK_VERSION"
-printf 'frontend-hm/package.json:  %s\n' "$JS_VERSION"
 
 # uv.lock records a pre-release without the separator the other sources write:
 # `2.2.0-dev` there is `2.2.0dev`. Compare the lock in that spelling; a release
@@ -93,6 +84,20 @@ else
   mismatch "backend/pyproject.toml" "$PY_VERSION"   "$CHART_VERSION" || status=1
   mismatch "backend/uv.lock"        "$LOCK_VERSION" "$(lock_spelling "$CHART_VERSION")" || status=1
   mismatch "frontend-hm/package.json"  "$JS_VERSION"   "$CHART_VERSION" || status=1
+fi
+
+# backend/uv.lock records the root package version in uv's PEP 440 form
+# (2.1.0-rc0 is stored as 2.1.0rc0), so let uv judge whether it still matches
+# pyproject.toml instead of re-implementing the normalization. A stale lock
+# passes the checks above, then fails the backend image's `uv sync --locked`
+# after the chart and the other images are already published.
+if ! command -v uv >/dev/null 2>&1; then
+  echo "::error::uv is required to check backend/uv.lock; install it from https://docs.astral.sh/uv/." >&2
+  status=1
+elif ! lock_output=$(cd "$ROOT/backend" && uv lock --check 2>&1); then
+  printf '%s\n' "$lock_output" >&2
+  echo "::error::'uv lock --check' failed on backend/uv.lock (output above); if the lock is stale, run scripts/bump_version.sh." >&2
+  status=1
 fi
 
 if [ "$status" -ne 0 ]; then

@@ -21,6 +21,8 @@ _OVERDUE_ENDS_PER_POLL = 16
 _STOP_REQUEST_TIMEOUT_SECONDS = 10.0
 _OBSERVATION_TIMEOUT_SECONDS = 2.0
 _CONFIRM_TIMEOUT_SECONDS = 5.0
+# Matches the reconciliation pass's own candidate page (reconcile_terminal_runs).
+_RECONCILE_LOOKUP_LIMIT = 100
 _STOP_RETRY_DELAYS = (5, 15, 30)
 
 
@@ -79,6 +81,28 @@ class TimeBoundedScheduledTaskService(ScheduledTaskService):
         # Global budget and same-thread ordering include durable retirement
         # holds. Other free slots remain usable, including manual triggers.
         await super().run_once(now=now)
+
+    async def _locally_unwinding_task_run_ids(self, *, now: datetime) -> frozenset[str]:
+        """Running occurrences whose worker task in this process has not finished.
+
+        Reconciliation must not finalize them from the durable run status: the
+        worker commits that status before it releases its sandbox, and the
+        completion callback that follows ends the occurrence itself. A lookup
+        failure propagates, so the caller skips reconciliation for this poll
+        rather than freeing capacity it cannot account for.
+        """
+        if self._get_run_task is None:
+            return frozenset()
+        rows = await self._task_run_repo.list_overdue_running(started_before=now, limit=_RECONCILE_LOOKUP_LIMIT)
+        owned = set()
+        for row in rows:
+            occurrence_id, run_id = row.get("id"), row.get("run_id")
+            if not occurrence_id or not run_id:
+                continue
+            task = await asyncio.wait_for(self._get_run_task(run_id), timeout=_OBSERVATION_TIMEOUT_SECONDS)
+            if task is not None and not task.done():
+                owned.add(occurrence_id)
+        return frozenset(owned)
 
     def _state(self, occurrence: dict) -> _Retirement:
         key = occurrence["id"]

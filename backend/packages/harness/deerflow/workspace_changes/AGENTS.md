@@ -60,8 +60,9 @@ through a compiled graph and compares receipts with independent capture.
 The scanner opens the lexical root with `files.store.open_directory_source`,
 uses descriptor-relative `fwalk`, and opens each regular file once with no-follow.
 Metadata, sample, digest and text come from that file; per-file reads stay bounded
-and size/mtime changes make enumeration incomplete. Symlinks remain metadata-only
-stubs. Unsupported safe reads must not be reported as complete delivery evidence.
+and size/mtime changes make enumeration incomplete. An entry that is gone between
+the listing and its open is skipped, not truncation; any other read failure still
+truncates. Symlinks remain metadata-only stubs. Unsupported safe reads must not be reported as complete delivery evidence.
 
 After `_prepare_capture()` hands off roots, cancellation must drain text scans
 (`include_text=True`) before removing the cache the worker may still access.

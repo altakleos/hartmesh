@@ -110,7 +110,7 @@ enum UserScope:
 - 成功后签发 JWT，放入 `access_token` HttpOnly cookie。
 - 响应体只返回 `expires_in` 和 `needs_setup`，不返回 token。
 
-登录失败会按客户端 IP 计数。IP 解析只在 TCP peer 属于 `AUTH_TRUSTED_PROXIES` 时信任 `X-Real-IP`，不使用 `X-Forwarded-For`。阈值与锁定时长可通过 `auth.local.max_login_attempts`（默认 5）和 `auth.local.lockout_seconds`（默认 300 秒）配置，按次实时读取，改配置后下一次登录即生效，无需重启 Gateway（`max_login_attempts` 最小为 2：单次失败不得锁定 IP。时长热改按方向生效：下调可提前释放进行中的锁定、收紧阈值会保留已计数的失败；上调只延长仍在锁定期内的锁定，不会复活已服满原时长的锁定）。
+登录失败会按客户端 IP 计数。IP 解析只在 TCP peer 属于 `AUTH_TRUSTED_PROXIES` 时信任 `X-Real-IP`，不使用 `X-Forwarded-For`。`AUTH_TRUSTED_PROXIES` 接受逗号分隔的 IP、CIDR 或主机名；主机名在事件循环外解析，结果（包括解析失败）缓存 10 秒，因此重启后换了地址的代理容器仍能被识别。两个 compose 文件默认把它设为内置的 `nginx` 服务：否则所有浏览器登录都以 nginx 的地址计数，任何人输错 5 次密码就会锁住所有用户。nginx 在每个转发到 Gateway 的 location 中都用 `$remote_addr` 覆盖 `X-Real-IP`，这是信任它的前提。阈值与锁定时长可通过 `auth.local.max_login_attempts`（默认 5）和 `auth.local.lockout_seconds`（默认 300 秒）配置，按次实时读取，改配置后下一次登录即生效，无需重启 Gateway（`max_login_attempts` 最小为 2：单次失败不得锁定 IP。时长热改按方向生效：下调可提前释放进行中的锁定、收紧阈值会保留已计数的失败；上调只延长仍在锁定期内的锁定，不会复活已服满原时长的锁定）。计数器的存放位置由 `auth.local.lockout_store` 决定：默认 `memory` 为进程内计数器（每个 Gateway 进程各自计数，重启即清空）；`redis` 让所有 worker 与副本共享同一份锁定状态并在重启后保留，Redis 不可用时登录接口按失败关闭返回 503。迁移 `0035_login_throttle` 建立的 `login_throttle` 表为保持迁移链完整而保留，但不被读取。锁定期内的再次失败不会重置 `locked_at`：锁定时长从锁定开始计算，而不是从最后一次尝试计算。
 
 ### 注册
 
@@ -420,6 +420,10 @@ PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
 
 迁移脚本覆盖 legacy `memory.json`、`threads/` 和 `agents/` 到 per-user layout。
 
+thread 归属读取 Gateway 所配置数据库（`config.yaml` 的 `database`）中 `threads_meta.user_id`，未记录归属的 thread 归入 `default`。若存在 legacy thread 但无法读取该表（数据库文件不存在、`memory` 后端或查询失败），脚本在移动任何数据前退出；只有从未记录过 thread 归属的安装才应传 `--allow-missing-thread-owners`，此时所有 legacy thread 归入 `default`。
+
+修复前的脚本找不到数据库，会把所有 legacy thread 移到 `users/default/threads/`，且因 `threads/` 已不存在，重跑不会生效。恢复方法：停止 Gateway，用 `SELECT thread_id, user_id FROM threads_meta WHERE user_id IS NOT NULL AND user_id <> 'default'` 列出有真实归属的 thread，把存在的 `users/default/threads/{thread_id}` 移回 `threads/{thread_id}`，再重跑脚本（先 `--dry-run`）。若归属用户之后又使用过该 thread，目标目录已存在，脚本不会覆盖，而是把旧副本放到 `migration-conflicts/{thread_id}`，需手动合并。
+
 ## 安全不变量
 
 必须长期保持的不变量：
@@ -438,7 +442,7 @@ PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
 | 边界 | 当前行为 | 后续方向 |
 |---|---|---|
 | 无 admin 时注册普通用户 | 允许注册普通 `user` | 如产品要求先初始化 admin，给 `/register` 加 gate |
-| 登录限速 | 进程内 dict，单 worker 精确，多 worker 近似 | Redis / DB-backed rate limiter |
+| 登录限速 | 按账号锁定加按来源的喷洒防护；`auth.local.lockout_store: memory`（默认）为进程内计数，`redis` 为多副本共享 | 管理员解锁之外的审计与告警 |
 | OAuth / OIDC | 已实现通用 OIDC SSO（Keycloak, Google, Azure AD, Okta 等），支持 PKCE + nonce、auto-provisioning、email domain 限制（详见 [SSO.md](SSO.md)） | 支持 RP-initiated logout、自定义 scope 映射 |
 | IM 用户隔离 | `channel_connections` 绑定到 `users.id`；未绑定消息在 `require_bound_identity: true` 时被拒绝 | 更多渠道与审计能力 |
 | Internal Auth 终端直持 token | 平台可把共享密钥下发给终端，导致 `Owner-User-Id` 可伪造 | 仅平台后端持 token；终端走平台自己的认证 |

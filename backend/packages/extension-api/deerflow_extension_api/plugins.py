@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from deerflow_extension_api.agent_runs import AgentRuns
 from deerflow_extension_api.auth import ExtensionPrincipal
 from deerflow_extension_api.human_input import HumanInputActions
 from deerflow_extension_api.settings import FrontendBinding, SettingsContribution, SettingsField, SettingValue
@@ -25,6 +26,9 @@ class ActionContext:
     storage: ResourceStorage | None = field(default=None, kw_only=True)
     resource: StorageResource | None = field(default=None, kw_only=True)
     human_input: HumanInputActions | None = field(default=None, kw_only=True)
+    agent_runs: AgentRuns | None = field(default=None, kw_only=True)
+    # Host-stamped browser session; model tools and other callers default closed.
+    interaction: Literal["session", "other"] = field(default="other", kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,14 @@ class ToolContext(ActionContext):
 
 
 @dataclass(frozen=True)
+class PluginToolResult:
+    """Model-visible text plus optional JSON artifact for an opted-in tool."""
+
+    content: str
+    artifact: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
 class ModelTool:
     name: str
     description: str
@@ -53,6 +65,7 @@ class ModelTool:
     handler: Callable[[Mapping[str, Any], ToolContext], Awaitable[Any]]
     group: str = "extensions"
     purpose: Literal["business", "management"] = "business"
+    response_format: Literal["content", "content_and_artifact"] = field(default="content", kw_only=True)
 
 
 @dataclass(frozen=True)

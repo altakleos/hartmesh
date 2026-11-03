@@ -38,7 +38,7 @@ from test_gateway_services import _make_start_run_request
 from test_telegram_supervisor import build
 
 from app.channels.manager import ChannelManager
-from app.channels.store import ChannelStore
+from app.channels.store import JsonChannelStore
 from app.gateway import chat_storage, deps
 from app.gateway import storage_spaces as spaces
 from app.gateway.auth.local_provider import LocalAuthProvider
@@ -486,7 +486,7 @@ async def drive_message(e, monkeypatch, tmp_path, *, prompts=("What is two plus 
         supervisor.thread_client = gateway
         if document is not None:
             _serve_a_file(supervisor, boot, document[1])
-        store = await asyncio.to_thread(ChannelStore, str(tmp_path / "manager.json"))
+        store = await asyncio.to_thread(JsonChannelStore, str(tmp_path / "manager.json"))
         manager = ChannelManager(boot.service.bus, store, connection_repo=db.connections, langgraph_url="http://gateway.test/api", gateway_url=gateway.gateway_url, max_concurrency=1)
         boot.service.manager = manager
         finished = asyncio.Event()

@@ -8,7 +8,7 @@ from _run_output_store_test_support import capture_run as capture_run
 from _run_output_store_test_support import output_store as output_store  # noqa: F401
 from sqlalchemy import text
 
-from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
 from deerflow.runtime.events.store.db import DbRunEventStore
@@ -21,7 +21,7 @@ async def capture_environment(output_store):
     async with output_store.engine.begin() as connection:
         if output_store.dialect == "sqlite":
             await connection.execute(text("BEGIN"))
-        await connection.run_sync(lambda conn: RunEventRow.metadata.create_all(conn, tables=[RunEventRow.__table__, ThreadMetaRow.__table__]))
+        await connection.run_sync(lambda conn: RunEventRow.metadata.create_all(conn, tables=[RunEventRow.__table__, RunEventThreadSeqRow.__table__, ThreadMetaRow.__table__]))
     yield SimpleNamespace(**vars(output_store), event_store=DbRunEventStore(output_store.sf), thread_store=ThreadMetaRepository(output_store.sf), manager=RunManager(output_store.repository))
 
 

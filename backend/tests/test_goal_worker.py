@@ -15,6 +15,41 @@ from deerflow.runtime.runs.manager import RunRecord, RunStartOutcome
 from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("successful_work", [True, False], ids=["new-work-same-reply", "failed-work-paraphrased-reply"])
+async def test_goal_progress_uses_operation_results_instead_of_reply_wording(monkeypatch, successful_work):
+    saver = InMemorySaver()
+    thread_id = "operation-progress-behavior"
+    await _seed_goal_thread(saver, thread_id=thread_id, goal_text="Finish the controlled task")
+    goal = await read_thread_goal(saver, thread_id)
+    goal["max_continuations"] = 8
+    await write_thread_goal(saver, thread_id, goal)
+
+    async def fixed_evaluator(*_args, **_kwargs):
+        return GoalEvaluation(satisfied=False, blocker="goal_not_met_yet", reason="Work remains", evidence_summary="Fixed local result")
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fixed_evaluator)
+    messages = [HumanMessage(content="Finish the controlled task")]
+    decisions = []
+    for turn in range(3):
+        call = {"id": f"call-{turn}", "name": "write_file" if successful_work else "read_file", "args": {"path": f"/outputs/part-{turn}.txt"}}
+        if turn:
+            messages.append(HumanMessage(content="Continue", additional_kwargs={"hide_from_ui": True, "deerflow_goal_continuation": True}))
+        messages.extend(
+            [
+                AIMessage(content="", tool_calls=[call]),
+                ToolMessage(content=f"Created part {turn}" if successful_work else "File not found", tool_call_id=call["id"], name=call["name"], status="success" if successful_work else "error"),
+                AIMessage(content="More work remains." if successful_work else f"Investigating another approach, attempt {turn}."),
+            ]
+        )
+        await _write_messages(saver, thread_id=thread_id, messages=messages)
+        result = await worker._prepare_goal_continuation_input(accessor=_full_accessor(saver), bridge=_CollectingBridge(), checkpointer=saver, thread_id=thread_id, run_id="controlled-run", model_name=None, app_config=None)
+        decisions.append(result is not None)
+    saved = await read_thread_goal(saver, thread_id)
+    assert decisions == ([True, True, True] if successful_work else [True, True, False])
+    assert saved["no_progress_count"] == (0 if successful_work else 2)
+
+
 def _full_accessor(checkpointer) -> CheckpointStateAccessor:
     """Bind a full-mode accessor over a state-only graph for materialized reads."""
     graph = build_state_mutation_graph("goal_evaluator", "full")
@@ -768,7 +803,8 @@ async def test_goal_worker_stands_down_without_durable_assistant_receipt():
 class _FailingEvaluatorModel:
     """Evaluator chat model whose provider call raises, or whose answer is not valid JSON."""
 
-    def __init__(self, outcome: Exception | str, before=None) -> None:
+    def __init__(self, outcome: Exception | str, before=None, *, normal_completion=False) -> None:
+        self._normal_completion = normal_completion
         self._outcome = outcome
         self._before = before
         self.calls = 0
@@ -779,7 +815,7 @@ class _FailingEvaluatorModel:
             await self._before()
         if isinstance(self._outcome, Exception):
             raise self._outcome
-        return AIMessage(content=self._outcome)
+        return AIMessage(content=self._outcome, response_metadata={"finish_reason": "stop"} if self._normal_completion else {})
 
 
 @pytest.mark.asyncio
@@ -828,6 +864,46 @@ async def test_goal_worker_records_a_failed_evaluator_call(outcome, error_type, 
     assert "request-detail-7f3a" not in repr(latest_goal)
     assert [event for event, _ in bridge.events] == ["values"]
     assert "request-detail-7f3a" not in repr(bridge.events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_change", ["abort", "clear", "replace", "message"])
+async def test_goal_format_retry_does_not_outlive_a_user_change(user_change):
+    saver = InMemorySaver()
+    thread_id = "format-retry-user-change"
+    await _seed_goal_thread(saver, thread_id=thread_id, goal_text="Finish the report")
+    abort_event = asyncio.Event()
+
+    async def change():
+        if user_change == "abort":
+            abort_event.set()
+        elif user_change == "clear":
+            await write_thread_goal(saver, thread_id, None)
+        elif user_change == "replace":
+            await write_thread_goal(saver, thread_id, build_goal_state("A different request"))
+        else:
+            await _write_messages(saver, thread_id=thread_id, messages=[HumanMessage(content="Actually, wait for me.")])
+
+    critic = _FailingEvaluatorModel("{PRIVATE_CRITIC", before=change, normal_completion=True)
+    result = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(saver),
+        bridge=_CollectingBridge(),
+        checkpointer=saver,
+        thread_id=thread_id,
+        run_id="format-retry",
+        model_name=None,
+        app_config=None,
+        evaluator_model_factory=lambda: critic,
+        abort_event=abort_event,
+    )
+    assert result is None
+    assert critic.calls == 1
+    current_goal = await read_thread_goal(saver, thread_id)
+    if user_change == "clear":
+        assert current_goal is None
+    else:
+        assert current_goal["continuation_count"] == current_goal["no_progress_count"] == 0
+        assert "last_evaluation" not in current_goal
 
 
 @pytest.mark.asyncio
@@ -1408,3 +1484,37 @@ async def test_run_agent_strips_branch_checkpoint_for_goal_continuation(monkeypa
     assert "checkpoint_id" not in second_config
     assert "checkpoint_map" not in second_config
     assert second_config["thread_id"] == "thread-branch-continuation"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["full", "delta"])
+async def test_rollback_restores_the_met_goal_record_a_cancelled_run_dropped(mode):
+    """A rolled-back run whose input replaced the goal must not lose the earlier record."""
+    from langgraph.graph import END, START, StateGraph
+
+    from deerflow.agents.thread_state import get_thread_state_schema
+    from deerflow.runtime.goal import build_goal_outcome
+
+    checkpointer = InMemorySaver()
+    builder = StateGraph(get_thread_state_schema(mode))
+    builder.add_node("agent", lambda state: {"messages": [AIMessage(content="Working on it.")]})
+    builder.add_edge(START, "agent")
+    builder.add_edge("agent", END)
+    graph = builder.compile(checkpointer=checkpointer)
+    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode=mode)
+    thread_id = "rollback-outcome-thread"
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    record = build_goal_outcome(build_goal_state("Ship it"), GoalEvaluation(satisfied=True, blocker="none", reason="Shipped."), reply_message_id=None)
+
+    await graph.ainvoke({"messages": [HumanMessage(content="Ship it")]}, config)
+    await write_thread_goal(checkpointer, thread_id, None, outcome=record)
+    rollback_point = await worker._capture_rollback_point(accessor, checkpointer, config)
+    await graph.ainvoke({"messages": [HumanMessage(content="Next")], "goal": build_goal_state("Next goal"), "goal_outcome": None}, config)
+    assert (await accessor.aget(config)).values["goal_outcome"] is None
+
+    restored = await worker._rollback_to_pre_run_checkpoint(accessor=accessor, checkpointer=checkpointer, thread_id=thread_id, run_id="run-1", rollback_point=rollback_point, snapshot_capture_failed=False)
+
+    values = (await accessor.aget(config)).values
+    assert restored is True
+    assert values["goal_outcome"] == record
+    assert values.get("goal") is None
