@@ -40,6 +40,14 @@ logger = logging.getLogger(__name__)
 
 _ERROR_OBSERVATION_SIGNATURE = "'ErrorObservation' object has no attribute 'exit_code'"
 
+
+class _StoppedByAbort(str):
+    """Output ``_exec_shell`` returns when this sandbox's own abort ended the command."""
+
+
+#: The command did not fail: HartMesh's per-call abort ended it on purpose.
+_STOPPED_BY_ABORT = _StoppedByAbort("Error: command cancelled")
+
 # How many aborted calls a sandbox remembers. The memory only has to outlive
 # the command each abort was aimed at; nothing here can see a tool call end, so
 # it is bounded rather than cleared.
@@ -417,7 +425,7 @@ class AioSandbox(Sandbox):
         *,
         context: str,
         request_options: dict[str, int] | None = None,
-    ) -> None:
+    ) -> bool:
         try:
             client.shell.cleanup_session(
                 session_id,
@@ -431,6 +439,8 @@ class AioSandbox(Sandbox):
                 context,
                 cleanup_error,
             )
+            return False
+        return True
 
     @staticmethod
     def _format_shell_result(result) -> tuple[str, int | None, str | None]:
@@ -642,19 +652,19 @@ class AioSandbox(Sandbox):
                 while getattr(getattr(result, "data", None), "status", None) == "running":
                     accepted = True
                     if inflight.aborted:
-                        return "Error: command cancelled", None, "terminated"
+                        return _STOPPED_BY_ABORT, None, "terminated"
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise httpx.ReadTimeout("AIO shell command response deadline exceeded")
                     options = {"timeout_in_seconds": min(2, remaining), "max_retries": 0}
                     client.shell.wait_for_process(id=session_id, max_wait_seconds=1, request_options=options)
                     if inflight.aborted:
-                        return "Error: command cancelled", None, "terminated"
+                        return _STOPPED_BY_ABORT, None, "terminated"
                     result = client.shell.view(id=session_id, request_options=options)
                     viewed = True
             except ApiError as error:
                 if inflight.aborted:
-                    return "Error: command cancelled", None, "terminated"
+                    return _STOPPED_BY_ABORT, None, "terminated"
                 if accepted:
                     # An accepted command may have already changed files. Route
                     # lost polling responses through the no-replay transport
@@ -662,7 +672,7 @@ class AioSandbox(Sandbox):
                     raise httpx.ReadError("AIO accepted command outcome is unknown after polling failed") from error
                 raise
             if inflight.aborted:
-                return "Error: command cancelled", None, "terminated"
+                return _STOPPED_BY_ABORT, None, "terminated"
         with self._abort_state_lock():
             self._remember_session_token(session_id, token)
         if viewed:
@@ -1322,7 +1332,14 @@ class AioSandbox(Sandbox):
                 if self._is_session_invalidating_shell_status(status):
                     session_id = self._recovery_session_id
                     self._recovery_session_id = None
-                    self._default_shell_corrupted = True
+                    # HartMesh's default shell has an explicit session id, so a
+                    # session that its own per-call abort ended is replaced on
+                    # the next command, as a scoped session is. Upstream fences
+                    # it because its implicit shell cannot be cleaned up by id;
+                    # here that fence is kept only for a cleanup that failed.
+                    stopped = status == "terminated" and isinstance(output, _StoppedByAbort)
+                    if not stopped:
+                        self._default_shell_corrupted = True
                     if session_id is not None:
                         if status == "terminated":
                             cleanup_context = "default shell after terminal session loss"
@@ -1330,12 +1347,14 @@ class AioSandbox(Sandbox):
                             cleanup_context = "default shell after ambiguous no-change timeout"
                         else:
                             cleanup_context = "default shell after unexpected status"
-                        self._cleanup_session_best_effort(
+                        cleaned = self._cleanup_session_best_effort(
                             client,
                             session_id,
                             context=cleanup_context,
                             request_options=self._bounded_cleanup_request_options(),
                         )
+                        if stopped and not cleaned:
+                            self._default_shell_corrupted = True
 
                 return self._render_shell_output(
                     output,
