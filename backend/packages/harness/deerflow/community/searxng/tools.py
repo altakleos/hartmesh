@@ -7,6 +7,7 @@ from typing import Any
 from langchain.tools import tool
 
 from deerflow.community.search_time_range import SearchTimeRange
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 from .searxng_client import SearxngClient
@@ -23,7 +24,6 @@ SEARCH_UNAVAILABLE_MESSAGE = "Web search is unavailable right now: the search se
 MAX_TITLE_CHARS = 256
 MAX_URL_CHARS = 2048
 MAX_SNIPPET_CHARS = 2048
-_WEB_SCHEMES = ("http://", "https://")
 
 # How many searches one Gateway process has in flight at once. A research
 # fan-out that asks dozens of questions in a minute is what gets a tenant's
@@ -78,8 +78,10 @@ def normalize_results(results: list[dict[str, Any]], max_results: int) -> list[d
 
     normalized: list[dict[str, str]] = []
     for result in results:
-        url = str(result.get("url") or "")
-        if not url.lower().startswith(_WEB_SCHEMES):
+        # Results are untrusted: an intranet or metadata URL would otherwise
+        # reach the model and the user's browser as a clickable link.
+        url = safe_public_result_url(result.get("url"))
+        if not url:
             continue
         normalized.append(
             {
@@ -134,18 +136,18 @@ def normalize_image_results(results: list[dict[str, Any]], max_results: int) -> 
 
     normalized: list[dict[str, str]] = []
     for result in results:
-        image_url = str(result.get("img_src") or "")
-        if not image_url.lower().startswith(_WEB_SCHEMES):
+        image_url = safe_public_result_url(result.get("img_src"))
+        if not image_url:
             # A result with no direct image address is no use to a caller
             # that is about to hand one to an image generator.
             continue
-        thumbnail = str(result.get("thumbnail_src") or result.get("thumbnail") or "")
+        thumbnail = safe_public_result_url(result.get("thumbnail_src") or result.get("thumbnail"))
         normalized.append(
             {
                 "title": str(result.get("title") or "")[:MAX_TITLE_CHARS],
                 "image_url": image_url[:MAX_URL_CHARS],
-                "thumbnail_url": thumbnail[:MAX_URL_CHARS] if thumbnail.lower().startswith(_WEB_SCHEMES) else "",
-                "source_url": str(result.get("url") or "")[:MAX_URL_CHARS],
+                "thumbnail_url": thumbnail[:MAX_URL_CHARS],
+                "source_url": safe_public_result_url(result.get("url"))[:MAX_URL_CHARS],
             }
         )
         if len(normalized) >= max_results:
