@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with managed storage. Unless a sandbox was serving the conversation, the tool reported
   success and the image was then withheld from the model, which said it could not load it.
   These images are read through the person's pinned Space, and a withheld image is logged.
+- An AI assistant or AI employee now sees a photo on the first try. Until it had used a
+  file or shell tool since its workspace last started, the image tool reported the photo as
+  not found. A new conversation, or one resumed after the workspace stopped, often got an
+  answer saying the image could not be found. The tool now reads the photo from the
+  workspace that the turn has already started.
 
 ## [2.2.0+hartmesh.49] - 2026-11-03
 

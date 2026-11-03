@@ -115,6 +115,18 @@ def _read_verified_host_copy(
     return data
 
 
+def _agent_workspace_started() -> bool:
+    """An AI agent's run has started its workspace, the only place its files can be read.
+
+    Its conversation may not have saved that workspace yet, or may have saved one that
+    was since replaced. An ordinary chat reads its host copy and starts no sandbox.
+    """
+    from deerflow.agent_instances.runtime import current_environment
+
+    environment = current_environment()
+    return environment is not None and environment.provider is not None
+
+
 def _view_image(
     runtime: Runtime,
     image_path: str,
@@ -134,9 +146,11 @@ def _view_image(
     Args:
         image_path: Absolute /mnt/user-data virtual path to the image file. Common formats supported: jpg, jpeg, png, webp, gif.
     """
-    from deerflow.sandbox.tools import sandbox_authorization_scope
+    from deerflow.sandbox.tools import ensure_sandbox_initialized, sandbox_authorization_scope
 
     with sandbox_authorization_scope(runtime):
+        if _agent_workspace_started():
+            ensure_sandbox_initialized(runtime)
         return _view_image_authorized(runtime, image_path, tool_call_id)
 
 
@@ -307,9 +321,11 @@ async def _aview_image(
 ) -> Command:
     """Run the blocking image read without letting cancellation outlive it."""
     from deerflow.sandbox.lease import run_sync_lifecycle_operation
-    from deerflow.sandbox.tools import sandbox_authorization_scope_async
+    from deerflow.sandbox.tools import ensure_sandbox_initialized_async, sandbox_authorization_scope_async
 
     async with sandbox_authorization_scope_async(runtime):
+        if _agent_workspace_started():
+            await ensure_sandbox_initialized_async(runtime)
         return await run_sync_lifecycle_operation(
             _view_image_authorized,
             runtime,
