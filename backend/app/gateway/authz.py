@@ -189,6 +189,9 @@ def _get_route_authorization_config() -> AuthorizationConfig:
 
     Falls back to a disabled config when AppConfig is not available (e.g. test
     environments without a config.yaml), preserving legacy all-permissions behavior.
+    ``get_app_config()`` stats and hashes ``config.yaml`` and
+    ``extensions_config.json`` on every call, so async request paths use
+    :func:`_route_authorization_config_async`.
     """
     from deerflow.config.app_config import get_app_config
 
@@ -196,6 +199,11 @@ def _get_route_authorization_config() -> AuthorizationConfig:
         return get_app_config().authorization
     except (FileNotFoundError, RuntimeError):
         return AuthorizationConfig()
+
+
+async def _route_authorization_config_async() -> AuthorizationConfig:
+    """Off-loop :func:`_get_route_authorization_config` for async request paths."""
+    return await asyncio.to_thread(_get_route_authorization_config)
 
 
 # --- Provider cache (W1/F1) ---
@@ -285,7 +293,9 @@ async def resolve_route_permissions(
     Background delivery may supply freshly prepared configuration and request
     strict reads. Those reads offload cold discovery, construct providers on the
     calling loop and raise RouteAuthorityUnavailable for configuration/provider
-    errors, irrespective of the HTTP fail-open setting.
+    errors, irrespective of the HTTP fail-open setting. The default path reads
+    the config in a worker: ``AuthMiddleware`` calls this for every
+    authenticated request.
     """
     if prepared_config is not None:
         config = prepared_config
@@ -297,7 +307,7 @@ async def resolve_route_permissions(
         except Exception:
             raise RouteAuthorityUnavailable from None
     else:
-        config = _get_route_authorization_config()
+        config = await _route_authorization_config_async()
     if config.enabled is not True:
         return list(_ALL_PERMISSIONS)
 
