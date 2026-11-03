@@ -938,7 +938,10 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
             tool_name_prefix=True,
         )
 
-        async def load_server_tools(server_name: str) -> list[BaseTool]:
+        async def load_server_tools(server_name: str) -> list[BaseTool] | None:
+            # ``None`` marks a server whose discovery failed, which is distinct
+            # from a server that answered with zero tools: only the latter is
+            # evidence that configured task_toolsets name missing tools.
             try:
                 server_cfg = extensions_config.mcp_servers.get(server_name)
                 tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
@@ -984,7 +987,7 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
                             server_name,
                             session_init_timeout,
                         )
-                        return []
+                        return None
                 return await discovery
             except Exception as e:
                 # Never interpolate ``e`` nor attach its traceback: ``ExtensionsConfig``
@@ -996,12 +999,12 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
                     server_name,
                     type(e).__name__,
                 )
-                return []
+                return None
 
         # Get tools from each server independently so one broken MCP server does
         # not prevent healthy servers from contributing their tools.
         tools_by_server = await asyncio.gather(*(load_server_tools(name) for name in servers_config))
-        tools = [tool for server_tools in tools_by_server for tool in server_tools]
+        tools = [tool for server_tools in tools_by_server if server_tools is not None for tool in server_tools]
         logger.info(f"Successfully loaded {len(tools)} tool(s) from MCP servers")
 
         # Wrap each tool with persistent-session logic.
@@ -1016,6 +1019,11 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
         # "web_") matches "web" first), which pools the tool under the wrong server. Using the
         # source grouping makes routing exact even when a server opts out of name prefixing.
         for source_name, server_tools in zip(servers_config.keys(), tools_by_server, strict=True):
+            if server_tools is None:
+                # Discovery already logged the skip. Validating task_toolsets
+                # against a server that never answered would report every
+                # raw tool as missing and discard the healthy servers' tools.
+                continue
             transport = servers_config[source_name].get("transport", "stdio")
             server_cfg = extensions_config.mcp_servers.get(source_name)
             tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
