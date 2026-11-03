@@ -1548,7 +1548,7 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
         raise
     except Exception as e:
         logger.error(f"Failed to update MCP configuration: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update MCP configuration: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update MCP configuration")
 
 
 @router.post(
@@ -1572,7 +1572,7 @@ async def create_mcp_servers(request: Request, body: McpConfigUpdateRequest) -> 
         raise
     except Exception as e:
         logger.error("Failed to add MCP servers: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to add MCP servers: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to add MCP servers")
 
 
 @router.put(
@@ -1599,7 +1599,7 @@ async def update_mcp_server(request: Request, body: McpServerConfigUpdateRequest
         raise
     except Exception as e:
         logger.error("Failed to update MCP server %s: %s", body.server_name, e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update MCP server: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update MCP server")
 
 
 @router.delete(
@@ -1622,7 +1622,7 @@ async def delete_mcp_server(request: Request, server_name: str) -> McpConfigResp
         raise
     except Exception as e:
         logger.error("Failed to delete MCP server %s: %s", server_name, e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to delete MCP server: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to delete MCP server")
 
 
 @router.patch(
@@ -1645,4 +1645,4 @@ async def update_mcp_server_state(request: Request, body: McpServerStateUpdateRe
         raise
     except Exception as e:
         logger.error("Failed to update MCP server %s state: %s", body.server_name, e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update MCP server state: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update MCP server state")
