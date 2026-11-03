@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
-from deerflow.skills.package_files import is_code_file, is_executable_binary_prefix
+from deerflow.skills.package_files import EXEC_SNIFF_BYTES, executable_binary_magic, is_code_file, is_executable_binary_prefix
 from deerflow.skills.package_paths import is_eval_fixture_skill_md
 from deerflow.skills.skillscan.models import (
     FindingSeverity,
@@ -209,7 +209,7 @@ def scan_archive_preflight(archive_path: Path) -> ScanResult:
                     continue
                 try:
                     with zf.open(info) as member:
-                        prefix = member.read(8)
+                        prefix = member.read(EXEC_SNIFF_BYTES)
                 except Exception as e:
                     scanner_errors.append(f"{normalized}: failed to read archive member prefix: {e}")
                     continue
@@ -260,7 +260,7 @@ def scan_skill_dir(skill_dir: Path) -> ScanResult:
             findings.append(_finding("package-undecodable-script", file=rel_path, evidence=evidence))
             # A decoded executable is string-table noise that reads as secrets
             # and URLs; its CRITICAL executable finding already blocks it.
-            if is_executable_binary_prefix(file_bytes[:8]):
+            if is_executable_binary_prefix(file_bytes[:EXEC_SNIFF_BYTES]):
                 continue
 
         try:
@@ -301,8 +301,8 @@ def _scan_file_package_properties(rel_path: str, file_bytes: bytes, file_size: i
         findings.append(_finding("package-git-directory", file=rel_path, evidence=".git"))
     if _is_nested_archive_name(rel_path) or _looks_like_archive(file_bytes):
         findings.append(_nested_archive_finding(rel_path, file_bytes[:8], lambda: file_bytes, []))
-    if is_executable_binary_prefix(file_bytes[:8]):
-        findings.append(_finding("package-executable-binary", file=rel_path, evidence=_binary_magic_evidence(file_bytes[:8])))
+    if is_executable_binary_prefix(file_bytes[:EXEC_SNIFF_BYTES]):
+        findings.append(_finding("package-executable-binary", file=rel_path, evidence=_binary_magic_evidence(file_bytes[:EXEC_SNIFF_BYTES])))
     return findings
 
 
@@ -667,7 +667,7 @@ def _nested_zip_contains_executable(data: bytes) -> bool:
                     continue
                 try:
                     with nested.open(info) as member:
-                        if is_executable_binary_prefix(member.read(8)):
+                        if is_executable_binary_prefix(member.read(EXEC_SNIFF_BYTES)):
                             return True
                 except Exception:
                     continue
@@ -763,9 +763,10 @@ def _looks_like_archive(file_bytes: bytes) -> bool:
 
 
 def _binary_magic_evidence(prefix: bytes) -> str:
-    if prefix.startswith(b"\x7fELF"):
+    magic = executable_binary_magic(prefix) or b""
+    if magic.startswith(b"\x7fELF"):
         return "ELF"
-    if prefix.startswith(b"MZ"):
+    if magic.startswith(b"MZ"):
         return "PE"
     return "Mach-O"
 
