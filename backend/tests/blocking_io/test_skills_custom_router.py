@@ -57,9 +57,9 @@ def _isolate_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         reset_current_user(token)
 
 
-def _admin_request() -> Request:
+def _admin_request(user_id=None) -> Request:
     # AuthMiddleware supplies matching request/runtime owner identity.
-    user = SimpleNamespace(id=UUID("11111111-2222-3333-4444-555555555555"), system_role="admin")
+    user = SimpleNamespace(id=user_id or UUID("11111111-2222-3333-4444-555555555555"), system_role="admin")
     from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
 
     app = SimpleNamespace(state=SimpleNamespace(customer_administration_policy=CustomerAdministrationPolicy(local_skill_management=True)))
@@ -159,7 +159,8 @@ async def test_edit_resolves_the_callers_storage_inside_the_worker(monkeypatch) 
 
     token = set_current_user(SimpleNamespace(id="skill-editor"))
     try:
-        await update_custom_skill(_SKILL_NAME, CustomSkillUpdateRequest(content=edited), _admin_request(), config)
+        # HartMesh requires the request user to be the runtime owner.
+        await update_custom_skill(_SKILL_NAME, CustomSkillUpdateRequest(content=edited), _admin_request("skill-editor"), config)
     finally:
         reset_current_user(token)
 

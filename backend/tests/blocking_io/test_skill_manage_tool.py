@@ -33,8 +33,22 @@ pytestmark = pytest.mark.asyncio
 
 _SKILL_NAME = "loop-manage-skill"
 _SKILL_MD = f"---\nname: {_SKILL_NAME}\ndescription: Anchor fixture skill.\n---\n\n# {_SKILL_NAME}\n"
+# HartMesh delegates skill management explicitly; these blocking anchors run
+# as the delegated owner (default-deny lives in the policy admission suite).
+from deerflow.runtime.customer_administration import (  # noqa: E402
+    CUSTOMER_ADMINISTRATION_CONTEXT_KEY,
+    CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY,
+    CustomerAdministrationPolicy,
+    CustomerManagementActor,
+)
+
 _RUNTIME = SimpleNamespace(
-    context={"thread_id": "thread-1", "user_id": "default"},
+    context={
+        "thread_id": "thread-1",
+        "user_id": "default",
+        CUSTOMER_ADMINISTRATION_CONTEXT_KEY: CustomerAdministrationPolicy(local_skill_management=True),
+        CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY: CustomerManagementActor(owner_id="default", administrator=True),
+    },
     config={"configurable": {"thread_id": "thread-1", "user_id": "default"}},
 )
 

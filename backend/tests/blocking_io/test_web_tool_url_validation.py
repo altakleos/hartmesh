@@ -125,9 +125,13 @@ async def test_browser_navigate_tool_resolves_off_loop(loopback_dns: list[str]) 
 
 async def test_browser_navigate_and_capture_resolves_off_loop(tmp_path, loopback_dns: list[str]) -> None:
     manager = MagicMock()
+    # HartMesh's screenshot writer asks Storage Spaces first; with Spaces off
+    # the classic outputs path follows.
+    no_spaces = SimpleNamespace(storage_spaces=SimpleNamespace(enabled=False))
     with (
         patch.object(browser_tools, "_get_tool_config", return_value={}),
         patch.object(browser_tools, "get_browser_session_manager", return_value=manager),
+        patch("deerflow.spaces.chat_screenshots.get_app_config", return_value=no_spaces),
         pytest.raises(ValueError, match="Refusing to browse a private, loopback, or metadata address"),
     ):
         await browser_tools.navigate_and_capture(thread_id="thread-1", url=_UNRESOLVED_LOOPBACK_URL, outputs_path=tmp_path)

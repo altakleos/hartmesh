@@ -166,6 +166,11 @@ def _offline(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(httpx.AsyncClient, "send", refuse)
     monkeypatch.setattr(browser_tools, "get_browser_session_manager", lambda: _FakeSessionManager())
+    # HartMesh's screenshot writer asks Storage Spaces first (off the loop,
+    # through run_file_io); with Spaces off the tool's own config read follows.
+    from types import SimpleNamespace as _Namespace
+
+    monkeypatch.setattr("deerflow.spaces.chat_screenshots.get_app_config", lambda: _Namespace(storage_spaces=_Namespace(enabled=False)))
 
 
 @pytest.mark.parametrize(("module", "invoke", "expected_reads"), _CASES)

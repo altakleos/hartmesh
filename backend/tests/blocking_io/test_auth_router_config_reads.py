@@ -101,7 +101,7 @@ async def test_setup_status_reads_registration_gate_off_the_loop(client: httpx.A
     response = await client.get("/api/v1/auth/setup-status")
 
     assert response.status_code == 200
-    assert response.json() == {"needs_setup": True, "registration_enabled": False}
+    assert response.json() == {"needs_setup": True, "registration_enabled": False, "sign_on_only": False}
 
 
 async def test_providers_reads_oidc_config_off_the_loop(client: httpx.AsyncClient) -> None:
