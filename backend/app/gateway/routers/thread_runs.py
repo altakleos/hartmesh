@@ -1934,12 +1934,18 @@ async def list_run_events(
     await _require_run_visible_to_scope(run_id, thread_id, request)
     event_store = get_run_event_store(request)
     if event_types:
-        types = event_types.split(",")
+        # Split on commas and normalise each entry: the value goes straight into
+        # a SQL ``IN``, so a padded entry ("message, tool") would silently match
+        # nothing and return a 200 with a truncated audit trail. Blank entries
+        # carry no intent and are dropped; a filter that reduces to nothing is
+        # the same as no filter, matching the empty-string case above.
+        types = [name for entry in event_types.split(",") if (name := entry.strip())]
         if len(types) > MAX_EVENT_TYPE_FILTERS:
             raise HTTPException(
                 status_code=422,
                 detail=f"event_types accepts at most {MAX_EVENT_TYPE_FILTERS} values",
             )
+        types = types or None
     else:
         types = None
     events = await event_store.list_events(
