@@ -653,3 +653,37 @@ skill-creator scripts is committed; it must reach `main` before the merge PR.
 - Off-loop `sign_on_only()` and registration reads on every authenticated request.
 - Dependabot: enable security updates in repository settings (upstream keeps no
   configuration file either).
+
+## Appendix D — Merge decisions (2026-11-03)
+
+Decided by the maintainer before the merge (references are to §5.2):
+
+1. **Skill tool policy (a):** accept upstream's deletion of `SkillToolPolicyMiddleware`
+   and `skills/tool_policy.py`; move same-message hold-back and `first-command`
+   ordering into a HartMesh-owned `SkillLoadOrderMiddleware` at the old slot in both
+   chains (`first_command_order=False` for subagents). `allowed-tools` becomes
+   metadata, as upstream.
+2. **Run lifecycle (f):** upstream's structure is the base (split admission locks,
+   journal write ownership, `run.terminal`, finalization draining); HartMesh's output
+   capture, AgentExecution environment, storage provider, customer-administration
+   policy and `GATEWAY_STOP_REASON` are re-layered on top. The journal lost-ack
+   duplicate (#6846) and the admission lock split (#7664) arrive with it.
+3. **Staging:** two merges — first to `b537d9c` (upstream 2.2.0), released as
+   `2.2.0+hartmesh.N`; then `b537d9c..upstream/main` (Queue/Steer, command scopes,
+   producer fencing, admission-lock split).
+4. **Managed Telegram step budget:** 1000, matching web chats and scheduled runs
+   (done in Phase 0; a configured session value still overrides it).
+
+The remaining §5.2 collisions follow the document's recommendations: keep HartMesh's
+login throttle (b) and account-disable model, and do not mount `admin_users` (c);
+keep `sandbox.prewarm: false` (d); keep HartMesh's per-call command abort with
+`supports_command_cancellation` false (e); gate Queue/Steer on
+`allows_clarification`, no `agent_execution` and capture off before enabling it (g);
+count scheduler capacity with `holds_execution`/`blocks_thread` (h); move HartMesh's
+inbound-file leases to their own module (i); keep the managed human-input builder
+(j); adapt project staging to `FeaturePaths` and keep summaries off (k); re-weave the
+batch owner checks before enabling batches (l).
+
+**Order of work:** land Phase 0 (this branch) on `main` first — the skill-review
+waiver must be in the trusted base before the merge PR — then trim the AGENTS.md
+chains below budget (§5.4), then the step-1 merge on its own branch.
