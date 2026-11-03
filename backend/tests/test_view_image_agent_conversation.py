@@ -28,7 +28,7 @@ from deerflow.agent_instances.runtime import InstanceSandboxProvider, execution_
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState
 from deerflow.persistence.spaces.files import SpaceBackingRow
-from deerflow.sandbox.lease import release_sandbox_execution_lease_async
+from deerflow.sandbox.lease import discard_sandbox_lease_manager, get_sandbox_lease_manager, release_sandbox_execution_lease_async
 from deerflow.sandbox.middleware import SandboxMiddleware
 from deerflow.tools.builtins.view_image_tool import view_image_tool
 
@@ -82,6 +82,9 @@ class Workspace:
     def release_command_scope(self, scope_id):
         """The run's lease ends; this stand-in keeps no shell sessions."""
 
+    def close(self):
+        """The run ends; this stand-in holds no client."""
+
 
 async def _agent_chat(instances):
     agents, authority, _, sf = await conversations(instances)
@@ -105,7 +108,7 @@ async def _turn(execution, home, saved, *, sync):
     inputs = {"messages": [HumanMessage(content="What are these?")], "thread_data": execution.thread_paths, **saved}
     config = {"configurable": {"thread_id": execution.thread_id}}
     with execution_scope(execution) as environment:
-        environment.provider = InstanceSandboxProvider(execution, Workspace(home))
+        provider = environment.provider = InstanceSandboxProvider(execution, Workspace(home))
         try:
             if sync:
                 # A synchronous graph runs off the authority loop, as embedded callers do.
@@ -114,6 +117,13 @@ async def _turn(execution, home, saved, *, sync):
                 state = await graph.ainvoke(inputs, config, context=context)
         finally:
             await release_sandbox_execution_lease_async(context)
+            used = get_sandbox_lease_manager(provider)
+            # The worker closes the run's own provider once the run has ended.
+            provider.close()
+    # Every turn binds a lease now; the provider is never reused, so nothing may keep it.
+    leftover = get_sandbox_lease_manager(provider)
+    discard_sandbox_lease_manager(provider)
+    assert leftover is not used
     return state, model
 
 

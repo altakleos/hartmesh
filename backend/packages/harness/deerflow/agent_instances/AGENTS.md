@@ -140,7 +140,9 @@ accepts historical containment. Caller-owned live-run snapshots require coordina
 `runtime.prepare_environment` consumes exact admitted native attachments and the
 existing AIO SDK. Address immutable Docker IDs, not container IPs. Drain preparation
 and closure across cancellation; unknown outcomes retain native intents. SDK closure,
-leases and ordinary completion never fence or replace physical writers. Children
+leases and ordinary completion never fence or replace physical writers. Each run
+gets its own `InstanceSandboxProvider`, and the sandbox middleware binds a lease on
+every agent turn, so `close()` discards that provider's lease manager. Children
 inherit the full Home mount; tool filtering is not a narrower filesystem boundary.
 An external operator closure needs exact historical fenced SQL plus canonical host
 containment before replacement. Recheck its actor, incarnation, host, CID and full
