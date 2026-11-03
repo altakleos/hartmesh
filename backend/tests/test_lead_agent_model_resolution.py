@@ -930,7 +930,13 @@ def test_build_middlewares_orders_skill_activation_before_durable_context(monkey
 
     activation_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, SkillActivationMiddleware))
     durable_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, DurableContextMiddleware))
-    assert durable_idx == activation_idx + 1
+    # HartMesh's SkillLoadOrderMiddleware keeps the former SkillToolPolicy slot
+    # between them; it wraps tool calls only, so it sees no model request.
+    from deerflow.agents.middlewares.skill_load_order_middleware import SkillLoadOrderMiddleware
+
+    between = middlewares[activation_idx + 1 : durable_idx]
+    assert durable_idx > activation_idx
+    assert [type(middleware) for middleware in between] == [SkillLoadOrderMiddleware]
 
 
 def test_build_middlewares_places_mcp_routing_before_deferred_filter(monkeypatch):

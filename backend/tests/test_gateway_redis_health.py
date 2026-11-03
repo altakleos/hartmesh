@@ -137,6 +137,11 @@ async def test_redis_failure_degrades_readiness_without_changing_liveness(health
 
     app = create_app()
     app.state.checkpointer_config = CheckpointerConfig(type="memory")
+    # Upstream's stream-bridge probe fails closed without a bridge; a memory
+    # bridge reports not_configured, so only the Redis verdict decides here.
+    from deerflow.runtime import MemoryStreamBridge
+
+    app.state.stream_bridge = MemoryStreamBridge()
     app.state.redis_readiness = SimpleNamespace(check=AsyncMock(return_value="unreachable"))
     monkeypatch.setattr("app.gateway.health.get_engine", lambda: None)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:

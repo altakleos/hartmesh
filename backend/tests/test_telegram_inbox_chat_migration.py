@@ -184,7 +184,10 @@ def test_chain_and_current_orm_key():
     from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow
 
     script = ScriptDirectory(str(_MIGRATIONS_DIR))
-    assert script.get_heads() == ["0044_telegram_assistant_ids"]
+    # Upstream's revisions follow this chain since the step-1 merge; the chain
+    # keeps one head and this revision stays in it.
+    assert len(script.get_heads()) == 1
+    assert REVISION in {revision.revision for revision in script.walk_revisions()}
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     assert list(TelegramInboundMarkRow.__table__.primary_key.columns.keys()) == NEW_KEY
     assert list(historical()._metadata.tables[TABLE].primary_key.columns.keys()) == OLD_KEY

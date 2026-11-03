@@ -813,22 +813,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from app.gateway.customer_administration import customer_administration_host_scope
     from deerflow.runtime.customer_administration import capture_customer_administration_policy
 
-    if getattr(app.state, "customer_administration_policy", None) is None:
-        config = await asyncio.to_thread(get_app_config)
-        app.state.customer_administration_policy = capture_customer_administration_policy(config)
-    manager = _lifespan_resources(app)
-    async with customer_administration_host_scope(app):
-        await manager.__aenter__()
-    try:
-        yield
-    except BaseException:
+    # The policy capture below is already a startup step that reads config, so
+    # sandbox shutdown is claimed before it (the claim nests; see _lifespan_resources).
+    with hold_sandbox_shutdown_ownership():
+        if getattr(app.state, "customer_administration_policy", None) is None:
+            config = await asyncio.to_thread(get_app_config)
+            app.state.customer_administration_policy = capture_customer_administration_policy(config)
+        manager = _lifespan_resources(app)
         async with customer_administration_host_scope(app):
-            suppressed = await manager.__aexit__(*sys.exc_info())
-        if not suppressed:
-            raise
-    else:
-        async with customer_administration_host_scope(app):
-            await manager.__aexit__(None, None, None)
+            await manager.__aenter__()
+        try:
+            yield
+        except BaseException:
+            async with customer_administration_host_scope(app):
+                suppressed = await manager.__aexit__(*sys.exc_info())
+            if not suppressed:
+                raise
+        else:
+            async with customer_administration_host_scope(app):
+                await manager.__aexit__(None, None, None)
 
 
 @asynccontextmanager

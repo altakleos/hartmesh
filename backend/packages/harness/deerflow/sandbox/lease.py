@@ -424,13 +424,20 @@ class SandboxLeaseManager:
         release_on_last: bool,
         allow_unscoped_borrow: bool,
         storage_candidate: object = None,
+        validate_storage: bool = False,
     ) -> tuple[_LeaseBinding | None, bool] | None:
         with self._observe_client_lifecycle(sandbox_id) as (observation, revision):
             sandbox = self._provider.get(sandbox_id) if allow_unscoped_borrow else self._provider.get_scoped(sandbox_id, thread_id=key[1], user_id=key[0])
+            if sandbox is None:
+                return None
+            if validate_storage:
+                # Storage Spaces validate the live client's incarnation before
+                # the bind, and only once the one lookup found a client.
+                storage_candidate = self._validate_storage_candidate(sandbox_id, key, allow_unscoped_borrow=allow_unscoped_borrow)
             with self._metadata_lock:
                 # A fork's different serializer cannot protect its earlier
                 # lookup from a parent finishing teardown before this bind.
-                if sandbox is None or observation.revision != revision:
+                if observation.revision != revision:
                     return None
                 return self._bind_locked(owner_id, sandbox_id, key, release_on_last=release_on_last, storage_candidate=storage_candidate)
 
@@ -707,21 +714,7 @@ class SandboxLeaseManager:
             if existing_sandbox_id is not None:
                 return existing_sandbox_id
 
-            # Storage Spaces validate the live client's incarnation before the
-            # bind, so only look for a client to validate once one exists.
-            sandbox = (
-                self._provider.get(sandbox_id)
-                if allow_unscoped_borrow
-                else self._provider.get_scoped(
-                    sandbox_id,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                )
-            )
-            binding = None
-            if sandbox is not None:
-                token = self._validate_storage_candidate(sandbox_id, key, allow_unscoped_borrow=allow_unscoped_borrow)
-                binding = self._bind_live_client(owner_id, sandbox_id, key, release_on_last=release_on_last, allow_unscoped_borrow=allow_unscoped_borrow, storage_candidate=token)
+            binding = self._bind_live_client(owner_id, sandbox_id, key, release_on_last=release_on_last, allow_unscoped_borrow=allow_unscoped_borrow, validate_storage=True)
             if binding is not None:
                 previous, release_previous = binding
                 if release_previous and previous is not None:
