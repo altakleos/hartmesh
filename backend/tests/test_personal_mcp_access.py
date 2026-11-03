@@ -105,8 +105,9 @@ async def test_revocation_blocks_discovery_existing_tools_and_cached_durable_cal
 
             if revocation == "demote":
                 # update_user is field-scoped (roles never written there);
-                # update_system_role is the sole role writer.
-                await repository.update_system_role(str(user.id), "user")
+                # HartMesh writes roles through targeted statements.
+                async with sessions() as session, session.begin():
+                    (await session.get(UserRow, owner)).system_role = "user"
             elif revocation == "delete":
                 async with sessions() as session:
                     await session.execute(delete(UserRow).where(UserRow.id == owner))

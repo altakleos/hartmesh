@@ -21,6 +21,27 @@ from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp.lifecycle import _stdio_fingerprints, legacy_token, parse_mcp_lifecycle
 
 
+def _policy():
+    """HartMesh gates local MCP writes on the customer-administration policy.
+
+    These writers are exercised with management delegated and exactly the
+    launches the tests write approved; the gate's own rules are covered in
+    tests/test_mcp_config_secrets.py.
+    """
+    from deerflow.config.app_config import AppConfig
+    from deerflow.runtime.customer_administration import capture_customer_administration_policy
+
+    approved = [
+        {"command": "npx"},
+        {"command": "uvx"},
+        {"command": "npx", "args": ["pkg-v1"]},
+        {"command": "npx", "args": ["pkg-v2"]},
+        {"command": "npx", "args": ["pkg-b"], "env": {"TOKEN": "$PE_VAR"}},
+        {"command": "npx", "args": ["pkg-b"], "env": {"TOKEN": "secret-value"}},
+    ]
+    return capture_customer_administration_policy(AppConfig.model_validate({"sandbox": {"use": "test"}, "customer_administration": {"local_mcp_management": True}, "approved_local_mcp_definitions": approved}))
+
+
 def _stdio(command: str) -> dict:
     return {"enabled": True, "type": "stdio", "command": command}
 
@@ -49,11 +70,11 @@ def test_state_disable_and_reenable_advance_the_generation(
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
     baseline = _legacy(cfg, "A")
 
-    mcp_router._apply_mcp_server_state_update(McpServerStateUpdateRequest(server_name="A", enabled=False))
+    mcp_router._apply_mcp_server_state_update(McpServerStateUpdateRequest(server_name="A", enabled=False), policy=_policy())
     disabled = _ledger(cfg).servers["A"]
     assert disabled != baseline
 
-    mcp_router._apply_mcp_server_state_update(McpServerStateUpdateRequest(server_name="A", enabled=True))
+    mcp_router._apply_mcp_server_state_update(McpServerStateUpdateRequest(server_name="A", enabled=True), policy=_policy())
     reenabled = _ledger(cfg).servers["A"]
     assert reenabled not in {baseline, disabled}
 
@@ -68,13 +89,14 @@ def test_delete_then_identical_readd_advance_the_generation(
     _write(cfg, {"A": _stdio("npx")})
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
 
-    mcp_router._apply_mcp_server_delete("A")
+    mcp_router._apply_mcp_server_delete("A", policy=_policy())
     tombstone = _ledger(cfg).servers["A"]
 
     mcp_router._apply_mcp_servers_create(
         McpConfigUpdateRequest(
             mcp_servers={"A": McpServerConfigResponse(enabled=True, type="stdio", command="npx")},
-        )
+        ),
+        policy=_policy(),
     )
     rebound = _ledger(cfg).servers["A"]
     assert rebound != tombstone
@@ -117,7 +139,8 @@ def test_bulk_update_rotates_only_the_changed_server_token(
                 "A": McpServerConfigResponse(enabled=True, type="stdio", command="npx", args=["pkg-v2"]),
                 "B": McpServerConfigResponse(enabled=True, type="stdio", command="npx", args=["pkg-b"], env={"TOKEN": "$PE_VAR"}),
             }
-        )
+        ),
+        policy=_policy(),
     )
 
     ledger = _ledger(cfg)
@@ -154,7 +177,8 @@ async def test_targeted_metadata_update_keeps_token_and_session(
         McpServerConfigUpdateRequest(
             server_name="A",
             server=McpServerConfigResponse(enabled=True, type="stdio", command="npx", description="renamed"),
-        )
+        ),
+        policy=_policy(),
     )
 
     ledger = _ledger(cfg)
@@ -213,8 +237,8 @@ def test_removed_servers_drop_their_stored_oauth_tokens_and_disabled_ones_keep_t
     store.forget_unconfigured.return_value = 0
     previous = set_mcp_oauth_token_store(store)
     try:
-        mcp_router._apply_mcp_server_state_update(McpServerStateUpdateRequest(server_name="A", enabled=False))
-        mcp_router._apply_mcp_server_delete("B")
+        mcp_router._apply_mcp_server_state_update(McpServerStateUpdateRequest(server_name="A", enabled=False), policy=_policy())
+        mcp_router._apply_mcp_server_delete("B", policy=_policy())
     finally:
         set_mcp_oauth_token_store(previous)
 

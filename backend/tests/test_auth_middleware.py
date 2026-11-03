@@ -451,7 +451,12 @@ def test_internal_auth_owner_header_of_suspended_account_rejected(tmp_path):
     """(#3462 gap 3) IM-channel dispatch surface: the internal principal is
     synthesized from trusted headers without a users-row lookup, so the
     middleware itself rejects an owner-bound internal call whose account was
-    suspended — at the very next request, like every other surface."""
+    suspended — at the very next request, like every other surface.
+
+    HartMesh's disable model is identity-keyed (``disable_identity``), not
+    upstream's ``users.disabled`` column; the middleware asks
+    ``owner_is_refused``.
+    """
     import asyncio
     import json
 
@@ -462,6 +467,7 @@ def test_internal_auth_owner_header_of_suspended_account_rejected(tmp_path):
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from app.gateway.auth_middleware import AuthMiddleware
     from app.gateway.internal_auth import create_internal_auth_headers
+    from deerflow.config.auth_config import LOCAL_ACCOUNT_ISSUER
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
 
     async def _dispatch(owner_user_id: str):
@@ -486,7 +492,7 @@ def test_internal_auth_owner_header_of_suspended_account_rejected(tmp_path):
         await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path}/users.db", sqlite_dir=str(tmp_path))
         repo = SQLiteUserRepository(get_session_factory())
         owner = await repo.create_user(User(email="channel-owner@example.com", system_role="user"))
-        await repo.set_disabled(str(owner.id), True)
+        assert await repo.disable_identity(LOCAL_ACCOUNT_ISSUER, str(owner.id))
 
         import app.gateway.deps as deps_module
 
@@ -504,7 +510,7 @@ def test_internal_auth_owner_header_of_suspended_account_rejected(tmp_path):
             assert status_code == 200
 
             # Re-enabling restores the internal surface immediately.
-            await repo.set_disabled(str(owner.id), False)
+            await repo.enable_identity(LOCAL_ACCOUNT_ISSUER, str(owner.id))
             status_code, body = await _dispatch(str(owner.id))
             assert status_code == 200
         finally:

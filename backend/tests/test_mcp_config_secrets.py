@@ -1878,7 +1878,7 @@ async def test_skill_toggle_and_mcp_create_share_one_new_config(first_writer, mo
 
     async def _create_mcp_server() -> None:
         body = McpConfigUpdateRequest(mcp_servers={"added": McpServerConfigResponse(command="npx")})
-        await create_mcp_servers(_request_with_role("admin"), body)
+        await create_mcp_servers(_request_with_role("admin", approved_launches=[{"command": "npx"}]), body)
 
     def _toggle_skill() -> None:
         skills_router._write_extensions_skill_state(None, "demo-skill", False, rebuild_public_projection=False)
@@ -1901,7 +1901,11 @@ async def test_skill_toggle_and_mcp_create_share_one_new_config(first_writer, mo
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["bulk", "disable", "delete"])
 async def test_frozen_task_server_mutation_rejected_before_persistence(operation, monkeypatch, tmp_path):
-    """Frozen durable-task server edits must fail before any file mutation."""
+    """Frozen durable-task server edits must fail before any file mutation.
+
+    HartMesh gates local MCP management first; the launch is approved so the
+    frozen-task refusal is what answers.
+    """
     config_path = tmp_path / "extensions_config.json"
     original = {
         "mcpServers": {
@@ -1942,7 +1946,7 @@ async def test_frozen_task_server_mutation_rejected_before_persistence(operation
         with pytest.raises(HTTPException) as exc_info:
             if operation == "bulk":
                 await update_mcp_configuration(
-                    _request_with_role("admin"),
+                    _request_with_role("admin", approved_launches=[{"command": "npx"}]),
                     McpConfigUpdateRequest(
                         mcp_servers={
                             "tasks": McpServerConfigResponse(
@@ -1955,11 +1959,11 @@ async def test_frozen_task_server_mutation_rejected_before_persistence(operation
                 )
             elif operation == "disable":
                 await update_mcp_server_state(
-                    _request_with_role("admin"),
+                    _request_with_role("admin", approved_launches=[{"command": "npx"}]),
                     McpServerStateUpdateRequest(server_name="tasks", enabled=False),
                 )
             else:
-                await delete_mcp_server(_request_with_role("admin"), "tasks")
+                await delete_mcp_server(_request_with_role("admin", approved_launches=[{"command": "npx"}]), "tasks")
     finally:
         set_mcp_task_config_snapshot(None)
 

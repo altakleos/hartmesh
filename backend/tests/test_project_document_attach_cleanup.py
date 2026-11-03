@@ -11,18 +11,28 @@ call sits after the removal in the same ``finally``.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from fastapi import HTTPException
+from starlette.requests import Request
 
 from app.gateway.routers import project_documents as mod
 
 
-class _Request:
-    """Minimal request stand-in; the permission decorators honor this bypass."""
+class _Request(Request):
+    """Minimal request; the permission decorators honor this bypass.
+
+    HartMesh's ``storage_feature`` boundary requires a real host request; this
+    one is on the legacy path (no Storage Spaces), which runs the endpoint.
+    """
 
     _deerflow_test_bypass_auth = True
+
+    def __init__(self) -> None:
+        app = SimpleNamespace(state=SimpleNamespace(storage_spaces=None, storage_spaces_enabled=False))
+        super().__init__({"type": "http", "method": "POST", "path": "/", "headers": [], "query_string": b"", "app": app})
 
 
 class _StagedPath:

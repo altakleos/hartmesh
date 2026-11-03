@@ -672,7 +672,8 @@ class TestAgentsAPI:
             json=package,
         )
         assert imported.status_code == 201
-        assert imported.json() == {**payload, "name": "research-lead-copy", "knowledge_scope": None}
+        # HartMesh agent responses also carry the (here unset) work policy.
+        assert imported.json() == {**payload, "name": "research-lead-copy", "knowledge_scope": None, "work_policy": None}
 
     def test_agent_package_excludes_runtime_state_and_operator_github_binding(self, agent_client, tmp_path):
         assert agent_client.post("/api/agents", json={"name": "portable", "soul": "Portable soul"}).status_code == 201

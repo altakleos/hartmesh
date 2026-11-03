@@ -726,9 +726,19 @@ async def test_committed_response_failure_still_finishes_retired_pool(reconciler
     # write commits that exact revision, forcing a conservative full reset.
     _write_config(cfg, {"A": _stdio("cmd-A")}, interceptors=["changed.interceptor"])
 
+    from types import SimpleNamespace
+
+    from deerflow.config.app_config import AppConfig
+    from deerflow.runtime.customer_administration import capture_customer_administration_policy
+
+    # HartMesh resolves the customer-administration policy from the request;
+    # disabling a local server needs only delegated management.
+    policy = capture_customer_administration_policy(AppConfig.model_validate({"sandbox": {"use": "test"}, "customer_administration": {"local_mcp_management": True}}))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(customer_administration_policy=policy)))
+
     with pytest.raises(HTTPException) as exc_info:
         await mcp_router.update_mcp_server_state(
-            request=None,
+            request=request,
             body=McpServerStateUpdateRequest(server_name="A", enabled=False),
         )
 

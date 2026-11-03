@@ -232,7 +232,7 @@ USER_DATA_AREAS = ("uploads", "outputs", "workspace")
 SCHEDULE_FIELDS = ("id", "title", "prompt", "schedule_type", "schedule_spec", "timezone", "status", "context_mode", "assistant_id", "thread_id", "overlap_policy", "created_at", "updated_at", "next_run_at", "last_run_at")
 PROJECT_FIELDS = ("id", "name", "instructions", "presentation", "status", "created_at", "updated_at")
 DOCUMENT_FIELDS = ("id", "name", "sha256", "size_bytes", "source_thread_id", "source_kind", "source_name", "created_at", "updated_at")
-PREFERENCE_FIELDS = ("notification_enabled", "model_name", "mode", "reasoning_effort")
+PREFERENCE_FIELDS = ("notification_enabled", "model_name", "mode", "reasoning_effort", "locale")
 
 #: How long an export stays once every part has been downloaded, for one that did not arrive whole.
 REDOWNLOAD_SECONDS = 600

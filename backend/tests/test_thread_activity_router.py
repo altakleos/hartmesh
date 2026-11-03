@@ -210,12 +210,17 @@ async def test_memory_backend_reports_unavailable(tmp_path):
 def _feature_config():
     from types import SimpleNamespace
 
+    from deerflow.config.ui_config import UiConfig
+
     config = SimpleNamespace(
         agents_api=SimpleNamespace(enabled=False),
         tools=[],
         subagent_runtime=SimpleNamespace(max_running=3),
         knowledge_base=SimpleNamespace(enabled=False, scope_selection_enabled=False),
         scheduler=SimpleNamespace(enabled=False, tool_enabled=False, min_once_delay_seconds=60),
+        # HartMesh's workspace presentation and tenant bundle sections.
+        ui=UiConfig(),
+        tenant_bundle=SimpleNamespace(path=None),
     )
     config.get_tool_config = lambda _name: None
     return config

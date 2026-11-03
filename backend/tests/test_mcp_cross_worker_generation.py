@@ -171,7 +171,17 @@ _GATEWAY_WRITER_PROGRAM = textwrap.dedent(
     a_epoch_baseline = pool._bindings[("deployment", "A")].epoch
     b_epoch_baseline = pool._bindings[("deployment", "B")].epoch
 
-    mcp_router._apply_mcp_server_delete("A")
+    # HartMesh gates local MCP writes: management delegated, the launch approved.
+    from deerflow.config.app_config import AppConfig
+    from deerflow.runtime.customer_administration import capture_customer_administration_policy
+
+    policy = capture_customer_administration_policy(AppConfig.model_validate({
+        "sandbox": {"use": "test"},
+        "customer_administration": {"local_mcp_management": True},
+        "approved_local_mcp_definitions": [{"command": "npx"}],
+    }))
+
+    mcp_router._apply_mcp_server_delete("A", policy=policy)
     a_epoch_after_delete = pool._bindings[("deployment", "A")].epoch
 
     mcp_router._apply_mcp_servers_create(
@@ -179,7 +189,8 @@ _GATEWAY_WRITER_PROGRAM = textwrap.dedent(
             mcp_servers={
                 "A": McpServerConfigResponse(enabled=True, type="stdio", command="npx")
             }
-        )
+        ),
+        policy=policy,
     )
     a_epoch_after_readd = pool._bindings[("deployment", "A")].epoch
     b_epoch_after_readd = pool._bindings[("deployment", "B")].epoch

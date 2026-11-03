@@ -149,10 +149,13 @@ def test_mcp_discovery_failure_log_redacts_resolved_credentials(caplog):
 
     mock_client_instance = MagicMock()
     mock_client_instance.get_tools = AsyncMock(side_effect=get_tools_for_server)
+    # HartMesh selects the enabled servers before building their connections.
+    config = MagicMock(model_extra={})
+    config.get_enabled_mcp_servers.return_value = {"A": MagicMock()}
 
     with (
         patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance),
-        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=MagicMock(model_extra={})),
+        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=config),
         patch("deerflow.mcp.tools.build_servers_config", return_value={"A": {}}),
         patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
         patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),

@@ -3916,8 +3916,14 @@ def test_history_head_carries_goal_state_without_messages(monkeypatch, mode) -> 
         _record_met_goal(checkpointer, thread_id, record)
         met_history = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10}).json()
 
-    assert set_head == {"goal": goal_response.json()["goal"]}
-    assert met_history[0]["values"] == {"goal_outcome": record}
+    # HartMesh's thread state materializes an empty artifacts channel, which the
+    # head projects as [] (an empty list only clears stale UI state).
+    def without_empty_artifacts(values):
+        assert values.get("artifacts", []) == []
+        return {key: value for key, value in values.items() if key != "artifacts"}
+
+    assert without_empty_artifacts(set_head) == {"goal": goal_response.json()["goal"]}
+    assert without_empty_artifacts(met_history[0]["values"]) == {"goal_outcome": record}
     # Older entries stay title/thread_data only.
     assert len(met_history) > 1
     assert all(not {"goal", "goal_outcome"} & set(entry["values"]) for entry in met_history[1:])

@@ -79,6 +79,12 @@ def gateway(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     set_auth_config(AuthConfig(jwt_secret=_TEST_SECRET))
     asyncio.run(init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path}/gateway.db", sqlite_dir=str(tmp_path)))
+    # The rendered profile names Postgres; the test database is this SQLite file.
+    # Synchronous stores (agents, IM runtime config) follow the same database.
+    from deerflow.persistence.agents import sql as agents_sql
+
+    real_sync_sessionmaker = agents_sql.get_sync_sessionmaker
+    monkeypatch.setattr(agents_sql, "get_sync_sessionmaker", lambda _url: real_sync_sessionmaker(f"sqlite:///{tmp_path}/gateway.db"))
     deps._cached_local_provider = None
     deps._cached_repo = None
     _SETUP_STATUS_CACHE.clear()

@@ -42,6 +42,20 @@ def personal_client(tmp_path, monkeypatch):
         yield client
 
 
+def _approve_local_launches(client, *definitions):
+    """HartMesh admits a local (stdio) launch only when the provider approved it exactly.
+
+    The approval covers command, args, env and cwd, so a bundled connection's
+    credentials are part of it.
+    """
+    from deerflow.config.app_config import AppConfig
+    from deerflow.runtime.customer_administration import capture_customer_administration_policy
+
+    approved = [{key: definition[key] for key in ("command", "args", "env", "cwd") if key in definition} for definition in definitions]
+    startup = AppConfig.model_validate({"sandbox": {"use": "test"}, "customer_administration": {"local_mcp_management": True}, "approved_local_mcp_definitions": approved})
+    client.app.state.customer_administration_policy = capture_customer_administration_policy(startup)
+
+
 def create(client, user, *, name="github", token=None, role="admin"):
     return client.post(
         "/api/mcp/personal/config/servers",
@@ -308,10 +322,18 @@ def test_ordinary_users_install_and_manage_bundled_connections(personal_client, 
     platform = tmp_path / "deployment.json"
     platform.write_text(json.dumps({"mcpServers": {}}))
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(platform))
+    from deerflow.capabilities.business import connection_config
+
     user = {"test-user": "alice", "test-role": "user"}
     name = "my-" + provider
+    install = {"plugin_id": provider, "name": name, "scope": "user", "configuration": credentials}
+    # HartMesh: a local launch, bundled or not, needs the provider's exact approval.
+    refused = personal_client.post("/api/capabilities/installations", headers=user, json=install)
+    assert refused.status_code == 403, refused.text
+    assert read_user_mcp_config("alice")["mcpServers"] == {}
+    _approve_local_launches(personal_client, connection_config(provider, credentials))
     # The web UI installs every catalog connection with scope "user".
-    response = personal_client.post("/api/capabilities/installations", headers=user, json={"plugin_id": provider, "name": name, "scope": "user", "configuration": credentials})
+    response = personal_client.post("/api/capabilities/installations", headers=user, json=install)
     assert response.status_code == 200, response.text
     assert [item["name"] for item in response.json()["items"]] == [name]
     for secret in credentials.values():
@@ -338,6 +360,8 @@ def test_bundled_launcher_with_a_working_directory_requires_an_administrator(per
     from deerflow.capabilities.business import connection_config
 
     definition = {**connection_config("hubspot", {"access_token": "private-token"}), "cwd": "/srv"}
+    # Approved by the provider, so the remaining refusal is the administrator rule.
+    _approve_local_launches(personal_client, definition)
     user = {"test-user": "alice", "test-role": "user"}
     response = personal_client.post("/api/mcp/personal/config/servers", headers=user, json={"mcp_servers": {"crm": definition}})
     assert response.status_code == 403
