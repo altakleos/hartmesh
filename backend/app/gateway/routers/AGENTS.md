@@ -50,6 +50,8 @@ Workspace prewarm checks `sandbox:execute` before provider lookup/scheduling,
 using the shared request authorization helper off-loop. Denial returns 202
 with `scheduled: false, reason: forbidden`; thread ownership still applies.
 
+Upload, delete and shelf-attach 500s name the file, not the cause; `OSError` host paths stay in the log.
+
 Thread `owner_user_id` comes only from stored `user_id` across create/replay/race,
 GET/search/PATCH/move; checkpoint-only ownership stays unknown.
 GET's opt-in bool `X-DeerFlow-Require-Thread-Binding` requires `agent_conversations`:
