@@ -89,7 +89,7 @@ This identity survives the background timer boundary.
 
 `memory.mode: tool` registers the four memory tools.
 
-DeerMem debounces each `(thread_id, user_id, agent_name)` on monotonic deadlines; other conversations cannot reset it. Same-key coalescing keeps the first arrival; `backend_config.max_wait_seconds` (default 300) caps deferral. One timer, one serial consumer; flushes and emergency snapshots are eligible at once. Tests: `tests/test_memory_queue_deadlines.py` (fake clock).
+DeerMem debounces each `(thread_id, user_id, agent_name)` on monotonic deadlines; other conversations cannot reset it. Same-key coalescing keeps the first arrival; `backend_config.max_wait_seconds` (default 300) caps deferral. One timer, one serial consumer; flushes and emergency snapshots are eligible at once. Emergency snapshots stay separate in arrival order even for one key (successive compactions remove disjoint partitions) and bypass `queue_max_depth`, warning at 32 pending per key and each doubling. Tests: `tests/test_memory_emergency_backlog.py`, `tests/test_memory_emergency_snapshots.py`. Tests: `tests/test_memory_queue_deadlines.py` (fake clock).
 The model chooses when to search or change facts.
 Tool mode still uses `MemoryMiddleware` for passive writes on supported remote backends.
 
