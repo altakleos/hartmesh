@@ -226,6 +226,10 @@ async def test_terminal_commit_heartbeat_distinguishes_owner_outcome_from_takeov
 @pytest.mark.parametrize("path", ["ack_before_renewal", "ack_during_renewal"])
 async def test_terminal_attempt_ack_arbitrates_rejected_renewal(database_runtime, monkeypatch, status, path):
     store, _ = database_runtime
+    # Upstream's ACK protocol path (update_status / finalize_if_not_cancelled). HartMesh's
+    # SQL stores settle terminals through finalize_owned (runtime/runs/terminal.py) and
+    # leave a live worker to settle cancellation; this test pins upstream's path.
+    monkeypatch.setattr(store, "supports_terminal_recovery", False)
     manager = RunManager(store=store, worker_id="owner", run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True))
     record = await manager.create_or_reject("result", user_id="alice")
     record.scheduled_goal_cleanup_pending = True
@@ -275,6 +279,10 @@ async def test_terminal_attempt_ack_arbitrates_rejected_renewal(database_runtime
 @pytest.mark.parametrize("status", ["success", "error"])
 async def test_delayed_terminal_ack_preserves_worker_hook_and_stream_end(database_runtime, monkeypatch, status):
     store, checkpointer = database_runtime
+    # Upstream's ACK protocol path (update_status / finalize_if_not_cancelled). HartMesh's
+    # SQL stores settle terminals through finalize_owned (runtime/runs/terminal.py) and
+    # leave a live worker to settle cancellation; this test pins upstream's path.
+    monkeypatch.setattr(store, "supports_terminal_recovery", False)
     manager = RunManager(store=store, worker_id="owner", run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True))
     metadata = {"scheduled_task_id": "task", "scheduled_task_run_id": "occurrence", "scheduled_goal_objective": "Report"}
     record = await manager.create_or_reject("result", user_id="alice", metadata=metadata)

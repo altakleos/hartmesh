@@ -32,6 +32,10 @@ def anyio_backend():
 )
 @pytest.mark.parametrize("with_event_store", [True, False])
 async def test_real_worker_atomic_replacement_retains_finalization_authority(store, action, with_event_store, host_finalization_cancel, stale_renewal_race):
+    # Upstream's ACK protocol path (update_status / finalize_if_not_cancelled). HartMesh's
+    # SQL stores settle terminals through finalize_owned (runtime/runs/terminal.py) and
+    # leave a live worker to settle cancellation; this test pins upstream's path.
+    store.supports_terminal_recovery = False
     manager = RunManager(store=store, worker_id="owner", run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=10, grace_seconds=0))
     record = await manager.create_or_reject("thread", user_id="review")
     started, rollback_entered, release_rollback = (asyncio.Event() for _ in range(3))

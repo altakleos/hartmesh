@@ -392,6 +392,10 @@ async def test_delayed_atomic_interrupted_ack_cannot_restart_acknowledged_error(
 async def test_direct_cancel_keeps_terminal_confirmation_behind_rollback(store, action):
     from deerflow.runtime.runs.manager import CancelOutcome
 
+    # Upstream's ACK protocol path (update_status / finalize_if_not_cancelled). HartMesh's
+    # SQL stores settle terminals through finalize_owned (runtime/runs/terminal.py) and
+    # leave a live worker to settle cancellation; this test pins upstream's path.
+    store.supports_terminal_recovery = False
     manager = manager_for(store)
     record = await manager.create_or_reject("thread", user_id="review")
     await manager.try_start(record.run_id)
