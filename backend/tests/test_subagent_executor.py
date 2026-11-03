@@ -6944,7 +6944,11 @@ async def test_instance_child_receives_host_capability_and_discloses_inherited_f
 
     provider = InstanceSandboxProvider(bound, SimpleNamespace(id="qualified-native"))
     graph = SimpleNamespace(astream=stream)
-    monkeypatch.setattr(executor, "_create_agent", lambda *args, **kwargs: graph)
+    async def create_agent(*args, **kwargs):
+        # ``_create_agent`` is async upstream (declared-tool authorization).
+        return graph
+
+    monkeypatch.setattr(executor, "_create_agent", create_agent)
     with execution_scope(bound) as environment:
         environment.provider = provider
         result = await executor._aexecute("Do bounded Home work")
@@ -7014,7 +7018,7 @@ def test_bound_child_real_middleware_chain_activates_only_public_packages(classe
     executor = classes["SubagentExecutor"](config=base_config, tools=[], app_config=app_config, user_id="requester", agent_execution=bound)
     executor._available_skill_names = {"sample"}
     with execution_scope(bound):
-        executor._create_agent()
+        asyncio.run(executor._create_agent())
         activation = next(m for m in captured["chain"] if isinstance(m, SkillActivationMiddleware))
         load_order = next(m for m in captured["chain"] if isinstance(m, SkillLoadOrderMiddleware))
         errors = next(m for m in captured["chain"] if isinstance(m, shared_chain.ToolErrorHandlingMiddleware))

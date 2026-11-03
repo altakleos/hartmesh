@@ -2196,6 +2196,8 @@ class RunManager:
                     event_type="run.delivery",
                     category="outputs",
                     content={"presented": 0, "paths": [], "by_tool": {}},
+                    # Recovery runs outside the owner's request: name the owner.
+                    user_id=record.user_id,
                 )
             )
             return True

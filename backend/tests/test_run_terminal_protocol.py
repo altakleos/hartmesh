@@ -232,9 +232,21 @@ async def test_graph_success_before_failed_artifact_delivery_has_error_terminal(
     confirmed_terminal(await terminal_events(runtime, run.record), run.record, "error")
 
 
+def _use_upstream_ack_protocol(runtime, monkeypatch):
+    """Run this test on upstream's ACK path (update_status / finalize_if_not_cancelled).
+
+    HartMesh's SQL stores commit terminals through their finalize_owned CAS
+    (runtime/runs/terminal.py), which confirms an attributable row by reading
+    it back and bridges into the upstream ACK. Upstream's protocol still serves
+    stores without terminal recovery; these tests pin that path.
+    """
+    monkeypatch.setattr(runtime.runs, "supports_terminal_recovery", False)
+
+
 @pytest.mark.asyncio
 async def test_peer_takeover_rejects_old_owner_and_healthy_owner_publishes(runtime, monkeypatch):
     """Catches publication on rejected CAS; healthy control prevents vacuity."""
+    _use_upstream_ack_protocol(runtime, monkeypatch)
     entered, release = asyncio.Event(), asyncio.Event()
     original = runtime.runs.finalize_if_not_cancelled
 
@@ -271,6 +283,7 @@ async def test_peer_takeover_rejects_old_owner_and_healthy_owner_publishes(runti
 @pytest.mark.asyncio
 async def test_rollback_intermediate_ack_waits_for_restoration_and_final_error(runtime, monkeypatch):
     """Catches interrupted ACK being published while rollback is unfinished."""
+    _use_upstream_ack_protocol(runtime, monkeypatch)
     executing, restoring, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
     saver = InMemorySaver()
     restored = []
@@ -596,6 +609,7 @@ async def test_unconfirmed_terminal_does_not_seal_or_block_stream_end(runtime, m
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ack", [False, None])
 async def test_matching_terminal_row_without_commit_ack_cannot_authorize_event(runtime, monkeypatch, ack):
+    _use_upstream_ack_protocol(runtime, monkeypatch)
     original = runtime.runs.update_status
 
     async def lose_terminal_ack(run_id, status, **kwargs):
