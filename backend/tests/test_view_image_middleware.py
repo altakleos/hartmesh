@@ -22,6 +22,7 @@ Covered behavior:
 """
 
 import base64
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -33,6 +34,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 
+import deerflow.sandbox.tools  # noqa: F401  # Binds the real gate before a test here patches it.
 from deerflow.agents.middlewares.view_image_middleware import (
     _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
     ViewImageMiddleware,
@@ -857,39 +859,71 @@ def test_managed_upload_reaches_the_model_past_a_parked_sandbox(tmp_path, monkey
         assert _image_urls(ViewImageMiddleware()._inject(request)) == [expected]
 
 
-def _swap_for_another_space(name: Path, tmp_path: Path, content: bytes) -> None:
+_SWAP_TARGETS = ["another-space", "another-conversation"]
+
+
+def _swap_name(name: Path, tmp_path: Path, target: str) -> None:
     """What a sandbox process can do to a name once the Gateway has validated it."""
-    theirs = tmp_path / "another-space" / "theirs.png"
-    theirs.parent.mkdir(exist_ok=True)
-    theirs.write_bytes(content)
-    name.unlink()
-    name.symlink_to(theirs)
+    if target == "another-space":
+        theirs = tmp_path / "another-space" / "theirs.png"
+    else:
+        conversations = next(parent for parent in name.parents if parent.name == "conversations")
+        theirs = conversations / "other-thread" / "user-data" / "uploads" / "theirs.png"
+    theirs.parent.mkdir(parents=True, exist_ok=True)
+    theirs.write_bytes(_PIXEL)
+    directory = name.is_dir()
+    if directory:
+        name.rename(name.with_name(name.name + "-moved"))
+    else:
+        name.unlink()
+    destination = theirs.parent if directory else theirs
+    # Confinement alone refuses the absolute link and follows the relative one.
+    name.symlink_to(destination if target == "another-space" else os.path.relpath(destination, name.parent))
 
 
-def test_managed_tool_read_is_not_redirected_by_a_swap_after_validation(tmp_path, monkeypatch):
+def _view_with_swap(request, paths, monkeypatch, image_path, swap):
     from deerflow.config.paths import paths_scope
     from deerflow.sandbox import tools as sandbox_tools
     from deerflow.tools.builtins.view_image_tool import _view_image_authorized
 
-    request, paths, _ = _managed_view_request(tmp_path, monkeypatch)
-    thread_data = request.state["thread_data"]
-    name = Path(thread_data["uploads_path"]) / "stone.png"
     validate = sandbox_tools.resolve_and_validate_user_data_path
 
     def validate_then_swap(path, data):
         resolved = validate(path, data)
-        _swap_for_another_space(name, tmp_path, _PIXEL)
+        swap()
         return resolved
 
     monkeypatch.setattr(sandbox_tools, "resolve_and_validate_user_data_path", validate_then_swap)
+    runtime = SimpleNamespace(state={"thread_data": request.state["thread_data"]}, context=request.runtime.context)
     with paths_scope(paths):
-        result = _view_image_authorized(SimpleNamespace(state={"thread_data": thread_data}, context=request.runtime.context), _UPLOAD, "call-image")
+        return _view_image_authorized(runtime, image_path, "call-image")
+
+
+@pytest.mark.parametrize("target", _SWAP_TARGETS)
+def test_managed_tool_read_is_not_redirected_by_a_swap_after_validation(tmp_path, monkeypatch, target):
+    request, paths, _ = _managed_view_request(tmp_path, monkeypatch)
+    name = Path(request.state["thread_data"]["uploads_path"]) / "stone.png"
+
+    result = _view_with_swap(request, paths, monkeypatch, _UPLOAD, lambda: _swap_name(name, tmp_path, target))
 
     assert "viewed_images" not in result.update
     assert result.update["messages"][0].content.startswith("Error reading image file")
 
 
-def test_managed_model_read_is_not_redirected_when_an_old_entry_has_no_digest(tmp_path, monkeypatch):
+def test_managed_tool_read_is_not_redirected_by_a_swapped_parent_directory(tmp_path, monkeypatch):
+    request, paths, _ = _managed_view_request(tmp_path, monkeypatch)
+    album = Path(request.state["thread_data"]["uploads_path"]) / "album"
+    album.mkdir()
+    (album / "theirs.png").write_bytes(_PIXEL)
+
+    result = _view_with_swap(request, paths, monkeypatch, "/mnt/user-data/uploads/album/theirs.png", lambda: _swap_name(album, tmp_path, "another-conversation"))
+
+    assert "viewed_images" not in result.update
+    assert result.update["messages"][0].content.startswith("Error reading image file")
+
+
+@pytest.mark.parametrize("target", _SWAP_TARGETS)
+def test_managed_model_read_is_not_redirected_when_an_old_entry_has_no_digest(tmp_path, monkeypatch, target):
     """A digest catches a later swap, but a checkpoint from before digests has none."""
     from deerflow.config.paths import paths_scope
 
@@ -900,10 +934,39 @@ def test_managed_model_read_is_not_redirected_when_an_old_entry_has_no_digest(tm
 
     def match_then_swap(_cls, *args):
         allowed = matches(*args)
-        _swap_for_another_space(Path(entry["actual_path"]), tmp_path, _PIXEL)
+        _swap_name(Path(entry["actual_path"]), tmp_path, target)
         return allowed
 
     monkeypatch.setattr(ViewImageMiddleware, "_host_path_matches_request", classmethod(match_then_swap))
+    with paths_scope(paths):
+        assert _image_urls(ViewImageMiddleware()._inject(request)) == []
+
+
+def test_a_link_the_tool_already_resolved_still_reaches_the_model(tmp_path, monkeypatch):
+    """Refusing links at read time costs nothing: the tool records the resolved path."""
+    from deerflow.config.paths import paths_scope
+    from deerflow.tools.builtins.view_image_tool import _view_image_authorized
+
+    request, paths, expected = _managed_view_request(tmp_path, monkeypatch)
+    thread_data = request.state["thread_data"]
+    (Path(thread_data["uploads_path"]) / "link.png").symlink_to("stone.png")
+    runtime = SimpleNamespace(state={"thread_data": thread_data}, context=request.runtime.context)
+    with paths_scope(paths):
+        result = _view_image_authorized(runtime, "/mnt/user-data/uploads/link.png", "call-image")
+        request.state["viewed_images"] = result.update["viewed_images"]
+        request.messages[0].tool_calls[0]["args"]["image_path"] = "/mnt/user-data/uploads/link.png"
+        assert _image_urls(ViewImageMiddleware()._inject(request)) == [expected]
+
+
+def test_a_viewed_image_that_became_a_link_loop_does_not_break_the_model_call(tmp_path, monkeypatch):
+    """Path.resolve raises RuntimeError here, and every viewed entry is checked on each call."""
+    from deerflow.config.paths import paths_scope
+
+    request, paths, _ = _managed_view_request(tmp_path, monkeypatch)
+    name = Path(request.state["viewed_images"][_UPLOAD]["actual_path"])
+    name.unlink()
+    name.symlink_to(name.name)
+
     with paths_scope(paths):
         assert _image_urls(ViewImageMiddleware()._inject(request)) == []
 

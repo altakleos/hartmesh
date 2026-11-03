@@ -236,17 +236,19 @@ class ChatStoragePaths(Paths):
         directory(thread + "/acp-workspace")
 
     def read_user_file(self, path, *, max_bytes):
-        """Read a host path through the pinned personal Space, never by its mutable name.
+        """Read a resolved host path through the pinned personal Space.
 
-        A sandbox process can replace a component after a path was validated. Every
-        refusal is an OSError, so a caller treats it as any other failed read.
+        A sandbox process can replace a component after a path was validated, and
+        confinement alone still follows a relative link to another conversation. The
+        path was resolved, so any link met here is such a swap, and the read refuses it.
+        Every refusal is an OSError, so a caller treats it as any other failed read.
         """
         if self._chat_user is None:
             raise PermissionError("This conversation has no admitted personal files")
         try:
             relative = Path(path).relative_to(self._chat_user.data_path.resolve())
             with self._chat_user.filesystem() as filesystem:
-                return filesystem.read_bytes(str(relative), max_bytes=max_bytes)
+                return filesystem.read_bytes(str(relative), max_bytes=max_bytes, follow_symlinks=False)
         except (ValueError, StorageUnavailable, SpaceConflict) as exc:
             raise OSError(f"{type(exc).__name__}: {exc}") from exc
 

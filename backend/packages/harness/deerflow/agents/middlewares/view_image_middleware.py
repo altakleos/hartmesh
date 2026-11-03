@@ -439,7 +439,9 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             else:
                 expected_path = get_paths().resolve_virtual_path(thread_id, image_path, user_id=user_id)
             return Path(actual_path).resolve() == expected_path
-        except (OSError, PermissionError, TypeError, ValueError):
+        except (OSError, PermissionError, TypeError, ValueError, RuntimeError):
+            # Path.resolve raises RuntimeError on a symlink loop. Every viewed entry
+            # passes through here, so one bad file must not fail the whole model call.
             return False
 
     def _image_injection_plan(self, request: ModelRequest) -> tuple[list[AnyMessage], bool, bool]:
