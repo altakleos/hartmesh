@@ -280,3 +280,13 @@ the parent-shell kill, or Bash can execute the rest of the cancelled command.
 replies and failed session cleanup prevent Work completion confirmation even when
 socket close returns. `requires_container_recycle` also covers pending/ambiguous
 session creation. Neither flag grants permission to retire a native storage writer.
+
+## Read failure contract
+`read_file` returns content or an ``Error: ...`` string, never raises. The
+server reports missing files as an error envelope with ``data: {}``, which the
+SDK cannot parse into ``FileReadResult``; the resulting ``ValidationError``
+becomes ``Error: file not found or unreadable: <path>`` logged at debug
+(missing files are expected on ReadBeforeWrite probes of new files), never the
+raw pydantic text. Other exceptions keep the error log.
+Regressions: `test_aio_sandbox.py`.
+
