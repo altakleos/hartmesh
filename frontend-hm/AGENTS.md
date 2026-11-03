@@ -155,6 +155,9 @@ Rstest has node and happy-dom projects in `rstest.config.ts`. Pure logic uses
 `*.test.ts(x)`; React hooks/components use `*.dom.test.ts(x)`. Keep effect,
 cleanup and store-order tests under real React rather than mocking React.
 Only DOM tests pay the document environment's higher runtime cost.
+Content/state DOM suites may mock decorative `FlipDisplay` with
+`tests/unit/helpers/flip-display.tsx` (keeps children, classes and keyed
+remounts): Happy DOM 21 rejects a cancelled animation's `finished` promise.
 
 Use task-specific disk-backed `TMPDIR`, `TMP` and `TEMP` for suites. Set
 `HARTMESH_TEST_OUTPUT` to a directory there when using Rstest's
