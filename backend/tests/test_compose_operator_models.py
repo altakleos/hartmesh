@@ -132,7 +132,7 @@ def test_the_key_is_optional_and_its_absence_renders_the_bundled_catalogue(rende
     """No custom source: provider-key discovery, identities and order as before."""
     keys = {"OPENAI_API_KEY": "secret", "ANTHROPIC_API_KEY": "secret", "TAVILY_API_KEY": "secret"}
     document = _render(render_config, catalog, _base_environ(**keys))
-    assert [model["name"] for model in document["models"]] == ["gpt-4", "gpt-5-responses", "claude-sonnet-4"]
+    assert [model["name"] for model in document["models"]] == ["gpt-4", "gpt-5-responses", "claude-sonnet-5-5"]
     # An empty value is the same as an unset one, so a commented-out or blanked
     # key in an existing .env is still "no custom source" rather than a refusal.
     blank = _render(render_config, catalog, _base_environ(**keys, HARTMESH_MODELS_FILE="   "))

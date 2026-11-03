@@ -154,6 +154,50 @@ describe("uploads api", () => {
     expect(error.message).toBe("Upload failed");
   });
 
+  test("fails when the gateway stored none of the files", async () => {
+    const error = await uploadError(
+      jsonResponse(200, {
+        success: false,
+        files: [],
+        message: "Successfully uploaded 0 file(s); skipped 1 unsafe file(s)",
+        skipped_files: ["../evil.txt"],
+      }),
+    );
+
+    expect(error.message).toBe(
+      "Upload incomplete: Successfully uploaded 0 file(s); skipped 1 unsafe file(s)",
+    );
+  });
+
+  test("tolerates a missing message on a failed upload", async () => {
+    const error = await uploadError(
+      jsonResponse(200, { success: false, files: [], skipped_files: ["x"] }),
+    );
+
+    expect(error.message).toBe("Upload failed");
+  });
+
+  test("returns a partial upload so the caller can send what was stored", async () => {
+    const body = {
+      success: false,
+      files: [
+        {
+          filename: "ok.txt",
+          size: 2,
+          virtual_path: "/mnt/user-data/uploads/ok.txt",
+        },
+      ],
+      message: "Successfully uploaded 1 file(s); skipped 1 unsafe file(s)",
+      skipped_files: ["../evil.txt"],
+    };
+    mockedFetch.mockResolvedValueOnce(jsonResponse(200, body));
+
+    await expect(uploadFiles("thread-1", [])).resolves.toMatchObject({
+      files: body.files,
+      skipped_files: ["../evil.txt"],
+    });
+  });
+
   test("encodes uploaded filenames in delete request paths", async () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(200, {

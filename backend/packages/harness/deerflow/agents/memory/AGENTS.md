@@ -13,6 +13,9 @@ This directory owns memory capture, storage, retrieval, prompt injection, and mo
 - `manager.py` defines the backend-neutral `MemoryManager` contract.
 - `agents/middlewares/memory_middleware.py` queues filtered conversations for passive capture.
 - `summarization_hook.py` connects memory work to the summarization lifecycle.
+  Async compaction runs it in a worker thread: `add_nowait` is sync HTTP for some
+  backends, and instance memory validates its execution on the owner loop
+  (`tests/blocking_io/test_summarization_memory_flush.py`).
 - `tools.py` provides `memory_search`, `memory_add`, `memory_update`, and `memory_delete`.
 - `backends/deermem/` contains the default local backend.
 - `backends/mem0/`, `backends/openviking/`, and `backends/honcho/` contain optional adapters.
@@ -88,6 +91,8 @@ It captures `user_id` when it enqueues work.
 This identity survives the background timer boundary.
 
 `memory.mode: tool` registers the four memory tools.
+
+DeerMem debounces each `(thread_id, user_id, agent_name)` on monotonic deadlines; other conversations cannot reset it. Same-key coalescing keeps the first arrival; `backend_config.max_wait_seconds` (default 300) caps deferral. One timer, one serial consumer; flushes and emergency snapshots are eligible at once. Emergency snapshots stay separate in arrival order even for one key (successive compactions remove disjoint partitions) and bypass `queue_max_depth`, warning at 32 pending per key and each doubling. Tests: `tests/test_memory_emergency_backlog.py`, `tests/test_memory_emergency_snapshots.py`. Tests: `tests/test_memory_queue_deadlines.py` (fake clock).
 The model chooses when to search or change facts.
 Tool mode still uses `MemoryMiddleware` for passive writes on supported remote backends.
 

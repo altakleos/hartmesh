@@ -83,6 +83,12 @@ MAX_CHANNEL_AGENT_DESCRIPTION_CHARS = 120
 # limit via `subagents.max_turns` (see SubagentExecutor). Do not conflate this
 # 100 with the general-purpose subagent's max_turns.
 DEFAULT_RUN_CONFIG: dict[str, Any] = {"recursion_limit": 100}
+# Managed (host-prepared) turns, such as managed Telegram bots, get the same
+# step budget as a web chat (frontend-hm sends 1000) and as scheduled runs
+# (scheduler.recursion_limit), so a multi-step request from a phone is not
+# cut short at 100 super-steps. A configured session value still overrides it,
+# and the Gateway clamps every run to max_recursion_limit.
+EXECUTION_RUN_CONFIG: dict[str, Any] = {"recursion_limit": 1000}
 DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "thinking_enabled": True,
     "is_plan_mode": False,
@@ -2674,7 +2680,7 @@ class ChannelManager:
         channel, user = self._resolve_session_layer(msg)
         constructor_target = {"assistant_id": self._assistant_id} if self._assistant_id != DEFAULT_ASSISTANT_ID else {}
         _validate_execution_carriers(execution, constructor_target, self._default_session, channel, user, msg.metadata, extra_context)
-        config = _merge_dicts(DEFAULT_RUN_CONFIG, self._default_session.get("config"), channel.get("config"), user.get("config"))
+        config = _merge_dicts(EXECUTION_RUN_CONFIG, self._default_session.get("config"), channel.get("config"), user.get("config"))
         config["configurable"] = _as_dict(config.get("configurable")) | {"checkpoint_ns": "", "thread_id": execution.thread_id}
         if isinstance(config.get("context"), Mapping):
             config["context"] = dict(config["context"])

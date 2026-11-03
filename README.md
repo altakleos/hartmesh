@@ -418,6 +418,8 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 
 ### Configuration
 
+Application SQL JSON writes normalize non-finite floats (`NaN`, `Infinity`, `-Infinity`) to `null` on SQLite and PostgreSQL, including DB-backed agent definitions. Existing rows are not rewritten.
+
 Operators can extend lead-agent, subagent, and DeerMem extraction prompts with
 literal prepend/append configuration without editing source templates. See
 [prompt overlays](backend/docs/CONFIGURATION.md#prompt-overlays).
@@ -564,6 +566,10 @@ It is disabled by default; see the linked guide to enable it.
    OpenRouter and similar OpenAI-compatible gateways should be configured with `langchain_openai:ChatOpenAI` plus `base_url`. If you prefer a provider-specific environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
 
    To route OpenAI models through `/v1/responses`, keep using `langchain_openai:ChatOpenAI` and set `use_responses_api: true` with `output_version: responses/v1`.
+
+   The lead agent also recognizes Responses output-token caps (`status: incomplete` with `incomplete_details.reason: max_output_tokens`), including streaming responses. It suppresses tool execution, removes the suppressed calls from later model requests, and preserves text and reasoning. A capped tool-call response includes a visible notice; other incomplete reasons retain their existing handling.
+
+   When thinking is disabled on a legacy profile, blank `extra_body`, `thinking`, and nested `extra_body.thinking` keys in a `when_thinking_enabled` template are treated as absent during dialect inference. When thinking is enabled, template values are forwarded as configured.
 
    Models whose provider contract differs from DeerFlow's generic thinking/effort assumptions can declare a per-model mapping-valued `reasoning:` block (thinking `unsupported`/`optional`/`required`, the accepted effort values with aliases and a default, the payload dialect, and the reasoning-history requirement). The setup wizard's Z.AI GLM-5.3-Flash profile uses it: thinking stays on for every foreground and background call, and the effort selector offers the model's own `low`/`high`/`max` levels. Ollama's existing boolean `reasoning: true` remains a native provider setting and is forwarded to ChatOllama. When migrating a profile to a custom effort `path`, remove any old `reasoning_effort` setting from the profile and thinking templates; configuration validation rejects the leftover key. The chat UI drops a remembered provider-specific effort when switching to a legacy model that does not advertise it. Profiles without the block keep their existing provider behavior. See `config.example.yaml` for the shape and the equivalent manual configuration.
 
@@ -979,10 +985,12 @@ A temporary connection or session-check failure preserves unsaved workspace edit
 
 Local password changes invalidate prior browser sessions using an atomic database version increment. If credentials change during a password request, it returns a conflict and asks the user to sign in again. Login hash upgrades preserve concurrent account changes and session revocations.
 
+OIDC/SSO authorization endpoints may include provider query parameters such as `?prompt=login`. The sign-in redirect preserves those parameters when adding the login request, including for configured `authorization_endpoint` overrides.
+
 DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser-facing scheme and origin behind a proxy. The bundled nginx sets `X-Forwarded-Proto`, but preserves an upstream HTTPS value and does not overwrite every forwarded header. Configure the outer trusted proxy to replace or strip client-supplied forwarding headers before traffic reaches DeerFlow.
 
 > [!IMPORTANT]
-> The Gateway still owns active run tasks in process, so production defaults to a single Gateway worker (`GATEWAY_WORKERS=1`). Multi-worker deployments require Postgres, the Redis stream bridge (`stream_bridge.type: redis`), `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; process-local memory/JSONL event stores cannot enforce singleton delivery receipts across workers. The bridge shares SSE delivery and bounded `Last-Event-ID` replay across workers. When a valid reconnect cursor has been trimmed, or a subscriber that already established an empty-stream wait falls behind before its first delivery, Memory and Redis emit a machine-readable SSE `gap` event instead of silently returning a partial replay; the Web UI reloads durable thread/event state and resumes from the retained tail. Lease reconciliation marks runs from dead workers as errors, persists their delivery receipts, publishes the terminal stream marker, schedules retained-stream cleanup, and updates the affected thread status. SSE, `/wait`, and internal stream consumers use `stream_bridge.heartbeat_interval_seconds` (default `15`) for idle liveness checks; changing it requires a Gateway restart. Malformed Redis reconnect IDs live-tail new events instead of replaying the retained buffer, and the rolling retained-buffer TTL (`stream_ttl_seconds`) remains a cleanup safety net rather than a run timeout. IM channel state and other process-local services still need their own multi-worker coordination.
+> The Gateway still owns active run tasks in process, so production defaults to a single Gateway worker (`GATEWAY_WORKERS=1`). Multi-worker deployments require Postgres, the Redis stream bridge (`stream_bridge.type: redis`), `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; process-local memory/JSONL event stores cannot enforce singleton delivery receipts across workers. The bridge shares SSE delivery and bounded `Last-Event-ID` replay across workers. When a valid reconnect cursor has been trimmed, or a subscriber that already established an empty-stream wait falls behind before its first delivery, Memory and Redis emit a machine-readable SSE `gap` event instead of silently returning a partial replay; the Web UI reloads durable thread/event state and resumes from the retained tail. Lease reconciliation marks runs from dead workers as errors, persists their delivery receipts, publishes the terminal stream marker, schedules retained-stream cleanup, and updates the affected thread status. SSE, `/wait`, and internal stream consumers use `stream_bridge.heartbeat_interval_seconds` (default `15`) for idle liveness checks; changing it requires a Gateway restart. An already-observed Redis stream removed during replay signals a `gap`, so slow subscribers reload durable state instead of heartbeating forever after cleanup. Malformed Redis reconnect IDs live-tail new events instead of replaying the retained buffer, and the rolling retained-buffer TTL (`stream_ttl_seconds`) remains a cleanup safety net rather than a run timeout. IM channel state and other process-local services still need their own multi-worker coordination.
 >
 > In single-process JSONL deployments, cancelling an admitted event-store mutation waits for its background file I/O, rollback, and bookkeeping to settle before releasing the thread write lock. This prevents an older cancelled write from recreating deleted records or rolling back a later successful write. Cancellation can therefore wait on slow storage; it does not stop an in-flight filesystem operation. Callers still waiting to acquire the lock can cancel without starting a mutation. A batch spanning multiple threads drains its current thread group before propagating cancellation; subsequent thread groups do not start.
 >
@@ -1277,6 +1285,7 @@ unchanged. Restart the
 Gateway after promotion or upgrade to refresh every worker's catalog.
 
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
+Missing, malformed, or out-of-range token response `expires_in` values use a one-hour default lifetime. This includes lifetimes that cannot be added to the current time without overflowing the expiry timestamp.
 Durable HTTP/SSE task status and cancellation calls select configured `user_auth` credentials using the persisted task owner, including after restart; per-request secrets are not retained for background calls. If a request-scoped credential overrides submit authentication, both credentials must authorize access to the same remote task.
 For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`; durable background-task calls honor the same setting for HTTP/SSE servers as well.
 For stdio file outputs, a bare filename is linked to a uniquely matching file created or changed by that call. Filenames embedded in unrelated paths, including Windows backslash paths, are left intact.
@@ -1296,6 +1305,7 @@ tool steps while the server creates the conversation and confirms the message.
 Capability Center groups plugins by office collaboration, documents and knowledge, search and research, business and data, and development and operations. The directory includes setup references alongside existing MCP configurations and Lark. Recommended integrations and built-in support do not imply an installed or verified connection; the Installed filter shows configured MCP entries and installed Lark only.
 
 Personal MCP connections configured in the web interface are persisted per user.
+Unexpected failures when changing deployment or personal MCP configuration return fixed error messages; exception details stay in server logs.
 Deployment tools remain shared. Administrators can add, edit, enable, disable and delete shared MCP servers under **Platform provided**; ordinary users see their status without controls. Personal plugin switches affect only the signed-in user's connections. See [connection ownership](docs/capability-center.md#personal-and-deployment-mcp-configuration).
 
 For plugin manifests, adapter registration, and Agent capability selection, see
@@ -1326,6 +1336,12 @@ OpenViking memory backend; it does not replace automatic turn capture or recall.
 [OpenViking MCP tools configuration](backend/docs/MCP_SERVER.md#openviking-mcp-tools).
 
 The Gateway can adapt an MCP server's ordinary `submit` / `status` / `cancel` tools into durable background tasks. The Agent sees only the configured submit tool and a DeerFlow-local task ID; remote IDs are persisted before the submit call returns, while status and cancel stay internal to the runtime. Polling uses cross-worker leases, exponential retry backoff, scoped MCP sessions, bounded result storage, and restart recovery. A status-tool `isError` is retained as a bounded diagnostic and retried; servers report a permanent remote-task outcome through a normal structured result with `status: "failed"`. Remote poll hints are finite positive numbers capped at 24 hours, artifact-reference JSON is limited to 64 KiB, and task/server identifiers are validated against their durable SQL column limits before persistence. Input-required and terminal updates wake the current chat through idempotent Agent runs, while `list_background_tasks` and `cancel_background_task` let the Agent manage tasks without asking users for remote handles. Current-thread tasks are available through `GET /api/threads/{thread_id}/mcp-tasks`, its detail endpoint, and `POST /api/threads/{thread_id}/mcp-tasks/{task_id}/cancel`; when the task runtime actually starts, the Web UI exposes the same safe local view from the chat header with live status refresh, cancellation, and on-demand result, artifact, input-request, status-error, and cancellation-retry details. Default-disabled and memory-backend deployments hide that UI and do not poll the task endpoints. A failed remote cancellation remains queued with backoff, and its latest bounded error and attempt count stay visible in the expanded task card. Enable `mcp_tasks` in `config.yaml`, configure `task_toolsets` with exact raw tool names in `extensions_config.json`, and use a SQL database backend (`sqlite` or `postgres`). Task-enabled server connection, authentication, interceptor, timeout, or binding changes require a Gateway restart so Agent tool discovery and background calls cannot use different configuration versions. `input_required` is notification-only for now: DeerFlow can display the request but cannot yet submit the user's answer back to the remote task.
+
+For deployment-level HTTP/SSE servers with `task_toolsets`, discovery, ordinary
+tools, and background task calls share OAuth token state within one Gateway
+process, including across tool-cache resets. Rotated refresh tokens stay in
+memory; they are not written back to configuration or shared across processes.
+After a restart, the configured refresh token must still be valid.
 
 Notification launch and failed Agent-run deliveries use capped exponential backoff with a visible attempt count and stop after five failed attempts. When a bounded ordinary release exceeds its drain deadline, the service retains ownership until it settles. A permanently rejected target such as a deleted chat is dead-lettered immediately instead of retried forever or recreated. Cancellation endpoints return after durably recording the request; the background service owns the potentially slow remote MCP call and its retry schedule.
 
@@ -1955,6 +1971,8 @@ If a trusted operator manages the configured skills directory through an externa
 
 Skill installs and agent-managed skill edits run through **SkillScan**, a native deterministic safety scanner before the LLM-based skill scanner. Phase 1 runs offline with no Semgrep/OpenGrep dependency, blocks high-confidence `CRITICAL` findings such as private keys or shell execution, and passes warning findings to the LLM scanner for contextual review. Code files (anything under `scripts/`, a script suffix such as `.py`, `.sh`, or `.js`, or an extensionless file starting with `#!`) that are not NUL-free UTF-8 text raise a warning and are still analyzed over a lossy decode, so a single stray byte cannot hide them from `CRITICAL` checks. The moderation adapter normalizes both plain-text model responses and LangChain Responses API text blocks before parsing the required JSON decision. Python instance-client exfiltration checks follow a minimal same-scope evidence chain: a simple name bound to a known client constructor, optional name-to-name aliases, and an actual outbound method or context-manager use supported by that constructor. Constructor roots must be proven imports; bare canonical-looking names are not inferred as modules. Nested scopes do not inherit client handles and inherit only constructor import aliases that are never rebound in the enclosing scope. Comprehensions, walrus-bearing statements, annotations, complex binding targets, unsupported operations, and ambiguous branch flows produce no finding from this signal; skipped constructs conservatively invalidate every name they may bind so stale client state cannot create a finding. A deterministic work budget or recursion limit reached by this best-effort analysis does not discard findings already collected for the file. Set `skill_scan.enabled: false` in `config.yaml` to disable only the deterministic analyzers; safe archive extraction and the LLM scanner still run.
 
+Windows scripts (`.bat`, `.cmd`, `.ps1`, `.psm1`, `.js`, `.jse`, `.vbs`, `.vbe`, `.wsf`), HTML applications (`.hta`), and scriptlets (`.sct`) count as code even outside `scripts/`, regardless of filename case. They receive both SkillScan analysis and the installer's executable-code policy.
+
 DeerFlow also ships with **skill-reviewer**, a public skill for read-only skill quality review. It uses the built-in `review_skill_package` tool to inspect installed skills, local packages, archives, or pasted `SKILL.md` content without activating the target skill, binding its secrets, executing its scripts, or installing it. The tool returns a compact, tag-neutralized JSON payload to the model context and keeps the full raw review payload in the tool artifact for programmatic consumers. The deterministic review core reuses DeerFlow parsing and SkillScan facts, emits versioned JSON contracts under `contracts/skill_review/`, and can be run from the backend CLI:
 
 ```bash
@@ -1964,7 +1982,7 @@ uv run python -m deerflow.skills.review.cli ../skills/public/data-analysis --for
 
 Public-skill CI waivers are exact, expiring exceptions in `.github/skill-review-waivers.v1.json`. Because only the trusted base manifest can suppress a finding, a file-changing pull request can be preauthorized safely by first merging a manifest-only change that lists the reviewed future full-file SHA-256 in `preapproved_file_sha256s`; the file change can then land in a later pull request.
 
-Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. The bundled DDG, Brave, Tavily, and SearXNG search providers accept an optional `time_range` of `day`, `week`, `month`, or `year`; omitting it preserves existing search behavior. For DDG recency searches, DeerFlow excludes DDGS backends that ignore time limits. Swap anything. Add anything.
+Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. The bundled DDG, Brave, Tavily, and SearXNG search providers accept an optional `time_range` of `day`, `week`, `month`, or `year`; omitting it preserves existing search behavior. For DDG recency searches, DeerFlow excludes DDGS backends that ignore time limits. SearXNG web and image results drop result, image, thumbnail and source URLs that point at private, loopback, link-local or metadata addresses (no DNS lookup is made), so they never reach the model or the browser as links. Swap anything. Add anything.
 
 For DDG web search and DDG image search, `max_results` in `config.yaml` can be a positive integer or an environment-variable reference such as `max_results: $DDG_MAX_RESULTS` with `DDG_MAX_RESULTS=5`. The configured value takes precedence over the tool call's `max_results` argument. Invalid values (for example, `abc`, an empty string, or `3.5`), zero, and negative counts produce a warning and fall back to the default of 5 results.
 
@@ -2393,6 +2411,8 @@ Compaction keeps the current user request and summarizes older assistant/tool ac
 
 Use `/compact` in the Web UI composer to summarize older context for the current thread. DeerFlow keeps the full chat visible, but future model calls use the compacted summary plus recent messages. The command is ignored when there is not enough history to compact, and it is blocked while the thread has a run in flight, including when that run is owned by another Gateway worker. If a multi-worker reservation loses its lease, DeerFlow cancels the checkpoint writer before the replacing run proceeds and returns a retryable conflict after cleanup. Thread-title edits are serialized through the same state-write boundary and show a conflict without closing the rename dialog when a run is active.
 
+Manual compaction also returns HTTP 409 when execution is pending or the checkpoint is unavailable, so it cannot confirm the thread is idle.
+
 The chat header also shows a context-window gauge when the selected model has a positive `context_window` configured. It estimates the latest materialized checkpoint's message tokens and keeps the previous same-thread percentage visible while data refetches, independently of the cumulative token-usage setting.
 
 ### Sub-Agents
@@ -2528,6 +2548,19 @@ For example, independent read-only research can run concurrently when the wall-c
 
 ### Sandbox & File System
 
+Host-externalized tool outputs use the Gateway's normal file-creation umask.
+Host and sandbox outputs use deterministic filenames hashed from the raw tool
+call ID and output content. Missing, colliding, or oversized IDs cannot overwrite
+different output or make the filename too long; identical output can reuse its path.
+Host and remote sandbox persistence failures, including invalid Unicode during filename
+hashing, use the configured inline fallback.
+
+Mounted sandboxes running under another UID need read access through the shared
+storage permissions. An unclean shutdown can leave `.tool-output-*.tmp` files in
+`tool_output.storage_subdir` (default `.tool-results`) under thread outputs.
+Remove leftovers during thread-data maintenance with all Gateway writers stopped,
+or when deleting the corresponding inactive thread's data.
+
 `E2BSandboxProvider` uses `wait` as its default overflow policy. It waits for
 `acquire_timeout`, then fails the agent turn. DeerFlow does not retry the turn
 automatically. Clients can use the structured error to schedule a retry.
@@ -2585,6 +2618,10 @@ DeerFlow doesn't just *talk* about doing things. It has its own computer.
 
 Each task gets its own execution environment with a full filesystem view — skills, workspace, uploads, outputs. The agent reads, writes, and edits files. It can view images and, when configured safely, execute shell commands.
 
+The read-before-write gate ties each read mark to that `read_file` call's result, including custom tools returning multi-message `Command` updates. An unrelated result cannot authorize a write after a failed read or hide a successful read.
+
+Concurrent reads and writes to the same file share a gate across synchronous and asynchronous tool calls. Async callers waiting for that gate do not occupy worker threads needed to finish the current read or write. Cancelling a waiting call leaves the current operation running; a call that already started file inspection still waits for that work to finish before releasing its gate.
+
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
 
 Remote `ls` excludes ignored descendants before applying its 500-entry listing limit, so dependency and build trees do not crowd out visible files. Explicitly listing an ignored directory still lists its contents; normal depth and output limits remain in effect.
@@ -2616,6 +2653,11 @@ again. Files created in the run's outputs directory during agent setup can also
 be handed over when the model omits them.
 
 Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership includes tagged tool presentations and explicit runtime handover from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Installed artifact plugins can supply compact display projections while source view, editing, copying and downloads retain complete canonical bytes. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names.
+
+Saving also bounds the existing-file read to 2 MiB plus one detection byte, so a
+file that grows or is replaced after the size check is rejected without loading
+the entire oversized file into memory.
+
 
 CSV and TSV artifacts open as tables in the artifact panel and in a separate window. The preview preserves text values (including leading zeros), supports an optional header row, and pages through up to 200 rows and 50 columns from the initial sample. Long or multiline cells can be opened and copied in full. Switch to source to inspect or edit the file; downloads and separate windows use the saved version.
 
@@ -2718,6 +2760,8 @@ request the binary capability retain the legacy JSON/base64 frame protocol.
 
 **Strict Tool-Call Recovery**: When a provider or middleware interrupts a tool-call loop, DeerFlow now strips provider-level raw tool-call metadata on forced-stop assistant messages and injects placeholder tool results for dangling calls before the next model invocation. This keeps OpenAI-compatible reasoning models that strictly validate `tool_call_id` sequences from failing with malformed history errors.
 
+**Provider Safety Stops**: With `safety_finish_reason.enabled`, native OpenAI Responses `status=incomplete` with `incomplete_details.reason=content_filter` suppresses tool calls, including malformed calls, and removes their native frames from subsequent requests. Empty filtered responses receive an explanation; visible partial answers without tool calls are preserved.
+
 **Visible Tool-Run Completion**: For interactive turns, DeerFlow retries an empty post-tool final response once, then surfaces a visible error instead of reporting a silent successful run.
 
 **Run History**: Image-only user input is recorded once per run, even when the agent makes multiple model calls. Its media content remains in history without requiring a text summary.
@@ -2754,6 +2798,18 @@ by sibling deletions or runtime failures (such as unavailable sources or policy 
 become available in the next batch, when rejected additions can be retried.
 
 ### Long-Term Memory
+
+DeerMem debounces pending updates independently per conversation, user, and agent.
+`memory.backend_config.debounce_seconds` sets the quiet period (default 30 seconds),
+and `max_wait_seconds` caps debounce deferral from the first pending update
+(default 300 seconds). Activity in another conversation cannot extend that wait.
+Extraction remains serial, so backlog and LLM latency can still delay completion.
+Emergency snapshots of messages removed by compaction remain separate in arrival
+order, so later compactions cannot replace earlier pending snapshots.
+A backlog warning identifies the conversation, user, and agent at 32 pending emergency
+snapshots and each doubling. These snapshots remain admitted beyond `queue_max_depth`
+and stay in memory until processing. Check extraction latency when warnings appear;
+process exit can still lose pending work.
 
 The opt-in [DeerMem scope-isolation benchmark](backend/scripts/benchmark/deermem_scope_isolation/README.md)
 checks semantic safety across facts and summaries, and fact routing across users
@@ -2996,6 +3052,15 @@ origin project, or to a project you pick when the origin is gone or archived;
 if the target already holds an identical active file, the entries merge.
 Deleting a project moves its entire shelf to trash in the same step.
 
+If the retention configuration cannot be read, automatic cleanup is deferred
+and the trash listing remains available. Cleanup resumes with the current
+configured retention window once the configuration is readable again.
+
+Permanently deleting read-only documents also works on Windows. A file that is
+already missing does not block deletion; other filesystem errors keep the entry
+in Trash for retry. Permissions on symlink targets are preserved.
+
+
 ## Scheduled Tasks
 
 DeerFlow now includes a first-class scheduled-task MVP in the workspace.
@@ -3008,11 +3073,14 @@ Current MVP capabilities:
 - One-time task forms reject local times skipped by daylight-saving transitions; select another time before creating or saving the task.
 - Choose whether each scheduled task reuses a thread and its conversation history or creates a fresh thread per run
 - Pin each task to `lead_agent` (default) or a custom agent the owner already has; unknown names are rejected
+- Sending `assistant_id: null` in a scheduled-task PATCH resets the task to `lead_agent`; omitting `assistant_id` preserves the current agent, including when that custom agent has since been deleted
 - Duplicate an existing task into the create form as an editable draft without copying its run history
 - Support `once`, `cron`, and `interval` schedules
 - Editing or duplicating an interval task preserves its saved cadence until the interval is explicitly changed, including sub-minute intervals allowed by the operator's scheduler configuration
 - Run background scheduled executions as non-interactive DeerFlow runs (`ask_clarification` is not exposed there)
 - Persist a due execution as `queued` when its reused thread or the global execution budget is busy, then launch it when capacity is available; queued occurrences survive Gateway restarts and fail after `scheduler.queue_timeout_seconds`
+- Retrying a busy scheduled task keeps its execution slot while an earlier recovery pass is still in progress.
+
 - Freeze a task's definition while an occurrence is `queued`, `launching`, or `running`, so a durable occurrence cannot silently pick up a different prompt, thread, or schedule; transitioning a task to paused or deleting it cancels an existing waiting occurrence, while `launching`/`running` work must finish before those mutations are retried and an explicit manual trigger may still wait and run without resuming a paused schedule
 - Pause, resume, trigger, inspect history, and delete tasks
 - Search task titles or prompts, combined with status/type filters and the current thread scope.

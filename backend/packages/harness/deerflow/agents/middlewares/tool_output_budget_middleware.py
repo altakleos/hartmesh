@@ -29,6 +29,7 @@ import logging
 import os
 import posixpath
 import shlex
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace as dc_replace
 from typing import TYPE_CHECKING, Any, override
@@ -49,7 +50,7 @@ from deerflow.agents.middlewares.tool_transform_meta import append_tool_transfor
 from deerflow.community.ragflow.sources import budget_source_artifact
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.config.tool_output_config import ToolOutputConfig
-from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH, WRITE_ELISION_PLACEHOLDER_TEMPLATE
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
 if TYPE_CHECKING:
@@ -150,16 +151,7 @@ def _sanitize_tool_name(name: str) -> str:
     return safe or "unknown"
 
 
-def _sanitize_tool_call_id(tool_call_id: str) -> str:
-    """Make a tool call id safe to use inside a filename.
-
-    The id reaches us from the model/provider, so it gets the same treatment as
-    a tool name: no separators and no traversal components.
-    """
-    return _sanitize_tool_name(tool_call_id)
-
-
-def _build_externalized_filename(*, tool_name: str, tool_call_id: str) -> str:
+def _build_externalized_filename(*, tool_name: str, tool_call_id: str, content: str) -> str:
     """Build the on-disk filename for an externalized tool output.
 
     Shared by the host-disk and sandbox externalization paths so both
@@ -167,11 +159,15 @@ def _build_externalized_filename(*, tool_name: str, tool_call_id: str) -> str:
     """
     safe_name = _sanitize_tool_name(tool_name)
     ext = _EXT_MAP.get(tool_name, "txt")
-    # Derived from the call id so the host-disk and sandbox paths agree on one
-    # name for a given call, and so externalizing the same output twice is
-    # idempotent instead of leaving two files behind.
-    safe_id = _sanitize_tool_call_id(tool_call_id)
-    return f"{safe_name}-{safe_id}.{ext}"
+    # Hash the raw ID and content so missing IDs, sanitization collisions and
+    # oversized IDs cannot overwrite distinct output. Frame the ID length to
+    # keep the boundary unambiguous, including when either value contains NUL.
+    call_id_bytes = tool_call_id.encode("utf-8")
+    digest = hashlib.sha256()
+    digest.update(len(call_id_bytes).to_bytes(8, "big"))
+    digest.update(call_id_bytes)
+    digest.update(content.encode("utf-8"))
+    return f"{safe_name}-{digest.hexdigest()}.{ext}"
 
 
 def _externalize(
@@ -191,26 +187,29 @@ def _externalize(
     except OSError:
         return None
 
-    filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id)
-    filepath = os.path.join(storage_dir, filename)
-
-    if not os.path.abspath(filepath).startswith(os.path.abspath(storage_dir)):
-        return None
-
-    # Publish through a sibling temp file: a write that fails part-way (disk
-    # full, interrupted request) used to leave a truncated file under the final
-    # name even though this function reported failure, so the outputs directory
-    # accumulated half-written files that nothing references.
-    tmp_path = f"{filepath}.tmp"
+    # Each writer owns a unique sibling temp file, so concurrent calls cannot
+    # truncate or clean up each other's pending output. Publish only after close
+    # (also required on Windows), keeping the final filename deterministic.
+    tmp_path = None
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
+        filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id, content=content)
+        filepath = os.path.join(storage_dir, filename)
+        if not os.path.abspath(filepath).startswith(os.path.abspath(storage_dir)):
+            return None
+
+        candidate_path = os.path.join(storage_dir, f".tool-output-{uuid.uuid4().hex}.tmp")
+        # Exclusive creation keeps per-writer ownership while honoring umask,
+        # unlike NamedTemporaryFile's fixed 0600 mode on mounted outputs.
+        with open(candidate_path, "x", encoding="utf-8") as f:
+            tmp_path = candidate_path
             f.write(content)
         os.replace(tmp_path, filepath)
-    except OSError:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+    except (OSError, UnicodeEncodeError):
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
         return None
 
     return f"{_VIRTUAL_OUTPUTS_BASE}/{storage_subdir}/{filename}"
@@ -234,10 +233,12 @@ def _externalize_to_sandbox(
     """
     if os.path.isabs(storage_subdir) or ".." in storage_subdir:
         return None
-    filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id)
-    virtual_dir = f"{_VIRTUAL_OUTPUTS_BASE}/{storage_subdir}"
-    virtual_path = f"{virtual_dir}/{filename}"
     try:
+        # Hashing encodes provider text too; keep encoding errors within the
+        # same failure boundary as sandbox writes so callers can truncate.
+        filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id, content=content)
+        virtual_dir = f"{_VIRTUAL_OUTPUTS_BASE}/{storage_subdir}"
+        virtual_path = f"{virtual_dir}/{filename}"
         # AIO sandbox write_file does NOT create parent directories, so create
         # them explicitly before writing. execute_command returns its stdout
         # verbatim (including an "Error: ..." string on failure) rather than
@@ -713,8 +714,9 @@ _SUPERSEDING_READ_STATUSES = frozenset({"success", "partial_success"})
 # Deterministic for a given payload so repeated model calls keep the same
 # request prefix (prompt caching) instead of drifting. Framework-owned static
 # text plus a character count; no model-supplied value is interpolated (the
-# path stays visible in the call's own ``path`` argument).
-_ELIDED_WRITE_CONTENT_TEMPLATE = "[content elided: {chars} chars; this write_file call succeeded and the file was read or modified again afterwards, so the on-disk file is the current version; call read_file on its path to see it]"
+# path stays visible in the call's own ``path`` argument). The template is
+# shared with ``write_file``, which refuses to write it back out (#7319).
+_ELIDED_WRITE_CONTENT_TEMPLATE = WRITE_ELISION_PLACEHOLDER_TEMPLATE
 
 
 def elide_superseded_write_payloads(messages: list[Any], *, min_chars: int, keep_recent: int) -> list[Any] | None:

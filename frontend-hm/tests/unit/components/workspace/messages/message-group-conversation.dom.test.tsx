@@ -28,6 +28,13 @@ rs.mock("@/core/auth/AuthProvider", () => ({
 rs.mock("@/components/workspace/person-name", () => ({
   useSupervisorName: () => "Jordan",
 }));
+// Happy DOM 21 rejects a cancelled animation's `finished` promise, which Motion
+// leaves unhandled; this suite checks content and state, not the flip animation.
+rs.mock("@/components/workspace/flip-display", () => ({
+  FlipDisplay: (props: Parameters<typeof StaticFlipDisplay>[0]) => (
+    <StaticFlipDisplay {...props} />
+  ),
+}));
 
 import {
   ConversationFilesContext,
@@ -35,6 +42,8 @@ import {
 } from "@/components/workspace/chats/conversation-files";
 import { MessageGroup } from "@/components/workspace/messages/message-group";
 import { I18nProvider } from "@/core/i18n/context";
+
+import { FlipDisplay as StaticFlipDisplay } from "../../../helpers/flip-display";
 const binding = {
   id: "a".repeat(32),
   name: "Researcher",

@@ -4394,15 +4394,13 @@ models:
       currency: USD
       input_per_million: 0.57
       output_per_million: 2.30
-  - name: claude-sonnet-4
-    display_name: Claude Sonnet 4
+  - name: claude-sonnet-5-5
+    display_name: Claude Sonnet 5.5
     use: langchain_anthropic:ChatAnthropic
-    model: claude-sonnet-4-20250514
+    model: claude-sonnet-5-5                 # thinks by default; rejects budget_tokens
     api_key: $ANTHROPIC_API_KEY
     context_window: 200000
-    max_tokens: 8192
-    supports_thinking: true
-    thinking: { type: enabled, budget_tokens: 2048 }
+    max_tokens: 16000
 ```
 
 Then, in `/srv/hartmesh/.env`:

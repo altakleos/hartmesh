@@ -182,6 +182,18 @@ explicit per-endpoint replies and event-controlled completion/cancellation.
 Generate synthetic bot credentials at runtime; never record token-bearing URLs
 or use real Telegram accounts in these tests.
 
+
+
+
+## Project trash purge
+
+Purge regressions use real original/companion files and the repository transaction.
+Inject initial and persistent unlink failures to exercise Windows retry semantics
+on every platform; assert rollback and a later successful purge. Plant real links
+with `support.symlinks.symlink_or_skip`, preserve target bytes/modes, and cover
+dangling links and removal before retry. Keep filesystem work off the event loop.
+
+
 ## Router auth fixtures
 
 For owner-scoped route assertions, pass a stable `user_factory` and

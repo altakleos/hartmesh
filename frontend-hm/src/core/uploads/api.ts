@@ -164,7 +164,22 @@ export async function uploadFiles(
     );
   }
 
-  return response.json();
+  const result = (await response.json()) as UploadResponse;
+  // The Gateway answers 200 even when it skipped every file (for example an
+  // unsafe name). Sending then would post the message with no attachments,
+  // so fail like any other upload error. A partial upload still returns:
+  // the caller warns about what was skipped and sends what was stored.
+  const stored = Array.isArray(result.files) ? result.files.length : 0;
+  if (stored === 0 && result.success === false) {
+    // A gateway or proxy may omit `message`; treat it like an empty one.
+    const message =
+      typeof result.message === "string" ? result.message.trim() : "";
+    throw new Error(
+      message ? `Upload incomplete: ${message}` : "Upload failed",
+    );
+  }
+
+  return result;
 }
 
 /**

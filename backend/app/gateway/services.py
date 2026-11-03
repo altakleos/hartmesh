@@ -1252,7 +1252,7 @@ class _RawCheckpointSnapshot:
     metadata, config ancestry, created_at) comes straight from the tuple.
     """
 
-    __slots__ = ("checkpoint_exists", "config", "values", "metadata", "parent_config", "created_at", "tasks", "tasks_known", "next")
+    __slots__ = ("checkpoint_exists", "config", "values", "metadata", "parent_config", "created_at", "tasks", "tasks_known", "next", "channel_versions")
 
     def __init__(self, config: dict[str, Any], tup: Any | None) -> None:
         self.checkpoint_exists = tup is not None
@@ -1265,6 +1265,8 @@ class _RawCheckpointSnapshot:
         self.tasks: tuple = ()
         self.tasks_known = False
         self.next: tuple = ()
+        versions = checkpoint.get("channel_versions")
+        self.channel_versions = dict(versions) if isinstance(versions, dict) else None
 
 
 class _RawCheckpointReadAccessor:
@@ -2860,6 +2862,11 @@ async def wait_for_run_completion(
                     # The wait API only needs terminal completion, not a complete
                     # event replay. Resume at the retained tail rather than
                     # treating a bridge gap as a client disconnect.
+                    if entry.latest_available_event_id is None:
+                        current = await run_mgr.get(record.run_id, user_id=record.user_id) if record.store_only else record
+                        if current is not None and await _terminal_record_stream_missing(bridge, current):
+                            completed = True
+                            return True
                     resume_from_event_id = entry.latest_available_event_id
                     gap_seen = True
                     break

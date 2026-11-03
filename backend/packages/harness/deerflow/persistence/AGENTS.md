@@ -17,7 +17,13 @@ hide a foreign lease. The public RunStore remains unchanged.
 
 Postgres bootstrap owns its session-scoped advisory lock until `pg_advisory_unlock` completes. Drain that unlock across host cancellation before leaving the SQLAlchemy connection context; repeated cancellation must not return a pooled session while it still holds the bootstrap mutex. Ordinary database errors remain best-effort and are logged.
 
+Acquire that lock by polling `pg_try_advisory_lock`, never with a blocking `pg_advisory_lock`: the app engine's asyncpg `command_timeout` bounds every statement, so a blocking acquire fails a second instance's startup whenever a peer's migration outlasts it.
+
+`init_engine` auto-creates a Postgres database only on SQLSTATE `3D000`. Missing relations, columns and roles also "do not exist"; a `CREATE DATABASE` retry would mask them.
+
 When `database.postgres_schema` is configured, both async ORM connections and the synchronous SQLAlchemy connections used by DB-backed custom agents and managed subagents must use the same `search_path`; preserve this invariant when adding another persistence entry point.
+
+Every JSON column write goes through `dumps_json_safe` (`json_compat.py`): non-finite floats normalize to `None` because PostgreSQL jsonb rejects the bare `NaN`/`Infinity` token (SQLite would silently accept it). The shared async engine and sync agent-storage engine wire it on both SQLite and PostgreSQL; keep new JSON-writing persistence entry points on it too.
 
 Alembic stamp/upgrade workers started inside `bootstrap_schema()` remain owned by the bootstrap critical section until the worker finishes. Drain those `asyncio.to_thread()` calls across host cancellation before releasing the in-process SQLite bootstrap lock or PostgreSQL advisory lock; otherwise another bootstrap can overlap a still-running migration worker.
 
@@ -33,3 +39,17 @@ explicit None, raw owner filtering and ordinary results/errors. Driver tests
 prove independent UPDATE/COMMIT/readback and cursor closure: DELETE can retain a
 read lock after cancellation; production WAL's successful writer is a distinct
 control, not evidence of the same lock failure.
+
+
+
+
+
+
+
+Expired-launch scans select candidates, not ownership. After taking the parent
+and occurrence locks, recheck launch status and lease expiry before recovery.
+A busy launch may have requeued and a manual trigger reclaimed the same row
+while recovery waited; the new claim can have the same process owner. Preserve
+its full row and execution-budget slot. A lease equal to scan time is still live;
+missing or strictly older leases remain recoverable.
+

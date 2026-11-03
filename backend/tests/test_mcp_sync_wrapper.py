@@ -99,7 +99,40 @@ def test_mcp_tool_loading_skips_failed_server():
     assert [tool.name for tool in tools] == ["good-server_search"]
     assert tools[0].func is not None
     mock_warning.assert_called_once()
-    assert "bad-server" in mock_warning.call_args[0][0]
+    args, kwargs = mock_warning.call_args
+    assert args[1] == "bad-server"
+    assert args[2] == "RuntimeError"
+    assert "server 'bad-server'" in args[0] % args[1:]
+    assert kwargs.get("exc_info") is None
+
+
+def test_mcp_discovery_failure_log_redacts_resolved_credentials(caplog):
+    """A failed per-server discovery must not log a credential-bearing URL (upstream #6794)."""
+    import httpx
+
+    secret = "s3cr3t-pass-123"
+
+    async def get_tools_for_server(*, server_name: str | None = None):
+        request = httpx.Request("GET", f"https://alice:{secret}@remote.test/mcp")
+        raise httpx.HTTPStatusError(f"Client error for url '{request.url}'", request=request, response=httpx.Response(401, request=request))
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.get_tools = AsyncMock(side_effect=get_tools_for_server)
+
+    with (
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance),
+        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=MagicMock(model_extra={})),
+        patch("deerflow.mcp.tools.build_servers_config", return_value={"A": {}}),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        caplog.at_level("WARNING", logger="deerflow.mcp.tools"),
+    ):
+        tools = asyncio.run(get_mcp_tools())
+
+    assert tools == []
+    assert secret not in caplog.text
+    assert "server 'A'" in caplog.text
+    assert "HTTPStatusError" in caplog.text
 
 
 def test_mcp_tool_sync_wrapper_in_running_loop():
@@ -249,16 +282,16 @@ def test_func_patched_mcp_tool_keeps_toolnode_runtime_injection(tmp_path):
         (tool,) = asyncio.run(get_mcp_tools())
 
     # After func patching, LangGraph must still detect the runtime injection.
-    assert _get_all_injected_args(tool).runtime == "runtime"
+    assert _get_all_injected_args(tool).runtime == "deerflow_runtime"
 
     # And a real ToolNode must pass the ToolRuntime through to the coroutine.
     seen: dict[str, object] = {}
 
     orig = tool.coroutine
 
-    async def spy(runtime: object | None = None, **arguments: object) -> str:
-        seen["runtime"] = runtime
-        return await orig(runtime=runtime, **arguments)
+    async def spy(deerflow_runtime: object | None = None, **arguments: object) -> str:
+        seen["runtime"] = deerflow_runtime
+        return await orig(deerflow_runtime=deerflow_runtime, **arguments)
 
     tool.coroutine = spy
 

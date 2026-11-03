@@ -83,3 +83,48 @@ describe("api fetcher unauthorized redirect", () => {
     },
   );
 });
+
+describe("api fetcher CSRF cookies", () => {
+  afterEach(() => {
+    document.cookie = "theme=; max-age=0; path=/";
+    document.cookie = "csrf_token=; max-age=0; path=/";
+    rs.unstubAllGlobals();
+  });
+
+  it("forwards a malformed CSRF cookie after an unrelated malformed cookie", async () => {
+    const sentHeaders: Headers[] = [];
+    rs.stubGlobal(
+      "fetch",
+      rs.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        sentHeaders.push(new Headers(init?.headers));
+        return new Response("ok");
+      }),
+    );
+    // Each assignment sets one cookie; semicolon-separated tails are attributes.
+    document.cookie = "theme=%E0; path=/";
+    document.cookie = "csrf_token=%gh; path=/";
+
+    expect(document.cookie).toBe("theme=%E0; csrf_token=%gh");
+
+    await apiFetch("http://localhost/api/threads", { method: "POST" });
+
+    expect(sentHeaders).toHaveLength(1);
+    expect(sentHeaders[0]?.get("X-CSRF-Token")).toBe("%gh");
+  });
+
+  it("still decodes a percent-encoded CSRF cookie", async () => {
+    const sentHeaders: Headers[] = [];
+    rs.stubGlobal(
+      "fetch",
+      rs.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        sentHeaders.push(new Headers(init?.headers));
+        return new Response("ok");
+      }),
+    );
+    document.cookie = "csrf_token=cookie%2Dtoken; path=/";
+
+    await apiFetch("http://localhost/api/threads", { method: "POST" });
+
+    expect(sentHeaders[0]?.get("X-CSRF-Token")).toBe("cookie-token");
+  });
+});

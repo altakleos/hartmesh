@@ -60,6 +60,7 @@ compatibility. Create's default null binding proves nothing about actual binding
 and rendered `artifacts`, `todos` and non-null `goal`. Keep the API channel
 serializer and explicit projection; expose no internal sandbox state. Empty lists
 are meaningful; omit absent/null goals to preserve frontend local overrides.
+Upload, shelf, agent, profile, agent-config, MCP and skill-read errors use fixed text; paths stay in logs.
 
 Artifacts, Files and Shared stream MIME sniffing/metadata/ranges from one safely
 opened descriptor. Preflight paths determine HTTP errors, never permission to

@@ -1184,7 +1184,11 @@ async def _run_agent(
     pre_run_output_snapshot: WorkspaceSnapshot | None = None
     workspace_changes_user_id: str | None = None
     workspace_excluded_dir_names: frozenset[str] | None = None
-    snapshot_capture_failed = False
+    # Fail closed until a pre-run capture completes: a cancellation delivered
+    # before or during capture leaves no rollback point, and treating that as
+    # "the thread had no pre-run checkpoint" would delete a live thread's
+    # checkpoints on a rollback cancel.
+    snapshot_capture_failed = True
     llm_error_fallback_message: str | None = None
     checkpoint_rollback_completed = False
     terminal_stream_closed = False
@@ -1811,8 +1815,12 @@ async def _run_agent(
                 try:
                     rollback_point = await _capture_rollback_point(accessor, checkpointer, checkpoint_config)
                 except Exception:
-                    snapshot_capture_failed = True
                     logger.warning("Could not capture pre-run checkpoint snapshot for run %s", run_id, exc_info=True)
+                else:
+                    # Only a completed capture proves what the pre-run state was.
+                    # ``None`` now unambiguously means the thread had no
+                    # checkpoint, so rollback may safely reset it to empty.
+                    snapshot_capture_failed = False
                 if rollback_point is not None:
                     pre_run_checkpoint_id = rollback_point.config.get("configurable", {}).get("checkpoint_id")
                     pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(rollback_point.messages)})
@@ -1855,16 +1863,11 @@ async def _run_agent(
                         raise OutputEvidenceError()
                     inventory_capture.bind_baseline(selected_values)
 
-        # Capture the effective (resolved) model name from the agent's metadata.
-        # _resolve_model_name in agent.py may return the default model if the
-        # requested name is not in the allowlist — this update ensures the
-        # persisted model_name reflects the actual model used.
-        if record.model_name is not None:
-            resolved = getattr(agent, "metadata", {}) or {}
-            if isinstance(resolved, dict):
-                effective = resolved.get("model_name")
-                if effective and effective != record.model_name:
-                    await run_manager.update_model_name(record.run_id, effective)
+        # Persist the model assembly resolved — the default when the request
+        # named none, or a fallback when the requested model is unavailable —
+        # so the stored model_name reflects the actual model used (#3109).
+        if effective_model and effective_model != record.model_name:
+            await run_manager.update_model_name(record.run_id, effective_model)
 
         # 4. Attach checkpointer and store
         if checkpointer is not None:
@@ -2542,6 +2545,9 @@ async def _run_agent(
 # ---------------------------------------------------------------------------
 
 
+_GOAL_RUN_HARD_STOP_REASONS = frozenset({"token_capped", "loop_capped"})
+
+
 @dataclass(frozen=True)
 class _GoalCompletionCandidate:
     goal: GoalState
@@ -2932,11 +2938,10 @@ async def _prepare_goal_continuation_input(
         return _GoalCompletionCandidate(copy.deepcopy(current_goal), conversation_signature_before)
 
     stand_down_reason = _stand_down_reason(goal, evaluation, no_progress_count)
-    if stand_down_reason is None and run_stop_reason == "token_capped":
-        # The run already used up its token budget, and continuations share that
-        # budget, so another hidden turn would spend one more model call only to
-        # have its tool calls stripped.
-        stand_down_reason = "token_capped"
+    if stand_down_reason is None and run_stop_reason in _GOAL_RUN_HARD_STOP_REASONS:
+        # Both guards keep their safety state across hidden turns in this run.
+        # Respect the hard stop instead of re-entering the same run budget.
+        stand_down_reason = run_stop_reason
     if stand_down_reason is not None or not should_continue_goal(goal, evaluation, no_progress_count=no_progress_count):
         await _persist(goal, evaluation, no_progress_count, stand_down_reason=stand_down_reason)
         return None

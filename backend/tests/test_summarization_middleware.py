@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import contextvars
+import threading
 from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
@@ -374,6 +377,38 @@ async def test_abefore_model_calls_hooks_same_as_sync() -> None:
 
     assert len(captured) == 1
     assert [message.content for message in captured[0].messages_to_summarize] == ["user-1", "assistant-1"]
+
+
+_HOOK_CONTEXT: contextvars.ContextVar[str] = contextvars.ContextVar("_HOOK_CONTEXT")
+
+
+@pytest.mark.anyio
+async def test_abefore_model_runs_hooks_in_a_worker_with_sync_semantics(caplog: pytest.LogCaptureFixture) -> None:
+    loop_thread = threading.get_ident()
+    calls: list[tuple[str, int, str | None]] = []
+
+    def _hook(name: str):
+        def hook(_: SummarizationEvent) -> None:
+            calls.append((name, threading.get_ident(), _HOOK_CONTEXT.get(None)))
+
+        return hook
+
+    def _broken_hook(_: SummarizationEvent) -> None:
+        raise RuntimeError("hook failure")
+
+    middleware = _middleware(before_summarization=[_hook("first"), _broken_hook, _hook("second")])
+    token = _HOOK_CONTEXT.set("run-context")
+    try:
+        with caplog.at_level("ERROR"):
+            result = await middleware.abefore_model({"messages": _messages()}, _runtime())
+    finally:
+        _HOOK_CONTEXT.reset(token)
+
+    assert [name for name, _, _ in calls] == ["first", "second"]
+    assert all(thread != loop_thread for _, thread, _ in calls)
+    assert all(context == "run-context" for _, _, context in calls)
+    assert "before_summarization hook _broken_hook failed" in caplog.text
+    assert isinstance(result["messages"][0], RemoveMessage)
 
 
 def test_memory_flush_hook_skips_when_memory_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1838,3 +1873,34 @@ def test_first_turn_long_analysis_preserves_current_request() -> None:
     summarized_ids = [m.id for m in ev.messages_to_summarize]
     assert len(summarized_ids) > 0
     assert "ai1" in summarized_ids
+
+
+@pytest.mark.anyio
+async def test_abefore_model_hook_can_call_back_into_its_owner_loop() -> None:
+    """An AI-employee memory flush validates its execution on the owner loop.
+
+    ``AgentExecution.validate_sync`` refuses to run on its own authority loop
+    and otherwise submits the check to that loop. Async compaction used to fire
+    hooks inline on the loop, so the refusal was swallowed and the instance's
+    pre-compaction memory was silently lost; hooks now run in a worker thread.
+    """
+    owner_loop = asyncio.get_running_loop()
+    results: list[str] = []
+
+    async def _validate() -> str:
+        return "validated"
+
+    def _instance_memory_hook(_: SummarizationEvent) -> None:
+        try:
+            current = asyncio.get_running_loop()
+        except RuntimeError:
+            current = None
+        if current is owner_loop:
+            raise RuntimeError("Synchronous instance operations cannot block their authority loop")
+        results.append(asyncio.run_coroutine_threadsafe(_validate(), owner_loop).result(timeout=5))
+
+    middleware = _middleware(before_summarization=[_instance_memory_hook])
+    result = await middleware.abefore_model({"messages": _messages()}, _runtime())
+
+    assert results == ["validated"]
+    assert isinstance(result["messages"][0], RemoveMessage)

@@ -28,6 +28,11 @@ const config = {
     root: fileURLToPath(new URL(".", import.meta.url)),
   },
   devIndicators: false,
+  // The product renders no next/image, so the Image Optimization API serves
+  // nothing it needs. Keep it off: /_next/image is reachable without signing
+  // in, and it is where Next.js's remote-code-execution and SSRF advisories
+  // live.
+  images: { unoptimized: true },
   allowedDevOrigins: getAllowedDevOrigins(),
   async rewrites() {
     const rewrites = [];

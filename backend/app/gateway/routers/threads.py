@@ -32,7 +32,11 @@ from app.gateway.checkpoint_lineage import (
     CheckpointParentMissingError,
     find_checkpoint_before_message,
     find_checkpoint_before_message_chronologically,
+    history_parent_index,
     is_duration_only_checkpoint,
+    parent_from_history_index,
+    resolve_history_versions,
+    resolve_stamp_candidate_versions,
 )
 from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager, get_run_store
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
@@ -55,6 +59,7 @@ from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_stat
 from deerflow.runtime.context_compaction import (
     ContextCompactionDisabled,
     ContextCompactionFailed,
+    ContextCompactionPendingWork,
     ThreadCompactionResult,
     compact_thread_context,
 )
@@ -224,8 +229,13 @@ async def _find_branch_checkpoint(
     target_message_ids: set[str],
 ) -> Any:
     try:
-        for snapshot in await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT):
-            if is_duration_only_checkpoint(snapshot):
+        history = await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT)
+        history_index = history_parent_index(history)
+        version_cache: dict[tuple[str, str, str], Any] = {}
+        for snapshot in history:
+            parent = parent_from_history_index(snapshot, history_index)
+            versions, parent_versions = await resolve_stamp_candidate_versions(accessor, snapshot, parent, version_cache)
+            if is_duration_only_checkpoint(snapshot, parent=parent, versions=versions, parent_versions=parent_versions):
                 continue
             if _matches_branch_target(_checkpoint_messages(snapshot), target_message_ids):
                 return snapshot
@@ -245,8 +255,13 @@ async def _branch_targets_latest_turn(
 ) -> bool:
     """Return whether the target turn is the final visible turn."""
     try:
-        for snapshot in await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT):
-            if is_duration_only_checkpoint(snapshot):
+        history = await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT)
+        history_index = history_parent_index(history)
+        version_cache: dict[tuple[str, str, str], Any] = {}
+        for snapshot in history:
+            parent = parent_from_history_index(snapshot, history_index)
+            versions, parent_versions = await resolve_stamp_candidate_versions(accessor, snapshot, parent, version_cache)
+            if is_duration_only_checkpoint(snapshot, parent=parent, versions=versions, parent_versions=parent_versions):
                 continue
             messages = _checkpoint_messages(snapshot)
             if not messages:
@@ -303,7 +318,7 @@ async def _find_branch_replay_base(
         logger.exception("Failed to scan replay checkpoint history for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to inspect checkpoint history") from exc
 
-    replay_base, target_found = find_checkpoint_before_message_chronologically(history, target_human_id)
+    replay_base, target_found = find_checkpoint_before_message_chronologically(history, target_human_id, history_versions=await resolve_history_versions(accessor, history))
     if not target_found:
         logger.warning(
             "Could not locate branch user message %s in chronological history for thread %s",
@@ -1583,6 +1598,8 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
             )
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Compact after the run finishes.") from None
+    except ContextCompactionPendingWork as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     except _CHECKPOINT_MODE_ERRORS as exc:
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
     except ContextCompactionDisabled:

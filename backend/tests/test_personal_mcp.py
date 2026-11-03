@@ -3,13 +3,14 @@
 import asyncio
 import ipaddress
 import json
+import logging
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from langchain_core.tools import ToolException
 
@@ -414,6 +415,54 @@ async def test_personal_tool_guard_reuses_validation_and_rejects_file_replacemen
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("parameter", ["runtime", "deerflow_runtime"])
+async def test_personal_tool_guard_reads_the_injected_runtime_for_either_transport(personal_client, parameter):
+    """HTTP/SSE tools keep the adapter's ``runtime``; pooled stdio uses ``deerflow_runtime``."""
+    from typing import Annotated
+
+    from langchain_core.messages import AIMessage
+    from langchain_core.tools import InjectedToolArg, StructuredTool
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    from deerflow.mcp.user_tools import _guard
+    from deerflow.tools.types import Runtime
+
+    assert create(personal_client, "alice").status_code == 200
+    server_name = next(iter(load_user_mcp_config("alice").mcp_servers))
+    calls = []
+
+    async def invoke_runtime(runtime: Annotated[Runtime | None, InjectedToolArg()] = None, **arguments):
+        calls.append(arguments)
+        return "ok"
+
+    async def invoke_deerflow_runtime(deerflow_runtime: Runtime | None = None, **arguments):
+        calls.append(arguments)
+        return "ok"
+
+    coroutine = invoke_runtime if parameter == "runtime" else invoke_deerflow_runtime
+    tool = _guard(
+        StructuredTool(name="personal_test", description="Personal test", args_schema={"type": "object", "properties": {"runtime": {"type": "string"}}}, coroutine=coroutine),
+        "alice",
+        server_name,
+    )
+    builder = StateGraph(MessagesState, context_schema=dict)
+    builder.add_node("tools", ToolNode([tool]))
+    builder.add_edge(START, "tools")
+    builder.add_edge("tools", END)
+    graph = builder.compile()
+    message = AIMessage(content="", tool_calls=[{"name": "personal_test", "args": {"runtime": "python"}, "id": "call-1", "type": "tool_call"}])
+
+    # No ambient user: only the injected runtime says who is calling.
+    result = await graph.ainvoke({"messages": [message]}, context={"user_id": "alice"})
+    assert result["messages"][-1].content == "ok"
+    assert calls == [{"runtime": "python"} if parameter == "deerflow_runtime" else {}]
+
+    with pytest.raises(ToolException, match="belongs to another user"):
+        await graph.ainvoke({"messages": [message]}, context={"user_id": "bob"})
+
+
+@pytest.mark.asyncio
 async def test_background_calls_resolve_only_persisted_task_owner(personal_client, monkeypatch):
     import deerflow.mcp.user_config as user_config
     from deerflow.mcp.task_tool_caller import McpTaskToolCaller
@@ -570,7 +619,7 @@ async def test_gateway_registers_driver_for_personal_only_task_toolsets(personal
             identity = set_current_user(SimpleNamespace(id="alice"))
             try:
                 result = await tools[0].coroutine(
-                    runtime=SimpleNamespace(context={"thread_id": "thread-1", "thread_incarnation": "incarnation-1", "run_id": "run-1"}, config={}, tool_call_id="call-1"),
+                    deerflow_runtime=SimpleNamespace(context={"thread_id": "thread-1", "thread_incarnation": "incarnation-1", "run_id": "run-1"}, config={}, tool_call_id="call-1"),
                     topic="MCP",
                 )
             finally:
@@ -579,3 +628,95 @@ async def test_gateway_registers_driver_for_personal_only_task_toolsets(personal
             submitted = app.state.mcp_task_service.submit.await_args.kwargs
             assert submitted["driver_name"] == ORDINARY_MCP_TASK_DRIVER
             assert submitted["request"].driver_data["connection_scope"] == "personal"
+
+
+@pytest.mark.parametrize("failure_stage", ["resolve", "read", "write"])
+@pytest.mark.parametrize(
+    ("method", "url", "body", "expected_detail"),
+    [
+        ("POST", "/api/mcp/personal/config/servers", {"mcp_servers": {"new": {"type": "http", "url": "https://example.com/new"}}}, "Failed to add personal MCP servers"),
+        ("PUT", "/api/mcp/personal/config/server", {"server_name": "github", "server": {"type": "http", "url": "https://example.com/updated"}}, "Failed to update personal MCP server"),
+        ("PATCH", "/api/mcp/personal/config", {"server_name": "github", "enabled": False}, "Failed to update personal MCP server state"),
+        ("DELETE", "/api/mcp/personal/config/servers/github", None, "Failed to delete personal MCP server"),
+    ],
+    ids=["create", "update", "state", "delete"],
+)
+def test_personal_mutation_storage_errors_have_fixed_details_and_server_logs(personal_client, monkeypatch, caplog, failure_stage, method, url, body, expected_detail):
+    assert create(personal_client, "alice").status_code == 200
+    path = user_mcp_config_path("alice")
+    before = path.read_bytes()
+    host_path = "/srv/private/deer-flow/users/alice/extensions_config.json"
+    error = PermissionError(13, "Permission denied", host_path)
+
+    def fail(*_args, **_kwargs):
+        raise error
+
+    boundary = {"resolve": "user_mcp_config_path", "read": "read_user_mcp_config", "write": "atomic_write_extensions_config"}[failure_stage]
+    monkeypatch.setattr(personal_mcp, boundary, fail)
+    with TestClient(personal_client.app, raise_server_exceptions=False) as client:
+        with caplog.at_level(logging.ERROR, logger="app.gateway.routers.personal_mcp"):
+            response = client.request(method, url, headers={"test-user": "alice"}, json=body)
+
+    assert response.status_code == 500
+    assert response.headers["content-type"].startswith("application/json"), response.text
+    assert response.json() == {"detail": expected_detail}
+    assert host_path not in response.text
+    assert path.read_bytes() == before
+    records = [record for record in caplog.records if record.name == "app.gateway.routers.personal_mcp"]
+    assert len(records) == 1
+    assert records[0].exc_info[1] is error
+    assert host_path in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unreachable_personal_task_server_keeps_other_personal_tools(personal_client):
+    from langchain_core.tools import StructuredTool
+
+    from deerflow.config.extensions_config import atomic_write_extensions_config
+    from deerflow.mcp.user_tools import _load
+
+    toolset = {"name": "reports", "submit_tool": "submit_report", "status_tool": "status_report", "cancel_tool": "cancel_report"}
+    atomic_write_extensions_config(
+        user_mcp_config_path("alice"),
+        {
+            "mcpServers": {
+                "notes": {"type": "http", "url": "https://notes.example.com/mcp"},
+                "reports": {"type": "http", "url": "https://reports.example.com/mcp", "task_toolsets": [toolset]},
+            }
+        },
+    )
+
+    class FakeClient:
+        def __init__(self, servers, *, tool_interceptors, **_kwargs):
+            self.servers = servers
+            self.tool_interceptors = tool_interceptors
+            self.callbacks = None
+
+        async def get_tools(self, *, server_name):
+            if "reports" in self.servers[server_name]["url"]:
+                raise ConnectionError("reports is down")
+            return [StructuredTool.from_function(lambda: "ok", name=f"{server_name}_search", description="search")]
+
+    with (
+        patch("deerflow.mcp.tasks.runtime.is_mcp_task_runtime_available", return_value=True),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient),
+    ):
+        personal = load_user_mcp_config("alice")
+        tools = await _load("alice", personal)
+
+    notes_name = next(name for name, server in personal.mcp_servers.items() if server.url == "https://notes.example.com/mcp")
+    assert [tool.name for tool in tools] == [f"{notes_name}_search"]
+
+
+def test_ordinary_bundled_connection_check_does_not_read_an_undeclared_cwd():
+    """The response model declares no ``cwd``; reading it raised AttributeError (upstream #7400)."""
+    from deerflow.capabilities.business import connection_config
+
+    definition = connection_config("hubspot", {"access_token": "private-token"})
+    server = personal_mcp.mcp.McpServerConfigResponse.model_validate(definition)
+    personal_mcp._validate_personal_server(server, admin=False)
+
+    with_cwd = personal_mcp.mcp.McpServerConfigResponse.model_validate({**definition, "cwd": "/srv"})
+    with pytest.raises(HTTPException) as denied:
+        personal_mcp._validate_personal_server(with_cwd, admin=False)
+    assert denied.value.status_code == 403

@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from app.gateway.customer_administration import request_customer_administration_policy, require_provider_operation
 from app.gateway.deps import require_admin_user
+from app.gateway.secret_masking import MASKED_VALUE, mask_secret_values, normalize_config_key
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
     McpRoutingConfig,
@@ -559,29 +560,19 @@ class McpCacheResetResponse(BaseModel):
     message: str = Field(description="Human-readable reset status")
 
 
-_MASKED_VALUE = "***"
+_MASKED_VALUE = MASKED_VALUE
 _SENSITIVE_EXTRA_KEY_RE = re.compile(
     r"(^|_)(api_key|apikey|access_key|private_key|client_secret|secret|token|password|passwd|credential|credentials|authorization|bearer)(_|$)",
     re.IGNORECASE,
 )
 
 
-def _normalize_config_key(key: str) -> str:
-    with_boundaries = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", key)
-    with_boundaries = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", with_boundaries)
-    return re.sub(r"[^a-z0-9]+", "_", with_boundaries.lower()).strip("_")
-
-
 def _is_sensitive_extra_key(key: str) -> bool:
-    return bool(_SENSITIVE_EXTRA_KEY_RE.search(_normalize_config_key(key)))
+    return bool(_SENSITIVE_EXTRA_KEY_RE.search(normalize_config_key(key)))
 
 
 def _mask_sensitive_extra_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {key: _MASKED_VALUE if _is_sensitive_extra_key(str(key)) else _mask_sensitive_extra_value(nested) for key, nested in value.items()}
-    if isinstance(value, list):
-        return [_mask_sensitive_extra_value(item) for item in value]
-    return value
+    return mask_secret_values(value, _is_sensitive_extra_key)
 
 
 def _contains_masked_sensitive_extra_value(key: str, value: Any) -> bool:
@@ -1557,7 +1548,7 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
         raise
     except Exception as e:
         logger.error(f"Failed to update MCP configuration: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update MCP configuration: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update MCP configuration")
 
 
 @router.post(
@@ -1581,7 +1572,7 @@ async def create_mcp_servers(request: Request, body: McpConfigUpdateRequest) -> 
         raise
     except Exception as e:
         logger.error("Failed to add MCP servers: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to add MCP servers: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to add MCP servers")
 
 
 @router.put(
@@ -1608,7 +1599,7 @@ async def update_mcp_server(request: Request, body: McpServerConfigUpdateRequest
         raise
     except Exception as e:
         logger.error("Failed to update MCP server %s: %s", body.server_name, e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update MCP server: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update MCP server")
 
 
 @router.delete(
@@ -1631,7 +1622,7 @@ async def delete_mcp_server(request: Request, server_name: str) -> McpConfigResp
         raise
     except Exception as e:
         logger.error("Failed to delete MCP server %s: %s", server_name, e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to delete MCP server: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to delete MCP server")
 
 
 @router.patch(
@@ -1654,4 +1645,4 @@ async def update_mcp_server_state(request: Request, body: McpServerStateUpdateRe
         raise
     except Exception as e:
         logger.error("Failed to update MCP server %s state: %s", body.server_name, e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update MCP server state: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update MCP server state")
