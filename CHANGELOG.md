@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.50] - 2026-11-03
+
 ### Files
 
 - A vision model now sees an image uploaded to an ordinary conversation or a Telegram bot
@@ -19,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stopped, often got an answer saying the image could not be found. Each turn now starts
   with the workspace the run has already started, so several photos viewed at once also
   reach the model.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.49. The database head stays at
+`0044_telegram_assistant_ids`, and the configuration version stays at 55.
 
 ## [2.2.0+hartmesh.49] - 2026-11-03
 
