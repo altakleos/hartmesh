@@ -1799,3 +1799,33 @@ async def test_install_skill_archive_drains_install_and_cache_refresh_across_can
 
     assert _user_custom_dir(tmp_path, "default").joinpath("install-skill").exists()
     assert refresh_calls == [("refresh", "default")]
+
+
+@pytest.mark.parametrize(
+    ("path", "patch_target", "detail"),
+    [
+        ("/api/skills", "_load_user_skills", "Failed to load skills."),
+        ("/api/skills/custom", "_get_owned_private_skill_storage", "Failed to list custom skills."),
+        ("/api/skills/demo-skill", "_load_user_skills", "Failed to get skill."),
+    ],
+)
+def test_skill_reads_keep_load_error_text_out_of_500(monkeypatch, tmp_path, caplog, path, patch_target, detail):
+    """A load failure's host path stays in the server log, never in the 500 body (upstream #7155)."""
+    import logging
+
+    host_path = "/srv/private/deer-flow/users/alice/skills/custom/demo-skill/SKILL.md"
+
+    def fail(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied", host_path)
+
+    monkeypatch.setattr(skills_router, patch_target, fail)
+    config = SimpleNamespace(skills=SimpleNamespace(get_skills_path=lambda: tmp_path / "skills", container_path="/mnt/skills"))
+    app = _make_test_app(config)
+
+    with TestClient(app, raise_server_exceptions=False) as client, caplog.at_level(logging.ERROR, logger=skills_router.__name__):
+        response = client.get(path)
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": detail}
+    assert host_path not in response.text
+    assert host_path in caplog.text
