@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from langchain_core.tools import ToolException
 
@@ -658,3 +658,17 @@ async def test_unreachable_personal_task_server_keeps_other_personal_tools(perso
 
     notes_name = next(name for name, server in personal.mcp_servers.items() if server.url == "https://notes.example.com/mcp")
     assert [tool.name for tool in tools] == [f"{notes_name}_search"]
+
+
+def test_ordinary_bundled_connection_check_does_not_read_an_undeclared_cwd():
+    """The response model declares no ``cwd``; reading it raised AttributeError (upstream #7400)."""
+    from deerflow.capabilities.business import connection_config
+
+    definition = connection_config("hubspot", {"access_token": "private-token"})
+    server = personal_mcp.mcp.McpServerConfigResponse.model_validate(definition)
+    personal_mcp._validate_personal_server(server, admin=False)
+
+    with_cwd = personal_mcp.mcp.McpServerConfigResponse.model_validate({**definition, "cwd": "/srv"})
+    with pytest.raises(HTTPException) as denied:
+        personal_mcp._validate_personal_server(with_cwd, admin=False)
+    assert denied.value.status_code == 403
