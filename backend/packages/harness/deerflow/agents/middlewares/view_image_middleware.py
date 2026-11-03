@@ -149,6 +149,8 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         checkpoints additionally verify the exact SHA-256 before a synchronized
         host copy can stand in for bytes from an earlier sandbox generation.
         """
+        from deerflow.tools.builtins.view_image_tool import read_host_image
+
         try:
             file_path = Path(actual_path)
             if not file_path.exists() or not file_path.is_file():
@@ -156,8 +158,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             current_size = file_path.stat().st_size
             if current_size != expected_size or current_size > _MAX_IMAGE_BYTES:
                 return None
-            with open(file_path, "rb") as f:
-                image_bytes = f.read()
+            image_bytes = read_host_image(file_path)
             return cls._encode_image_bytes(
                 image_bytes,
                 mime_type,
@@ -316,6 +317,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                     }
                 )
             else:
+                logger.warning("Viewed image %s was withheld from the model: unavailable, changed or not this run's", image_path)
                 content_blocks.append({"type": "text", "text": f"  (file unavailable or changed: {image_path})"})
 
         return content_blocks
@@ -378,6 +380,23 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         context = getattr(request.runtime, "context", None)
         return context if isinstance(context, Mapping) else {}
 
+    @staticmethod
+    def _root_belongs_to_run(root: Path, root_name: str, thread_id: str, user_id: str) -> bool:
+        """Bind a stored root to this run, whichever layout its paths use.
+
+        A managed conversation keeps its roots in the person's Space, so only the
+        run's own admitted paths can say which root is its own. They refuse
+        another owner, and a run with no personal Space has no root to match.
+        """
+        from deerflow.config.paths import get_paths
+        from deerflow.spaces.chat_paths import ChatStoragePaths
+
+        paths = get_paths()
+        if isinstance(paths, ChatStoragePaths):
+            expected = paths.thread_data(thread_id, user_id=user_id).get(f"{root_name}_path")
+            return expected is not None and root == Path(expected).resolve()
+        return root.parts[-6:] == ("users", user_id, "threads", thread_id, "user-data", root_name)
+
     @classmethod
     def _host_path_matches_request(cls, request: ModelRequest, image_path: str, actual_path: str) -> bool:
         """Bind a stored host copy to the authenticated run's user and thread."""
@@ -413,15 +432,16 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 root_path = thread_data.get(f"{root_name}_path")
                 if not isinstance(root_path, str) or not root_path:
                     return False
-                root = Path(root_path).resolve()
-                if root.parts[-6:] != ("users", user_id, "threads", thread_id, "user-data", root_name):
+                if not cls._root_belongs_to_run(Path(root_path).resolve(), root_name, thread_id, user_id):
                     return False
                 validate_local_tool_path(image_path, thread_data, read_only=True)
                 expected_path = Path(resolve_and_validate_user_data_path(image_path, thread_data))
             else:
                 expected_path = get_paths().resolve_virtual_path(thread_id, image_path, user_id=user_id)
             return Path(actual_path).resolve() == expected_path
-        except (OSError, PermissionError, TypeError, ValueError):
+        except (OSError, PermissionError, TypeError, ValueError, RuntimeError):
+            # Path.resolve raises RuntimeError on a symlink loop. Every viewed entry
+            # passes through here, so one bad file must not fail the whole model call.
             return False
 
     def _image_injection_plan(self, request: ModelRequest) -> tuple[list[AnyMessage], bool, bool]:

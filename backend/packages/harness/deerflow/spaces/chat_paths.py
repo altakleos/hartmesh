@@ -7,11 +7,15 @@ must refresh current authority before each effect and each retained-client use.
 import errno
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
+
+from deerflow_extension_api.storage import StorageUnavailable
 
 from deerflow.agent_instances.contract import Refusal
 from deerflow.config.paths import Paths, _join_host_path, _validate_thread_id, _validate_user_id
 from deerflow.spaces.backings import VerifiedVolume
+from deerflow.spaces.contract import SpaceConflict
 from deerflow.spaces.provision import SPACE_MIN_FREE_BYTES, SPACE_MIN_FREE_INODES
 
 
@@ -230,6 +234,23 @@ class ChatStoragePaths(Paths):
         for leaf in ("workspace", "uploads", "outputs"):
             directory(thread + "/user-data/" + leaf)
         directory(thread + "/acp-workspace")
+
+    def read_user_file(self, path, *, max_bytes):
+        """Read a resolved host path through the pinned personal Space.
+
+        A sandbox process can replace a component after a path was validated, and
+        confinement alone still follows a relative link to another conversation. The
+        path was resolved, so any link met here is such a swap, and the read refuses it.
+        Every refusal is an OSError, so a caller treats it as any other failed read.
+        """
+        if self._chat_user is None:
+            raise PermissionError("This conversation has no admitted personal files")
+        try:
+            relative = Path(path).relative_to(self._chat_user.data_path.resolve())
+            with self._chat_user.filesystem() as filesystem:
+                return filesystem.read_bytes(str(relative), max_bytes=max_bytes, follow_symlinks=False)
+        except (ValueError, StorageUnavailable, SpaceConflict) as exc:
+            raise OSError(f"{type(exc).__name__}: {exc}") from exc
 
     def user_files_dir(self, user_id):
         return self._chat_root(user_id) / "files"

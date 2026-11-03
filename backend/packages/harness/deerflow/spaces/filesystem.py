@@ -190,10 +190,10 @@ class ConfinedFilesystem:
             os.close(fd)
         return sorted(entries, key=lambda entry: entry.name), truncated
 
-    def read_bytes(self, path: str, *, max_bytes: int) -> bytes:
+    def read_bytes(self, path: str, *, max_bytes: int, follow_symlinks: bool = True) -> bytes:
         if type(max_bytes) is not int or not 1 <= max_bytes <= 64 * 1024 * 1024:
             raise ValueError("Bounded read requires a positive limit up to64MiB")
-        fd = self.open_regular(path)
+        fd = self.open_regular(path, follow_symlinks=follow_symlinks)
         try:
             before = os.fstat(fd)
             if before.st_size > max_bytes:
