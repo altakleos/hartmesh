@@ -285,7 +285,14 @@ class InstanceSandboxProvider(SandboxProvider):
         pass
 
     def close(self):
-        self.sandbox.close()
+        try:
+            self.sandbox.close()
+        finally:
+            # A run's provider is never reused. Its lease manager would otherwise
+            # keep it, and a serializer thread, for the life of the process.
+            from deerflow.sandbox.lease import discard_sandbox_lease_manager
+
+            discard_sandbox_lease_manager(self)
 
 
 def instance_tools(tools):
