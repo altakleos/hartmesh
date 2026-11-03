@@ -244,17 +244,17 @@ async def test_a_key_for_a_provider_that_had_none_brings_its_models_and_a_replac
     _, repository = database
     service = _service(repository, environ)
     await service.start()
-    assert "claude-sonnet-4" not in _model_keys(_live_config())
+    assert "claude-sonnet-5-5" not in _model_keys(_live_config())
 
     await service.put("anthropic", OWN, **ADMIN)
-    assert _model_keys(_live_config())["claude-sonnet-4"] == OWN
-    assert _client_key("claude-sonnet-4") == OWN
+    assert _model_keys(_live_config())["claude-sonnet-5-5"] == OWN
+    assert _client_key("claude-sonnet-5-5") == OWN
 
     replaced = await service.put("anthropic", NEWER, **ADMIN)
     assert replaced["action"] == "replaced"
-    assert _model_keys(_live_config())["claude-sonnet-4"] == NEWER
+    assert _model_keys(_live_config())["claude-sonnet-5-5"] == NEWER
     # The client the next run builds carries the replacement; nothing is sent anywhere.
-    assert _client_key("claude-sonnet-4") == NEWER
+    assert _client_key("claude-sonnet-5-5") == NEWER
     await service.put("openai", NEWER, **ADMIN)
     assert _client_key("gpt-4") == NEWER
 
@@ -288,7 +288,7 @@ async def test_removing_the_products_key_falls_back_to_the_environments_or_to_no
     removed = await service.remove("anthropic", **ADMIN)
     assert removed["provider"]["source"] == "none"
     assert "ANTHROPIC_API_KEY" not in environ
-    assert "claude-sonnet-4" not in _model_keys(_live_config())
+    assert "claude-sonnet-5-5" not in _model_keys(_live_config())
 
     again = await service.remove("anthropic", **ADMIN)
     assert again["action"] == "none"
@@ -392,7 +392,7 @@ async def test_a_change_the_database_does_not_take_puts_the_gateway_back_on_what
     assert "ANTHROPIC_API_KEY" not in environ
     assert environ["DEER_FLOW_CONFIG_PATH"] == str(tmp_path / "home" / "config.yaml")
     assert not (tmp_path / "home" / "config.effective.yaml").exists()
-    assert "claude-sonnet-4" not in _model_keys(_live_config())
+    assert "claude-sonnet-5-5" not in _model_keys(_live_config())
     assert _model_keys(_live_config())["gpt-4"] == SEED
 
 
@@ -534,7 +534,7 @@ async def test_repeated_cancellation_during_rollback_does_not_admit_the_next_cha
     assert not installs_during_restore
     assert environ["OPENAI_API_KEY"] == SEED
     assert environ["ANTHROPIC_API_KEY"] == NEWER
-    assert _model_keys(_live_config())["claude-sonnet-4"] == NEWER
+    assert _model_keys(_live_config())["claude-sonnet-5-5"] == NEWER
     assert set(await repository.stored()) == {"ANTHROPIC_API_KEY"}
     assert "provider keys: change failed (RuntimeError)" in caplog.text
     assert OWN not in caplog.text

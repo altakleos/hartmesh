@@ -991,7 +991,7 @@ def test_catalog_fragments_are_derived_from_the_example_and_reference_only_their
     [
         ("none", set(), [], "deerflow.community.searxng.tools:web_search_tool"),
         ("one", {"GEMINI_API_KEY"}, ["gemini-2.5-pro"], "deerflow.community.searxng.tools:web_search_tool"),
-        ("several", {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TAVILY_API_KEY", "SERPER_API_KEY"}, ["gpt-4", "gpt-5-responses", "claude-sonnet-4"], "deerflow.community.tavily.tools:web_search_tool"),
+        ("several", {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TAVILY_API_KEY", "SERPER_API_KEY"}, ["gpt-4", "gpt-5-responses", "claude-sonnet-5-5"], "deerflow.community.tavily.tools:web_search_tool"),
     ],
 )
 def test_render_includes_only_present_providers_and_leaves_no_absent_reference(render_config: ModuleType, label: str, keys: set[str], expected_models: list[str], expected_search: str) -> None:

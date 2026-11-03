@@ -100,7 +100,7 @@ def _halves(text_value):
 def anthropic_stream(*, text_value="", thinking=None, tool=None, message_id="msg_1") -> bytes:
     usage = {"input_tokens": 25, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 1, "service_tier": "standard"}
     events = [
-        ("message_start", {"type": "message_start", "message": {"id": message_id, "type": "message", "role": "assistant", "model": "claude-sonnet-4-20250514", "content": [], "stop_reason": None, "stop_sequence": None, "usage": usage}})
+        ("message_start", {"type": "message_start", "message": {"id": message_id, "type": "message", "role": "assistant", "model": "claude-sonnet-5-5", "content": [], "stop_reason": None, "stop_sequence": None, "usage": usage}})
     ]
     index = 0
 

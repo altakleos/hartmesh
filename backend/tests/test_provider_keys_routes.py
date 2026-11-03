@@ -140,7 +140,7 @@ def test_an_administrator_sets_replaces_and_removes_a_key_and_reads_back_only_it
     assert SENTINEL not in added.text
 
     models = admin.get("/api/models").json()["models"]
-    assert "claude-sonnet-4" in [model["name"] for model in models]
+    assert "claude-sonnet-5-5" in [model["name"] for model in models]
 
     replaced = _put(admin, "anthropic", {"key": SENTINEL + "-2"})
     assert replaced.json()["action"] == "replaced"
@@ -148,7 +148,7 @@ def test_an_administrator_sets_replaces_and_removes_a_key_and_reads_back_only_it
     removed = admin.request("DELETE", "/api/provider-keys/anthropic", headers=_csrf(admin))
     assert removed.status_code == 200, removed.text
     assert (removed.json()["action"], removed.json()["provider"]["source"]) == ("removed", "none")
-    assert "claude-sonnet-4" not in [model["name"] for model in admin.get("/api/models").json()["models"]]
+    assert "claude-sonnet-5-5" not in [model["name"] for model in admin.get("/api/models").json()["models"]]
 
     events = admin.get("/api/provider-keys/events").json()["events"]
     assert [(event["variable"], event["action"], event["actor_email"]) for event in events] == [
@@ -184,14 +184,14 @@ def test_an_administrator_tests_a_key_without_setting_it(gateway, monkeypatch: p
 
     assert tested.status_code == 200, tested.text
     assert tested.headers["cache-control"] == "no-store"
-    assert tested.json() == {"provider": "anthropic", "kind": "models", "result": "rejected", "reason": None, "model": "claude-sonnet-4"}
+    assert tested.json() == {"provider": "anthropic", "kind": "models", "result": "rejected", "reason": None, "model": "claude-sonnet-5-5"}
     assert SENTINEL not in tested.text
     assert asked[0]["api_key"] == SENTINEL
     # Tested, not set: the provider still has no key and nothing was recorded.
     sources = {provider["provider"]: provider["source"] for provider in admin.get("/api/provider-keys").json()["providers"]}
     assert sources["anthropic"] == "none"
     assert admin.get("/api/provider-keys/events").json()["events"] == []
-    assert "claude-sonnet-4" not in [model["name"] for model in admin.get("/api/models").json()["models"]]
+    assert "claude-sonnet-5-5" not in [model["name"] for model in admin.get("/api/models").json()["models"]]
 
 
 def test_a_test_refuses_what_a_write_refuses(gateway) -> None:
