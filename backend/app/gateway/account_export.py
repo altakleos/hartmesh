@@ -255,6 +255,17 @@ _REASONS = {
 }
 
 
+def _read_scope(app: Any) -> SimpleNamespace:
+    """The request-shaped scope the shared conversation reader is given.
+
+    The reader builds the Gateway run context, which binds session-scoped
+    agent-run delegation from ``request.state``. An export runs for its person
+    outside any request, so the scope carries an empty state: no delegation,
+    the same as an internal caller, and no ``AttributeError`` on ``state``.
+    """
+    return SimpleNamespace(app=app, state=SimpleNamespace())
+
+
 class ExportRefused(Exception):
     """An export that cannot be prepared; ``code`` is what the page says."""
 
@@ -1100,8 +1111,9 @@ class AccountExportService:
             "transcripts": [],
         }
         try:
-            conversation = await transcript.read_conversation(SimpleNamespace(app=self._app), thread_id, record, user_id=job.user_id)
+            conversation = await transcript.read_conversation(_read_scope(self._app), thread_id, record, user_id=job.user_id)
         except Exception:  # noqa: BLE001 - one conversation that cannot be read must not keep the rest from the person
+            logger.warning("account export: conversation %s could not be read; its transcript is skipped", thread_id, exc_info=True)
             skipped.append({"path": f"conversations/{thread_id}/transcript", "reason": "unreadable"})
             return entry
         if conversation is not None:

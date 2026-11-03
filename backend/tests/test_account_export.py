@@ -759,6 +759,36 @@ async def test_a_conversation_that_cannot_be_read_is_named_and_the_rest_exports(
     assert "conversations/a-thread-1/transcript.md" in _archive(job)
 
 
+@pytest.mark.anyio
+async def test_the_read_scope_builds_a_run_context_beside_the_agent_runs_host(tmp_path, monkeypatch) -> None:
+    """The reader builds the Gateway run context, whose agent-run host binds from ``request.state``.
+
+    A scope of ``app`` alone raised ``AttributeError`` there in a production
+    Gateway, so every conversation was skipped as unreadable.
+    """
+    from app.gateway.deps import get_run_context
+    from app.gateway.extension_agent_runs import GatewayAgentRunsHost
+
+    deployment = _Deployment(tmp_path, monkeypatch)
+    deployment.app.state.agent_runs_host = GatewayAgentRunsHost(deployment.app, load_user=None)
+    monkeypatch.setattr("app.gateway.deps.get_config", lambda: None)
+    await _two_people(deployment)
+    real_read = transcript.read_conversation
+    contexts = []
+
+    async def _through_the_run_context(scope, thread_id, record, *, user_id):
+        contexts.append(get_run_context(scope))
+        return await real_read(scope, thread_id, record, user_id=user_id)
+
+    monkeypatch.setattr(transcript, "read_conversation", _through_the_run_context)
+
+    job = await deployment.export(PERSON_A)
+
+    assert job.state == "ready" and _skipped(job) == {}
+    assert contexts and all(context.agent_runs is None for context in contexts)
+    assert {"conversations/a-thread-1/transcript.json", "conversations/a-thread-2/transcript.json"} <= set(_archive(job))
+
+
 # ── Size ─────────────────────────────────────────────────────────────────
 
 
