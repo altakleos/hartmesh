@@ -1,6 +1,8 @@
 import { describe, expect, it } from "@rstest/core";
 
+import type { StorageFeature } from "@/core/features/api";
 import {
+  fileAreaNotice,
   readStorageRefusal,
   storageRefusalSentence,
 } from "@/core/file-areas/storage-state";
@@ -44,6 +46,28 @@ describe("storage refusal presentation", () => {
       { status: 507, code: "future-code" },
     ])
       expect(readStorageRefusal(error)).toBeNull();
+  });
+
+  it("reads a failed slot as a fault, never as seats or as the person's own files", () => {
+    const refusal = fileAreaNotice(
+      { state: "incomplete", own: "fault" } as StorageFeature,
+      null,
+      "files",
+    );
+    expect(refusal?.detailCode).toBe("fault");
+    const sentence = storageRefusalSentence(refusal, enUS, {
+      area: "files",
+      support: "Acme",
+      administrator: true,
+    });
+    expect(sentence).toBe(enUS.chat.filesFault("Acme"));
+    expect(sentence).not.toMatch(/seat|safety check/i);
+    expect(
+      storageRefusalSentence(refusal, zhCN, {
+        area: "files",
+        support: "管理员",
+      }),
+    ).toBe(zhCN.chat.filesFault("管理员"));
   });
 
   it("maps personal, shared and upload capacity refusals to active-locale text", () => {

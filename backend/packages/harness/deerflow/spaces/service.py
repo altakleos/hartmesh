@@ -279,8 +279,8 @@ class SpaceFiles:
             handle = used.get(slot)
             self._publish_claim(slot, expected, handle or expected.handle, "bound" if handle is not None else "unclaimed")
 
-    async def refresh_bound_volumes(self):
-        """Prove mounts before a short parent-locked publication of operator growth."""
+    async def _prove_bound_volumes(self):
+        """Read every bound slot's mount and marker; no SQL row stays held while this runs."""
         claims = self._claim_snapshot()
         errors = {}
         async with self.registry._sf() as session:
@@ -299,6 +299,16 @@ class SpaceFiles:
             except (BackingUnavailable, OSError) as exc:
                 if self._claim(binding.slot_id) is expected:
                     errors[binding.slot_id] = str(exc)
+        return claims, proven, errors
+
+    async def bound_volume_errors(self):
+        """What a refresh would report, for callers too frequent to lock every Space row."""
+        claims, _proven, errors = await self._prove_bound_volumes()
+        return {slot: error for slot, error in errors.items() if self._claim(slot) is claims[slot]}
+
+    async def refresh_bound_volumes(self):
+        """Prove mounts before a short parent-locked publication of operator growth."""
+        claims, proven, errors = await self._prove_bound_volumes()
         # No mount/extent I/O is awaited while holding SQLite's application
         # writer. Current binding identity is checked again under parent locks.
         publications = []
@@ -389,6 +399,10 @@ class SpaceFiles:
         """A host snapshot of unbound, empty qualified capacity; never an admission."""
         excluded = set(unverified).union(*self.bound_slots.values(), *self.unclaimed_slots.values())
         return {slot for slot, spec in self.catalog.volumes.items() if getattr(spec, "kind", None) in (kind, None) and slot not in excluded}
+
+    def failed_slots(self, kind, *, unverified):
+        """A host snapshot of capacity failing its proof, whoever it is still bound to."""
+        return {slot for slot, spec in self.catalog.volumes.items() if getattr(spec, "kind", None) in (kind, None) and slot in unverified}
 
     async def binding_verified(self, space_id):
         """Project backing facts without holding SQL across filesystem proof."""

@@ -30,6 +30,7 @@ export interface Translations {
     filesFull: (support: string) => string;
     filesPreparing: (support: string) => string;
     filesNoSeat: (administrator: boolean, provider: string) => string;
+    filesFault: (support: string) => string;
     filesUnavailable: string;
     myFilesUnchecked: string;
   };

@@ -1236,11 +1236,11 @@ class TelegramBotChannel(TelegramChannel):
             return "file.own_unavailable", None
         await check()
         storage = features.get("storage_spaces")
-        if type(storage) is not dict or storage.get("state") not in {"off", "ready", "incomplete", "unavailable"} or storage.get("own") not in {"ready", "not-assigned", "no-seat", "unverified"}:
+        if type(storage) is not dict or storage.get("state") not in {"off", "ready", "incomplete", "unavailable"} or storage.get("own") not in {"ready", "not-assigned", "no-seat", "unverified", "fault"}:
             return "file.own_unavailable", features
         if storage["state"] == "unavailable":
             return "file.own_unavailable", features
-        key = {"not-assigned": "file.own_preparing", "no-seat": "file.own_no_seat", "unverified": "file.own_unchecked"}.get(storage["own"])
+        key = {"not-assigned": "file.own_preparing", "no-seat": "file.own_no_seat", "unverified": "file.own_unchecked", "fault": "file.own_unavailable"}.get(storage["own"])
         return key, features
 
     async def _file_button(self, link, *, thread_id):

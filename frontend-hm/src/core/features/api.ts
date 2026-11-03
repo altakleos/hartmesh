@@ -193,7 +193,12 @@ export const STORAGE_REASONS = [
 ] as const;
 export type StorageReason = (typeof STORAGE_REASONS)[number];
 export type StorageState = "off" | "ready" | "incomplete" | "unavailable";
-export type OwnFilesState = "ready" | "not-assigned" | "no-seat" | "unverified";
+export type OwnFilesState =
+  | "ready"
+  | "not-assigned"
+  | "no-seat"
+  | "unverified"
+  | "fault";
 export interface StorageFeature {
   known: boolean;
   enabled: boolean;
@@ -305,6 +310,7 @@ export function selectStorageState(
     "not-assigned",
     "no-seat",
     "unverified",
+    "fault",
   ];
   return {
     known: true,

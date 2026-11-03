@@ -50,7 +50,7 @@ class StorageSpacesFeature(BaseModel):
     user_spaces: bool = False
     state: Literal["off", "ready", "incomplete", "unavailable"] = "off"
     reason: str | None = None
-    own: Literal["ready", "not-assigned", "no-seat", "unverified"] = "ready"
+    own: Literal["ready", "not-assigned", "no-seat", "unverified", "fault"] = "ready"
 
 
 class SeatCount(BaseModel):
@@ -298,6 +298,15 @@ async def _feature_owner(request):
     return None
 
 
+def _unassigned(files, seats, unverified):
+    """Anyone signed in is counted, so a seat can only be what is missing past the limit."""
+    if files.assignable_slots("user", unverified=unverified):
+        return "not-assigned"
+    if seats.free < 0:
+        return "no-seat"
+    return "fault" if files.failed_slots("user", unverified=unverified) else "not-assigned"
+
+
 async def _storage_features(request, config):
     from app.gateway import storage_spaces as ss
 
@@ -320,7 +329,7 @@ async def _storage_features(request, config):
                 space_id = link.space_id if link is not None else None
             if state.state not in ("off", "unavailable"):
                 if space_id is None:
-                    own = "not-assigned" if files.assignable_slots("user", unverified=app.state.agent_execution.unverified) else "no-seat"
+                    own = _unassigned(files, counts["user"], app.state.agent_execution.unverified)
                 else:
                     own = "ready" if await files.binding_verified(space_id) else "unverified"
         storage = StorageSpacesFeature(enabled=True, backend="fixed-ext4", editor_concurrency="shared", user_spaces=files.user_spaces, state=state.state, reason=state.reason, own=own)

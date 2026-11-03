@@ -80,7 +80,16 @@ async def test_reader_reserves_before_getfile_and_transfers_charge_until_manager
         await e.channel.stop()
 
 
-@pytest.mark.parametrize("state,own,key", [("ready", "not-assigned", "file.own_preparing"), ("ready", "no-seat", "file.own_no_seat"), ("ready", "unverified", "file.own_unchecked"), ("unavailable", "ready", "file.own_unavailable")])
+@pytest.mark.parametrize(
+    "state,own,key",
+    [
+        ("ready", "not-assigned", "file.own_preparing"),
+        ("ready", "no-seat", "file.own_no_seat"),
+        ("ready", "unverified", "file.own_unchecked"),
+        ("incomplete", "fault", "file.own_unavailable"),
+        ("unavailable", "ready", "file.own_unavailable"),
+    ],
+)
 async def test_reader_storage_state_refuses_before_getfile(db, monkeypatch, state, own, key):
     e = await fixture(db, monkeypatch, features={"storage_spaces": {"state": state, "own": own, "reason": None}})
     try:

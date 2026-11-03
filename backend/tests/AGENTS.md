@@ -344,7 +344,8 @@ The mandatory native tier also runs the scheduled-trim regression on isolated,
 disposable loop images. Only a task-owned nonempty fstab table is passed to
 `fstrim --listed-in`: its unprotected positive control must actually lose physical
 allocation and fail qualification; the protected image must retain allocation,
-files and qualification. Never run this native test locally or trim the host's
+files and qualification. A second native case restores a really trimmed image and
+reads its file through a fresh mount. Never run these locally or trim the host's
 global table. Compose failure evidence includes bounded fstrim service/timer facts.
 After deliberate workspace destruction/replacement, the bundle journey waits for
 public `agent_instances.execution` readiness before the next independent journey.

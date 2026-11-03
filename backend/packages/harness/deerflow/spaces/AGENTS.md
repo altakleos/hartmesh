@@ -102,9 +102,11 @@ can run a text chat.
 
 Fixed image mounts share `FIXED_VOLUME_MOUNT_OPTIONS`, including `nodiscard`.
 Operators must exclude them from FITRIM; Compose fstab entries use
-`X-fstrim.notrim`. Keep full physical-allocation and FIEMAP qualification intact.
-Never refill sparse backings automatically. Native CI proves actual trim of an
-unprotected disposable image and retained allocation of an excluded one.
+`X-fstrim.notrim`. Keep full physical-allocation and FIEMAP qualification intact:
+only root's `prepare` and `verify --repair` refill a hole, never qualification or
+the Gateway. Native CI proves actual trim of an unprotected disposable image,
+retained allocation of an excluded one and restoring a trimmed one. Frequent
+callers use `bound_volume_errors`: `refresh_bound_volumes` locks every Space row.
 
 `provision.py` owns operator preparation and whole-plan byte/inode arithmetic.
 The legacy script imports its unchanged entry point. Typed schema-2 inventories

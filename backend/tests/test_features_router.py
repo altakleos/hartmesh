@@ -7,6 +7,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from test_agent_instances import instances as instances
+from test_storage_spaces_startup import _without_background_passes
 from test_storage_spaces_startup import startup as startup
 
 from app.gateway.deps import get_config
@@ -151,6 +152,45 @@ async def test_features_do_not_project_a_person_from_unsupported_identity(startu
     response = await _managed_features(startup, user_id="default", source=source)
     assert response["agent_instances"]["ai_assistants"]["mine"] == 0
     assert response["storage_spaces"]["own"] == "ready"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "free,failed,bound,own",
+    [
+        pytest.param(9, "user", False, "fault", id="free-seats-and-a-failed-slot"),
+        pytest.param(0, "user", False, "fault", id="this-person-holds-the-last-seat-and-its-slot-failed"),
+        pytest.param(0, "user", True, "fault", id="a-failed-slot-still-bound-to-someone"),
+        pytest.param(-1, "user", False, "no-seat", id="more-accounts-than-seats-beside-a-failed-slot"),
+        pytest.param(-1, None, False, "no-seat", id="more-accounts-than-seats"),
+        pytest.param(0, None, False, "not-assigned", id="this-person-holds-the-last-seat-and-a-release-is-pending"),
+        pytest.param(9, None, False, "not-assigned", id="free-seats-and-nothing-failed"),
+        pytest.param(9, "assistant", False, "not-assigned", id="another-kinds-slot-failed"),
+    ],
+)
+async def test_seats_are_blamed_only_when_they_are_taken(startup, monkeypatch, free, failed, bound, own):
+    from _storage_spaces_test_support import ALICE
+
+    from deerflow.spaces.contract import Custody, MutationMode
+
+    ss, app, config, sf, catalog, _, _ = startup
+    await _without_background_passes(ss, app, config, sf)
+    files = app.state.storage_spaces
+    slots = {spec.kind: slot for slot, spec in catalog.volumes.items()}
+    original = ss.allowance
+
+    async def allowance(state, kind, **kwargs):
+        return ss.Allowance(10, 10, 31, 10 - free, free) if kind == "user" else await original(state, kind, **kwargs)
+
+    monkeypatch.setattr(ss, "allowance", allowance)
+    if bound:
+        await files.assign(kind="user", actor=ALICE, name="User fixture", custody=Custody.personal(ALICE), mode=MutationMode.NATIVE)
+    else:
+        files.unclaimed_slots["user"].add(slots["user"])
+    if failed is not None:
+        app.state.agent_execution.unverified[slots[failed]] = "fixture hole"
+    response = await _managed_features(startup, user_id="bob")
+    assert response["storage_spaces"]["own"] == own
 
 
 @pytest.mark.asyncio

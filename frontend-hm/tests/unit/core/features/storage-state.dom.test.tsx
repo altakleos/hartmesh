@@ -122,4 +122,32 @@ describe("current-account storage observers", () => {
     });
     expect(fetch).toHaveBeenCalledTimes(2);
   });
+
+  it("keeps asking while a fault lasts, so the notice clears without a reload", async () => {
+    rs.useFakeTimers();
+    rs.mocked(fetch).mockImplementation(() =>
+      Promise.resolve(
+        Response.json({
+          ...ready,
+          storage_spaces: { ...ready.storage_spaces, own: "fault" },
+        }),
+      ),
+    );
+    const { view } = start();
+    await act(async () => {
+      await rs.advanceTimersByTimeAsync(1);
+    });
+    expect(state().storage.own).toBe("fault");
+    rs.mocked(fetch).mockImplementation(() =>
+      Promise.resolve(Response.json(ready)),
+    );
+    await act(async () => {
+      await rs.advanceTimersByTimeAsync(15_000);
+    });
+    expect(state().storage.own).toBe("ready");
+    view.unmount();
+    await act(async () => {
+      await rs.runAllTimersAsync();
+    });
+  });
 });

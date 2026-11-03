@@ -119,7 +119,9 @@ export function useStorage() {
   const query = useFeatures(selectStorageState, {
     refetchInterval: (query) =>
       !query.state.error &&
-      selectStorageState(query.state.data).own === "not-assigned"
+      ["not-assigned", "fault"].includes(
+        selectStorageState(query.state.data).own,
+      )
         ? 15_000
         : false,
   });

@@ -1320,6 +1320,8 @@ export function createEnUS(product: string): Translations {
         administrator
           ? `Files are not available for your account: more accounts exist here than seats. Ask ${provider} for more seats.`
           : "Files are not available for your account, so chats run without them. Ask an administrator.",
+      filesFault: (support) =>
+        `Files are not available because of a storage fault, so chats run without them for now. Ask ${support} to fix it.`,
       filesUnavailable:
         "Files are not available right now. Chats work without files until this is fixed.",
       myFilesUnchecked:

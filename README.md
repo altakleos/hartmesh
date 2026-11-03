@@ -681,6 +681,9 @@ Managed loop-backed Spaces reserve their full image capacity. New mounts use
 `nodiscard`, and generated fstab entries exclude them from the standard scheduled
 trim service. Existing pools need updated entries through `si fstab-sync` or
 preparation; see [the trim policy](deploy/compose/README.md#fixed-image-trim-policy).
+Preparation and `verify --repair` restore an image another trim emptied, keeping its
+files. While an image fails verification, `/health` reads `incomplete` rather than
+`ready`, and someone with no files yet sees a storage fault, not a shortage of seats.
 
 With managed storage enabled, the backend also provides
 `python -m app.gateway.agent_instances` for operator inspection and recovery.
