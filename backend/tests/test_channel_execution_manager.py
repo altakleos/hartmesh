@@ -117,6 +117,23 @@ async def test_valid_host_context_uses_original_thread_and_typed_creating_path(s
 
 
 @pytest.mark.asyncio
+async def test_a_managed_turn_gets_the_web_chat_step_budget(setup):
+    # Web chats and scheduled runs run with recursion_limit 1000; a managed
+    # turn used the ordinary channel default of 100 and stopped long jobs early.
+    e = setup
+    await e.manager._handle_chat(e.message)
+    assert e.client.runs.stream.call_args.kwargs["config"]["recursion_limit"] == 1000
+
+
+@pytest.mark.asyncio
+async def test_a_configured_session_recursion_limit_still_wins_for_a_managed_turn(setup):
+    e = setup
+    e.manager._default_session["config"] = {"recursion_limit": 50}
+    await e.manager._handle_chat(e.message)
+    assert e.client.runs.stream.call_args.kwargs["config"]["recursion_limit"] == 50
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("attribute,value", [("owner_user_id", "other"), ("connection_id", "other"), ("chat_id", "other")])
 async def test_host_scope_mismatch_refuses_before_thread_or_run(setup, attribute, value):
     e = setup
