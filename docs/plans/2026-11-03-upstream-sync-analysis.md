@@ -596,3 +596,60 @@ git log --no-merges --cherry-mark --left-right HEAD...upstream/main | grep '^=' 
 ```
 
 The "names each side needs" checklist (§5.1) came from a static AST import check over the merged tree, run twice: once with every conflicted file resolved to HartMesh's version and once to upstream's. Rerun that check against the resolved tree before opening the merge PR.
+
+---
+
+## Appendix C — Phase 0 status (2026-11-03)
+
+Phase 0 landed on branch `claude/zen-ramanujan-vekdgx` as 84 commits after this
+document. Upstream commits were cherry-picked with `-x` and their authors kept;
+changelog hunks and the pinned `frontend/` copy were never taken; hand ports say
+"ported from" and name what was left out. Every commit ran its own tests, and the
+backend suite ran in full on the refreshed dependencies (34,181 passed; two failures
+are environmental in the session container and fail identically on the base:
+`/mnt/skills` exists, and `TRACEPARENT` is set). `frontend-hm`: `pnpm check`,
+`pnpm test` (3,212 passed) and `pnpm build` pass.
+
+**Security (§4.1), all taken:** #6513, #6202, #6580, #7374, #7665, #7266, #7217,
+#7255, #7275, #7155, #7467 (control-character part, backend and frontend-hm),
+#6831, #7449 (frontend-hm), #6794 (hand port), #7258.
+
+**Dependencies:** backend lock refreshed to upstream's versions for the advisory set
+(uv 0.11.1, `uv lock --check` clean); frontend-hm on next 16.4.1, zod 4.6.7,
+happy-dom 21, plus in-range dompurify/lodash-es/source-map-js; the image optimizer
+is off. `pnpm audit --prod`: 5 critical / 13 high → 0 critical / 3 high (transitive
+pins with no compatible fix: chevrotain's lodash-es, @langchain/core's langsmith and
+zod 3). The langgraph 1.2.14 bump needed upstream's #7703 test-double adaptation.
+
+**Correctness (§4.2), taken:** NaN/inf (#7670, #7733); sandbox audit (#6307, #7247,
+#7290); DeerMem (#6672, #7152, #7530 — also fixes the AI-employee pre-compaction
+memory loss, with a HartMesh regression test); checkpoints (#5988, #6929); Redis
+bridge (#6605, #6951, #6690); bootstrap (#6349, #7410, #7489, #6306); middleware
+(#6150, #6363, #6511, #6803, #6946, #6965, #7762, #6107); skills/MCP (#6271, #6133,
+#6342, #6321, #6359, #6473, #6481, #6506, #7081, #7400, #7677); projects trash
+(#7732, #7683, #7499); scheduler (#6975, #6185, #7196); goal (#7167); gateway
+(#7370, #7758, #7557, #6250, #7727); events (#7352); runtime (#6980); sandbox
+(#6834, AIO part of #6673); wizard (#7585).
+
+**HartMesh-owned (§4.3), done:** SearXNG result-URL screening; the retired
+Anthropic model replaced in the Compose catalog; `account_disabled` recognised by
+frontend-hm; the upload gate (#7122/#7342 adapted to HartMesh's `success` meaning);
+CSRF and locale cookie hardening (#7589, #7553). Mechanical frontend-hm ports:
+#7284, #5876, #7743, #6959, #7213, #7175.
+
+**Merge preparation (§5.4):** the skill-review waiver preapproval for upstream's
+skill-creator scripts is committed; it must reach `main` before the merge PR.
+
+**Deferred, with reasons:**
+- Need a Docker host for acceptance (none in the session): Compose `init: true` and
+  `--timeout-graceful-shutdown`, pinning the acceptance nginx to the production digest.
+- Belong to the run-lifecycle decision (§5.2 f): the journal lost-ack duplicate
+  (#6846) and the admission lock split (#7664).
+- Product decision: managed Telegram's recursion limit (100, versus 1000 for web).
+- Need wider upstream context than a cherry-pick: #6712 (all providers' download
+  signature), #7485 (needs `deerflow.utils.atomic_write`), #6701/#6827/#7650/#6702/
+  #7465/#6407 (frontend-hm adaptations without an existing test harness to extend),
+  the SSO landing part of #7467.
+- Off-loop `sign_on_only()` and registration reads on every authenticated request.
+- Dependabot: enable security updates in repository settings (upstream keeps no
+  configuration file either).
