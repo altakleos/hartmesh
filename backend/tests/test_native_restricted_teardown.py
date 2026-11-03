@@ -903,8 +903,12 @@ def test_shutdown_keeps_the_marker_of_a_stop_still_running(fixture):
 
     store.close = observed_close
     try:
-        provider.shutdown()
-        assert at_close == [store.owner_id], "A peer must not be handed a container whose stop is running"
+        # Retryable shutdown (upstream, adopted): the set it could not stop is
+        # kept for a retry and the store stays open; the marker must survive.
+        with pytest.raises(RuntimeError, match="retry shutdown"):
+            provider.shutdown()
+        assert at_close == []
+        assert store.owner("native") == store.owner_id, "A peer must not be handed a container whose stop is running"
     finally:
         discard_sandbox_lease_manager(provider)
 
@@ -932,11 +936,15 @@ def test_shutdown_lets_go_of_a_set_it_could_not_finish(fixture):
 
         NativeResourceSet.__init__ = short_budget
         try:
-            provider.shutdown()
+            # Retryable shutdown keeps the unfinished set for a retry, but its
+            # lease is let go so the next Gateway can recover it at once.
+            with pytest.raises(RuntimeError, match="retry shutdown"):
+                provider.shutdown()
         finally:
             NativeResourceSet.__init__ = real_init
         assert "native" in provider._warm_pool
-        assert at_close == [None], "A lease left behind refuses the next Gateway's recovery until its TTL"
+        assert at_close == []
+        assert store.owner("native") is None, "A lease left behind refuses the next Gateway's recovery until its TTL"
         budget[0] = 0
     finally:
         discard_sandbox_lease_manager(provider)

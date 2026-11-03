@@ -909,7 +909,9 @@ def test_member_skill_reads_keep_load_error_text_out_of_500(monkeypatch, tmp_pat
     extensions_config = tmp_path / "extensions_config.json"
     extensions_config.write_text("{not json", encoding="utf-8")
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_config))
-    app = _make_demo_custom_skill_app(monkeypatch, tmp_path, user_factory=_make_member_user)
+    # HartMesh's private-skill reads require the runtime user to be the owner,
+    # so the member is the effective user rather than a random id.
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path, user_factory=lambda: SimpleNamespace(id=skills_router.get_effective_user_id(), email="member-test@example.com", password_hash="x", system_role="user", needs_setup=False))
 
     with TestClient(app) as client, caplog.at_level(logging.ERROR, logger=skills_router.__name__):
         response = client.get(path)

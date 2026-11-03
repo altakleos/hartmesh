@@ -4404,7 +4404,9 @@ async def test_worker_skips_execution_and_finalization_after_ownership_loss():
     thread_store.update_display_name.assert_not_awaited()
     thread_store.update_status.assert_not_awaited()
     on_run_completed.assert_not_awaited()
-    bridge.publish_end.assert_not_awaited()
+    # HartMesh closes a fenced stream so clients stop waiting (worker.py
+    # _close_fenced_stream); durable recovery still owns the terminal status.
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 
 @pytest.mark.anyio

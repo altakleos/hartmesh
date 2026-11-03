@@ -426,6 +426,8 @@ async def test_browser_tools_acquire_sessions_with_pinned_egress(tmp_path):
         patch.object(browser_tools, "_get_tool_config", return_value={}),
         patch.object(browser_tools, "get_browser_session_manager", return_value=manager),
         patch.object(browser_tools, "_resolve_host_addresses", return_value=[ipaddress.ip_address("93.184.215.14")]),
+        # HartMesh's Storage Spaces screenshot writer is consulted first; Spaces off here.
+        patch("deerflow.spaces.chat_screenshots.get_app_config", return_value=SimpleNamespace(storage_spaces=SimpleNamespace(enabled=False))),
     ):
         await browser_tools.navigate_and_capture(thread_id="thread-1", url="https://example.com/", outputs_path=tmp_path)
         browser_tools._resolve_session(SimpleNamespace(context={"thread_id": "thread-1"}, state={}), {})

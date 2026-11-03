@@ -616,7 +616,10 @@ class ScheduledTaskRepository:
             elif keeps_pause(row, status):
                 # Paused while this occurrence was launching -- its owner was
                 # turned off -- so the launch is recorded and the pause stands.
-                row.last_error = last_error
+                # A manual trial on a task the host paused keeps its pause
+                # reason too (upstream), whichever branch records the launch.
+                if not (occurrence is not None and occurrence.trigger == "manual" and is_host_pause_marker(row.last_error)):
+                    row.last_error = last_error
             else:
                 # A trial on a task the host paused keeps its pause reason.
                 keep_pause_marker = occurrence is not None and occurrence.trigger == "manual" and row.status == "paused" and status == "paused" and is_host_pause_marker(row.last_error)

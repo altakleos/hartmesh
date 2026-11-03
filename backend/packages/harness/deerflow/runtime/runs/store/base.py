@@ -144,6 +144,7 @@ class RunStore(abc.ABC):
         stop_reason: str | None = None,
         output_receipt: OutputReceipt | None = None,
         inventory_evidence: InventoryEvidence | None = None,
+        goal_verdict: dict[str, Any] | None = None,
     ) -> bool:
         """Conditionally settle exactly the observed owned row, or return False.
 

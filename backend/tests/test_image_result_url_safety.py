@@ -203,6 +203,11 @@ async def test_text_search_providers_screen_result_urls(provider, url, expected)
     payload = json.loads(raw)
     # Some providers return a bare list, others a {"results": [...]} envelope.
     rows = payload["results"] if isinstance(payload, dict) else payload
+    if provider == "searxng" and not expected:
+        # HartMesh's SearXNG keeps web results only: a non-public URL drops the
+        # whole row instead of blanking its link (stricter than upstream).
+        assert rows == []
+        return
     assert [row["url"] for row in rows] == [expected]
     assert rows[0]["title"] == "t"
     # The snippet key differs by provider ("content" or "snippet").

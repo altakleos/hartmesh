@@ -92,5 +92,7 @@ async def test_history_head_carries_exactly_the_contract_keys(monkeypatch):
     entries = await call_unwrapped(threads.get_thread_history, thread_id="contract-thread", body=threads.ThreadHistoryRequest(limit=2), request=request, background_tasks=BackgroundTasks())
 
     head, older = (entry.model_dump(mode="json")["values"] for entry in entries)
-    assert set(head) == set(_CONTRACT["history_head_keys"])
+    # HartMesh's head also rehydrates the rendered artifacts and todo list of a
+    # reopened chat (routers/threads.py); the goal keys are upstream's contract.
+    assert set(head) == set(_CONTRACT["history_head_keys"]) | {"artifacts", "todos"}
     assert set(older) == {"title", "thread_data"}

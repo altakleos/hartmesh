@@ -3054,6 +3054,11 @@ async def _start_run(
                     except RunIdempotencyUnsupported as exc:
                         raise HTTPException(status_code=503, detail=str(exc)) from exc
                     except RunIdempotencyKeyMismatch as exc:
+                        if publication is not None:
+                            # A managed turn's key resolving to another owner's row is
+                            # a lookup HartMesh cannot attest; it never reuses or reports
+                            # that row, and the channel retries the same publication.
+                            raise channel_lookup_unavailable() from None
                         # A trusted internal key is scoped by owner, not thread: the
                         # same message requested on another thread (IM ``/new``) is
                         # a different request for the run already admitted.

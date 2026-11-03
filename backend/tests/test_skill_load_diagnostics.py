@@ -217,11 +217,16 @@ def test_management_route_uses_caller_scope(scope):
         assert private not in response.text
 
 
-def test_non_admin_cannot_scan_diagnostics(scope, monkeypatch):
-    _, config, _ = scope
-    monkeypatch.setattr(routes, "_get_user_skill_storage", lambda _: pytest.fail("unauthorized scan"))
+def test_member_scans_only_their_own_diagnostics(scope):
+    """HartMesh gates diagnostics like list_custom_skills: a member reads their own private skills only."""
+    paths, config, _ = scope
+    write(paths.user_custom_skills_dir(USER_ID), "mine")
+    write(paths.user_custom_skills_dir("another-user"), "other-private")
     with client_for(config, "user") as client:
-        assert client.get("/api/skills/diagnostics/custom").status_code == 403
+        response = client.get("/api/skills/diagnostics/custom")
+    assert response.status_code == 200
+    assert [d["package"] for d in response.json()["diagnostics"]] == ["mine"]
+    assert "other-private" not in response.text
 
 
 def test_diagnostic_failure_does_not_expose_exception(scope, monkeypatch):
@@ -255,7 +260,10 @@ def test_correction_and_reload_restore_runtime_catalog(scope, monkeypatch):
             # A management read alone does not update the runtime's cached list.
             assert client.get("/api/skills/diagnostics/custom").json()["diagnostics"] == []
             assert prompt.get_enabled_skills_for_config(config, user_id=USER_ID) == []
-            assert client.post("/api/skills/reload").status_code == 200
+            # HartMesh's HTTP reload is provider-only (403); operator code
+            # refreshes the process-local caches directly.
+            assert client.post("/api/skills/reload").status_code == 403
+            prompt.clear_skills_system_prompt_cache()
             assert client.get("/api/skills/diagnostics/custom").json()["diagnostics"] == []
         assert [s.name for s in prompt.get_enabled_skills_for_config(config, user_id=USER_ID)] == ["broken"]
     finally:

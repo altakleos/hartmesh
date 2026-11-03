@@ -190,7 +190,7 @@ def test_skill_markdown_validation_reads_lf_bytes(monkeypatch) -> None:
 
     seen: list[bytes] = []
 
-    def fake_validate(skill_dir: Path):
+    def fake_validate(skill_dir: Path, *, package=None):
         seen.append((Path(skill_dir) / "SKILL.md").read_bytes())
         return True, "", "demo-skill"
 
@@ -240,7 +240,7 @@ async def test_skill_manage_static_scan_matches_stored_bytes(storage, monkeypatc
     }
     seen: list[dict[str, bytes]] = []
 
-    def fake_scan(skill_dir, *, skill_name):
+    def fake_scan(skill_dir, *, skill_name, app_config=None):
         assert skill_name == "demo-skill"
         seen.append({relative: (Path(skill_dir) / relative).read_bytes() for relative in updates})
         if existing:

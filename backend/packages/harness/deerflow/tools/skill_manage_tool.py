@@ -225,9 +225,10 @@ async def _skill_manage_impl(
     expected_count: int | None = None,
     allow_baseline_override: bool = False,
 ) -> str:
-    from deerflow.utils.file_io import await_drained
-
-    return await await_drained(_skill_manage_impl_undrained(runtime, action, name, content=content, path=path, find=find, replace=replace, expected_count=expected_count, allow_baseline_override=allow_baseline_override))
+    # Admitted mutations drain their write, history and cache tail inside the
+    # name lock (``_settle_skill_mutation``). Draining the whole call as well
+    # would make a cancelled lock waiter keep waiting for the holder.
+    return await _skill_manage_impl_undrained(runtime, action, name, content=content, path=path, find=find, replace=replace, expected_count=expected_count, allow_baseline_override=allow_baseline_override)
 
 
 async def _skill_manage_impl_undrained(

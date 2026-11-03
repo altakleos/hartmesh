@@ -105,8 +105,9 @@ class _Form:
             raise self.close_error
         await self.archive.close()
 
-    def get(self, _key: str) -> skills_router.UploadFile:
-        return self.archive
+    def get(self, key: str, default=None):
+        # HartMesh also reads the optional ``allow_baseline_override`` field.
+        return self.archive if key == "archive" else default
 
 
 @pytest.mark.asyncio
@@ -127,13 +128,17 @@ async def test_upload_finally_preserves_install_outcome(tmp_path, monkeypatch, c
     def _copy(_source):
         return archive
 
-    async def _install(path, _config):
+    async def _install(path, _config, **_kwargs):
         assert path.read_bytes() == b"archive-bytes"
         if outcome == "install_error":
             raise install_error
         return response
 
     monkeypatch.setattr(skills_router, "require_admin_user", _admin)
+    # HartMesh's delegation and owner guards are covered by the router suites;
+    # these tests are about the temporary archive's cleanup.
+    monkeypatch.setattr(skills_router, "require_customer_management_for_request", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(skills_router, "require_private_skill_owner", _admin)
     monkeypatch.setattr(skills_router, "_parse_skill_archive_form", _parse)
     monkeypatch.setattr(skills_router, "_copy_uploaded_skill_archive", _copy)
     monkeypatch.setattr(skills_router, "_install_skill_archive", _install)
@@ -196,13 +201,17 @@ async def test_upload_finally_close_failure_still_discards_and_preserves_outcome
     def _copy(_source):
         return archive
 
-    async def _install(path, _config):
+    async def _install(path, _config, **_kwargs):
         assert path.read_bytes() == b"archive-bytes"
         if outcome == "install_error":
             raise install_error
         return response
 
     monkeypatch.setattr(skills_router, "require_admin_user", _admin)
+    # HartMesh's delegation and owner guards are covered by the router suites;
+    # these tests are about the temporary archive's cleanup.
+    monkeypatch.setattr(skills_router, "require_customer_management_for_request", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(skills_router, "require_private_skill_owner", _admin)
     monkeypatch.setattr(skills_router, "_parse_skill_archive_form", _parse)
     monkeypatch.setattr(skills_router, "_copy_uploaded_skill_archive", _copy)
     monkeypatch.setattr(skills_router, "_install_skill_archive", _install)

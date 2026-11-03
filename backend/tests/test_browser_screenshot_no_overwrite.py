@@ -23,7 +23,14 @@ async def _screenshot(outputs: Path, filename: str | None = "report.png"):
     manager = MagicMock()
     manager.get_session.return_value = session
     runtime = SimpleNamespace(context={"thread_id": "thread-1"}, state={"thread_data": {"outputs_path": str(outputs)}})
-    with patch.object(tools, "get_browser_session_manager", return_value=manager), patch.object(tools, "_get_tool_config", return_value={}):
+    # HartMesh asks its Storage Spaces writer first; with Spaces off it
+    # returns None and the classic outputs path below is used.
+    no_spaces = SimpleNamespace(storage_spaces=SimpleNamespace(enabled=False))
+    with (
+        patch.object(tools, "get_browser_session_manager", return_value=manager),
+        patch.object(tools, "_get_tool_config", return_value={}),
+        patch("deerflow.spaces.chat_screenshots.get_app_config", return_value=no_spaces),
+    ):
         return await tools.browser_screenshot_tool.coroutine(runtime=runtime, tool_call_id="t1", filename=filename)
 
 

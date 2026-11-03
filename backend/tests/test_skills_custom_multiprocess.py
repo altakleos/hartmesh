@@ -62,13 +62,30 @@ def _mutate_in_process(base_dir, action, content, gate_phase, ready, start, atte
 
             patch.setattr(UserScopedSkillStorage, method, gated)
 
+        from deerflow.runtime.customer_administration import CustomerManagementActor, bind_customer_management_actor
+
+        # HartMesh's delegation, owner and visibility guards are covered by the
+        # router suites; this test is about cross-process serialization.
+        owner = CustomerManagementActor(owner_id="default", private_skill_owner=True)
+
+        async def _owner(_request):
+            return owner
+
+        async def _visible(*_args, **_kwargs):
+            return None
+
+        patch.setattr(router, "require_customer_management_for_request", lambda *_args, **_kwargs: None)
+        patch.setattr(router, "require_private_skill_owner", _owner)
+        patch.setattr(router, "_require_private_skill_visibility", _visible)
+
         request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
         ready.set()
         assert start.wait(30), "parent did not start the mutation"
-        if action == "edit":
-            asyncio.run(router.update_custom_skill("demo-skill", router.CustomSkillUpdateRequest(content=content), request, config))
-        else:
-            asyncio.run(router.rollback_custom_skill("demo-skill", router.SkillRollbackRequest(history_index=0), request, config))
+        with bind_customer_management_actor(owner):
+            if action == "edit":
+                asyncio.run(router.update_custom_skill("demo-skill", router.CustomSkillUpdateRequest(content=content), request, config))
+            else:
+                asyncio.run(router.rollback_custom_skill("demo-skill", router.SkillRollbackRequest(history_index=0), request, config))
         done.set()
 
 

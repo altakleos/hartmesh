@@ -2123,7 +2123,7 @@ class RunManager:
                 record = self._runs.get(run_id)
             if record is None:
                 return None
-            result = await persist_terminal(self, record, status, error=error, stop_reason=stop_reason, respect_cancellation=True)
+            result = await persist_terminal(self, record, status, error=error, stop_reason=stop_reason, respect_cancellation=True, goal_verdict=goal_verdict)
             return result.cancel_action
         if not persist or not self.heartbeat_enabled or self._store is None:
             await self.set_status(

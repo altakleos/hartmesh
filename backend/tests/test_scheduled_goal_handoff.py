@@ -154,12 +154,16 @@ async def test_two_worker_terminal_handoff_cannot_inherit_scheduled_goal(infrast
 
     monkeypatch.setattr(worker, "evaluate_goal_completion", evaluate)
     monkeypatch.setattr(worker, "create_goal_evaluator_model", lambda **kwargs: object())
-    update_status = store.update_status
+    # HartMesh commits a SQL run's terminal outcome through its finalize_owned
+    # CAS (runtime/runs/terminal.py); other stores use update_status.
+    terminal_method = "finalize_owned" if getattr(store, "supports_terminal_recovery", False) is True else "update_status"
+    commit_terminal = getattr(store, terminal_method)
     handed_off = False
 
-    async def admit_after_terminal_commit(run_id, status, **kwargs):
+    async def admit_after_terminal_commit(run_id, *args, **kwargs):
         nonlocal handed_off
-        updated = await update_status(run_id, status, **kwargs)
+        updated = await commit_terminal(run_id, *args, **kwargs)
+        status = kwargs["status"] if terminal_method == "finalize_owned" else args[0]
         if updated and run_id == scheduled.run_id and status == "success" and not handed_off:
             handed_off = True
             ordinary = await peer.create_or_reject("result", user_id="alice")
@@ -179,7 +183,7 @@ async def test_two_worker_terminal_handoff_cannot_inherit_scheduled_goal(infrast
             await entered.wait()
         return updated
 
-    monkeypatch.setattr(store, "update_status", admit_after_terminal_commit)
+    monkeypatch.setattr(store, terminal_method, admit_after_terminal_commit)
     try:
         async with asyncio.timeout(10):
             await worker.run_agent(
@@ -322,15 +326,19 @@ async def test_scheduled_cleanup_survives_persistence_failure_and_restart(infras
     manager = RunManager(store=store)
     metadata = {"scheduled_task_id": "task", "scheduled_task_run_id": "occurrence", "scheduled_goal_objective": "Report"}
     record = await manager.create_or_reject("result", user_id="alice", metadata=metadata)
-    update_status, write_goal = store.update_status, worker.write_thread_goal
+    # HartMesh commits a SQL run's terminal outcome through its finalize_owned
+    # CAS (runtime/runs/terminal.py); other stores use update_status.
+    terminal_method = "finalize_owned" if getattr(store, "supports_terminal_recovery", False) is True else "update_status"
+    commit_terminal, write_goal = getattr(store, terminal_method), worker.write_thread_goal
     failures = []
 
-    async def fail_terminal(run_id, status, **kwargs):
+    async def fail_terminal(run_id, *args, **kwargs):
+        status = kwargs["status"] if terminal_method == "finalize_owned" else args[0]
         if run_id == record.run_id and status == "success" and not failures:
             failures.append(failure)
             assert await goal.read_thread_goal(checkpointer, "result") is None
             raise RuntimeError("terminal write failed once")
-        return await update_status(run_id, status, **kwargs)
+        return await commit_terminal(run_id, *args, **kwargs)
 
     async def fail_cleanup(*args, **kwargs):
         if args[2] is None and not failures:
@@ -339,7 +347,7 @@ async def test_scheduled_cleanup_survives_persistence_failure_and_restart(infras
         return await write_goal(*args, **kwargs)
 
     if failure == "terminal_write":
-        monkeypatch.setattr(store, "update_status", fail_terminal)
+        monkeypatch.setattr(store, terminal_method, fail_terminal)
     else:
         monkeypatch.setattr(worker, "write_thread_goal", fail_cleanup)
 
@@ -583,7 +591,10 @@ async def test_cancel_accepted_at_terminal_cas_wins_after_worker_abort_check(inf
     manager = RunManager(store=store, worker_id="scheduler", run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True))
     metadata = {"scheduled_task_id": "task", "scheduled_task_run_id": "occurrence", "scheduled_goal_objective": "Report"}
     record = await manager.create_or_reject("result", user_id="alice", metadata=metadata)
-    finalize = store.finalize_if_not_cancelled
+    # HartMesh's SQL status CAS is finalize_owned (runtime/runs/terminal.py,
+    # expected_cancel_action fence); other stores use finalize_if_not_cancelled.
+    cas_method = "finalize_owned" if getattr(store, "supports_terminal_recovery", False) is True else "finalize_if_not_cancelled"
+    finalize = getattr(store, cas_method)
     accepted = []
 
     async def cancel_before_status_cas(run_id, **kwargs):
@@ -599,7 +610,7 @@ async def test_cancel_accepted_at_terminal_cas_wins_after_worker_abort_check(inf
                 accepted.append(await manager.cancel(run_id, action=action))
         return await finalize(run_id, **kwargs)
 
-    monkeypatch.setattr(store, "finalize_if_not_cancelled", cancel_before_status_cas)
+    monkeypatch.setattr(store, cas_method, cancel_before_status_cas)
 
     async def node(state):
         return {"messages": [AIMessage(content="Report verified")], "title": "Report"}

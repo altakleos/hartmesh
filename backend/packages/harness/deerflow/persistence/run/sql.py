@@ -467,7 +467,22 @@ class RunRepository(RunStore):
             raise ValueError("Invalid terminal reason")
         return {"status": status, "error": error, "stop_reason": stop_reason, "updated_at": datetime.now(UTC)}
 
-    async def finalize_owned(self, run_id, *, owner_worker_id, expected_change_seq, expected_status, expected_cancel_action, require_lease, status, error=None, stop_reason=None, output_receipt=None, inventory_evidence=None) -> bool:
+    async def finalize_owned(
+        self,
+        run_id,
+        *,
+        owner_worker_id,
+        expected_change_seq,
+        expected_status,
+        expected_cancel_action,
+        require_lease,
+        status,
+        error=None,
+        stop_reason=None,
+        output_receipt=None,
+        inventory_evidence=None,
+        goal_verdict=None,
+    ) -> bool:
         """Own a requested seal through native SQL work and transaction exit."""
         fields = {
             "owner_worker_id": owner_worker_id,
@@ -481,6 +496,8 @@ class RunRepository(RunStore):
         }
         if inventory_evidence is not None:
             fields["inventory_evidence"] = inventory_evidence
+        if goal_verdict is not None:
+            fields["goal_verdict"] = goal_verdict
         if output_receipt is not None:
             from deerflow.runtime.runs.output import validate_receipt_status
             from deerflow.runtime.runs.terminal import TerminalWriteFailure, exception_classification
@@ -492,13 +509,30 @@ class RunRepository(RunStore):
             return await await_drained(self._finalize_owned(run_id, **fields))
         return await self._finalize_owned(run_id, **fields)
 
-    async def _finalize_owned(self, run_id, *, owner_worker_id, expected_change_seq, expected_status, expected_cancel_action, require_lease, status, error=None, stop_reason=None, output_receipt=None, inventory_evidence=None) -> bool:
+    async def _finalize_owned(
+        self,
+        run_id,
+        *,
+        owner_worker_id,
+        expected_change_seq,
+        expected_status,
+        expected_cancel_action,
+        require_lease,
+        status,
+        error=None,
+        stop_reason=None,
+        output_receipt=None,
+        inventory_evidence=None,
+        goal_verdict=None,
+    ) -> bool:
         """CAS finalization, with explicit pre-commit versus ambiguous failure phases."""
         from deerflow.runtime.runs.output import OUTPUT_EVIDENCE_KEY, OutputEvidenceError, capture_from_kwargs, receipt_from_kwargs, receipt_to_dict
         from deerflow.runtime.runs.terminal import TerminalWriteFailure, exception_classification
 
         try:
             values = self._terminal_values(status, error, stop_reason)
+            if goal_verdict is not None:
+                values["goal_verdict"] = self._safe_json(goal_verdict)
             if expected_status not in {"pending", "running", "interrupted"} or not owner_worker_id or type(expected_change_seq) is not int:
                 raise ValueError("Invalid terminal fence")
             wanted = None

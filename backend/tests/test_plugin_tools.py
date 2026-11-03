@@ -373,8 +373,11 @@ def test_new_contract_keeps_old_positional_signature_and_is_frozen(installed):
     old = plugin.tools[0]
     declaration = ModelTool(old.name, old.description, old.input_schema, old.handler, "custom-group")
     assert declaration.response_format == "content" and declaration.group == "custom-group"
+    # HartMesh's contract keeps ``purpose`` as the sixth positional field;
+    # ``response_format`` stays keyword-only after it.
+    assert ModelTool(old.name, old.description, old.input_schema, old.handler, "custom-group", "management").purpose == "management"
     with pytest.raises(TypeError):
-        ModelTool(old.name, old.description, old.input_schema, old.handler, "custom-group", "content_and_artifact")
+        ModelTool(old.name, old.description, old.input_schema, old.handler, "custom-group", "business", "content_and_artifact")
     result = PluginToolResult("visible", None)
     with pytest.raises(FrozenInstanceError):
         result.content = "changed"

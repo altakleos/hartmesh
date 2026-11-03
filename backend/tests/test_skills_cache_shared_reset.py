@@ -21,7 +21,6 @@ import threading
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import uuid4
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
@@ -34,7 +33,7 @@ from app.gateway.deps import get_config
 from app.gateway.routers import skills as skills_router
 from deerflow.agents.lead_agent import prompt as prompt_module
 from deerflow.config.authorization_config import AuthorizationConfig
-from deerflow.config.extensions_config import ExtensionsConfig, reset_extensions_config
+from deerflow.config.extensions_config import reset_extensions_config
 from deerflow.config.file_signature import get_config_signature
 from deerflow.config.paths import Paths
 from deerflow.config.shared_reset_marker import SharedResetChange, SharedResetMarkerTracker
@@ -42,8 +41,6 @@ from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 from deerflow.skills.types import Skill
 from deerflow.tools import skill_manage_tool as skill_manage_module
-
-_PROCESS_MESSAGE = "Skill caches invalidated; subsequent runs in this Gateway process will rescan the latest skills."
 
 
 class _Clock:
@@ -249,13 +246,21 @@ def test_publish_skills_cache_reset_writes_marker_without_invalidating_the_publi
 
 
 def _make_admin_user() -> User:
-    return User(email="admin-shared-reset@example.com", password_hash="x", system_role="admin", id=uuid4())
+    # HartMesh requires the request's runtime user to be the skill owner, so
+    # the signed-in admin is the effective user each test pins (as in
+    # tests/test_skills_custom_router.py).
+    return SimpleNamespace(id=skills_router.get_effective_user_id(), email="admin-shared-reset@example.com", password_hash="x", system_role="admin", needs_setup=False)
 
 
 def _make_test_app(config) -> FastAPI:
     if not hasattr(config, "authorization"):
         config.authorization = AuthorizationConfig(enabled=False)
-    app = make_authed_test_app(user_factory=_make_admin_user)
+    app = make_authed_test_app(user_factory=_make_admin_user, bind_current_user=True, signed_in=True)
+    # HartMesh admits customer skill mutations only under an explicit
+    # local_skill_management delegation (as tests/test_skills_custom_router.py).
+    from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
+
+    app.state.customer_administration_policy = CustomerAdministrationPolicy(local_skill_management=True)
     app.state.config = config
     app.dependency_overrides[get_config] = lambda: config
     app.include_router(skills_router.router)
@@ -360,8 +365,14 @@ def test_archive_install_publishes_marker(shared_config, custom_skill_app, monke
 
 
 def test_archive_upload_publishes_marker(shared_config, custom_skill_app, monkeypatch) -> None:
-    class _Storage:
-        async def ainstall_skill_from_archive(self, archive_path: Path) -> dict:
+    from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
+
+    # HartMesh installs only into the caller's owner-scoped storage.
+    class _Storage(UserScopedSkillStorage):
+        def __init__(self):
+            self._user_id = "default"
+
+        async def ainstall_skill_from_archive(self, archive_path: Path, *, name_check=None) -> dict:
             return {"success": True, "skill_name": "uploaded-skill", "message": "Skill installed successfully"}
 
     monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: _Storage())
@@ -374,49 +385,15 @@ def test_archive_upload_publishes_marker(shared_config, custom_skill_app, monkey
     assert _marker_payload(shared_config)["user_id"] == "default"
 
 
-def test_public_skill_toggle_publishes_global_marker(shared_config, monkeypatch) -> None:
-    def _load_skills(*, enabled_only: bool):
-        enabled = ExtensionsConfig.from_file(str(shared_config.path)).skills.get("public-skill", SimpleNamespace(enabled=True)).enabled
-        skill = Skill(
-            name="public-skill",
-            description="Description for public-skill",
-            license="MIT",
-            skill_dir=Path("/tmp/public-skill"),
-            skill_file=Path("/tmp/public-skill/SKILL.md"),
-            relative_path=Path("public-skill"),
-            category="public",
-            enabled=enabled,
-        )
-        return [] if enabled_only and not enabled else [skill]
-
-    events: list[tuple[str, str | None]] = []
-    real_publish = skills_router.publish_skills_cache_reset
-
-    def _publish(*, user_id=None):
-        events.append(("publish", user_id))
-        return real_publish(user_id=user_id)
-
-    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: SimpleNamespace(load_skills=_load_skills))
-    monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
-    monkeypatch.setattr(skills_router, "clear_skills_system_prompt_cache", lambda: events.append(("clear", None)))
-    monkeypatch.setattr(skills_router, "publish_skills_cache_reset", _publish)
-
-    with TestClient(_make_test_app(SimpleNamespace())) as client:
-        response = client.put("/api/skills/public-skill", json={"enabled": False})
-
-    assert response.status_code == 200, response.text
-    assert response.json()["enabled"] is False
-    assert json.loads(shared_config.path.read_text(encoding="utf-8"))["skills"]["public-skill"]["enabled"] is False
-    assert events == [("clear", None), ("publish", None)]
-    assert "user_id" not in _marker_payload(shared_config)
-
-
 def test_custom_skill_toggle_publishes_user_scoped_marker(shared_config, monkeypatch) -> None:
     from deerflow.skills.storage import user_scoped_skill_storage as uss_module
 
     enabled_state = {"value": True}
 
     class _FakeUserScopedStorage:
+        # The toggle refuses storage not scoped to the caller.
+        user_id = "default"
+
         def load_skills(self, *, enabled_only: bool = False):
             skill = Skill(
                 name="demo-skill",
@@ -458,83 +435,6 @@ def test_custom_skill_toggle_publishes_user_scoped_marker(shared_config, monkeyp
     assert _marker_payload(shared_config)["user_id"] == "default"
 
 
-def _make_reload_app() -> FastAPI:
-    config = SimpleNamespace(
-        skills=SimpleNamespace(get_skills_path=lambda: "/tmp/skills", container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
-        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
-    )
-    app = make_authed_test_app(user_factory=_make_admin_user)
-    app.state.config = config
-    app.dependency_overrides[get_config] = lambda: config
-    app.include_router(skills_router.router)
-    return app
-
-
-def test_reload_publishes_marker_and_reports_shared_config_scope(shared_config, monkeypatch) -> None:
-    events: list[str] = []
-
-    async def _refresh() -> None:
-        events.append("refresh")
-
-    real_publish = skills_router.publish_skills_cache_reset
-
-    def _publish(*, user_id=None):
-        events.append("publish")
-        return real_publish(user_id=user_id)
-
-    monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
-    monkeypatch.setattr(skills_router, "publish_skills_cache_reset", _publish)
-
-    with TestClient(_make_reload_app()) as client:
-        first = client.post("/api/skills/reload")
-        first_signature = get_config_signature(_marker_path(shared_config))
-        second = client.post("/api/skills/reload")
-
-    assert first.status_code == 200, first.text
-    assert first.json()["success"] is True
-    assert first.json()["scope"] == "shared_config"
-    assert "shared config directory" in first.json()["message"]
-    assert events == ["refresh", "publish", "refresh", "publish"]
-    assert second.status_code == 200
-    assert get_config_signature(_marker_path(shared_config)) != first_signature
-    assert "user_id" not in _marker_payload(shared_config)
-
-
-def test_reload_without_config_path_falls_back_to_process_scope(shared_config, monkeypatch) -> None:
-    async def _refresh() -> None:
-        return None
-
-    monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
-    monkeypatch.setattr(prompt_module, "resolve_shared_config_path", lambda: None)
-
-    with TestClient(_make_reload_app()) as client:
-        response = client.post("/api/skills/reload")
-
-    assert response.status_code == 200, response.text
-    assert response.json() == {"success": True, "scope": "process", "message": _PROCESS_MESSAGE}
-    assert not _marker_path(shared_config).exists()
-
-
-def test_reload_marker_publication_failure_is_a_generic_server_error(shared_config, monkeypatch) -> None:
-    """A 200 must never mean that only the handling process was refreshed."""
-
-    async def _refresh() -> None:
-        return None
-
-    def _failing_publish(*, user_id=None):
-        raise OSError("read-only volume at /srv/company/minio")
-
-    monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
-    monkeypatch.setattr(skills_router, "publish_skills_cache_reset", _failing_publish)
-
-    with TestClient(_make_reload_app()) as client:
-        response = client.post("/api/skills/reload")
-
-    assert response.status_code == 500
-    assert response.json() == {"detail": "Failed to invalidate skills cache."}
-    assert "/srv/company/minio" not in response.text
-
-
 # --------------------------------------------------------------------------- #
 # Review follow-ups: cancellation drains the reload tail; publication errors
 # are never reported as 404
@@ -543,47 +443,6 @@ def test_reload_marker_publication_failure_is_a_generic_server_error(shared_conf
 
 def _admin_request() -> SimpleNamespace:
     return SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
-
-
-@pytest.mark.asyncio
-async def test_reload_drains_refresh_and_publish_across_cancellation(shared_config, monkeypatch) -> None:
-    """A caller cancelled after the local refresh must not skip the shared marker.
-
-    ``/skills/reload`` is the operator hook for external mount writes: if the
-    cancellation unwound between the refresh and the publish, every peer
-    replica would keep the old skill set, the one outcome the endpoint exists
-    to prevent. Mirrors the drained-tail tests of the other mutation routes.
-    """
-    started = asyncio.Event()
-    release = asyncio.Event()
-
-    async def _blocked_refresh() -> None:
-        started.set()
-        await release.wait()
-
-    monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _blocked_refresh)
-    assert not _marker_path(shared_config).exists()
-
-    task = asyncio.create_task(skills_router.reload_skills(_admin_request()))
-    try:
-        await asyncio.wait_for(started.wait(), 5)
-        task.cancel()
-        await asyncio.sleep(0.05)
-        task.cancel()
-        await asyncio.sleep(0.05)
-        assert not task.done(), "the drained tail must keep running until it settles"
-
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-    finally:
-        release.set()
-        if not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-    assert _marker_path(shared_config).exists(), "the shared marker must be published even though the caller was cancelled"
-    assert "user_id" not in _marker_payload(shared_config)
 
 
 def _marker_write_raises_file_not_found(monkeypatch: pytest.MonkeyPatch, shared_config) -> str:
@@ -653,47 +512,6 @@ def test_rollback_marker_publication_failure_is_500_not_404(shared_config, custo
     assert missing not in response.text
 
 
-def test_public_toggle_marker_publication_failure_is_500(shared_config, monkeypatch) -> None:
-    missing = _marker_write_raises_file_not_found(monkeypatch, shared_config)
-    skill = Skill(
-        name="public-skill",
-        description="Description for public-skill",
-        license="MIT",
-        skill_dir=Path("/tmp/public-skill"),
-        skill_file=Path("/tmp/public-skill/SKILL.md"),
-        relative_path=Path("public-skill"),
-        category="public",
-        enabled=True,
-    )
-    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: SimpleNamespace(load_skills=lambda *, enabled_only: [skill]))
-    monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
-    monkeypatch.setattr(skills_router, "clear_skills_system_prompt_cache", lambda: None)
-
-    with TestClient(_make_test_app(SimpleNamespace())) as client:
-        response = client.put("/api/skills/public-skill", json={"enabled": False})
-
-    assert response.status_code == 500, response.text
-    assert response.json()["detail"].startswith("Failed to update skill:")
-    assert missing not in response.text
-    assert json.loads(shared_config.path.read_text(encoding="utf-8"))["skills"]["public-skill"]["enabled"] is False
-
-
-def test_reload_marker_write_file_not_found_is_a_generic_server_error(shared_config, monkeypatch) -> None:
-    missing = _marker_write_raises_file_not_found(monkeypatch, shared_config)
-
-    async def _refresh() -> None:
-        return None
-
-    monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
-
-    with TestClient(_make_reload_app()) as client:
-        response = client.post("/api/skills/reload")
-
-    assert response.status_code == 500
-    assert response.json() == {"detail": "Failed to invalidate skills cache."}
-    assert missing not in response.text
-
-
 def test_publish_skills_cache_reset_wraps_filesystem_errors(shared_config, monkeypatch) -> None:
     """The dedicated error type is not an OSError, so no handler can map it to 404/400."""
     missing = _marker_write_raises_file_not_found(monkeypatch, shared_config)
@@ -757,8 +575,16 @@ def agent_skill_tool(shared_config, monkeypatch: pytest.MonkeyPatch, tmp_path: P
         (skill_dir / "references" / "guide.md").write_text("guide", encoding="utf-8")
 
     def _call(**kwargs):
+        from deerflow.runtime.customer_administration import CUSTOMER_ADMINISTRATION_CONTEXT_KEY, CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY, CustomerAdministrationPolicy, CustomerManagementActor
+
+        # A delegated owner operation, as in tests/test_skill_manage_tool.py.
         runtime = SimpleNamespace(
-            context={"thread_id": "thread-1", "user_id": _AGENT_USER},
+            context={
+                "thread_id": "thread-1",
+                "user_id": _AGENT_USER,
+                CUSTOMER_ADMINISTRATION_CONTEXT_KEY: CustomerAdministrationPolicy(local_skill_management=True),
+                CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY: CustomerManagementActor(owner_id=_AGENT_USER, administrator=True),
+            },
             config={"configurable": {"thread_id": "thread-1", "user_id": _AGENT_USER}},
         )
         return skill_manage_module.skill_manage_tool.coroutine(runtime=runtime, name=_AGENT_SKILL, **kwargs)

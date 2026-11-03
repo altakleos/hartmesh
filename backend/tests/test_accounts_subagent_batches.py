@@ -261,6 +261,12 @@ async def test_owner_refusal_cancels_and_supervises_until_execution_stops(stores
     assert await repo.claim_items(now=datetime.now(UTC), lease_owner="next-worker", lease_seconds=60, limit=3) == []
 
 
+async def _check_acceptance_with_real_lease(service, repo, item):
+    """The acceptance check runs inside the item's durable lease (upstream BatchItemLease)."""
+    async with batch_service.BatchItemLease(repo, item_id=item["id"], owner=service._lease_owner, seconds=60) as lease:
+        return await service._check_acceptance_with_lease(item, SimpleNamespace(), SimpleNamespace(), lease)
+
+
 @pytest.mark.asyncio
 async def test_owner_refusal_prevents_post_execution_acceptance_sandbox(stores, monkeypatch):
     _, repo, owner, _ = stores
@@ -270,7 +276,7 @@ async def test_owner_refusal_prevents_post_execution_acceptance_sandbox(stores, 
     item["acceptance_criteria"] = ["file:/mnt/user-data/outputs/result.txt exists"]
     checker = AsyncMock()
     monkeypatch.setattr(batch_service, "check_batch_acceptance", checker)
-    assert await service._check_acceptance_with_lease(item, SimpleNamespace(), SimpleNamespace()) == (False, None)
+    assert await _check_acceptance_with_real_lease(service, repo, item) == (False, None)
     checker.assert_not_called()
 
 
@@ -386,7 +392,7 @@ async def test_acceptance_drains_before_retrying_owner_cancellation(stores, monk
     service = batch_service.SubagentBatchService(repository=repo, config=SubagentBatchesConfig(lease_seconds=10, poll_interval_seconds=0.1), runtime_config=SubagentRuntimeConfig(), owner_access=access)
     [item] = await repo.claim_items(now=datetime.now(UTC), lease_owner=service._lease_owner, lease_seconds=60, limit=1)
     item["acceptance_criteria"] = ["file:/mnt/user-data/outputs/result.txt exists"]
-    task = asyncio.create_task(service._check_acceptance_with_lease(item, SimpleNamespace(), SimpleNamespace()))
+    task = asyncio.create_task(_check_acceptance_with_real_lease(service, repo, item))
     try:
         await asyncio.wait_for(started.wait(), 2)
         await asyncio.wait_for(cancelling.wait(), 6)

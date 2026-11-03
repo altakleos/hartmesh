@@ -827,9 +827,13 @@ def _notification_startup_config(*, channel_connections_enabled: bool = True):
             max_concurrent_runs_per_user=2,
             multi_instance=False,
             queue_timeout_seconds=3600,
+            # HartMesh's wall-clock bound on a scheduled run (run_time_bound).
+            max_run_seconds=None,
         ),
         run_ownership=SimpleNamespace(grace_seconds=30),
         channel_connections=ChannelConnectionsConfig.model_validate({"enabled": channel_connections_enabled}),
+        # HartMesh's lifespan also opens its Storage Spaces resources (off here).
+        storage_spaces=StorageSpacesConfig(),
     )
 
 
@@ -878,6 +882,8 @@ async def _run_lifespan_with_notification_worker(*, channel_service_available: b
 
     with (
         patch("app.gateway.app.get_app_config", return_value=startup_config),
+        # A real log level here would reconfigure process logging for every later test.
+        patch("app.gateway.app.configure_logging"),
         patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
         patch("app.gateway.app.langgraph_runtime", _langgraph_with_scheduled_repos),
         patch("app.gateway.app._ensure_admin_user", AsyncMock()),
@@ -953,6 +959,7 @@ def test_lifespan_detaches_the_outbox_when_the_delivery_worker_cannot_start() ->
     async def run() -> None:
         with (
             patch("app.gateway.app.get_app_config", return_value=_notification_startup_config()),
+            patch("app.gateway.app.configure_logging"),
             patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
             patch("app.gateway.app.langgraph_runtime", _langgraph_with_scheduled_repos),
             patch("app.gateway.app._ensure_admin_user", AsyncMock()),

@@ -1,6 +1,7 @@
 """Capture predecessor admission over real SQL, without fake final text."""
 
 import asyncio
+import functools
 import inspect
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -117,6 +118,9 @@ async def test_cancelled_capture_admission_retains_committed_identity_before_cle
     entered, release = asyncio.Event(), asyncio.Event()
     identities = []
 
+    # Keeps the store's signature: keyed admission probes it (upstream).
+
+    @functools.wraps(original)
     async def committed_then_hold(*args, **values):
         try:
             result = await original(*args, **values)
@@ -179,28 +183,44 @@ async def test_malformed_capture_does_not_abandon_an_unawaited_admission(output_
 
 @pytest.mark.asyncio
 async def test_same_key_retry_cannot_change_original_cancelled_admission_provenance(output_store, monkeypatch):
+    """A same-key retry that lands while a cancelled original is closing reuses it, and the original stays cancelled.
+
+    Upstream's atomic replacement interrupts the predecessor inside the store
+    transaction, so the post-registration await is the cancelled-admission
+    cleanup itself: cancel the original right after its committed admission
+    and hold that cleanup while the retry arrives.
+    """
     from deerflow.runtime.runs.output import receipt_from_kwargs
 
     manager, predecessor = await admitted(output_store, capture=False)
-    original = manager._persist_status
+    original_create = output_store.repository.create_thread_operation_atomic
+    original_close = manager._close_cancelled_admission
     entered, release = asyncio.Event(), asyncio.Event()
     key = uuid4().hex
+    creator: asyncio.Task | None = None
 
-    async def persist_then_hold(record, *args, **kwargs):
-        result = await original(record, *args, **kwargs)
-        if record is predecessor:
-            entered.set()
-            await release.wait()
+    # Keeps the store's signature: keyed admission probes it (upstream).
+    @functools.wraps(original_create)
+    async def commit_then_cancel(*args, **kwargs):
+        result = await original_create(*args, **kwargs)
+        # The store call runs in the admission's drained inner task; cancel
+        # the caller once, after its row committed.
+        if creator is not None and not entered.is_set() and not creator.cancelling():
+            creator.cancel()
         return result
 
-    monkeypatch.setattr(manager, "_persist_status", persist_then_hold)
+    async def hold_close(record):
+        entered.set()
+        await release.wait()
+        return await original_close(record)
+
+    monkeypatch.setattr(output_store.repository, "create_thread_operation_atomic", commit_then_cancel)
+    monkeypatch.setattr(manager, "_close_cancelled_admission", hold_close)
     call = dict(user_id=RAW_OWNER, kwargs={"output_capture": {"version": 1}}, multitask_strategy="interrupt", idempotency_key=key)
     creator = asyncio.create_task(manager.create_or_reject(predecessor.thread_id, **call))
     try:
-        # This is the real post-registration predecessor-persistence await;
-        # the manager registry lock is free while the original is still owned.
+        # The registry lock is free while the cancelled original still owns its cleanup.
         await asyncio.wait_for(entered.wait(), 5)
-        creator.cancel()
         reused = await manager.create_or_reject(predecessor.thread_id, **call)
         assert reused.idempotency_reused and reused.task is None
         release.set()
@@ -211,7 +231,8 @@ async def test_same_key_retry_cannot_change_original_cancelled_admission_provena
         assert row["status"] == "interrupted" and seal is not None and seal.reason == "cancelled", "Retry's shared sticky flag cannot turn the original new registration into a reused invocation"
     finally:
         release.set()
-        await asyncio.gather(creator, return_exceptions=True)
+        if creator is not None:
+            await asyncio.gather(creator, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -222,6 +243,9 @@ async def test_lost_capture_admission_commit_response_retains_original_identity(
     original = output_store.repository.create_thread_operation_atomic
     identities = []
 
+    # Keeps the store's signature: keyed admission probes it (upstream).
+
+    @functools.wraps(original)
     async def committed_response_lost(*args, **kwargs):
         result = await original(*args, **kwargs)
         identities.append(result[0]["run_id"])
@@ -257,6 +281,9 @@ async def test_lost_result_refuses_uncertain_or_foreign_row_without_upsert(outpu
     async def failed_read(*args, **kwargs):
         raise OSError("Synthetic followup read failure")
 
+    # Keeps the store's signature: keyed admission probes it (upstream).
+
+    @functools.wraps(original_create)
     async def committed_then_changed(*args, **kwargs):
         result = await original_create(*args, **kwargs)
         row = result[0]

@@ -569,9 +569,29 @@ class _ObservedSkillLock:
         return await self.lock.__aexit__(*exc)
 
 
+def _owner_view(parking: _ParkingStorage, user_id: str):
+    """HartMesh's skill_manage only mutates the caller's owner-scoped storage.
+
+    Each call gets an owner-scoped view whose delete parks through the shared
+    state, so lock behaviour stays observable across owners.
+    """
+    from deerflow.config.paths import make_safe_user_id
+    from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
+
+    class _ParkingOwnerStorage(UserScopedSkillStorage):
+        def __init__(self) -> None:
+            self._user_id = make_safe_user_id(user_id)
+            self._app_config = SimpleNamespace()
+
+        def delete_custom_skill(self, name: str, *, history_meta: dict) -> None:
+            parking.delete_custom_skill(name, history_meta=history_meta)
+
+    return _ParkingOwnerStorage()
+
+
 def _park_skill_mutations(monkeypatch, arrived) -> _ParkingStorage:
     storage = _ParkingStorage()
-    monkeypatch.setattr(skill_manage_module, "get_or_new_user_skill_storage", lambda _user_id: storage)
+    monkeypatch.setattr(skill_manage_module, "get_or_new_user_skill_storage", lambda user_id, **_kwargs: _owner_view(storage, user_id))
 
     async def _refresh(_user_id: str) -> None:
         return None

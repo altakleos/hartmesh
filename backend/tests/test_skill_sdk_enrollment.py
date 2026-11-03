@@ -69,10 +69,14 @@ assert guard._runtime is None
 set_current_user(SimpleNamespace(id=sys.argv[2]))
 client = DeerFlowClient(config_path=sys.argv[1])
 storage = get_or_new_user_skill_storage(sys.argv[2], app_config=client._app_config)
+from deerflow.runtime.customer_administration import CustomerManagementDenied
 try:
     exec(sys.argv[3])
 except HostCapabilityError as exc:
     print(json.dumps({"error": exc.code}))
+except CustomerManagementDenied:
+    # HartMesh's client refuses undelegated or global skill state first.
+    print(json.dumps({"error": "CUSTOMER_MANAGEMENT_DENIED"}))
 else:
     print(json.dumps({"error": None}))
 """
@@ -102,7 +106,10 @@ else:
 def test_fresh_sdk_refuses_enrolled_owner_without_gateway_runtime(sdk_home, action):
     _, _, root, repository = sdk_home
     before = repository.observe("owner", "example", capture_package(root).digest, True, exists=True)
-    assert run_sdk(sdk_home, action) == {"error": "MUTATION_RUNTIME_REQUIRED"}
+    # HartMesh's client.update_skill refuses an undelegated SDK before the
+    # enrollment guard is reached; either refusal leaves the package untouched.
+    expected = "CUSTOMER_MANAGEMENT_DENIED" if action.startswith("client.update_skill") else "MUTATION_RUNTIME_REQUIRED"
+    assert run_sdk(sdk_home, action) == {"error": expected}
     assert (root / "SKILL.md").read_text(encoding="utf-8") == CONTENT
     assert not (root.parent.parent / "_skill_states.json").exists()
     after = repository.observe("owner", "example", capture_package(root).digest, True, exists=True)
@@ -113,12 +120,15 @@ def test_fresh_sdk_refuses_enrolled_owner_without_gateway_runtime(sdk_home, acti
 def test_fresh_sdk_global_toggle_cannot_bypass_another_enrolled_owner(sdk_home):
     _, _, root, repository = sdk_home
     repository.observe("owner", "example", capture_package(root).digest, True, exists=True)
-    assert run_sdk(sdk_home, "client.update_skill('example', enabled=False)", owner="other") == {"error": "MUTATION_RUNTIME_REQUIRED"}
+    # HartMesh's SDK refuses customer changes to global skill state outright.
+    assert run_sdk(sdk_home, "client.update_skill('example', enabled=False)", owner="other") == {"error": "CUSTOMER_MANAGEMENT_DENIED"}
     assert json.loads((sdk_home[0] / "extensions.json").read_text(encoding="utf-8")) == {"skills": {}}
 
 
 def test_unenrolled_sdk_retains_skill_management(sdk_home):
-    assert run_sdk(sdk_home, "client.update_skill('example', enabled=False); client.update_skill('example', enabled=True)") == {"error": None}
+    # HartMesh's client adds delegation checks in front of owner storage; the
+    # enrollment guard itself sits in that storage, so exercise it there.
+    assert run_sdk(sdk_home, "storage.set_skill_enabled_state('example', False); storage.set_skill_enabled_state('example', True)") == {"error": None}
 
 
 def test_existing_sdk_rechecks_enrollment_after_an_earlier_unmanaged_read(sdk_home):
@@ -150,7 +160,7 @@ def test_sdk_does_not_create_a_missing_application_database(sdk_home):
 from pathlib import Path
 path = Path(client._app_config.database.sqlite_path)
 path.unlink()
-client.update_skill("example", enabled=False)
+storage.set_skill_enabled_state("example", False)
 assert not path.exists()
 """
     assert run_sdk(sdk_home, action) == {"error": None}

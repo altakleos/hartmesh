@@ -82,6 +82,12 @@ async def test_completion_fallback_terminalizes_with_staged_verdict(run_store):
     statements.clear()
     await manager.update_run_completion(record.run_id, status="success", message_count=2)
     row = await store.get(record.run_id, user_id="alice")
+    if getattr(store, "supports_terminal_recovery", False) is True:
+        # HartMesh's SQL terminal authority is the worker's finalize_owned CAS
+        # (runtime/runs/terminal.py); completion metadata never terminalizes a
+        # staged run, so the verdict waits for that write.
+        assert row["status"] == "pending" and row["goal_verdict"] is None
+        return
     assert row["status"] == "success"
     assert row["goal_verdict"] == verdict
     terminal_updates = [statement for statement in statements if statement.startswith("UPDATE runs SET") and "status=" in statement]

@@ -99,6 +99,10 @@ def _local_coercer_names(tree: ast.Module) -> set[str]:
             continue
         if function.name.startswith("_coerce") and ("max_results" in function.name or _references_max_results(function) or function.name in called_for_max_results):
             owned.add(function.name)
+        # HartMesh's SearXNG spells its copy ``_configured_max_results``: a
+        # helper that reads ``max_results`` and converts it with ``int()``.
+        if function.name.endswith("max_results") and _references_max_results(function) and any(isinstance(node, ast.Call) and getattr(node.func, "id", None) == "int" for node in _code_nodes(function)):
+            owned.add(function.name)
         for node in _code_nodes(function):
             if isinstance(node, ast.Assign):
                 targets = node.targets

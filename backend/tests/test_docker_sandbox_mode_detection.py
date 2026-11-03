@@ -145,8 +145,9 @@ def test_provisioner_start_selects_services_and_overlay(script_name, value, expe
     docker_dir.mkdir()
     for filename in ("docker-compose-dev.yaml", "docker-compose.yaml", "docker-compose.dood.yaml"):
         (docker_dir / filename).write_text("services: {}\n", encoding="utf-8")
-    (checkout / "frontend").mkdir()
-    for filename in (".env", "frontend/.env"):
+    # HartMesh's launchers seed and read frontend-hm/.env (frontend/ is the pinned upstream copy).
+    (checkout / "frontend-hm").mkdir()
+    for filename in (".env", "frontend-hm/.env"):
         (checkout / filename).write_text("# synthetic, no credentials\n", encoding="utf-8")
     extensions = checkout / "extensions_config.json"
     extensions.write_text("{}\n", encoding="utf-8")

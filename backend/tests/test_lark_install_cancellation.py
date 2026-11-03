@@ -15,7 +15,7 @@ async def test_lark_install_drains_cache_refresh_across_cancellation(monkeypatch
     release = threading.Event()
     refreshed = asyncio.Event()
 
-    async def allow_admin(*_args, **_kwargs) -> None:
+    def allow_provider_operation(*_args, **_kwargs) -> None:
         return None
 
     def install(*_args, **_kwargs):
@@ -26,7 +26,8 @@ async def test_lark_install_drains_cache_refresh_across_cancellation(monkeypatch
     async def refresh() -> None:
         refreshed.set()
 
-    monkeypatch.setattr(integrations, "require_admin_user", allow_admin)
+    # HartMesh gates integration installs on provider operation, not tenant admin.
+    monkeypatch.setattr(integrations, "require_provider_operation", allow_provider_operation)
     monkeypatch.setattr(integrations, "install_lark_integration", install)
     monkeypatch.setattr(integrations, "refresh_skills_system_prompt_cache_async", refresh)
 
