@@ -2673,6 +2673,11 @@ export function useThreadStream({
             if (files.length > 0) {
               const uploadResponse = await uploadFiles(threadId, files);
               uploadedFileInfo = uploadResponse.files;
+              if ((uploadResponse.skipped_files ?? []).length > 0) {
+                // Some attachments were refused (an unsafe name, for
+                // example); the message goes out with the ones stored.
+                toast.warning(uploadResponse.message);
+              }
 
               // The upload is done: the human message carries the files and
               // the placeholder leaves, so the activity row can say what the
