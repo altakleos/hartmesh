@@ -54,6 +54,7 @@ const AUTH_ERROR_CODES = [
   "system_already_initialized",
   "registration_disabled",
   "sign_on_required",
+  "account_disabled",
   "setup_required",
   "no_seats_left",
 ] as const;
