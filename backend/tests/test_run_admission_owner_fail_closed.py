@@ -30,7 +30,9 @@ async def _repo(tmp_path):
 
 def _admit(repo, run_id, *, operation_kind="run", **owner):
     lease = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
-    return repo.create_thread_operation_atomic(run_id, thread_id=f"thread-{run_id}", owner_worker_id="worker-1", lease_expires_at=lease, operation_kind=operation_kind, multitask_strategy="reject", created_at=datetime.now(UTC).isoformat(), **owner)
+    return repo.create_thread_operation_atomic(
+        run_id, thread_id=f"thread-{run_id}", owner_worker_id="worker-1", lease_expires_at=lease, operation_kind=operation_kind, multitask_strategy="reject", created_at=datetime.now(UTC).isoformat(), **owner
+    )
 
 
 @pytest.mark.anyio
