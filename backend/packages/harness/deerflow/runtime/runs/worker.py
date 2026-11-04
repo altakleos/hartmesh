@@ -2413,7 +2413,8 @@ async def _run_agent(
             if stop_reason is None and runtime_context is not None and runtime_context.get("sandbox_id") is None:
                 # A refused sandbox call the run survived, and no later call got
                 # the sandbox: the turn's sandboxed work never ran. A guard's stop
-                # wins, and a turn whose retry found a slot is not refused.
+                # wins, and a turn whose retry found a slot is not refused. This
+                # is the lead agent's context; a delegated task has its own.
                 stop_reason = runtime_context.get(TOOL_REFUSAL_REASON_CONTEXT_KEY)
             produced_output_paths = (
                 await _produced_output_paths(

@@ -14,6 +14,9 @@ the sandbox, tool-error and loop-guard middlewares, ``run_agent``, the SQL run
 store, and ``ScheduledTaskService.handle_run_completion`` over the SQL
 scheduled-task repositories, wired as the Gateway wires it
 (``RunContext.on_run_completed``). Only the model is scripted.
+
+The outcome is the store's (``finalize_occurrence``): the completion hook,
+the poller's reconcile and startup recovery read the same run row the same way.
 """
 
 from __future__ import annotations
@@ -46,6 +49,7 @@ from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
+from deerflow.persistence.scheduled_task_runs.finalization import STOPPED_EARLY_ERRORS
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 from deerflow.runtime.runs import worker
@@ -53,6 +57,7 @@ from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import RunContext, run_agent
 from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 from deerflow.sandbox.middleware import SandboxMiddleware
 from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
 from deerflow.sandbox.tools import bash_tool, ensure_sandbox_initialized_async
@@ -309,3 +314,89 @@ async def test_a_scheduled_run_with_no_reason_still_ends_success(stores, monkeyp
 
     assert (stored["status"], stored["stop_reason"]) == ("success", None)
     assert (outcome.status, outcome.error, outcome.last_error) == ("success", None, None)
+
+
+# The same run row, however its occurrence is finalized. The completion hook
+# can miss (a deploy cancels it after the run committed, the Gateway restarts,
+# the hook raises); the poller and startup recovery then finish the occurrence
+# from the durable run alone.
+
+
+async def _finished_run(stores, *, stop_reason: str | None, goal_objective: str | None = None) -> SimpleNamespace:
+    run_id, thread_id = str(uuid4()), f"thread-{uuid4().hex}"
+    task_id, occurrence_id = await _scheduled_occurrence(stores, run_id, thread_id)
+    if goal_objective is not None:
+        async with stores.session_factory() as session:
+            await session.execute(update(ScheduledTaskRunRow).where(ScheduledTaskRunRow.id == occurrence_id).values(goal_objective=goal_objective))
+            await session.commit()
+    await stores.runs.put(run_id, thread_id=thread_id, assistant_id="lead_agent", user_id=OWNER, status="success", stop_reason=stop_reason, metadata={"scheduled_task_id": task_id, "scheduled_task_run_id": occurrence_id})
+    return SimpleNamespace(task_id=task_id, occurrence_id=occurrence_id, run_id=run_id)
+
+
+async def _outcome(stores, run) -> SimpleNamespace:
+    occurrence = next(row for row in await stores.occurrences.list_by_task(run.task_id) if row["id"] == run.occurrence_id)
+    schedule = await stores.schedules.get(run.task_id, user_id=OWNER)
+    return SimpleNamespace(status=occurrence["status"], error=occurrence["error"], last_error=schedule["last_error"])
+
+
+async def _by_the_hook(stores, run, stop_reason, goal_verdict=None):
+    kwargs = {"goal_verdict": goal_verdict} if goal_verdict is not None else {}
+    await stores.schedules.complete_run(run.task_id, user_id=OWNER, task_run_id=run.occurrence_id, run_id=run.run_id, status="success", error=None, finished_at=datetime.now(UTC), only_if_active=True, stop_reason=stop_reason, **kwargs)
+
+
+async def _by_the_poller(stores, run, stop_reason):
+    assert await stores.schedules.reconcile_terminal_runs(now=datetime.now(UTC)) == 1
+
+
+async def _at_startup(stores, run, stop_reason):
+    assert await stores.occurrences.mark_stale_active_runs(error="restarted") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish", [_by_the_hook, _by_the_poller, _at_startup], ids=["completion-hook", "poller-reconcile", "startup-recovery"])
+@pytest.mark.parametrize(("stop_reason", "expected"), [("sandbox_capacity_exceeded", ("failed", REFUSED, REFUSED)), (None, ("success", None, None))], ids=["refused", "no-reason"])
+async def test_every_way_of_finishing_an_occurrence_reads_the_same_run_the_same_way(stores, finish, stop_reason, expected):
+    run = await _finished_run(stores, stop_reason=stop_reason)
+
+    await finish(stores, run, stop_reason)
+
+    outcome = await _outcome(stores, run)
+    assert (outcome.status, outcome.error, outcome.last_error) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop_reason", "words"),
+    [
+        ("sandbox_capacity_exceeded", REFUSED),
+        ("loop_capped", LOOPED),
+        ("token_capped", "the task used up the amount of text it is allowed, so it stopped before it finished"),
+        ("safety_capped", "the model declined to go on, so the task stopped before it finished"),
+        ("model_length_capped", "the model's answer was cut off at its length limit, so the task stopped before it finished"),
+        # The cap drops the extra delegations and the run may go on: the words say only what is true either way.
+        ("subagent_limit_capped", "the task asked for more helpers than it is allowed, so the work they would have done was not done"),
+        ("extension_guard_capped", "the task stopped before it finished"),
+    ],
+    ids=["capacity", "loop", "token", "safety", "model-length", "subagent-limit", "unnamed"],
+)
+async def test_an_occurrence_that_did_not_do_the_task_says_why_in_words(stores, stop_reason, words):
+    run = await _finished_run(stores, stop_reason=stop_reason)
+
+    await _by_the_hook(stores, run, stop_reason)
+
+    outcome = await _outcome(stores, run)
+    assert (outcome.status, outcome.error, outcome.last_error) == ("failed", words, words)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("satisfied", "expected_status"), [(True, "success"), (False, "unmet")])
+async def test_a_goal_occurrence_capped_by_a_guard_is_still_judged_by_its_verdict(stores, satisfied, expected_status):
+    run = await _finished_run(stores, stop_reason="loop_capped", goal_objective="The report is in outputs")
+
+    await _by_the_hook(stores, run, "loop_capped", goal_verdict={"satisfied": satisfied, "stand_down_reason": None if satisfied else "loop_capped"})
+
+    assert (await _outcome(stores, run)).status == expected_status
+
+
+def test_the_store_names_the_refusal_by_the_reason_the_run_carries():
+    assert SandboxCapacityExceededError.run_stop_reason in STOPPED_EARLY_ERRORS

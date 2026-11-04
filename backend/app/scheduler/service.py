@@ -29,7 +29,6 @@ from deerflow.persistence.user.model import UserPreferenceRow
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.runtime.run_origin import origin_kind_of
 from deerflow.runtime.runs.capture_io import run_capture_io
-from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 from deerflow.scheduler.host_notes import RUN_ERROR_DELETED_WHILE_QUEUED, RUN_ERROR_INTERRUPTED, RUN_ERROR_LEASE_LOST, RUN_ERROR_PAUSED_WHILE_QUEUED, RUN_ERROR_QUEUE_TIMEOUT, RUN_ERROR_RESTARTED
 from deerflow.scheduler.schedules import next_run_at, should_advance_schedule_cursor
 from deerflow.scheduler.stop_rule import launch_prompt
@@ -37,22 +36,6 @@ from deerflow.trace_context import ensure_trace_context
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
-
-# What a task's owner reads when its run ended ``success`` but did not do the
-# task: a sandbox refusal, or a guard that cut the run short. Nobody reads an
-# unattended answer, so the occurrence says it in words; the typed reason stays
-# on the run and in the log. A reason with no phrase of its own reads as the
-# generic sentence.
-_SANDBOX_REFUSED_ERROR = "no sandbox was free when the task ran, so its tools did not run"
-_STOPPED_EARLY_ERROR = "the task stopped before it finished"
-_STOPPED_EARLY_ERRORS: dict[str, str] = {
-    SandboxCapacityExceededError.run_stop_reason: _SANDBOX_REFUSED_ERROR,
-    "loop_capped": "the task kept repeating the same action, so it was stopped before it finished",
-    "token_capped": "the task used up the amount of text it is allowed, so it stopped before it finished",
-    "safety_capped": "the model declined to go on, so the task stopped before it finished",
-    "model_length_capped": "the model's answer was cut off at its length limit, so the task stopped before it finished",
-    "subagent_limit_capped": "the task used up the helpers it is allowed, so it stopped before it finished",
-}
 
 
 def _zone_is_placeholder(task: dict[str, Any]) -> bool:
@@ -1053,14 +1036,7 @@ class ScheduledTaskService:
             return
 
         terminal_status: Literal["success", "failed", "interrupted", "unmet"] | None
-        stop_reason = getattr(record, "stop_reason", None)
-        if record.status.value == "success" and stop_reason and metadata.get("scheduled_goal_objective") is None:
-            # The model answered in words, but the task's tools never ran or a
-            # guard cut it short. A goal task is judged by its verdict below.
-            terminal_status = "failed"
-            error = _STOPPED_EARLY_ERRORS.get(stop_reason, _STOPPED_EARLY_ERROR)
-            logger.info("Scheduled task-run %s: run %s ended success but did not finish (%s)", task_run_id, record.run_id, stop_reason)
-        elif record.status.value == "success":
+        if record.status.value == "success":
             terminal_status = "success"
             error = None
             verdict = getattr(record, "goal_verdict", None)
@@ -1084,6 +1060,11 @@ class ScheduledTaskService:
         completion_kwargs = {}
         if metadata.get("scheduled_goal_objective") is not None:
             completion_kwargs["goal_verdict"] = getattr(record, "goal_verdict", None)
+        stop_reason = getattr(record, "stop_reason", None)
+        if stop_reason:
+            # A success run that did not do the task ends its occurrence failed
+            # (finalize_occurrence), on this path and on every recovery path.
+            completion_kwargs["stop_reason"] = stop_reason
         # The outcome and its notices (chat event, IM outbox row) commit in one
         # transaction: the finalization observer stages them. A completion
         # that recorded nothing (another run's occurrence, already finalized

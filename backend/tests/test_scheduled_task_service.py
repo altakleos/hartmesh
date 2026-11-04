@@ -667,43 +667,25 @@ async def test_handle_run_completion_forwards_terminal_outcome(run_status, error
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("run_status", "stop_reason", "error", "expected_error"),
+    ("run_status", "error", "expected"),
     [
-        (RunStatus.success, "sandbox_capacity_exceeded", None, "no sandbox was free when the task ran, so its tools did not run"),
-        (RunStatus.success, "loop_capped", None, "the task kept repeating the same action, so it was stopped before it finished"),
-        (RunStatus.success, "token_capped", None, "the task used up the amount of text it is allowed, so it stopped before it finished"),
-        (RunStatus.success, "extension_guard_capped", None, "the task stopped before it finished"),
+        (RunStatus.success, None, ("success", None)),
         # A refusal before the model ends the run ``error``: its occurrence reads as before.
-        (RunStatus.error, "sandbox_capacity_exceeded", "All sandbox replica slots are in use", "All sandbox replica slots are in use"),
+        (RunStatus.error, "All sandbox replica slots are in use", ("failed", "All sandbox replica slots are in use")),
     ],
-    ids=["capacity", "loop-guard", "token-guard", "unnamed-guard", "capacity-before-the-model"],
+    ids=["survived", "before-the-model"],
 )
-async def test_a_run_that_did_not_do_the_task_ends_its_occurrence_failed_in_words(run_status, stop_reason, error, expected_error):
+async def test_the_completion_hands_the_runs_stop_reason_to_the_store_that_judges_it(run_status, error, expected):
+    """The words are the store's (finalize_occurrence), so recovery reads the same run the same way."""
     task_repo = DummyTaskRepo([_once_task_row()])
     service = _make_service(task_repo, DummyRunRepo())
     record = _completion_record(run_status, error=error)
-    record.stop_reason = stop_reason
+    record.stop_reason = "sandbox_capacity_exceeded"
 
     await service.handle_run_completion(record)
 
     [(_task_id, completion)] = task_repo.completions
-    assert (completion["status"], completion["error"]) == ("failed", expected_error)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("satisfied", "occurrence_status"), [(True, "success"), (False, "unmet")])
-async def test_a_goal_task_capped_by_a_guard_is_still_judged_by_its_verdict(satisfied, occurrence_status):
-    task_repo = DummyTaskRepo([_once_task_row()])
-    service = _make_service(task_repo, DummyRunRepo())
-    record = _completion_record(RunStatus.success)
-    record.metadata["scheduled_goal_objective"] = "The report is in outputs"
-    record.stop_reason = "loop_capped"
-    record.goal_verdict = {"satisfied": satisfied, "stand_down_reason": None if satisfied else "loop_capped"}
-
-    await service.handle_run_completion(record)
-
-    [(_task_id, completion)] = task_repo.completions
-    assert completion["status"] == occurrence_status
+    assert (completion["status"], completion["error"], completion["stop_reason"]) == (*expected, "sandbox_capacity_exceeded")
 
 
 @pytest.mark.asyncio

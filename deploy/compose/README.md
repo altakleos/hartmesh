@@ -1897,9 +1897,10 @@ raised from inside that call and reaches the model, which is told the
 workspace is running as much sandboxed work as it has room for and to finish
 with what it has rather than call the tool again. The turn still ends
 `success`, and its run records `sandbox_capacity_exceeded` as its stop reason
-when the lead agent's tool call was refused and no later call in the turn got a
-sandbox (a refusal inside a delegated task is reported in that task's result;
-§ "Reading a turn's timing"). Nothing retries that turn. A message queued during
+when the lead agent's tool call was refused and none of the lead agent's later
+calls in the turn got a sandbox. A delegated task is apart both ways: a refusal
+inside it is reported in that task's result (§ "Reading a turn's timing"), and
+a sandbox it gets later does not clear the lead agent's refusal. Nothing retries that turn. A message queued during
 it is not sent on its own; it waits to be sent again. A scheduled task's
 occurrence with that stop reason is recorded as failed, since nobody reads an
 unattended answer. A turn that calls no sandbox-backed tool (a plain chat, or one that
@@ -2143,7 +2144,9 @@ is refused after the wait.
 people, its first sandbox call waits and is refused. The occurrence ends `failed`
 and says `no sandbox was free when the task ran, so its tools did not run`, on
 the task's *Last error* and on the run's row. It starts no third container, and
-it is not retried: the next occurrence is the next attempt.
+it is not retried: the next occurrence is the next attempt. An occurrence
+finished after a Gateway restart, or after its completion was missed, reads
+its run the same way.
 `backend/tests/test_scheduled_capacity_admission.py` shows this, and a
 guard-capped run, through the provider's admission, the worker and the scheduler.
 
