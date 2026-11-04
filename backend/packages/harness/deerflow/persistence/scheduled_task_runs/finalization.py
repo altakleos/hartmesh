@@ -41,6 +41,23 @@ _ONCE_OUTCOME_STATUSES = frozenset(RUN_EVENT_BY_STATUS)
 AGENT_STOP_LAST_ERROR_PREFIX = "stopped by the agent in run "
 AUTO_PAUSE_LAST_ERROR = "paused after 3 unmet scheduled goal runs"
 
+# A ``success`` run whose stop reason says the task did not get done: the
+# occurrence ends ``failed`` with these words on its error and the task's
+# ``last_error``, never the code. A reason with no words of its own gets the
+# fallback. The capacity key is ``SandboxCapacityExceededError.run_stop_reason``
+# (pinned by tests/test_scheduled_capacity_admission.py), spelled out so the
+# store does not import the sandbox package.
+STOPPED_EARLY_ERROR = "the task stopped before it finished"
+STOPPED_EARLY_ERRORS: dict[str, str] = {
+    "sandbox_capacity_exceeded": "no sandbox was free when the task ran, so its tools did not run",
+    "loop_capped": "the task kept repeating the same action, so it was stopped before it finished",
+    "token_capped": "the task used up the amount of text it is allowed, so it stopped before it finished",
+    "safety_capped": "the model declined to go on, so the task stopped before it finished",
+    "model_length_capped": "the model's answer was cut off at its length limit, so the task stopped before it finished",
+    # The cap drops the extra delegations; the run may go on without them.
+    "subagent_limit_capped": "the task asked for more helpers than it is allowed, so the work they would have done was not done",
+}
+
 
 def utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
@@ -120,8 +137,14 @@ async def finalize_occurrence(
     run_id: str | None,
     goal_verdict: dict[str, Any] | None = None,
     observer: FinalizationObserver | None = None,
+    stop_reason: str | None = None,
 ) -> bool:
-    """Terminalize once; receipts may still be repaired by the launch helpers."""
+    """Terminalize once; receipts may still be repaired by the launch helpers.
+
+    ``stop_reason`` is the durable run's: the completion hook and every
+    recovery path pass it, so the same run row gives the same outcome however
+    its occurrence is finalized.
+    """
     from deerflow.persistence.scheduled_tasks.model import LIVE_TASK_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES
 
     if occurrence.status in TERMINAL_RUN_STATUSES:
@@ -131,7 +154,12 @@ async def finalize_occurrence(
     # Copy and validate JSON before committing an evaluator result. Do not let
     # mutable in-memory evidence rewrite an already recorded occurrence.
     verdict = json.loads(json.dumps(goal_verdict)) if goal_verdict is not None else None
-    if status == "success" and occurrence.goal_objective is not None and (verdict is None or verdict.get("satisfied") is not True):
+    if status == "success" and stop_reason and occurrence.goal_objective is None:
+        # The model answered, but the task's tools never ran or a guard cut it
+        # short. A goal occurrence is judged by its verdict instead.
+        status = "failed"
+        error = STOPPED_EARLY_ERRORS.get(stop_reason, STOPPED_EARLY_ERROR)
+    elif status == "success" and occurrence.goal_objective is not None and (verdict is None or verdict.get("satisfied") is not True):
         status = "unmet"
         error = (verdict or {}).get("stand_down_reason") or "no_verdict"
     occurrence.status = status

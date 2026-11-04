@@ -43,6 +43,7 @@ from langgraph.types import Command, Overwrite
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.agents.interaction_policy import RunInteractionPolicy, resolve_run_interaction_policy
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
+from deerflow.agents.middlewares.tool_error_handling_middleware import TOOL_REFUSAL_REASON_CONTEXT_KEY
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.constants import CONVERSATION_READER_CONTEXT_KEY, TOOL_RESULTS_DIRNAME
@@ -2312,6 +2313,7 @@ async def _run_agent(
         # turns complete cleanly afterward (#4176 review).
         if isinstance(runtime.context, dict):
             runtime.context.pop("stop_reason", None)
+            runtime.context.pop(TOOL_REFUSAL_REASON_CONTEXT_KEY, None)
 
         def capture_goal_verdict(evaluated_goal: GoalState, evaluation: GoalEvaluation, stand_down_reason: str | None) -> None:
             nonlocal final_goal_verdict
@@ -2408,6 +2410,12 @@ async def _run_agent(
                 from deerflow.sandbox.lease import cancel_sandbox_execution_lease_async
 
                 await cancel_sandbox_execution_lease_async(runtime_ctx)
+            if stop_reason is None and runtime_context is not None and runtime_context.get("sandbox_id") is None:
+                # A refused sandbox call the run survived, and no later call got
+                # the sandbox: the turn's sandboxed work never ran. A guard's stop
+                # wins, and a turn whose retry found a slot is not refused. This
+                # is the lead agent's context; a delegated task has its own.
+                stop_reason = runtime_context.get(TOOL_REFUSAL_REASON_CONTEXT_KEY)
             produced_output_paths = (
                 await _produced_output_paths(
                     pre_run_output_snapshot,

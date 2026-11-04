@@ -89,8 +89,10 @@ class SandboxCapacityExceededError(SandboxError):
     one sentence that says what is actually true. Both are read by
     ``deerflow.agents.middlewares`` off the exception object itself; nothing
     matches on the message text. ``run_stop_reason`` is the structured reason
-    the run record carries when a refusal ends or shapes a turn, whether it
-    was raised before the model or out of a tool call.
+    the run record carries when a refusal ends or shapes a turn: an ``error``
+    run when it was raised before the model, and a ``success`` run when a lead
+    agent's tool call was refused, no guard stopped the turn and none of the
+    lead agent's later calls got a sandbox (a delegated task has its own).
     """
 
     CODE = "SANDBOX_CAPACITY_EXCEEDED"

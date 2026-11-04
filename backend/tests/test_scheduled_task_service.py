@@ -666,6 +666,29 @@ async def test_handle_run_completion_forwards_terminal_outcome(run_status, error
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("run_status", "error", "expected"),
+    [
+        (RunStatus.success, None, ("success", None)),
+        # A refusal before the model ends the run ``error``: its occurrence reads as before.
+        (RunStatus.error, "All sandbox replica slots are in use", ("failed", "All sandbox replica slots are in use")),
+    ],
+    ids=["survived", "before-the-model"],
+)
+async def test_the_completion_hands_the_runs_stop_reason_to_the_store_that_judges_it(run_status, error, expected):
+    """The words are the store's (finalize_occurrence), so recovery reads the same run the same way."""
+    task_repo = DummyTaskRepo([_once_task_row()])
+    service = _make_service(task_repo, DummyRunRepo())
+    record = _completion_record(run_status, error=error)
+    record.stop_reason = "sandbox_capacity_exceeded"
+
+    await service.handle_run_completion(record)
+
+    [(_task_id, completion)] = task_repo.completions
+    assert (completion["status"], completion["error"], completion["stop_reason"]) == (*expected, "sandbox_capacity_exceeded")
+
+
+@pytest.mark.asyncio
 async def test_existing_running_occurrence_blocks_duplicate_fresh_thread_run():
     launched = []
 

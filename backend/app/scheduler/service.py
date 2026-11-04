@@ -1060,6 +1060,11 @@ class ScheduledTaskService:
         completion_kwargs = {}
         if metadata.get("scheduled_goal_objective") is not None:
             completion_kwargs["goal_verdict"] = getattr(record, "goal_verdict", None)
+        stop_reason = getattr(record, "stop_reason", None)
+        if stop_reason:
+            # A success run that did not do the task ends its occurrence failed
+            # (finalize_occurrence), on this path and on every recovery path.
+            completion_kwargs["stop_reason"] = stop_reason
         # The outcome and its notices (chat event, IM outbox row) commit in one
         # transaction: the finalization observer stages them. A completion
         # that recorded nothing (another run's occurrence, already finalized

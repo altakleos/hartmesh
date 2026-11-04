@@ -404,6 +404,7 @@ class ScheduledTaskRunRepository:
             run_id=candidate.run_id if candidate is not None else row.run_id,
             goal_verdict=candidate.goal_verdict if candidate is not None else None,
             observer=self._finalization_observer,
+            stop_reason=candidate.stop_reason if candidate is not None else None,
         )
 
     async def list_by_task(
@@ -1176,6 +1177,7 @@ class ScheduledTaskRunRepository:
                                 created_at=candidate.created_at,
                                 status=refreshed["status"],
                                 error=refreshed.get("error"),
+                                stop_reason=refreshed.get("stop_reason"),
                                 goal_verdict=refreshed.get("goal_verdict"),
                             )
                 if row.status == "launching" and row.run_id is None:

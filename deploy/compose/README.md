@@ -1895,12 +1895,15 @@ A refusal is customer-visible and deliberately so. On this profile a turn
 asks for its sandbox at its first sandbox-backed tool call, so the refusal is
 raised from inside that call and reaches the model, which is told the
 workspace is running as much sandboxed work as it has room for and to finish
-with what it has rather than call the tool again. The run records
-`sandbox_capacity_exceeded` as its stop reason when the lead agent's tool call
-was refused (a refusal inside a delegated task is reported in that task's
-result; § "Reading a turn's timing"), and a scheduled task's occurrence with
-that stop reason is recorded as failed, since nobody reads an unattended
-answer. A turn that calls no sandbox-backed tool (a plain chat, or one that
+with what it has rather than call the tool again. The turn still ends
+`success`, and its run records `sandbox_capacity_exceeded` as its stop reason
+when the lead agent's tool call was refused and none of the lead agent's later
+calls in the turn got a sandbox. A delegated task is apart both ways: a refusal
+inside it is reported in that task's result (§ "Reading a turn's timing"), and
+a sandbox it gets later does not clear the lead agent's refusal. Nothing retries that turn. A message queued during
+it is not sent on its own; it waits to be sent again. A scheduled task's
+occurrence with that stop reason is recorded as failed, since nobody reads an
+unattended answer. A turn that calls no sandbox-backed tool (a plain chat, or one that
 only asks a clarifying question) never acquires, waits for or evicts a
 sandbox, and answers while both slots are busy. Stop during the wait ends it
 at once and the turn is recorded as cancelled, holding no slot. Stop while a
@@ -2135,14 +2138,17 @@ can also evict a person's idle warm sandbox, so that person's next turn pays a
 cold start (80 to 91 s measured). Scheduled work at round times (a Monday 09:00
 review) overlaps with people opening the app. With room for two scheduled runs
 at once (`max_concurrent_runs` 2), two runs hold both slots and a person's turn
-is refused after the wait; `backend/tests/test_scheduled_capacity_admission.py`
-shows both cases.
+is refused after the wait.
 
 **A scheduled occurrence that cannot get a slot.** With both slots held by
 people, its first sandbox call waits and is refused. The occurrence ends `failed`
 and says `no sandbox was free when the task ran, so its tools did not run`, on
 the task's *Last error* and on the run's row. It starts no third container, and
-it is not retried: the next occurrence is the next attempt.
+it is not retried: the next occurrence is the next attempt. An occurrence
+finished after a Gateway restart, or after its completion was missed, reads
+its run the same way.
+`backend/tests/test_scheduled_capacity_admission.py` shows this, and a
+guard-capped run, through the provider's admission, the worker and the scheduler.
 
 **What bounds a scheduled run**, and what its owner reads when it ends (in the
 task's *Last error* and on the occurrence's row of the run history). Nothing
@@ -2152,7 +2158,7 @@ notifies a person: they read the page.
 | --- | --- | --- |
 | Wall time, `max_run_seconds` | occurrence `failed`; the run is asked to stop and ends `interrupted` when the Stop lands | `the task did not finish within 15 minutes, so it was stopped` |
 | Step limit, `recursion_limit` | occurrence `failed`; run `error`, `stop_reason: recursion_limit_reached` | `the task used up the number of steps it is allowed, so it stopped before it finished` |
-| A guard or execution budget (`loop_capped`, `turn_budget_exhausted`, and the like) | occurrence `failed`; run `success` with that `stop_reason` | words about the limit, never the code |
+| A guard (`loop_capped`, `token_capped`, and the like) | occurrence `failed`; run `success` with that `stop_reason` | words about the limit, never the code |
 | No sandbox free | occurrence `failed`; run `success`, `stop_reason: sandbox_capacity_exceeded` | `no sandbox was free when the task ran, so its tools did not run` |
 | Waiting behind the run ahead, `queue_timeout_seconds` | occurrence `failed`, no run | `scheduled task queue wait timeout exceeded` |
 

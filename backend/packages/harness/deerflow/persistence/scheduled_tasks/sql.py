@@ -765,11 +765,13 @@ class ScheduledTaskRepository:
         only_if_active: bool = False,
         retirement_pending: bool = False,
         goal_verdict: dict[str, Any] | None = None,
+        stop_reason: str | None = None,
     ) -> bool:
         """Commit occurrence completion, accounting and eligible parent outcome.
 
         ``only_if_active`` makes it a compare-and-set: an occurrence that has
         already ended keeps its outcome and the call answers ``False``.
+        ``stop_reason`` is the durable run's (see ``finalize_occurrence``).
         """
         if status not in TERMINAL_RUN_STATUSES:
             raise ValueError(f"unsupported terminal occurrence status: {status!r}")
@@ -784,7 +786,7 @@ class ScheduledTaskRepository:
             if occurrence.lease_owner == EXECUTION_RETIREMENT_PENDING or (only_if_active and occurrence.status not in ACTIVE_RUN_STATUSES):
                 await session.rollback()
                 return False
-            accepted = await finalize_occurrence(session, task, occurrence, status=status, error=error, finished_at=finished_at, run_id=run_id, goal_verdict=goal_verdict, observer=self._finalization_observer)
+            accepted = await finalize_occurrence(session, task, occurrence, status=status, error=error, finished_at=finished_at, run_id=run_id, goal_verdict=goal_verdict, observer=self._finalization_observer, stop_reason=stop_reason)
             if accepted and retirement_pending:
                 # The run is still executing: it keeps its capacity charge until
                 # its worker retires (scheduled_task_runs/retirement.py).
@@ -860,6 +862,7 @@ class ScheduledTaskRepository:
                         run_id=run.run_id,
                         goal_verdict=run.goal_verdict,
                         observer=self._finalization_observer,
+                        stop_reason=run.stop_reason,
                     )
                     await session.commit()
                     if accepted:

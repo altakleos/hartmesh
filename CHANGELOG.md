@@ -96,6 +96,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A steered run cannot be regenerated or edited from part of it, and a task's pending
   receipt no longer counts as its result.
 
+### Sandbox capacity and scheduled tasks
+
+- A scheduled task whose run found both sandbox slots in use ends `failed` again, and its
+  *Last error* and the occurrence say `no sandbox was free when the task ran, so its
+  tools did not run`. Since `.38` it ended `success`. A scheduled run that a guard cut
+  short (`loop_capped`, `token_capped` and the like) also ends `failed`, in words about
+  the limit. A goal task is still judged by its verdict. An occurrence finished after a
+  Gateway restart, or after its completion was missed, reads its run the same way.
+- A turn whose sandbox call was refused for capacity ends `success` with
+  `stop_reason: sandbox_capacity_exceeded`, unless a later call of the lead agent's got a
+  sandbox (a delegated task's sandbox is not counted). It
+  does not become retryable. A message queued during that turn is not sent on its own
+  and waits for **Send again**, as after a guard-capped turn.
+- The model is told to finish with what it has again. Since `.38` an async sandbox tool
+  call returned the raw refusal text, which read as a failed call to retry.
 
 ### Backend test sharding
 

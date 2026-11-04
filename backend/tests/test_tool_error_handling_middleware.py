@@ -1419,3 +1419,42 @@ def test_build_lead_runtime_middlewares_passes_read_before_write_config():
     assert len(gates) == 1
     # Only the wired value is under test; the full policy identity is covered by the middleware's own tests.
     assert gates[0].release_policy_parameters()["config"]["elide_min_chars"] == 321
+
+
+def test_a_capacity_refusal_is_recorded_beside_the_guards_stop_reason_not_in_it():
+    """A refused sandbox call is a fact for the run record, not a guard's stop.
+
+    The guards read ``context["stop_reason"]`` as the reason that already
+    stopped this turn. Were the refusal written there, a model that kept
+    retrying and tripped the loop cap would be recorded as refused for capacity.
+    """
+    from deerflow.agents.middlewares.tool_error_handling_middleware import TOOL_REFUSAL_REASON_CONTEXT_KEY
+    from deerflow.sandbox.exceptions import SandboxCapacityExceededError
+
+    context: dict = {}
+    request = SimpleNamespace(tool_call={"name": "bash", "id": "tc-1"}, runtime=SimpleNamespace(context=context))
+
+    def _refuse(_req):
+        raise SandboxCapacityExceededError(replicas=2, active=2, retry_after_seconds=5)
+
+    ToolErrorHandlingMiddleware().wrap_tool_call(request, _refuse)
+
+    assert "stop_reason" not in context
+    assert context[TOOL_REFUSAL_REASON_CONTEXT_KEY] == SandboxCapacityExceededError.run_stop_reason
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("disk full"), type("Lookalike", (RuntimeError,), {"run_stop_reason": "sandbox_capacity_exceeded"})("busy")], ids=["ordinary", "declared-by-another-type"])
+def test_only_a_capacity_refusal_records_a_run_level_reason(failure):
+    """Typed, never declared: another exception carrying the attribute is not authority."""
+    from deerflow.agents.middlewares.tool_error_handling_middleware import TOOL_REFUSAL_REASON_CONTEXT_KEY
+
+    context: dict = {}
+    request = SimpleNamespace(tool_call={"name": "bash", "id": "tc-1"}, runtime=SimpleNamespace(context=context))
+
+    def _fail(_req):
+        raise failure
+
+    ToolErrorHandlingMiddleware().wrap_tool_call(request, _fail)
+
+    assert TOOL_REFUSAL_REASON_CONTEXT_KEY not in context
+    assert "stop_reason" not in context
