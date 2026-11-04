@@ -72,6 +72,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   HartMesh version and is checked with the other version sources by
   `scripts/verify_versions.sh` and moved by `scripts/bump_version.sh`.
 
+### Backend test sharding
+
+- `backend/.test_durations` is rebuilt from the six CI shard reports of the step-2 sync.
+  The old file had no time for 9,153 of the 56,112 offline tests (about 1,357 s together)
+  and kept 736 tests that no longer exist. Test time per shard was 848–1,058 s; it is now
+  about 1,000 s for each of the six shards.
+
 ### Schema changes
 
 - Upstream's migrations `0027_notification_deliveries` through
