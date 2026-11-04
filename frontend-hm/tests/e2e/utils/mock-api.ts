@@ -118,6 +118,8 @@ export type MockAPIOptions = {
     agentInstancesEnabled?: boolean;
     browserControlEnabled?: boolean;
     mcpTasksEnabled?: boolean;
+    /** Report Queue/Steer support (`run_inputs`); off unless a spec opts in. */
+    runInputs?: boolean;
     telegram?: Record<string, unknown> | null;
   };
   runStreamHandler?: (route: Route) => Promise<void>;
@@ -383,6 +385,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       true,
     browserControlEnabled: options?.features?.browserControlEnabled ?? true,
     mcpTasksEnabled: options?.features?.mcpTasksEnabled ?? true,
+    runInputs: options?.features?.runInputs ?? false,
     telegram: options?.features?.telegram ?? null,
   };
 
@@ -1469,6 +1472,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           },
           browser_control: { enabled: featureFlags.browserControlEnabled },
           mcp_tasks: { enabled: featureFlags.mcpTasksEnabled },
+          run_inputs: featureFlags.runInputs,
           telegram: featureFlags.telegram,
           storage_spaces: {
             enabled: false,

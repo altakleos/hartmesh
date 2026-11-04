@@ -36,6 +36,8 @@ export interface AgentThreadState extends Record<string, unknown> {
   artifacts?: string[];
   todos?: Todo[];
   goal?: GoalState | null;
+  /** Steer inputs the current run has taken into its turn (server-owned). */
+  applied_run_inputs?: { run_id: string; ids: string[] } | null;
 }
 
 export interface AgentThreadContext extends Record<string, unknown> {

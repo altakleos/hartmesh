@@ -356,3 +356,26 @@ describe("parseSubtaskResult — shared contract fixture", () => {
     });
   }
 });
+
+describe("steered-run pending receipts", () => {
+  const pending = {
+    type: "tool",
+    id: "result-1",
+    tool_call_id: "call-1",
+    content: "The subagent result is pending and will arrive in this Run.",
+    additional_kwargs: { subagent_pending: true, run_id: "run-1" },
+  } as Message;
+
+  it("is not the task's result, so a settled turn keeps the task running", () => {
+    expect(hasSubtaskToolResult("call-1", [pending])).toBe(false);
+    expect(derivePendingSubtaskStatus("call-1", [pending], false)).toBe(
+      "failed",
+    );
+    const final = {
+      ...pending,
+      content: "Done",
+      additional_kwargs: { [SUBAGENT_STATUS_KEY]: "completed" },
+    } as Message;
+    expect(hasSubtaskToolResult("call-1", [pending, final])).toBe(true);
+  });
+});

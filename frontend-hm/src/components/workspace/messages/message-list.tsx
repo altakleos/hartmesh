@@ -46,7 +46,10 @@ import {
   type HumanInputRequest,
   type HumanInputResponse,
 } from "@/core/messages/human-input";
-import { getRunDurationDisplaysByGroupIndex } from "@/core/messages/run-duration";
+import {
+  getMessageRunId,
+  getRunDurationDisplaysByGroupIndex,
+} from "@/core/messages/run-duration";
 import {
   buildTokenDebugSteps,
   type TokenDebugStep,
@@ -305,6 +308,7 @@ export function MessageList({
   onSubmitHumanInput,
   onBranchTurn,
   canRegenerate = false,
+  activeRunId,
   canEdit = false,
   canBranch = false,
   enableSidecarActions = true,
@@ -342,6 +346,11 @@ export function MessageList({
     messageIds: string[],
   ) => void | Promise<void>;
   canRegenerate?: boolean;
+  /**
+   * The run still taking Queue/Steer inputs. Its groups stay live even when a
+   * steered message has started a later group.
+   */
+  activeRunId?: string;
   canEdit?: boolean;
   canBranch?: boolean;
   enableSidecarActions?: boolean;
@@ -543,6 +552,30 @@ export function MessageList({
   }, [groupedMessages]);
   const updateSubtask = useUpdateSubtask();
   const lastGroupIndex = groupedMessages.length - 1;
+  const isGroupLoading = useCallback(
+    (groupIndex: number) =>
+      thread.isLoading &&
+      (groupIndex === lastGroupIndex ||
+        (!!activeRunId &&
+          Boolean(
+            groupedMessages[groupIndex]?.messages.some(
+              (message) =>
+                (getMessageRunId(message) ??
+                  message.additional_kwargs?.run_id) === activeRunId,
+            ),
+          ))),
+    [activeRunId, groupedMessages, lastGroupIndex, thread.isLoading],
+  );
+  // A run that took a Steer input cannot be replayed from only part of it.
+  const isSteeredRun = useCallback(
+    (message: Message) => {
+      const runId =
+        getMessageRunId(message) ?? message.additional_kwargs?.run_id;
+      const applied = thread.values.applied_run_inputs;
+      return !!applied?.ids.length && runId === applied.run_id;
+    },
+    [thread.values.applied_run_inputs],
+  );
   const previousTurnUsageStateRef = useRef<AssistantTurnUsageState | undefined>(
     undefined,
   );
@@ -972,7 +1005,13 @@ export function MessageList({
           {enableRegenerateForTurn &&
             actionTarget?.id &&
             onRegenerateMessage && (
-              <Tooltip content={t.common.regenerate}>
+              <Tooltip
+                content={
+                  isSteeredRun(actionTarget)
+                    ? t.inputBox.runInputReplayUnavailable
+                    : t.common.regenerate
+                }
+              >
                 <Button
                   aria-label={t.common.regenerate}
                   size="icon-sm"
@@ -980,6 +1019,7 @@ export function MessageList({
                   variant="ghost"
                   disabled={
                     !canRegenerate ||
+                    isSteeredRun(actionTarget) ||
                     replayActionBusy ||
                     regeneratingMessageId === actionTarget.id
                   }
@@ -1013,12 +1053,14 @@ export function MessageList({
       branchingMessageId,
       canBranch,
       canRegenerate,
+      isSteeredRun,
       onBranchTurn,
       onRegenerateMessage,
       regeneratingMessageId,
       replayActionBusy,
       t.common.branch,
       t.common.regenerate,
+      t.inputBox.runInputReplayUnavailable,
     ],
   );
 
@@ -1105,9 +1147,7 @@ export function MessageList({
 
     const webPageKeys = webPageLinksByGroupIndex.get(groupIndex);
     const links =
-      agentTarget &&
-      webPageKeys &&
-      !(thread.isLoading && groupIndex === lastGroupIndex) ? (
+      agentTarget && webPageKeys && !isGroupLoading(groupIndex) ? (
         <WebPageLinks keys={webPageKeys} target={agentTarget} />
       ) : null;
 
@@ -1155,8 +1195,7 @@ export function MessageList({
             renderGroup={(group, groupIndex) => {
               const turnUsageMessages =
                 turnUsageMessagesByGroupIndex[groupIndex];
-              const groupIsLoading =
-                thread.isLoading && groupIndex === lastGroupIndex;
+              const groupIsLoading = isGroupLoading(groupIndex);
 
               if (group.type === "human" || group.type === "assistant") {
                 return withRunDuration(
@@ -1193,6 +1232,8 @@ export function MessageList({
                           threadIsLoading={thread.isLoading}
                           canEdit={
                             group.type === "human" &&
+                            !msg.additional_kwargs?.run_input_id &&
+                            !isSteeredRun(msg) &&
                             Boolean(msg.id) &&
                             msg.id === latestEditableHumanMessageId &&
                             canEdit &&
@@ -1406,7 +1447,12 @@ export function MessageList({
                     }
                   } else if (message.type === "tool") {
                     const taskId = message.tool_call_id;
-                    if (taskId) {
+                    // A pending receipt leaves the task running until its
+                    // final result arrives in the same run.
+                    if (
+                      taskId &&
+                      message.additional_kwargs?.subagent_pending !== true
+                    ) {
                       const parsed = parseSubtaskResult(
                         extractTextFromMessage(message),
                         message.additional_kwargs,

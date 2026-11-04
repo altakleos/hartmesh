@@ -11,6 +11,7 @@ import {
   selectCustomerAdministration,
   selectBrowserControlEnabled,
   selectMcpTasksEnabled,
+  selectRunInputsEnabled,
   selectSubagentBatchesCapability,
   selectStorageSpacesEnabled,
   selectStorageState,
@@ -75,6 +76,16 @@ export function useDocumentTitle(page: string, productName: string) {
       ? page
       : `${page} - ${companyName ?? productName}`;
   }, [companyName, isLoading, page, productName]);
+}
+
+/**
+ * Whether the Gateway accepts Queue/Steer inputs for an active run. A missing,
+ * malformed or failed answer reads as off, so the composer keeps its ordinary
+ * wait-while-streaming behaviour.
+ */
+export function useRunInputsEnabled(enabled = true) {
+  const { data } = useFeatures(selectRunInputsEnabled);
+  return enabled && data === true;
 }
 
 export function useBrowserControlEnabled() {
