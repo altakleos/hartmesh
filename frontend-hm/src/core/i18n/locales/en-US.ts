@@ -349,8 +349,6 @@ export function createEnUS(product: string): Translations {
           `${name}'s workspace was closed for maintenance by ${provider} while ${name} was working on this.`,
         hostReplaced: (name) =>
           `The service moved to a new server while ${name} was working on this. ${name}'s files are as of the last backup; check the files before you continue.`,
-        settingsChanged: (name) =>
-          `The service was updated while ${name} was working on this, so ${name}'s workspace was restarted.`,
         unknown: (name) => `${name}'s work on this was interrupted.`,
         kept: (name) =>
           `What ${name} had done is kept in ${name}'s files; nothing was submitted for review.`,

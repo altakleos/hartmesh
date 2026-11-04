@@ -670,6 +670,7 @@ class ResidentRuntime:
 
             async def reconcile():
                 nonlocal claim, identity, generation, enabled
+                outdated = ()
                 if entry is None and claim.container_id is None:
                     return unconfirmed("preparing")
                 if entry is not None:
@@ -748,8 +749,11 @@ class ResidentRuntime:
                             # longer uses; every upgrade changes the network policy.
                             # Left pending it holds every AI agent unavailable for as
                             # long as it runs. Closed, the next turn starts a fresh one.
-                            logger.warning("agents: workspace %s was started with settings this service no longer uses (%s); closing it so the next turn starts a fresh one", claim.id, ", ".join(changed.changed))
-                            reason = "settings-changed"
+                            # Recorded as the run path records a running workspace it
+                            # cannot resume, so a release that predates this still
+                            # reads the row after a rollback.
+                            outdated = changed.changed
+                            reason = "container-absent"
                         else:
                             fresh = await self.attachments.retained_attachment(claim.id)
                             if resumed is None or resumed.id != claim.id or resumed.container_id != claim.container_id or fresh is None:
@@ -765,6 +769,8 @@ class ResidentRuntime:
                     return unconfirmed("busy-containment")
                 if not await self.attachments.contain_host(claim.id, reason):
                     return unconfirmed("containment-unconfirmed")
+                if outdated:
+                    logger.warning("agents: workspace %s was started with settings this service no longer uses (%s); closed it, and the next turn starts a fresh one", claim.id, ", ".join(outdated))
                 self.app.state.agent_execution.attachments_fenced += 1
                 return True
 

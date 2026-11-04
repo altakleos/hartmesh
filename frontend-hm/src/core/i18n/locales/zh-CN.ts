@@ -334,8 +334,6 @@ export function createZhCN(product: string): Translations {
           `${name}处理此任务时，${provider}关闭了${name}的工作环境以进行维护。`,
         hostReplaced: (name) =>
           `${name}处理此任务时，服务已迁移到新服务器。${name}的文件为上次备份时的版本；继续前请检查文件。`,
-        settingsChanged: (name) =>
-          `${name}处理此任务时，服务已更新，因此${name}的工作环境已重新启动。`,
         unknown: (name) => `${name}处理此任务的工作已中断。`,
         kept: (name) =>
           `${name}已完成的内容保留在${name}的文件中；没有提交审核。`,

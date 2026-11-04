@@ -118,36 +118,45 @@ async def test_unique_active_workspace_is_qualified_before_association(execution
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("settings_changed", [True, False], ids=["settings-changed", "unexplained-refusal"])
-async def test_a_running_workspace_started_with_older_settings_is_closed_at_start_not_left_pending(execution, fixture, monkeypatch, caplog, settings_changed):
+@pytest.mark.parametrize("case", ["settings-changed", "settings-changed-but-busy", "unexplained-refusal"])
+async def test_a_running_workspace_started_with_older_settings_is_closed_at_start_not_left_pending(execution, fixture, monkeypatch, caplog, case):
     """An upgrade leaves an AI employee's workspace running with the previous release's settings.
 
     Resume refuses it, as it must. Left pending, that refusal kept every AI agent
     unavailable until the container went away; the start has to close it instead.
-    An unexplained refusal still proves nothing about the workspace, so it stays.
+    It is recorded as the run path records a running workspace it cannot resume,
+    `container-absent`, which a release that predates this still reads after a
+    rollback. Work in flight still blocks the close, and an unexplained refusal
+    proves nothing about the workspace, so both stay.
     """
     from deerflow.spaces.docker import ResidentSettingsChanged, StorageHostUnqualified
 
-    _service, _admitted, _row, sf = execution
+    _service, admitted, _row, sf = execution
     module, app, host, _attachments, adapter, claim = await build(execution, fixture, monkeypatch)
-    refusal = ResidentSettingsChanged(("network policy",)) if settings_changed else StorageHostUnqualified("Resident activation lacks its exact prepared original graph")
+    refusal = StorageHostUnqualified("Resident activation lacks its exact prepared original graph") if case == "unexplained-refusal" else ResidentSettingsChanged(("network policy",))
 
     def verify_active(_container, _plan):
         raise refusal
 
     adapter.verify_active = verify_active
+    if case == "settings-changed-but-busy":
+        busy = host.registry.in_flight
+        monkeypatch.setattr(host.registry, "in_flight", lambda instance_id: frozenset({"live-run"}) if instance_id == admitted.instance.id else busy(instance_id))
     pending = await module.reconcile_residents(app, deadline=time.monotonic() + 10)
     async with sf() as session:
         row = await session.get(SpaceAttachmentRow, claim.id)
-    if settings_changed:
+    closed = f"agents: workspace {claim.id} was started with settings this service no longer uses (network policy); closed it"
+    if case == "settings-changed":
         assert pending == []
-        assert (row.phase, row.fence_reason) == ("fenced", "settings-changed")
+        assert (row.phase, row.fence_reason) == ("fenced", "container-absent")
         assert claim.container_id not in adapter.containers and host.registry.external_slots() == 0
         assert app.state.agent_execution.attachments_fenced == 1
-        assert f"agents: workspace {claim.id} was started with settings this service no longer uses (network policy)" in caplog.text
+        assert closed in caplog.text
     else:
         assert pending == [claim.id] and row.phase == "active"
         assert claim.container_id in adapter.containers and host.workspace_qualified is False
+        assert closed not in caplog.text
+    if case == "unexplained-refusal":
         assert f"agents: workspace {claim.id} remains pending" in caplog.text
         assert "StorageHostUnqualified: Resident activation lacks its exact prepared original graph" in caplog.text
 

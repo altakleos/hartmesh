@@ -176,23 +176,6 @@ test("a contained completion report is labelled interrupted and keeps its candid
   expect(screen.queryByText("outcome-uncertain")).toBeNull();
   expect(readWorkRun).not.toHaveBeenCalled();
 });
-test("work closed because the service was updated says so and keeps the files", () => {
-  const props = options();
-  props.record.attempt!.status = "failed";
-  props.record.attempt!.contained = { reason: "settings-changed", at: "now" };
-  show(props);
-  expect(
-    screen.getByText(
-      "The service was updated while Researcher was working on this, so Researcher's workspace was restarted.",
-    ),
-  ).toBeTruthy();
-  expect(
-    screen.getByText(
-      "What Researcher had done is kept in Researcher's files; nothing was submitted for review.",
-    ),
-  ).toBeTruthy();
-  expect(screen.queryByText("settings-changed")).toBeNull();
-});
 test("work ending without a result explains where to answer only on an open assignment without a request", () => {
   const props = options();
   props.record.attempt!.status = "succeeded";

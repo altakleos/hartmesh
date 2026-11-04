@@ -13,12 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again. That workspace was started with the previous release's settings, so the
   Gateway refused to take it over. It also never closed it, and every AI agent stayed
   unavailable until the container was removed. Now the Gateway closes it at start
-  with the reason `settings-changed`; its files stay in its Space and the next turn
-  starts a fresh workspace. This affected every upgrade from `v2.2.0+hartmesh.46`
-  on with the default allowlist egress, because the network policy covers the
-  pinned proxy image, which every release changes.
-- Work interrupted this way says that the service was updated and the workspace
-  restarted, and that the files are kept.
+  and logs `agents: workspace <id> was started with settings this service no longer
+  uses (…); closed it, …`. Its files stay in its Space and the next turn starts a fresh
+  workspace. This affected every upgrade from `v2.2.0+hartmesh.46` on with the
+  default allowlist egress, because the network policy covers the pinned proxy
+  image, which every release changes.
+- The close is recorded with the existing reason `container-absent`, as the run path
+  already records a running workspace it cannot resume, so rolling back to an
+  earlier release still reads the record. A workspace with work in flight is not
+  closed.
 - While a workspace keeps AI agents unavailable, the Gateway's log names it and the
   underlying cause on every retry: `agents: workspace <id> remains pending, …`.
 

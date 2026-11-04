@@ -2534,7 +2534,7 @@ missing slots and does not cure a Gateway helper failure.
 | `agents: ready (<n> attachments fenced at start; <n> work attempts settled)` | Resident restoration and containment completed. |
 | `agents: unavailable (…)` | Qualification remains closed; maintenance retries. |
 | `agents: attachment <id> of <id> contained (<reason>)` | Exact workspace containment confirmed. |
-| `agents: workspace <id> was started with settings this service no longer uses (…)` | A workspace still running from before an upgrade or a settings change; it is closed (`settings-changed`) and the next turn starts a fresh one. |
+| `agents: workspace <id> was started with settings this service no longer uses (…); closed it, …` | A workspace still running from before an upgrade or a settings change was closed (recorded as `container-absent`); the next turn starts a fresh one. |
 | `agents: workspace <id> remains pending, so AI agents stay unavailable (…)` | Why a workspace blocks readiness, repeated on every retry. |
 | `agents: work attempt <id> of <id> settled failed (…)` | Interrupted attempt failed without promoting its candidate. |
 | `agents: held (…)` / `agents: hold lifted` | Operator hold found / removed. |
@@ -2643,11 +2643,12 @@ stops work in flight during graceful shutdown; a forced kill grants no drainage.
 
 An upgrade is different. A workspace left running was started with the previous
 release's settings: its network policy covers the pinned proxy image, which
-every release changes. The new Gateway closes it at start with the reason
-`settings-changed` and reaches `agents: ready`; its files stay in its Space and
-the next turn starts a fresh workspace. The same happens after a change to the
-sandbox mounts or network settings. From `v2.2.0+hartmesh.46` through `.51`
-such a start stayed `agents: unavailable` until the container was removed.
+every release changes. The new Gateway closes it at start, logs which settings
+changed and reaches `agents: ready`; its files stay in its Space and the next
+turn starts a fresh workspace. A workspace with work in flight is not closed.
+The same happens after a change to the sandbox mounts or network settings. From
+`v2.2.0+hartmesh.46` through `.51` such a start stayed `agents: unavailable`
+until the container was removed.
 On startup the host contains workspaces associated with orphaned runs and settles
 their attempts as failed. Work can then be explicitly resumed. Nothing restarts
 an assignment automatically. An idle workspace expires after 1800 seconds in

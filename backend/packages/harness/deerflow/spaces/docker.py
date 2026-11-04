@@ -49,10 +49,11 @@ class StorageHostUnqualified(StorageAdapterUnsupported):
 class ResidentSettingsChanged(StorageHostUnqualified):
     """A resident this host prepared was admitted under settings it no longer uses.
 
-    The record is this host's own (same container, daemon and incarnation), so
-    the workspace is safe to close and start again. ``changed`` names what
-    differs; an upgrade changes the network policy on every release, because
-    its digest covers the pinned proxy image.
+    The record is this host's own (same container, daemon, incarnation and
+    roots), so the workspace is safe to close and start again. ``changed``
+    names what differs: read-only mounts or network settings. An upgrade
+    changes the network policy on every release, because its digest covers
+    the pinned proxy image.
     """
 
     def __init__(self, changed):
@@ -413,10 +414,11 @@ class DockerStorageAdapter:
         mode = self._backend.network_mode
         target = _network_target(self._backend, plan.id)
         configured = tuple((source, destination, False) for source, destination, readonly in self._configured_mounts if readonly is True)
-        if record is None or record.phase != "prepared" or (record.container_id, record.daemon_id, record.incarnation) != (container, plan.host_id, plan.incarnation) or len(configured) != len(self._configured_mounts):
+        # Changed roots are not a settings change: containment rechecks the record's
+        # roots against the current volumes, so only restoration can close them.
+        if record is None or record.phase != "prepared" or (record.container_id, record.daemon_id, record.incarnation, record.roots) != (container, plan.host_id, plan.incarnation, roots) or len(configured) != len(self._configured_mounts):
             raise StorageHostUnqualified("Resident activation lacks its exact prepared original graph")
         current = {
-            "storage roots": (record.roots, roots),
             "configured mounts": (record.configured_mounts, configured),
             "network mode": (record.network_mode, mode),
             "network": (record.network_target, target),

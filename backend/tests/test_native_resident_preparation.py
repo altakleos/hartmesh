@@ -147,13 +147,14 @@ def _resident_adapter(local, provider):
     return actual
 
 
-@pytest.mark.parametrize("change", ["proxy-image", "incarnation"])
+@pytest.mark.parametrize("change", ["proxy-image", "incarnation", "storage-root"])
 def test_resume_after_an_upgrade_says_the_settings_changed_and_never_that_for_another_identity(managed, monkeypatch, change):
     """Every release pins a new proxy image, and the network policy digest covers it.
 
     A resident the previous release prepared under allowlist egress therefore
     carries the previous digest. Resume must refuse it as changed settings, which
-    the start can act on, and never give that answer for a record it cannot claim.
+    the start can act on, and never give that answer for a record it cannot claim
+    or for a replaced storage root, which only restoration can close.
     """
     from deerflow.community.aio_sandbox.native_resource_set import NativeResourceSet
     from deerflow.spaces.docker import ResidentSettingsChanged
@@ -183,6 +184,8 @@ def test_resume_after_an_upgrade_says_the_settings_changed_and_never_that_for_an
     local._network_config = {**local._network_config, "proxy_image": "proxy:this-release"}
     if change == "incarnation":
         plan = replace(plan, incarnation="f" * 32)
+    elif change == "storage-root":
+        plan = replace(plan, views=(replace(plan.views[0], native_root=replace(plan.views[0].native_root, root_inode=99)),))
     with pytest.raises(StorageHostUnqualified) as refused:
         actual.verify_active(CONTAINER, plan)
     if change == "proxy-image":

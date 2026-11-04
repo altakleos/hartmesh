@@ -248,7 +248,6 @@ export interface Translations {
       storageRecovery: (provider: string, name: string) => string;
       operator: (name: string, provider: string) => string;
       hostReplaced: (name: string) => string;
-      settingsChanged: (name: string) => string;
       unknown: (name: string) => string;
       kept: (name: string) => string;
       candidate: (name: string) => string;
