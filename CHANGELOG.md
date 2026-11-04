@@ -61,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scheduled or webhook run (an AI employee's Work attempt among them), an AI agent run
   and an output-captured run keep the one input they were admitted with; the Gateway
   answers a Queue or Steer submission for them with 409.
+- A web chat turn that opens Queue and Steer runs two more middlewares, so a plain
+  one-reply turn takes about 28 LangGraph steps. An API client that sets
+  `config.recursion_limit` below about 30 now stops at its step limit; the Gateway's
+  default (100) and the web app's, IM channels' and scheduler's values (1000) are unaffected.
 - HartMesh keeps its per-call command abort. Upstream's run-scoped command cancellation
   is not enabled, so stopping a run still ends only the commands that run started.
 - Run event producer fencing stays off (`run_events.producer_fencing: "off"`).

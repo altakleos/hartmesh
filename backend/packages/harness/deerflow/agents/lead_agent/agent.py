@@ -940,6 +940,9 @@ _INVENTORY_STATE_KEYS = _PRESENTATION_STATE_KEYS | frozenset(
         "summary_text",
         # Written by the worker after goal evaluation, not by the model: auxiliary, never a presentation fragment.
         "goal_outcome",
+        # Queue/Steer receipts (#7729), written only by run-input control, which
+        # an output-captured run never opens: auxiliary, never a presentation fragment.
+        "applied_run_inputs",
     }
 )
 

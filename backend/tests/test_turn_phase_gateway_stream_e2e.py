@@ -362,7 +362,14 @@ def _register_and_create_thread(client: httpx.Client, base: str, *, langgraph_pr
     return csrf, thread_id
 
 
-def _run_body(text: str, *, recursion_limit: int = 25) -> dict[str, Any]:
+# What the Gateway applies when a client sends no recursion_limit
+# (AppConfig.recursion_limit). The web chat opens Queue/Steer (#7729), whose
+# middlewares add graph nodes: a plain text turn is about 28 supersteps, past
+# LangGraph's own default of 25 that this probe used to pin.
+_GATEWAY_DEFAULT_RECURSION_LIMIT = 100
+
+
+def _run_body(text: str, *, recursion_limit: int = _GATEWAY_DEFAULT_RECURSION_LIMIT) -> dict[str, Any]:
     return {
         "assistant_id": "lead_agent",
         "input": {"messages": [{"role": "user", "content": text}]},
@@ -382,7 +389,7 @@ def _observe_stream(
     langgraph_prefix: str = "/api",
     on_frame: Any = None,
     timeout: float = 60.0,
-    recursion_limit: int = 25,
+    recursion_limit: int = _GATEWAY_DEFAULT_RECURSION_LIMIT,
 ) -> _StreamObservation:
     """POST the run and time what the client can see, frame by frame.
 
