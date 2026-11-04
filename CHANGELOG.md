@@ -72,24 +72,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   HartMesh version and is checked with the other version sources by
   `scripts/verify_versions.sh` and moved by `scripts/bump_version.sh`.
 
+### Upstream DeerFlow sync (`c373f8491`)
+
+- Merges upstream from `fcbb14e83` to `c373f8491`: queued inputs keep dispatching after
+  one is cancelled (#7746), the GitHub research skill reports truncated trees (#7815),
+  and `.env.example` documents MiniMax's regional hosts (#7833). `frontend/` stays
+  pinned at `fcbb14e83`; none of these touch it.
+
 ### Web app: Queue and Steer
 
 - The HartMesh web app now offers Queue and Steer while a chat runs, ported from
   upstream #7729 and #7790. **Send while working** picks the mode and **Send update**
   sends plain text to the running turn; **Stop current task** still stops it. Pending
   updates are listed above the composer with **Remove this message** and, once the run ends,
-  **Send again**. A run that a queued update starts is followed in the open chat.
+  **Send again**. A run that a queued or re-sent update starts is followed in the open
+  chat, from the update's own run ID, and **Stop current task** cancels it too.
 - The controls appear only when `GET /api/features` reports `run_inputs` and the
   Gateway names a run that takes inputs, so a chat with an AI assistant or employee
   and autonomous runs keep the usual wait. A rejected update (409) keeps the draft and
   lets the next send target the new run; an uncertain failure keeps the same request
-  ID and settings, so a retry cannot create a second input.
+  ID and settings, so a retry cannot create a second input. A queued update uses the
+  composer's resolved model and mode, as an ordinary send does.
 - A steered run cannot be regenerated or edited from part of it, and a task's pending
   receipt no longer counts as its result.
-- Merges upstream to `c373f8491`: queued inputs keep dispatching after one is cancelled
-  (#7746), the GitHub research skill reports truncated trees (#7815), and `.env.example`
-  documents MiniMax's regional hosts (#7833). `frontend/` stays pinned at `fcbb14e83`;
-  none of these touch it.
+
 
 ### Backend test sharding
 

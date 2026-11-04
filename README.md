@@ -1837,8 +1837,9 @@ task** still stops the run. Pending updates are listed above the composer, where
 each can be removed while it waits or sent again after the run ends. The controls
 appear only when the Gateway stores run inputs and the running turn is an ordinary
 chat: a chat with an AI assistant or employee, a scheduled run and other autonomous
-runs keep the usual wait. A run that a queued update starts is followed in the open
-chat, as is one started from another tab.
+runs keep the usual wait. A run that a queued or re-sent update starts is followed
+in the open chat, as is one started from another tab, and **Stop current task**
+cancels it. Opening a chat later never replays a run that has already ended.
 
 Markdown and JSON conversation exports from the chat header or sidebar read all
 persisted history pages, including earlier turns outside the loaded view or

@@ -161,3 +161,69 @@ export function reconcileRunInputs(
     return inState || inTranscript ? { ...item, status: "applied" } : item;
   });
 }
+
+/** An input's identity: its ID is unique only within its target run. */
+export const runInputKey = (input: Pick<RunInput, "id" | "target_run_id">) =>
+  `${input.target_run_id}:${input.id}`;
+
+/**
+ * Statuses that may still turn into a run: waiting inputs, and unapplied ones
+ * the person can send again.
+ */
+const UNSETTLED_RUN_INPUT_STATUSES: ReadonlySet<RunInput["status"]> = new Set([
+  "pending",
+  "applying",
+  "dispatching",
+  "not_applied",
+]);
+
+/** Record the inputs seen unsettled, so their later runs can be followed. */
+export function rememberUnsettledRunInputs(
+  state: RunInputState | undefined,
+  seen: Set<string>,
+): void {
+  for (const item of state?.items ?? [])
+    if (UNSETTLED_RUN_INPUT_STATUSES.has(item.status))
+      seen.add(runInputKey(item));
+}
+
+/**
+ * The run this view should join, or null.
+ *
+ * - The run the Gateway reports taking inputs, unless this tab already
+ *   streams it (its reconnect pointer) or has streamed, finished or stopped it.
+ * - Otherwise the run a queued or re-sent input started. Such a run takes
+ *   inputs only once its graph starts, so it is followed from the input's own
+ *   `run_id`; only inputs this view saw unsettled count, so opening a chat
+ *   never replays an old run.
+ *
+ * Pass only state fetched since the view started: a cached answer from an
+ * earlier visit can name a run that is long over.
+ */
+export function selectRunToFollow({
+  state,
+  unsettledSeen,
+  streamed,
+  pointer,
+}: {
+  state: RunInputState | undefined;
+  unsettledSeen: ReadonlySet<string>;
+  streamed: ReadonlySet<string>;
+  pointer: string | null;
+}): string | null {
+  if (!state) return null;
+  const eligible = (runId: string | null | undefined): runId is string =>
+    !!runId && runId !== pointer && !streamed.has(runId);
+  if (eligible(state.active_run_id)) return state.active_run_id;
+  for (let index = state.items.length - 1; index >= 0; index -= 1) {
+    const item = state.items[index]!;
+    if (
+      item.status === "applied" &&
+      item.run_id !== item.target_run_id &&
+      unsettledSeen.has(runInputKey(item)) &&
+      eligible(item.run_id)
+    )
+      return item.run_id;
+  }
+  return null;
+}

@@ -385,7 +385,11 @@ export function InputBox({
    * Queue/Steer: send plain text to the active run instead of waiting for it.
    * Present only when the Gateway reports a run that accepts inputs.
    */
-  onBusySubmit?: (text: string, mode: RunInputMode) => Promise<unknown>;
+  onBusySubmit?: (
+    text: string,
+    mode: RunInputMode,
+    modelContext?: InputBoxSubmitOptions["modelContext"],
+  ) => Promise<unknown>;
 }) {
   const { locale, t } = useI18n();
   const [runInputMode, setRunInputMode] = useState<RunInputMode>("queue");
@@ -1330,7 +1334,19 @@ export function InputBox({
           runInputInFlight.current = true;
           setRunInputSending(true);
           try {
-            await onBusySubmit(message.text, runInputMode);
+            // A queued input starts its own run: resolve its settings the
+            // way an ordinary send does.
+            await onBusySubmit(
+              message.text,
+              runInputMode,
+              selectedModel
+                ? {
+                    model_name: selectedModel.name,
+                    mode: resolveChatMode(context.mode, selectedModel),
+                    reasoning_effort: context.reasoning_effort,
+                  }
+                : undefined,
+            );
             return;
           } finally {
             runInputInFlight.current = false;
@@ -1410,6 +1426,8 @@ export function InputBox({
     [
       abortVoiceInput,
       agentFiles?.uploading,
+      context.mode,
+      context.reasoning_effort,
       restoredFileCount,
       handleCompactCommand,
       handleGoalCommand,
@@ -1417,6 +1435,7 @@ export function InputBox({
       modelSubmitError,
       onBusySubmit,
       runInputMode,
+      selectedModel,
       selectedSlashSkill,
       sidecar?.conversationQuotes.length,
       status,

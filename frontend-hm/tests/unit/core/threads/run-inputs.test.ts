@@ -4,7 +4,9 @@ import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import {
   changeRunInput,
   reconcileRunInputs,
+  rememberUnsettledRunInputs,
   RunInputRequestError,
+  selectRunToFollow,
   submitRunInput,
   type RunInput,
 } from "@/core/threads/run-inputs";
@@ -107,5 +109,71 @@ describe("run-input requests", () => {
     expect(calls[0]?.[1]).toBe("DELETE");
     expect(calls[1]?.[0]).toMatch(/\/inputs\/input-1\/retry$/);
     expect(calls[1]?.[1]).toBe("POST");
+  });
+});
+
+describe("selectRunToFollow", () => {
+  const queued = (overrides: Partial<RunInput>) =>
+    input({ mode: "queue", ...overrides });
+
+  it("follows the run taking inputs unless this tab streams it", () => {
+    const state = { items: [], active_run_id: "run-2" };
+    const base = { state, unsettledSeen: new Set<string>() };
+    expect(
+      selectRunToFollow({ ...base, streamed: new Set(), pointer: null }),
+    ).toBe("run-2");
+    expect(
+      selectRunToFollow({ ...base, streamed: new Set(), pointer: "run-2" }),
+    ).toBeNull();
+    expect(
+      selectRunToFollow({
+        ...base,
+        streamed: new Set(["run-2"]),
+        pointer: null,
+      }),
+    ).toBeNull();
+  });
+
+  it("follows a queued input's run only when this view saw it waiting", () => {
+    const seen = new Set<string>();
+    rememberUnsettledRunInputs(
+      { items: [queued({ status: "pending" })], active_run_id: "run-1" },
+      seen,
+    );
+    const applied = {
+      items: [queued({ status: "applied", run_id: "run-2" })],
+      active_run_id: null,
+    };
+    expect(
+      selectRunToFollow({
+        state: applied,
+        unsettledSeen: seen,
+        streamed: new Set(["run-1"]),
+        pointer: null,
+      }),
+    ).toBe("run-2");
+    expect(
+      selectRunToFollow({
+        state: applied,
+        unsettledSeen: new Set(),
+        streamed: new Set(),
+        pointer: null,
+      }),
+    ).toBeNull();
+  });
+
+  it("never follows a steer input's own run", () => {
+    const seen = new Set(["run-1:input-1"]);
+    expect(
+      selectRunToFollow({
+        state: {
+          items: [input({ status: "applied", run_id: "run-1" })],
+          active_run_id: null,
+        },
+        unsettledSeen: seen,
+        streamed: new Set(),
+        pointer: null,
+      }),
+    ).toBeNull();
   });
 });

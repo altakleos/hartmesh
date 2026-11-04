@@ -163,9 +163,80 @@ for (const mode of ["queue", "steer"] as const) {
   });
 }
 
+test("Stop current task cancels a run the chat followed", async ({ page }) => {
+  let activeRunId: string | null = RUN_A;
+  const cancelled: string[] = [];
+  const streams = new Map<string, Route>();
+  mockLangGraphAPI(page, {
+    features: { runInputs: true },
+    threads: [
+      {
+        thread_id: MOCK_THREAD_ID,
+        title: "Stop a followed run",
+        messages: [{ type: "human", id: "human-1", content: "Start working" }],
+      },
+    ],
+  });
+  await page.route(`**/api/threads/${MOCK_THREAD_ID}/inputs`, (route) =>
+    route.fulfill({ json: { items: [], active_run_id: activeRunId } }),
+  );
+  await page.route(
+    new RegExp(
+      `/api/langgraph/threads/${MOCK_THREAD_ID}/runs/${RUN_A}(?:\\?|$)`,
+    ),
+    (route) =>
+      route.fulfill({
+        json: {
+          run_id: RUN_A,
+          thread_id: MOCK_THREAD_ID,
+          assistant_id: "lead_agent",
+          status: activeRunId ? "running" : "interrupted",
+          metadata: {},
+          kwargs: {},
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      }),
+  );
+  await page.route(
+    `**/api/langgraph/threads/${MOCK_THREAD_ID}/runs/*/stream*`,
+    (route) => {
+      streams.set(
+        new URL(route.request().url()).pathname.split("/").at(-2)!,
+        route,
+      );
+    },
+  );
+  await page.route(
+    `**/api/langgraph/threads/${MOCK_THREAD_ID}/runs/*/cancel*`,
+    (route) => {
+      cancelled.push(
+        new URL(route.request().url()).pathname.split("/").at(-2)!,
+      );
+      activeRunId = null;
+      return route.fulfill({ json: {} });
+    },
+  );
+  try {
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect.poll(() => streams.has(RUN_A)).toBe(true);
+    await page.getByRole("button", { name: "Stop current task" }).click();
+    await expect.poll(() => cancelled).toContain(RUN_A);
+  } finally {
+    for (const route of streams.values())
+      await route
+        .fulfill({
+          contentType: "text/event-stream",
+          body: "event: end\ndata: {}\n\n",
+        })
+        .catch(() => undefined);
+  }
+});
+
 test("without run_inputs the composer keeps waiting while a run streams", async ({
   page,
 }) => {
+  let held: Route | undefined;
   mockLangGraphAPI(page, {
     threads: [
       {
@@ -174,16 +245,41 @@ test("without run_inputs the composer keeps waiting while a run streams", async 
         messages: [{ type: "human", id: "human-1", content: "Start working" }],
       },
     ],
+    runStreamHandler: async (route) => {
+      held = route;
+    },
   });
   let inputReads = 0;
   await page.route(`**/api/threads/${MOCK_THREAD_ID}/inputs`, (route) => {
     inputReads += 1;
     return route.fulfill({ json: { items: [], active_run_id: RUN_A } });
   });
-  await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
-  await expect(page.getByPlaceholder(/how can i assist you/i)).toBeVisible();
-  await expect(page.getByRole("button", { name: "Send update" })).toHaveCount(
-    0,
-  );
-  expect(inputReads).toBe(0);
+  try {
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await textarea.fill("First question");
+    await textarea.press("Enter");
+    await expect.poll(() => held !== undefined).toBe(true);
+
+    await textarea.fill("A follow-up while it runs");
+    await textarea.press("Enter");
+    await expect(
+      page.getByText("Please wait for the current response to finish."),
+    ).toBeVisible();
+    await expect(textarea).toHaveValue("A follow-up while it runs");
+    await expect(page.getByRole("button", { name: "Send update" })).toHaveCount(
+      0,
+    );
+    await expect(
+      page.getByRole("button", { name: "Send while working" }),
+    ).toHaveCount(0);
+    expect(inputReads).toBe(0);
+  } finally {
+    await held
+      ?.fulfill({
+        contentType: "text/event-stream",
+        body: "event: end\ndata: {}\n\n",
+      })
+      .catch(() => undefined);
+  }
 });

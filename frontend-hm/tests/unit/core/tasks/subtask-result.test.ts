@@ -366,7 +366,7 @@ describe("steered-run pending receipts", () => {
     additional_kwargs: { subagent_pending: true, run_id: "run-1" },
   } as Message;
 
-  it("is not the task's result, so a settled turn keeps the task running", () => {
+  it("does not count as the task's result once the turn settles", () => {
     expect(hasSubtaskToolResult("call-1", [pending])).toBe(false);
     expect(derivePendingSubtaskStatus("call-1", [pending], false)).toBe(
       "failed",

@@ -16,25 +16,36 @@ import {
 const stream = rs.hoisted(() => ({
   isLoading: true,
   joinStream: rs.fn(async (_runId: string) => undefined),
+  options: undefined as
+    | {
+        onFinish?: (
+          state: unknown,
+          meta?: { run_id: string; thread_id: string },
+        ) => void;
+      }
+    | undefined,
 }));
 
 rs.mock("@/core/api", () => ({
   cancelActiveThreadRun: async () => undefined,
   getAPIClient: () => ({
-    runs: { list: async () => [] },
+    runs: { cancel: async () => undefined, list: async () => [] },
     threads: { update: async () => ({}) },
   }),
 }));
 
 rs.mock("@langchain/langgraph-sdk/react", () => ({
-  useStream: () => ({
-    isLoading: stream.isLoading,
-    joinStream: stream.joinStream,
-    messages: [],
-    stop: async () => undefined,
-    submit: async () => undefined,
-    values: { artifacts: [], messages: [], title: "", todos: [] },
-  }),
+  useStream: (options: typeof stream.options) => {
+    stream.options = options;
+    return {
+      isLoading: stream.isLoading,
+      joinStream: stream.joinStream,
+      messages: [],
+      stop: async () => undefined,
+      submit: async () => undefined,
+      values: { artifacts: [], messages: [], title: "", todos: [] },
+    };
+  },
 }));
 
 type SubmittedInput = {
@@ -50,8 +61,10 @@ type SubmittedInput = {
 const queryClients: QueryClient[] = [];
 let activeRunId: string | null;
 let receipts: RunInput[];
+let inputReads: number;
 let submittedInputs: SubmittedInput[];
 let firstPostFailure:
+  | "hang"
   | "conflict"
   | "network"
   | "server"
@@ -105,20 +118,39 @@ async function flushFrames() {
 
 async function renderThread({
   account = "account-1" as string | null,
-}: { account?: string | null } = {}) {
+  cached,
+}: {
+  account?: string | null;
+  /** An answer cached by an earlier visit to the same chat. */
+  cached?: { items: RunInput[]; active_run_id: string | null };
+} = {}) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   queryClients.push(queryClient);
+  if (cached)
+    queryClient.setQueryData(
+      [...runInputsKey("thread-1"), account ?? null],
+      cached,
+    );
   const rendered = renderHook(
-    ({ modelName }: { modelName: string }) =>
+    ({
+      modelName,
+      owner = account,
+    }: {
+      modelName: string;
+      owner?: string | null;
+    }) =>
       useThreadStream({
         context: { ...DEFAULT_LOCAL_SETTINGS.context, model_name: modelName },
         threadId: "thread-1",
-        runInputs: account ? { account } : null,
+        runInputs: owner ? { account: owner } : null,
       }),
     {
-      initialProps: { modelName: "model-original" },
+      initialProps: {
+        modelName: "model-original",
+        owner: account,
+      } as { modelName: string; owner?: string | null },
       wrapper: createWrapper(queryClient),
     },
   );
@@ -143,6 +175,7 @@ beforeEach(() => {
   stream.joinStream.mockClear();
   activeRunId = "run-1";
   receipts = [];
+  inputReads = 0;
   submittedInputs = [];
   firstPostFailure = "conflict";
   rs.stubGlobal(
@@ -157,6 +190,7 @@ beforeEach(() => {
         "http://localhost",
       );
       if (url.pathname === "/api/threads/thread-1/inputs") {
+        inputReads += 1;
         return jsonResponse({ items: receipts, active_run_id: activeRunId });
       }
       const match = /^\/api\/threads\/thread-1\/runs\/([^/]+)\/inputs$/.exec(
@@ -172,6 +206,12 @@ beforeEach(() => {
         submittedInputs.push(submission);
         const receipt = receiptFor(submission);
         if (submittedInputs.length === 1) {
+          if (firstPostFailure === "hang")
+            return new Promise<Response>((_resolve, reject) => {
+              init.signal?.addEventListener("abort", () =>
+                reject(new DOMException("aborted", "AbortError")),
+              );
+            });
           if (firstPostFailure === "conflict")
             return jsonResponse(
               { detail: "Run is finishing; this input was not accepted" },
@@ -308,16 +348,37 @@ test("a steer input carries no settings of its own", async () => {
   expect(submittedInputs[0]?.body.context).toEqual({});
 });
 
-test("follows a queued run once, and keeps the view busy until it is joined", async () => {
+async function refetchInputs(queryClient: QueryClient) {
+  await act(async () => {
+    await queryClient.invalidateQueries({ queryKey: runInputsKey("thread-1") });
+  });
+  await flushFrames();
+}
+
+function queueInput(overrides: Partial<RunInput>): RunInput {
+  return {
+    id: "queued-1",
+    target_run_id: "run-1",
+    message_id: "message-queued-1",
+    text: "Then summarise it",
+    mode: "queue",
+    status: "pending",
+    created_at: "2026-11-04T00:00:00Z",
+    ...overrides,
+  };
+}
+
+test("follows a run it is not streaming once, and records it for Stop and reload", async () => {
   stream.isLoading = false;
   const { result, rerender } = await renderThread();
 
   expect(stream.joinStream).toHaveBeenCalledTimes(1);
   expect(stream.joinStream).toHaveBeenCalledWith("run-1");
+  expect(window.sessionStorage.getItem("lg:stream:thread-1")).toBe("run-1");
   rerender({ modelName: "model-original" });
   await flushFrames();
   expect(stream.joinStream).toHaveBeenCalledTimes(1);
-  // The joined run now counts as streamed; the SDK's own loading state rules.
+  // Once joined, the SDK's own loading state rules the composer.
   expect(result.current.thread.isLoading).toBe(false);
 });
 
@@ -330,12 +391,124 @@ test("does not join when the Gateway reports no run taking inputs", async () => 
   expect(result.current.thread.isLoading).toBe(false);
 });
 
-test("never rejoins the run this view was streaming once it settles", async () => {
-  const { rerender } = await renderThread();
+test("never rejoins the run this tab streamed once it settles", async () => {
+  // The SDK names the tab's own run in its reconnect pointer while streaming.
+  window.sessionStorage.setItem("lg:stream:thread-1", "run-1");
+  const { queryClient, rerender } = await renderThread();
   expect(stream.joinStream).not.toHaveBeenCalled();
-  // The SDK settles while the Gateway still reports the run for a moment.
+
+  // It settles while the Gateway still reports the run for a moment.
+  window.sessionStorage.removeItem("lg:stream:thread-1");
+  act(() => {
+    stream.options?.onFinish?.(
+      { values: {} },
+      { run_id: "run-1", thread_id: "thread-1" },
+    );
+  });
+  stream.isLoading = false;
+  rerender({ modelName: "model-original" });
+  await refetchInputs(queryClient);
+  expect(stream.joinStream).not.toHaveBeenCalled();
+});
+
+test("follows the next run even when it is reported while this one finishes", async () => {
+  window.sessionStorage.setItem("lg:stream:thread-1", "run-1");
+  const { queryClient, rerender } = await renderThread();
+
+  // A queued input started run-2 while the SDK still settles run-1.
+  await advanceToRun(queryClient, "run-2");
+  expect(stream.joinStream).not.toHaveBeenCalled();
+
+  window.sessionStorage.removeItem("lg:stream:thread-1");
   stream.isLoading = false;
   rerender({ modelName: "model-original" });
   await flushFrames();
+  expect(stream.joinStream).toHaveBeenCalledTimes(1);
+  expect(stream.joinStream).toHaveBeenCalledWith("run-2");
+});
+
+test("a cached answer from an earlier visit is not followed", async () => {
+  stream.isLoading = false;
+  activeRunId = null;
+  const { result } = await renderThread({
+    cached: { items: [], active_run_id: "run-old" },
+  });
   expect(stream.joinStream).not.toHaveBeenCalled();
+  expect(result.current.thread.isLoading).toBe(false);
+});
+
+test("follows a queued input's run before that run takes inputs", async () => {
+  stream.isLoading = false;
+  activeRunId = null;
+  receipts = [queueInput({ status: "pending" })];
+  const { queryClient } = await renderThread();
+  expect(stream.joinStream).not.toHaveBeenCalled();
+
+  // Dispatched: the input names its run, which has not reopened inputs yet.
+  receipts = [queueInput({ status: "applied", run_id: "run-2" })];
+  await refetchInputs(queryClient);
+  expect(stream.joinStream).toHaveBeenCalledTimes(1);
+  expect(stream.joinStream).toHaveBeenCalledWith("run-2");
+});
+
+test("an input applied before the chat opened is not followed", async () => {
+  stream.isLoading = false;
+  activeRunId = null;
+  receipts = [queueInput({ status: "applied", run_id: "run-old" })];
+  await renderThread();
+  expect(stream.joinStream).not.toHaveBeenCalled();
+});
+
+test("polling stops once nothing is running or waiting", async () => {
+  stream.isLoading = false;
+  activeRunId = null;
+  await renderThread();
+  const reads = inputReads;
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(10_000);
+  });
+  expect(inputReads).toBe(reads);
+});
+
+test("a queued input carries the composer's resolved model settings", async () => {
+  firstPostFailure = "accepted";
+  const { result } = await renderThread();
+  await act(async () => {
+    await result.current.sendInput("Then summarise it", "queue", {
+      model_name: "model-picked",
+      mode: "flash",
+      reasoning_effort: "low",
+    });
+  });
+  expect(submittedInputs[0]?.body.context).toMatchObject({
+    model_name: "model-picked",
+    mode: "flash",
+    thread_id: "thread-1",
+  });
+});
+
+test("an account switch retires a send still in flight", async () => {
+  firstPostFailure = "hang";
+  const { result, rerender } = await renderThread();
+  let sending!: Promise<unknown>;
+  act(() => {
+    sending = result.current.sendInput("Continue", "queue");
+  });
+  await flushFrames();
+  expect(submittedInputs).toHaveLength(1);
+
+  rerender({ modelName: "model-original", owner: "account-2" });
+  await act(async () => {
+    await expect(sending).rejects.toMatchObject({ name: "AbortError" });
+  });
+  await flushFrames();
+  // The retired attempt is gone: the next send is a new request.
+  firstPostFailure = "accepted";
+  await act(async () => {
+    await result.current.sendInput("Continue", "queue");
+  });
+  expect(submittedInputs).toHaveLength(2);
+  expect(submittedInputs[1]?.body.request_id).not.toBe(
+    submittedInputs[0]?.body.request_id,
+  );
 });
