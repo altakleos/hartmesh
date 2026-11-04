@@ -34,6 +34,7 @@ from app.gateway.authz import require_cancel_permission_if, resolve_route_permis
 from app.gateway.channel_execution import CHANNEL_TURN_ID_KEY, ChannelExecutionProofError, ChannelExecutionReceipt, ChannelExecutionRequest, receipt_from_run_kwargs
 from app.gateway.channel_execution_reads import channel_lookup_unavailable, live_channel_human
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.history_seed import reserve_history_seed, write_history_seed
 from app.gateway.internal_auth import (
     INTERNAL_OWNER_USER_ID_HEADER_NAME,
     INTERNAL_SYSTEM_ROLE,
@@ -176,6 +177,8 @@ _TERMINAL_RUN_STATUSES = {
 _TERMINAL_STREAM_RECOVERED = "recovered"
 _TERMINAL_STREAM_PRODUCER_EXPIRED = "producer_expired"
 
+# Includes same-thread create admission and metadata I/O; timeout rejects strict
+# starts and leaves non-strict starts without verified metadata (MCP fails closed).
 _THREAD_METADATA_SETUP_TIMEOUT_SECONDS = 5.0
 
 _OUTPUT_PROOF_CLAIM_KEYS = frozenset({"output_evidence", "inventory_evidence", "output_inventory_profile", "qualify_output_view"})
@@ -215,6 +218,10 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             SUBAGENT_RECEIPT_VERDICT_KEY,
             SUBAGENT_ACCEPTANCE_VERDICT_KEY,
             UNTRUSTED_INPUT_KEY,
+            "run_input_id",
+            "run_input_source",
+            "origin_task_id",
+            "subagent_pending",
         }
     )
     | PROVENANCE_KEYS
@@ -277,6 +284,18 @@ async def _ensure_thread_metadata(
     require_existing_thread: bool = False,
 ) -> dict[str, Any]:
     """Ensure an admitted run's thread exists without delaying task attachment."""
+    async with goal_thread_lock(record.thread_id):
+        return await _ensure_thread_metadata_locked(run_ctx, record, owner_user_id=owner_user_id, require_existing_thread=require_existing_thread)
+
+
+async def _ensure_thread_metadata_locked(
+    run_ctx: RunContext,
+    record: RunRecord,
+    *,
+    owner_user_id: str | None,
+    require_existing_thread: bool,
+) -> dict[str, Any]:
+    """Share create admission with HTTP while retaining detached task ownership."""
     thread_store = run_ctx.thread_store
     existing = await run_capture_io(lambda: thread_store.get(record.thread_id))
     if existing is None and owner_user_id:
@@ -639,7 +658,7 @@ def _normalize_input_messages(
 
 #: State channels only the server writes. ``goal_outcome`` is the "goal met"
 #: record that clearing a satisfied goal writes; a caller copy would forge one.
-SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome"})
+SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs"})
 
 
 def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | None:
@@ -955,6 +974,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             "__run_loop_detection_recorder",
             "__run_tool_promotion_recorder",
             "__run_tool_progress_recorder",
+            "__run_input_control",
             "langgraph_auth_user",
             "langgraph_auth_user_id",
             RUNTIME_PRESENTED_FILES_CONTEXT_KEY,
@@ -1975,35 +1995,41 @@ async def ensure_checkpoint_history_seeded(
     if await event_store.list_messages(thread_id, limit=1, user_id=None):
         return
 
-    checkpoint_config = {
-        "configurable": {
-            "thread_id": thread_id,
-            "checkpoint_ns": "",
-        }
-    }
+    checkpoint_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     if await get_checkpointer(request).aget_tuple(checkpoint_config) is None:
         return
 
-    accessor, config = await abuild_checkpoint_state_accessor(
-        request,
-        thread_id=thread_id,
-        assistant_id=assistant_id,
-    )
-    snapshot = await accessor.aget(config)
-    values = getattr(snapshot, "values", None)
-    messages = values.get("messages") if isinstance(values, dict) else None
-    if not isinstance(messages, list) or not messages:
+    async def checkpoint_messages() -> list:
+        accessor, config = await abuild_checkpoint_state_accessor(request, thread_id=thread_id, assistant_id=assistant_id)
+        snapshot = await accessor.aget(config)
+        values = getattr(snapshot, "values", None)
+        messages = values.get("messages") if isinstance(values, dict) else None
+        return messages if isinstance(messages, list) else []
+
+    # Eligibility is advisory; an empty head needs no migration reservation.
+    # Discard this preview and reread under admission before any publication.
+    if not await checkpoint_messages():
         return
 
-    events = build_checkpoint_history_seed_events(
-        messages,
-        thread_id=thread_id,
-        run_id_prefix=f"checkpoint-seed-{thread_id}",
-    )
-    if not events:
-        return
-    await event_store.put_batch(events)
-    logger.info("Seeded %d checkpoint-history events for thread %s", len(events), thread_id)
+    async with reserve_history_seed(request, thread_id) as reservation:
+        if reservation is not None and await event_store.list_messages(thread_id, limit=1, user_id=None):
+            return
+        if await get_checkpointer(request).aget_tuple(checkpoint_config) is None:
+            return
+
+        messages = await checkpoint_messages()
+        if not messages:
+            return
+
+        events = build_checkpoint_history_seed_events(
+            messages,
+            thread_id=thread_id,
+            run_id_prefix=f"checkpoint-seed-{thread_id}",
+        )
+        if not events:
+            return
+        await write_history_seed(request, events, reservation=reservation, seed_kind="checkpoint", assistant_id=assistant_id)
+        logger.info("Seeded %d checkpoint-history events for thread %s", len(events), thread_id)
 
 
 def _message_identifier(message: Any) -> str | None:
@@ -2944,6 +2970,11 @@ async def _start_run(
                 knowledge_scope=admitted_knowledge_scope,
                 **incarnation_kwargs,
             )
+            if execution_context.agent_runs is not None and run_mgr.input_store is not None:
+                from app.gateway.run_inputs import dispatch_queued_inputs
+                from deerflow.runtime.runs.inputs import RunInputs
+
+                await dispatch_queued_inputs(RunInputs(run_mgr.input_store, record.run_id, record.user_id), agent_runs=execution_context.agent_runs, thread_id=thread_id)
 
         async def run_after_metadata(record: RunRecord) -> None:
             # Bind on the original attached task before any metadata child can

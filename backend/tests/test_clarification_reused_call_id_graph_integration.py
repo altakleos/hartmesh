@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
 
+from deerflow.agents.human_input import HUMAN_INPUT_RESPONSE_KEY, extract_unanswered_human_input_request
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.tools.builtins.clarification_tool import ask_clarification_tool
 
@@ -55,6 +56,22 @@ class _ScriptedModel(BaseChatModel):
         return self._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
 
+def _answer(request: dict[str, str], value: str) -> HumanMessage:
+    return HumanMessage(
+        content=value,
+        additional_kwargs={
+            HUMAN_INPUT_RESPONSE_KEY: {
+                "version": 1,
+                "kind": "human_input_response",
+                "source": "ask_clarification",
+                "request_id": request["request_id"],
+                "response_kind": "text",
+                "value": value,
+            }
+        },
+    )
+
+
 def _assert_every_call_answered_in_place(messages: list) -> None:
     """Each tool call is followed by its own result, as providers require."""
     for index, message in enumerate(messages):
@@ -62,6 +79,32 @@ def _assert_every_call_answered_in_place(messages: list) -> None:
             result = messages[index + 1]
             assert isinstance(result, ToolMessage), f"call at {index} has no result: {messages}"
             assert result.tool_call_id == _REUSED_CALL_ID
+
+
+def test_reused_call_id_keeps_each_clarification_question():
+    model = _ScriptedModel(replies=[_ask("Which city?"), _ask("How many days?"), AIMessage(content="done")], seen=[])
+    agent = create_agent(model=model, tools=[ask_clarification_tool], middleware=[ClarificationMiddleware()], checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "reused-call-id"}}
+
+    agent.invoke({"messages": [HumanMessage(content="Plan a trip")]}, config)
+    first = extract_unanswered_human_input_request(agent.get_state(config).values["messages"])
+    assert first is not None and first["question"] == "Which city?"
+
+    agent.invoke({"messages": [_answer(first, "Seoul")]}, config)
+    second = extract_unanswered_human_input_request(agent.get_state(config).values["messages"])
+    assert second is not None and second["question"] == "How many days?"
+    assert second["request_id"] != first["request_id"]
+
+    agent.invoke({"messages": [_answer(second, "3 days")]}, config)
+
+    messages = agent.get_state(config).values["messages"]
+    _assert_every_call_answered_in_place(messages)
+    questions = [message.artifact["human_input"]["question"] for message in messages if isinstance(message, ToolMessage)]
+    assert questions == ["Which city?", "How many days?"]
+    # The model sees both questions next to the answers given to them.
+    final_call = model.seen[-1]
+    _assert_every_call_answered_in_place(final_call)
+    assert [message.content for message in final_call if isinstance(message, HumanMessage)] == ["Plan a trip", "Seoul", "3 days"]
 
 
 def test_reused_call_id_keeps_each_unattended_clarification_result():

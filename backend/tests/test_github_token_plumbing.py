@@ -44,6 +44,7 @@ def _new_aio_sandbox_with_session_state():
     sbx._execution_outcome_uncertain = threading.Event()
     sbx._shell_session_creation_state = _SessionCreationState()
     sbx._bash_session_creation_state = _SessionCreationState()
+    sbx._default_shell_stopped = False
     return sbx
 
 

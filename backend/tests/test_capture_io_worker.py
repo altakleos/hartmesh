@@ -16,7 +16,6 @@ from sqlalchemy import event
 
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.runs import worker
-from deerflow.runtime.runs.capture_io import CaptureIOUnsupported
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.output import UnavailableOutputReceipt
 from deerflow.runtime.runs.schemas import RunStatus
@@ -186,7 +185,11 @@ async def test_foreign_store_handle_cannot_mint_worker_lifetime_from_saved_captu
     env.record = await env.manager.get(env.record.run_id)
     assert env.record.store_only
     try:
-        with pytest.raises(CaptureIOUnsupported):
+        # Upstream's run_producer_context (#7619) refuses a store-only handle
+        # before HartMesh's capture entry could mint a lifetime from its kwargs.
+        from deerflow.runtime.runs.manager import RunStartupError
+
+        with pytest.raises(RunStartupError, match="locally admitted Worker"):
             await execute(env)
         assert env.calls == [] and env.scheduled == []
         assert await db.repository.get(env.record.run_id, user_id=RAW_OWNER) == before

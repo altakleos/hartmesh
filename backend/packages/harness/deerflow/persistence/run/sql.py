@@ -7,6 +7,7 @@ minutes -- we don't hold connections across long execution.
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
 from contextlib import asynccontextmanager
@@ -62,6 +63,43 @@ class RunRepository(RunStore):
     supports_terminal_recovery = True
     supports_output_receipts = True
     supports_output_inventory = True
+    supports_event_producer_fencing = True
+    supports_run_inputs = True
+
+    async def mutate_run_inputs(self, run_id, change, *, user_id=None, owner_worker_id=None):
+        from deerflow.runtime.runs.inputs import InputConflict, empty_input_state
+
+        async with self._sf() as session:
+            # Preserve the existing global-clock -> row lock order (SQLite's
+            # first write serializes peer connections as well).
+            await self._next_change_seq(session)
+            row = (await session.execute(select(RunRow).where(RunRow.run_id == run_id).with_for_update())).scalar_one_or_none()
+            if row is None or (user_id is not None and row.user_id != user_id):
+                raise InputConflict("Run not found")
+            if owner_worker_id is not None:
+                lease = row.lease_expires_at
+                if row.owner_worker_id != owner_worker_id or (lease is not None and lease.replace(tzinfo=UTC) <= datetime.now(UTC)):
+                    raise InputConflict("Run ownership changed")
+            state = copy.deepcopy(row.run_inputs_json or empty_input_state())
+            change(state, self._row_to_dict(row))
+            row.run_inputs_json = state
+            await session.commit()
+            return copy.deepcopy(state)
+
+    async def list_input_runs(self, thread_id, *, user_id=None, limit=10):
+        async with self._sf() as session:
+            query = select(RunRow).where(RunRow.thread_id == thread_id, RunRow.run_inputs_json["items"][0]["id"].as_string().is_not(None))
+            if user_id is not None:
+                query = query.where(RunRow.user_id == user_id)
+            rows = await session.execute(query.order_by(RunRow.created_at.desc(), RunRow.run_id.desc()).limit(limit))
+            return [self._row_to_dict(row) for row in rows.scalars()]
+
+    async def active_input_run(self, thread_id, *, user_id=None):
+        async with self._sf() as session:
+            query = select(RunRow.run_id).where(RunRow.thread_id == thread_id, RunRow.status.in_(("pending", "running")), RunRow.cancel_action.is_(None), RunRow.run_inputs_json["closed"].as_boolean().is_(False))
+            if user_id is not None:
+                query = query.where(RunRow.user_id == user_id)
+            return (await session.execute(query.order_by(RunRow.created_at.desc(), RunRow.run_id.desc()).limit(1))).scalar_one_or_none()
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
@@ -153,6 +191,7 @@ class RunRepository(RunStore):
         # Remap JSON columns to match RunStore interface
         d["metadata"] = d.pop("metadata_json", {})
         d["kwargs"] = d.pop("kwargs_json", {})
+        d["run_inputs"] = d.pop("run_inputs_json", None)
         d["idempotency_request"] = d.pop("idempotency_request_json", None)
         # Convert datetime to ISO string for consistency with MemoryRunStore.
         # SQLite drops tzinfo on read despite ``DateTime(timezone=True)`` —
@@ -230,11 +269,15 @@ class RunRepository(RunStore):
                 if row is None and status in {"success", "error", "timeout", "interrupted"} or row is not None and any(getattr(row, key) != values[key] for key in ("status", "kwargs_json", "user_id", "thread_id", "owner_worker_id")):
                     raise OutputEvidenceError() from None
             if row is None:
-                session.add(RunRow(run_id=run_id, created_at=created, evidence_seal_state="pending", **values))
+                row = RunRow(run_id=run_id, created_at=created, evidence_seal_state="pending", run_incarnation=uuid4().hex, producer_epoch=uuid4().hex, producer_state="open", **values)
+                session.add(row)
             else:
                 for key, value in values.items():
                     setattr(row, key, value)
+            await session.flush()
+            admitted = self._row_to_dict(row)
             await session.commit()
+            return admitted
 
     async def seal_evidence(self, run_id: str, *, owner_worker_id: str, receipt) -> bool:
         """Persist a completed drain and changed-run position in one fenced transaction."""
@@ -1283,6 +1326,8 @@ class RunRepository(RunStore):
     async def _claim_for_takeover_owned(self, run_id, *, grace_seconds, error, stop_reason):
         values: dict[str, Any] = {
             "status": "error",
+            "producer_state": "revoked",
+            "producer_epoch": uuid4().hex,
             "error": error,
             "evidence_seal_state": "partial",
             "evidence_seal_error": "Worker lease expired without a completed journal seal.",
@@ -1389,7 +1434,7 @@ class RunRepository(RunStore):
         operation_kind: str = "run",
         multitask_strategy: str = "reject",
         assistant_id: str | None = None,
-        user_id: str | None = None,
+        user_id: str | None | _AutoSentinel = AUTO,
         model_name: str | None = None,
         metadata: dict[str, Any] | None = None,
         kwargs: dict[str, Any] | None = None,
@@ -1401,8 +1446,17 @@ class RunRepository(RunStore):
         idempotency_request: dict[str, Any] | None = None,
         execution_fence=None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        """Atomically admit a thread operation and settle eligible predecessors."""
-        resolved_user_id = resolve_user_id(user_id or AUTO, method_name="RunRepository.create_thread_operation_atomic")
+        """Atomically admit a thread operation and settle eligible predecessors.
+
+        A run fails closed on ownership: an omitted or ``None`` owner is the
+        request user, and without one the admission raises rather than storing
+        a run nobody owns. A non-run reservation (a checkpoint write or a
+        history seed) keeps upstream's reading (#7619): an explicit ``None`` is
+        an ownerless row, which a legacy ownerless thread's seeding needs and
+        which executes nothing.
+        """
+        fail_closed = user_id is None and operation_kind == "run"
+        resolved_user_id = resolve_user_id(AUTO if fail_closed else user_id, method_name="RunRepository.create_thread_operation_atomic")
         return await await_drained(
             self._create_thread_operation_atomic_owned(
                 run_id,
@@ -1470,6 +1524,9 @@ class RunRepository(RunStore):
 
         values = {
             "thread_id": thread_id,
+            "run_incarnation": uuid4().hex,
+            "producer_epoch": uuid4().hex,
+            "producer_state": "open",
             "evidence_origin": evidence_origin,
             "evidence_agent_id": evidence_agent_id,
             "evidence_seal_state": "pending",
@@ -1545,6 +1602,11 @@ class RunRepository(RunStore):
                             raise ConflictError(f"Thread {thread_id} already has an active run owned by another worker")
                     if row.operation_kind != "run" and not lease_expired:
                         raise ConflictError(f"Thread {thread_id} has an active checkpoint write")
+                    if row.owner_worker_id != owner_worker_id:
+                        # The replaced producer loses its event authority
+                        # whichever way its row settles.
+                        row.producer_state = "revoked"
+                        row.producer_epoch = uuid4().hex
                     if failed_kwargs is not None:
                         row.status = "error"
                         row.error = "Run reclaimed before replacement because its execution ownership is no longer current."
@@ -1558,8 +1620,11 @@ class RunRepository(RunStore):
                     claimed.append(self._row_to_dict(row))
 
             values["change_seq"] = change_seq
-            session.add(RunRow(run_id=run_id, **values))
+            new_row = RunRow(run_id=run_id, **values)
+            session.add(new_row)
             try:
+                await session.flush()
+                admitted = self._row_to_dict(new_row)
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()
@@ -1569,5 +1634,4 @@ class RunRepository(RunStore):
                         raise RunIdempotencyConflict(self._row_to_dict(existing)) from exc
                 raise
 
-            new_row = await session.get(RunRow, run_id)
-            return self._row_to_dict(new_row), claimed
+            return admitted, claimed

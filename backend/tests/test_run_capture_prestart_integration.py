@@ -98,7 +98,10 @@ async def test_actual_service_startup_failure_has_failed_output_without_model_ex
         original_commit = AsyncSession.commit
 
         async def lose_committed_admission_response(session):
-            creating = session.bind is e.engine and any(isinstance(row, RunRow) and row.operation_kind == "run" for row in session.new)
+            # Upstream flushes the admitted row before committing, so it has
+            # moved from ``session.new`` into the identity map by now.
+            candidates = [*session.new, *session.identity_map.values()]
+            creating = session.bind is e.engine and any(isinstance(row, RunRow) and row.operation_kind == "run" and row.status == "pending" for row in candidates)
             await original_commit(session)
             if creating and not fault_calls:
                 # The actual INSERT committed. The manager still has to retain

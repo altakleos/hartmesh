@@ -214,8 +214,9 @@ Repo-wide conventions:
 - **Skill text encoding** — use explicit UTF-8 for textual skill resources.
   Read `SKILL.md` with `encoding="utf-8-sig"` to strip a leading BOM; write with
   `encoding="utf-8"`. Never rely on the platform locale.
-- **Version sources must stay in lockstep** — `backend/pyproject.toml`, the root
-  `deer-flow` entry in `backend/uv.lock` (uv's normalized spelling),
+- **Version sources must stay in lockstep** — `backend/pyproject.toml`,
+  `backend/packages/harness/pyproject.toml`, the `deer-flow` and
+  `deerflow-harness` entries in `backend/uv.lock` (uv's normalized spelling),
   `frontend-hm/package.json`, and `deploy/helm/deer-flow/Chart.yaml` (`version`
   and `appVersion`) must agree. A `v*` tag triggers `scripts/verify_versions.sh`
   and blocks publishing on drift. Bump with `scripts/bump_version.sh <ver>`

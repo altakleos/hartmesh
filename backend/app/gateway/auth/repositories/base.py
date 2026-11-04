@@ -6,7 +6,7 @@ from app.gateway.auth.models import User
 
 
 class LastAdminRemainsError(RuntimeError):
-    """Raised when a role write would demote the last remaining admin.
+    """Raised when a role write would demote the last remaining active admin.
 
     Bootstrap lockout protection: raised inside the same serialized
     transaction that would perform the write, so the check-then-act window

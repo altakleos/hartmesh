@@ -234,7 +234,7 @@ Destroy the sandbox, sidecar, and both networks together.
 
 AIO has two distinct stdin contracts: the persistent `/v1/shell` transport is a
 PTY, while `/v1/bash` uses a subprocess pipe that stays open for writes. Keep
-persistent shell commands unchanged: the Lark broker shim already ignores TTY
+persistent shell stdin unchanged: the Lark broker shim already ignores TTY
 input. Only fresh `_run_bash_exec` calls prefix the original command with
 `exec < /dev/null` so default stdin gets immediate EOF; explicit
 pipes/heredocs/files still override fd0. Those sessions are created and
@@ -290,8 +290,14 @@ the parent-shell kill, or Bash can execute the rest of the cancelled command.
 
 `execution_outcome_uncertain` is monotonic per SDK client. Lost command/mutating-file
 replies and failed session cleanup prevent Work completion confirmation even when
-socket close returns. `requires_container_recycle` also covers pending/ambiguous
-session creation. Neither flag grants permission to retire a native storage writer.
+socket close returns. `requires_container_recycle` covers ambiguous session
+creation and a corrupted default shell; a session ended by HartMesh's own abort
+whose cleanup succeeded is replaced, not fenced. Neither flag grants permission
+to retire a native storage writer.
+
+Upstream's run-scoped command ownership (#7772: owner markers, owned shell/bash
+polling, pidfd cleanup) stays off: `supports_command_cancellation = False`, so
+no scope binds and the worker's run-cancel hook is a no-op (decision e).
 
 ## Reuse admission
 
