@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.52] - 2026-11-04
+
 ### AI employee workspaces across an upgrade
 
 - An upgrade with an AI employee's workspace still running reaches `agents: ready`
@@ -24,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closed.
 - While a workspace keeps AI agents unavailable, the Gateway's log names it and the
   underlying cause on every retry: `agents: workspace <id> remains pending, …`.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.51. The database head stays at
+`0051_merge_run_inputs_fencing`, and the configuration version stays at 65.
 
 ## [2.2.0+hartmesh.51] - 2026-11-04
 
