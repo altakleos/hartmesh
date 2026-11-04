@@ -2411,20 +2411,21 @@ export function useThreadStream({
   // Only answers fetched since this view started may name a run to follow:
   // a cached answer from an earlier visit can name a run that is long over.
   const runInputView = `${onStreamThreadId ?? ""}\u0000${runInputAccount ?? ""}`;
+  // Read the query only while the feature is on: stream tests stub useQuery.
+  const inputUpdatedAt = runInputsActive ? inputQuery.dataUpdatedAt : 0;
   const runInputViewRef = useRef({
     key: runInputView,
-    cachedAt: inputQuery.dataUpdatedAt,
+    cachedAt: inputUpdatedAt,
     unsettledSeen: new Set<string>(),
   });
   if (runInputViewRef.current.key !== runInputView)
     runInputViewRef.current = {
       key: runInputView,
-      cachedAt: inputQuery.dataUpdatedAt,
+      cachedAt: inputUpdatedAt,
       unsettledSeen: new Set<string>(),
     };
   const freshInputState =
-    runInputsActive &&
-    inputQuery.dataUpdatedAt > runInputViewRef.current.cachedAt
+    runInputsActive && inputUpdatedAt > runInputViewRef.current.cachedAt
       ? inputQuery.data
       : undefined;
   rememberUnsettledRunInputs(
