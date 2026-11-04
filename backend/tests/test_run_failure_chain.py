@@ -46,7 +46,9 @@ def test_an_explicit_cause_wins_over_the_context():
 @pytest.mark.parametrize(
     "message",
     [
-        "123456789:" + "A" * 31,
+        # An explicit ID keeps the token-shaped sample out of node IDs, CI
+        # logs and .test_durations (tests/test_telegram_token_pattern.py).
+        pytest.param("123456789:" + "A" * 31, id="token-shaped"),
         "person@example.com",
         "SELECT secret FROM users",
         "Connection refused by db.internal",
