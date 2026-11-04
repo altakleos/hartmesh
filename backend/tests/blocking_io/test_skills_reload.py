@@ -42,3 +42,22 @@ async def test_customer_reload_denies_before_scanning(monkeypatch) -> None:
         await skills_router.reload_skills(request=None)
     assert denied.value.status_code == 403
     refresh.assert_not_awaited()
+
+
+async def test_shared_marker_publication_runs_off_the_loop(tmp_path: Path, monkeypatch) -> None:
+    """Resolving the shared config path and writing the reset marker are filesystem work.
+
+    The customer reload route is provider-only, but every skill mutation tail
+    still publishes the shared marker through ``_publish_skills_cache_reset``.
+    """
+    config_path = tmp_path / "extensions_config.json"
+    await asyncio.to_thread(config_path.write_text, '{"mcpServers": {}, "skills": {}}', encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
+
+    try:
+        generation = await skills_router._publish_skills_cache_reset(None)
+    finally:
+        prompt_module._skills_cache_reset_tracker.reset()
+
+    assert generation is not None
+    assert await asyncio.to_thread(lambda: prompt_module.SKILLS_CACHE_RESET_MARKER.path_for(config_path).exists())

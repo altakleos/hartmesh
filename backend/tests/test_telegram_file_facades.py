@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.channels.execution import ChannelUploadRefused
-from app.channels.inbound_files import InboundFileLease
+from app.channels.inbound_leases import InboundFileLease
 from app.telegram_bots.files import read_inbound, write_failed
 
 
@@ -98,7 +98,7 @@ async def test_facade_failures_are_class_only_but_cancellation_propagates(monkey
 @pytest.mark.asyncio
 async def test_facades_forward_the_exact_original_typed_execution_context(monkeypatch):
     from app.channels.execution import ChannelExecutionContext, ChannelExecutionScope
-    from app.channels.inbound_files import current_inbound_file_context, inbound_file_context
+    from app.channels.inbound_leases import current_inbound_file_context, inbound_file_context
 
     scope = ChannelExecutionScope("a" * 32, "original-owner", "original-connection", "original-chat", "original-thread", "original-endpoint", "lead_agent", None)
     context = ChannelExecutionContext(scope, SimpleNamespace(), SimpleNamespace(authorize=AsyncMock(), current=lambda _operation: True))

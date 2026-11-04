@@ -71,7 +71,10 @@ def test_stored_keys_are_applied_before_anything_is_built_from_the_config() -> N
     gateway = (BACKEND / "app" / "gateway" / "app.py").read_text(encoding="utf-8")
     functions = {node.name: node for node in ast.parse(gateway).body if isinstance(node, ast.AsyncFunctionDef)}
     assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_lifespan_resources" for node in ast.walk(functions["lifespan"]))
-    lifespan = ast.get_source_segment(gateway, functions["_lifespan_resources"])
+    # Upstream's split: _lifespan_resources claims sandbox shutdown ownership
+    # and enters _gateway_lifespan, which holds the startup sequence.
+    assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_gateway_lifespan" for node in ast.walk(functions["_lifespan_resources"]))
+    lifespan = ast.get_source_segment(gateway, functions["_gateway_lifespan"])
     assert lifespan is not None
     entered = lifespan.index("_runtime_with_mcp_pool_shutdown(app, startup_config)")
     rebound = lifespan.index('if getattr(app.state, "provider_keys_applied", False):')
@@ -81,6 +84,6 @@ def test_stored_keys_are_applied_before_anything_is_built_from_the_config() -> N
     # Channel acquisition now lives in a cleanup scope shared with Telegram.
     # Follow that call from the actual lifespan, rather than treating an
     # earlier helper definition as an earlier execution of its body.
-    assert reloaded < lifespan.index("_channel_services_lifetime(app, startup_config)")
+    assert reloaded < lifespan.index("_channel_services_lifetime(app, startup_config, credentials_cipher=")
     channel_scope = functions["_channel_services_lifetime"]
     assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "start_channel_service" for node in ast.walk(channel_scope))

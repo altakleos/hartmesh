@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 from dotenv import load_dotenv
+from test_mcp_cache_reconciliation import reconciler  # noqa: F401 - fixture re-export
 
 from deerflow.client import DeerFlowClient, StreamEvent
 from deerflow.config.app_config import AppConfig
@@ -718,7 +719,7 @@ class TestConfigManagement:
         assert "mcp_servers" in result
         assert isinstance(result["mcp_servers"], dict)
 
-    def test_update_mcp_config_writes_and_invalidates(self, e2e_env, tmp_path, monkeypatch):
+    def test_update_mcp_config_writes_and_invalidates(self, e2e_env, reconciler, tmp_path, monkeypatch):  # noqa: F811 - imported fixture
         """update_mcp_config() writes extensions_config.json and invalidates the agent."""
         # Set up a writable extensions_config.json
         config_file = tmp_path / "extensions_config.json"

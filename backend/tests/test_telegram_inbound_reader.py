@@ -15,7 +15,7 @@ from _telegram_repository_test_support import db as db
 from test_telegram_bot_adapter import build, start
 
 from app.channels.execution import ChannelExecutionContext, ChannelExecutionScope
-from app.channels.inbound_files import saved_file_key
+from app.channels.inbound_leases import saved_file_key
 
 pytestmark = pytest.mark.asyncio
 

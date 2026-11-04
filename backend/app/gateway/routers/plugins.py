@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from dataclasses import asdict
 from types import MappingProxyType
 
@@ -11,12 +12,53 @@ from deerflow_extension_api.auth import resolve_principal
 from deerflow_extension_api.storage import StorageConflict, StorageIdentityRequired, StorageOperationPending, StorageUnavailable
 from fastapi import APIRouter, HTTPException, Request, Response
 
+from app.gateway.deps import require_admin_user
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied
+from deerflow.extensions import get_runtime_diagnostics
 from deerflow.extensions.browser_assets import LoadedBrowserAssets, valid_asset_path
 from deerflow.extensions.plugin_tools import plugin_settings
 
 router = APIRouter(prefix="/api/plugins", tags=["plugins"])
 logger = logging.getLogger(__name__)
+
+_DIAGNOSTIC_SOURCE = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", re.ASCII)
+
+
+def _diagnostic_summary(message: str) -> str:
+    # Never scrub and return arbitrary exception text: secrets have no fixed format.
+    summaries = (
+        (
+            (
+                "could not resolve extension entry point:",
+                "extension entry point is not callable:",
+                "could not inspect extension-api version marker:",
+                "extension declares invalid extension-api version marker",
+                "extension requires extension-api ",
+            ),
+            "Extension loading failed.",
+        ),
+        (("install() failed:",), "Extension registration failed."),
+        (("router ",), "Extension router could not be mounted."),
+        (("service start()",), "Extension service could not start."),
+        (("service stop()",), "Extension service could not stop."),
+    )
+    summary = next((summary for prefixes, summary in summaries if isinstance(message, str) and message.startswith(prefixes)), "Extension reported a diagnostic.")
+    return f"{summary} See Gateway logs for details."
+
+
+@router.get("/diagnostics")
+async def plugin_diagnostics(request: Request, response: Response) -> list[dict[str, str]]:
+    """Read a safe snapshot of this Gateway process's retained diagnostics."""
+    await require_admin_user(request, detail="Only administrators can read plugin diagnostics.")
+    response.headers["Cache-Control"] = "private, no-store"
+    return [
+        {
+            "source": item.source if isinstance(item.source, str) and len(item.source) <= 256 and _DIAGNOSTIC_SOURCE.fullmatch(item.source) else "[redacted]",
+            "level": item.level if isinstance(item.level, str) and item.level in {"debug", "info", "warning", "error"} else "unknown",
+            "summary": _diagnostic_summary(item.message),
+        }
+        for item in get_runtime_diagnostics()
+    ]
 
 
 def _principal(request):
@@ -111,6 +153,7 @@ async def plugin_asset(request: Request, namespace: str, revision: str, path: st
 @router.post("/{namespace}/actions/{action_name}")
 async def invoke_plugin_action(request: Request, namespace: str, action_name: str):
     """Invoke an installed action with the authenticated viewer and deployment settings."""
+    from deerflow_extension_api.agent_runs import AgentRunError, resolve_agent_runs
     from deerflow_extension_api.auth import resolve_principal
     from deerflow_extension_api.plugins import ActionContext
 
@@ -159,6 +202,10 @@ async def invoke_plugin_action(request: Request, namespace: str, action_name: st
         raise HTTPException(422, "Plugin action requires a JSON object.") from exc
     try:
         async with asyncio.timeout(30):
+            runs = resolve_agent_runs(request)
+            agent_runs = runs.for_plugin(namespace) if runs is not None else None
+            # Host-stamped browser session; every other caller defaults closed.
+            interaction = "session" if getattr(request.state, "auth_source", None) == "session" and not principal.is_internal else "other"
             if plugin.api_version in (4, 5):
                 from deerflow_extension_api.storage import StorageActor
 
@@ -190,14 +237,26 @@ async def invoke_plugin_action(request: Request, namespace: str, action_name: st
                         human_input = HostHumanInputActions(request, source, plugin, action, principal)
                     try:
                         return await action.handler(
-                            MappingProxyType(payload), ActionContext(principal, MappingProxyType(settings), actor=StorageActor(actor.kind, actor.subject_id), storage=storage, resource=resource, human_input=human_input)
+                            MappingProxyType(payload),
+                            ActionContext(
+                                principal,
+                                MappingProxyType(settings),
+                                actor=StorageActor(actor.kind, actor.subject_id),
+                                storage=storage,
+                                resource=resource,
+                                human_input=human_input,
+                                agent_runs=agent_runs,
+                                interaction=interaction,
+                            ),
                         )
                     finally:
                         if human_input is not None:
                             human_input.retire()
-            return await action.handler(MappingProxyType(payload), ActionContext(principal, MappingProxyType(settings)))
+            return await action.handler(MappingProxyType(payload), ActionContext(principal, MappingProxyType(settings), agent_runs=agent_runs, interaction=interaction))
     except HTTPException:
         raise
+    except AgentRunError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
     except AgentDenied as exc:
         raise HTTPException(404, "Human Work request is unavailable.") from exc
     except AgentConflict as exc:

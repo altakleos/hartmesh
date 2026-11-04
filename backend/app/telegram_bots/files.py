@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from app.channels.execution import ChannelUploadRefused
-from app.channels.inbound_files import InboundFileLease
+from app.channels.inbound_leases import InboundFileLease
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -99,7 +99,7 @@ def _channel(file):
 
 async def read_inbound(file, client) -> InboundFileLease | None:
     """Borrow the captured adapter; its bounded reader owns download and notices."""
-    from app.channels.inbound_files import current_inbound_file_context
+    from app.channels.inbound_leases import current_inbound_file_context
 
     execution_context = current_inbound_file_context()
     try:
@@ -117,7 +117,7 @@ async def read_inbound(file, client) -> InboundFileLease | None:
 
 async def write_failed(file, exc: Exception) -> None:
     """Translate a manager write failure without retaining its native traceback."""
-    from app.channels.inbound_files import current_inbound_file_context
+    from app.channels.inbound_leases import current_inbound_file_context
 
     execution_context = current_inbound_file_context()
     try:

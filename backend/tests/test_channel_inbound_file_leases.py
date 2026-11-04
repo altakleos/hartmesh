@@ -9,7 +9,7 @@ import pytest
 
 from app.channels import manager
 from app.channels.execution import ChannelUploadRefused
-from app.channels.inbound_files import saved_file_key
+from app.channels.inbound_leases import saved_file_key
 from app.channels.message_bus import INBOUND_FILE_CONTENT_KEY, InboundMessage
 from deerflow.uploads import manager as uploads
 
@@ -177,11 +177,11 @@ async def test_cancelled_manager_waits_for_actual_native_worker(ingestion, monke
     started, finish, completed = threading.Event(), threading.Event(), threading.Event()
     actual = uploads.write_upload_file_no_symlink if phase == "write" else manager._make_inbound_file_sandbox_readable
 
-    def blocked(*args):
+    def blocked(*args, **kwargs):
         started.set()
         assert finish.wait(15), "test did not release the filesystem worker"
         try:
-            return actual(*args)
+            return actual(*args, **kwargs)
         finally:
             completed.set()
 
@@ -204,7 +204,7 @@ async def test_cancelled_manager_waits_for_actual_native_worker(ingestion, monke
 def lease_type():
     import importlib
 
-    return importlib.import_module("app.channels.inbound_files").InboundFileLease
+    return importlib.import_module("app.channels.inbound_leases").InboundFileLease
 
 
 @pytest.mark.asyncio
@@ -337,7 +337,7 @@ async def test_write_failure_notifies_actual_channel_and_releases_before_next_fi
         assert finalized.is_set() and released == ["done"]
         return b"Good file"
 
-    def write(base, name, data):
+    def write(base, name, data, **kwargs):
         if phase == "write" and name == "bad.txt":
             if failure_kind == "chained":
                 try:
@@ -345,7 +345,7 @@ async def test_write_failure_notifies_actual_channel_and_releases_before_next_fi
                 except OSError as cause:
                     raise failure from cause
             raise failure
-        return actual_write(base, name, data)
+        return actual_write(base, name, data, **kwargs)
 
     def permits(path):
         if phase == "permissions" and path.name == "bad.txt":
@@ -387,10 +387,10 @@ async def test_notifier_failure_does_not_stop_following_file_or_expose_exception
     async def reader(file, _client):
         return lease_type()(b"First file", release) if file["filename"] == "bad.txt" else b"Following file"
 
-    def write(base, name, data):
+    def write(base, name, data, **kwargs):
         if name == "bad.txt":
             raise OSError("native private sentinel")
-        return actual(base, name, data)
+        return actual(base, name, data, **kwargs)
 
     async def notify(_file, _error):
         raise RuntimeError("https://private.example/file?signed=sentinel")
@@ -477,7 +477,7 @@ async def test_cancelled_native_failure_releases_buffer_without_waiting_for_garb
     async def reader(_file, _client):
         return lease_type()(OwnedBytes(b"Only the lease and native worker own this buffer"), release)
 
-    def write(_base, _name, _data):
+    def write(_base, _name, _data, **_kwargs):
         started.set()
         assert finish.wait(15)
         try:
@@ -559,7 +559,7 @@ async def test_cancelled_manager_drains_started_failure_notification_before_rele
         read.append(file["filename"])
         return lease_type()(b"Charged file", release)
 
-    def write(_base, _name, _data):
+    def write(_base, _name, _data, **_kwargs):
         raise OSError("write failed")
 
     async def notify(_file, _error):

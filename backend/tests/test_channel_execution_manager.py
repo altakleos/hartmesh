@@ -17,13 +17,13 @@ from app.channels.execution import ChannelExecutionBusyError, ChannelExecutionCo
 from app.channels.manager import ChannelManager, _human_input_message
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus
 from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
-from app.channels.store import ChannelStore
+from app.channels.store import JsonChannelStore
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("required,context", [(True, None), (True, {}), (False, {}), (1, None), (None, None)])
 async def test_required_or_malformed_host_context_refuses_before_ordinary_client(tmp_path, monkeypatch, required, context):
-    manager = ChannelManager(MessageBus(), ChannelStore(str(tmp_path / "channels.json")))
+    manager = ChannelManager(MessageBus(), JsonChannelStore(str(tmp_path / "channels.json")))
     message = InboundMessage(channel_name="slack", chat_id="chat", user_id="sender", text="hello")
     # The pre-change dataclass permits these host attributes, but the actual
     # manager ignores them. This is a behavioral red, not a missing-API probe.
@@ -79,7 +79,7 @@ def setup(tmp_path, monkeypatch):
         outbounds.append(message)
 
     bus.subscribe_outbound(outbound)
-    manager = ChannelManager(bus, ChannelStore(str(tmp_path / "channels.json")))
+    manager = ChannelManager(bus, JsonChannelStore(str(tmp_path / "channels.json")))
     scope = ChannelExecutionScope("a" * 32, "owner", "connection", "chat", "original-thread", "original-endpoint", "lead_agent", None)
     admission = Admission()
     stream = OwnedStream([SimpleNamespace(event="values", data={"messages": [{"type": "ai", "content": "answer"}]}, id=None)])

@@ -38,7 +38,7 @@ from test_gateway_services import _make_start_run_request
 from test_telegram_supervisor import build
 
 from app.channels.manager import ChannelManager
-from app.channels.store import ChannelStore
+from app.channels.store import JsonChannelStore
 from app.gateway import chat_storage, deps
 from app.gateway import storage_spaces as spaces
 from app.gateway.auth.local_provider import LocalAuthProvider
@@ -302,6 +302,11 @@ def render_compose_config(tmp_path, monkeypatch, *, keys, tweak=None):
     for module, name in ((memory_config, "_memory_config"), (agents_api_config, "_agents_api_config"), (stream_bridge_config, "_stream_bridge_config")):
         monkeypatch.setattr(module, name, getattr(module, name))
     app_config.reset_app_config()
+    # The rendered DATABASE_URL is a synthetic, unreachable Postgres: the turn
+    # runs on the harness's own engine. Upstream's skill-enrollment probe
+    # (deerflow.skills.mutations.enrollment, covered by test_skill_sdk_enrollment)
+    # would open that URL on every skill load and refuse them all.
+    monkeypatch.setattr("deerflow.skills.mutations.guard.require_unenrolled", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
     monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
 
@@ -486,7 +491,7 @@ async def drive_message(e, monkeypatch, tmp_path, *, prompts=("What is two plus 
         supervisor.thread_client = gateway
         if document is not None:
             _serve_a_file(supervisor, boot, document[1])
-        store = await asyncio.to_thread(ChannelStore, str(tmp_path / "manager.json"))
+        store = await asyncio.to_thread(JsonChannelStore, str(tmp_path / "manager.json"))
         manager = ChannelManager(boot.service.bus, store, connection_repo=db.connections, langgraph_url="http://gateway.test/api", gateway_url=gateway.gateway_url, max_concurrency=1)
         boot.service.manager = manager
         finished = asyncio.Event()

@@ -232,7 +232,7 @@ USER_DATA_AREAS = ("uploads", "outputs", "workspace")
 SCHEDULE_FIELDS = ("id", "title", "prompt", "schedule_type", "schedule_spec", "timezone", "status", "context_mode", "assistant_id", "thread_id", "overlap_policy", "created_at", "updated_at", "next_run_at", "last_run_at")
 PROJECT_FIELDS = ("id", "name", "instructions", "presentation", "status", "created_at", "updated_at")
 DOCUMENT_FIELDS = ("id", "name", "sha256", "size_bytes", "source_thread_id", "source_kind", "source_name", "created_at", "updated_at")
-PREFERENCE_FIELDS = ("notification_enabled", "model_name", "mode", "reasoning_effort")
+PREFERENCE_FIELDS = ("notification_enabled", "model_name", "mode", "reasoning_effort", "locale")
 
 #: How long an export stays once every part has been downloaded, for one that did not arrive whole.
 REDOWNLOAD_SECONDS = 600
@@ -253,6 +253,17 @@ _REASONS = {
     "unreadable": "it could not be read",
     "too_large": "larger than this deployment's disk",
 }
+
+
+def _read_scope(app: Any) -> SimpleNamespace:
+    """The request-shaped scope the shared conversation reader is given.
+
+    The reader builds the Gateway run context, which binds session-scoped
+    agent-run delegation from ``request.state``. An export runs for its person
+    outside any request, so the scope carries an empty state: no delegation,
+    the same as an internal caller, and no ``AttributeError`` on ``state``.
+    """
+    return SimpleNamespace(app=app, state=SimpleNamespace())
 
 
 class ExportRefused(Exception):
@@ -1100,8 +1111,9 @@ class AccountExportService:
             "transcripts": [],
         }
         try:
-            conversation = await transcript.read_conversation(SimpleNamespace(app=self._app), thread_id, record, user_id=job.user_id)
+            conversation = await transcript.read_conversation(_read_scope(self._app), thread_id, record, user_id=job.user_id)
         except Exception:  # noqa: BLE001 - one conversation that cannot be read must not keep the rest from the person
+            logger.warning("account export: conversation %s could not be read; its transcript is skipped", thread_id, exc_info=True)
             skipped.append({"path": f"conversations/{thread_id}/transcript", "reason": "unreadable"})
             return entry
         if conversation is not None:

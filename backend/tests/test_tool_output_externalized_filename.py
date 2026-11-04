@@ -128,7 +128,7 @@ def test_sandbox_externalization_handles_filename_encoding_failure(invalid_field
 
 @pytest.mark.parametrize("async_wrapper", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize("invalid_field", ["content", "tool_call_id"])
-@pytest.mark.parametrize("storage_target", ["sandbox", "host", "mounted-host"])
+@pytest.mark.parametrize("storage_target", ["sandbox", "host", "mounted-host", "blob"])
 @pytest.mark.asyncio
 async def test_filename_encoding_failure_uses_bounded_fallback(monkeypatch, tmp_path: Path, async_wrapper: bool, invalid_field: str, storage_target: str):
     from deerflow.agents.middlewares import tool_output_budget_middleware as mw
@@ -136,6 +136,8 @@ async def test_filename_encoding_failure_uses_bounded_fallback(monkeypatch, tmp_
     sandbox = MagicMock(spec=Sandbox)
     provider = SimpleNamespace(uses_thread_data_mounts=storage_target == "mounted-host", get=lambda _: sandbox)
     monkeypatch.setattr(mw, "get_sandbox_provider", lambda: provider)
+    blob_store = MagicMock() if storage_target == "blob" else None
+    monkeypatch.setattr(mw, "get_blob_store_if_enabled", lambda: blob_store)
     content = "A" * 16_000 + ("\ud800" if invalid_field == "content" else "X") + "B" * 16_000
     call_id = "call_1" + ("\ud800" if invalid_field == "tool_call_id" else "")
     message = ToolMessage(content=content, name="remote_executor", tool_call_id=call_id, id="message_1", artifact={"original": True})
@@ -169,4 +171,6 @@ async def test_filename_encoding_failure_uses_bounded_fallback(monkeypatch, tmp_
     assert message.content == content
     sandbox.execute_command.assert_not_called()
     sandbox.write_file.assert_not_called()
+    if blob_store is not None:
+        blob_store.put_bytes.assert_not_called()
     assert not any(path.is_file() for path in tmp_path.rglob("*"))

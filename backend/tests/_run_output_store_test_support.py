@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from deerflow.config.run_ownership_config import RunOwnershipConfig
-from deerflow.persistence.run.model import RunChangeClockRow, RunRow
+from deerflow.persistence.run.model import CompletedRunSnapshotRow, RunChangeClockRow, RunRow
 from deerflow.persistence.run.sql import RunRepository
 from deerflow.runtime.runs.manager import RunManager
 
@@ -40,7 +40,7 @@ async def output_store(tmp_path, request):
     async with engine.begin() as connection:
         if request.param == "sqlite":
             await connection.execute(text("BEGIN"))
-        await connection.run_sync(lambda conn: RunRow.metadata.create_all(conn, tables=[RunRow.__table__, RunChangeClockRow.__table__]))
+        await connection.run_sync(lambda conn: RunRow.metadata.create_all(conn, tables=[RunRow.__table__, RunChangeClockRow.__table__, CompletedRunSnapshotRow.__table__]))
     sf = async_sessionmaker(engine, expire_on_commit=False)
     try:
         yield SimpleNamespace(repository=RunRepository(sf), sf=sf, engine=engine, dialect=request.param)

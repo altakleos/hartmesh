@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from app.channels import manager as mgr
-from app.channels.inbound_files import InboundFileLease
+from app.channels.inbound_leases import InboundFileLease
 from app.channels.message_bus import InboundMessage
 from deerflow.uploads.manager import get_uploads_dir
 

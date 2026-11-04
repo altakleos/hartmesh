@@ -57,17 +57,27 @@ from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
-from app.gateway.services import abuild_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
+from app.gateway.services import (
+    abuild_checkpoint_state_accessor,
+    build_thread_checkpoint_state_accessor,
+    serialize_wait_run_status,
+    sse_consumer,
+    start_run,
+    wait_for_run_completion,
+)
+from app.gateway.sse_headers import sse_response_headers
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
 from deerflow.authz.sandbox_authz import safe_app_config_async
 from deerflow.config.paths import get_paths, make_safe_user_id
 from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus, ThreadOperationKind, serialize_channel_values_for_api
+from deerflow.runtime.goal import is_active_goal
 from deerflow.runtime.runs.store.base import format_run_cursor_created_at, normalize_run_created_at_iso
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.file_io import await_drained
+from deerflow.utils.llm_text import strip_leading_think_blocks
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.utils.thread_id import ThreadId
 from deerflow.workspace_changes import get_workspace_changes_response
@@ -84,6 +94,7 @@ _MISSING_REGENERATE_BASE_DETAIL = "Could not find an addressable checkpoint befo
 _UNSAFE_REGENERATE_LINEAGE_DETAIL = "Could not safely resolve the checkpoint before the target user message"
 THREAD_MESSAGE_LEGACY_SCAN_BATCH = 201
 MAX_EVENT_TYPE_FILTERS = 100
+_LEGACY_IDEMPOTENCY_REQUEST_KEY = "idempotency_request"
 
 
 IdempotencyKeyHeader = Annotated[
@@ -96,24 +107,39 @@ IdempotencyKeyHeader = Annotated[
 ]
 
 
-def _scope_http_run_idempotency_key(request: Request, thread_id: str, key: str | None) -> str | None:
-    """Namespace a caller key for the process-wide run idempotency index."""
+def _scope_http_run_idempotency_key(request: Request, thread_id: str, key: str | None, *, channel_execution: bool = False) -> str | None:
+    """Namespace a caller key for the process-wide run idempotency index.
+
+    Browser and API keys are scoped by owner and thread. A trusted internal
+    caller's key is scoped by owner only: the IM channel manager derives it
+    from the provider message, and a redelivery may be requested on another
+    thread once ``/new`` rebound the conversation; it must then meet the run
+    admitted for the first delivery (a 409) instead of starting a second one.
+
+    A managed channel execution (``channel_execution`` on the request, or the
+    channel idempotency lookup) keeps the owner-and-thread ``http-run:`` scope:
+    a turn admitted before the ``internal-run:`` scope existed is stored under
+    it, and a retry after the upgrade must still find that run instead of
+    admitting a second one.
+    """
     if not isinstance(key, str):
         return None
     key = key.strip()
     if not key:
         raise HTTPException(status_code=422, detail="Idempotency-Key must not be blank")
     owner_id = get_trusted_internal_owner_user_id(request)
+    user = getattr(request.state, "user", None)
     if owner_id is None:
-        user = getattr(request.state, "user", None)
         user_id = getattr(user, "id", None)
         owner_id = str(user_id) if user_id is not None else get_effective_user_id()
+    if not channel_execution and getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
+        return "internal-run:" + hashlib.sha256(f"{owner_id}\0{key}".encode()).hexdigest()
     digest = hashlib.sha256(f"{owner_id}\0{thread_id}\0{key}".encode()).hexdigest()
     return f"http-run:{digest}"
 
 
 async def _refresh_store_backed_run(run_mgr: Any, record: Any) -> Any:
-    """Overlay durable status/error onto a hydrated store-only record."""
+    """Overlay durable status/error/stop reason onto a hydrated store-only record."""
     if not getattr(record, "store_only", False):
         return record
     store = getattr(run_mgr, "_store", None)
@@ -137,6 +163,8 @@ async def _refresh_store_backed_run(run_mgr: Any, record: Any) -> Any:
             pass
     if "error" in row:
         record.error = row.get("error")
+    if "stop_reason" in row:
+        record.stop_reason = row.get("stop_reason")
     return record
 
 
@@ -367,6 +395,12 @@ async def _raise_lease_valid_elsewhere(
 
 def _record_to_response(record: RunRecord) -> RunResponse:
     kwargs = dict(record.kwargs or {})
+    legacy_idempotency_request = kwargs.pop(_LEGACY_IDEMPOTENCY_REQUEST_KEY, None)
+    if isinstance(legacy_idempotency_request, dict) and legacy_idempotency_request.get("kind") == "resume":
+        # Readers may outlive rows written by the pre-0034 rolling-upgrade
+        # fence. Keep its private digest and synthetic input out of every
+        # public run response; new writers use the dedicated ORM column.
+        kwargs["input"] = None
     if "config" in kwargs:
         kwargs["config"] = redact_config_secrets(kwargs["config"])
 
@@ -555,8 +589,7 @@ def _has_title(values: dict[str, Any]) -> bool:
 
 
 def _has_active_goal(snapshot: Any) -> bool:
-    goal = _checkpoint_values(snapshot).get("goal")
-    return isinstance(goal, dict) and goal.get("status") == "active"
+    return is_active_goal(_checkpoint_values(snapshot).get("goal"))
 
 
 def _latest_editable_turn(messages: list[Any], human_message_id: str) -> tuple[int, Any, int, Any, list[str]]:
@@ -592,10 +625,11 @@ def _run_last_ai_matches_message(record: RunRecord, message: Any) -> bool:
     last_ai_message = (record.last_ai_message or "").strip()
     if not last_ai_message:
         return False
-    target_text = _message_text(message).strip()
+    target_text = _message_text(message)
     if not target_text:
         return False
-    return last_ai_message == target_text[: len(last_ai_message)]
+    # Match both historical raw summaries and newer visible-answer summaries.
+    return any(last_ai_message == text[: len(last_ai_message)] for text in (target_text.strip(), strip_leading_think_blocks(target_text)))
 
 
 async def _find_target_run_id(
@@ -605,8 +639,9 @@ async def _find_target_run_id(
     source_human: Any,
     request: Request,
 ) -> str:
+    user_id = await _run_scope_user_id(request, thread_id)
     event_store = get_run_event_store(request)
-    rows = await event_store.list_messages(thread_id, limit=REGENERATE_HISTORY_SCAN_LIMIT)
+    rows = await event_store.list_messages(thread_id, limit=REGENERATE_HISTORY_SCAN_LIMIT, user_id=user_id)
     for row in reversed(rows):
         if row.get("event_type") not in {"ai_message", "llm.ai.response"}:
             continue
@@ -620,7 +655,6 @@ async def _find_target_run_id(
         return source_run_id
 
     run_mgr = get_run_manager(request)
-    user_id = await _run_scope_user_id(request, thread_id)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=10)
     fallback_record = next(
         (record for record in records if record.status == RunStatus.success and _run_last_ai_matches_message(record, target_message)),
@@ -970,7 +1004,7 @@ async def create_run(
         body,
         thread_id,
         request,
-        idempotency_key=_scope_http_run_idempotency_key(request, thread_id, idempotency_key),
+        idempotency_key=_scope_http_run_idempotency_key(request, thread_id, idempotency_key, channel_execution=body.channel_execution is not None),
     )
     return _record_to_response(record)
 
@@ -995,7 +1029,7 @@ async def stream_run(
         body,
         thread_id,
         request,
-        idempotency_key=_scope_http_run_idempotency_key(request, thread_id, idempotency_key),
+        idempotency_key=_scope_http_run_idempotency_key(request, thread_id, idempotency_key, channel_execution=body.channel_execution is not None),
     )
 
     # Same shape join already rejects: a reused store-only handle on a
@@ -1018,15 +1052,10 @@ async def stream_run(
             emit_gap_on_missing_stream=record.idempotency_reused,
         ),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-            # LangGraph Platform includes run metadata in this header.
-            # The SDK uses a greedy regex to extract the run id from this path,
-            # so it must point at the canonical run resource without extra suffixes.
-            "Content-Location": f"/api/threads/{thread_id}/runs/{record.run_id}",
-        },
+        # LangGraph Platform includes run metadata in Content-Location.
+        # The SDK uses a greedy regex to extract the run id from this path,
+        # so it must point at the canonical run resource without extra suffixes.
+        headers=sse_response_headers(content_location=f"/api/threads/{thread_id}/runs/{record.run_id}"),
     )
 
 
@@ -1050,7 +1079,7 @@ async def wait_run(
         body,
         thread_id,
         request,
-        idempotency_key=_scope_http_run_idempotency_key(request, thread_id, idempotency_key),
+        idempotency_key=_scope_http_run_idempotency_key(request, thread_id, idempotency_key, channel_execution=body.channel_execution is not None),
     )
     # Capture before waiting: create_or_reject mutates the shared cached
     # record's idempotency_reused flag, so an overlapping retry must not
@@ -1062,12 +1091,19 @@ async def wait_run(
     # serializing whatever checkpoint happens to exist.
     if getattr(record, "store_only", False) and not getattr(bridge, "supports_cross_process", False):
         record = await _refresh_store_backed_run(run_mgr, record)
-        return {"status": record.status.value, "error": record.error}
+        return serialize_wait_run_status(record)
 
     if record.task is not None or getattr(record, "store_only", False):
         completed = await wait_for_run_completion(bridge, record, request, run_mgr)
     else:
         completed = True
+
+    if completed:
+        record = await _refresh_store_backed_run(run_mgr, record)
+        if record.status == RunStatus.error:
+            # A failure before the first checkpoint leaves an earlier answer at
+            # the thread head. Return this run's error, never that old state.
+            return serialize_wait_run_status(record)
 
     # Idempotent reuse is not bound to a run-specific checkpoint id. The latest
     # thread head may be a later run, so do not claim it as this run's result.
@@ -1085,9 +1121,7 @@ async def wait_run(
         except Exception:
             logger.exception("Failed to fetch final state for run %s", record.run_id)
 
-    if completed:
-        record = await _refresh_store_backed_run(run_mgr, record)
-    return {"status": record.status.value, "error": record.error}
+    return serialize_wait_run_status(record)
 
 
 def _parse_run_page_created_at(value: str) -> str:
@@ -1167,10 +1201,12 @@ async def _require_run_visible_to_scope(run_id: str, thread_id: str, request: Re
     """Gate run-scoped sub-resource reads and writes (events, messages, join,
     stream, cancel, artifact archive).
 
-    These routes query or mutate by ``(thread_id, run_id)`` without a
-    per-user filter of their own. For trusted internal callers on threads
-    without established ownership, that let an internal caller acting for
-    owner A read or cancel owner B's run by id (#5448 review P1 follow-up).
+    These routes query or mutate by ``(thread_id, run_id)``; events and
+    messages add only the ``_run_scope_user_id`` data filter, which matches
+    row stamps rather than gating the run itself. For trusted internal
+    callers on threads without established ownership, a missing gate let an
+    internal caller acting for owner A read or cancel owner B's run by id
+    (#5448 review P1 follow-up).
     The run's own stamp must therefore match the acting owner's raw value (or
     the legacy ``"default"`` stamp); every other caller and every
     established-ownership thread keeps its existing semantics.
@@ -1272,7 +1308,7 @@ async def lookup_run_by_idempotency_key(thread_id: ThreadId, request: Request, i
         raise HTTPException(422, "Channel execution read version is required")
     if len(request.headers.getlist("Idempotency-Key")) != 1 or idempotency_key is None:
         raise HTTPException(422, "Exactly one Idempotency-Key is required")
-    key = _scope_http_run_idempotency_key(request, thread_id, idempotency_key)
+    key = _scope_http_run_idempotency_key(request, thread_id, idempotency_key, channel_execution=True)
     async with channel_read_scope(request, thread_id) as owner:
         try:
             record = await get_run_manager(request).lookup_idempotent_run(thread_id, key, user_id=owner)
@@ -1402,11 +1438,7 @@ async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> Stream
         # policy must not fire because an observer closed their connection.
         sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=sse_response_headers(),
     )
 
 
@@ -1494,11 +1526,7 @@ async def _stream_existing_run(
         # must not fire because a joiner closed their connection.
         sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=sse_response_headers(),
     )
 
 
@@ -1735,6 +1763,7 @@ async def list_run_messages(
             except Exception:
                 raise channel_lookup_unavailable() from None
     await _require_run_visible_to_scope(run_id, thread_id, request)
+    user_id = await _run_scope_user_id(request, thread_id)
     event_store = get_run_event_store(request)
     rows = await event_store.list_messages_by_run(
         thread_id,
@@ -1742,6 +1771,7 @@ async def list_run_messages(
         limit=limit + 1,
         before_seq=before_seq,
         after_seq=after_seq,
+        user_id=user_id,
     )
     data, has_more = trim_run_message_page(rows, limit=limit, after_seq=after_seq)
 
@@ -1818,7 +1848,8 @@ def _presented_files_from_delivery(events: list[dict]) -> list[str]:
 
 
 async def _archive_presented_paths(thread_id: ThreadId, run_id: str, request: Request) -> list[str]:
-    run = await get_run_store(request).get(run_id)
+    user_id = await _run_scope_user_id(request, thread_id)
+    run = await get_run_store(request).get(run_id, user_id=user_id)
     if run is None or run.get("thread_id") != thread_id or run.get("operation_kind", "run") != "run":
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     if run.get("status") in {RunStatus.pending.value, RunStatus.running.value}:
@@ -1829,6 +1860,7 @@ async def _archive_presented_paths(thread_id: ThreadId, run_id: str, request: Re
         run_id,
         event_types=["run.delivery"],
         limit=2,
+        user_id=user_id,
     )
     return _presented_files_from_delivery(events)
 
@@ -1932,6 +1964,7 @@ async def list_run_events(
     task's persisted steps without the run-wide ``limit`` truncating the tail (#3779).
     """
     await _require_run_visible_to_scope(run_id, thread_id, request)
+    user_id = await _run_scope_user_id(request, thread_id)
     event_store = get_run_event_store(request)
     if event_types:
         # Split on commas and normalise each entry: the value goes straight into
@@ -1955,6 +1988,7 @@ async def list_run_events(
         task_id=task_id,
         limit=limit,
         after_seq=after_seq,
+        user_id=user_id,
     )
     return [
         {
@@ -1978,6 +2012,7 @@ async def get_run_workspace_changes(
 ) -> dict:
     """Return workspace/output file changes recorded for one run."""
     await _require_run_visible_to_scope(run_id, thread_id, request)
+    user_id = await _run_scope_user_id(request, thread_id)
     event_store = get_run_event_store(request)
     return await get_workspace_changes_response(
         event_store,
@@ -1985,6 +2020,7 @@ async def get_run_workspace_changes(
         run_id,
         include_files=include_files,
         include_diff=include_diff,
+        user_id=user_id,
     )
 
 

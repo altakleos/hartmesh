@@ -73,11 +73,15 @@ class Workspace:
     def __init__(self, home):
         self.id, self.home = CURRENT, home
 
-    def download_file(self, path):
+    def download_file(self, path, *, max_bytes=None):
+        # Sandbox.download_file's contract: honour the ceiling, never return a prefix.
         name = path.removeprefix("/mnt/user-data/uploads/")
         if name == path or "/" in name:
             raise FileNotFoundError(path)
-        return (self.home / "uploads" / name).read_bytes()
+        data = (self.home / "uploads" / name).read_bytes()
+        if max_bytes is not None and len(data) > max_bytes:
+            raise OSError(f"{path} exceeds {max_bytes} bytes")
+        return data
 
     def release_command_scope(self, scope_id):
         """The run's lease ends; this stand-in keeps no shell sessions."""

@@ -14,7 +14,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from sqlalchemy import event, text, update
 from sqlalchemy.util import await_only
 
-from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.runtime.capture_resources import OwnedCheckpointSaver
 from deerflow.runtime.events.store.db import DbRunEventStore
@@ -29,7 +29,7 @@ async def _environment(environment, monkeypatch):
     async with environment.engine.begin() as connection:
         if environment.dialect == "sqlite":
             await connection.execute(text("BEGIN"))
-        await connection.run_sync(lambda conn: RunEventRow.metadata.create_all(conn, tables=[RunEventRow.__table__]))
+        await connection.run_sync(lambda conn: RunEventRow.metadata.create_all(conn, tables=[RunEventRow.__table__, RunEventThreadSeqRow.__table__]))
     monkeypatch.setattr("deerflow.runtime.runs.worker._produced_output_paths", AsyncMock(return_value=[]))
     monkeypatch.setattr("deerflow.runtime.runs.worker.capture_output_snapshot", AsyncMock(return_value=None))
     monkeypatch.setattr("deerflow.runtime.runs.worker.capture_workspace_snapshot", AsyncMock(return_value=None))

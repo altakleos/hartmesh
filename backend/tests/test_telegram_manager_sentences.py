@@ -141,7 +141,8 @@ def test_upstream_literals_unchanged():
     }
     assert {name: getattr(manager, name) for name in expected} == expected
     inline = {
-        "_handle_message": ["An internal error occurred. Please try again.", "Channel execution protocol refused"],
+        # Upstream split _handle_message into a wrapper and _dispatch_message, which holds the body.
+        "_dispatch_message": ["An internal error occurred. Please try again.", "Channel execution protocol refused"],
         "_load_thread_agent": ["This conversation has an invalid stored agent selection. Use /agent use <name> to start a valid conversation."],
         "_handle_chat_on_thread": ["(No response from agent)"],
         "_handle_streaming_chat": ["An error occurred while processing your request. Please try again.", "(No response from agent)"],

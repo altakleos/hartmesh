@@ -15,6 +15,8 @@ from typing import Literal, get_args
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+from deerflow.utils.bash_exit import BASH_TOOL_NAMES, bash_exit_status
+
 TOOL_META_KEY = "deerflow_tool_meta"
 PROGRESS_GUARD_ERROR_TYPE = "blocked_by_progress_guard"
 
@@ -118,7 +120,7 @@ TOOL_RESULT_ERROR_TYPES = frozenset(_ATTRS_BY_ERROR_TYPE) | {"unknown", PROGRESS
 # recognised in its message, so the behaviour cannot drift with the wording.
 #
 # ``not_run`` is a call the runtime held back before it ran
-# (SkillToolPolicyMiddleware): chosen in the same message that loads the skill
+# (SkillLoadOrderMiddleware): chosen in the same message that loads the skill
 # instructions meant to govern it, or sandbox work chosen before the first
 # command a skill loaded in this turn starts with. Nothing failed; the next
 # step is to choose again with those instructions, or that command, in hand.
@@ -313,10 +315,16 @@ _SUBAGENT_FAILURE_STATUSES = frozenset({"failed", "cancelled", "timed_out", "pol
 
 
 def normalize_tool_message(msg: ToolMessage) -> ToolMessage:
-    """Attach deerflow_tool_meta to a ToolMessage if not already present."""
+    """Attach tool status, correcting legacy bash analysis that missed an exit."""
+    content = msg.content if isinstance(msg.content, str) else ""
+    bash_status = bash_exit_status(content) if msg.name in BASH_TOOL_NAMES else None
+    failed_bash = bash_status is not None and bash_status[0] == "error"
     existing = (msg.additional_kwargs or {}).get(TOOL_META_KEY)
     if existing is not None:
-        return msg
+        # Explicit producer stamps remain authoritative. Older checkpoints can
+        # contain generic analysis success for a provider-reported failed exit.
+        if not (failed_bash and isinstance(existing, dict) and existing.get("source") == "content_analysis" and existing.get("status") == "success"):
+            return msg
 
     kwargs = msg.additional_kwargs or {}
     subagent_status = kwargs.get("subagent_status")
@@ -331,7 +339,6 @@ def normalize_tool_message(msg: ToolMessage) -> ToolMessage:
         msg.additional_kwargs = updated_kwargs
         return msg
 
-    content = msg.content if isinstance(msg.content, str) else ""
     # Pre-compute once; reused by the partial-success marker check below to avoid calling
     # content.lower() once per _PARTIAL_MARKERS entry inside the generator.
     content_lower = content.lower()
@@ -360,8 +367,18 @@ def normalize_tool_message(msg: ToolMessage) -> ToolMessage:
         attrs = _classify_error_text(content[len(_ERROR_PREFIX) :])
         meta = _make_meta(status="error", source="tool_return", **attrs)
     elif (json_error := _extract_json_error_text(content)) is not None:
-        attrs = _classify_error_text(json_error)
-        meta = _make_meta(status="error", source="tool_return", **attrs)
+        if msg.name == "read_file":
+            # Native reads return document text, not a tool error envelope.
+            # Explicit failures above still take precedence over file content.
+            meta = _make_meta(status="success", source="content_analysis")
+        else:
+            attrs = _classify_error_text(json_error)
+            meta = _make_meta(status="error", source="tool_return", **attrs)
+    elif failed_bash:
+        # A nonzero shell exit does not raise a Python exception. Keep it
+        # recoverable: grep/diff and diagnostic probes can legitimately use 1.
+        # Do not derive auth/stop categories from arbitrary stdout numbers.
+        meta = _make_meta(status="error", source="content_analysis", **_UNKNOWN_ERROR)
     elif (shell_attrs := _classify_error_shell(msg, content)) is not None:
         meta = _make_meta(status="error", source="content_analysis", **shell_attrs)
     elif any(m in content_lower for m in _PARTIAL_MARKERS):

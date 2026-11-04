@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, String, text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, String, false, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -83,6 +83,12 @@ class UserRow(Base):
     # shape of the replacement address to know.
     email_released_from: Mapped[str | None] = mapped_column(String(320), nullable=True)
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Account lifecycle (RFC #4063 / issue #3462 gap 3): an operator-disabled
+    # account is rejected at every authentication surface (password login,
+    # JWT session resolution, PAT, OAuth) — the row is retained with its
+    # credentials and role so re-enabling restores exactly what was suspended.
+    disabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
 
     __table_args__ = (
         # sqlite_where alone is a SQLAlchemy dialect-specific kwarg -- it

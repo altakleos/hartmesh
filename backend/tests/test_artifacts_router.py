@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import logging
 import os
 import stat
 import threading
@@ -7,6 +8,7 @@ import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from _router_auth_helpers import call_unwrapped, make_authed_test_app
@@ -75,6 +77,274 @@ def test_get_artifact_reads_utf8_text_file_on_windows_locale(tmp_path, monkeypat
     assert response.text == text
     assert response.headers["content-type"].startswith("text/plain")
     assert response.headers["accept-ranges"] == "bytes"
+
+
+def test_get_artifact_reads_shared_viewed_image_blob_when_local_path_is_missing(tmp_path, monkeypatch) -> None:
+    """A second Gateway can serve an image from its shared blob ref without the writer's disk."""
+    from deerflow.storage import BlobRef
+
+    image_bytes = b"\x89PNG\r\n\x1a\nimage"
+    virtual_path = "/mnt/user-data/outputs/chart.png"
+    digest = hashlib.sha256(image_bytes).hexdigest()
+    blob_ref = BlobRef(sha256=digest, size=len(image_bytes), kind="viewed-image", content_type="image/png")
+    absent_on_reader = tmp_path / "writer-only" / "chart.png"
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        lambda _thread_id, _path, user_id=None: absent_on_reader,
+    )
+
+    from app.gateway import services
+
+    class Accessor:
+        async def aget(self, _config):
+            return SimpleNamespace(
+                values={
+                    "viewed_images": {
+                        virtual_path: {
+                            "actual_path": str(absent_on_reader),
+                            "mime_type": "image/png",
+                            "size": len(image_bytes),
+                            "sha256": digest,
+                            "blob_ref": blob_ref.model_dump(mode="json"),
+                        }
+                    }
+                }
+            )
+
+    async def build_accessor(_request, *, thread_id):
+        assert thread_id == "thread-1"
+        return Accessor(), {"configurable": {"thread_id": thread_id}}
+
+    monkeypatch.setattr(services, "build_thread_checkpoint_state_accessor", build_accessor)
+
+    class SharedStore:
+        def get_bytes(self, requested_ref):
+            assert requested_ref == blob_ref
+            return image_bytes
+
+    monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", lambda: SharedStore())
+
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    url = f"/api/threads/thread-1/artifacts/{virtual_path.lstrip('/')}"
+    with TestClient(app) as client:
+        response = client.get(url)
+
+    assert response.status_code == 200
+    assert response.content == image_bytes
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["ETag"] == f'"{digest}"'
+
+    with TestClient(app) as client:
+        ranged = client.get(url, headers={"Range": "bytes=1-3", "If-Range": f'"{digest}"'})
+    assert ranged.status_code == 206
+    assert ranged.content == image_bytes[1:4]
+    assert ranged.headers["Content-Range"] == f"bytes 1-3/{len(image_bytes)}"
+
+
+def test_get_artifact_rejects_checkpoint_image_blob_metadata_mismatch(tmp_path, monkeypatch) -> None:
+    from deerflow.storage import BlobRef
+
+    image_bytes = b"\x89PNG\r\n\x1a\nimage"
+    virtual_path = "/mnt/user-data/outputs/chart.png"
+    actual_digest = hashlib.sha256(image_bytes).hexdigest()
+    wrong_digest = hashlib.sha256(b"different bytes").hexdigest()
+    blob_ref = BlobRef(sha256=actual_digest, size=len(image_bytes), kind="viewed-image", content_type="image/png")
+    absent_on_reader = tmp_path / "writer-only" / "chart.png"
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        lambda _thread_id, _path, user_id=None: absent_on_reader,
+    )
+
+    from app.gateway import services
+
+    class Accessor:
+        async def aget(self, _config):
+            return SimpleNamespace(
+                values={
+                    "viewed_images": {
+                        virtual_path: {
+                            "mime_type": "image/png",
+                            "size": len(image_bytes),
+                            "sha256": wrong_digest,
+                            "blob_ref": blob_ref.model_dump(mode="json"),
+                        }
+                    }
+                }
+            )
+
+    async def build_accessor(_request, *, thread_id):
+        return Accessor(), {"configurable": {"thread_id": thread_id}}
+
+    monkeypatch.setattr(services, "build_thread_checkpoint_state_accessor", build_accessor)
+
+    class MustNotReadStore:
+        def get_bytes(self, _requested_ref):
+            pytest.fail("checkpoint metadata must be validated before reading a blob")
+
+    monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", lambda: MustNotReadStore())
+
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/thread-1/artifacts/{virtual_path.lstrip('/')}")
+    assert response.status_code == 404
+    # HartMesh serves through DescriptorFileResponse, whose 404 names the file.
+    assert response.json()["detail"].startswith("File not found: ")
+
+
+@pytest.mark.parametrize(
+    ("record_state", "internal", "owner_header", "expected_status"),
+    [
+        ("owned", False, None, 200),
+        ("foreign", False, None, 404),
+        ("deleted", False, None, 404),
+        ("missing", False, None, 404),
+        ("deleted", True, "owner", 404),
+        ("foreign", True, "owner", 200),
+        ("foreign", False, "owner", 404),
+        ("shared", False, None, 200),
+    ],
+)
+def test_shared_image_blob_requires_existing_thread_access(tmp_path, monkeypatch, record_state, internal, owner_header, expected_status):
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway import services
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.storage import BlobRef
+
+    image_bytes = b"\x89PNG\r\n\x1a\nprivate image"
+    virtual_path = "/mnt/user-data/outputs/private.png"
+    ref = BlobRef(sha256=hashlib.sha256(image_bytes).hexdigest(), size=len(image_bytes), kind="viewed-image", content_type="image/png")
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    if record_state != "missing":
+        owner = "reader" if record_state == "owned" else None if record_state == "shared" else "owner"
+        asyncio.run(thread_store.create("thread-1", user_id=owner))
+        if record_state == "deleted":
+            # Checkpoint cleanup can fail independently of metadata deletion.
+            asyncio.run(thread_store.delete("thread-1", user_id=owner))
+
+    metadata_reads, blob_reads, store_probes = [], [], []
+
+    class Accessor:
+        async def aget(self, _config):
+            metadata_reads.append(True)
+            return SimpleNamespace(values={"viewed_images": {virtual_path: {"mime_type": "image/png", "size": len(image_bytes), "sha256": ref.sha256, "blob_ref": ref.model_dump(mode="json")}}})
+
+    async def build_accessor(_request, *, thread_id):
+        assert thread_id == "thread-1"
+        return Accessor(), {"configurable": {"thread_id": thread_id}}
+
+    class SharedStore:
+        def get_bytes(self, requested_ref):
+            blob_reads.append(requested_ref)
+            return image_bytes
+
+    def get_store():
+        store_probes.append(True)
+        return SharedStore()
+
+    monkeypatch.setattr(services, "build_thread_checkpoint_state_accessor", build_accessor)
+    monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", get_store)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda *_args, **_kwargs: tmp_path / "absent.png")
+    user = SimpleNamespace(id="reader", system_role=INTERNAL_SYSTEM_ROLE if internal else "user")
+    app = make_authed_test_app(user_factory=lambda: user)
+    app.state.thread_store = thread_store
+    app.include_router(artifacts_router.router)
+    headers = {INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_header} if owner_header else {}
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/thread-1/artifacts/{virtual_path.lstrip('/')}", headers=headers)
+
+    assert response.status_code == expected_status
+    if expected_status == 200:
+        assert response.content == image_bytes
+        assert blob_reads == [ref]
+        assert metadata_reads == [True]
+        assert store_probes == [True]
+    else:
+        assert not metadata_reads
+        assert not blob_reads
+        assert not store_probes
+
+
+@pytest.fixture
+def shared_image_blob_request(tmp_path, monkeypatch):
+    from app.gateway import services
+    from deerflow.storage import BlobRef
+
+    payload = b"\x89PNG\r\n\x1a\nimage"
+    virtual_path = "/mnt/user-data/outputs/chart.png"
+    ref = BlobRef(sha256=hashlib.sha256(payload).hexdigest(), size=len(payload), kind="viewed-image", content_type="image/png")
+    metadata = {"mime_type": "image/png", "size": len(payload), "sha256": ref.sha256, "blob_ref": ref.model_dump(mode="json")}
+    accessor = SimpleNamespace(aget=AsyncMock(return_value=SimpleNamespace(values={"viewed_images": {virtual_path: metadata}})))
+    build_accessor = AsyncMock(return_value=(accessor, {"configurable": {"thread_id": "thread-1"}}))
+    monkeypatch.setattr(services, "build_thread_checkpoint_state_accessor", build_accessor)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda *_args, **_kwargs: tmp_path / "absent.png")
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        yield SimpleNamespace(client=client, url=f"/api/threads/thread-1/artifacts/{virtual_path.lstrip('/')}", build_accessor=build_accessor, accessor=accessor, ref=ref, payload=payload)
+
+
+def test_disabled_blob_storage_skips_checkpoint_reads(shared_image_blob_request, monkeypatch):
+    scenario = shared_image_blob_request
+    get_store = Mock(return_value=None)
+    monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", get_store)
+
+    response = scenario.client.get(scenario.url)
+
+    assert response.status_code == 404
+    # HartMesh serves through DescriptorFileResponse, whose 404 names the file.
+    assert response.json()["detail"].startswith("File not found: ")
+    get_store.assert_called_once_with()
+    scenario.build_accessor.assert_not_awaited()
+    scenario.accessor.aget.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure_stage", ["initialize", "read"])
+def test_shared_image_blob_store_failures_warn_without_details(shared_image_blob_request, monkeypatch, caplog, failure_stage):
+    from deerflow.storage import BlobReadError
+
+    scenario = shared_image_blob_request
+    private_detail = "sensitive-backend-detail-not-for-logs"
+    error = RuntimeError(private_detail) if failure_stage == "initialize" else BlobReadError(private_detail)
+    read_blob = Mock(side_effect=error)
+    get_store = Mock(side_effect=error) if failure_stage == "initialize" else Mock(return_value=SimpleNamespace(get_bytes=read_blob))
+    monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", get_store)
+
+    with caplog.at_level(logging.WARNING, logger=artifacts_router.__name__):
+        response = scenario.client.get(scenario.url)
+
+    assert response.status_code == 404
+    records = [record for record in caplog.records if record.name == artifacts_router.__name__ and record.levelno == logging.WARNING]
+    assert len(records) == 1
+    assert records[0].getMessage() == f"Could not resolve viewed-image blob for thread artifact ({type(error).__name__})"
+    assert private_detail not in caplog.text
+    assert private_detail not in response.text
+    get_store.assert_called_once_with()
+    if failure_stage == "initialize":
+        scenario.build_accessor.assert_not_awaited()
+    else:
+        read_blob.assert_called_once_with(scenario.ref)
+
+
+def test_local_artifact_keeps_legacy_missing_thread_access(tmp_path, monkeypatch):
+    from langgraph.store.memory import InMemoryStore
+
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+
+    local_file = tmp_path / "legacy.txt"
+    local_file.write_text("legacy local artifact", encoding="utf-8")
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda *_args, **_kwargs: local_file)
+    app = make_authed_test_app()
+    app.state.thread_store = MemoryThreadMetaStore(InMemoryStore())
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        response = client.get("/api/threads/legacy-thread/artifacts/mnt/user-data/outputs/legacy.txt")
+    assert response.status_code == 200
+    assert response.text == "legacy local artifact"
 
 
 @asynccontextmanager
@@ -698,6 +968,92 @@ def test_get_artifact_inline_text_returns_sha256_etag(tmp_path, monkeypatch) -> 
     assert response.headers.get("etag") == f'"{expected}"'
 
 
+def _replace_preserving_artifact_mtime(path: Path, content: bytes) -> None:
+    before = path.stat()
+    staged = path.with_name("replacement.part")
+    staged.write_bytes(content)
+    os.utime(staged, ns=(before.st_atime_ns, before.st_mtime_ns))
+    os.replace(staged, path)
+    after = path.stat()
+    assert after.st_size == before.st_size
+    assert after.st_mtime_ns == before.st_mtime_ns
+    assert after.st_ino != before.st_ino
+
+
+@pytest.mark.parametrize(
+    ("filename", "query", "request_headers", "disposition", "expected_status"),
+    [
+        ("note.txt", "", {}, "inline", 200),
+        ("note.txt", "", {"Range": "bytes=0-2"}, "inline", 206),
+        ("note.txt", "?download=true", {}, "attachment", 200),
+        ("page.html", "", {}, "attachment", 200),
+    ],
+)
+def test_artifact_etag_tracks_external_atomic_replacement(tmp_path, monkeypatch, filename, query, request_headers, disposition, expected_status) -> None:
+    artifact_path = tmp_path / filename
+    old, new = b"old report", b"new report"
+    artifact_path.write_bytes(old)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    url = f"/api/threads/thread-1/artifacts/mnt/user-data/outputs/{filename}{query}"
+
+    with TestClient(app) as client:
+        first = client.get(url)
+        assert first.content == old
+        assert first.headers["etag"] == f'"{hashlib.sha256(old).hexdigest()}"'
+        _replace_preserving_artifact_mtime(artifact_path, new)
+        second = client.get(url, headers=request_headers)
+
+    assert second.status_code == expected_status
+    assert second.content == (new[:3] if request_headers else new)
+    assert second.headers["etag"] == f'"{hashlib.sha256(new).hexdigest()}"'
+    assert second.headers["content-disposition"].startswith(f"{disposition};")
+    if request_headers:
+        assert second.headers["content-range"] == f"bytes 0-2/{len(new)}"
+
+
+def test_refreshed_artifact_etag_can_be_used_to_save(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_bytes(b"old report")
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+    _patch_artifact_update_dependencies(monkeypatch, artifact_path)
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    url = "/api/threads/thread-1/artifacts/mnt/user-data/outputs/note.txt"
+
+    with TestClient(app) as client:
+        previous = client.get(url)
+        _replace_preserving_artifact_mtime(artifact_path, b"new report")
+        refreshed = client.get(url)
+        rejected = client.put(url, json={"content": "user edit", "expected_sha256": previous.headers["etag"].strip('"')})
+        saved = client.put(url, json={"content": "user edit", "expected_sha256": refreshed.headers["etag"].strip('"')})
+
+    assert rejected.status_code == 412
+    assert saved.status_code == 200
+    assert artifact_path.read_bytes() == b"user edit"
+    assert saved.json()["sha256"] == hashlib.sha256(b"user edit").hexdigest()
+
+
+def test_replaced_artifact_rejects_previous_if_range_validator(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_bytes(b"old report")
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    url = "/api/threads/thread-1/artifacts/mnt/user-data/outputs/note.txt"
+
+    with TestClient(app) as client:
+        first = client.get(url)
+        _replace_preserving_artifact_mtime(artifact_path, b"new report")
+        response = client.get(url, headers={"Range": "bytes=0-2", "If-Range": first.headers["etag"]})
+
+    assert response.status_code == 200
+    assert response.content == b"new report"
+    assert "content-range" not in response.headers
+    assert response.headers["etag"] == f'"{hashlib.sha256(b"new report").hexdigest()}"'
+
+
 def test_get_skill_archive_preview_supports_bounded_range_requests(tmp_path, monkeypatch) -> None:
     payload = ("skill preview \u4e2d\u6587\n" * 100_000).encode()
     skill_path = tmp_path / "sample.skill"
@@ -1033,11 +1389,10 @@ def test_skill_archive_preview_rejects_oversized_member_before_decompression(tmp
     assert exc_info.value.status_code == 413
 
 
-def test_get_artifact_large_text_skips_etag(tmp_path, monkeypatch) -> None:
+def test_get_artifact_large_text_skips_content_hashing(tmp_path, monkeypatch) -> None:
     # A text artifact larger than MAX_EDITABLE_ARTIFACT_BYTES must not be hashed
     # on every GET / Range request (performance P1 from review). The response
-    # still streams, but carries no full-content SHA-256 ETag; the client falls
-    # back to its own hashing where crypto.subtle is available.
+    # still streams with an opaque metadata validator, not an editable digest.
     payload = b"a" * (artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES + 1)
     artifact_path = tmp_path / "large.txt"
     artifact_path.write_bytes(payload)
@@ -1055,15 +1410,11 @@ def test_get_artifact_large_text_skips_etag(tmp_path, monkeypatch) -> None:
         )
 
     assert response.status_code == 200
-    # Oversized artifacts skip the full-file SHA-256 pass, so there must be no
-    # 64-hex content-hash ETag. Starlette's FileResponse may still attach a
-    # cheap mtime/size-derived ETag, which requires no file read.
-    etag = response.headers.get("etag")
-    assert etag is None or len(etag.strip('"')) != 64
+    assert response.headers["etag"].startswith('"stat-')
     assert response.content == payload
 
 
-def test_get_artifact_large_active_content_skips_etag(tmp_path, monkeypatch) -> None:
+def test_get_artifact_large_active_content_skips_content_hashing(tmp_path, monkeypatch) -> None:
     # Active content (e.g. .html) is force-downloaded. A large active file must
     # still force a download but skip the full-file SHA-256 pass (performance P1).
     payload = "<html>" + ("a" * (artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES + 1)) + "</html>"
@@ -1087,3 +1438,90 @@ def test_get_artifact_large_active_content_skips_etag(tmp_path, monkeypatch) -> 
     assert isinstance(response, FileResponse)
     assert response.headers.get("content-disposition", "").startswith("attachment;")
     assert len(response.headers["etag"].strip('"')) != 64
+    assert response.headers["etag"].startswith('"stat-')
+
+
+@pytest.mark.parametrize(
+    ("filename", "query", "disposition"),
+    [
+        ("large.txt", "", "inline"),
+        ("large.txt", "?download=true", "attachment"),
+        ("large.html", "", "attachment"),
+        ("large.bin", "", "inline"),
+    ],
+)
+@pytest.mark.parametrize("validator_header", ["etag", "last-modified"])
+def test_large_artifact_replacement_rejects_stale_if_range(tmp_path, monkeypatch, filename, query, disposition, validator_header) -> None:
+    artifact_path = tmp_path / filename
+    prefix = b"\x00" if filename.endswith(".bin") else b"a"
+    old = prefix + b"a" * artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES
+    new = prefix + b"b" * artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES
+    artifact_path.write_bytes(old)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+
+    # HartMesh hashes only what it captures (hash_max_bytes); an oversized file gets the stat validator.
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    url = f"/api/threads/thread-1/artifacts/mnt/user-data/outputs/{filename}{query}"
+
+    with TestClient(app) as client:
+        first = client.get(url)
+        assert first.content == old
+        matching = client.get(url, headers={"Range": "bytes=0-2", "If-Range": first.headers["etag"]})
+        assert matching.status_code == 206
+        assert matching.content == old[:3]
+        _replace_preserving_artifact_mtime(artifact_path, new)
+        stale = client.get(url, headers={"Range": "bytes=0-2", "If-Range": first.headers[validator_header]})
+        assert stale.status_code == 200
+        assert stale.content == new
+        assert "content-range" not in stale.headers
+        assert stale.headers["etag"] != first.headers["etag"]
+        assert stale.headers["last-modified"] == first.headers["last-modified"]
+        assert stale.headers["etag"].startswith('"stat-')
+        assert stale.headers["content-disposition"].startswith(f"{disposition};")
+        current = client.get(url, headers={"Range": "bytes=0-2", "If-Range": stale.headers["etag"]})
+        ordinary = client.get(url, headers={"Range": "bytes=0-2"})
+
+    for response in (current, ordinary):
+        assert response.status_code == 206
+        assert response.content == new[:3]
+        assert response.headers["content-range"] == f"bytes 0-2/{len(new)}"
+        assert response.headers["etag"] == stale.headers["etag"]
+
+
+def test_small_artifact_replacement_rejects_date_if_range(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_bytes(b"old report")
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    url = "/api/threads/thread-1/artifacts/mnt/user-data/outputs/note.txt"
+
+    with TestClient(app) as client:
+        first = client.get(url)
+        _replace_preserving_artifact_mtime(artifact_path, b"new report")
+        response = client.get(url, headers={"Range": "bytes=0-2", "If-Range": first.headers["last-modified"]})
+
+    assert response.status_code == 200
+    assert response.content == b"new report"
+    assert "content-range" not in response.headers
+    assert response.headers["etag"] == f'"{hashlib.sha256(b"new report").hexdigest()}"'
+
+
+def test_artifact_at_editing_size_limit_keeps_a_saveable_content_revision(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "limit.txt"
+    payload = b"a" * artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES
+    artifact_path.write_bytes(payload)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+    _patch_artifact_update_dependencies(monkeypatch, artifact_path)
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    url = "/api/threads/thread-1/artifacts/mnt/user-data/outputs/limit.txt"
+
+    with TestClient(app) as client:
+        preview = client.get(url)
+        assert preview.headers["etag"] == f'"{hashlib.sha256(payload).hexdigest()}"'
+        saved = client.put(url, json={"content": "edited", "expected_sha256": preview.headers["etag"].strip('"')})
+
+    assert saved.status_code == 200
+    assert artifact_path.read_bytes() == b"edited"

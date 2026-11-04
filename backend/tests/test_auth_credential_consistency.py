@@ -44,6 +44,15 @@ async def repo(tmp_path):
         await engine.dispose()
 
 
+async def grant_role(repo, user_id, role):
+    """A concurrent role change. ``update_user`` is field-scoped and never
+    writes the role (upstream review P1); HartMesh writes roles through
+    targeted statements, which this stands in for."""
+    async with repo._sf() as session:
+        await session.execute(update(UserRow).where(UserRow.id == str(user_id)).values(system_role=role))
+        await session.commit()
+
+
 async def legacy_user(repo):
     legacy = bcrypt.hashpw(PASSWORD.encode(), bcrypt.gensalt(rounds=4)).decode()
     return await repo.create_user(User(email="owned@example.com", password_hash=legacy))
@@ -72,6 +81,7 @@ async def test_rehash_preserves_newer_metadata_and_refuses_revoked_credentials(r
         current.password_hash = hash_password("ResetFixturePassword!28")
         current.token_version += 1
     await repo.update_user(current)
+    await grant_role(repo, user.id, "admin")
     release.set()
     authenticated = await pending
     persisted = await repo.get_user_by_id(str(user.id))
@@ -142,6 +152,7 @@ async def test_resets_increment_persisted_version_and_preserve_account_fields(re
     user = await legacy_user(repo)
     current = user.model_copy(update={"system_role": "admin", "needs_setup": True, "token_version": 7})
     await repo.update_user(current)
+    await grant_role(repo, user.id, "admin")
     results = await asyncio.gather(*(repo.replace_password(str(user.id), f"owned-hash-{i}", needs_setup=True) for i in range(3)))
     assert sorted(result.token_version for result in results) == [8, 9, 10]
     persisted = await repo.get_user_by_id(str(user.id))

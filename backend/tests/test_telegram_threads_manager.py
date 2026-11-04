@@ -7,14 +7,14 @@ from test_telegram_threads import close, environment, inbound, origin
 
 from app.channels.manager import ChannelManager
 from app.channels.message_bus import MessageBus
-from app.channels.store import ChannelStore
+from app.channels.store import JsonChannelStore
 
 pytestmark = pytest.mark.asyncio
 
 
 async def test_actual_manager_reuses_the_prepared_sql_mapping_without_sdk_creation(db, monkeypatch, tmp_path):
     e = await environment(db, monkeypatch)
-    manager = ChannelManager(MessageBus(), ChannelStore(str(tmp_path / "manager.json")), connection_repo=db.connections, langgraph_url="https://runtime.example/base/api", gateway_url="https://gateway.example")
+    manager = ChannelManager(MessageBus(), JsonChannelStore(str(tmp_path / "manager.json")), connection_repo=db.connections, langgraph_url="https://runtime.example/base/api", gateway_url="https://gateway.example")
     try:
         message = inbound(e)
         prepared = await e.threads.ensure_thread(e.link, message, origin=await origin(e))

@@ -112,7 +112,7 @@ def diagnostic(record, status, *, outcome, exception_class="none", attempt=0):
     )
 
 
-async def persist_terminal(manager, record, status, *, error=None, stop_reason=None, respect_cancellation=False, output_receipt=None, inventory_evidence=None, _inventory_attempt=None):
+async def persist_terminal(manager, record, status, *, error=None, stop_reason=None, respect_cancellation=False, output_receipt=None, inventory_evidence=None, goal_verdict=None, _inventory_attempt=None):
     """Confirm or recover one owned outcome; never replay an ambiguous transaction.
 
     The SQL CAS uses the original observed change position, owner, source status,
@@ -123,6 +123,8 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
     """
     store = manager._store
     policy = manager._terminal_recovery_policy
+    # An explicit verdict travels with this write; otherwise the staged one does.
+    verdict = deepcopy(goal_verdict) if goal_verdict is not None else deepcopy(record.goal_verdict) if record.goal_verdict is not None else None
     wanted = None
     if output_receipt is not None:
         from .output import validate_receipt_status
@@ -204,6 +206,7 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                             record.stop_reason = row.get("stop_reason")
                             record.updated_at = row["updated_at"]
                             record.terminal_confirmed = True
+                            _acknowledge_upstream_terminal(manager, record)
                             if wanted is not None:
                                 record.kwargs = deepcopy(row["kwargs"])
                         return StatusFinalization(finalized=True, output_receipt_confirmed=output_confirmed, inventory_evidence_confirmed=inventory_confirmed)
@@ -270,6 +273,9 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                             stop_reason=saved_reason,
                             **({"output_receipt": wanted} if wanted is not None else {}),
                             **({"inventory_evidence": inventory_evidence} if wants_inventory else {}),
+                            # Upstream records a scheduled goal's verdict in the same
+                            # terminal write as the outcome it judged.
+                            **({"goal_verdict": verdict} if verdict is not None else {}),
                         )
                     )
                     if finalized:
@@ -277,8 +283,11 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                             record.status = status
                             record.error = saved_error
                             record.stop_reason = saved_reason
+                            if verdict is not None:
+                                record.goal_verdict = deepcopy(verdict)
                             record.updated_at = datetime.now(UTC).isoformat()
                             record.terminal_confirmed = True
+                            _acknowledge_upstream_terminal(manager, record)
                             if wanted is not None:
                                 record.kwargs = {**record.kwargs, OUTPUT_EVIDENCE_KEY: wanted_json}
                                 if wants_inventory:
@@ -320,3 +329,16 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
             unconfirmed = unconfirmed and deadline is not None and deadline > datetime.now(UTC)
         await manager._mark_ownership_lost(record, reason=UNCONFIRMED_ERROR, require_active=False, terminal_write_unconfirmed=unconfirmed)
         return StatusFinalization(finalized=False)
+
+
+def _acknowledge_upstream_terminal(manager, record) -> None:
+    """Mirror a confirmed fenced terminal into the manager's terminal ACK.
+
+    HartMesh's ``finalize_owned`` CAS is the terminal authority for stores that
+    support terminal recovery; the manager's heartbeat, barrier and completion
+    paths read ``terminal_commit_proof``. Without this ACK they would treat a
+    durably finalized run as unconfirmed. Caller holds ``manager._lock``.
+    """
+    acknowledge = getattr(manager, "_acknowledge_terminal", None)
+    if acknowledge is not None:
+        acknowledge(record, manager._terminal_outcome(record), record.terminal_status_revision)

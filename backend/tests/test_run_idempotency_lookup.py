@@ -151,7 +151,9 @@ async def test_read_uses_the_actual_POST_owner_thread_key_normalization(lookup_e
     found = []
     for owner, thread in [(OWNER, THREAD), (OWNER, "other-lookup-thread"), (OTHER, "other-owned-thread")]:
         headers = {INTERNAL_OWNER_USER_ID_HEADER_NAME: owner, "Idempotency-Key": " " + KEY + " "}
-        created = await e.client.post(f"/api/threads/{thread}/runs", headers=headers, json={"assistant_id": "lead_agent"})
+        # The lookup is channel-execution-only, so create the way a managed turn
+        # does: both then use the owner-and-thread ``http-run:`` key scope.
+        created = await e.client.post(f"/api/threads/{thread}/runs", headers=headers, json={"assistant_id": "lead_agent", "channel_execution": {"version": 1, "publication_id": KEY}})
         assert created.status_code == 200, created.text
         looked_up = await e.client.get(f"/api/threads/{thread}/runs/by-idempotency-key", headers=headers)
         assert looked_up.status_code == 200, looked_up.text

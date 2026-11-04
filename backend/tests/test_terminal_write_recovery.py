@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from deerflow.config.run_ownership_config import RunOwnershipConfig
-from deerflow.persistence.run.model import RunChangeClockRow, RunRow
+from deerflow.persistence.run.model import CompletedRunSnapshotRow, RunChangeClockRow, RunRow
 from deerflow.persistence.run.sql import RunRepository
 from deerflow.runtime.runs.manager import ConflictError, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
@@ -43,7 +43,7 @@ async def repository(tmp_path, request):
     else:
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/runs.db")
     async with engine.begin() as connection:
-        await connection.run_sync(lambda conn: RunRow.metadata.create_all(conn, tables=[RunRow.__table__, RunChangeClockRow.__table__]))
+        await connection.run_sync(lambda conn: RunRow.metadata.create_all(conn, tables=[RunRow.__table__, RunChangeClockRow.__table__, CompletedRunSnapshotRow.__table__]))
     try:
         yield RunRepository(async_sessionmaker(engine, expire_on_commit=False))
     finally:
@@ -375,7 +375,9 @@ async def test_late_completion_metadata_cannot_recreate_or_change_a_new_owners_r
     expected = await repository.get(record.run_id)
     await manager.update_run_completion(record.run_id, status="success", total_tokens=999)
     assert await repository.get(record.run_id) == expected
-    assert record.ownership_lost
+    # Upstream's lifecycle keeps an acknowledged terminal outcome final: the
+    # rejected metadata write cannot fence it, and nothing was rewritten.
+    assert manager._has_final_terminal_ack(record) and not record.ownership_lost
 
 
 @pytest.mark.anyio

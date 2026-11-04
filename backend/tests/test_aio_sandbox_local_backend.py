@@ -1,14 +1,17 @@
+import ast
 import json
 import logging
 import os
 import socket
 import subprocess
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from deerflow.community.aio_sandbox import backend as _backend_mod
+from deerflow.community.aio_sandbox import local_backend as local_backend_module
 from deerflow.community.aio_sandbox.local_backend import (
     LocalContainerBackend,
     _ContainerInspection,
@@ -2106,6 +2109,7 @@ def test_deny_pending_network_policy_events_uses_atomic_proxy_command(monkeypatc
 def test_is_container_running_false_on_apple_container_not_found(monkeypatch):
     """Apple Container's generic "not found" is trusted when it names the container."""
     backend = _backend_for_inspect_tests()
+    backend._runtime = "container"
 
     def fake_run(cmd, **kwargs):
         return SimpleNamespace(stdout="", stderr='Error: not found: "sandbox-apple"', returncode=1)
@@ -2128,6 +2132,439 @@ def test_is_container_running_raises_on_unrelated_not_found_error(monkeypatch):
         backend._is_container_running("sandbox-busy")
 
 
+@pytest.mark.parametrize("runtime", ["docker", "container"])
+def test_absence_does_not_treat_stopped_container_as_missing(monkeypatch, runtime):
+    backend = _backend_for_inspect_tests()
+    backend._runtime = runtime
+    name = "sandbox-stopped"
+    entry = {"Name": f"/{name}", "Id": "stopped-generation", "State": {"Running": False}} if runtime == "docker" else {"configuration": {"id": name}, "status": "stopped"}
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout=json.dumps([entry]), stderr="", returncode=0))
+    assert backend.is_absent("stopped") is False
+
+
+@pytest.mark.parametrize("runtime", ["docker", "container"])
+def test_absence_requires_runtime_confirmation(monkeypatch, runtime):
+    backend = _backend_for_inspect_tests()
+    backend._runtime = runtime
+    name = f"{backend._container_prefix}-missing"
+    error = f"Error: No such container: {name}" if runtime == "docker" else f'Error: not found: "{name}"'
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout="", stderr=error, returncode=1))
+    assert backend.is_absent("missing") is True
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout="", stderr="daemon unavailable", returncode=1))
+    with pytest.raises(RuntimeError):
+        backend.is_absent("missing")
+
+
+@pytest.mark.parametrize("operation", ["is_absent", "_is_container_running"])
+@pytest.mark.parametrize(
+    "error",
+    [
+        'Failed to initialize: unable to resolve docker endpoint: context "deerflow-container-review-missing": context not found: open /synthetic-home/.docker/contexts/meta/context/meta.json: no such file or directory',
+        'unable to resolve docker endpoint: context "sandbox-missing": context not found',
+        "Error: container runtime not found while inspecting sandbox-missing",
+        "OCI runtime failed for container sandbox-missing: executable file not found in $PATH",
+        "Error: No such object: sandbox-other",
+        "Error response from daemon: No such container: sandbox-missing-extra",
+        # Docker 29 lowercases the client-side scaffolding; the near-miss and
+        # case-sensitivity rules must survive the normalization.
+        "error: no such object: sandbox-other",
+        "error response from daemon: no such container: sandbox-missing-extra",
+        "error: no such object: Sandbox-Missing",
+        "error: no such object",
+        "error: no such image: sandbox-missing",
+        "prefix error: no such object: sandbox-missing",
+        "error: no such object: sandbox-missing suffix",
+        "error: no such object: sandbox-missing\nError response from daemon: permission denied",
+        "warning: using default context\nerror: no such object: sandbox-missing",
+    ],
+)
+def test_runtime_absence_rejects_errors_not_about_the_requested_container(monkeypatch, operation, error):
+    backend = _backend_for_inspect_tests()
+
+    def failed(cmd, **kwargs):
+        if kwargs.get("check"):
+            raise subprocess.CalledProcessError(1, cmd, stderr=error)
+        return SimpleNamespace(stdout="", stderr=error, returncode=1)
+
+    monkeypatch.setattr("subprocess.run", failed)
+    target = "missing" if operation == "is_absent" else "sandbox-missing"
+    with pytest.raises((RuntimeError, subprocess.CalledProcessError)):
+        getattr(backend, operation)(target)
+
+
+@pytest.mark.parametrize("operation", ["is_absent", "_is_container_running", "_stop_container"])
+@pytest.mark.parametrize(
+    ("runtime", "error"),
+    [
+        ("docker", "Error: No such object: sandbox-missing"),
+        ("docker", "Error response from daemon: No such container: sandbox-missing"),
+        # Docker CLI v29 lowercases the client-side error scaffolding
+        # ("error: no such object: <name>"); the name stays byte-exact.
+        ("docker", "error: no such object: sandbox-missing"),
+        ("docker", "error response from daemon: no such container: sandbox-missing"),
+        # ArgumentParser prefers ContainerizationError.errorDescription, so
+        # ContainerInspect's missing-resource message has no type or quotes.
+        ("container", "Error: container not found: sandbox-missing"),
+        ("container", 'Error: notFound: "container not found: sandbox-missing"'),
+        ("container", 'notFound: "container not found: sandbox-missing"'),
+        ("container", 'Error: not found: "sandbox-missing"'),
+    ],
+)
+def test_runtime_absence_accepts_exact_missing_container_responses(monkeypatch, operation, runtime, error):
+    backend = _backend_for_inspect_tests()
+    backend._runtime = runtime
+
+    def missing(cmd, **kwargs):
+        if kwargs.get("check"):
+            raise subprocess.CalledProcessError(1, cmd, stderr=error)
+        return SimpleNamespace(stdout="[]", stderr=error, returncode=1)
+
+    monkeypatch.setattr("subprocess.run", missing)
+    target = "missing" if operation == "is_absent" else "sandbox-missing"
+    result = getattr(backend, operation)(target)
+    assert result is (True if operation == "is_absent" else False if operation == "_is_container_running" else None)
+
+
+@pytest.mark.parametrize("state", ["created", "exited", "running", "dead"])
+def test_inspect_runtime_observes_docker_generation_without_health_or_port(monkeypatch, state):
+    backend = _backend_for_inspect_tests()
+    commands = []
+    entry = {"Id": "immutable-docker-generation", "Name": "/sandbox-existing", "Created": "2026-04-08T01:22:50Z", "State": {"Status": state, "Running": state == "running"}}
+
+    def inspect(cmd, **kwargs):
+        commands.append(cmd)
+        assert 0 < kwargs["timeout"] <= 15
+        return SimpleNamespace(stdout=json.dumps([entry]), stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", inspect)
+    monkeypatch.setattr(backend, "_is_container_running", lambda *_args: pytest.fail("runtime inspection must not require running"))
+    monkeypatch.setattr(backend, "_get_container_port", lambda *_args: pytest.fail("runtime inspection must not require a port"))
+    monkeypatch.setattr(local_backend_module, "wait_for_sandbox_ready", lambda *_args, **_kwargs: pytest.fail("runtime inspection must not require health"))
+
+    info = backend.inspect_runtime("existing")
+
+    assert info is not None
+    assert info.sandbox_id == "existing"
+    assert info.container_name == "sandbox-existing"
+    assert info.container_id == "immutable-docker-generation"
+    assert info.created_at == 1775611370.0
+    assert commands == [["docker", "inspect", "sandbox-existing"]]
+
+
+def test_inspect_runtime_keeps_apple_resource_with_unknown_generation(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._runtime = "container"
+    # ManagedContainer serializes configuration.id, which is the user-selected
+    # logical name rather than an immutable generation; it cannot fence teardown.
+    entry = {"id": "sandbox-existing", "configuration": {"id": "sandbox-existing"}, "status": {"state": "stopped"}}
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout=json.dumps([entry]), stderr="", returncode=0))
+
+    info = backend.inspect_runtime("existing")
+
+    assert info is not None
+    assert info.container_name == "sandbox-existing"
+    assert info.container_id is None
+    assert backend.is_absent("existing") is False
+
+
+@pytest.mark.parametrize("proxy_missing", [False, True])
+@pytest.mark.parametrize("persisted_mode", ["allowlist", "isolated"])
+def test_inspect_runtime_recovers_restricted_proxy_port_without_losing_main_identity(monkeypatch, proxy_missing, persisted_mode):
+    backend = _backend_for_inspect_tests()
+    proxy_name, _ = backend._resource_names("existing")
+    entry = {"Id": "main-generation", "Name": "/sandbox-existing", "Config": {"Labels": {"deerflow.network_mode": persisted_mode}}}
+    proxy = {"Id": "proxy-generation", "Name": f"/{proxy_name}", "HostConfig": {"PortBindings": {"8080/tcp": [{"HostPort": "18080"}]}}}
+
+    def runtime(cmd, **kwargs):
+        if cmd[-1] == proxy_name:
+            return SimpleNamespace(stdout="[]" if proxy_missing else json.dumps([proxy]), stderr=f"Error: No such object: {proxy_name}" if proxy_missing else "", returncode=1 if proxy_missing else 0)
+        return SimpleNamespace(stdout=json.dumps([entry]), stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    info = backend.inspect_runtime("existing")
+    assert info is not None
+    assert info.container_id == "main-generation"
+    assert info.sandbox_url == ("" if proxy_missing else "http://localhost:18080")
+
+
+def test_inspect_runtime_propagates_unknown_proxy_port_probe(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    proxy_name, _ = backend._resource_names("existing")
+    entry = {"Id": "main-generation", "Name": "/sandbox-existing", "Config": {"Labels": {"deerflow.network_mode": "allowlist"}}}
+
+    def runtime(cmd, **kwargs):
+        if cmd[-1] == proxy_name:
+            return SimpleNamespace(stdout="", stderr="daemon unavailable", returncode=1)
+        return SimpleNamespace(stdout=json.dumps([entry]), stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    with pytest.raises(RuntimeError, match="daemon unavailable"):
+        backend.inspect_runtime("existing")
+
+
+def test_inspect_runtime_retains_direct_binding_during_network_mode_transition(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._network_mode = "allowlist"
+    proxy_name, _ = backend._resource_names("existing")
+    entry = {"Id": "legacy-generation", "Name": "/sandbox-existing", "HostConfig": {"PortBindings": {"8080/tcp": [{"HostPort": "18080"}]}}}
+
+    def runtime(cmd, **kwargs):
+        if cmd[-1] == proxy_name:
+            return SimpleNamespace(stdout="[]", stderr=f"Error: No such object: {proxy_name}", returncode=1)
+        return SimpleNamespace(stdout=json.dumps([entry]), stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    assert backend.inspect_runtime("existing").sandbox_url == "http://localhost:18080"
+
+
+def test_inspect_runtime_does_not_inherit_another_generations_pending_port(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._pending_cleanup_ports["old-generation"] = ("existing", 18080)
+    entry = {"Id": "replacement-generation", "Name": "/sandbox-existing"}
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout=json.dumps([entry]), stderr="", returncode=0))
+    info = backend.inspect_runtime("existing")
+    assert info.container_id == "replacement-generation"
+    assert info.sandbox_url == ""
+    assert backend._pending_cleanup_ports == {"old-generation": ("existing", 18080)}
+
+
+@pytest.mark.parametrize(
+    "stderr, absent",
+    [
+        ("Error response from daemon: network sandbox-net-x not found", True),
+        ("error: network sandbox-net-x not found", True),  # Docker 29 lowercase
+        ("Error: No such network: sandbox-net-x", True),
+        # A different network's absence, a context failure, or a lookalike
+        # must raise instead of reading as absent.
+        ("Error response from daemon: network sandbox-net-x-extra not found", False),
+        ('context "sandbox-net-x": context not found', False),
+        ("command not found: docker network inspect", False),
+    ],
+)
+def test_inspect_network_uses_strict_missing_network_parser(monkeypatch, stderr, absent):
+    """The non-strict inspect path shares the strict parser: context-name
+    collisions and wrong-target errors raise instead of reading as absent."""
+    backend = _restricted_backend()
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **k: SimpleNamespace(stdout="[]", stderr=stderr, returncode=1),
+    )
+
+    if absent:
+        assert backend._inspect_network("sandbox-net-x") is None
+    else:
+        with pytest.raises(RuntimeError):
+            backend._inspect_network("sandbox-net-x")
+
+
+@pytest.mark.parametrize("error_kind", ["context", "wrong-target", "wrong-target-lowercase", "case-drift", "active-endpoint", "prefix", "suffix", "mixed-stderr", "empty"])
+def test_absent_teardown_preserves_pending_port_on_unknown_network_cleanup_error(monkeypatch, error_kind):
+    backend = _restricted_backend()
+    backend._pending_cleanup_ports["old-generation"] = ("existing", 18080)
+    proxy_name, network_name = backend._resource_names("existing")
+    errors = {
+        "context": f'context "{network_name}": context not found',
+        "wrong-target": f"Error response from daemon: network {network_name}-extra not found",
+        "wrong-target-lowercase": f"error: network {network_name}-extra not found",
+        "case-drift": f"error: network {network_name.upper()} not found",
+        "active-endpoint": f"Error response from daemon: network {network_name} has active endpoints",
+        "prefix": f"prefix error: network {network_name} not found",
+        "suffix": f"error: network {network_name} not found suffix",
+        "mixed-stderr": f"error: network {network_name} not found\nError response from daemon: permission denied",
+        "empty": "",
+    }
+    released = []
+    monkeypatch.setattr(local_backend_module, "release_port", released.append)
+    monkeypatch.setattr(backend, "_stop_container", lambda *_args: None)
+
+    def runtime(cmd, **kwargs):
+        if cmd == ["docker", "rm", "-f", proxy_name]:
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        return SimpleNamespace(stdout="", stderr=errors[error_kind], returncode=1)
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    with pytest.raises(RuntimeError):
+        backend.complete_absent_teardown("existing")
+    assert released == []
+    assert backend._pending_cleanup_ports == {"old-generation": ("existing", 18080)}
+
+
+@pytest.mark.parametrize("error_style", ["legacy", "lowercase-scaffolding", "uppercase-scaffolding", "cli-exit-status"])
+@pytest.mark.parametrize("sandbox_id", ["existing", "Mixed-Case"])
+def test_absent_teardown_accepts_only_exact_missing_networks(monkeypatch, error_style, sandbox_id):
+    backend = _restricted_backend()
+    backend._pending_cleanup_ports["old-generation"] = (sandbox_id, 18080)
+    released = []
+    monkeypatch.setattr(local_backend_module, "release_port", released.append)
+    monkeypatch.setattr(backend, "_stop_container", lambda *_args: None)
+    commands = []
+    # Docker CLI v29 lowercases client-side error scaffolding; the daemon-side
+    # wrapper is stable, but both shapes must prove absence identically.
+    error_formats = {
+        "legacy": ("Error: No such container: {}", "Error response from daemon: network {} not found"),
+        "lowercase-scaffolding": ("error: no such object: {}", "error: network {} not found"),
+        "uppercase-scaffolding": ("ERROR: NO SUCH OBJECT: {}", "ERROR: NETWORK {} NOT FOUND"),
+        "cli-exit-status": ("Error: No such container: {}", "Error response from daemon: network {} not found\nexit status 1\n"),
+    }
+    container_error, network_error = error_formats[error_style]
+
+    def runtime(cmd, **kwargs):
+        commands.append(cmd)
+        if cmd[:3] == ["docker", "rm", "-f"]:
+            return SimpleNamespace(stdout="", stderr=container_error.format(cmd[-1]), returncode=1)
+        return SimpleNamespace(stdout="", stderr=network_error.format(cmd[-1]), returncode=1)
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    backend.complete_absent_teardown(sandbox_id)
+    assert released == [18080]
+    assert backend._pending_cleanup_ports == {}
+    assert ["docker", "network", "rm", backend._resource_names(sandbox_id)[1]] in commands
+    assert ["docker", "network", "rm", backend._egress_network_name(sandbox_id)] in commands
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("Error response from daemon: network sandbox-net not found", True),
+        ("error response from daemon: network sandbox-net not found", True),
+        ("error: network sandbox-net not found", True),
+        ("Error: No such network: sandbox-net", True),
+        ("error: no such network: sandbox-net", True),
+        ("No such network: sandbox-net", True),
+        ("network sandbox-net not found", True),
+        ("Error response from daemon: network sandbox-net not found\nexit status 1\n", True),
+        ("Error response from daemon: network sandbox-net-extra not found\nexit status 1", False),
+        ("Error response from daemon: network Sandbox-Net not found\nexit status 1", False),
+        ("Error response from daemon: network sandbox-net not found\nexit status 2", False),
+        ("Error response from daemon: network sandbox-net not found\npermission denied\nexit status 1", False),
+        ("Error response from daemon: network sandbox-net not found\nexit status 1\nunknown failure", False),
+        ("error: network sandbox-net-extra not found", False),
+        ("error: network Sandbox-Net not found", False),
+        ("error: no such network: sandbox-other", False),
+        ("error: network sandbox-net has active endpoints", False),
+        ('context "sandbox-net": context not found', False),
+        ("", False),
+    ],
+)
+def test_is_no_such_network_error_matches_scaffolding_case_insensitively(message, expected):
+    assert local_backend_module._is_no_such_network_error(message, "sandbox-net") is expected
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        # Docker <=28 client-side and daemon-side forms.
+        ("Error: No such object: sandbox-x", True),
+        ("Error response from daemon: No such container: sandbox-x", True),
+        ("No such object: sandbox-x", True),
+        # Docker 29 lowercases the client-side scaffolding.
+        ("error: no such object: sandbox-x", True),
+        ("error response from daemon: no such container: sandbox-x", True),
+        # Scaffolding is normalized; the name stays byte-exact and the whole
+        # message must match.
+        ("error: no such object: Sandbox-X", False),
+        ("error: no such object: sandbox-x-extra", False),
+        ("error: no such object", False),
+        ("error: no such image: sandbox-x", False),
+        ("prefix error: no such object: sandbox-x", False),
+        ("error: no such object: sandbox-x suffix", False),
+        # Apple Container forms stay exact-match.
+        ("Error: container not found: sandbox-x", True),
+        ('notFound: "container not found: sandbox-x"', True),
+        ('Error: not found: "sandbox-x"', True),
+        ("error: container not found: sandbox-x", False),
+        ("", False),
+    ],
+)
+def test_is_no_such_container_error_matches_scaffolding_case_insensitively(message, expected):
+    assert local_backend_module._is_no_such_container_error(message, "sandbox-x") is expected
+
+
+def test_apple_list_does_not_mark_unsupported_runtime_metadata_for_replacement(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._runtime = "container"
+    entry = {"configuration": {"id": "sandbox-existing"}, "status": "running"}
+
+    def runtime(cmd, **kwargs):
+        return SimpleNamespace(stdout="sandbox-existing\n" if "ps" in cmd else json.dumps([entry]), stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    assert backend.list_running() == []
+    assert backend.inspect_runtime("existing") is not None
+
+
+def test_apple_batch_preserves_legacy_docker_shaped_metadata(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._runtime = "container"
+    entry = {"Name": "/sandbox-existing", "NetworkSettings": {"Ports": {"8080/tcp": [{"HostPort": "18080"}]}}}
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout=json.dumps([entry]), stderr="", returncode=0))
+    assert backend._batch_inspect(["sandbox-existing"], strict=True)["sandbox-existing"].host_port == 18080
+
+
+@pytest.mark.parametrize("runtime", ["docker", "container"])
+def test_inspect_runtime_only_returns_none_for_authoritative_absence(monkeypatch, runtime):
+    backend = _backend_for_inspect_tests()
+    backend._runtime = runtime
+    error = "Error: No such object: sandbox-missing" if runtime == "docker" else "Error: container not found: sandbox-missing"
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout="[]", stderr=error, returncode=1))
+
+    assert backend.inspect_runtime("missing") is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "",
+        "[]",
+        "{}",
+        "not JSON",
+        json.dumps([{"Name": "/sandbox-other", "Id": "generation"}]),
+        json.dumps([{"Name": "/sandbox-existing"}]),
+        json.dumps([{"Name": "/sandbox-existing", "Id": 42}]),
+        json.dumps([{"Name": "/sandbox-existing", "Id": "generation"}, {"Name": "/sandbox-existing", "Id": "other-generation"}]),
+    ],
+)
+def test_inspect_runtime_fails_closed_on_incomplete_or_invalid_docker_response(monkeypatch, payload):
+    backend = _backend_for_inspect_tests()
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout=payload, stderr="", returncode=0))
+
+    with pytest.raises(RuntimeError):
+        backend.inspect_runtime("existing")
+    with pytest.raises(RuntimeError):
+        backend.is_absent("existing")
+
+
+@pytest.mark.parametrize("failure", [OSError("runtime unavailable"), subprocess.TimeoutExpired("inspect", 5)])
+def test_inspect_runtime_propagates_runtime_failures(monkeypatch, failure):
+    backend = _backend_for_inspect_tests()
+
+    def failed(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr("subprocess.run", failed)
+    with pytest.raises(RuntimeError):
+        backend.inspect_runtime("existing")
+
+
+def test_batch_inspect_keeps_present_generations_with_exact_partial_absence(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    entry = {"Name": "/sandbox-existing", "Id": "immutable-generation"}
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout=json.dumps([entry]), stderr="Error: No such object: sandbox-missing", returncode=1))
+
+    inspections = backend._batch_inspect(["sandbox-existing", "sandbox-missing"], strict=True)
+
+    assert list(inspections) == ["sandbox-existing"]
+    assert inspections["sandbox-existing"].container_id == "immutable-generation"
+
+
+def test_batch_inspect_does_not_accept_absence_of_an_unrequested_resource(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout="[]", stderr="Error: No such object: sandbox-other", returncode=1))
+
+    with pytest.raises(RuntimeError):
+        backend._batch_inspect(["sandbox-existing"], strict=True)
+
+
 def test_stop_container_passes_a_timeout(monkeypatch):
     """An unbounded `stop` can outlive the teardown lease that guards it.
 
@@ -2148,6 +2585,43 @@ def test_stop_container_passes_a_timeout(monkeypatch):
     backend._stop_container("sandbox-slow")
 
     assert seen.get("timeout") == backend._STOP_TIMEOUT_SECONDS
+
+
+def test_failed_stop_is_not_reported_as_destroyed(monkeypatch):
+    backend = _backend_for_inspect_tests()
+
+    def denied(cmd, **_kwargs):
+        raise subprocess.CalledProcessError(1, cmd, stderr="daemon denied stop")
+
+    monkeypatch.setattr("subprocess.run", denied)
+    with pytest.raises(subprocess.CalledProcessError):
+        backend.destroy(SandboxInfo("sandbox", "http://localhost:18080", container_id="generation"))
+
+
+def test_docker_discovery_preserves_runtime_generation(monkeypatch):
+    import json
+
+    import requests
+
+    backend = _backend_for_inspect_tests()
+    payload = [
+        {
+            "Id": "docker-generation",
+            "Name": "/sandbox-existing",
+            "Config": {"Image": "sandbox:latest", "Labels": {"deerflow.role": "sandbox", "deerflow.sandbox_id": "existing", "deerflow.network_mode": "open"}},
+            "NetworkSettings": {"Ports": {"8080/tcp": [{"HostPort": "18080"}]}},
+        }
+    ]
+
+    def runtime(cmd, **_kwargs):
+        return SimpleNamespace(returncode=0, stdout="true" if "-f" in cmd else json.dumps(payload), stderr="")
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    monkeypatch.setattr(requests.Session, "get", lambda *_args, **_kwargs: SimpleNamespace(status_code=200))
+
+    info = backend.discover("existing")
+    assert info is not None
+    assert info.container_id == "docker-generation"
 
 
 def test_stop_container_propagates_a_timeout_instead_of_reporting_success(monkeypatch):
@@ -2754,11 +3228,7 @@ def _destroy_probe(monkeypatch, backend, *, containers: set[str], networks: set[
             return SimpleNamespace(stdout="id\n", stderr="", returncode=0) if name in containers else SimpleNamespace(stdout="", stderr=f"Error: No such object: {name}", returncode=1)
         if verb == "network" and cmd[2] == "inspect":
             name = cmd[3]
-            return (
-                SimpleNamespace(stdout='[{"Driver":"bridge","Internal":true,"Labels":{},"Options":{}}]', stderr="", returncode=0)
-                if name in networks
-                else SimpleNamespace(stdout="", stderr=f"Error: No such network: {name} not found", returncode=1)
-            )
+            return SimpleNamespace(stdout='[{"Driver":"bridge","Internal":true,"Labels":{},"Options":{}}]', stderr="", returncode=0) if name in networks else SimpleNamespace(stdout="", stderr=f"Error: No such network: {name}", returncode=1)
         if verb == "stop":
             # `docker stop` carries a grace flag before the name; the name is last.
             name = cmd[-1]
@@ -2994,3 +3464,64 @@ def test_the_owner_is_not_part_of_a_restricted_sandbox_s_identity_labels():
     backend = _restricted_backend()
 
     assert set(backend._restricted_labels("x", "sandbox")) == {"deerflow.sandbox_id", "deerflow.role", "deerflow.network_mode", "deerflow.network_policy_digest"}
+
+
+def test_docker_subprocess_calls_pin_utf8_decoding(monkeypatch):
+    """Locale-default text decoding silently loses docker CLI output on hosts
+    whose ANSI code page is not UTF-8 (e.g. cp936 Chinese Windows): the decode
+    error surfaces inside subprocess's reader thread, so ``stdout``/``stderr``
+    come back ``None``, and JSON-parsing call sites either crash on ``None``
+    or silently mis-parse. Every text-mode call in this module must therefore
+    pin ``encoding="utf-8"`` with ``errors="replace"``.
+    """
+    seen: list[dict] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(stdout='"Debian GNU/Linux 15"\n', stderr="", returncode=0)
+
+    _docker_server_is_desktop.cache_clear()
+    monkeypatch.setattr("subprocess.run", fake_run)
+    try:
+        backend = LocalContainerBackend(
+            image="sandbox:latest",
+            base_port=8080,
+            container_prefix="sandbox",
+            config_mounts=[],
+            environment={},
+        )
+        assert backend._docker_server_is_desktop() is False
+    finally:
+        _docker_server_is_desktop.cache_clear()
+
+    assert seen, "expected the docker detection path to shell out"
+    for kwargs in seen:
+        assert kwargs.get("encoding") == "utf-8", kwargs
+        assert kwargs.get("errors") == "replace", kwargs
+
+
+def test_every_text_mode_subprocess_call_pins_utf8():
+    """Check each text-mode subprocess call's encoding and error handling.
+
+    A text-mode call without ``encoding=`` decodes with the platform's
+    preferred encoding, which loses output entirely on non-UTF-8 locales.
+    ``errors="replace"`` also keeps malformed bytes from discarding a stream.
+    """
+    source = Path(local_backend_module.__file__).read_text(encoding="utf-8")
+
+    def runs_a_child(node):
+        # subprocess.run directly, or HartMesh's self._run (the deadline-bounded wrapper).
+        func = node.func
+        return isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and ((func.value.id == "subprocess" and func.attr == "run") or (func.value.id == "self" and func.attr == "_run"))
+
+    calls = [node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call) and runs_a_child(node)]
+    assert calls, "expected subprocess.run calls in the local backend"
+    assert any(isinstance(call.func.value, ast.Name) and call.func.value.id == "self" for call in calls), "expected self._run calls in the local backend"
+    for call in calls:
+        keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+        text_mode = keywords.get("text")
+        if not isinstance(text_mode, ast.Constant) or text_mode.value is not True:
+            continue
+        for name, expected in (("encoding", "utf-8"), ("errors", "replace")):
+            value = keywords.get(name)
+            assert isinstance(value, ast.Constant) and value.value == expected, f"line {call.lineno}: text-mode subprocess.run must pass {name}={expected!r}"

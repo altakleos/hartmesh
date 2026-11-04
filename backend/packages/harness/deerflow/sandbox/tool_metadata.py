@@ -2,7 +2,7 @@
 
 The tag is *written* where the sandbox tools are defined (``tools.py``) and
 *read* by policy that orders sandbox work, such as a skill's ``first-command``
-(``SkillToolPolicyMiddleware``). Readers ask the tool, not a list of names, so
+(``SkillLoadOrderMiddleware``). Readers ask the tool, not a list of names, so
 a sandbox tool added later is covered from the moment it is tagged.
 
 A leaf module like ``deerflow.tools.mcp_metadata``: it imports nothing from the

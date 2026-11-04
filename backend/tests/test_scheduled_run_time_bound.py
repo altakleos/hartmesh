@@ -593,3 +593,65 @@ async def test_pending_retirement_blocks_same_thread_despite_reversed_admission_
         await session.commit()
     assert later not in {row["id"] for row in await stores.occurrences.list_queued_runs(limit=10)}
     assert await stores.occurrences.claim_queued_run(later, lease_owner="peer", now=now, lease_seconds=120, global_max_concurrent_runs=2) is None
+
+
+# ── Reconciliation skips what a local worker still owns ───────────────────
+
+
+def test_reconciliation_skips_an_occurrence_whose_local_worker_is_unwinding(stores):
+    """The durable run can read terminal before the worker releases its sandbox.
+
+    Upstream's terminal-run reconciliation must not finalize that occurrence
+    from the durable status while this process's worker task is still running;
+    the worker's own completion callback ends it.
+    """
+
+    async def scenario():
+        now = datetime.now(UTC)
+        _task_id, live_occurrence, live_run = await _running_occurrence(stores, started_at=now - timedelta(seconds=30))
+        _other_task, done_occurrence, done_run = await _running_occurrence(stores, started_at=now - timedelta(seconds=30))
+        unwinding = asyncio.get_running_loop().create_future()
+        finished = asyncio.get_running_loop().create_future()
+        finished.set_result(None)
+        workers = {live_run: unwinding, done_run: finished}
+
+        async def get_run_task(run_id):
+            return workers.get(run_id)
+
+        service = _service(stores, get_run_task=get_run_task, stop_run=None)
+        try:
+            assert await service._locally_unwinding_task_run_ids(now=now) == frozenset({live_occurrence})
+        finally:
+            unwinding.cancel()
+        assert done_occurrence not in await service._locally_unwinding_task_run_ids(now=now)
+
+    asyncio.run(scenario())
+
+
+def test_reconciliation_skip_set_is_empty_without_local_run_tasks(stores):
+    async def scenario():
+        now = datetime.now(UTC)
+        await _running_occurrence(stores, started_at=now - timedelta(seconds=30))
+        assert await _service(stores)._locally_unwinding_task_run_ids(now=now) == frozenset()
+
+    asyncio.run(scenario())
+
+
+def test_run_once_passes_the_skip_set_to_reconciliation(stores, monkeypatch):
+    async def scenario():
+        service = _service(stores, max_run_seconds=None)
+        seen = []
+
+        async def reconcile(*, now, skip_task_run_ids=frozenset(), **_kwargs):
+            seen.append(skip_task_run_ids)
+            return 0
+
+        async def owned(*, now):
+            return frozenset({"occurrence-held-here"})
+
+        monkeypatch.setattr(service._task_repo, "reconcile_terminal_runs", reconcile)
+        monkeypatch.setattr(service, "_locally_unwinding_task_run_ids", owned)
+        await service.run_once(now=datetime.now(UTC))
+        assert seen == [frozenset({"occurrence-held-here"})]
+
+    asyncio.run(scenario())

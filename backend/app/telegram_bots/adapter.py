@@ -27,7 +27,7 @@ from telegram.error import BadRequest, Forbidden, InvalidToken, NetworkError, Re
 from telegram.ext import AIORateLimiter, Application, ApplicationHandlerStop, CallbackQueryHandler, ChatMemberHandler, CommandHandler, Defaults, ExtBot, ManagedBotUpdatedHandler, MessageHandler, TypeHandler, filters
 
 from app.channels.execution import ChannelExecutionContext
-from app.channels.inbound_files import InboundFileLease, saved_file_key
+from app.channels.inbound_leases import InboundFileLease, saved_file_key
 from app.channels.telegram import TelegramChannel
 from app.telegram_bots.capped_download import ManagedHTTPXRequest
 from app.telegram_bots.render import render, render_plain

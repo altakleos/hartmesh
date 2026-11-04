@@ -5,7 +5,7 @@ directory and the words that follow it::
 
     first-command: scripts/report.py build
 
-``SkillToolPolicyMiddleware`` then runs nothing else in the sandbox between the
+``SkillLoadOrderMiddleware`` then runs nothing else in the sandbox between the
 message that first loads the skill and a run of that command. A skill declares
 one only when its instructions start every piece of work with that command,
 because the command itself reads what it needs (for business-report, the build

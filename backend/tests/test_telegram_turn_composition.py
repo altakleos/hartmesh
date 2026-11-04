@@ -30,7 +30,7 @@ from test_telegram_supervisor import build
 
 from app.channels.manager import ChannelManager
 from app.channels.message_bus import InboundMessage
-from app.channels.store import ChannelStore
+from app.channels.store import JsonChannelStore
 from app.gateway import chat_storage, services
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.csrf_middleware import CSRFMiddleware
@@ -252,7 +252,7 @@ async def test_actual_managed_turn_creates_once_and_delivers_only_verified_outpu
             supervisor.outbox.clock = boot.clock.now
         supervisor.app, supervisor.authority, supervisor._app_config = app, live.authority, configured
         supervisor.thread_client = owner
-        channel_store = await asyncio.to_thread(ChannelStore, str(tmp_path / "manager.json"))
+        channel_store = await asyncio.to_thread(JsonChannelStore, str(tmp_path / "manager.json"))
         manager = ChannelManager(boot.service.bus, channel_store, connection_repo=db.connections, langgraph_url="http://gateway.test/api", gateway_url=owner.gateway_url, max_concurrency=1)
         boot.service.manager = manager
         final, model_entered, model_release = asyncio.Event(), asyncio.Event(), asyncio.Event()

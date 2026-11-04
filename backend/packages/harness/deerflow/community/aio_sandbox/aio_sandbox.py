@@ -1,6 +1,5 @@
 import base64
 import contextlib
-import errno
 import logging
 import math
 import posixpath
@@ -16,6 +15,8 @@ from agent_sandbox.core.api_error import ApiError
 from pydantic import ValidationError
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
+from deerflow.sandbox.download import download_limit, read_download_stream
 from deerflow.sandbox.remote_list_dir import (
     parse_remote_list_dir_output,
     remote_list_dir_command,
@@ -29,7 +30,7 @@ from deerflow.sandbox.sandbox import (
 from deerflow.sandbox.search import (
     GrepMatch,
     path_matches,
-    should_ignore_path,
+    should_ignore_path_under_root,
     truncate_line,
 )
 
@@ -37,9 +38,15 @@ from .backend import sandbox_http_trust_env
 
 logger = logging.getLogger(__name__)
 
-_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
-
 _ERROR_OBSERVATION_SIGNATURE = "'ErrorObservation' object has no attribute 'exit_code'"
+
+
+class _StoppedByAbort(str):
+    """Output ``_exec_shell`` returns when this sandbox's own abort ended the command."""
+
+
+#: The command did not fail: HartMesh's per-call abort ended it on purpose.
+_STOPPED_BY_ABORT = _StoppedByAbort("Error: command cancelled")
 
 # How many aborted calls a sandbox remembers. The memory only has to outlive
 # the command each abort was aimed at; nothing here can see a tool call end, so
@@ -205,6 +212,7 @@ class AioSandbox(Sandbox):
         default_command_timeout: float | None = None,
         control_transport: httpx.BaseTransport | None = None,
         download_roots: tuple[str, ...] | None = None,
+        lark_cli_broker: bool | None = None,
     ):
         """Initialize the AIO sandbox.
 
@@ -216,6 +224,11 @@ class AioSandbox(Sandbox):
                 relay. These are never injected into sandbox commands.
             default_command_timeout: Provider-configured command deadline used
                 when a command does not provide an explicit timeout.
+            lark_cli_broker: Pod-attested Lark broker mode. ``True``/``False``
+                are attested states; the ``None`` default keeps an unattested
+                sandbox fail-closed, so a construction site that forgets to
+                thread the attested value cannot silently authorize the
+                plaintext credential-mount overlay.
         """
         super().__init__(id)
         if download_roots is not None and (
@@ -225,6 +238,7 @@ class AioSandbox(Sandbox):
         ):
             raise ValueError("Download roots must be bounded canonical absolute directories")
         self._download_roots = download_roots or (VIRTUAL_PATH_PREFIX,)
+        self.lark_cli_broker = lark_cli_broker
         if default_command_timeout is None:
             self._default_command_timeout = self._DEFAULT_HARD_TIMEOUT
         else:
@@ -411,7 +425,7 @@ class AioSandbox(Sandbox):
         *,
         context: str,
         request_options: dict[str, int] | None = None,
-    ) -> None:
+    ) -> bool:
         try:
             client.shell.cleanup_session(
                 session_id,
@@ -425,6 +439,8 @@ class AioSandbox(Sandbox):
                 context,
                 cleanup_error,
             )
+            return False
+        return True
 
     @staticmethod
     def _format_shell_result(result) -> tuple[str, int | None, str | None]:
@@ -507,11 +523,24 @@ class AioSandbox(Sandbox):
         return self._execution_outcome_uncertain.is_set()
 
     @property
+    def has_pending_session_creates(self) -> bool:
+        """Whether a shell/bash create still needs its outcome reconciled."""
+        with self._session_creation_state_lock:
+            return bool(self._shell_session_creation_state.pending or self._bash_session_creation_state.pending)
+
+    @property
     def requires_container_recycle(self) -> bool:
         with self._session_creation_state_lock:
             shell = self._shell_session_creation_state
             bash = self._bash_session_creation_state
-            return bool(shell.pending or shell.ambiguous or bash.pending or bash.ambiguous)
+            # The implicit shell cannot be cleaned up by a known session id.
+            # Its fence must outlive this client, including release/reclaim.
+            # Pending creations are transient in-flight requests, not uncertain
+            # outcomes: an unresolved create becomes an ambiguous tombstone
+            # before its execution lease ends. Fencing on pending let a
+            # concurrent acquire recycle a healthy container that another run
+            # was actively using.
+            return bool(self._default_shell_corrupted or shell.ambiguous or bash.ambiguous)
 
     def _create_shell_session(self, client) -> str:
         session_id = str(uuid.uuid4())
@@ -623,19 +652,19 @@ class AioSandbox(Sandbox):
                 while getattr(getattr(result, "data", None), "status", None) == "running":
                     accepted = True
                     if inflight.aborted:
-                        return "Error: command cancelled", None, "terminated"
+                        return _STOPPED_BY_ABORT, None, "terminated"
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise httpx.ReadTimeout("AIO shell command response deadline exceeded")
                     options = {"timeout_in_seconds": min(2, remaining), "max_retries": 0}
                     client.shell.wait_for_process(id=session_id, max_wait_seconds=1, request_options=options)
                     if inflight.aborted:
-                        return "Error: command cancelled", None, "terminated"
+                        return _STOPPED_BY_ABORT, None, "terminated"
                     result = client.shell.view(id=session_id, request_options=options)
                     viewed = True
             except ApiError as error:
                 if inflight.aborted:
-                    return "Error: command cancelled", None, "terminated"
+                    return _STOPPED_BY_ABORT, None, "terminated"
                 if accepted:
                     # An accepted command may have already changed files. Route
                     # lost polling responses through the no-replay transport
@@ -643,7 +672,7 @@ class AioSandbox(Sandbox):
                     raise httpx.ReadError("AIO accepted command outcome is unknown after polling failed") from error
                 raise
             if inflight.aborted:
-                return "Error: command cancelled", None, "terminated"
+                return _STOPPED_BY_ABORT, None, "terminated"
         with self._abort_state_lock():
             self._remember_session_token(session_id, token)
         if viewed:
@@ -1303,7 +1332,14 @@ class AioSandbox(Sandbox):
                 if self._is_session_invalidating_shell_status(status):
                     session_id = self._recovery_session_id
                     self._recovery_session_id = None
-                    self._default_shell_corrupted = True
+                    # HartMesh's default shell has an explicit session id, so a
+                    # session that its own per-call abort ended is replaced on
+                    # the next command, as a scoped session is. Upstream fences
+                    # it because its implicit shell cannot be cleaned up by id;
+                    # here that fence is kept only for a cleanup that failed.
+                    stopped = status == "terminated" and isinstance(output, _StoppedByAbort)
+                    if not stopped:
+                        self._default_shell_corrupted = True
                     if session_id is not None:
                         if status == "terminated":
                             cleanup_context = "default shell after terminal session loss"
@@ -1311,12 +1347,14 @@ class AioSandbox(Sandbox):
                             cleanup_context = "default shell after ambiguous no-change timeout"
                         else:
                             cleanup_context = "default shell after unexpected status"
-                        self._cleanup_session_best_effort(
+                        cleaned = self._cleanup_session_best_effort(
                             client,
                             session_id,
                             context=cleanup_context,
                             request_options=self._bounded_cleanup_request_options(),
                         )
+                        if stopped and not cleaned:
+                            self._default_shell_corrupted = True
 
                 return self._render_shell_output(
                     output,
@@ -1502,7 +1540,7 @@ class AioSandbox(Sandbox):
             logger.error(f"Failed to read file in sandbox: {e}")
             return f"Error: {e}"
 
-    def download_file(self, path: str) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
         """Download file bytes from the sandbox.
 
         Raises:
@@ -1510,6 +1548,7 @@ class AioSandbox(Sandbox):
                 outside ``VIRTUAL_PATH_PREFIX``.
             OSError: If the file cannot be retrieved from the sandbox.
         """
+        limit = download_limit(max_bytes, _MAX_DOWNLOAD_SIZE)
         # Reject path traversal before sending to the container API.
         # LocalSandbox gets this implicitly via _resolve_path;
         # here the path is forwarded verbatim so we must check explicitly.
@@ -1525,20 +1564,14 @@ class AioSandbox(Sandbox):
             logger.error("Refused download outside allowed directory: path=%s, allowed_roots=%s", path, allowed_roots)
             raise PermissionError(f"Access denied: path must be under an admitted download root: '{path}'")
 
+        # Keep the lock through iteration and stream cleanup: the SDK iterator
+        # opens its HTTP response lazily, and close() detaches this client under
+        # the same lock before closing its pooled connections. Request-level
+        # concurrency does not make a download safe against concurrent close.
         with self._lock:
             try:
-                chunks: list[bytes] = []
-                total = 0
-                for chunk in self._client.file.download_file(path=path):
-                    total += len(chunk)
-                    if total > _MAX_DOWNLOAD_SIZE:
-                        raise OSError(
-                            errno.EFBIG,
-                            f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes",
-                            path,
-                        )
-                    chunks.append(chunk)
-                return b"".join(chunks)
+                stream = self._client.file.download_file(path=path)
+                return read_download_stream(stream, limit, path)
             except OSError:
                 raise
             except Exception as e:
@@ -1654,22 +1687,22 @@ class AioSandbox(Sandbox):
                 raise
 
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
+        root_path = path.rstrip("/") or "/"
         if not include_dirs:
             result = self._client.file.find_files(path=path, glob=pattern)
             files = result.data.files if result.data and result.data.files else []
-            filtered = [file_path for file_path in files if not should_ignore_path(file_path)]
+            filtered = [file_path for file_path in files if not should_ignore_path_under_root(file_path, root_path)]
             truncated = len(filtered) > max_results
             return filtered[:max_results], truncated
 
         result = self._client.file.list_path(path=path, recursive=True, show_hidden=False)
         entries = result.data.files if result.data and result.data.files else []
         matches: list[str] = []
-        root_path = path.rstrip("/") or "/"
         root_prefix = root_path if root_path == "/" else f"{root_path}/"
         for entry in entries:
             if entry.path != root_path and not entry.path.startswith(root_prefix):
                 continue
-            if should_ignore_path(entry.path):
+            if should_ignore_path_under_root(entry.path, root_path):
                 continue
             rel_path = entry.path[len(root_path) :].lstrip("/")
             if path_matches(pattern, rel_path):
@@ -1721,7 +1754,7 @@ class AioSandbox(Sandbox):
         truncated = bool(data and data.truncated)
         for match in provider_matches:
             file_path = match.file
-            if should_ignore_path(file_path):
+            if should_ignore_path_under_root(file_path, root):
                 continue
             if file_path == root:
                 rel_path = file_path.rsplit("/", 1)[-1]

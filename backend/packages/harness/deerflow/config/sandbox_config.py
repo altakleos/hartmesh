@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
+from deerflow.config._boolean_guards import reject_boolean
+
 SandboxOwnershipType = Literal["memory", "redis"]
 SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
 SandboxNetworkMode = Literal["open", "isolated", "allowlist"]
@@ -14,6 +16,20 @@ SandboxNetworkApproval = Literal["deny", "prompt"]
 # Reserving half the signed range for that timestamp keeps accepted TTLs usable
 # without making config validation depend on the current clock.
 _REDIS_MAX_SAFE_TTL_MILLISECONDS = (2**63 - 1) // 2
+
+
+def normalize_container_path(value: str) -> str:
+    """Strip trailing slashes from a container mount/virtual path.
+
+    LocalSandboxProvider normalizes when building path mappings, but the tool
+    path gates compare the configured value as-is; one spelling at config load
+    keeps both layers in agreement. An empty result (the container root or a
+    blank value) cannot be expressed in the gates and is rejected instead.
+    """
+    normalized = value.rstrip("/")
+    if not normalized:
+        raise ValueError("container_path must be a non-empty mount point below the container root")
+    return normalized
 
 
 class SandboxNetworkConfig(BaseModel):
@@ -40,10 +56,8 @@ class SandboxNetworkConfig(BaseModel):
 
     @field_validator("temporary_grant_ttl", mode="before")
     @classmethod
-    def _reject_boolean_temporary_grant_ttl(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("must be an integer, not a boolean")
-        return value
+    def _reject_boolean_temporary_grant_ttl(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
 
     proxy_image: str = Field(
         default="ghcr.io/bytedance/deer-flow-sandbox-network-proxy:latest",
@@ -124,10 +138,8 @@ class SandboxOwnershipConfig(BaseModel):
 
     @field_validator("renewal_interval_seconds", "ttl_multiplier", mode="before")
     @classmethod
-    def _reject_boolean_ownership_settings(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("must be a number, not a boolean")
-        return value
+    def _reject_boolean_ownership_settings(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="a number")
 
     key_prefix: str = Field(
         default="deerflow:sandbox:owner",
@@ -168,6 +180,13 @@ class VolumeMountConfig(BaseModel):
     container_path: str = Field(..., description="Path inside the container")
     read_only: bool = Field(default=False, description="Whether the mount is read-only")
 
+    @field_validator("container_path")
+    @classmethod
+    def _normalize_container_path(cls, value: str) -> str:
+        # Keep a natural "/mnt/reports/" spelling from producing a mount the
+        # tool gates reject with a confusing PermissionError.
+        return normalize_container_path(value)
+
 
 class SandboxConfig(BaseModel):
     """Config section for a sandbox.
@@ -177,7 +196,8 @@ class SandboxConfig(BaseModel):
         allow_host_bash: Enable host-side bash execution for LocalSandboxProvider.
             Dangerous and intended only for fully trusted local workflows.
 
-    AioSandboxProvider, BoxliteProvider, E2BSandboxProvider, and OpenSandboxProvider shared options:
+    AioSandboxProvider, BoxliteProvider, E2BSandboxProvider, OpenSandboxProvider, and
+    LocalSandboxProvider shared options:
         image: Sandbox image to use (Docker/AIO, BoxLite OCI, or OpenSandbox image)
         replicas: Positive provider capacity. E2B shares it across Gateway
             workers when ownership uses Redis; other modes/providers keep
@@ -192,7 +212,11 @@ class SandboxConfig(BaseModel):
             (SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT); OpenSandboxProvider defaults
             to 30. A finite number greater than 0 and at most 3600; anything
             else refuses to load. There is no value that disables the deadline.
-        environment: Environment variables to inject into the sandbox (values starting with $ are resolved from host env)
+        environment: Environment variables to inject into the sandbox (values starting with $ are
+            resolved from host env when config is loaded; providers use them verbatim). Injected
+            entries bypass the env-policy scrubber as operator-authorized values;
+            LocalSandboxProvider masks injected credentials from bash tool output and command
+            errors while preserving benign configuration values.
 
     BoxliteProvider specific options:
         health_check_skip_seconds: Optional reclaim-time skip window in seconds for recently released warm VMs. Default behavior is 0.0 = always validate before reuse.
@@ -222,6 +246,15 @@ class SandboxConfig(BaseModel):
     allow_host_bash: bool = Field(
         default=False,
         description="Allow the bash tool to execute directly on the host when using LocalSandboxProvider. Dangerous; intended only for fully trusted local environments.",
+    )
+    prewarm: bool = Field(
+        default=False,
+        description=("Start an AioSandboxProvider acquire in parallel with the first model call when the user input contains a strong sandbox-use signal. Disabled by default; ignored by other sandbox providers."),
+    )
+    prewarm_max_concurrent: int = Field(
+        default=1,
+        ge=1,
+        description=("Maximum pending or ready-but-unused AIO prewarms per provider instance in this process. When full, skip speculation without delaying foreground tools. This is not a total container or deployment-wide limit."),
     )
     image: str | None = Field(
         default=None,
@@ -277,6 +310,7 @@ class SandboxConfig(BaseModel):
     )
 
     @field_validator(
+        "prewarm_max_concurrent",
         "port",
         "replicas",
         "acquire_timeout",
@@ -290,10 +324,8 @@ class SandboxConfig(BaseModel):
         mode="before",
     )
     @classmethod
-    def _reject_boolean_numeric_settings(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("must be a number, not a boolean")
-        return value
+    def _reject_boolean_numeric_settings(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="a number")
 
     prewarm_claim_timeout: int | None = Field(
         default=None,
@@ -349,7 +381,7 @@ class SandboxConfig(BaseModel):
     )
     environment: dict[str, str] = Field(
         default_factory=dict,
-        description="Environment variables to inject into the sandbox container. Values starting with $ will be resolved from host environment variables.",
+        description="Environment variables to inject into sandbox commands (including the local provider). Values starting with $ will be resolved from host environment variables when config is loaded.",
     )
     network: SandboxNetworkConfig = Field(
         default_factory=SandboxNetworkConfig,
@@ -380,10 +412,10 @@ class SandboxConfig(BaseModel):
             "(1.9.3+, recommended 1.11.0) enforce it server-side through "
             "`hard_timeout`; the frozen legacy `all-in-one-sandbox:latest` image "
             "only gets the bounded host-side request. `bash_command_timeout` is "
-            "used by providers that explicitly wire this setting (currently "
-            "LocalSandbox, AioSandbox, and OpenSandbox). Other providers retain "
-            "their provider-specific command defaults unless a caller supplies an "
-            "explicit timeout."
+            "forwarded to each provider's command API. LocalSandbox, AioSandbox, "
+            "OpenSandbox, E2B, BoxLite, and Tenki apply it to bash commands; "
+            "providers without per-command timeout support retain their own "
+            "defaults."
         ),
     )
 

@@ -2,7 +2,7 @@
 
 Adds the nullable per-claim token columns ``McpTaskRepository`` uses to fence
 poll, cancel, and notification mutations to the exact claim generation. The
-chain-head pin moved on to ``test_migration_0027_account_access``.
+chain-head pin lives in ``test_migration_chain_head``.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import asyncio
 import pytest
 import sqlalchemy as sa
 from alembic import command
+from alembic.script import ScriptDirectory
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from deerflow.persistence import bootstrap
@@ -24,11 +25,10 @@ TOKEN_COLUMNS = {"lease_token", "notification_lease_token"}
 
 
 async def test_0026_chains_into_the_single_head():
-    from alembic.script import ScriptDirectory
-
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
     assert len(script.get_heads()) == 1
     # Later migrations may advance the head without removing this revision.
+    assert REVISION in {revision.revision for revision in script.walk_revisions()}
     assert script.get_revision(REVISION).down_revision == PREVIOUS
 
 

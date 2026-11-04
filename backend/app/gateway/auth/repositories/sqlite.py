@@ -147,6 +147,7 @@ def _normalize_email(email: str) -> str:
 # Fixed 63-bit key for pg_advisory_xact_lock(bigint); scopes the first-admin
 # claim without colliding with other advisory-lock users in this database.
 _FIRST_ADMIN_LOCK_KEY = int.from_bytes(hashlib.sha256(b"deerflow:auth:first-admin-claim").digest()[:8], "big") & 0x7FFFFFFFFFFFFFFF
+_ROLE_MUTATION_LOCK_KEY = int.from_bytes(hashlib.sha256(b"deerflow:auth:role-mutation").digest()[:8], "big") & 0x7FFFFFFFFFFFFFFF
 
 
 class NoSeatLeft(Exception):
@@ -420,6 +421,23 @@ class SQLiteUserRepository(UserRepository):
             result = await session.execute(stmt)
             return await self._load(session, result.scalars().first())
 
+    @staticmethod
+    async def _serialize_account_role_mutation(session: AsyncSession) -> None:
+        """Serialize role mutations before the admin count is read.
+
+        Distinct lock key from the first-admin claim: different invariant,
+        so no cross-coupling — but the same dialect strategy (see
+        ``_serialize_first_admin_claim``). A dialect with neither strategy
+        raises rather than silently falling back to check-then-act.
+        """
+        dialect = session.get_bind().dialect.name
+        if dialect == "sqlite":
+            await session.execute(text("BEGIN IMMEDIATE"))
+        elif dialect == "postgresql":
+            await session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": _ROLE_MUTATION_LOCK_KEY})
+        else:
+            raise RuntimeError(f"no role-mutation serialization strategy for dialect {dialect!r}")
+
     async def update_user(self, user: User) -> User:
         async with self._sf() as session:
             if session.get_bind().dialect.name == "sqlite":
@@ -454,7 +472,11 @@ class SQLiteUserRepository(UserRepository):
                 row.email = canonical_email
             user.email = row.email
             row.password_hash = user.password_hash
-            row.system_role = user.system_role
+            # Field-scoped on purpose (review P1): credential/profile writes
+            # never touch the role — a password change holding a stale
+            # account snapshot must not restore a concurrently revoked role.
+            # HartMesh writes roles only through targeted sign-in and role-limit writes.
+            user.system_role = row.system_role
             row.oauth_provider = user.oauth_provider
             row.oauth_id = user.oauth_id
             row.oauth_issuer = user.oauth_issuer

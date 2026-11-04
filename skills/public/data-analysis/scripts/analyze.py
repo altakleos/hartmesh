@@ -20,6 +20,7 @@ import os
 import re
 import sys
 import tempfile
+from collections import Counter
 from collections.abc import Mapping
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -54,7 +55,9 @@ CACHE_ENTRIES_KEPT = 3
 EXCEL_EXTENSIONS = (".xlsx", ".xlsm", ".xls")
 
 
-def resolve_cache_dir(env: Mapping[str, str] | None = None, workspace_dir: str = DEFAULT_WORKSPACE_DIR) -> str:
+def resolve_cache_dir(
+    env: Mapping[str, str] | None = None, workspace_dir: str = DEFAULT_WORKSPACE_DIR
+) -> str:
     """Pick the cache directory: explicit override, else the chat workspace, else the temp dir."""
     env = os.environ if env is None else env
     override = env.get(CACHE_DIR_ENV)
@@ -69,16 +72,26 @@ CACHE_DIR = resolve_cache_dir()
 
 
 def compute_files_hash(files: list[str]) -> str:
-    """Compute a combined SHA256 hash of all input files for cache key."""
-    hasher = hashlib.sha256()
-    for file_path in sorted(files):
+    """Hash the ordered names and contents that determine the loaded table map."""
+    # A new namespace also prevents reuse of maps built by the old allocator.
+    hasher = hashlib.sha256(b"data-analysis-inputs-v2\0")
+    for file_path in files:
+        name = os.fsencode(os.path.basename(file_path))
+        hasher.update(len(name).to_bytes(8, "big"))
+        hasher.update(name)
+        file_hasher = hashlib.sha256()
         try:
             with open(file_path, "rb") as f:
                 while chunk := f.read(8192):
-                    hasher.update(chunk)
+                    file_hasher.update(chunk)
         except OSError:
-            # Include path as fallback if file can't be read
-            hasher.update(file_path.encode())
+            # Keep unreadable paths distinct, including POSIX surrogate escapes.
+            hasher.update(b"missing\0")
+            file_hasher = hashlib.sha256(os.fsencode(file_path))
+        else:
+            hasher.update(b"readable\0")
+        # Fixed-width digests preserve file boundaries, even for empty files.
+        hasher.update(file_hasher.digest())
     return hasher.hexdigest()
 
 
@@ -172,7 +185,9 @@ def open_cache(files: list[str]) -> tuple[duckdb.DuckDBPyConnection, dict[str, s
                 logger.warning(f"Cached database unusable ({e}); rebuilding it")
             else:
                 logger.info(f"Cache hit! Using cached database: {db_path}")
-                logger.info(f"Loaded {len(cached_table_map)} table(s) from cache: {', '.join(cached_table_map.keys())}")
+                logger.info(
+                    f"Loaded {len(cached_table_map)} table(s) from cache: {', '.join(cached_table_map.keys())}"
+                )
                 return con, cached_table_map
         discard_cache_entry(files_hash)
         con = duckdb.connect(db_path)
@@ -206,21 +221,30 @@ def sanitize_table_name(name: str) -> str:
     return sanitized
 
 
-def _unique_table_name(table_name: str, table_map: dict[str, str]) -> str:
-    """Suffix a table name until it no longer collides with an already loaded table."""
-    original_table_name = table_name
+def _quote_identifier(name: str) -> str:
+    """Quote a SQL identifier, including embedded double quotes."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _allocate_table_names(name: str, table_map: dict[str, str]) -> tuple[str, str]:
+    """Keep lookup aliases and SQL names unique, including case-only collisions."""
+    reserved = {n.casefold() for n in (*table_map.keys(), *table_map.values())}
+    base = sanitize_table_name(name)
+    table_name = base
     counter = 1
-    while table_name in table_map.values():
-        table_name = f"{original_table_name}_{counter}"
+    while table_name.casefold() in reserved:
+        table_name = f"{base}_{counter}"
         counter += 1
-    return table_name
+    # An original name must never redirect an earlier canonical SQL name.
+    alias = table_name if name.casefold() in reserved else name
+    return alias, table_name
 
 
 def load_files(con: duckdb.DuckDBPyConnection, files: list[str]) -> dict[str, str]:
     """
     Load Excel/CSV files into DuckDB tables.
 
-    Returns a mapping of original_name -> sanitized_table_name.
+    Returns unique lookup aliases mapped to their canonical SQL table names.
     """
     table_map: dict[str, str] = {}
 
@@ -263,16 +287,18 @@ def _load_excel(
             logger.warning(f"  Skipped empty sheet '{sheet_name}'")
             continue
 
-        table_name = _unique_table_name(sanitize_table_name(sheet_name), table_map)
+        alias, table_name = _allocate_table_names(sheet_name, table_map)
 
         try:
             con.register("sheet_source", frame)
-            con.execute(f'CREATE TABLE "{table_name}" AS SELECT * FROM sheet_source')
+            con.execute(
+                f"CREATE TABLE {_quote_identifier(table_name)} AS SELECT * FROM sheet_source"
+            )
             con.unregister("sheet_source")
-            table_map[sheet_name] = table_name
-            row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[
-                0
-            ]
+            table_map[alias] = table_name
+            row_count = con.execute(
+                f"SELECT COUNT(*) FROM {_quote_identifier(table_name)}"
+            ).fetchone()[0]
             logger.info(
                 f"  Loaded sheet '{sheet_name}' -> table '{table_name}' ({row_count} rows)"
             )
@@ -285,18 +311,20 @@ def _load_csv(
 ) -> None:
     """Load a CSV file into a DuckDB table."""
     base_name = os.path.splitext(os.path.basename(file_path))[0]
-    table_name = _unique_table_name(sanitize_table_name(base_name), table_map)
-    quoted_path = file_path.replace("'", "''")
+    alias, table_name = _allocate_table_names(base_name, table_map)
 
     try:
         con.execute(
             f"""
-            CREATE TABLE "{table_name}" AS
-            SELECT * FROM read_csv_auto('{quoted_path}')
-        """
+            CREATE TABLE {_quote_identifier(table_name)} AS
+            SELECT * FROM read_csv_auto(?)
+        """,
+            [file_path],
         )
-        table_map[base_name] = table_name
-        row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+        table_map[alias] = table_name
+        row_count = con.execute(
+            f"SELECT COUNT(*) FROM {_quote_identifier(table_name)}"
+        ).fetchone()[0]
         logger.info(
             f"  Loaded CSV '{base_name}' -> table '{table_name}' ({row_count} rows)"
         )
@@ -314,11 +342,13 @@ def action_inspect(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) ->
         output_parts.append(f"{'=' * 60}")
 
         # Get row count
-        row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+        row_count = con.execute(
+            f"SELECT COUNT(*) FROM {_quote_identifier(table_name)}"
+        ).fetchone()[0]
         output_parts.append(f"Rows: {row_count}")
 
         # Get column info
-        columns = con.execute(f'DESCRIBE "{table_name}"').fetchall()
+        columns = con.execute(f"DESCRIBE {_quote_identifier(table_name)}").fetchall()
         output_parts.append(f"\nColumns ({len(columns)}):")
         output_parts.append(f"{'Name':<30} {'Type':<15} {'Nullable'}")
         output_parts.append(f"{'-' * 30} {'-' * 15} {'-' * 8}")
@@ -330,8 +360,10 @@ def action_inspect(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) ->
         col_names = [col[0] for col in columns]
         non_null_parts = []
         for c in col_names:
-            non_null_parts.append(f'COUNT("{c}") as "{c}"')
-        non_null_sql = f'SELECT {", ".join(non_null_parts)} FROM "{table_name}"'
+            non_null_parts.append(f"COUNT({_quote_identifier(c)})")
+        non_null_sql = (
+            f"SELECT {', '.join(non_null_parts)} FROM {_quote_identifier(table_name)}"
+        )
         try:
             non_null_counts = con.execute(non_null_sql).fetchone()
             output_parts.append("\nNon-null counts:")
@@ -343,10 +375,14 @@ def action_inspect(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) ->
         # Sample data (first 5 rows)
         output_parts.append("\nSample data (first 5 rows):")
         try:
-            sample = con.execute(f'SELECT * FROM "{table_name}" LIMIT 5').fetchdf()
+            sample = con.execute(
+                f"SELECT * FROM {_quote_identifier(table_name)} LIMIT 5"
+            ).fetchdf()
             output_parts.append(sample.to_string(index=False))
         except Exception:
-            sample = con.execute(f'SELECT * FROM "{table_name}" LIMIT 5').fetchall()
+            sample = con.execute(
+                f"SELECT * FROM {_quote_identifier(table_name)} LIMIT 5"
+            ).fetchall()
             header = [col[0] for col in columns]
             output_parts.append("  " + " | ".join(header))
             for row in sample:
@@ -357,6 +393,42 @@ def action_inspect(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) ->
     return result
 
 
+_SQL_SKIPPED_SEGMENT = re.compile(
+    r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|--[^\n]*|/\*.*?\*/", re.S
+)
+_BARE_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _quote_bare_multiword_names(sql: str, names: list[str]) -> str:
+    """Quote bare sheet/file names that are not plain identifiers (``Payments 2026``).
+
+    Only plain SQL text is touched: string literals, quoted identifiers and
+    comments pass through unchanged, so literals and column names keep their
+    meaning. Plain identifiers need no help; their temporary views resolve.
+    """
+    needing = sorted(
+        (name for name in names if not _BARE_IDENTIFIER.fullmatch(name)),
+        key=len,
+        reverse=True,
+    )
+    if not needing:
+        return sql
+    pattern = re.compile(
+        "|".join(rf"(?<![\w\"]){re.escape(name)}(?![\w\"])" for name in needing)
+    )
+
+    def quote(text: str) -> str:
+        return pattern.sub(lambda match: _quote_identifier(match.group(0)), text)
+
+    parts, position = [], 0
+    for segment in _SQL_SKIPPED_SEGMENT.finditer(sql):
+        parts.append(quote(sql[position : segment.start()]))
+        parts.append(segment.group(0))
+        position = segment.end()
+    parts.append(quote(sql[position:]))
+    return "".join(parts)
+
+
 def action_query(
     con: duckdb.DuckDBPyConnection,
     sql: str,
@@ -364,29 +436,22 @@ def action_query(
     output_file: str | None = None,
 ) -> str:
     """Execute a SQL query and return/export results."""
-    # Replace original sheet/file names with sanitized table names in SQL
-    modified_sql = sql
-    for original_name, table_name in sorted(
-        table_map.items(), key=lambda x: len(x[0]), reverse=True
-    ):
-        if original_name != table_name:
-            # A quoted original name (such as "Payments 2026") becomes the quoted
-            # SQL name; a bare one is quoted as it is replaced.
-            modified_sql = modified_sql.replace(f'"{original_name}"', f'"{table_name}"')
-            modified_sql = re.sub(
-                rf'(?<!")\b{re.escape(original_name)}\b(?!")',
-                f'"{table_name}"',
-                modified_sql,
-            )
-
     try:
-        result = con.execute(modified_sql)
+        # Let DuckDB resolve identifiers without rewriting SQL literals, column
+        # names, comments, or CTEs. Temporary views also work on read-only caches.
+        for original_name, table_name in table_map.items():
+            if original_name != table_name:
+                con.execute(
+                    f"CREATE OR REPLACE TEMP VIEW {_quote_identifier(original_name)} "
+                    f"AS SELECT * FROM main.{_quote_identifier(table_name)}"
+                )
+        result = con.execute(_quote_bare_multiword_names(sql, list(table_map)))
         columns = [desc[0] for desc in result.description]
         rows = result.fetchall()
     except Exception as e:
         error_msg = f"SQL Error: {e}\n\nAvailable tables:\n"
         for orig, tbl in table_map.items():
-            cols = con.execute(f'DESCRIBE "{tbl}"').fetchall()
+            cols = con.execute(f"DESCRIBE {_quote_identifier(tbl)}").fetchall()
             col_names = [c[0] for c in cols]
             error_msg += f'  "{tbl}" ({orig}): {", ".join(col_names)}\n'
         print(error_msg)
@@ -435,9 +500,21 @@ def _format_table(columns: list[str], rows: list[tuple]) -> str:
     return result
 
 
+def _markdown_cell(value: object) -> str:
+    """Keep table delimiters and line breaks inside a single Markdown cell."""
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\n", "<br>")
+    )
+
+
 def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> str:
     """Export query results to a file (CSV, JSON, or Markdown)."""
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
     ext = os.path.splitext(output_file)[1].lower()
 
     if ext == ".csv":
@@ -449,6 +526,13 @@ def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> 
             writer.writerows(rows)
 
     elif ext == ".json":
+        duplicates = [name for name, count in Counter(columns).items() if count > 1]
+        if duplicates:
+            raise ValueError(
+                "JSON export requires unique column names; duplicates: "
+                + ", ".join(repr(name) for name in duplicates)
+                + ". Use SQL aliases (AS) to give each result column a distinct name."
+            )
         records = []
         for row in rows:
             record = {}
@@ -461,19 +545,22 @@ def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> 
                     val = val.hex()
                 record[col] = val
             records.append(record)
+        # Reject non-JSON numbers, including nested values, before touching the
+        # destination so a failed export cannot overwrite an existing result.
+        serialized = json.dumps(
+            records, indent=2, ensure_ascii=False, default=str, allow_nan=False
+        )
         with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(records, f, indent=2, ensure_ascii=False, default=str)
+            f.write(serialized)
 
     elif ext == ".md":
         with open(output_file, "w", encoding="utf-8") as f:
             # Header
-            f.write("| " + " | ".join(columns) + " |\n")
+            f.write("| " + " | ".join(_markdown_cell(c) for c in columns) + " |\n")
             f.write("| " + " | ".join("---" for _ in columns) + " |\n")
             # Rows
             for row in rows:
-                f.write(
-                    "| " + " | ".join(str(v).replace("|", "\\|") for v in row) + " |\n"
-                )
+                f.write("| " + " | ".join(_markdown_cell(v) for v in row) + " |\n")
     else:
         msg = f"Unsupported output format: {ext}. Use .csv, .json, or .md"
         print(msg)
@@ -491,17 +578,17 @@ def action_summary(
 ) -> str:
     """Generate statistical summary for a table."""
     # Resolve table name
-    resolved = table_map.get(table_name, table_name)
+    resolved = _quote_identifier(table_map.get(table_name, table_name))
 
     try:
-        columns = con.execute(f'DESCRIBE "{resolved}"').fetchall()
+        columns = con.execute(f"DESCRIBE {resolved}").fetchall()
     except Exception:
         available = ", ".join(f'"{t}" ({o})' for o, t in table_map.items())
         msg = f"Table '{table_name}' not found. Available tables: {available}"
         print(msg)
         return msg
 
-    row_count = con.execute(f'SELECT COUNT(*) FROM "{resolved}"').fetchone()[0]
+    row_count = con.execute(f"SELECT COUNT(*) FROM {resolved}").fetchone()[0]
 
     output_parts = []
     output_parts.append(f"\nStatistical Summary: {table_name}")
@@ -523,6 +610,7 @@ def action_summary(
 
     for col in columns:
         col_name, col_type = col[0], col[1].upper()
+        quoted_col = _quote_identifier(col_name)
         output_parts.append(f"\n--- {col_name} ({col[1]}) ---")
 
         # Check base type (strip parameterized parts)
@@ -532,16 +620,16 @@ def action_summary(
             try:
                 stats = con.execute(f"""
                     SELECT
-                        COUNT("{col_name}") as count,
-                        AVG("{col_name}")::DOUBLE as mean,
-                        STDDEV("{col_name}")::DOUBLE as std,
-                        MIN("{col_name}") as min,
-                        QUANTILE_CONT("{col_name}", 0.25) as q25,
-                        MEDIAN("{col_name}") as median,
-                        QUANTILE_CONT("{col_name}", 0.75) as q75,
-                        MAX("{col_name}") as max,
-                        COUNT(*) - COUNT("{col_name}") as null_count
-                    FROM "{resolved}"
+                        COUNT({quoted_col}) as count,
+                        AVG({quoted_col})::DOUBLE as mean,
+                        STDDEV({quoted_col})::DOUBLE as std,
+                        MIN({quoted_col}) as min,
+                        QUANTILE_CONT({quoted_col}, 0.25) as q25,
+                        MEDIAN({quoted_col}) as median,
+                        QUANTILE_CONT({quoted_col}, 0.75) as q75,
+                        MAX({quoted_col}) as max,
+                        COUNT(*) - COUNT({quoted_col}) as null_count
+                    FROM {resolved}
                 """).fetchone()
                 labels = [
                     "count",
@@ -565,11 +653,11 @@ def action_summary(
             try:
                 stats = con.execute(f"""
                     SELECT
-                        COUNT("{col_name}") as count,
-                        COUNT(DISTINCT "{col_name}") as unique_count,
-                        MODE("{col_name}") as mode_val,
-                        COUNT(*) - COUNT("{col_name}") as null_count
-                    FROM "{resolved}"
+                        COUNT({quoted_col}) as count,
+                        COUNT(DISTINCT {quoted_col}) as unique_count,
+                        MODE({quoted_col}) as mode_val,
+                        COUNT(*) - COUNT({quoted_col}) as null_count
+                    FROM {resolved}
                 """).fetchone()
                 output_parts.append(f"  count   : {stats[0]}")
                 output_parts.append(f"  unique  : {stats[1]}")
@@ -578,10 +666,10 @@ def action_summary(
 
                 # Show top 5 values
                 top_vals = con.execute(f"""
-                    SELECT "{col_name}", COUNT(*) as freq
-                    FROM "{resolved}"
-                    WHERE "{col_name}" IS NOT NULL
-                    GROUP BY "{col_name}"
+                    SELECT {quoted_col}, COUNT(*) as freq
+                    FROM {resolved}
+                    WHERE {quoted_col} IS NOT NULL
+                    GROUP BY {quoted_col}
                     ORDER BY freq DESC
                     LIMIT 5
                 """).fetchall()
@@ -640,15 +728,17 @@ def main():
 
     con, table_map = open_cache(args.files)
 
-    # Perform action
-    if args.action == "inspect":
-        action_inspect(con, table_map)
-    elif args.action == "query":
-        action_query(con, args.sql, table_map, args.output_file)
-    elif args.action == "summary":
-        action_summary(con, args.table, table_map)
-
-    con.close()
+    try:
+        if args.action == "inspect":
+            action_inspect(con, table_map)
+        elif args.action == "query":
+            action_query(con, args.sql, table_map, args.output_file)
+        elif args.action == "summary":
+            action_summary(con, args.table, table_map)
+    except ValueError as exc:
+        sys.exit(f"Error: {exc}")
+    finally:
+        con.close()
 
 
 if __name__ == "__main__":

@@ -5,6 +5,25 @@ from abc import ABC, abstractmethod
 from app.gateway.auth.models import User
 
 
+class LastAdminRemainsError(RuntimeError):
+    """Raised when a role write would demote the last remaining admin.
+
+    Bootstrap lockout protection: raised inside the same serialized
+    transaction that would perform the write, so the check-then-act window
+    that two concurrent demotions could race through is closed.
+    """
+
+
+class LastActiveAdminError(RuntimeError):
+    """Raised when an account write would disable the last active admin.
+
+    "Active" = an enabled admin row: disabled admins cannot authenticate, so
+    they cannot restore the deployment's management access. Raised inside the
+    same serialized transaction that would perform the write (see
+    ``LastAdminRemainsError`` for the race this closes).
+    """
+
+
 class UserNotFoundError(LookupError):
     """Raised when a user repository operation targets a non-existent row.
 
@@ -80,7 +99,6 @@ class UserRepository(ABC):
         """
         raise NotImplementedError
 
-    @abstractmethod
     async def update_user(self, user: User) -> User:
         """Update an existing user.
 
@@ -138,6 +156,15 @@ class UserRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def list_users(self) -> list[User]:
+        """Return all users ordered by creation (oldest first).
+
+        Origin: admin user-list surface (RFC #4063 / #3462 gap 2). Volume is
+        bounded by the deployment's user base; pagination can be added when a
+        real deployment needs it.
+        """
+        raise NotImplementedError
+
     async def count_admin_users(self) -> int:
         """Return number of users with system_role == 'admin'."""
         raise NotImplementedError

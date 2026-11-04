@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import re
+import socket
 import time
 import urllib.parse
 from ipaddress import ip_address, ip_network
@@ -50,7 +51,7 @@ from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, auth_
 from app.gateway.deps import get_current_user_from_request, get_local_provider, require_admin_user
 from app.gateway.storage_spaces import assign_created_account
 from app.gateway.utils import constant_time_equals
-from deerflow.config.auth_config import OIDCProviderConfig
+from deerflow.config.auth_config import OIDCAuthConfig, OIDCProviderConfig
 
 logger = logging.getLogger(__name__)
 
@@ -211,18 +212,42 @@ def _set_session_cookie(response: Response, token: str, request: Request, *, rem
 # a company can log in, because the lock that matters is keyed on the account.
 
 
-def _trusted_proxies() -> list:
-    """Parse ``AUTH_TRUSTED_PROXIES`` env var into a list of ip_network objects.
+# Hostname entries (e.g. the compose service ``nginx``) are re-resolved at most
+# this often: a restarted proxy container comes back on a new address, and
+# nginx's own resolver uses the same validity (docker/nginx/nginx.conf).
+_TRUSTED_PROXY_HOST_TTL_SECONDS = 10.0
+_HOSTNAME_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
+# hostname -> (monotonic expiry, resolved addresses). Failed lookups are cached
+# as an empty set too, so unauthenticated requests cannot drive a lookup storm.
+_trusted_proxy_host_cache: dict[str, tuple[float, frozenset]] = {}
+# hostname -> the lookup in progress. Concurrent cache misses (a burst of
+# setup-status / login requests when the entry expires) join it, so a refresh
+# costs one resolver call however many requests arrive while DNS is slow.
+_trusted_proxy_host_inflight: dict[str, asyncio.Task[frozenset]] = {}
 
-    Comma-separated CIDR or single-IP entries. Empty / unset = no proxy is
-    trusted (direct mode). Invalid entries are skipped with a logger warning.
-    Read live so env-var overrides take effect immediately and tests can
-    ``monkeypatch.setenv`` without poking a module-level cache.
+
+def _is_hostname(entry: str) -> bool:
+    """RFC 1123 hostname whose last label is not numeric (so ``10.0.0`` is not one)."""
+    labels = entry.split(".")
+    return len(entry) <= 253 and all(_HOSTNAME_LABEL.fullmatch(label) for label in labels) and not labels[-1].isdigit()
+
+
+def _trusted_proxies() -> tuple[list, list[str]]:
+    """Parse ``AUTH_TRUSTED_PROXIES`` into (ip_network objects, hostnames).
+
+    Comma-separated CIDR, single-IP or hostname entries. Empty / unset = no
+    proxy is trusted (direct mode). A hostname stands for every address it
+    resolves to, so a proxy without a fixed address (the compose ``nginx``
+    service) can still be named. Invalid entries are skipped with a logger
+    warning. The variable is read live so env-var overrides take effect
+    immediately and tests can ``monkeypatch.setenv``; only the addresses a
+    hostname resolves to are cached (``_trusted_proxy_host_addresses``).
     """
     raw = os.getenv("AUTH_TRUSTED_PROXIES", "").strip()
     if not raw:
-        return []
+        return [], []
     nets = []
+    hostnames = []
     for entry in raw.split(","):
         entry = entry.strip()
         if not entry:
@@ -230,11 +255,64 @@ def _trusted_proxies() -> list:
         try:
             nets.append(ip_network(entry, strict=False))
         except ValueError:
-            logger.warning("AUTH_TRUSTED_PROXIES: ignoring invalid entry %r", entry)
-    return nets
+            if _is_hostname(entry):
+                hostnames.append(entry)
+            else:
+                logger.warning("AUTH_TRUSTED_PROXIES: ignoring invalid entry %r", entry)
+    return nets, hostnames
 
 
-def _get_client_ip(request: Request) -> str:
+async def _resolve_trusted_proxy_host(hostname: str) -> frozenset:
+    """Resolve ``hostname`` in the loop's executor and cache the result (or the failure)."""
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+        addresses = frozenset(ip_address(info[4][0]) for info in infos)
+    except (OSError, ValueError) as exc:
+        logger.warning("AUTH_TRUSTED_PROXIES: could not resolve %r (%s); not trusting it for %.0fs", hostname, exc, _TRUSTED_PROXY_HOST_TTL_SECONDS)
+        addresses = frozenset()
+    _trusted_proxy_host_cache[hostname] = (time.monotonic() + _TRUSTED_PROXY_HOST_TTL_SECONDS, addresses)
+    return addresses
+
+
+async def _trusted_proxy_host_addresses(hostname: str) -> frozenset:
+    """Addresses ``hostname`` resolves to, cached for ``_TRUSTED_PROXY_HOST_TTL_SECONDS``.
+
+    The lookup runs in the loop's executor (``getaddrinfo`` blocks). A failed
+    lookup trusts nothing until the entry expires, which is the direct-mode
+    behavior, not an error for the request. One lookup per hostname runs at a
+    time: the cache check and the in-flight registration happen without a
+    yield in between, and later callers join that task. Callers wait through
+    ``asyncio.shield``, so one cancelled request (a client disconnect) cannot
+    cancel the lookup the others joined; the task caches its own result, so
+    it is kept even if every caller went away.
+    """
+    cached = _trusted_proxy_host_cache.get(hostname)
+    if cached is not None and time.monotonic() < cached[0]:
+        return cached[1]
+    task = _trusted_proxy_host_inflight.get(hostname)
+    if task is None:
+        task = asyncio.get_running_loop().create_task(_resolve_trusted_proxy_host(hostname))
+        _trusted_proxy_host_inflight[hostname] = task
+
+        def _release(done: asyncio.Task[frozenset]) -> None:
+            if _trusted_proxy_host_inflight.get(hostname) is done:
+                del _trusted_proxy_host_inflight[hostname]
+
+        task.add_done_callback(_release)
+    return await asyncio.shield(task)
+
+
+async def _is_trusted_proxy(peer_ip) -> bool:
+    nets, hostnames = _trusted_proxies()
+    if any(peer_ip in net for net in nets):
+        return True
+    for hostname in hostnames:
+        if peer_ip in await _trusted_proxy_host_addresses(hostname):
+            return True
+    return False
+
+
+async def _get_client_ip(request: Request) -> str:
     """Extract the real client IP for rate limiting.
 
     Trust model:
@@ -244,30 +322,30 @@ def _get_client_ip(request: Request) -> str:
       by the client itself.
     - ``X-Real-IP`` is **only** honored if the TCP peer is in the
       ``AUTH_TRUSTED_PROXIES`` allowlist (set via env var, comma-separated
-      CIDR or single IPs). When set, the gateway is assumed to be behind a
-      reverse proxy (nginx, Cloudflare, ALB, …) that overwrites
-      ``X-Real-IP`` with the original client address.
+      CIDR, single IPs or hostnames). When set, the gateway is assumed to be
+      behind a reverse proxy (nginx, Cloudflare, ALB, …) that overwrites
+      ``X-Real-IP`` with the original client address. The compose files
+      name their bundled ``nginx`` service here by default.
     - With no ``AUTH_TRUSTED_PROXIES`` set, ``X-Real-IP`` is silently
       ignored — closing the bypass where any client could rotate the
       header to dodge per-IP rate limits in dev / direct-gateway mode.
 
     ``X-Forwarded-For`` is intentionally NOT used because it is naturally
     client-controlled at the *first* hop and the trust chain is harder to
-    audit per-request.
+    audit per-request. A request without ``X-Real-IP`` never resolves a
+    hostname entry.
     """
     peer_host = request.client.host if request.client else None
+    real_ip = request.headers.get("x-real-ip", "").strip()
 
-    trusted = _trusted_proxies()
-    if trusted and peer_host:
+    if peer_host and real_ip:
         try:
             peer_ip = ip_address(peer_host)
-            if any(peer_ip in net for net in trusted):
-                real_ip = request.headers.get("x-real-ip", "").strip()
-                if real_ip:
-                    return real_ip
         except ValueError:
             # peer_host wasn't a parseable IP (e.g. "unknown") — fall through
-            pass
+            peer_ip = None
+        if peer_ip is not None and await _is_trusted_proxy(peer_ip):
+            return real_ip
 
     return peer_host or "unknown"
 
@@ -357,7 +435,7 @@ async def login_local(
         # answer is the mode, not the credentials. Off the loop like the
         # throttle policy read below, for the same reason.
         raise sign_on_required()
-    client_ip = _get_client_ip(request)
+    client_ip = await _get_client_ip(request)
     account = normalize_account(form_data.username)
     policy, store = await _resolve_throttle(request)
 
@@ -444,6 +522,8 @@ def _local_registration_enabled() -> bool:
     ``/register`` reads this fresh on every request (``get_app_config`` reloads on file
     change); ``/setup-status`` may serve it up to 60s stale via its per-IP result cache.
     The one reading lives in ``app.gateway.auth.mode``, which ``/health`` shares.
+    Both are unauthenticated and ``get_app_config`` stats and re-hashes the config
+    files on every call, so they run this through ``asyncio.to_thread``.
     """
     from app.gateway.auth.mode import local_registration_open
 
@@ -460,9 +540,9 @@ async def register(request: Request, response: Response, body: RegisterRequest):
     Returns 403 when ``auth.local.allow_registration`` is false, and in
     sign-on-only mode, where a local account is no way in at all.
     """
-    if sign_on_only():
+    if await asyncio.to_thread(sign_on_only):
         raise sign_on_required()
-    if not _local_registration_enabled():
+    if not await asyncio.to_thread(_local_registration_enabled):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=AuthErrorResponse(code=AuthErrorCode.REGISTRATION_DISABLED, message="Self-registration is disabled on this deployment").model_dump(),
@@ -865,9 +945,9 @@ async def setup_status(request: Request):
     bootstrap, and the frontend (whose own settings are fixed at build time)
     learns to show only the provider's sign-in.
     """
-    if sign_on_only():
+    if await asyncio.to_thread(sign_on_only):
         return {"needs_setup": False, "registration_enabled": False, "sign_on_only": True}
-    client_ip = _get_client_ip(request)
+    client_ip = await _get_client_ip(request)
     now = time.time()
 
     # Return cached result when within TTL — avoids 429 on multi-tab reconnection.
@@ -901,7 +981,8 @@ async def setup_status(request: Request):
 
             async def _compute_setup_status() -> dict:
                 admin_count = await get_local_provider().count_admin_users()
-                return {"needs_setup": admin_count == 0, "registration_enabled": _local_registration_enabled(), "sign_on_only": False}
+                registration_enabled = await asyncio.to_thread(_local_registration_enabled)
+                return {"needs_setup": admin_count == 0, "registration_enabled": registration_enabled, "sign_on_only": False}
 
             task = asyncio.create_task(_compute_setup_status())
             _SETUP_STATUS_INFLIGHT[client_ip] = task
@@ -1029,6 +1110,21 @@ def _set_csrf_cookie(response: Response, request: Request) -> None:
     )
 
 
+def _live_oidc_config() -> OIDCAuthConfig:
+    from deerflow.config.app_config import get_app_config
+
+    return get_app_config().auth.oidc
+
+
+async def _oidc_config() -> OIDCAuthConfig:
+    """The live ``auth.oidc`` config, read off the event loop.
+
+    The SSO routes are unauthenticated, and ``get_app_config`` stats and
+    re-hashes the config files on every call.
+    """
+    return await asyncio.to_thread(_live_oidc_config)
+
+
 def _resolve_oidc_redirect_uri(request: Request, provider_id: str, provider_config: OIDCProviderConfig) -> str:
     """Resolve the redirect URI for an OIDC provider.
 
@@ -1055,10 +1151,7 @@ async def list_auth_providers():
     Returns only safe frontend metadata — no secrets, endpoints, or
     internal configuration.
     """
-    from deerflow.config.app_config import get_app_config
-
-    app_config = get_app_config()
-    oidc_config = app_config.auth.oidc
+    oidc_config = await _oidc_config()
 
     if not oidc_config.enabled:
         return {"providers": []}
@@ -1088,10 +1181,7 @@ async def oauth_login(
     and PKCE parameters. The ``next`` query parameter specifies where to
     redirect after successful login (default: /workspace).
     """
-    from deerflow.config.app_config import get_app_config
-
-    app_config = get_app_config()
-    oidc_config = app_config.auth.oidc
+    oidc_config = await _oidc_config()
 
     if not oidc_config.enabled:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SSO authentication is not enabled")
@@ -1170,10 +1260,7 @@ async def oauth_callback(
     the ID token, provisions/links the DeerFlow user, and sets the
     session cookie.
     """
-    from deerflow.config.app_config import get_app_config
-
-    app_config = get_app_config()
-    oidc_config = app_config.auth.oidc
+    oidc_config = await _oidc_config()
 
     # ── Provider error ───────────────────────────────────────────────
     if error:

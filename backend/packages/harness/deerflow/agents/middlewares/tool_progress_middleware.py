@@ -429,7 +429,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
                 )
             return result
         if meta.error_type == "not_run":
-            # Held back before it reached the tool (SkillToolPolicyMiddleware):
+            # Held back before it reached the tool (SkillLoadOrderMiddleware):
             # says nothing about whether the tool is making progress.
             return result
         content = _message_content_str(message)

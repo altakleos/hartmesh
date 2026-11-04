@@ -433,7 +433,10 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
         ).strip()
         if not binding.startswith("127.0.0.1:"):
             raise RuntimeError(f"Acceptance ingress is not loopback: {binding}")
-        url = f"http://{binding}"
+        # nginx answers a GET on 127.0.0.1 with a 301 to localhost (#6156), so
+        # a session signed in on the IP spelling would lose its cookie on the
+        # next read. Browse the canonical spelling of the same loopback port.
+        url = "http://localhost:" + binding.rsplit(":", 1)[1]
         summary["url"] = url
         with urllib.request.urlopen(f"{url}/health/ready", timeout=5) as response:
             summary["readiness"] = json.load(response)

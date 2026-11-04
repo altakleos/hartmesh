@@ -15,6 +15,19 @@ from app.gateway.routers import features
 from deerflow.config.ui_config import StarterConfig, UiConfig
 
 
+@pytest.fixture(autouse=True)
+def isolated_worker_env(monkeypatch):
+    """Keep the feature surface independent of the invoking shell's worker count.
+
+    ``browser_capability()`` consults the Gateway worker count, which uvicorn takes
+    from ``WEB_CONCURRENCY`` on the launches that pass no ``--workers``. An exported
+    value there would otherwise make the browser-control assertions below report a
+    refusal the code under test did not produce.
+    """
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+
+
 def _app_with_config(
     *,
     agents_api_enabled: bool,
@@ -29,8 +42,14 @@ def _app_with_config(
     knowledge_search_provider: str | None = None,
     ui: UiConfig | None = None,
     tenant_bundle_path: str | None = None,
+    scheduled_task_repo_available: bool = False,
+    scheduler_running: bool = False,
+    scheduler_tool_enabled: bool = False,
+    channel_connections_enabled: bool | None = None,
 ) -> FastAPI:
     app = FastAPI()
+    app.state.scheduled_task_repo = object() if scheduled_task_repo_available else None
+    app.state.scheduled_task_service = SimpleNamespace(is_running=scheduler_running) if scheduled_task_repo_available else None
     app.state.mcp_tasks_available = mcp_tasks_available
     app.state.subagent_batches_available = subagent_batches_available
     if subagent_batch_repo_available is None:
@@ -52,7 +71,10 @@ def _app_with_config(
         ),
         ui=ui if ui is not None else UiConfig(),
         tenant_bundle=SimpleNamespace(path=tenant_bundle_path),
+        scheduler=SimpleNamespace(enabled=scheduler_running, tool_enabled=scheduler_tool_enabled, min_once_delay_seconds=60),
     )
+    if channel_connections_enabled is not None:
+        fake_config.channel_connections = SimpleNamespace(enabled=channel_connections_enabled)
     search_tool = SimpleNamespace(use=knowledge_search_provider) if knowledge_search_provider is not None else None
     fake_config.get_tool_config = lambda name: search_tool if name == "knowledge_search" else None
     app.dependency_overrides[get_config] = lambda: fake_config
@@ -97,6 +119,8 @@ def test_features_reports_agents_api_enabled(monkeypatch) -> None:
         "ui": _default_ui_payload(),
         "branding": NO_BRANDING,
         "telegram": None,
+        "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60, "group_notifications": False},
+        "thread_activity": {"available": False},
     }
 
 
@@ -284,6 +308,8 @@ def test_features_reports_agents_api_disabled(monkeypatch) -> None:
         "ui": _default_ui_payload(),
         "branding": NO_BRANDING,
         "telegram": None,
+        "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60, "group_notifications": False},
+        "thread_activity": {"available": False},
     }
 
 
@@ -516,3 +542,60 @@ def test_features_exposes_support_separately_from_customer_identity(tmp_path: Pa
         assert branding["provider"] == {"display_name": "Hosting", "support_url": "https://help.example.test/"}
         provider.write_text(json.dumps({"support_url": "javascript:alert(1)"}), encoding="utf-8")
         assert client.get("/api/features").json()["branding"]["provider"]["support_url"] is None
+
+
+@pytest.mark.parametrize(
+    ("repo", "running", "tool", "expected"),
+    [
+        (False, False, False, {"available": False, "running": False, "tool_enabled": False}),
+        (True, False, True, {"available": True, "running": False, "tool_enabled": False}),
+        (True, True, False, {"available": True, "running": True, "tool_enabled": False}),
+        (True, True, True, {"available": True, "running": True, "tool_enabled": True}),
+    ],
+    ids=["no-repo", "repo-service-not-running", "running-tool-off", "running-tool-on"],
+)
+def test_features_reports_scheduled_tasks_process_state(repo: bool, running: bool, tool: bool, expected: dict) -> None:
+    app = _app_with_config(agents_api_enabled=True, scheduled_task_repo_available=repo, scheduler_running=running, scheduler_tool_enabled=tool)
+    with TestClient(app) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["scheduled_tasks"] == {**expected, "min_interval_seconds": 60, "group_notifications": False}
+
+
+@pytest.mark.parametrize("repo", [False, True])
+@pytest.mark.parametrize("connections", [None, False, True])
+@pytest.mark.parametrize("running", [False, True])
+def test_features_group_notifications_require_repository_and_channel_connections(repo, connections, running):
+    app = _app_with_config(agents_api_enabled=True, scheduled_task_repo_available=repo, scheduler_running=running, channel_connections_enabled=connections)
+    with TestClient(app) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    # Existing tasks remain configurable even while the local poller is stopped.
+    assert response.json()["scheduled_tasks"]["group_notifications"] is (repo and connections is True)
+
+
+class _SqlRunStore:
+    async def latest_change(self, *, user_id):
+        return None
+
+
+@pytest.mark.parametrize(
+    ("run_store", "read_repo", "available"),
+    [
+        (None, None, False),
+        (SimpleNamespace(), object(), False),  # memory run store: no run-change clock seek
+        (_SqlRunStore(), None, False),
+        (_SqlRunStore(), object(), True),
+    ],
+    ids=["memory", "memory-run-store", "no-read-repo", "sql"],
+)
+def test_features_reports_thread_activity_only_with_sql_persistence(run_store, read_repo, available: bool) -> None:
+    """The frontend polls /api/thread-activity only when this says so; a
+    missing block on an older backend means unavailable."""
+    app = _app_with_config(agents_api_enabled=True)
+    app.state.run_store = run_store
+    app.state.thread_read_repo = read_repo
+    with TestClient(app) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["thread_activity"] == {"available": available}

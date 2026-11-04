@@ -49,8 +49,11 @@ jobs:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     # Collection and post-test drainage share the deadline with every case.
-    # Keep room for the full suite on slower hosted runners.
-    timeout-minutes: 20
+    # Keep room for the full suite on slower hosted runners. The upstream merge
+    # to b537d9c16 put each shard at 13-20 minutes (tests new since the
+    # .test_durations baseline get an estimated cost), so 20 cut a shard off
+    # after its last case.
+    timeout-minutes: 30
     strategy:
       # Duration-aware split: `make test-shard` balances the shards by real
       # wall-clock cost from backend/.test_durations (read-only for shards, so
@@ -114,6 +117,7 @@ jobs:
           # tests (issue #4120), which read DEDUPE_TEST_POSTGRES_URL. Without this
           # mapping those tests silently skip and the headline capability is never
           # exercised in CI.
+          DEERFLOW_TEST_WORKFLOW_POSTGRES: ${{ env.TEST_POSTGRES_URI }}
           DEDUPE_TEST_POSTGRES_URL: ${{ env.TEST_POSTGRES_URI }}
           PYTEST_ADDOPTS: --junitxml=test-results/backend-unit-shard-${{ matrix.shard }}.xml
         run: make test-shard SPLITS=6 GROUP=${{ matrix.shard }}

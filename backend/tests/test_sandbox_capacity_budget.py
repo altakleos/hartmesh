@@ -484,7 +484,7 @@ def test_a_set_whose_teardown_did_not_confirm_occupies_a_slot_in_the_count(tmp_p
 
     backend.destroy = _times_out
     info, _parked_at = provider._warm_pool[stranded]
-    provider._warm_pool[stranded] = (info, time.time() - 3600)
+    provider._warm_pool[stranded] = (info, time.monotonic() - 3600)  # the provider ages warm entries on the monotonic clock
     provider._reap_expired_warm(60.0)
     assert stranded in provider._cleanup_pending, "not confirmed absent"
     assert provider._sandboxes == {}, "nothing is active; only the stranded set is counted"
@@ -523,7 +523,7 @@ def test_teardown_racing_an_acquisition_hands_over_exactly_one_slot(tmp_path, mo
     backend.destroy = _slow_destroy
     # Aged rather than reaped with a zero timeout: zero *disables* the reaper.
     info, _parked_at = provider._warm_pool[parked]
-    provider._warm_pool[parked] = (info, time.time() - 3600)
+    provider._warm_pool[parked] = (info, time.monotonic() - 3600)  # the provider ages warm entries on the monotonic clock
     reaper = threading.Thread(target=lambda: provider._reap_expired_warm(60.0), name="reap")
     reaper.start()
     assert stopping.wait(timeout=10)

@@ -84,6 +84,15 @@ class DeerMemConfig(BaseModel):
             "Search bypasses this adapter when retrieval_relevance_enabled is true; indexing remains configured."
         ),
     )
+    retrieval_index_path: str = Field(
+        default="",
+        description=(
+            "Directory holding the derived SQLite FTS5 retrieval index. Empty (default) = ``{storage_path}/.retrieval``; "
+            "a relative path is resolved against storage_path; an absolute path is used as-is. The index is rebuildable, "
+            "so Gateway instances that share storage_path must each point this at instance-local disk: SQLite WAL is "
+            "unsupported on network filesystems, and peers would rebuild or delete each other's index."
+        ),
+    )
     fact_dedup_enabled: bool = Field(
         default=False,
         description=(
@@ -311,16 +320,17 @@ class DeerMemConfig(BaseModel):
             "Set programmatically by the host factory (not from YAML)."
         ),
     )
-    # ── Watermark cache (in-memory, bounded LRU) ─────────────────────────
+    # ── Watermark (in-memory LRU + persisted per-agent sidecar) ──────────
     watermark_max_keys: int = Field(
         default=4096,
         ge=0,
         description=(
             "Soft cap on the in-memory conversation-watermark cache (one entry "
-            "per distinct thread/user/agent). The cache is a bounded LRU: when "
-            "over capacity the least-recently-used entry is dropped, and a "
-            "dropped key re-extracts one batch on that thread's next turn (the "
-            "same as a restart). 0 = unbounded."
+            "per distinct thread/user/agent) and on each agent's persisted "
+            "watermarks.json sidecar (one entry per thread). Over capacity the "
+            "cache drops its least-recently-used entry and the sidecar its "
+            "least-recently-advanced thread; a thread missing from both "
+            "re-extracts one batch on its next turn. 0 = unbounded."
         ),
     )
     # ── Message processing (externalized patterns / prompts) ──

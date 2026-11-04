@@ -44,3 +44,27 @@ direct pnpm, falls back to Corepack, and resolves executable paths before
 changing to that project. The no-selector form retains `frontend/` for upstream
 compatibility. `make frontend-config` initializes the product's ignored `.env`,
 preserving an existing destination or migrating the old app's settings.
+
+## Scheduled-task notes
+
+- `scheduler.tool_enabled` (default off) offers owner-bound schedule tools only
+  through Gateway capability admission. Interactive turns create/manage their
+  schedules; scheduled turns can request stopping only their own schedule.
+  Per-occurrence goal success does not end a recurring schedule.
+- The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a
+  background scheduler gated by `config.yaml -> scheduler.enabled`.
+- Scheduled runs are non-interactive: `ask_clarification` is excluded. `non_interactive`,
+  `disable_clarification`, and `github_token` are honored only for internally-authenticated
+  callers; client-supplied copies are dropped.
+- Busy occurrences persist as `queued`; `scheduler.queue_timeout_seconds` bounds the wait.
+  Do not reintroduce skip-on-overlap.
+
+## Skill script tests
+
+Skill-creator tests must preserve YAML values/body, restore bytecode settings,
+and check invalid metadata through offline CLI subprocesses.
+Public skill script regressions live in `tests/skills/` and run in Skill Review CI
+independently of package review. Exercise dependency fallbacks with the optional
+import unavailable and mock HTTP transport to keep tests offline.
+Video, podcast, and chart-visualization CLI failures exit non-zero;
+diagnostics on stderr, success URLs on stdout; test offline.

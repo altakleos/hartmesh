@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from app.channels import inbound_files, manager
+from app.channels import inbound_leases, manager
 from app.channels.execution import ChannelExecutionContext, ChannelExecutionScope
 from app.channels.message_bus import InboundMessage
 from deerflow.uploads import manager as uploads
@@ -27,9 +27,9 @@ async def test_parallel_readers_keep_original_context_then_reset(tmp_path, monke
         if file["filename"] == "first.txt":
             entered.set()
             await release.wait()
-            seen.append(inbound_files.current_inbound_file_context())
+            seen.append(inbound_leases.current_inbound_file_context())
             return b"a"
-        seen.append(inbound_files.current_inbound_file_context())
+        seen.append(inbound_leases.current_inbound_file_context())
         release.set()
         return None
 
@@ -41,16 +41,16 @@ async def test_parallel_readers_keep_original_context_then_reset(tmp_path, monke
     one = asyncio.create_task(manager._ingest_inbound_files("thread", message("first.txt", first)))
     try:
         await asyncio.wait_for(entered.wait(), 15)
-        assert inbound_files.current_inbound_file_context() is None
+        assert inbound_leases.current_inbound_file_context() is None
         await manager._ingest_inbound_files("thread", message("second.txt", second))
         await one
         assert seen == [second, first]
-        assert inbound_files.current_inbound_file_context() is None
-        with inbound_files.inbound_file_context(first):
-            with inbound_files.inbound_file_context(None):
-                assert inbound_files.current_inbound_file_context() is None
-            assert inbound_files.current_inbound_file_context() is first
-        assert inbound_files.current_inbound_file_context() is None
+        assert inbound_leases.current_inbound_file_context() is None
+        with inbound_leases.inbound_file_context(first):
+            with inbound_leases.inbound_file_context(None):
+                assert inbound_leases.current_inbound_file_context() is None
+            assert inbound_leases.current_inbound_file_context() is first
+        assert inbound_leases.current_inbound_file_context() is None
     finally:
         release.set()
         one.cancel()
@@ -72,7 +72,7 @@ async def test_cancelled_reader_keeps_scope_until_reset(tmp_path, monkeypatch):
             entered.set()
             await asyncio.Event().wait()
         finally:
-            observed.append(inbound_files.current_inbound_file_context())
+            observed.append(inbound_leases.current_inbound_file_context())
 
     monkeypatch.setitem(manager.INBOUND_FILE_READERS, "context-test", read)
     task = asyncio.create_task(manager._ingest_inbound_files("thread", message))
@@ -81,7 +81,7 @@ async def test_cancelled_reader_keeps_scope_until_reset(tmp_path, monkeypatch):
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert observed == [cap] and inbound_files.current_inbound_file_context() is None
+        assert observed == [cap] and inbound_leases.current_inbound_file_context() is None
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

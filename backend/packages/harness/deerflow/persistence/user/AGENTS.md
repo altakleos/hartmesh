@@ -20,3 +20,12 @@ Local disablement uses a private reserved issuer plus immutable account ID in
 from provider subject-only fallback. Issuer normalization is Python `issuer_key`;
 SQL trim does not implement its whitespace rules. Identity-wide enablement must
 check every covered account for seat release before changing disablement or holds.
+
+
+`im_notifications.py` stores shared proactive-IM choices in the separate
+`im_notification_preferences` owner/provider table (0041), without a users FK:
+IM binding owners include the synthetic local `default` identity. Opt-out and
+terminal cancellation of pending/sending outbox rows share one transaction;
+reenabling never reopens them. PostgreSQL enqueue/patch lock preference rows in
+provider order; SQLite uses the enclosing writer transaction. Browser preference
+storage is unchanged. The app owns route auth, CSRF and stale-viewer checks.

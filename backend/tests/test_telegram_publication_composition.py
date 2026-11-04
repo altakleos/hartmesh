@@ -29,7 +29,7 @@ from app.gateway.stream_cleanup import StreamCleanupRegistry
 from app.telegram_bots.inbox import InboxRepository
 from app.telegram_bots.producer import Outbox
 from deerflow.config.run_ownership_config import RunOwnershipConfig
-from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
 from deerflow.persistence.run.model import RunChangeClockRow, RunRow
 from deerflow.persistence.run.sql import RunRepository
 from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow, TelegramOutboxRow
@@ -102,7 +102,7 @@ async def captured_projection(db, monkeypatch, *, link, thread_id, publication_i
     async with db.engine.begin() as connection:
         if db.dialect == "sqlite":
             await connection.execute(text("BEGIN"))
-        await connection.run_sync(lambda sync: RunRow.metadata.create_all(sync, tables=[RunRow.__table__, RunChangeClockRow.__table__, RunEventRow.__table__]))
+        await connection.run_sync(lambda sync: RunRow.metadata.create_all(sync, tables=[RunRow.__table__, RunChangeClockRow.__table__, RunEventRow.__table__, RunEventThreadSeqRow.__table__]))
     for name in ("capture_output_snapshot", "capture_workspace_snapshot"):
         monkeypatch.setattr("deerflow.runtime.runs.worker." + name, AsyncMock(return_value=None))
     monkeypatch.setattr("deerflow.runtime.runs.worker._produced_output_paths", AsyncMock(return_value=[]))

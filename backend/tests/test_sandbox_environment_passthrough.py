@@ -5,8 +5,7 @@ resolves the result again treats a secret that itself starts with ``$`` (a
 bcrypt hash, a generated password) as another reference and injects the wrong
 value -- ``""``, or an unrelated host variable's value when that name exists.
 
-HartMesh ships the AIO provider; upstream #6673 also fixed E2B, OpenSandbox and
-the ACP tool, which are not taken here. These tests start from YAML text so they also fail if load-time resolution is
+These tests start from YAML text so they also fail if load-time resolution is
 ever dropped for these sections.
 """
 
@@ -20,6 +19,9 @@ from deerflow.config.extensions_config import ExtensionsConfig
 
 _PROVIDERS = [
     pytest.param("deerflow.community.aio_sandbox.aio_sandbox_provider", "AioSandboxProvider", id="aio"),
+    pytest.param("deerflow.community.e2b_sandbox.e2b_sandbox_provider", "E2BSandboxProvider", id="e2b"),
+    pytest.param("deerflow.community.opensandbox.provider", "OpenSandboxProvider", id="opensandbox"),
+    pytest.param("deerflow.community.boxlite.provider", "BoxliteProvider", id="boxlite"),
 ]
 
 _RESOLVED = {
@@ -43,8 +45,7 @@ def _load(monkeypatch, tmp_path: Path, yaml_text: str) -> AppConfig:
     monkeypatch.setattr(AppConfig, "_apply_singleton_configs", classmethod(lambda cls, config, acp_agents: None))
     path = tmp_path / "config.yaml"
     path.write_text(yaml_text, encoding="utf-8")
-    monkeypatch.setattr(ExtensionsConfig, "from_file", classmethod(lambda cls, *_a, **_k: ExtensionsConfig(mcp_servers={}, skills={})))
-    return AppConfig._from_yaml_text(yaml_text, path)
+    return AppConfig._from_yaml_text(yaml_text, path, extensions=ExtensionsConfig(mcp_servers={}, skills={}))
 
 
 @pytest.mark.usefixtures("secret_env")
@@ -70,3 +71,27 @@ sandbox:
     loaded = provider._load_config()
 
     assert loaded["environment"] == _RESOLVED
+
+
+@pytest.mark.usefixtures("secret_env")
+def test_acp_agent_env_is_resolved_once_at_load(monkeypatch, tmp_path):
+    # invoke_acp_agent passes this env through unchanged; see
+    # test_invoke_acp_agent_tool.py::test_invoke_acp_agent_passes_env_to_spawn.
+    app_config = _load(
+        monkeypatch,
+        tmp_path,
+        """
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+acp_agents:
+  codex:
+    command: codex-acp
+    description: Codex CLI
+    env:
+      PASSWORD_HASH: $DEERFLOW_TEST_HASH
+      API_SECRET: $DEERFLOW_TEST_SECRET
+      NODE_ENV: production
+""",
+    )
+
+    assert app_config.acp_agents["codex"].env == _RESOLVED

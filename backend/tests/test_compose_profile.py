@@ -137,6 +137,12 @@ NGINX_VARIABLES = {
     "$frontend_upstream",
     "$provisioner_upstream",
     "$http_x_forwarded_proto",
+    # Upstream's loopback-host canonicalization (one cookie jar per host, #6156).
+    "$loopback_canonical_host",
+    "$loopback_origin",
+    "$loopback_port",
+    "$request_method",
+    "$request_uri",
 }
 _BARE_VARIABLE = re.compile(r"\$[a-z_]+")
 _ENV_REFERENCE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)")
@@ -715,9 +721,15 @@ def test_the_login_path_honours_a_forwarded_address_only_from_the_app_network(mo
     """The other half of that contract, on the Gateway's side: the shipped
     subnet is what makes nginx's X-Real-IP count, and a peer outside it cannot
     forge one."""
+    import asyncio
+
     from starlette.requests import Request
 
-    from app.gateway.routers.auth import _get_client_ip
+    from app.gateway.routers.auth import _get_client_ip as _get_client_ip_async
+
+    def _get_client_ip(request: Request) -> str:
+        # The Gateway resolves hostname proxies off the loop, so the reader is async.
+        return asyncio.run(_get_client_ip_async(request))
 
     subnet = ip_network(_app_subnet_defaults()[0])
     monkeypatch.setenv("AUTH_TRUSTED_PROXIES", str(subnet))
@@ -891,7 +903,7 @@ def test_profile_nginx_conf_is_a_verbatim_copy_of_the_compose_nginx_conf() -> No
     source = (PROFILE / "nginx" / "nginx.conf").read_text(encoding="utf-8")
     assert "${" not in source
     assert set(_BARE_VARIABLE.findall(source)) == NGINX_VARIABLES
-    assert len(_BARE_VARIABLE.findall(source)) == 109
+    assert len(_BARE_VARIABLE.findall(source)) == 123
 
 
 def test_agent_upload_routes_have_a_streaming_65_mebibyte_proxy_limit() -> None:
@@ -1855,8 +1867,8 @@ def test_show_web_page_tool_in_template(render_config: ModuleType) -> None:
     assert resolve_variable(entry["use"]).name == "show_web_page"
 
 
-def test_config_version_is_55() -> None:
-    assert yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))["config_version"] == yaml.safe_load(_example_config())["config_version"] == 55
+def test_config_version_is_65() -> None:
+    assert yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))["config_version"] == yaml.safe_load(_example_config())["config_version"] == 65
 
 
 def test_rendered_bundle_section_validates(render_config: ModuleType) -> None:
@@ -1889,8 +1901,13 @@ def test_deployment_wide_telegram_routes_refused_in_bundle(render_config: Module
     document, _ = render_config.render(yaml.safe_load(TEMPLATE.read_text(encoding="utf-8")), (), {**_base_environ(), "HARTMESH_TELEGRAM": "on"})
     person = User(id=UUID("11111111-2222-3333-4444-555555555555"), email="person@example.com", password_hash="x", system_role=role)
     app = make_authed_test_app(user_factory=lambda: person, bind_current_user=True, signed_in=True)
-    app.state.channel_connections_config = ChannelConnectionsConfig.model_validate(document["channel_connections"])
-    app.state.channels_config = document["channels"]
+    connections = ChannelConnectionsConfig.model_validate(document["channel_connections"])
+    app.state.channel_connections_config = connections
+    # channels.* is re-read from config.yaml on every request (another instance
+    # may have saved runtime config), so the rendered document is that config.
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(channel_connections, "_get_app_config", lambda: SimpleNamespace(model_extra={"channels": document["channels"]}, channel_connections=connections))
     repo = MagicMock()
     app.state.channel_connection_repo = repo
     path = tmp_path / "runtime-config.json"

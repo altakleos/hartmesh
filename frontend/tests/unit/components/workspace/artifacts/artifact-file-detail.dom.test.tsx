@@ -111,6 +111,26 @@ describe("ArtifactFileDetail extensionless source files", () => {
   });
 });
 
+describe("ArtifactFileDetail unknown file types", () => {
+  it.each(["constructor", "data.constructor", "__proto__", "data.__proto__"])(
+    "keeps %s on the download fallback instead of passing an invalid language to the editor",
+    (filename) => {
+      mocks.artifactContent.content = "file contents";
+      mocks.artifactContent.sha256 = "a".repeat(64);
+
+      const view = renderDetail(`/mnt/user-data/outputs/${filename}`);
+
+      expect(view.queryByTestId("artifact-source")).toBeNull();
+      expect(view.queryByRole("button", { name: "Edit" })).toBeNull();
+      expect(
+        view.getByRole("link", { name: "Download" }).getAttribute("href"),
+      ).toBe(
+        `/backend/api/threads/${THREAD_ID}/artifacts/mnt/user-data/outputs/${filename}?download=true`,
+      );
+    },
+  );
+});
+
 afterEach(() => {
   cleanup();
   rs.clearAllMocks();
@@ -146,4 +166,13 @@ describe("ArtifactFileDetail browser-preview iframe", () => {
       `/backend/api/threads/${THREAD_ID}/artifacts/mnt/user-data/outputs/chart.png`,
     );
   });
+});
+
+describe("ArtifactFileDetail malformed write-file URLs", () => {
+  it.each(["write-file:%E0%A4%A", "write-file://["])(
+    "renders the raw value without throwing: %s",
+    (filepath) => {
+      expect(() => renderDetail(filepath)).not.toThrow();
+    },
+  );
 });

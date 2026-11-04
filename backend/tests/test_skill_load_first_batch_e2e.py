@@ -102,14 +102,16 @@ def _bash(command: str, call_id: str, **extra: Any) -> dict:
 
 
 def _build(directory: str, period: str = "2026-08") -> dict:
-    """The build as the skill's Step 1 example writes it, with ``present`` beside ``command``.
+    """The build the skill's Step 1 example runs, with ``present`` beside ``command``.
 
-    Without the example's ``${SKILL_DIR:?…}`` guard, which the host-local
-    provider's path check reads as an absolute ``/scripts`` path; the sandbox
-    image runs the guarded form, and the recogniser's tests cover it.
+    With the skill directory written out rather than through ``$SKILL_DIR``:
+    the host-local provider's path check refuses any ``$VAR/...`` path, the
+    example's ``${SKILL_DIR:?…}`` form included, because a variable's value is
+    unknown there. The recogniser resolves the script path either way, the
+    sandbox image runs the documented form, and the recogniser's tests cover it.
     """
     out = f"/mnt/user-data/outputs/reports/{period}-business-review"
-    command = f'SKILL_DIR="{directory}"; python "$SKILL_DIR/scripts/report.py" build /mnt/user-data/uploads/input.xlsx --period {period} --out {out} --bundle-id draft-1 --render pdf,docx,xlsx'
+    command = f'python "{directory}/scripts/report.py" build /mnt/user-data/uploads/input.xlsx --period {period} --out {out} --bundle-id draft-1 --render pdf,docx,xlsx'
     present = [f"{out}/drafts/draft-1/{period}-business-review.{suffix}" for suffix in ("report.json", "pdf", "docx", "xlsx")]
     return _bash(command, "build", present=present)
 
