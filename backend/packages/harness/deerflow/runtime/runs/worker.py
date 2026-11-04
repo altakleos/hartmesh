@@ -3102,7 +3102,6 @@ async def _run_agent(
 _GOAL_RUN_ERROR_STOP_REASONS = frozenset({_RECURSION_CAPPED_STOP_REASON})
 
 
-
 @dataclass(frozen=True)
 class _GoalCompletionCandidate:
     goal: GoalState

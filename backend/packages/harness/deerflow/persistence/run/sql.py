@@ -1446,8 +1446,14 @@ class RunRepository(RunStore):
         idempotency_request: dict[str, Any] | None = None,
         execution_fence=None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        """Atomically admit a thread operation and settle eligible predecessors."""
-        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.create_thread_operation_atomic")
+        """Atomically admit a thread operation and settle eligible predecessors.
+
+        HartMesh fails closed on ownership: an omitted or ``None`` owner is the
+        request user, and without one the admission raises rather than storing
+        a run nobody owns. Upstream (#7619) reads an explicit ``None`` as an
+        ownerless row.
+        """
+        resolved_user_id = resolve_user_id(AUTO if user_id is None else user_id, method_name="RunRepository.create_thread_operation_atomic")
         return await await_drained(
             self._create_thread_operation_atomic_owned(
                 run_id,
