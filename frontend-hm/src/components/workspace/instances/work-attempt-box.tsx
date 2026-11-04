@@ -125,6 +125,9 @@ export function WorkContainedNotice({
     case "host-replaced":
       sentence = copy.hostReplaced(name);
       break;
+    case "settings-changed":
+      sentence = copy.settingsChanged(name);
+      break;
     default:
       sentence = copy.unknown(name);
   }
@@ -138,6 +141,7 @@ export function WorkContainedNotice({
         "idle",
         "lifecycle",
         "operator",
+        "settings-changed",
       ].includes(reason) && <p>{copy.kept(name)}</p>}
       {reason === "start-failed" && user?.system_role === "admin" && (
         <ProviderSupportLink

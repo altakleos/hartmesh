@@ -153,7 +153,7 @@ Unconfirmed containment stays unresolved; terminal run status alone is insuffici
 The attempt projection includes `workspace` (`starting`, `ready`, or null after
 settlement) and `contained` (null or `{reason, at}`). Recorded host reasons are
 `idle`, `start-failed`, `outcome-uncertain`, `container-absent`, `run-orphaned`,
-`operator`, `host-replaced`, `lifecycle`, and `storage-recovery`; host settlement
+`operator`, `host-replaced`, `settings-changed`, `lifecycle`, and `storage-recovery`; host settlement
 can also record `run-never-started`. History exposes the recorded reason and attachment ID.
 The Work list's `work_capacity` counts all in-flight attempts, including launch
 reservations, against `max(1, sandbox.replicas - 1)`. Its `running` details are

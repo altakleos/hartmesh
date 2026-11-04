@@ -135,6 +135,63 @@ def test_managed_activation_refuses_changed_original_record_before_start(managed
     actual._call.assert_not_called()
 
 
+def _resident_adapter(local, provider):
+    from deerflow.spaces.docker import DockerStorageAdapter
+
+    actual = DockerStorageAdapter.__new__(DockerStorageAdapter)
+    actual._operator_only = False
+    actual._backend, actual._configured_mounts = local, ()
+    actual._containment_scope = SimpleNamespace(provider=provider)
+    actual._validate = Mock(return_value="validated")
+    actual._call = Mock(return_value=SimpleNamespace(returncode=0))
+    return actual
+
+
+@pytest.mark.parametrize("change", ["proxy-image", "incarnation"])
+def test_resume_after_an_upgrade_says_the_settings_changed_and_never_that_for_another_identity(managed, monkeypatch, change):
+    """Every release pins a new proxy image, and the network policy digest covers it.
+
+    A resident the previous release prepared under allowlist egress therefore
+    carries the previous digest. Resume must refuse it as changed settings, which
+    the start can act on, and never give that answer for a record it cannot claim.
+    """
+    from deerflow.community.aio_sandbox.native_resource_set import NativeResourceSet
+    from deerflow.spaces.docker import ResidentSettingsChanged
+    from deerflow.spaces.native_teardown_evidence import NativeTeardownResource
+
+    local, _calls, provider, adapter, plan, admitted_labels, _original = admitted(managed, monkeypatch)
+    with preparation_scope(adapter, plan):
+        local.prepare_resident(ATTACHMENT, "hartmesh-space-" + ATTACHMENT, MOUNTS, admitted_labels)
+    bridge = provider._native_creation
+    local._network_mode = "allowlist"
+    local._network_config = {**local._network_config, "mode": "allowlist", "proxy_image": "proxy:previous-release"}
+    proxy, network = local._resource_names(plan.id)
+    created = "2026-10-14T00:00:00Z"
+    graph = (
+        NativeTeardownResource("container", "network-proxy", "3" * 64, proxy, created),
+        NativeTeardownResource("network", "network", "4" * 64, network, created),
+        NativeTeardownResource("network", "egress-network", "5" * 64, local._egress_network_name(plan.id), created),
+    )
+    saved = bridge.residents.for_attachment(ATTACHMENT)
+    previous = replace(saved, network_mode="allowlist", network_target=network, shared_network=None, resources=graph, policy_digest=local._network_policy_digest())
+    monkeypatch.setattr(bridge.residents, "for_attachment", lambda _id: previous)
+    # The physical graph is qualified by its own suites; this one is about the settings it was admitted with.
+    monkeypatch.setattr(NativeResourceSet, "qualify_resident_record", lambda _self, _record: {})
+    actual = _resident_adapter(local, provider)
+    assert actual.verify_active(CONTAINER, plan) == "validated", "the release that prepared it resumes it"
+
+    local._network_config = {**local._network_config, "proxy_image": "proxy:this-release"}
+    if change == "incarnation":
+        plan = replace(plan, incarnation="f" * 32)
+    with pytest.raises(StorageHostUnqualified) as refused:
+        actual.verify_active(CONTAINER, plan)
+    if change == "proxy-image":
+        assert isinstance(refused.value, ResidentSettingsChanged) and refused.value.changed == ("network policy",)
+    else:
+        assert not isinstance(refused.value, ResidentSettingsChanged)
+    actual._call.assert_not_called()
+
+
 @pytest.mark.parametrize("target", [None, "default", "bridge", "hm-custom"])
 def test_managed_activation_and_resume_accept_the_original_open_target(managed, monkeypatch, target):
     from deerflow.spaces.docker import DockerStorageAdapter

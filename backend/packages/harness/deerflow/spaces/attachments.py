@@ -30,7 +30,7 @@ from deerflow.utils.file_io import await_drained, run_file_io
 _operation = ContextVar("storage_attachment_operation", default=None)
 logger = logging.getLogger(__name__)
 
-HOST_FENCE_REASONS = frozenset({"container-absent", "run-orphaned", "start-failed", "outcome-uncertain", "idle", "operator", "host-replaced"})
+HOST_FENCE_REASONS = frozenset({"container-absent", "run-orphaned", "start-failed", "outcome-uncertain", "idle", "operator", "host-replaced", "settings-changed"})
 HUMAN_FENCE_REASONS = frozenset({"lifecycle", "storage-recovery"})
 FENCE_REASONS = HOST_FENCE_REASONS | HUMAN_FENCE_REASONS
 MAX_RETAINED_ATTACHMENTS = 4096

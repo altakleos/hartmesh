@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### AI employee workspaces across an upgrade
+
+- An upgrade with an AI employee's workspace still running reaches `agents: ready`
+  again. That workspace was started with the previous release's settings, so the
+  Gateway refused to take it over. It also never closed it, and every AI agent stayed
+  unavailable until the container was removed. Now the Gateway closes it at start
+  with the reason `settings-changed`; its files stay in its Space and the next turn
+  starts a fresh workspace. This affected every upgrade from `v2.2.0+hartmesh.46`
+  on with the default allowlist egress, because the network policy covers the
+  pinned proxy image, which every release changes.
+- Work interrupted this way says that the service was updated and the workspace
+  restarted, and that the files are kept.
+- While a workspace keeps AI agents unavailable, the Gateway's log names it and the
+  underlying cause on every retry: `agents: workspace <id> remains pending, …`.
+
 ## [2.2.0+hartmesh.51] - 2026-11-04
 
 ### Upstream DeerFlow sync (step 1 of 2: `b537d9c`)
