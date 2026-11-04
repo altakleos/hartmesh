@@ -30,6 +30,7 @@ from deerflow.agents.middlewares.tool_result_meta import (
 from deerflow.config.app_config import AppConfig
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 from deerflow.subagents.status_contract import (
     format_subagent_result_message,
     make_subagent_additional_kwargs,
@@ -43,6 +44,25 @@ logger = logging.getLogger(__name__)
 _MISSING_TOOL_CALL_ID = "missing_tool_call_id"
 _TASK_TOOL_NAME = "task"
 _RECOVERY_HINT = "Continue with available context, or choose an alternative tool."
+
+
+TOOL_REFUSAL_REASON_CONTEXT_KEY = "tool_refusal_reason"
+"""Where a refused tool call leaves its run-level reason for the worker."""
+
+
+def _record_run_stop_reason(request: ToolCallRequest, exc: Exception) -> None:
+    """Carry a capacity refusal to the run record.
+
+    The refusal becomes a result the run survives, so the worker never sees
+    the exception; it reads the reason off the runtime context. It is kept
+    apart from ``stop_reason``, which the guards write when they stop a turn:
+    the worker records a guard's reason first and this one only when none
+    stopped it. Typed, never read from text; the first refusal is kept. A
+    subagent has its own context, so its refusals stay in its result.
+    """
+    context = getattr(getattr(request, "runtime", None), "context", None)
+    if isinstance(exc, SandboxCapacityExceededError) and isinstance(context, dict):
+        context.setdefault(TOOL_REFUSAL_REASON_CONTEXT_KEY, SandboxCapacityExceededError.run_stop_reason)
 
 
 def _stamp_task_exception_status(message: ToolMessage, *, tool_name: str, error: str) -> ToolMessage:
@@ -135,6 +155,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         # carry the same structured metadata.
         structured_error = f"{exc.__class__.__name__}: {detail}"
         message = _stamp_task_exception_status(message, tool_name=tool_name, error=structured_error)
+        _record_run_stop_reason(request, exc)
         return stamp_exception_meta(message, structured_error, exc=exc)
 
     def _stamp_skill_read_metadata(

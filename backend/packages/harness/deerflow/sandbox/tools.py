@@ -2418,6 +2418,11 @@ async def _run_sync_tool_after_async_sandbox_init(
                 signal_cancel = partial(sandbox.request_command_cancel, owner) if func is bash_tool.func and owner else None
                 return await run_sync_lifecycle_operation(func, runtime, *args, _on_cancel=signal_cancel)
             return await run_sync_sandbox_command(sandbox, func, runtime, *args)
+    except SandboxCapacityExceededError:
+        # Raised, as the tool bodies raise it: ToolErrorHandlingMiddleware tells
+        # the model to wait and records the refusal for the run. Flattened here,
+        # the model reads a failed call to retry and the run says nothing.
+        raise
     except SandboxError as e:
         return f"Error: {e}"
     except Exception as e:

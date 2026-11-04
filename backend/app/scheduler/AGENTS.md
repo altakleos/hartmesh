@@ -28,3 +28,8 @@ Tests use real SQLite/PostgreSQL repositories and actual asyncio tasks; cover
 first-terminal races, cross-instance capacity, thread ordering, bounded retries,
 unknown evidence, record eviction, confirmation failures and shutdown. See
 backend/tests/test_scheduled_run_time_bound.py and test_scheduled_task_postgres.py.
+
+A `success` run that carries a stop reason (a guard's, or the sandbox refusal's
+`sandbox_capacity_exceeded`) did not do its task: its occurrence ends `failed`
+with words from `_STOPPED_EARLY_ERRORS`, never the code. A goal occurrence is
+still judged by its verdict. See test_scheduled_capacity_admission.py.

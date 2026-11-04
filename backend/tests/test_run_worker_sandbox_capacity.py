@@ -1,4 +1,4 @@
-"""Escaping typed capacity refusals, unlike handled tool results, end a run."""
+"""Typed capacity refusals: one that escapes ends the run, one a tool call meets is recorded on the run it survives."""
 
 import asyncio
 from types import SimpleNamespace
@@ -109,14 +109,17 @@ async def test_pre_model_capacity_has_a_durable_typed_stop_reason(output_store, 
 
 
 @pytest.mark.asyncio
-async def test_handled_tool_capacity_does_not_mark_the_surviving_run_retryable(output_store, monkeypatch):
+@pytest.mark.parametrize("typed", [True, False], ids=["typed-capacity", "wording-and-attribute-only"])
+async def test_handled_tool_capacity_is_recorded_on_the_run_it_survives_which_stays_a_success(output_store, monkeypatch, typed):
+    """A survived refusal is a ``success`` row: channels retry only ``error`` rows."""
     calls = []
+    failure = SandboxCapacityExceededError(active=2, replicas=2) if typed else CapacityWordingError("SandboxCapacityExceededError: sandbox_capacity_exceeded")
 
     @tool
     def saturated_tool() -> str:
         """A tool whose admitted provider has no free sandbox slot."""
         calls.append("tool")
-        raise SandboxCapacityExceededError(active=2, replicas=2)
+        raise failure
 
     model = OfflineModel(
         responses=[
@@ -129,5 +132,6 @@ async def test_handled_tool_capacity_does_not_mark_the_surviving_run_retryable(o
     record, stored = await run_graph(output_store, monkeypatch, graph)
 
     assert calls == ["tool"] and model.invocations == 2
-    assert record.status is RunStatus.success
-    assert stored["stop_reason"] is None and record.stop_reason is None
+    assert record.status is RunStatus.success and stored["error"] is None
+    assert stored["stop_reason"] == ("sandbox_capacity_exceeded" if typed else None)
+    assert record.stop_reason == stored["stop_reason"]
