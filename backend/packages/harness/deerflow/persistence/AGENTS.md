@@ -46,10 +46,10 @@ prove independent UPDATE/COMMIT/readback and cursor closure: DELETE can retain a
 read lock after cancellation; production WAL's successful writer is a distinct
 control, not evidence of the same lock failure.
 
-`create_thread_operation_atomic` fails closed on ownership: an omitted or `None`
-owner is the request user, and without one it raises. Upstream (#7619) stores an
-explicit `None` as an ownerless run; HartMesh does not
-(`tests/test_run_admission_owner_fail_closed.py`).
+`create_thread_operation_atomic` fails closed on a run's ownership: an omitted or
+`None` owner is the request user, and without one it raises. A non-run reservation
+keeps upstream's (#7619) explicit-`None` ownerless row, which legacy ownerless
+history seeding needs (`tests/test_run_admission_owner_fail_closed.py`).
 
 On SQLite, `BEGIN IMMEDIATE` takes the database-wide write lock, so every unrelated writer (run status, thread metadata, the scheduler) waits for the transaction and fails with `database is locked` after `busy_timeout` (30s). Do slow work such as document conversion before opening a locked transaction; lock only to revalidate and publish, as `ProjectDocumentRepository.publish_under_live_lock` does. `tests/test_project_document_tools.py::TestConversionSerialization` pins this.
 

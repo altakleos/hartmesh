@@ -1,11 +1,13 @@
 """A run admission without an owner fails closed instead of storing an ownerless row.
 
 Upstream #7619 reads an explicit ``user_id=None`` at
-``create_thread_operation_atomic`` as an ownerless run. HartMesh keeps its
-earlier rule: ``None`` is the request user, and with no user in context the
-admission raises. The run manager passes ``None`` whenever no owner was given
-and no user is in context, so without this rule such an admission would land
-a run row that no owner-scoped read can see.
+``create_thread_operation_atomic`` as an ownerless row. For a run, HartMesh
+keeps its earlier rule: ``None`` is the request user, and with no user in
+context the admission raises. The run manager passes ``None`` whenever no owner
+was given and no user is in context, so without this rule such an admission
+would land a run row that no owner-scoped read can see. A non-run reservation
+keeps upstream's reading: seeding a legacy ownerless thread's history needs an
+ownerless reservation, which executes nothing.
 """
 
 from __future__ import annotations
@@ -26,9 +28,9 @@ async def _repo(tmp_path):
     return RunRepository(get_session_factory())
 
 
-def _admit(repo, run_id, **owner):
+def _admit(repo, run_id, *, operation_kind="run", **owner):
     lease = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
-    return repo.create_thread_operation_atomic(run_id, thread_id=f"thread-{run_id}", owner_worker_id="worker-1", lease_expires_at=lease, multitask_strategy="reject", created_at=datetime.now(UTC).isoformat(), **owner)
+    return repo.create_thread_operation_atomic(run_id, thread_id=f"thread-{run_id}", owner_worker_id="worker-1", lease_expires_at=lease, operation_kind=operation_kind, multitask_strategy="reject", created_at=datetime.now(UTC).isoformat(), **owner)
 
 
 @pytest.mark.anyio
@@ -59,4 +61,18 @@ async def test_a_none_owner_is_the_request_user(tmp_path):
         assert row is not None and row["user_id"] == "request-user"
     finally:
         reset_current_user(token)
+        await close_engine()
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_a_non_run_reservation_may_be_ownerless(tmp_path):
+    from deerflow.persistence.engine import close_engine
+
+    repo = await _repo(tmp_path)
+    try:
+        await _admit(repo, "seed", operation_kind="checkpoint_write", user_id=None)
+        row = await repo.get("seed", user_id=None)
+        assert row is not None and row["user_id"] is None and row["operation_kind"] == "checkpoint_write"
+    finally:
         await close_engine()

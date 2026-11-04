@@ -1448,12 +1448,15 @@ class RunRepository(RunStore):
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically admit a thread operation and settle eligible predecessors.
 
-        HartMesh fails closed on ownership: an omitted or ``None`` owner is the
+        A run fails closed on ownership: an omitted or ``None`` owner is the
         request user, and without one the admission raises rather than storing
-        a run nobody owns. Upstream (#7619) reads an explicit ``None`` as an
-        ownerless row.
+        a run nobody owns. A non-run reservation (a checkpoint write or a
+        history seed) keeps upstream's reading (#7619): an explicit ``None`` is
+        an ownerless row, which a legacy ownerless thread's seeding needs and
+        which executes nothing.
         """
-        resolved_user_id = resolve_user_id(AUTO if user_id is None else user_id, method_name="RunRepository.create_thread_operation_atomic")
+        fail_closed = user_id is None and operation_kind == "run"
+        resolved_user_id = resolve_user_id(AUTO if fail_closed else user_id, method_name="RunRepository.create_thread_operation_atomic")
         return await await_drained(
             self._create_thread_operation_atomic_owned(
                 run_id,
