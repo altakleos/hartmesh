@@ -85,7 +85,9 @@ async def test_actual_admission_binds_capture_owner_before_first_executed_SQL(ou
     creating = asyncio.create_task(manager.create_or_reject(uuid4().hex, user_id=RAW_OWNER, kwargs=values))
     try:
         await asyncio.wait_for(barrier.entered.wait(), 5)
-        assert manager._lock.locked()
+        # Upstream #7664: the admission SQL holds only its thread's admission
+        # gate, never the registry lock, so heartbeats and other threads go on.
+        assert manager._pending_admissions and not manager._lock.locked()
         barrier.release.set()
         record = await creating
         await independent_commit(output_store, record)
@@ -103,7 +105,7 @@ async def test_actual_admission_binds_capture_owner_before_first_executed_SQL(ou
 
 
 @pytest.mark.asyncio
-async def test_shutdown_seals_late_capture_admission_while_executed_SQL_holds_registry_lock(output_store):
+async def test_shutdown_seals_late_capture_admission_while_earlier_admission_SQL_executes(output_store):
     manager = RunManager(output_store.repository)
     barrier = QueryBarrier(output_store, lambda statement: statement.startswith("INSERT INTO RUNS"))
     barrier.install()
@@ -111,7 +113,7 @@ async def test_shutdown_seals_late_capture_admission_while_executed_SQL_holds_re
     stopping = late = None
     try:
         await asyncio.wait_for(barrier.entered.wait(), 5)
-        assert manager._lock.locked()
+        assert manager._pending_admissions and not manager._lock.locked()
         stopping = asyncio.create_task(manager.shutdown(timeout=0.02))
         await asyncio.sleep(0)
         late = asyncio.create_task(manager.create_or_reject(uuid4().hex, user_id=RAW_OWNER, kwargs={"output_capture": {"version": 1}}))

@@ -152,7 +152,10 @@ async def test_worker_management_binding_uses_host_actor_not_account_role(monkey
     monkeypatch.setattr(worker, "_run_agent", execute)
     ctx = worker.RunContext(checkpointer=None, customer_management_actor=CustomerManagementActor(owner_id="owner", administrator=administrator))
     manager = SimpleNamespace(get_capture_io_owner=lambda record: None)
-    await worker.run_agent(Mock(), manager, SimpleNamespace(run_id="fixture-run", status="success"), ctx=ctx, config={"context": {"user_role": "admin"}})
+    # A host-admitted record: not a store-only hydration, and (with producer
+    # fencing off) no producer authority for run_producer_context to check.
+    record = SimpleNamespace(run_id="fixture-run", status="success", store_only=False)
+    await worker.run_agent(Mock(), manager, record, ctx=ctx, config={"context": {"user_role": "admin"}})
     assert observed == [administrator]
 
 
