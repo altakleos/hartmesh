@@ -293,7 +293,8 @@ retains host/owner/evidence checks without another pool probe. Per-plan
 confined directories; the Gateway supplies role policy. They are configured RO
 roots, never ordinary mount edges or grants. Company remains unreclaimable.
 Resident preparation and reuse check exact mounts/network; joint
-views require audience admission. No chat or task lifecycle owns it.
+views require audience admission. An owned record (same CID, daemon, incarnation,
+roots) admitted under other RO mounts or network settings raises `ResidentSettingsChanged`. No chat or task lifecycle owns it.
 
 Native recovery quiesces all mounts, records backup identity before I/O and
 validates archived trees before publication. Restore keeps root identity/current

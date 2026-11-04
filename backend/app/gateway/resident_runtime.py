@@ -38,6 +38,15 @@ class _ResidentAccountingChanged(Exception):
         self.bridge = bridge
 
 
+def _innermost_cause(exc):
+    """The deepest named cause, as ``Type: message``: wrappers say only that reuse failed."""
+    for _ in range(8):
+        if exc.__cause__ is None:
+            break
+        exc = exc.__cause__
+    return f"{type(exc).__name__}: {exc}"
+
+
 class ResidentRuntime:
     def __init__(self, app, *, registry, admission, entered):
         self.app, self.registry, self.admission = app, registry, admission
@@ -661,6 +670,7 @@ class ResidentRuntime:
 
             async def reconcile():
                 nonlocal claim, identity, generation, enabled
+                outdated = ()
                 if entry is None and claim.container_id is None:
                     return unconfirmed("preparing")
                 if entry is not None:
@@ -721,21 +731,36 @@ class ResidentRuntime:
                             resumed = await self.attachments.resume(actor=identity.principal, resources=expected, incarnation=claim.incarnation)
                         except Exception as exc:
                             from deerflow.community.aio_sandbox.native_creation import _NativeAccountingStale
+                            from deerflow.spaces.docker import ResidentSettingsChanged
 
-                            cause = exc
+                            cause, changed = exc, None
                             for _ in range(8):
                                 if isinstance(cause, _NativeAccountingStale):
                                     raise _ResidentAccountingChanged(claim.id, cause.bridge) from exc
+                                if isinstance(cause, ResidentSettingsChanged):
+                                    changed = cause
+                                    break
                                 cause = cause.__cause__
                                 if cause is None:
                                     break
-                            raise
-                        fresh = await self.attachments.retained_attachment(claim.id)
-                        if resumed is None or resumed.id != claim.id or resumed.container_id != claim.container_id or fresh is None:
-                            raise StorageRuntimeUnavailable("Workspace resume lost its exact retained identity")
-                        self.registry.retain(fresh)
-                        self.registry.associate(identity, self.registry.retained[claim.id], generation=generation)
-                        return True
+                            if changed is None:
+                                raise
+                            # This host's own workspace, admitted under settings it no
+                            # longer uses; every upgrade changes the network policy.
+                            # Left pending it holds every AI agent unavailable for as
+                            # long as it runs. Closed, the next turn starts a fresh one.
+                            # Recorded as the run path records a running workspace it
+                            # cannot resume, so a release that predates this still
+                            # reads the row after a rollback.
+                            outdated = changed.changed
+                            reason = "container-absent"
+                        else:
+                            fresh = await self.attachments.retained_attachment(claim.id)
+                            if resumed is None or resumed.id != claim.id or resumed.container_id != claim.container_id or fresh is None:
+                                raise StorageRuntimeUnavailable("Workspace resume lost its exact retained identity")
+                            self.registry.retain(fresh)
+                            self.registry.associate(identity, self.registry.retained[claim.id], generation=generation)
+                            return True
                 else:
                     reason = "container-absent"
                 # The Home fence stays installed through the awaited effect.
@@ -744,6 +769,8 @@ class ResidentRuntime:
                     return unconfirmed("busy-containment")
                 if not await self.attachments.contain_host(claim.id, reason):
                     return unconfirmed("containment-unconfirmed")
+                if outdated:
+                    logger.warning("agents: workspace %s was started with settings this service no longer uses (%s); closed it, and the next turn starts a fresh one", claim.id, ", ".join(outdated))
                 self.app.state.agent_execution.attachments_fenced += 1
                 return True
 
@@ -769,10 +796,11 @@ class ResidentRuntime:
                     pending.append(claim.id)
             except (_ResidentSnapshotChanged, _ResidentAccountingChanged):
                 raise
-            except Exception:
+            except Exception as exc:
                 self.registry.retain(claim)
                 self._invalidate_workspace("reconcile-error")
-                logger.exception("agents: attachment reconciliation remains pending")
+                # Every pass repeats this, at least once a minute, so a stalled start names its cause.
+                logger.exception("agents: workspace %s remains pending, so AI agents stay unavailable (%s)", claim.id, _innermost_cause(exc))
                 pending.append(claim.id)
         return pending
 

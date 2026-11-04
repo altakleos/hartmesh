@@ -131,6 +131,10 @@ mount, current Home ownership, unchanged missing/fenced SQL facts, and no local
 holders or borrowed complete durable inflight matches. One absolute deadline
 belongs to the owned initializer; only a new explicit retry gets a new budget.
 Completion drops only the exact attachment claim after durable original removal.
+A running workspace whose resume refuses with `ResidentSettingsChanged` is contained
+unless busy (every release's proxy pin changes its policy digest), recorded as
+`container-absent` like the run path so earlier releases read it after a rollback.
+Any other refusal stays pending and logs its innermost cause on each pass.
 
 Opt-in Work readiness/host-settlement seams require exact Home/actor/host facts.
 Reload attempts after Work locking; preserve terminal outcomes and candidates.
