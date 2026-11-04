@@ -28,6 +28,13 @@ jobs:
           ref: refs/tags/v${{ inputs.version }}
           fetch-depth: 0
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          # verify_versions.sh runs `uv lock --check`. Must match backend/Dockerfile's
+          # UV_IMAGE tag; pinned by backend/tests/test_ci_uv_version_pin.py
+          version: "0.11.1"
+
       - name: Validate versions and prepare release notes
         env:
           VERSION: ${{ inputs.version }}

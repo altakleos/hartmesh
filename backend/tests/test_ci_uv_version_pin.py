@@ -101,6 +101,33 @@ def test_every_setup_uv_step_uses_the_same_action_version():
     assert len(refs) == 1, f"astral-sh/setup-uv is referenced at mixed action versions, so the steps do not share caching or input behavior: {sorted(refs)}"
 
 
+def test_a_job_that_runs_the_version_gate_installs_uv_first():
+    """``scripts/verify_versions.sh`` runs ``uv lock --check`` and refuses without uv.
+
+    The release manifest ran it on a runner image with no uv, so ``.51`` was
+    tagged, built and published, and its manifest could not be recorded.
+    """
+    gated_jobs = 0
+    without_uv: list[str] = []
+    for path in _workflow_paths():
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for job_name, job in (workflow.get("jobs") or {}).items():
+            if not isinstance(job, dict):
+                continue
+            installed = False
+            for step in job.get("steps") or []:
+                if not isinstance(step, dict):
+                    continue
+                installed = installed or bool(_SETUP_UV_ACTION.match(str(step.get("uses", "")).strip()))
+                if "scripts/verify_versions.sh" in str(step.get("run", "")):
+                    gated_jobs += 1
+                    if not installed:
+                        without_uv.append(f"{path.name}: {job_name}: {step.get('name', '<unnamed step>')}")
+
+    assert gated_jobs, "no job runs scripts/verify_versions.sh; this test needs updating"
+    assert not without_uv, f"these steps run the version gate before any setup-uv step: {without_uv}"
+
+
 @pytest.mark.parametrize("compose_path", COMPOSE_PATHS, ids=lambda path: path.name)
 def test_compose_uv_image_default_matches_the_backend_dockerfile(compose_path: Path):
     """The compose override defaults must not drift from the image they build."""
