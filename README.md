@@ -1831,6 +1831,15 @@ limits still apply. Busy input currently accepts text only.
 If a run rejects an update because it has finished, retrying the retained draft
 during the next run targets that run. Uncertain network failures retain the
 original submission identity so retries can reconcile the same accepted input.
+In the HartMesh web app, pick **Queue** or **Steer** from **Send while working**
+next to the composer while a chat runs, then **Send update**; **Stop current
+task** still stops the run. Pending updates are listed above the composer, where
+each can be removed while it waits or sent again after the run ends. The controls
+appear only when the Gateway stores run inputs and the running turn is an ordinary
+chat: a chat with an AI assistant or employee, a scheduled run and other autonomous
+runs keep the usual wait. A run that a queued or re-sent update starts is followed
+in the open chat, as is one started from another tab, and **Stop current task**
+cancels it. Opening a chat later never replays a run that has already ended.
 
 Markdown and JSON conversation exports from the chat header or sidebar read all
 persisted history pages, including earlier turns outside the loaded view or
@@ -2675,6 +2684,7 @@ File reads accept raw repository-relative paths and preserve spaces, Unicode,
 `#`, `?`, and literal percent signs with either HTTP client.
 Directory listings ask for the repository's own default branch, so a repository that
 uses neither `main` nor `master` reports its current tree instead of a stale branch.
+They indicate when GitHub or the local output limit truncates the listing.
 The `issues` command excludes pull requests and follows additional pages to fill
 its requested issue limit; the `prs` command remains available for pull requests.
 

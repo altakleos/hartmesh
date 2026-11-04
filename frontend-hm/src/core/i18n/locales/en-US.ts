@@ -1309,6 +1309,25 @@ export function createEnUS(product: string): Translations {
         },
       ],
       pleaseWaitStreaming: "Please wait for the current response to finish.",
+      runInputMode: "Send while working",
+      queueMode: "Queue",
+      steerMode: "Steer",
+      queueModeHelp: "Run after the current task finishes",
+      steerModeHelp: "Adjust the current task at the next available point",
+      runInputSend: "Send update",
+      runInputTextOnly:
+        "Send plain text while a task is running. Attachments and slash commands can be sent when it finishes.",
+      runInputUnavailable:
+        "The message was not confirmed. Check the task status and try again; your draft is kept.",
+      stopRun: "Stop current task",
+      runInputQueued: "Queued",
+      runInputSteering: "Waiting to apply",
+      runInputUnapplied: "Not applied in this run",
+      runInputRetry: "Send again",
+      runInputCancel: "Remove this message",
+      runInputDispatching: "Pending confirmation",
+      runInputReplayUnavailable:
+        "This run was adjusted while working. Send a new message to continue instead of replaying only part of it.",
     },
 
     chat: {

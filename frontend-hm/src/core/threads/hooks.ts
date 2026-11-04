@@ -24,6 +24,10 @@ import {
 import { cancelActiveThreadRun, getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
 import {
+  readReconnectRun,
+  rememberReconnectRun,
+} from "../api/reconnect-pointer";
+import {
   observeSubmission,
   submissionErrorOrigin,
   type SubmissionOrigin,
@@ -68,6 +72,18 @@ import {
 } from "./api";
 import { runFlagsForMode } from "./run-context";
 import {
+  fetchRunInputState,
+  LIVE_RUN_INPUT_STATUSES,
+  reconcileRunInputs,
+  rememberUnsettledRunInputs,
+  RunInputRequestError,
+  runInputsKey,
+  selectRunToFollow,
+  submitRunInput,
+  type RunInput,
+  type RunInputMode,
+} from "./run-inputs";
+import {
   hasRenderedThreadStateUpdate,
   reduceThreadStateUpdates,
 } from "./stream-state";
@@ -100,7 +116,17 @@ export type ThreadStreamOptions = {
   /** Every admitted run; onStart retains its once-per-conversation behavior. */
   onAdmitted?: (threadId: string, runId: string) => void;
   onFinish?: (state: AgentThreadState) => void;
+  /**
+   * Queue/Steer for an active run, owned by this signed-in account. The page
+   * passes it only when `GET /api/features` reports `run_inputs`; without it
+   * the composer keeps its ordinary wait-while-streaming behaviour.
+   */
+  runInputs?: { account: string } | null;
 };
+
+const EMPTY_RUN_INPUTS: RunInput[] = [];
+/** How long after a run ends the input list is still polled for its successor. */
+export const RUN_INPUT_SETTLE_POLL_MS = 120_000;
 
 export type SendMessageOptions = {
   /** The composer's current catalog resolution, independent of settings effects. */
@@ -330,6 +356,26 @@ function messageIdentity(message: Message): string | undefined {
 }
 
 function dedupeMessagesByIdentity(messages: Message[]): Message[] {
+  // A steered run answers a still-running task with a pending receipt, and
+  // later in the same run with its final result under the same identity.
+  // Once the final result is present the receipt is retired.
+  const taskResultScope = (message: Message) => {
+    const raw = getMessageRunId(message) ?? message.additional_kwargs?.run_id;
+    return `${typeof raw === "string" ? raw : ""}:${messageIdentity(message) ?? ""}`;
+  };
+  const completedTaskResults = new Set(
+    messages
+      .filter(
+        (message) =>
+          message.type === "tool" &&
+          typeof message.additional_kwargs?.subagent_status === "string" &&
+          message.additional_kwargs?.subagent_pending !== true,
+      )
+      .map(taskResultScope),
+  );
+  const supersededPending = (message: Message) =>
+    message.additional_kwargs?.subagent_pending === true &&
+    completedTaskResults.has(taskResultScope(message));
   const lastIndexByIdentity = new Map<string, number>();
   const lastVisibleIndexByIdentity = new Map<string, number>();
 
@@ -340,6 +386,7 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   // stream/state channel instead of relying on message dedupe preservation.
   const preservedTurnDurations = new Map<string, number>();
   messages.forEach((message, index) => {
+    if (supersededPending(message)) return;
     const identity = messageIdentity(message);
     if (identity) {
       lastIndexByIdentity.set(identity, index);
@@ -357,6 +404,7 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
 
   return messages
     .filter((message, index) => {
+      if (supersededPending(message)) return false;
       const identity = messageIdentity(message);
       if (!identity) {
         return true;
@@ -1626,6 +1674,8 @@ export function invalidateStoppedThreadCaches(
     return;
   }
 
+  void queryClient.invalidateQueries({ queryKey: runInputsKey(threadId) });
+
   void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
   void queryClient.invalidateQueries({
     queryKey: threadHistoryQueryKey(threadId),
@@ -1751,6 +1801,7 @@ export function useThreadStream({
   onStart,
   onAdmitted,
   onFinish,
+  runInputs: runInputOwner,
 }: ThreadStreamOptions) {
   const { t } = useI18n();
   const agentBound = useRef(agentInstanceId);
@@ -2061,6 +2112,10 @@ export function useThreadStream({
     [],
   );
 
+  // Runs this view has streamed, finished or stopped. A queued input's run is
+  // joined only when it is none of these, so a run's own finish frame is
+  // never replayed while the input list still reports it active.
+  const streamedRunIdsRef = useRef(new Set<string>());
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
     assistantId: "lead_agent",
@@ -2075,6 +2130,7 @@ export function useThreadStream({
     // Keep explicit: SDK types claim @default true, but runtime uses throttle ?? false.
     throttle: true,
     onCreated(meta) {
+      streamedRunIdsRef.current.add(meta.run_id);
       const origin = admittedSubmissions.current.get(meta.run_id);
       if (origin && (origin.retired || origin !== pendingSend.current)) return;
       if (pendingSend.current && origin !== pendingSend.current) return;
@@ -2305,6 +2361,7 @@ export function useThreadStream({
       }
     },
     onFinish(state, meta) {
+      if (meta) streamedRunIdsRef.current.add(meta.run_id);
       const origin = meta
         ? admittedSubmissions.current.get(meta.run_id)
         : undefined;
@@ -2327,6 +2384,222 @@ export function useThreadStream({
     },
   });
 
+  // Queue/Steer: the Gateway's recent inputs for this thread and the run that
+  // can still take one. Keyed by account so a switch never shows or sends
+  // another person's inputs.
+  const runInputAccount = runInputOwner?.account ?? null;
+  const runInputsActive = !isMock && runInputAccount !== null;
+  const { isLoading: isThreadLoading, joinStream } = thread;
+  // After a run ends, keep polling briefly so a queued input's run is found
+  // even before it takes inputs; a stuck input does not poll forever.
+  const lastRunInputBusyAtRef = useRef(0);
+  const inputQuery = useQuery({
+    queryKey: [...runInputsKey(onStreamThreadId ?? ""), runInputAccount],
+    queryFn: ({ signal }) => fetchRunInputState(onStreamThreadId!, signal),
+    enabled: runInputsActive && !!onStreamThreadId,
+    refetchInterval: (query) =>
+      isThreadLoading ||
+      query.state.data?.active_run_id ||
+      (query.state.data?.items.some((item) =>
+        LIVE_RUN_INPUT_STATUSES.has(item.status),
+      ) &&
+        Date.now() - lastRunInputBusyAtRef.current < RUN_INPUT_SETTLE_POLL_MS)
+        ? 1000
+        : false,
+    retry: false,
+  });
+  // Only answers fetched since this view started may name a run to follow:
+  // a cached answer from an earlier visit can name a run that is long over.
+  const runInputView = `${onStreamThreadId ?? ""}\u0000${runInputAccount ?? ""}`;
+  // Read the query only while the feature is on: stream tests stub useQuery.
+  const inputUpdatedAt = runInputsActive ? inputQuery.dataUpdatedAt : 0;
+  const runInputViewRef = useRef({
+    key: runInputView,
+    cachedAt: inputUpdatedAt,
+    unsettledSeen: new Set<string>(),
+  });
+  if (runInputViewRef.current.key !== runInputView)
+    runInputViewRef.current = {
+      key: runInputView,
+      cachedAt: inputUpdatedAt,
+      unsettledSeen: new Set<string>(),
+    };
+  const freshInputState =
+    runInputsActive && inputUpdatedAt > runInputViewRef.current.cachedAt
+      ? inputQuery.data
+      : undefined;
+  rememberUnsettledRunInputs(
+    freshInputState,
+    runInputViewRef.current.unsettledSeen,
+  );
+  const inputActiveRunId = runInputsActive
+    ? (inputQuery.data?.active_run_id ?? null)
+    : null;
+  // The tab's own stream (submitted or rejoined after reload) is the run its
+  // reconnect pointer names; it never counts as a run to follow.
+  const reconnectRunId = readReconnectRun(onStreamThreadId);
+  if (isThreadLoading && reconnectRunId)
+    streamedRunIdsRef.current.add(reconnectRunId);
+  const followRunId = selectRunToFollow({
+    state: freshInputState,
+    unsettledSeen: runInputViewRef.current.unsettledSeen,
+    streamed: streamedRunIdsRef.current,
+    pointer: reconnectRunId,
+  });
+  const runInputBusy =
+    isThreadLoading || inputActiveRunId !== null || followRunId !== null;
+  useEffect(() => {
+    if (runInputBusy) lastRunInputBusyAtRef.current = Date.now();
+  }, [runInputBusy]);
+  useEffect(() => {
+    lastRunInputBusyAtRef.current = Date.now();
+  }, [runInputView]);
+  // An attempt keeps its request ID until the Gateway confirms or refuses it,
+  // so resending the same text after an unknown reply is idempotent.
+  const runInputAttemptRef = useRef<{
+    threadId: string;
+    runId: string;
+    text: string;
+    mode: RunInputMode;
+    id: string;
+    context?: Record<string, unknown>;
+  } | null>(null);
+  const runInputAbortRef = useRef<AbortController | null>(null);
+  useEffect(
+    () => () => {
+      runInputAbortRef.current?.abort();
+      runInputAttemptRef.current = null;
+    },
+    [onStreamThreadId, runInputAccount],
+  );
+  const sendInput = useCallback(
+    async (
+      text: string,
+      mode: RunInputMode,
+      modelContext?: SendMessageOptions["modelContext"],
+    ) => {
+      const targetThread = onStreamThreadId;
+      const runId = inputActiveRunId;
+      if (!targetThread || !runId)
+        throw new Error(t.inputBox.runInputUnavailable);
+      const previous = runInputAttemptRef.current;
+      const attempt =
+        previous?.threadId === targetThread &&
+        previous.text === text &&
+        previous.mode === mode
+          ? previous
+          : {
+              threadId: targetThread,
+              runId,
+              text,
+              mode,
+              id: crypto.randomUUID(),
+              // A queued input starts its own run, so it carries the
+              // composer's resolved settings, as an ordinary send does; a
+              // steer joins the current run's.
+              context:
+                mode === "queue"
+                  ? {
+                      ...context,
+                      ...modelContext,
+                      ...runFlagsForMode(
+                        modelContext?.mode ?? context.mode,
+                        modelContext?.reasoning_effort ??
+                          context.reasoning_effort,
+                      ),
+                      thread_id: targetThread,
+                    }
+                  : undefined,
+            };
+      runInputAttemptRef.current = attempt;
+      const controller = new AbortController();
+      runInputAbortRef.current?.abort();
+      runInputAbortRef.current = controller;
+      try {
+        const item = await submitRunInput({
+          threadId: targetThread,
+          runId: attempt.runId,
+          requestId: attempt.id,
+          text,
+          mode,
+          context: attempt.context,
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted)
+          throw new DOMException("The input was retired", "AbortError");
+        runInputAttemptRef.current = null;
+        void queryClient.invalidateQueries({
+          queryKey: runInputsKey(targetThread),
+        });
+        return item;
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          // The reply may have been lost after the Gateway stored the input.
+          const accepted = await fetchRunInputState(
+            targetThread,
+            controller.signal,
+          )
+            .then(({ items }) =>
+              items.find(
+                (item) =>
+                  item.id === attempt.id &&
+                  item.target_run_id === attempt.runId,
+              ),
+            )
+            .catch(() => undefined);
+          if (accepted && !controller.signal.aborted) {
+            runInputAttemptRef.current = null;
+            void queryClient.invalidateQueries({
+              queryKey: runInputsKey(targetThread),
+            });
+            return accepted;
+          }
+          // Only a conflict rejects the attempt: let the next one target the
+          // current run. Any other failure keeps its run, ID and context,
+          // because the recent-input list can omit an accepted input.
+          if (
+            !controller.signal.aborted &&
+            runInputAttemptRef.current === attempt &&
+            error instanceof RunInputRequestError &&
+            error.status === 409
+          )
+            runInputAttemptRef.current = null;
+          toast.error(t.inputBox.runInputUnavailable);
+        }
+        throw error;
+      }
+    },
+    [
+      context,
+      inputActiveRunId,
+      onStreamThreadId,
+      queryClient,
+      // Read the message only when sending: stream tests mock a partial `t`.
+      t,
+    ],
+  );
+  // Follow a run this view is not streaming: one a queued or re-sent input
+  // started, or one another tab started. Recording the tab's reconnect pointer
+  // lets Stop cancel it and a reload rejoin it; the SDK clears it on settle.
+  useEffect(() => {
+    if (
+      !followRunId ||
+      !onStreamThreadId ||
+      isThreadLoading ||
+      stoppingThreadId !== null
+    )
+      return;
+    streamedRunIdsRef.current.add(followRunId);
+    rememberReconnectRun(onStreamThreadId, followRunId);
+    void joinStream(followRunId);
+  }, [
+    followRunId,
+    isThreadLoading,
+    joinStream,
+    onStreamThreadId,
+    stoppingThreadId,
+  ]);
+
   const stopThread = useCallback(async () => {
     const stoppedThreadId =
       threadIdRef.current ?? displayThreadId ?? threadId ?? null;
@@ -2337,13 +2610,28 @@ export function useThreadStream({
     const pendingReplay = pendingPreparedReplayRef.current;
     const stoppedSubmission = pendingSend.current;
     const stoppedOwner = viewOwner.current;
+    // The tab's own run is cancelled through its reconnect pointer; a run
+    // about to be followed has none yet, so cancel that one by name.
+    const stoppedRunId = readReconnectRun(stoppedThreadId);
+    const unfollowedRunId = followRunId;
     try {
       await stopThreadAndInvalidateCaches(
         queryClient,
-        () => thread.stop(),
+        async () => {
+          if (unfollowedRunId && stoppedThreadId && !isMock)
+            await getAPIClient(isMock).runs.cancel(
+              stoppedThreadId,
+              unfollowedRunId,
+              true,
+            );
+          await thread.stop();
+        },
         stoppedThreadId,
         isMock,
       );
+      // The input list can report a cancelled run for a moment longer.
+      if (stoppedRunId) streamedRunIdsRef.current.add(stoppedRunId);
+      if (unfollowedRunId) streamedRunIdsRef.current.add(unfollowedRunId);
       if (stoppedSubmission) {
         stoppedSubmission.retired = true;
         stoppedSubmission.failure = new DOMException(
@@ -2370,6 +2658,7 @@ export function useThreadStream({
     clearTurnProgress,
     recordAgentRefusal,
     displayThreadId,
+    followRunId,
     isMock,
     queryClient,
     thread,
@@ -3151,6 +3440,7 @@ export function useThreadStream({
     stop: stopThread,
     isLoading:
       thread.isLoading ||
+      followRunId !== null ||
       (stoppingThreadId !== null && stoppingThreadId === currentViewThreadId),
     values: hasVisibleStreamState ? thread.values : EMPTY_THREAD_VALUES,
     messages: mergedMessages,
@@ -3172,6 +3462,16 @@ export function useThreadStream({
       agentRunRefusal?.threadId === currentViewThreadId
         ? agentRunRefusal
         : null,
+    sendInput,
+    runInputs: runInputsActive
+      ? reconcileRunInputs(
+          inputQuery.data?.items ?? EMPTY_RUN_INPUTS,
+          thread.values.applied_run_inputs,
+          thread.messages,
+        )
+      : EMPTY_RUN_INPUTS,
+    canSendInput: inputActiveRunId !== null,
+    activeRunId: inputActiveRunId ?? undefined,
     refusedNetworkRequests:
       refusedNetworkByConversation.get(
         JSON.stringify([agentInstanceId, currentViewThreadId]),

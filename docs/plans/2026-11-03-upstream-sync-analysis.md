@@ -249,6 +249,7 @@ HartMesh does not rely on `allowed-tools` for security: AI-employee authority co
 - HartMesh (b4d5252df, bbdf46008, 7e1e1e859): per tool call; qualified with real-bash tests.
 - **Keep HartMesh's and leave `supports_command_cancellation` False.** Upstream's worker calls then become no-ops.
 - Separately decide whether "stop current work" should also kill jobs backgrounded earlier.
+- **Decided (2026-11-04, owner):** keep HartMesh's per-call abort. Stopping a run ends only the commands that run started; jobs backgrounded earlier keep running.
 
 **(f) Run lifecycle and terminal authority.** Both sides built owner/lease/status compare-and-set terminal commits with staged-terminal renewal:
 

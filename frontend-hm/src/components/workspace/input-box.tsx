@@ -5,6 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import type { ChatStatus } from "ai";
 import {
   CheckIcon,
+  ChevronDownIcon,
   GraduationCapIcon,
   LightbulbIcon,
   Loader2Icon,
@@ -110,6 +111,7 @@ import {
   reasoningEffortForMode,
   resolveChatMode,
 } from "@/core/threads/run-context";
+import type { RunInputMode } from "@/core/threads/run-inputs";
 import { threadTokenUsageQueryKey } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import {
@@ -309,6 +311,7 @@ export function InputBox({
   onFollowupsVisibilityChange,
   onGoalChange,
   onSubmit,
+  onBusySubmit,
   onStop,
   ...props
 }: Omit<ComponentProps<typeof PromptInput>, "onSubmit"> & {
@@ -378,8 +381,22 @@ export function InputBox({
     options?: InputBoxSubmitOptions,
   ) => void | Promise<void>;
   onStop?: () => void;
+  /**
+   * Queue/Steer: send plain text to the active run instead of waiting for it.
+   * Present only when the Gateway reports a run that accepts inputs.
+   */
+  onBusySubmit?: (
+    text: string,
+    mode: RunInputMode,
+    modelContext?: InputBoxSubmitOptions["modelContext"],
+  ) => Promise<unknown>;
 }) {
   const { locale, t } = useI18n();
+  const [runInputMode, setRunInputMode] = useState<RunInputMode>("queue");
+  const [runInputSending, setRunInputSending] = useState(false);
+  const runInputInFlight = useRef(false);
+  const canSendBusyInput = !!onBusySubmit;
+  useEffect(() => setRunInputMode("queue"), [threadId]);
   const { companyName } = useBranding();
   const queryClient = useQueryClient();
   const searchParams = useSearchParams();
@@ -1297,6 +1314,45 @@ export function InputBox({
       if (agentFiles?.uploading)
         return Promise.reject(new Error("Files are still being saved."));
       if (status === "streaming") {
+        if (onBusySubmit) {
+          if (runInputInFlight.current)
+            return Promise.reject(new Error("input-in-flight"));
+          // A run takes text only; files, quotes and slash commands wait for
+          // an ordinary send, so the draft keeps them.
+          if (
+            !message.text.trim() ||
+            message.files.length ||
+            restoredFileCount ||
+            selectedSlashSkill ||
+            (sidecar?.conversationQuotes.length ?? 0) ||
+            message.text.trimStart().startsWith("/")
+          ) {
+            toast.info(t.inputBox.runInputTextOnly);
+            return Promise.reject(new Error("text-input-required"));
+          }
+          abortVoiceInput();
+          runInputInFlight.current = true;
+          setRunInputSending(true);
+          try {
+            // A queued input starts its own run: resolve its settings the
+            // way an ordinary send does.
+            await onBusySubmit(
+              message.text,
+              runInputMode,
+              selectedModel
+                ? {
+                    model_name: selectedModel.name,
+                    mode: resolveChatMode(context.mode, selectedModel),
+                    reasoning_effort: context.reasoning_effort,
+                  }
+                : undefined,
+            );
+            return;
+          } finally {
+            runInputInFlight.current = false;
+            setRunInputSending(false);
+          }
+        }
         toast.info(t.inputBox.pleaseWaitStreaming);
         return Promise.reject(new Error("streaming"));
       }
@@ -1370,16 +1426,23 @@ export function InputBox({
     [
       abortVoiceInput,
       agentFiles?.uploading,
+      context.mode,
+      context.reasoning_effort,
       restoredFileCount,
       handleCompactCommand,
       handleGoalCommand,
       handleStopStreaming,
       modelSubmitError,
+      onBusySubmit,
+      runInputMode,
+      selectedModel,
       selectedSlashSkill,
+      sidecar?.conversationQuotes.length,
       status,
       submitThreadMessage,
       t.inputBox.goalTooLong,
       t.inputBox.pleaseWaitStreaming,
+      t.inputBox.runInputTextOnly,
     ],
   );
 
@@ -1471,7 +1534,8 @@ export function InputBox({
     dismissedSkillSuggestionValue !== textInput.value;
   const isComposerDisabled = disabled === true;
   const isMockThread = isMock === true;
-  const composerLocked = isComposerDisabled || polishingInput;
+  const composerLocked =
+    isComposerDisabled || polishingInput || runInputSending;
   const draftSubmitAction = getInputSubmitAction({
     text: selectedSlashSkill
       ? `/${selectedSlashSkill.name} ${textInput.value}`
@@ -2935,6 +2999,57 @@ export function InputBox({
                 </ModelSelectorList>
               </ModelSelectorContent>
             </ModelSelector>
+            {status === "streaming" && canSendBusyInput && (
+              <>
+                <PromptInputActionMenu>
+                  <PromptInputActionMenuTrigger
+                    aria-label={t.inputBox.runInputMode}
+                    disabled={composerLocked}
+                  >
+                    {runInputMode === "queue"
+                      ? t.inputBox.queueMode
+                      : t.inputBox.steerMode}
+                    <ChevronDownIcon className="ml-1 size-3" aria-hidden />
+                  </PromptInputActionMenuTrigger>
+                  <PromptInputActionMenuContent>
+                    {(["queue", "steer"] as const).map((mode) => (
+                      <PromptInputActionMenuItem
+                        key={mode}
+                        onSelect={() => setRunInputMode(mode)}
+                      >
+                        <div>
+                          <div>
+                            {mode === "queue"
+                              ? t.inputBox.queueMode
+                              : t.inputBox.steerMode}
+                          </div>
+                          <div className="text-muted-foreground text-xs">
+                            {mode === "queue"
+                              ? t.inputBox.queueModeHelp
+                              : t.inputBox.steerModeHelp}
+                          </div>
+                        </div>
+                        {runInputMode === mode && (
+                          <CheckIcon className="ml-auto size-4" />
+                        )}
+                      </PromptInputActionMenuItem>
+                    ))}
+                  </PromptInputActionMenuContent>
+                </PromptInputActionMenu>
+                <PromptInputSubmit
+                  aria-label={t.inputBox.runInputSend}
+                  title={
+                    runInputMode === "queue"
+                      ? t.inputBox.queueModeHelp
+                      : t.inputBox.steerModeHelp
+                  }
+                  className="rounded-full"
+                  variant="outline"
+                  status={runInputSending ? "submitted" : "ready"}
+                  disabled={composerLocked || !textInput.value.trim()}
+                />
+              </>
+            )}
             {(status !== "streaming" || allowStop) && (
               <Tooltip
                 content={
@@ -2955,6 +3070,12 @@ export function InputBox({
                     }
                     variant="outline"
                     status={status}
+                    {...(status === "streaming" && canSendBusyInput
+                      ? {
+                          "aria-label": t.inputBox.stopRun,
+                          title: t.inputBox.stopRun,
+                        }
+                      : {})}
                     onClick={(e) => {
                       if (status === "streaming") {
                         e.preventDefault();

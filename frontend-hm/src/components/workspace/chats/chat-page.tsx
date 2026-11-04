@@ -33,6 +33,7 @@ import {
 } from "@/components/workspace/sidecar";
 import { TelegramWelcomeCard } from "@/components/workspace/telegram/welcome-card";
 import { ThreadBackgroundTasks } from "@/components/workspace/thread-background-tasks";
+import { ThreadRunInputs } from "@/components/workspace/thread-run-inputs";
 import { ThreadScheduledTasksLink } from "@/components/workspace/thread-scheduled-tasks-link";
 import { ThreadSubagentBatches } from "@/components/workspace/thread-subagent-batches";
 import { ThreadTitle } from "@/components/workspace/thread-title";
@@ -55,6 +56,7 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import {
   useAgentInstances,
   useBrowserControlEnabled,
+  useRunInputsEnabled,
   useStorage,
   useBranding,
 } from "@/core/features";
@@ -101,6 +103,7 @@ import { useThreadChat } from "./use-thread-chat";
 export default function ChatPage() {
   const { t } = useI18n();
   const { user } = useAuth();
+  const runInputsEnabled = useRunInputsEnabled(!!user);
   const locallyCreated = useRef<string | null>(null);
   const feature = useAgentInstances();
   const router = useRouter();
@@ -179,12 +182,17 @@ export default function ChatPage() {
     runRefusal,
     agentRunRefusal,
     refusedNetworkRequests,
+    sendInput,
+    runInputs,
+    canSendInput,
+    activeRunId,
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     displayThreadId: threadId,
     agentInstanceId: binding?.id,
     context: settings.context,
     isMock,
+    runInputs: runInputsEnabled && user?.id ? { account: user.id } : null,
     // onSend only animates the UI; do NOT flip `isNewThread` here — the
     // LangGraph SDK eagerly fetches /history the moment it receives a
     // thread id and assumes the thread exists on the backend (issue #2746).
@@ -614,6 +622,7 @@ export default function ChatPage() {
                     />
                   ) : (
                     <MessageList
+                      activeRunId={activeRunId}
                       agentTarget={agentTarget}
                       archiveDownloadsEnabled={
                         legacyCapabilities &&
@@ -746,6 +755,14 @@ export default function ChatPage() {
                         {fileNotice && (
                           <FilesStateNotice refusal={fileNotice} area="chat" />
                         )}
+                        <ThreadRunInputs
+                          account={user?.id}
+                          inputs={runInputs}
+                          threadId={
+                            isNewThread || isMock ? undefined : threadId
+                          }
+                          isRunning={thread.isLoading}
+                        />
                         <InputBox
                           allowStop={stop.allowed}
                           stopDisabled={stop.busy || stop.pending}
@@ -814,6 +831,7 @@ export default function ChatPage() {
                           onGoalChange={setLocalGoal}
                           onSubmit={handleSubmit}
                           onStop={stop.stop}
+                          onBusySubmit={canSendInput ? sendInput : undefined}
                         />
                       </>
                     ) : (

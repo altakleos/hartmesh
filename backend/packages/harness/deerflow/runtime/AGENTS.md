@@ -32,6 +32,11 @@ chat: never an autonomous/scheduled/webhook run, an agent-instance run or an
 output-captured run, whose one admitted input is its evidence; the Gateway then
 refuses Queue/Steer with 409 (`test_run_inputs_interaction_gate.py`).
 
+Queue dispatch skips only `InputCancelled` raised by the store's atomic claim
+before Run admission. Do not infer cancellation from a stale read or exception
+text; other admission errors and uncertain outcomes still stop dispatch for
+explicit reconciliation. Child Run wait failures still stop the queue.
+
 Run admission and assembly publication serialize per thread across Store I/O.
 Keep registry locks short; heartbeat snapshots must not queue on an
 admission gate. Preserve same-thread publication visibility, including reads of

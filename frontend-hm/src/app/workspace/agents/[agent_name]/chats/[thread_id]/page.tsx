@@ -33,6 +33,7 @@ import {
   SidecarTrigger,
 } from "@/components/workspace/sidecar";
 import { ThreadBackgroundTasks } from "@/components/workspace/thread-background-tasks";
+import { ThreadRunInputs } from "@/components/workspace/thread-run-inputs";
 import { ThreadSubagentBatches } from "@/components/workspace/thread-subagent-batches";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
@@ -40,7 +41,8 @@ import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicato
 import { Tooltip } from "@/components/workspace/tooltip";
 import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { useAgent } from "@/core/agents";
-import { useBrowserControlEnabled } from "@/core/features";
+import { useAuth } from "@/core/auth/AuthProvider";
+import { useBrowserControlEnabled, useRunInputsEnabled } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildHumanInputResponseText,
@@ -75,6 +77,8 @@ export default function AgentChatPage() {
 
   const { agent, isLoading: isAgentLoading } = useAgent(agent_name);
 
+  const { user } = useAuth();
+  const runInputsEnabled = useRunInputsEnabled(!!user);
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat();
   // A new thread's sandbox starts building the moment the page opens, so the
@@ -115,11 +119,16 @@ export default function AgentChatPage() {
     isHistoryLoading,
     hasMoreHistory,
     loadMoreHistory,
+    sendInput,
+    runInputs,
+    canSendInput,
+    activeRunId,
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     displayThreadId: threadId,
     context: { ...settings.context, agent_name: agent_name },
     isMock,
+    runInputs: runInputsEnabled && user?.id ? { account: user.id } : null,
     onSend: () => {
       setIsWelcomeMode(false);
     },
@@ -347,6 +356,7 @@ export default function AgentChatPage() {
             <main className="flex min-h-0 max-w-full grow flex-col">
               <div className="flex min-h-0 flex-1 justify-center">
                 <MessageList
+                  activeRunId={activeRunId}
                   agentTarget={{ kind: "custom_agent", name: agent_name }}
                   archiveDownloadsEnabled={
                     isNewThread || isMock || threadMetadata.data != null
@@ -428,6 +438,12 @@ export default function AgentChatPage() {
                     </div>
                   )}
 
+                  <ThreadRunInputs
+                    account={user?.id}
+                    inputs={runInputs}
+                    threadId={isNewThread || isMock ? undefined : threadId}
+                    isRunning={thread.isLoading}
+                  />
                   <InputBox
                     className={cn(
                       "bg-background/5 w-full",
@@ -466,6 +482,7 @@ export default function AgentChatPage() {
                     onGoalChange={setLocalGoal}
                     onSubmit={handleSubmit}
                     onStop={handleStop}
+                    onBusySubmit={canSendInput ? sendInput : undefined}
                   />
                   {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" && (
                     <div className="text-muted-foreground/67 w-full translate-y-12 text-center text-xs">

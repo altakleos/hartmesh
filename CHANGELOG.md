@@ -72,6 +72,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   HartMesh version and is checked with the other version sources by
   `scripts/verify_versions.sh` and moved by `scripts/bump_version.sh`.
 
+### Upstream DeerFlow sync (`c373f8491`)
+
+- Merges upstream from `fcbb14e83` to `c373f8491`: queued inputs keep dispatching after
+  one is cancelled (#7746), the GitHub research skill reports truncated trees (#7815),
+  and `.env.example` documents MiniMax's regional hosts (#7833). `frontend/` stays
+  pinned at `fcbb14e83`; none of these touch it.
+
+### Web app: Queue and Steer
+
+- The HartMesh web app now offers Queue and Steer while a chat runs, ported from
+  upstream #7729 and #7790. **Send while working** picks the mode and **Send update**
+  sends plain text to the running turn; **Stop current task** still stops it. Pending
+  updates are listed above the composer with **Remove this message** and, once the run ends,
+  **Send again**. A run that a queued or re-sent update starts is followed in the open
+  chat, from the update's own run ID, and **Stop current task** cancels it too.
+- The controls appear only when `GET /api/features` reports `run_inputs` and the
+  Gateway names a run that takes inputs, so a chat with an AI assistant or employee
+  and autonomous runs keep the usual wait. A rejected update (409) keeps the draft and
+  lets the next send target the new run; an uncertain failure keeps the same request
+  ID and settings, so a retry cannot create a second input. A queued update uses the
+  composer's resolved model and mode, as an ordinary send does.
+- A steered run cannot be regenerated or edited from part of it, and a task's pending
+  receipt no longer counts as its result.
+
+
+### Backend test sharding
+
+- `backend/.test_durations` is rebuilt from the six CI shard reports of the step-2 sync.
+  The old file had no time for 9,153 of the 56,112 offline tests (about 1,357 s together)
+  and kept 736 tests that no longer exist. Test time per shard was 848–1,058 s; it is now
+  about 1,000 s for each of the six shards.
+
 ### Schema changes
 
 - Upstream's migrations `0027_notification_deliveries` through
@@ -1756,6 +1788,9 @@ This section accumulates work toward the **2.3.0** milestone
   path but walked the unresolved tree, so no document matched and every
   original older than 24 hours was removed as an orphan, at Gateway startup
   and from `GET /api/trash/documents`. ([#7732])
+
+- **chat:** Cancelling a queued input after dispatch starts no longer
+  prevents subsequent queued inputs from executing. ([#7746])
 
 - **dev:** `scripts/dev_multi_instance.sh logs all` now prints the nginx logs
   as well as both Gateway logs; it printed only the Gateway logs, the same as
@@ -17692,6 +17727,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7727]: https://github.com/bytedance/deer-flow/pull/7727
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729
 [#7732]: https://github.com/bytedance/deer-flow/pull/7732
+[#7746]: https://github.com/bytedance/deer-flow/pull/7746
 [#7762]: https://github.com/bytedance/deer-flow/pull/7762
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781

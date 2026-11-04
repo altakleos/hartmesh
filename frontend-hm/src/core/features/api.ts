@@ -47,6 +47,8 @@ export const CLOSED_TELEGRAM: TelegramFeature = {
 };
 
 export interface FeaturesResponse {
+  /** Queue/Steer during an active interactive run; true only when the Gateway stores run inputs. */
+  run_inputs?: unknown;
   telegram?: {
     enabled?: unknown;
     bots?: unknown;
@@ -137,6 +139,10 @@ export async function fetchAgentsApiEnabled(): Promise<boolean> {
 
 export function selectAgentsApiEnabled(features: FeaturesResponse): boolean {
   return features.agents_api.enabled;
+}
+
+export function selectRunInputsEnabled(features: FeaturesResponse): boolean {
+  return features.run_inputs === true;
 }
 
 export async function fetchBrowserControlEnabled(): Promise<boolean> {

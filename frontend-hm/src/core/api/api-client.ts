@@ -15,6 +15,11 @@ import {
 import type { AgentThreadState } from "../threads/types";
 
 import { isStateChangingMethod, readCsrfCookie } from "./fetcher";
+import {
+  clearReconnectRun,
+  readReconnectRun,
+  rememberReconnectRun,
+} from "./reconnect-pointer";
 import { forceChatRunStreamOptions } from "./stream-mode";
 import { submissionCreated, submissionFailed } from "./submission-lifecycle";
 
@@ -211,49 +216,16 @@ async function shouldSkipReconnect(
   }
 }
 
-export function clearReconnectRun(
-  threadId: string | null | undefined,
-  runId: string,
-): void {
-  if (typeof window === "undefined" || !threadId) return;
-
-  const key = `lg:stream:${threadId}`;
-  try {
-    const storage = window.sessionStorage;
-    if (storage.getItem(key) === runId) {
-      storage.removeItem(key);
-    }
-  } catch {
-    // Ignore storage access failures so reconnect cleanup never throws.
-  }
-}
+export { clearReconnectRun };
 
 export async function cancelActiveThreadRun(threadId: string): Promise<void> {
   if (typeof window === "undefined") return;
-  let runId: string | null;
-  try {
-    runId = window.sessionStorage.getItem(`lg:stream:${threadId}`);
-  } catch {
-    return;
-  }
+  const runId = readReconnectRun(threadId);
   if (!runId) return;
   // SDK stop sends cancellation without awaiting it. Wait for the worker to
   // drain before the composer accepts a follow-up; otherwise admission is 409.
   await getAPIClient().runs.cancel(threadId, runId, true);
   clearReconnectRun(threadId, runId);
-}
-
-function rememberReconnectRun(
-  threadId: string | null | undefined,
-  runId: string,
-): void {
-  if (typeof window === "undefined" || !threadId) return;
-
-  try {
-    window.sessionStorage.setItem(`lg:stream:${threadId}`, runId);
-  } catch {
-    // Ignore storage access failures so gap recovery remains usable.
-  }
 }
 
 async function* recoverStreamReplayGaps({
