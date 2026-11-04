@@ -105,7 +105,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the limit. A goal task is still judged by its verdict. An occurrence finished after a
   Gateway restart, or after its completion was missed, reads its run the same way.
 - A turn whose sandbox call was refused for capacity ends `success` with
-  `stop_reason: sandbox_capacity_exceeded`, unless a later call in it got a sandbox. It
+  `stop_reason: sandbox_capacity_exceeded`, unless a later call of the lead agent's got a
+  sandbox (a delegated task's sandbox is not counted). It
   does not become retryable. A message queued during that turn is not sent on its own
   and waits for **Send again**, as after a guard-capped turn.
 - The model is told to finish with what it has again. Since `.38` an async sandbox tool
