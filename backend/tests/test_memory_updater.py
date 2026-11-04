@@ -3,6 +3,7 @@ import copy
 import json
 import logging
 import threading
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -263,6 +264,9 @@ def test_parse_memory_update_response_normalizes_reinforcement_entries() -> None
 
 
 def test_automatic_update_uses_hybrid_capacity_policy() -> None:
+    # Eviction scores decay against the real clock, so "recent" must be
+    # relative to now; fixed dates age out of the confirmation half-life.
+    recent = (datetime.now(UTC) - timedelta(days=5)).isoformat().replace("+00:00", "Z")
     updater = _make_updater(
         config=_memory_config(
             fact_eviction_policy="hybrid-v1",
@@ -278,7 +282,7 @@ def test_automatic_update_uses_hybrid_capacity_policy() -> None:
                     "content": f"high {index}",
                     "category": "preference",
                     "confidence": 0.99,
-                    "createdAt": "2026-08-12T00:00:00Z",
+                    "createdAt": recent,
                 }
                 for index in range(8)
             ],
@@ -295,7 +299,7 @@ def test_automatic_update_uses_hybrid_capacity_policy() -> None:
                 "category": "preference",
                 "confidence": 0.7,
                 "createdAt": "2025-01-01T00:00:00Z",
-                "lastConfirmedAt": "2026-08-12T00:00:00Z",
+                "lastConfirmedAt": recent,
             },
         ]
     )
