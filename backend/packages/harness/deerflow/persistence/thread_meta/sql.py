@@ -106,9 +106,10 @@ class ThreadMetaRepository(ThreadMetaStore):
             await session.flush()
             if admission is not None:
                 await admission(session, row)
+            # A refresh after commit could observe a replacement incarnation.
+            created = self._row_to_dict(row)
             await session.commit()
-            await session.refresh(row)
-            return self._row_to_dict(row)
+            return created
 
     async def claim_unowned(self, thread_id: str, owner: str) -> bool:
         if self.instance_authority is not None and await self.instance_authority.binding(thread_id) is not None:

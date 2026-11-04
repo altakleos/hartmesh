@@ -15,6 +15,9 @@ reloaded config; cold prompt rendering reads config without creating a provider.
 Unknown environments get generic guidance; runs without bash omit the section.
 `test_sandbox_preinstalled.py` pins these boundaries and the asserted imports.
 
+Upstream's run-scoped cancellation (`command_scope.py`) is off for Local and AIO
+(`supports_command_cancellation = False`); per-call abort stays the stop path.
+
 On startup failure, close reads and kill/reap the child, preserving the error.
 Only `finally` closes write ends.
 

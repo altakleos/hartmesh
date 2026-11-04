@@ -743,7 +743,13 @@ def test_default_confidence_policy_does_not_collect_hybrid_usage(deermem_data_di
     assert dm._storage.get_fact_usage(agent_name="__default__", user_id="u1") == {}
 
 
-def test_hybrid_capacity_keeps_recent_confirmation_over_stale_confidence(deermem_data_dir):
+@pytest.fixture
+def recent_fact_timestamp():
+    """Keep recent facts fresh regardless of when the eviction tests run."""
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def test_hybrid_capacity_keeps_recent_confirmation_over_stale_confidence(deermem_data_dir, recent_fact_timestamp):
     dm = DeerMem(
         backend_config={
             "storage_path": str(deermem_data_dir),
@@ -800,7 +806,7 @@ def test_hybrid_capacity_keeps_recent_confirmation_over_stale_confidence(deermem
     assert "stale_high" not in kept_ids
 
 
-def test_hybrid_import_applies_same_capacity_policy(deermem_data_dir):
+def test_hybrid_import_applies_same_capacity_policy(deermem_data_dir, recent_fact_timestamp):
     dm = DeerMem(
         backend_config={
             "storage_path": str(deermem_data_dir),
@@ -852,11 +858,12 @@ def test_hybrid_import_applies_same_capacity_policy(deermem_data_dir):
     )
 
     kept_ids = {fact["id"] for fact in memory["facts"]}
+    assert len(kept_ids) == 10
     assert "confirmed_recently" in kept_ids
     assert "stale_high" not in kept_ids
 
 
-def test_hybrid_capacity_reserves_correction_and_writes_audit(deermem_data_dir):
+def test_hybrid_capacity_reserves_correction_and_writes_audit(deermem_data_dir, recent_fact_timestamp):
     dm = DeerMem(
         backend_config={
             "storage_path": str(deermem_data_dir),
@@ -898,7 +905,7 @@ def test_hybrid_capacity_reserves_correction_and_writes_audit(deermem_data_dir):
     assert "Never repeat this corrected behavior" not in audit_path.read_text()
 
 
-def test_confidence_policy_shadow_does_not_change_actual_selection(deermem_data_dir):
+def test_confidence_policy_shadow_does_not_change_actual_selection(deermem_data_dir, recent_fact_timestamp):
     dm = DeerMem(
         backend_config={
             "storage_path": str(deermem_data_dir),

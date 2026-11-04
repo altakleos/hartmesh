@@ -15,12 +15,13 @@ build; a release tag here does not publish it.
 ### Version
 
 A HartMesh release is `X.Y.Z+hartmesh.N`: `X.Y.Z` is the upstream version the
-build is based on and `N` increases with every release. These four sources must
+build is based on and `N` increases with every release. These five sources must
 agree:
 
 | Source | Version field |
 | --- | --- |
 | `backend/pyproject.toml` | Root project `version` |
+| `backend/packages/harness/pyproject.toml` | `deerflow-harness` `version` |
 | `backend/uv.lock` | Root `deer-flow` package version (uv's normalized spelling) |
 | `frontend-hm/package.json` | `version` |
 | `deploy/helm/deer-flow/Chart.yaml` | Both `version` and `appVersion` |
@@ -28,7 +29,7 @@ agree:
 The pinned upstream `frontend/package.json` is excluded from HartMesh version
 bumps. `bash scripts/bump_version.sh <version>` updates the product sources and
 refreshes the lockfile; `bash scripts/verify_versions.sh <version>` checks all
-four. The publishing workflows stop when a source disagrees.
+five. The publishing workflows stop when a source disagrees.
 
 For `2.1.0+hartmesh.1` the spellings are: git tag `v2.1.0+hartmesh.1`,
 container image tag `v2.1.0-hartmesh.1`, and `sha-<first seven characters of
@@ -294,5 +295,5 @@ gate so that a merge cannot leave one behind:
   Verify both fresh bootstrap and upgrades from supported published heads with
   existing rows, on SQLite and PostgreSQL. Describe schema changes and upgrade
   actions in release notes, or explicitly state that there are none.
-- **Version sources.** When upstream changes its version, the four sources
+- **Version sources.** When upstream changes its version, the five sources
   must agree again: `scripts/verify_versions.sh` says which one does not.

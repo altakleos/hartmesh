@@ -65,7 +65,15 @@ IMPORTED_UPSTREAM_REVISIONS = (
     "0048_extension_execution_leases",
 )
 CHAIN_AFTER_UPSTREAM_BASE = DISTRIBUTION_REVISIONS + IMPORTED_UPSTREAM_REVISIONS
-HEAD = CHAIN_AFTER_UPSTREAM_BASE[-1]
+# Upstream's revisions through fcbb14e83 (sync step 2), imported exactly as
+# upstream ships them: two children of 0048, rejoined by a merge revision.
+IMPORTED_UPSTREAM_DIAMOND = {
+    "0049_run_inputs": "0048_extension_execution_leases",
+    "0049_run_producer_fencing": "0048_extension_execution_leases",
+    "0050_history_seed_authority": "0049_run_producer_fencing",
+    "0051_merge_run_inputs_fencing": ("0049_run_inputs", "0050_history_seed_authority"),
+}
+HEAD = "0051_merge_run_inputs_fencing"
 PUBLISHED_FIXTURES = ["release_39_ancestry.json", "release_43_ancestry.json", "release_44_ancestry.json", "release_45_ancestry.json", "release_46_ancestry.json", "release_50_ancestry.json"]
 
 
@@ -73,6 +81,15 @@ def test_the_chain_has_one_head_and_it_is_the_last_appended_revision():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
     assert script.get_heads() == [HEAD]
     assert bootstrap._get_head_revision() == HEAD
+
+
+def test_the_step_two_import_keeps_upstreams_diamond_on_the_appended_chain():
+    script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
+    for revision, parent in IMPORTED_UPSTREAM_DIAMOND.items():
+        assert script.get_revision(revision).down_revision == parent
+        assert len(revision) <= 32, "alembic_version.version_num is VARCHAR(32)"
+    fresh = [step.revision.revision for step in script._upgrade_revs("head", "base")]
+    assert set(fresh[-len(IMPORTED_UPSTREAM_DIAMOND) :]) == set(IMPORTED_UPSTREAM_DIAMOND)
 
 
 def test_each_distribution_revision_follows_the_one_before():

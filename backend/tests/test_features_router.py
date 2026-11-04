@@ -104,6 +104,7 @@ def test_features_reports_agents_api_enabled(monkeypatch) -> None:
         "people_search": "prefix",
         "customer_administration": {"plugin_management": False, "local_skill_management": False, "local_mcp_management": False, "provider_operations": False},
         "agents_api": {"enabled": True},
+        "run_inputs": False,
         "browser_control": {"enabled": False},
         "mcp_tasks": {"enabled": False},
         "subagent_batches": {
@@ -293,6 +294,7 @@ def test_features_reports_agents_api_disabled(monkeypatch) -> None:
         "people_search": "prefix",
         "customer_administration": {"plugin_management": False, "local_skill_management": False, "local_mcp_management": False, "provider_operations": False},
         "agents_api": {"enabled": False},
+        "run_inputs": False,
         "browser_control": {"enabled": False},
         "mcp_tasks": {"enabled": False},
         "subagent_batches": {

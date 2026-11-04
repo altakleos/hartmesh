@@ -991,7 +991,7 @@ source = { editable = "packages/extension-api" }
 
 [[package]]
 name = "deerflow-harness"
-version = "2.1.0"
+version = "2.2.0+hartmesh.50"
 source = { editable = "packages/harness" }
 dependencies = [
     { name = "agent-client-protocol" },

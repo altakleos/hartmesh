@@ -241,6 +241,7 @@ class FeaturesResponse(BaseModel):
     telegram: TelegramFeature | None = None
     scheduled_tasks: ScheduledTasksFeature
     thread_activity: ThreadActivityFeature
+    run_inputs: bool = False
 
 
 @router.get(
@@ -266,6 +267,7 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
         agent_instances=instances,
         people_search=people_search,
         customer_administration=await _customer_administration_feature(request, config),
+        run_inputs=getattr(getattr(request.app.state, "run_manager", None), "input_store", None) is not None,
         agents_api=AgentsApiFeature(enabled=config.agents_api.enabled),
         telegram=telegram_feature(request.app, config),
         browser_control=BrowserControlFeature(enabled=browser.available),

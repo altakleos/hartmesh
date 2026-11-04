@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
   "upstream_repository": "https://github.com/bytedance/deer-flow.git",
-  "upstream_commit": "b537d9c16c84e432ee609da57f042d4926c94f8c",
-  "frontend_tree": "f6abac3cc2a0af304f72c3f9efd8e626b41a6d47"
+  "upstream_commit": "fcbb14e83f1cdf65ad9ed1036404c0bfcbfe100b",
+  "frontend_tree": "7d0caaca0e7a413b51bf9cc9a0a1ae3cb14f07f0"
 }
