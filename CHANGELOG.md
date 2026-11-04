@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.51] - 2026-11-04
+
 ### Upstream DeerFlow sync (step 1 of 2: `b537d9c`)
 
 - Merges upstream DeerFlow up to `b537d9c16`. This brings in upstream's IM notification
