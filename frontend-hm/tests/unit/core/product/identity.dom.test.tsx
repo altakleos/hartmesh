@@ -164,3 +164,17 @@ test("name bounds count Unicode scalar values consistently with the Gateway", ()
   body.name = body.product.name = "😀".repeat(41);
   expect(parseProductIdentity(body)).toBeNull();
 });
+
+// UiConfig predates the strict mounted contract and permits joiners in names.
+test("unconfigured mode preserves legacy Unicode names without relaxing configured profiles", () => {
+  const legacy = "Example\u200dAssist";
+  const body = {
+    ...DEFAULT_IDENTITY,
+    name: legacy,
+    product: { ...DEFAULT_IDENTITY.product, name: legacy },
+  };
+  expect(parseProductIdentity(body)?.name).toBe(legacy);
+  const strict = profile("One");
+  strict.name = strict.product.name = legacy;
+  expect(parseProductIdentity(strict)).toBeNull();
+});

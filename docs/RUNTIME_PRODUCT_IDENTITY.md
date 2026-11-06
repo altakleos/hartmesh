@@ -77,6 +77,8 @@ schema and cannot be overlaid through it.
 
 Without `HARTMESH_PRODUCT_PAYLOAD`, existing `ui.product_name` (including Compose's
 `HARTMESH_PRODUCT_NAME` rendering) still overrides the HartMesh name default.
+Legacy names retain the existing `UiConfig` Unicode policy, including joiners;
+the narrower mounted-payload name policy applies only in configured mode.
 Existing tenant provider/support behavior remains unchanged. Existing
 `ui.profile`, `ui.starters`, tenant company data and other operational defaults
 remain independently configurable; they are not payload fields. Unknown payload

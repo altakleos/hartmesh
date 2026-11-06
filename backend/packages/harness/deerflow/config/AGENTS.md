@@ -281,3 +281,7 @@ public payload once under a process lock. `AppConfig` validates fixed-field
 ownership; `product_name` and Gateway readers use that complete snapshot. Never
 merge tenant material into it. Changes require all Gateway workers to restart;
 see [contract](../../../../../docs/RUNTIME_PRODUCT_IDENTITY.md).
+
+Runtime `product_name` uses the already admitted process snapshot without tenant
+filesystem access or copying assets. AppConfig admission and the synchronous
+public API readers retain ownership/conflict checks.

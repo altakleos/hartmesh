@@ -2,6 +2,8 @@ import { defineConfig, devices } from "@playwright/test";
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3000";
 const skipWebServer = process.env.PLAYWRIGHT_SKIP_WEB_SERVER === "1";
+const productGatewayPort = process.env.E2E_PRODUCT_GATEWAY_PORT ?? "3019";
+const productGatewayURL = `http://127.0.0.1:${productGatewayPort}`;
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -27,15 +29,24 @@ export default defineConfig({
 
   webServer: skipWebServer
     ? undefined
-    : {
-        command:
-          "./node_modules/.bin/next build && ./node_modules/.bin/next start",
-        url: baseURL,
-        reuseExistingServer: !process.env.CI,
-        timeout: 120_000,
-        env: {
-          SKIP_ENV_VALIDATION: "1",
-          DEER_FLOW_AUTH_DISABLED: "1",
+    : [
+        {
+          command: "node tests/fixtures/product-gateway.mjs",
+          url: `${productGatewayURL}/api/v1/auth/product-identity`,
+          reuseExistingServer: !process.env.CI,
+          env: { E2E_PRODUCT_GATEWAY_PORT: productGatewayPort },
         },
-      },
+        {
+          command:
+            "./node_modules/.bin/next build && ./node_modules/.bin/next start",
+          url: baseURL,
+          reuseExistingServer: !process.env.CI,
+          timeout: 120_000,
+          env: {
+            SKIP_ENV_VALIDATION: "1",
+            DEER_FLOW_AUTH_DISABLED: "1",
+            DEER_FLOW_INTERNAL_GATEWAY_BASE_URL: productGatewayURL,
+          },
+        },
+      ],
 });

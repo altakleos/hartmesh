@@ -199,6 +199,13 @@ def product_name(app_config: Any) -> str:
     config without a ``ui`` section (``None``, or a partial one built for an
     embedded client) is a deployment that named nothing.
     """
-    from deerflow.config.product_identity import identity_for
+    from deerflow.config.product_identity import mounted_identity
 
-    return identity_for(app_config)["name"]
+    # AppConfig admission validates the payload and ownership before runtime.
+    # Agent prompts and channel handlers only need the cached name, not tenant
+    # filesystem checks or a copy of the complete image-bearing API response.
+    identity = mounted_identity()
+    if identity is not None:
+        return identity["name"]
+    ui = getattr(app_config, "ui", None)
+    return ui.product_name if isinstance(ui, UiConfig) else DEFAULT_PRODUCT_NAME

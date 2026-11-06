@@ -2,16 +2,22 @@ import { z } from "zod";
 
 import { DEFAULT_PRODUCT_NAME } from ".";
 
-const name = z
+const boundedName = z
   .string()
   .min(1)
   .max(80)
-  .refine(
-    (v) =>
-      Array.from(v).length <= 40 &&
-      v === v.trim() &&
-      !/[\p{Cc}\p{Cf}\p{Cs}\u2028\u2029]/u.test(v),
-  );
+  .refine((v) => Array.from(v).length <= 40 && v === v.trim());
+const name = boundedName.refine(
+  (v) => !/[\p{Cc}\p{Cf}\p{Cs}\u2028\u2029]/u.test(v),
+);
+// Match the established UiConfig policy in unconfigured mode, including valid
+// joiners. The strict mounted payload has its own explicitly narrower policy.
+const legacyName = boundedName.refine(
+  (v) =>
+    !/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069\u200b\u200e\u200f\ufeff\p{Cs}]/u.test(
+      v,
+    ),
+);
 const png = z
   .string()
   .max(350_000)
@@ -45,9 +51,9 @@ const identity = z.discriminatedUnion("mode", [
     .object({
       schema_version: z.literal(1),
       mode: z.literal("default"),
-      name,
+      name: legacyName,
       product: z
-        .object({ name, logo: z.null(), browser_icon: z.null() })
+        .object({ name: legacyName, logo: z.null(), browser_icon: z.null() })
         .strict(),
       provider: z.null(),
     })

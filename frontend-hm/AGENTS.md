@@ -468,3 +468,12 @@ identity per mounted document and supplies i18n. Configured product/provider slo
 never take tenant identity. Fresh read failures render explicit unavailable state;
 established pages retain their complete snapshot. See the
 [runtime contract](../docs/RUNTIME_PRODUCT_IDENTITY.md).
+
+Default-mode product names retain the established UiConfig Unicode policy;
+configured-mode names follow the strict public payload policy. Keep their
+validators separate so new payload rules do not reject legacy deployments.
+
+Browser-mocked Playwright suites start `tests/fixtures/product-gateway.mjs`
+for server-side public identity reads. Its other routes return 503; browser route
+mocks still own feature/auth recovery. Keep this fixture outside production code
+and retain real-service identity/outage coverage separately.

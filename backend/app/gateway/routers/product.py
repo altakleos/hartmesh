@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
 from deerflow.config.product_identity import identity_for
-from deerflow.config.ui_config import MAX_PRODUCT_NAME_CHARS, product_name
+from deerflow.config.ui_config import MAX_PRODUCT_NAME_CHARS
 
 # Beside the other reads a sign-in page makes before anyone is signed in
 # (``/api/v1/auth/providers``, ``/api/v1/auth/setup-status``). A public path
@@ -26,7 +26,7 @@ class ProductResponse(BaseModel):
 @router.get("/product", response_model=ProductResponse, summary="Product name")
 def get_product(config: AppConfig = Depends(get_config)) -> ProductResponse:
     try:
-        return ProductResponse(name=product_name(config))
+        return ProductResponse(name=identity_for(config)["name"])
     except ValueError:
         raise HTTPException(503, "Service identity unavailable") from None
 

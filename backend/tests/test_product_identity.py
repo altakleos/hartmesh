@@ -220,3 +220,26 @@ def test_rejected_payload_diagnostics_do_not_echo_unknown_private_values(payload
     with pytest.raises(ValueError) as caught:
         identity_for(config())
     assert "synthetic-sensitive-value" not in "".join(traceback.format_exception(caught.value))
+
+
+def test_unconfigured_identity_keeps_legacy_unicode_joiners():
+    value = "Example\u200dAssist"
+    cfg = config(product_name=value)
+    assert identity_for(cfg)["name"] == value
+    assert identity_for(cfg)["product"]["name"] == value
+
+
+def test_admitted_runtime_name_does_not_read_tenant_files_or_copy_assets(payload, monkeypatch):
+    import os
+
+    cfg = config()
+    cfg.tenant_bundle.path = str(payload[0])
+    identity_for(cfg)  # configuration admission occurs before runtime reads
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("runtime name lookup must not perform file I/O or copy image bytes")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os.path, "lexists", forbidden)
+        patch.setattr(copy, "deepcopy", forbidden)
+        assert product_name(cfg) == "Example Product One"
