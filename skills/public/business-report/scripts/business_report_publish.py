@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 
 from business_report_common import REPORT_SUFFIX, InputError
+from business_report_product import MEMBER as PRODUCT_MEMBER
 from business_report_view import MAX_BYTES, VIEW_SUFFIX, serialize_view
 
 STATE_DIR = Path(".cache/business-report")
@@ -136,7 +137,7 @@ def current_identity(root: Path, base: str, *, verify: bool = True):
     return (str(current.resolve()), hashlib.sha256(current.read_bytes()).hexdigest()) if current else None
 
 
-def publish_bundle(root: Path, base: str, report: dict, targets: list[str], tenant_dir, render, prepare, *, bundle_id: str | None, expected_current, verify_current: bool = True, source: Path | None = None, carry: list[str] = ()) -> Path:
+def publish_bundle(root: Path, base: str, report: dict, targets: list[str], tenant_dir, render, prepare, *, bundle_id: str | None, expected_current, verify_current: bool = True, source: Path | None = None, carry: list[str] = (), product_identity=None) -> Path:
     """Generate privately, then lock only for the conditional publication.
 
     A crash after rename but before pointer replacement leaves a complete,
@@ -155,10 +156,20 @@ def publish_bundle(root: Path, base: str, report: dict, targets: list[str], tena
     path = stage / f"{base}{REPORT_SUFFIX}"
     try:
         prepare(stage)
+        if product_identity is not None:
+            (stage / PRODUCT_MEMBER).write_bytes(product_identity.record)
         write_json(path, report)
         write_json(stage / "checks.json", report["checks"])
         if source and carry:
             manifest = bundle_manifest(source)
+            previous = (source.parent / PRODUCT_MEMBER).read_bytes() if PRODUCT_MEMBER in manifest["sha256"] else None
+            if previous is not None and hashlib.sha256(previous).hexdigest() != manifest["sha256"][PRODUCT_MEMBER]:
+                raise InputError("The retained shared identity changed while reading. Restore the verified draft.")
+            selected = product_identity.record if product_identity is not None else None
+            if previous != selected:
+                # Shared attribution changed. Never label a previous HTML/PDF
+                # as a current render; other formats have no shared attribution.
+                carry = [name for name in carry if Path(name).suffix not in {".html", ".pdf"}]
             for name in carry:
                 content = (source.parent / name).read_bytes()
                 if hashlib.sha256(content).hexdigest() != manifest["sha256"][name]:

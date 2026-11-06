@@ -35,6 +35,7 @@ from business_report_common import (
     load_brand,
     picture_inside,
 )
+from business_report_product import load_product_identity
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches
 
@@ -97,7 +98,7 @@ def fetch_inline_only(url: str, *args, **kwargs):
 fetch_inline_only._fail_on_errors = True  # a refused URL stops the render instead of printing a gap
 
 
-def render_html(report: dict, report_path: Path, brand: dict) -> str:
+def render_html(report: dict, report_path: Path, brand: dict, product_identity=None) -> str:
     environment = jinja2.Environment(loader=jinja2.FileSystemLoader(str(TEMPLATES_DIR)), autoescape=jinja2.select_autoescape(["html", "j2"]), undefined=jinja2.StrictUndefined)
     template = environment.get_template("report.html.j2")
     currency = report["meta"]["currency"]["code"]
@@ -117,6 +118,7 @@ def render_html(report: dict, report_path: Path, brand: dict) -> str:
         fmt=lambda value, fmt: format_value(value, fmt, currency),
         cell_fmt=cell_format,
         checks_line=checks_line(report),
+        product_identity=product_identity,
     )
 
 
@@ -364,15 +366,23 @@ def draw_charts(charts: dict[str, dict], out_dir: Path, brand: dict, currency: s
     return written
 
 
-def render(report: dict, report_path: Path, target: str, out_path: Path | None, tenant_dir: str | None) -> Path:
+_UNSET = object()
+
+
+def render(report: dict, report_path: Path, target: str, out_path: Path | None, tenant_dir: str | None, *, product_identity=_UNSET) -> Path:
+    if product_identity is _UNSET:
+        try:
+            product_identity = load_product_identity()
+        except ValueError as error:
+            raise InputError(str(error)) from None
     brand = effective_brand(report, report_path, tenant_dir)
     base = report_path.name[: -len(REPORT_SUFFIX)] if report_path.name.endswith(REPORT_SUFFIX) else report_path.stem
     path = out_path or report_path.with_name(f"{base}.{target}")
     path.parent.mkdir(parents=True, exist_ok=True)
     if target == "html":
-        path.write_text(render_html(report, report_path, brand), encoding="utf-8")
+        path.write_text(render_html(report, report_path, brand, product_identity), encoding="utf-8")
     elif target == "pdf":
-        render_pdf(render_html(report, report_path, brand), path)
+        render_pdf(render_html(report, report_path, brand, product_identity), path)
     elif target == "docx":
         render_docx(report, report_path, brand, path)
     elif target == "xlsx":

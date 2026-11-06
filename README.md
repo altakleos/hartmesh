@@ -5070,3 +5070,9 @@ a browser icon and support link to the same application build. See the
 [runtime contract](docs/RUNTIME_PRODUCT_IDENTITY.md) for schema, ownership, legacy
 compatibility, restart behavior and explicit unavailable states. Tenant material
 remains authenticated.
+
+Business-report HTML and derived PDF can use a complete read-only offline
+projection of that same shared identity, with separate product/provider
+attribution and unchanged report company context. See the
+[offline report contract](docs/OFFLINE_REPORT_PRODUCT_IDENTITY.md) for export,
+sandbox mounts, digest admission and format compatibility.

@@ -135,6 +135,9 @@ Frontend: use `scripts/pnpm.py --project frontend-hm -- rstest run
 disk-temporary limits in `frontend-hm/AGENTS.md`. The optional real-service browser
 suite uses the documented environment in its own source and never bypasses auth.
 
-Runtime product identity does not qualify generated reports, tenant image
-preparation, tenant activation/restoration or browser tenant switching. Release
-publication and artifact qualification are separate evidence.
+The [offline report projection](OFFLINE_REPORT_PRODUCT_IDENTITY.md) supplies
+shared attribution to business-report HTML and PDF without a live Gateway.
+It requires explicit read-only sandbox exposure and matching digest admission.
+Runtime web identity alone does not qualify tenant image preparation, tenant
+activation/restoration or browser tenant switching. Release publication and
+artifact qualification are separate evidence.

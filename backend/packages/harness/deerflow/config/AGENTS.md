@@ -285,3 +285,8 @@ see [contract](../../../../../docs/RUNTIME_PRODUCT_IDENTITY.md).
 Runtime `product_name` uses the already admitted process snapshot without tenant
 filesystem access or copying assets. AppConfig admission and the synchronous
 public API readers retain ownership/conflict checks.
+
+`product_identity_export` exports the admitted configured public identity for
+offline readers with a canonical content digest. It retains fixed-field checks;
+it neither activates readers nor changes tenant state. See the
+[offline report contract](../../../../../docs/OFFLINE_REPORT_PRODUCT_IDENTITY.md).

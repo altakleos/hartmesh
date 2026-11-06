@@ -79,5 +79,18 @@
 <footer>
   Built from {% for input in report.meta.inputs %}{{ input.name }} (uploaded {{ input.uploaded }}){% if not loop.last %}, {% endif %}{% endfor %}. Checked by the report script.
 </footer>
+{% if product_identity %}
+<section id="shared-attribution" aria-label="Product and provider attribution">
+  <div class="attribution-identity">
+    <img src="{{ product_identity.product_logo }}" alt="">
+    <p><span class="attribution-role">Product</span><strong>{{ product_identity.product_name }}</strong></p>
+  </div>
+  <div class="attribution-identity">
+    <img src="{{ product_identity.provider_logo }}" alt="">
+    <p><span class="attribution-role">Provider</span><strong>{{ product_identity.provider_name }}</strong></p>
+  </div>
+  <p class="attribution-support"><a href="{{ product_identity.support_url }}" rel="noreferrer noopener">Support from {{ product_identity.provider_name }}</a><br><span>{{ product_identity.support_url }}</span></p>
+</section>
+{% endif %}
 </body>
 </html>

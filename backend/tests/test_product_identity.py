@@ -243,3 +243,26 @@ def test_admitted_runtime_name_does_not_read_tenant_files_or_copy_assets(payload
         patch.setattr(os.path, "lexists", forbidden)
         patch.setattr(copy, "deepcopy", forbidden)
         assert product_name(cfg) == "Example Product One"
+
+
+def test_offline_projection_binds_exact_admitted_identity_and_preserves_ownership(payload):
+    import hashlib
+
+    from deerflow.config.product_identity_export import offline_product_identity
+
+    record = offline_product_identity(config())
+    assert record["identity"] == identity_for(config())
+    assert record["schema_version"] == 1
+    canonical = json.dumps(record["identity"], sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
+    assert record["sha256"] == hashlib.sha256(canonical).hexdigest()
+    with pytest.raises(ValueError, match="conflicts"):
+        offline_product_identity(config(product_name="Unapproved Override"))
+    record["identity"]["product"]["name"] = "Changed"
+    assert offline_product_identity(config())["identity"]["product"]["name"] != "Changed"
+
+
+def test_offline_projection_refuses_to_invent_default_provider():
+    from deerflow.config.product_identity_export import offline_product_identity
+
+    with pytest.raises(ValueError, match="configured"):
+        offline_product_identity(config())
