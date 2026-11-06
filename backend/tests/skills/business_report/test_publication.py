@@ -57,7 +57,7 @@ def test_renderer_failure_keeps_the_preceding_complete_bundle(report, tmp_path, 
     before = public_bytes(root)
     real_render = report.render
 
-    def fail(document, report_path, target, out_path, tenant):
+    def fail(document, report_path, target, out_path, tenant, **kwargs):
         if target == failure_target:
             # A renderer can leave a partially written format before failing.
             destination = out_path or report_path.with_suffix(f".{target}")
@@ -65,7 +65,7 @@ def test_renderer_failure_keeps_the_preceding_complete_bundle(report, tmp_path, 
             if interrupted:
                 raise KeyboardInterrupt
             raise RuntimeError("controlled renderer failure")
-        return real_render(document, report_path, target, out_path, tenant)
+        return real_render(document, report_path, target, out_path, tenant, **kwargs)
 
     monkeypatch.setattr(report, "render", fail)
     if command == "build":
@@ -318,7 +318,7 @@ def test_failed_explicit_export_preserves_existing_destination_and_source(report
     destination = tmp_path / "export.xlsx"
     destination.write_bytes(b"keep previous export")
 
-    def fail(document, path, target, out_path, tenant):
+    def fail(document, path, target, out_path, tenant, **kwargs):
         out_path.write_bytes(b"partial export")
         if interrupted:
             raise KeyboardInterrupt
@@ -367,13 +367,13 @@ def test_interrupted_process_leaves_no_partial_bundle_in_delivery_scans(report, 
     def command():
         original = report.render
 
-        def paused(document, path, target, out_path, tenant):
+        def paused(document, path, target, out_path, tenant, **kwargs):
             if target == "xlsx":
                 (path.parent / "out.xlsx").write_bytes(b"partial private bytes")
                 ready.set()
                 if not hold.wait(20):
                     raise RuntimeError("test synchronization expired")
-            return original(document, path, target, out_path, tenant)
+            return original(document, path, target, out_path, tenant, **kwargs)
 
         report.render = paused
         build(report, root, "interrupted")
@@ -416,11 +416,11 @@ def test_concurrent_publishers_compare_the_exact_source_and_only_one_advances(re
     def command(index):
         original = report.render
 
-        def paused(document, path, target, out_path, tenant):
+        def paused(document, path, target, out_path, tenant, **kwargs):
             ready[index].set()
             if not proceed.wait(20):
                 raise RuntimeError("test synchronization expired")
-            return original(document, path, target, out_path, tenant)
+            return original(document, path, target, out_path, tenant, **kwargs)
 
         report.render = paused
         code = report.main(["prose", str(original_path), "--summary", f"Writer {'one' if index == 0 else 'two'}.", "--render", "xlsx", "--bundle-id", f"writer-{index}"])

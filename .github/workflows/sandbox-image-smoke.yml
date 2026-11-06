@@ -57,6 +57,17 @@ jobs:
       - name: Build the sandbox image
         run: docker build --build-arg "BASE_IMAGE=$SANDBOX_BASE_IMAGE" --tag deer-flow-sandbox-smoke docker/sandbox
 
+      - name: Qualify offline product attribution in real HTML and PDF
+        run: |
+          docker run --rm --network none --cap-drop ALL \
+            --security-opt no-new-privileges --user 1000:1000 --entrypoint python3 \
+            --volume "$PWD/skills/public/business-report:/mnt/skill:ro" \
+            --volume "$PWD/backend/tests/skills/business_report:/mnt/qualification:ro" \
+            deer-flow-sandbox-smoke \
+            /mnt/qualification/check_product_reports_on_image.py \
+            --skill /mnt/skill --fixtures /mnt/qualification/fixtures \
+            --output /tmp/report-product-qualification
+
       - name: Exercise the restricted runtime profile
         run: |
           set -euo pipefail

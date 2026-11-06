@@ -48,3 +48,14 @@ all fields before applying any, supports temporary field replacement, and retain
 `preferences-used.json` as a hashed supporting bundle member. Prose/render copy
 that exact verified snapshot. Report/view schemas are unchanged. The first-command
 declaration admits report.py so explicit settings-only requests need no build.
+
+`business_report_product.py` owns the strict offline shared identity projection.
+Capture once before each build/prose/render/export, then pass the immutable result
+to every renderer. Only HTML and derived PDF add product/provider attribution;
+report company and tenant presentation keep their existing owners. Store the
+canonical projection as a hashed supporting member; never carry HTML/PDF across
+a changed shared identity. Fixed fields come only from the operator environment
+and its read-only digest-bound input. No Gateway imports, network or shell calls.
+The pure `urllib.parse.urlsplit` parser is allowed; it performs no I/O. Shipped
+Pillow validates/decodes projected PNGs. See the
+[input/activation contract](../../../docs/OFFLINE_REPORT_PRODUCT_IDENTITY.md).

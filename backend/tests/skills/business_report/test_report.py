@@ -202,14 +202,25 @@ def test_warning_action_preserves_business_actions_and_authored_prose_rules(repo
 
 def test_script_installs_nothing_never_shells_out_and_runs_on_the_image_python() -> None:
     modules = sorted((SKILL_DIR / "scripts").glob("*.py"))
-    assert [module.name for module in modules] == ["business_report_common.py", "business_report_publish.py", "business_report_render.py", "business_report_sections.py", "business_report_settings.py", "business_report_view.py", "report.py"]
+    assert [module.name for module in modules] == [
+        "business_report_common.py",
+        "business_report_product.py",
+        "business_report_publish.py",
+        "business_report_render.py",
+        "business_report_sections.py",
+        "business_report_settings.py",
+        "business_report_view.py",
+        "report.py",
+    ]
     for module in modules:
         source = module.read_text(encoding="utf-8")
         ast.parse(source, feature_version=(3, 10))
         assert "subprocess" not in source, module.name
         assert "os.system" not in source, module.name
         assert not re.search(r"\bpip\b", source), module.name
-        assert not re.search(r"\b(urllib|requests|http\.client|socket)\b", source), module.name
+        # URL parsing does no I/O; no networking modules or dynamic imports.
+        offline_source = source.replace("from urllib.parse import urlsplit\n", "") if module.name == "business_report_product.py" else source
+        assert not re.search(r"\b(urllib|requests|http\.client|socket)\b", offline_source), module.name
         assert "__import__" not in source, module.name
         assert "importlib" not in source, module.name
 

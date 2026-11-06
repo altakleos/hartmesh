@@ -36,3 +36,10 @@ ul.checks, ul.notes { list-style: none; margin-left: 0; font-size: 9pt; }
 .check.warn .status { color: #9a6700; }
 .check.fail .status { color: #a33a2b; }
 footer { page-break-inside: avoid; margin-top: 16pt; padding-top: 6pt; border-top: 0.5pt solid #d9dce1; font-size: 8.5pt; color: #555555; }
+#shared-attribution { margin-top: 12pt; padding: 10pt; border: 0.5pt solid #777777; background: #ffffff; color: #222222; font-size: 9pt; }
+.attribution-identity { display: table; width: 100%; table-layout: fixed; margin-bottom: 8pt; page-break-inside: avoid; }
+.attribution-identity img { display: table-cell; width: 40pt; height: 40pt; object-fit: contain; vertical-align: middle; }
+.attribution-identity p { display: table-cell; padding-left: 12pt; vertical-align: middle; overflow-wrap: anywhere; }
+.attribution-role { display: block; font-weight: normal; }
+.attribution-support { margin: 0; overflow-wrap: anywhere; word-break: break-all; }
+.attribution-support a { color: #0645ad; text-decoration: underline; }

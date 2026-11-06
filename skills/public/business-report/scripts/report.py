@@ -33,6 +33,7 @@ import sys
 import warnings
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
+from functools import partial
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -85,6 +86,7 @@ try:
         utc_now,
         vocab,
     )
+    from business_report_product import load_product_identity
     from business_report_publish import STATE_DIR, bundle_manifest, current_identity, current_report, publication_lock, publication_root, publish_bundle, require_current, sync_directory, write_json
     from business_report_render import chart_path, draw_charts, fetch_inline_only, render
     from business_report_sections import SECTION_BUILDERS, TABLE_ROW_LIMIT, build_report
@@ -1471,7 +1473,16 @@ def command_inspect(args) -> int:
     return EXIT_OK
 
 
+def operation_product_identity():
+    try:
+        return load_product_identity()
+    except ValueError as error:
+        raise InputError(str(error)) from None
+
+
 def command_build(args) -> int:
+    product_identity = operation_product_identity()
+    renderer = partial(render, product_identity=product_identity)
     tenant_dir = resolve_tenant_dir(args.tenant)
     profile = load_profile(args.profile, tenant_dir)
     options = BuildOptions(brand=load_brand(tenant_dir))
@@ -1540,7 +1551,7 @@ def command_build(args) -> int:
                 },
             )
 
-    report_path = publish_bundle(out_dir, base, report, targets, tenant_dir, render, stage_charts, bundle_id=args.bundle_id, expected_current=expected, verify_current=False)
+    report_path = publish_bundle(out_dir, base, report, targets, tenant_dir, renderer, stage_charts, bundle_id=args.bundle_id, expected_current=expected, verify_current=False, product_identity=product_identity)
     print(f"Built draft {report['meta']['draft']}: {report['meta']['title']} -> {report_path}")
     if previous and any(check["id"] == "prose_numbers" for check in previous.get("checks", [])):
         print("The previous draft carried written text (summary or actions); this rebuild replaced it with the computed text. Run prose again if it still applies.")
@@ -1597,6 +1608,8 @@ def _source_report(path: Path):
 
 
 def command_prose(args) -> int:
+    product_identity = operation_product_identity()
+    renderer = partial(render, product_identity=product_identity)
     report_path = Path(args.report)
     summary: list[str] | None = None
     actions: list[str] | None = None
@@ -1615,7 +1628,7 @@ def command_prose(args) -> int:
     targets = parse_targets(args.render, "--render")
     report, root, base, expected = _source_report(report_path)
     updated, removed, notes = apply_prose(report, summary, actions)
-    published = publish_bundle(root, base, updated, targets, resolve_tenant_dir(args.tenant), render, lambda stage: _stage_report_charts(updated, report_path, stage), bundle_id=args.bundle_id, expected_current=expected)
+    published = publish_bundle(root, base, updated, targets, resolve_tenant_dir(args.tenant), renderer, lambda stage: _stage_report_charts(updated, report_path, stage), bundle_id=args.bundle_id, expected_current=expected, product_identity=product_identity)
     print(f"Draft {updated['meta']['draft']}: {published}")
     if removed:
         print(f"Removed {len(removed)} {plural(len(removed), 'number')} not in the report: {', '.join(removed)}. Sentences with them were dropped; say so to the user.")
@@ -1635,6 +1648,8 @@ def command_prose(args) -> int:
 
 
 def command_render(args) -> int:
+    product_identity = operation_product_identity()
+    renderer = partial(render, product_identity=product_identity)
     targets = parse_targets(args.to, "--to")
     if not targets:
         raise InputError("--to must name at least one format: pdf, docx, xlsx or html.")
@@ -1659,7 +1674,7 @@ def command_render(args) -> int:
             _stage_report_charts(report, report_path, stage)
             staged_report = stage / report_path.name
             _write_json(staged_report, report)
-            staged = render(report, staged_report, targets[0], stage / destination.name, tenant_dir)
+            staged = renderer(report, staged_report, targets[0], stage / destination.name, tenant_dir)
             staged.chmod(0o644)
             with staged.open("rb") as stream:
                 os.fsync(stream.fileno())
@@ -1674,7 +1689,7 @@ def command_render(args) -> int:
     # manifests do not establish which report supplied a format's numbers.
     carry = read_render_manifest(report_path) if report_path.parent.parent.name == "drafts" else []
     carry = [name for name in carry if name not in {_render_name(report_path, target) for target in targets}]
-    published = publish_bundle(root, base, report, targets, tenant_dir, render, lambda stage: _stage_report_charts(report, report_path, stage), bundle_id=args.bundle_id, expected_current=expected, source=report_path, carry=carry)
+    published = publish_bundle(root, base, report, targets, tenant_dir, renderer, lambda stage: _stage_report_charts(report, report_path, stage), bundle_id=args.bundle_id, expected_current=expected, source=report_path, carry=carry, product_identity=product_identity)
     print(f"Report: {published}")
     print_rendered(published, targets)
     print_unowned_renders(report_path)
