@@ -148,6 +148,19 @@ test("runtime identity across public entry and authenticated product information
       page.getByRole("link", { name: `${provider} support` }).first(),
     ).toBeVisible();
   }
+  if (provider) {
+    const support = page
+      .getByRole("link", { name: `${provider} support` })
+      .first();
+    const toggle = page.locator('[data-sidebar="rail"]');
+    await toggle.click();
+    await expect
+      .poll(async () => (await support.boundingBox())?.height ?? Infinity)
+      .toBeLessThanOrEqual(48);
+    await expect(support).toHaveAccessibleName(`${provider} support`);
+    await expect(support).toHaveAttribute("href", body.provider.support_url);
+    await toggle.click();
+  }
   await page.getByRole("button", { name: /settings and more/i }).click();
   await page.getByRole("menuitem", { name: /About/ }).click();
   if (provider) {

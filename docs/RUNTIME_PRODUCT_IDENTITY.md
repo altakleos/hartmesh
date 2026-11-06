@@ -109,7 +109,9 @@ return HTTP 503. The frontend validates one bounded response (2 MiB maximum,
 auth-request deadline) per server request.
 
 Sign-in/setup show the product and an explicitly public provider support control.
-The authenticated sidebar shows the product mark/name plus provider support;
+The authenticated sidebar shows the product mark/name plus provider support.
+Its collapsed rail keeps a compact provider mark with the full accessible support
+name and destination;
 product information separately identifies the supplied product, provider and
 truthful **HartMesh component version**. Page titles and icons use the product.
 Configured product slots cannot be replaced by tenant fields. Tenant information
