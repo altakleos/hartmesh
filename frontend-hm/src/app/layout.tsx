@@ -4,13 +4,10 @@ import { type Metadata } from "next";
 
 import { ThemeProvider } from "@/components/theme-provider";
 import { DEFAULT_LOCALE } from "@/core/i18n/locale";
-import { DEFAULT_PRODUCT_NAME } from "@/core/product";
 
-// Static on purpose: the route layouts replace the title with the
-// deployment's own name, read per request (`generateMetadata`).
-export const metadata: Metadata = {
-  title: DEFAULT_PRODUCT_NAME,
-};
+// Route layouts supply the validated identity. A static default here would
+// briefly invent branding while a configured reader is unavailable.
+export const metadata: Metadata = {};
 
 export default function RootLayout({
   children,

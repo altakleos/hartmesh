@@ -9,9 +9,12 @@ import { RedirectToLogin } from "@/components/workspace/redirect-to-login";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
 import { assertNever } from "@/core/auth/types";
-import { I18nProvider } from "@/core/i18n/context";
 import { detectLocaleServer } from "@/core/i18n/server";
-import { getServerSideProductName } from "@/core/product/server";
+import { RuntimeProductProvider } from "@/core/product/context";
+import {
+  getServerSideProductIdentity,
+  productMetadata,
+} from "@/core/product/server";
 
 import { WorkspaceContent } from "./workspace-content";
 
@@ -19,16 +22,16 @@ export const dynamic = "force-dynamic";
 
 /** The tab title until a page sets its own: the deployment's product name. */
 export async function generateMetadata(): Promise<Metadata> {
-  return { title: await getServerSideProductName() };
+  return productMetadata();
 }
 
 export default async function WorkspaceLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  const [locale, result, productName] = await Promise.all([
+  const [locale, result, snapshot] = await Promise.all([
     detectLocaleServer(),
     getServerSideUser(),
-    getServerSideProductName(),
+    getServerSideProductIdentity(),
   ]);
 
   let content: React.ReactNode;
@@ -65,8 +68,8 @@ export default async function WorkspaceLayout({
   }
 
   return (
-    <I18nProvider initialLocale={locale} productName={productName}>
+    <RuntimeProductProvider initialLocale={locale} snapshot={snapshot}>
       {content}
-    </I18nProvider>
+    </RuntimeProductProvider>
   );
 }

@@ -7,9 +7,11 @@ endpoints behind them allow exactly what they allowed before: `authorization`
 has no permission covering these APIs, so it is not the lever that closes them.
 What limits a person there is their `system_role`, which the API already checks.
 
-Every field is read through ``get_config`` on each request, so an edit to
+Without a public product payload, every field is read through ``get_config``
+on each request, so an edit to
 ``config.yaml`` reaches the next page load without a Gateway restart. Chat-app
-channels are the exception: they take the product name when they start.
+channels are the exception: they take the product name when they start. A configured public product payload
+fixes product identity for the Gateway process; its replacement requires restart.
 """
 
 from typing import Any, Literal
@@ -197,5 +199,13 @@ def product_name(app_config: Any) -> str:
     config without a ``ui`` section (``None``, or a partial one built for an
     embedded client) is a deployment that named nothing.
     """
+    from deerflow.config.product_identity import mounted_identity
+
+    # AppConfig admission validates the payload and ownership before runtime.
+    # Agent prompts and channel handlers only need the cached name, not tenant
+    # filesystem checks or a copy of the complete image-bearing API response.
+    identity = mounted_identity()
+    if identity is not None:
+        return identity["name"]
     ui = getattr(app_config, "ui", None)
     return ui.product_name if isinstance(ui, UiConfig) else DEFAULT_PRODUCT_NAME

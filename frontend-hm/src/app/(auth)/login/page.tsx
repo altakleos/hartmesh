@@ -24,6 +24,7 @@ import {
 import { parseAuthError } from "@/core/auth/types";
 import { useProductName } from "@/core/i18n/context";
 import { useI18n } from "@/core/i18n/hooks";
+import { useProductIdentity } from "@/core/product/context";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -32,6 +33,7 @@ export default function LoginPage() {
   const { theme, resolvedTheme } = useTheme();
   const { t } = useI18n();
   const productName = useProductName();
+  const identity = useProductIdentity();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -220,7 +222,11 @@ export default function LoginPage() {
   return (
     <div className="bg-background relative flex min-h-screen items-center justify-center overflow-x-hidden overflow-y-auto">
       <FlickeringGrid
-        className="absolute inset-0 z-0 mask-[url(/images/deer.svg)] mask-size-[100vw] mask-center mask-no-repeat md:mask-size-[72vh]"
+        className={
+          identity?.mode === "configured"
+            ? "hidden"
+            : "absolute inset-0 z-0 mask-[url(/images/deer.svg)] mask-size-[100vw] mask-center mask-no-repeat md:mask-size-[72vh]"
+        }
         squareSize={4}
         gridGap={4}
         color={actualTheme === "dark" ? "white" : "black"}

@@ -206,3 +206,8 @@ Unauthenticated auth routes (`/register`, `/setup-status`, `/providers`,
 `/oauth/{provider}`, `/callback/{provider}`, the `/login/local` throttle) read
 `get_app_config()` through `asyncio.to_thread`: each read stats and hashes the
 config files. Coverage: `tests/blocking_io/test_auth_router_config_reads.py`.
+
+`product.py` exposes public product/provider snapshots through the exact auth
+allowlisted `/api/v1/auth/product-identity`; legacy `/product` retains `{name}`.
+Only explicitly public sanitized payload fields/assets are projected. Protected
+tenant branding routes keep their existing authorization.

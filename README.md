@@ -5062,3 +5062,11 @@ Your unwavering commitment and expertise have been the driving force behind Deer
 [![Star History Chart](https://star-history.dera.page/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.dera.page/#bytedance/deer-flow&Date)
 
 Managers with current Home ADMIN can abandon an obsolete pending lifecycle operation only after its exact captured environments are confirmed fenced. The intent and original actor remain recorded; grants are unchanged and the agent stays suspended until explicit restore. Existing-chat legacy uploads, browser and sidecar actions require a positive unbound lookup.
+
+### Runtime product and provider identity
+
+A read-only Gateway payload can supply public product/provider names, PNG marks,
+a browser icon and support link to the same application build. See the
+[runtime contract](docs/RUNTIME_PRODUCT_IDENTITY.md) for schema, ownership, legacy
+compatibility, restart behavior and explicit unavailable states. Tenant material
+remains authenticated.

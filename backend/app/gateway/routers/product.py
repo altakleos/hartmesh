@@ -1,17 +1,16 @@
-"""The product's name, for pages that render before anyone signs in.
+"""Public deployment product/provider identity and the legacy name-only reader.
 
-The sign-in and setup pages carry it as their heading and every page as its
-tab title, so this is public -- unlike ``/api/features`` and the tenant logo,
-which are for people the deployment signed in. It says only what the
-deployment calls itself; a company's own brand is still delivered after sign-in.
+Only explicitly approved shared fields and sanitized raster assets are public.
+Tenant branding and configuration remain behind their existing authentication.
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
-from deerflow.config.ui_config import MAX_PRODUCT_NAME_CHARS, product_name
+from deerflow.config.product_identity import identity_for
+from deerflow.config.ui_config import MAX_PRODUCT_NAME_CHARS
 
 # Beside the other reads a sign-in page makes before anyone is signed in
 # (``/api/v1/auth/providers``, ``/api/v1/auth/setup-status``). A public path
@@ -25,5 +24,17 @@ class ProductResponse(BaseModel):
 
 
 @router.get("/product", response_model=ProductResponse, summary="Product name")
-async def get_product(config: AppConfig = Depends(get_config)) -> ProductResponse:
-    return ProductResponse(name=product_name(config))
+def get_product(config: AppConfig = Depends(get_config)) -> ProductResponse:
+    try:
+        return ProductResponse(name=identity_for(config)["name"])
+    except ValueError:
+        raise HTTPException(503, "Service identity unavailable") from None
+
+
+@router.get("/product-identity", summary="Public product and provider identity")
+def get_product_identity(response: Response, config: AppConfig = Depends(get_config)) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return identity_for(config)
+    except ValueError:
+        raise HTTPException(503, "Service identity unavailable", headers={"Cache-Control": "no-store"}) from None

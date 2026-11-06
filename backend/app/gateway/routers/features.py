@@ -11,7 +11,7 @@ import asyncio
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
@@ -253,6 +253,13 @@ class FeaturesResponse(BaseModel):
 async def list_features(request: Request, config: AppConfig = Depends(get_config)) -> FeaturesResponse:
     """Return availability of optional frontend features."""
     browser = browser_capability(config)
+    from deerflow.config.product_identity import identity_for
+
+    try:
+        identity = await run_file_io(identity_for, config)
+    except ValueError:
+        raise HTTPException(503, "Service identity unavailable") from None
+    public_provider = identity["provider"]
     bundle = configured_tenant_bundle(config.tenant_bundle.path)
     subagent_batch_worker_running = bool(getattr(request.app.state, "subagent_batches_available", False))
     storage, accounts, instances = await _storage_features(request, config)
@@ -306,7 +313,7 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
             company_name=bundle.company_name,
             colors=BrandColors(primary=bundle.primary, secondary=bundle.secondary),
             has_logo=bundle.logo is not None,
-            provider=ProviderSupport(display_name=bundle.provider_name, support_url=bundle.support_url),
+            provider=ProviderSupport(display_name=public_provider["name"], support_url=public_provider["support_url"]) if public_provider else ProviderSupport(display_name=bundle.provider_name, support_url=bundle.support_url),
         ),
     )
 

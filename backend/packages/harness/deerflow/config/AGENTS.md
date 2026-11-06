@@ -275,3 +275,13 @@ independently with value-free problems; only authenticated features expose them.
 ### Web model provider presets
 
 Managed model provider presets live only in `managed_model_providers.py`. `managed_models.py` reads legacy custom encrypted records compatibly and converts presets into ModelConfig without changing YAML, previous snapshots or injected configurations. See the managed-model section in `../models/AGENTS.md` and the Web registration section of `backend/docs/CONFIGURATION.md`.
+
+Public product identity: `product_identity.py` reads an environment-selected, bounded
+public payload once under a process lock. `AppConfig` validates fixed-field
+ownership; `product_name` and Gateway readers use that complete snapshot. Never
+merge tenant material into it. Changes require all Gateway workers to restart;
+see [contract](../../../../../docs/RUNTIME_PRODUCT_IDENTITY.md).
+
+Runtime `product_name` uses the already admitted process snapshot without tenant
+filesystem access or copying assets. AppConfig admission and the synchronous
+public API readers retain ownership/conflict checks.

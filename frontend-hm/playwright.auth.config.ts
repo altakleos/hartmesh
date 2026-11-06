@@ -4,6 +4,8 @@ const frontendPort = process.env.E2E_AUTH_FRONTEND_PORT ?? "3001";
 const frontendURL =
   process.env.PLAYWRIGHT_AUTH_BASE_URL ?? `http://localhost:${frontendPort}`;
 const skipWebServer = process.env.PLAYWRIGHT_SKIP_WEB_SERVER === "1";
+const productGatewayPort = process.env.E2E_PRODUCT_GATEWAY_PORT ?? "3019";
+const productGatewayURL = `http://127.0.0.1:${productGatewayPort}`;
 
 /**
  * Auth-enabled E2E coverage for the login and setup pages. The default config
@@ -34,16 +36,24 @@ export default defineConfig({
 
   webServer: skipWebServer
     ? undefined
-    : {
-        command: `pnpm build && pnpm exec next start -p ${frontendPort}`,
-        url: frontendURL,
-        reuseExistingServer: !process.env.CI,
-        timeout: 240_000,
-        env: {
-          SKIP_ENV_VALIDATION: "1",
-          DEER_FLOW_AUTH_DISABLED: "0",
-          DEER_FLOW_INTERNAL_GATEWAY_BASE_URL: "http://127.0.0.1:65535",
-          DEER_FLOW_TRUSTED_ORIGINS: frontendURL,
+    : [
+        {
+          command: "node tests/fixtures/product-gateway.mjs",
+          url: `${productGatewayURL}/api/v1/auth/product-identity`,
+          reuseExistingServer: !process.env.CI,
+          env: { E2E_PRODUCT_GATEWAY_PORT: productGatewayPort },
         },
-      },
+        {
+          command: `pnpm build && pnpm exec next start -p ${frontendPort}`,
+          url: frontendURL,
+          reuseExistingServer: !process.env.CI,
+          timeout: 240_000,
+          env: {
+            SKIP_ENV_VALIDATION: "1",
+            DEER_FLOW_AUTH_DISABLED: "0",
+            DEER_FLOW_INTERNAL_GATEWAY_BASE_URL: productGatewayURL,
+            DEER_FLOW_TRUSTED_ORIGINS: frontendURL,
+          },
+        },
+      ],
 });

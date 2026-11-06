@@ -1,10 +1,14 @@
 import { describe, expect, rs, test } from "@rstest/core";
 import { isValidElement, type ReactElement } from "react";
 
-import { I18nProvider } from "@/core/i18n/context";
+import { RuntimeProductProvider } from "@/core/product/context";
 
 rs.mock("@/core/product/server", () => ({
-  getServerSideProductName: rs.fn(async () => "Acme Assist"),
+  getServerSideProductIdentity: rs.fn(async () => ({ name: "Acme Assist" })),
+  productMetadata: rs.fn(async () => ({
+    title: "Acme Assist",
+    icons: { icon: "/favicon.ico" },
+  })),
 }));
 rs.mock("@/core/i18n/server", () => ({
   detectLocaleServer: rs.fn(async () => "en-US"),
@@ -21,12 +25,12 @@ rs.mock("next/navigation", () => ({
   }),
 }));
 
-type ProviderProps = { initialLocale: string; productName?: string };
+type ProviderProps = { initialLocale: string; snapshot: { name: string } };
 
 function providerProps(tree: unknown): ProviderProps {
   expect(isValidElement(tree)).toBe(true);
   const element = tree as ReactElement<ProviderProps>;
-  expect(element.type).toBe(I18nProvider);
+  expect(element.type).toBe(RuntimeProductProvider);
   return element.props;
 }
 
@@ -42,9 +46,10 @@ describe("the deployment's product name reaches every layout", () => {
 
     await expect(layout.generateMetadata()).resolves.toEqual({
       title: "Acme Assist",
+      icons: { icon: "/favicon.ico" },
     });
     const props = providerProps(await layout.default({ children: null }));
-    expect(props.productName).toBe("Acme Assist");
+    expect(props.snapshot.name).toBe("Acme Assist");
   });
 
   test("the workspace", async () => {
@@ -52,9 +57,10 @@ describe("the deployment's product name reaches every layout", () => {
 
     await expect(layout.generateMetadata()).resolves.toEqual({
       title: "Acme Assist",
+      icons: { icon: "/favicon.ico" },
     });
     const props = providerProps(await layout.default({ children: null }));
-    expect(props.productName).toBe("Acme Assist");
+    expect(props.snapshot.name).toBe("Acme Assist");
   });
 
   test("the artifact window", async () => {
@@ -62,8 +68,9 @@ describe("the deployment's product name reaches every layout", () => {
 
     await expect(layout.generateMetadata()).resolves.toEqual({
       title: "Acme Assist",
+      icons: { icon: "/favicon.ico" },
     });
     const props = providerProps(await layout.default({ children: null }));
-    expect(props.productName).toBe("Acme Assist");
+    expect(props.snapshot.name).toBe("Acme Assist");
   });
 });

@@ -58,6 +58,7 @@ _PUBLIC_EXACT_PATHS: frozenset[str] = frozenset(
         "/api/v1/auth/providers",
         # The product's name heads the sign-in page; see routers/product.py.
         "/api/v1/auth/product",
+        "/api/v1/auth/product-identity",
     }
 )
 
