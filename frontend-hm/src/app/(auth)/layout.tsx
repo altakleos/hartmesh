@@ -6,15 +6,22 @@ import { GatewayOfflineFallback } from "@/components/workspace/gateway-offline-f
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
 import { assertNever } from "@/core/auth/types";
-import { I18nProvider } from "@/core/i18n/context";
 import { detectLocaleServer } from "@/core/i18n/server";
-import { getServerSideProductName } from "@/core/product/server";
+import {
+  RuntimeProductProvider,
+  ProviderIdentity,
+  ProductLogo,
+} from "@/core/product/context";
+import {
+  getServerSideProductIdentity,
+  productMetadata,
+} from "@/core/product/server";
 
 export const dynamic = "force-dynamic";
 
 /** The tab title until a page sets its own: the deployment's product name. */
 export async function generateMetadata(): Promise<Metadata> {
-  return { title: await getServerSideProductName() };
+  return productMetadata();
 }
 
 export default async function AuthLayout({
@@ -22,10 +29,10 @@ export default async function AuthLayout({
 }: {
   children: ReactNode;
 }) {
-  const [locale, result, productName] = await Promise.all([
+  const [locale, result, snapshot] = await Promise.all([
     detectLocaleServer(),
     getServerSideUser(),
-    getServerSideProductName(),
+    getServerSideProductIdentity(),
   ]);
 
   let content: ReactNode;
@@ -64,8 +71,14 @@ export default async function AuthLayout({
   }
 
   return (
-    <I18nProvider initialLocale={locale} productName={productName}>
+    <RuntimeProductProvider initialLocale={locale} snapshot={snapshot}>
+      <div className="fixed top-4 left-4 z-10">
+        <ProductLogo />
+      </div>
+      <div className="fixed right-4 bottom-4 z-10">
+        <ProviderIdentity />
+      </div>
       {content}
-    </I18nProvider>
+    </RuntimeProductProvider>
   );
 }

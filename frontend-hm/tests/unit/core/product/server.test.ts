@@ -51,7 +51,15 @@ describe("getServerSideProductName", () => {
 
   test("reads the deployment's name from the Gateway's public route", async () => {
     const fetchSpy = rs.fn(() =>
-      Promise.resolve(Response.json({ name: "Acme Assist" })),
+      Promise.resolve(
+        Response.json({
+          schema_version: 1,
+          mode: "default",
+          name: "Acme Assist",
+          product: { name: "Acme Assist", logo: null, browser_icon: null },
+          provider: null,
+        }),
+      ),
     );
     rs.stubGlobal("fetch", fetchSpy);
 
@@ -63,13 +71,13 @@ describe("getServerSideProductName", () => {
       string,
       RequestInit,
     ];
-    expect(url).toBe("http://gateway.test:8001/api/v1/auth/product");
+    expect(url).toBe("http://gateway.test:8001/api/v1/auth/product-identity");
     // An operator's edit reaches the next page load, not a cached one.
     expect(init.cache).toBe("no-store");
     expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 
-  test("a Gateway error leaves the default name", async () => {
+  test("a Gateway error reports identity unavailable", async () => {
     rs.stubGlobal(
       "fetch",
       rs.fn(() =>
@@ -79,10 +87,12 @@ describe("getServerSideProductName", () => {
 
     const { getServerSideProductName } = await loadFreshProductServer();
 
-    await expect(getServerSideProductName()).resolves.toBe("HartMesh");
+    await expect(getServerSideProductName()).resolves.toBe(
+      "Service identity unavailable",
+    );
   });
 
-  test("an unreachable Gateway leaves the default name", async () => {
+  test("an unreachable Gateway reports identity unavailable", async () => {
     rs.stubGlobal(
       "fetch",
       rs.fn(() => Promise.reject(new DOMException("Aborted", "AbortError"))),
@@ -90,10 +100,12 @@ describe("getServerSideProductName", () => {
 
     const { getServerSideProductName } = await loadFreshProductServer();
 
-    await expect(getServerSideProductName()).resolves.toBe("HartMesh");
+    await expect(getServerSideProductName()).resolves.toBe(
+      "Service identity unavailable",
+    );
   });
 
-  test("a body that is not JSON leaves the default name", async () => {
+  test("a body that is not JSON reports identity unavailable", async () => {
     rs.stubGlobal(
       "fetch",
       rs.fn(() => Promise.resolve(new Response("<html>proxy</html>"))),
@@ -101,7 +113,9 @@ describe("getServerSideProductName", () => {
 
     const { getServerSideProductName } = await loadFreshProductServer();
 
-    await expect(getServerSideProductName()).resolves.toBe("HartMesh");
+    await expect(getServerSideProductName()).resolves.toBe(
+      "Service identity unavailable",
+    );
   });
 
   test("the static website never asks a Gateway", async () => {

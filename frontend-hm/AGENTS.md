@@ -461,3 +461,10 @@ attempt; failed cancellation preserves uncertainty and all new sends wait while
 Stop is pending. Text and file submissions propagate admission rejection to the
 existing PromptInput cleanup boundary. Draft/reference cleanup happens only on
 confirmed admission; accepted attempts release captured browser File objects.
+
+Runtime identity: `core/product/server.ts` reads a bounded public Gateway snapshot.
+Route layouts pass it into `RuntimeProductProvider`, which pins one complete
+identity per mounted document and supplies i18n. Configured product/provider slots
+never take tenant identity. Fresh read failures render explicit unavailable state;
+established pages retain their complete snapshot. See the
+[runtime contract](../docs/RUNTIME_PRODUCT_IDENTITY.md).

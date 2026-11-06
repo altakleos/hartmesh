@@ -14,6 +14,7 @@ import {
 import { logoURL, useBranding } from "@/core/features";
 import { useProductName } from "@/core/i18n/context";
 import { useI18n } from "@/core/i18n/hooks";
+import { ProviderIdentity, useProductIdentity } from "@/core/product/context";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -32,12 +33,24 @@ export function WorkspaceHeader({ className }: { className?: string }) {
   const { state } = useSidebar();
   const pathname = usePathname();
   const branding = useBranding();
+  const identity = useProductIdentity();
+  const configured = identity?.mode === "configured";
   const productName = useProductName();
   // Nothing until the deployment has answered: the wrong name is worse than
   // a beat with none.
-  const name = branding.isLoading ? "" : (branding.companyName ?? productName);
+  const name = configured
+    ? identity.name
+    : branding.isLoading
+      ? ""
+      : (branding.companyName ?? productName);
   const mark = name ? companyMark(name) : "";
-  const logo = branding.hasLogo ? (
+  const logo = configured ? (
+    <img
+      src={identity.product.logo}
+      alt=""
+      className="size-6 shrink-0 rounded bg-white object-contain"
+    />
+  ) : branding.hasLogo ? (
     <img
       src={logoURL()}
       alt=""
@@ -80,6 +93,7 @@ export function WorkspaceHeader({ className }: { className?: string }) {
           </div>
         )}
       </div>
+      <ProviderIdentity />
       <SidebarMenu>
         <SidebarMenuItem>
           <SidebarMenuButton

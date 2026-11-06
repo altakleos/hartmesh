@@ -2,6 +2,7 @@ import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
 import { useEffect } from "react";
 
 import { useAuth } from "@/core/auth/AuthProvider";
+import { useProductIdentity } from "@/core/product/context";
 
 import {
   type FeaturesResponse,
@@ -54,13 +55,15 @@ export function useFeatures<T>(
  */
 export function useBranding() {
   const { data } = useFeatures(selectBranding);
+  const identity = useProductIdentity();
+  const provider = identity?.mode === "configured" ? identity.provider : null;
   return {
     companyName: data?.companyName ?? null,
     primary: data?.primary ?? null,
     secondary: data?.secondary ?? null,
     hasLogo: data?.hasLogo ?? false,
-    providerName: data?.providerName ?? null,
-    supportURL: data?.supportURL ?? null,
+    providerName: provider?.name ?? data?.providerName ?? null,
+    supportURL: provider?.support_url ?? data?.supportURL ?? null,
     isLoading: data === undefined,
   };
 }
@@ -71,11 +74,14 @@ export function useBranding() {
  */
 export function useDocumentTitle(page: string, productName: string) {
   const { companyName, isLoading } = useBranding();
+  const identity = useProductIdentity();
+  const configured = identity?.mode === "configured";
   useEffect(() => {
-    document.title = isLoading
-      ? page
-      : `${page} - ${companyName ?? productName}`;
-  }, [companyName, isLoading, page, productName]);
+    document.title =
+      isLoading && !configured
+        ? page
+        : `${page} - ${configured ? identity.name : (companyName ?? productName)}`;
+  }, [companyName, isLoading, page, productName, configured, identity]);
 }
 
 /**

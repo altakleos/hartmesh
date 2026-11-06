@@ -436,6 +436,13 @@ class AppConfig(BaseModel):
     _tools_by_name: dict[str, ToolConfig] = PrivateAttr(default_factory=dict)
     _tool_groups_by_name: dict[str, ToolGroupConfig] = PrivateAttr(default_factory=dict)
 
+    @model_validator(mode="after")
+    def _public_identity_ownership(self) -> "AppConfig":
+        from deerflow.config.product_identity import identity_for
+
+        identity_for(self)
+        return self
+
     @model_validator(mode="before")
     @classmethod
     def _drop_null_config_sections(cls, data: Any) -> Any:

@@ -4,15 +4,18 @@ import "streamdown/styles.css";
 import { type Metadata } from "next";
 
 import { QueryClientProvider } from "@/components/query-client-provider";
-import { I18nProvider } from "@/core/i18n/context";
 import { detectLocaleServer } from "@/core/i18n/server";
-import { getServerSideProductName } from "@/core/product/server";
+import { RuntimeProductProvider } from "@/core/product/context";
+import {
+  getServerSideProductIdentity,
+  productMetadata,
+} from "@/core/product/server";
 
 export const dynamic = "force-dynamic";
 
 /** The tab title until a page sets its own: the deployment's product name. */
 export async function generateMetadata(): Promise<Metadata> {
-  return { title: await getServerSideProductName() };
+  return productMetadata();
 }
 
 /**
@@ -30,14 +33,14 @@ export async function generateMetadata(): Promise<Metadata> {
 export default async function ArtifactViewerLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  const [locale, productName] = await Promise.all([
+  const [locale, snapshot] = await Promise.all([
     detectLocaleServer(),
-    getServerSideProductName(),
+    getServerSideProductIdentity(),
   ]);
 
   return (
-    <I18nProvider initialLocale={locale} productName={productName}>
+    <RuntimeProductProvider initialLocale={locale} snapshot={snapshot}>
       <QueryClientProvider>{children}</QueryClientProvider>
-    </I18nProvider>
+    </RuntimeProductProvider>
   );
 }
