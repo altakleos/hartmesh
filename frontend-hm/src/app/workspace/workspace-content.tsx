@@ -11,6 +11,7 @@ import { TelegramSetupHost } from "@/components/workspace/telegram/setup-host";
 import { WorkspaceSettingsDeepLink } from "@/components/workspace/workspace-settings-deep-link";
 import { WorkspaceSidebar } from "@/components/workspace/workspace-sidebar";
 import { ExtensionPageBootstrap } from "@/core/extensions/hooks";
+import { TenantPresentationProvider } from "@/core/features/tenant-presentation";
 import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
 
 function parseSidebarOpenCookie(
@@ -35,22 +36,27 @@ export async function WorkspaceContent({
 
   return (
     <QueryClientProvider>
-      <FileActionLifetimeProvider>
-        <ExtensionPageBootstrap />
-        <SidebarProvider className="h-screen" defaultOpen={initialSidebarOpen}>
-          <WorkspaceSidebar />
-          <SidebarInset className="min-w-0">
-            <GatewayOfflineBanner gatewayUnavailable={gatewayUnavailable} />
-            <ModelLoadErrorBanner gatewayUnavailable={gatewayUnavailable} />
-            {children}
-          </SidebarInset>
-        </SidebarProvider>
-        <CommandPalette />
-        <SettingsDialogHost />
-        <TelegramSetupHost />
-        <WorkspaceSettingsDeepLink />
-        <Toaster position="top-center" />
-      </FileActionLifetimeProvider>
+      <GatewayOfflineBanner gatewayUnavailable={gatewayUnavailable} />
+      <TenantPresentationProvider>
+        <FileActionLifetimeProvider>
+          <ExtensionPageBootstrap />
+          <SidebarProvider
+            className="h-screen"
+            defaultOpen={initialSidebarOpen}
+          >
+            <WorkspaceSidebar />
+            <SidebarInset className="min-w-0">
+              <ModelLoadErrorBanner gatewayUnavailable={gatewayUnavailable} />
+              {children}
+            </SidebarInset>
+          </SidebarProvider>
+          <CommandPalette />
+          <SettingsDialogHost />
+          <TelegramSetupHost />
+          <WorkspaceSettingsDeepLink />
+          <Toaster position="top-center" />
+        </FileActionLifetimeProvider>
+      </TenantPresentationProvider>
     </QueryClientProvider>
   );
 }

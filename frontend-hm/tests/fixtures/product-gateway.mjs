@@ -1,4 +1,4 @@
-/** Public SSR identity for browser-mocked suites; other Gateway reads fail closed. */
+/** Product identity and explicit legacy selection for browser-mocked suites. */
 import { createServer } from "node:http";
 
 const port = Number(process.env.E2E_PRODUCT_GATEWAY_PORT ?? "3019");
@@ -8,6 +8,10 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 const server = createServer((request, response) => {
   response.setHeader("Content-Type", "application/json");
   response.setHeader("Cache-Control", "no-store");
+  if (request.method === "GET" && request.url === "/api/branding/presentation") {
+    response.end(JSON.stringify({ schema_version: 1, mode: "legacy" }));
+    return;
+  }
   if (
     request.method === "GET" &&
     request.url === "/api/v1/auth/product-identity"

@@ -860,6 +860,13 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # snapshot on `app.state` to keep that contract enforceable.
     try:
         startup_config = get_app_config()
+        # Only the presentation selection is startup-owned. Starters, roles and
+        # other tenant settings retain their independent live-read behavior.
+        app.state.tenant_presentation_reader = await asyncio.to_thread(branding.create_presentation_reader, startup_config)
+        try:
+            await asyncio.to_thread(app.state.tenant_presentation_reader.read)
+        except ValueError:
+            logger.warning("Tenant presentation unavailable or invalid; authenticated fresh readers will refuse")
         from deerflow.runtime.customer_administration import capture_customer_administration_policy
 
         if getattr(app.state, "customer_administration_policy", None) is None:

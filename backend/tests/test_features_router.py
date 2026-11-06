@@ -84,6 +84,23 @@ def _app_with_config(
 NO_BRANDING = {"company_name": None, "colors": {"primary": None, "secondary": None}, "has_logo": False, "provider": {"display_name": None, "support_url": None}}
 
 
+def test_strict_presentation_cannot_project_loose_tenant_or_provider_fields(tmp_path):
+    from deerflow.config.tenant_bundle import TenantBundleConfig
+    from deerflow.config.tenant_presentation import PresentationReader
+
+    (tmp_path / "brand.json").write_text(json.dumps({"company_name": "Example Loose Name", "colors": {"primary": "#123456"}}))
+    (tmp_path / "provider.json").write_text(json.dumps({"display_name": "Example Loose Provider", "support_url": "https://support.example.test/legacy"}))
+    (tmp_path / "starters.json").write_text("[]")
+    app = _app_with_config(agents_api_enabled=True, tenant_bundle_path=str(tmp_path))
+    app.state.tenant_presentation_reader = PresentationReader(TenantBundleConfig(path=str(tmp_path), presentation="strict-v1", presentation_sha256="0" * 64), {})
+    with TestClient(app) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["branding"] == NO_BRANDING
+    assert response.json()["ui"]["starters"] == []
+    assert response.headers["cache-control"] == "private, no-store"
+
+
 def _default_ui_payload() -> dict:
     """What a deployment that configured no presentation reports."""
     return {

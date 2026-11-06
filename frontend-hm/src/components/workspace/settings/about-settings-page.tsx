@@ -13,14 +13,14 @@ import { APP_VERSION } from "@/version";
 import { aboutMarkdown } from "./about-content";
 
 export function AboutSettingsPage() {
-  const { companyName, isLoading } = useBranding();
+  const { companyName, isLoading, strict } = useBranding();
   const productName = useProductName();
   const identity = useProductIdentity();
-  if (identity?.mode === "configured") {
+  if (identity?.mode === "configured" || strict) {
     return (
       <section className="space-y-4">
         <ProductLogo />
-        <h1>{identity.name}</h1>
+        <h1>{identity?.name ?? productName}</h1>
         <ProviderIdentity />
         <p>HartMesh component version {APP_VERSION}.</p>
       </section>

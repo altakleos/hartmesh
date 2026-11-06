@@ -8,7 +8,7 @@ interface GatewayOfflineFallbackProps {
   /**
    * When true, this component renders its own banner. The workspace layout
    * sets this to false because WorkspaceContent already mounts the banner
-   * inside its sidebar layout. The (auth) layout sets it to true because
+   * before tenant admission. The (auth) layout sets it to true because
    * its plain children have no banner of their own.
    */
   renderBanner?: boolean;

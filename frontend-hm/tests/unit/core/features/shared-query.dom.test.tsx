@@ -133,6 +133,9 @@ describe("shared feature discovery", () => {
     expect(state()).toEqual({
       branding: {
         companyName: "Example Company",
+        logo: null,
+        snapshotId: null,
+        strict: false,
         primary: "#123456",
         secondary: null,
         hasLogo: true,
@@ -167,6 +170,9 @@ describe("shared feature discovery", () => {
     await waitFor(() => expect(state().branding.isLoading).toBe(false));
     expect(state().branding).toEqual({
       companyName: null,
+      logo: null,
+      snapshotId: null,
+      strict: false,
       primary: null,
       secondary: null,
       hasLogo: false,

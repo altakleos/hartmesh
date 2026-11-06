@@ -53,7 +53,7 @@ export default async function WorkspaceLayout({
       break;
     case "gateway_unavailable":
       // GatewayOfflineFallback supplies the AuthProvider; WorkspaceContent
-      // already mounts the banner inside its sidebar layout, so renderBanner
+      // already mounts the recovery banner before tenant admission, so renderBanner
       // stays false here to avoid double-mounting.
       content = (
         <GatewayOfflineFallback>

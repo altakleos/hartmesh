@@ -979,6 +979,15 @@ with no network and exits before the Gateway starts (§ "Storage and agents").
 
 ### Tenant bundle
 
+The layout below describes tolerant legacy presentation, still the default.
+For coherent authenticated workspace name/logo snapshots, opt into
+`tenant_bundle.presentation: strict-v1` with a complete `presentation.json` and
+its independently selected digest in the existing read-only mount. Follow the
+[strict input and activation contract](../../docs/TENANT_PRESENTATION.md),
+including every affected Gateway worker's restart and serving-snapshot check.
+Strict mode does not apply tenant colors to web styling or change independent
+starters, roles and report settings. Report/sandbox readers remain separate.
+
 `/srv/hartmesh/operator/tenant/` is where the operator writes what the
 workspace says about the company it serves. Two readers, one directory, no
 copy: every sandbox mounts it read-only at `/mnt/tenant` (a `sandbox.mounts`
