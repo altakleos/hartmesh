@@ -441,7 +441,9 @@ startup, while a stale copy diverges silently at a security boundary. `starlette
 therefore a declared, bounded direct dependency so the bump is visible in review, and
 `tests/test_gateway_request_path.py` pins the agreement independently of the mechanism.
 Any preflight, conflict, or include failure rolls back the whole router without preventing
-later routers from mounting. Do not introduce a framework-bound `RouterContributor`
+later routers from mounting. Public auth reservations must mirror AuthMiddleware,
+including `/api/v1/auth/product-identity` across all methods and trailing slashes.
+Do not introduce a framework-bound `RouterContributor`
 contract: the public registry accepts `Sequence[Any]`
 to keep extension-api dependency-free.
 

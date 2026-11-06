@@ -52,6 +52,7 @@ _HOST_PUBLIC_EXACT_PATHS = frozenset(
         "/api/v1/auth/initialize",
         "/api/v1/auth/providers",
         "/api/v1/auth/product",
+        "/api/v1/auth/product-identity",
     }
 )
 _HOST_CSRF_EXEMPT_EXACT_PATHS = frozenset({"/api/v1/auth/me"})
