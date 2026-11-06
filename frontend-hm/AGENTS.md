@@ -462,18 +462,11 @@ Stop is pending. Text and file submissions propagate admission rejection to the
 existing PromptInput cleanup boundary. Draft/reference cleanup happens only on
 confirmed admission; accepted attempts release captured browser File objects.
 
-Runtime identity: `core/product/server.ts` reads a bounded public Gateway snapshot.
-Route layouts pass it into `RuntimeProductProvider`, which pins one complete
-identity per mounted document and supplies i18n. Configured product/provider slots
-never take tenant identity. Fresh read failures render explicit unavailable state;
-established pages retain their complete snapshot. See the
+Runtime identity (`core/product/`): layouts pass one validated public snapshot to
+`RuntimeProductProvider` for i18n and product identity. Retain complete admitted
+identity on failure; fresh failures show unavailable. Configured product/provider
+slots never use tenant fields. Keep legacy UiConfig name validation separate from
+strict mounted names. Browser-mocked Playwright suites use
+`tests/fixtures/product-gateway.mjs` for SSR identity only (other routes 503);
+retain real-service outage checks. See the
 [runtime contract](../docs/RUNTIME_PRODUCT_IDENTITY.md).
-
-Default-mode product names retain the established UiConfig Unicode policy;
-configured-mode names follow the strict public payload policy. Keep their
-validators separate so new payload rules do not reject legacy deployments.
-
-Browser-mocked Playwright suites start `tests/fixtures/product-gateway.mjs`
-for server-side public identity reads. Its other routes return 503; browser route
-mocks still own feature/auth recovery. Keep this fixture outside production code
-and retain real-service identity/outage coverage separately.
