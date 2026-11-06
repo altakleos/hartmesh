@@ -8,7 +8,10 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 const server = createServer((request, response) => {
   response.setHeader("Content-Type", "application/json");
   response.setHeader("Cache-Control", "no-store");
-  if (request.method === "GET" && request.url === "/api/branding/presentation") {
+  if (
+    request.method === "GET" &&
+    request.url === "/api/branding/presentation"
+  ) {
     response.end(JSON.stringify({ schema_version: 1, mode: "legacy" }));
     return;
   }
