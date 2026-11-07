@@ -58,9 +58,10 @@ complete reference frontend. Product UI changes belong in `frontend-hm/`.
 - Analysis caches keep private immutable generations, HartMesh's input identity
   and read-only SQL. Shared lifetime locks allow parallel readers/builders;
   cleanup retains the three newest complete entries only when the cache is idle.
-- Focused compatibility regressions and static checks are underway. Final
-  independent review, PR publication and exact-head CI remain the merge gates.
-  Commands, outcomes and the reviewed revision will be recorded in the PR.
+- Focused compatibility regressions and static checks passed, and independent
+  review approved the implementation. [PR #377](https://github.com/altakleos/hartmesh/pull/377)
+  records commands, outcomes, reviewed revisions and CI repairs. Integration is
+  gated on all applicable checks passing against its exact published head.
 
 ## What upstream is improving
 

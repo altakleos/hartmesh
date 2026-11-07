@@ -69,6 +69,7 @@ def test_a_real_partial_set_goes_and_the_owner_can_start_again(local, sandbox_id
     pending_at_the_failure = []
 
     def start_a_proxy_then_fail(*args, **kwargs):
+        kwargs["proxy_state"].proxy_may_exist = True
         pending_at_the_failure.extend(local.journal.pending())
         _start_proxy(proxy_name, network_name)
         connected = _docker("network", "connect", egress_name, proxy_name)
@@ -155,6 +156,7 @@ def test_a_set_it_cannot_prove_gone_keeps_the_owner_refused(local, sandbox_id, m
     proxy_name, network_name = local._resource_names(sandbox_id)
 
     def start_a_proxy_then_fail(*args, **kwargs):
+        kwargs["proxy_state"].proxy_may_exist = True
         _start_proxy(proxy_name, network_name)
         raise RuntimeError("Proxy reported no address")
 
