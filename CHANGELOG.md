@@ -45,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restoring a selection; replacing a host file alone does not refresh an existing
   file bind mount. See [offline report presentation](docs/OFFLINE_REPORT_PRESENTATION.md).
 
+### Storage lifecycle
+
+- Storage preparation and quiescence handle a process exiting during the mount
+  census when Linux reports either a missing file or a missing process. A PID
+  is ignored only after its directory has disappeared; unreadable facts for a
+  process still visible continue to refuse the operation.
+
 ### Schema changes
 
 No database schema changes since v2.2.0+hartmesh.52. The database head stays at

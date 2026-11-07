@@ -160,8 +160,10 @@ single-host native attachments.
 The [backing requirements](docs/STORAGE_SPACES.md#qualified-linux-backing) describe
 the fixed filesystem byte/inode bounds and platform reserve. Administrators can
 create quiesced backups, restore with current grants, archive and delete through
-the generic recovery controls. A trusted consumer can attach native roots on the
-qualified local Linux Docker host; lifecycle changes require confirmed containment.
+the generic recovery controls. Storage preparation and quiescence tolerate
+processes exiting during inspection. The operator still refuses when a visible
+process has unreadable mount facts. A trusted consumer can attach native roots
+on the qualified local Linux Docker host; lifecycle changes require confirmed containment.
 Closures record who began them and why. Trusted host code can contain a workspace
 without advancing its Space generation; confirmed closures notify consumers after
 commit. Uncertain creation or Docker replies keep the attachment pending.

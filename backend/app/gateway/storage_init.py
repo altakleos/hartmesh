@@ -140,7 +140,7 @@ def container_holders(loops: dict[str, str | None], *, proc_root: Path = Path("/
             for slot, loop in loops.items():
                 if loop and loop in sources:
                     holders.append(dict(pid=int(proc.name), container_id=match.group()[:12], slot_id=slot))
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             if proc.exists():
                 raise Refused(f"cannot read container mount facts for process {proc.name}") from None
         except OSError as exc:
