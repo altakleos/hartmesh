@@ -185,6 +185,31 @@ test("one build admits complete tenant snapshots through authenticated activatio
     expect(upload.ok(), await upload.text()).toBe(true);
     const fileURL = `/api/threads/${threadId}/artifacts/mnt/user-data/uploads/preserved.txt`;
     expect(await (await page.request.get(fileURL)).body()).toEqual(keptBytes);
+    stop();
+    const outageRefresh = page.waitForResponse(
+      (response) =>
+        response.request().headers().rsc === "1" &&
+        response.url().includes("/workspace/chats/"),
+    );
+    await page.evaluate(() =>
+      (
+        window as unknown as { next: { router: { refresh: () => void } } }
+      ).next.router.refresh(),
+    );
+    await outageRefresh;
+    await expect(
+      page.getByText(
+        /Service identity reader unavailable\. Retaining the verified identity/,
+      ),
+    ).toBeVisible();
+    await expect(page.getByTestId("tenant-context")).toHaveAttribute(
+      "data-snapshot-id",
+      first.snapshot_id,
+    );
+    await expect(page.getByTestId("tenant-logo")).toHaveAttribute(
+      "src",
+      first.tenant.logo,
+    );
     activate("B");
     await page.getByRole("link", { name: "My files", exact: true }).click();
     await expect(page).toHaveURL(/\/workspace\/files/);
@@ -384,6 +409,55 @@ test("one build admits complete tenant snapshots through authenticated activatio
     activate("A");
     await page.reload();
     await admitted(page, "Example Tenant One");
+    const oldAccount = await (await page.request.get("/api/v1/auth/me")).json();
+    const csrfCurrent = (await page.context().cookies()).find(
+      (cookie) => cookie.name === "csrf_token",
+    )!.value;
+    await page.evaluate(() => {
+      (
+        window as unknown as { tenantProofDocument?: boolean }
+      ).tenantProofDocument = true;
+    });
+    const registered = await page.request.post("/api/v1/auth/register", {
+      headers: { "X-CSRF-Token": csrfCurrent },
+      data: {
+        email: "second@example.com",
+        password: "SyntheticTenant!8642",
+        remember_me: false,
+      },
+    });
+    expect(registered.status()).toBe(201);
+    const newAccount = await registered.json();
+    expect(newAccount.id).not.toBe(oldAccount.id);
+    expect(newAccount.system_role).toBe("user");
+    await page.evaluate(() =>
+      (
+        window as unknown as { next: { router: { refresh: () => void } } }
+      ).next.router.refresh(),
+    );
+    await expect
+      .poll(
+        async () => {
+          try {
+            return await page.evaluate(
+              () =>
+                (window as unknown as { tenantProofDocument?: boolean })
+                  .tenantProofDocument === true,
+            );
+          } catch {
+            return true;
+          }
+        },
+        { timeout: 15_000 },
+      )
+      .toBe(false);
+    await admitted(page, "Example Tenant One");
+    expect((await (await page.request.get("/api/v1/auth/me")).json()).id).toBe(
+      newAccount.id,
+    );
+    expect([403, 404]).toContain(
+      (await page.request.get(`/api/langgraph/threads/${threadId}`)).status(),
+    );
     await page.getByRole("button", { name: /settings and more/i }).click();
     await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
     await page.getByRole("button", { name: "Account", exact: true }).click();

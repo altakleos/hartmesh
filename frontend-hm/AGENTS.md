@@ -360,6 +360,9 @@ Fresh failures show unavailable. `useBranding` ignores live tenant fields in
 strict mode while other features keep refreshing. The header shows a separately
 named Workspace context with fixed readable colors, including collapsed names.
 Static/legacy paths stay compatible. See [the contract](../docs/TENANT_PRESENTATION.md).
+Keep session recovery and the index's pure route control outside private admission.
+Uncertain SSR auth preserves the provider path; confirmed scope changes retire it
+until a full reload, including when later SSR responses become uncertain again.
 Files tabs derive from `useSearchParams`, including same-page/history navigation.
 
 One rule governs what happens while the answer is unknown: a control someone

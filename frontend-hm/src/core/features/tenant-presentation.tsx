@@ -145,8 +145,11 @@ async function fetchSelection(
 /** One complete selection for this authenticated account/document lifetime. */
 export function TenantPresentationProvider({
   children,
+  routeControl = null,
 }: {
   children: ReactNode;
+  /** Only the workspace index's existing server redirect; never private UI. */
+  routeControl?: ReactNode;
 }) {
   const product = useProductIdentity();
   const { user } = useAuth();
@@ -182,6 +185,9 @@ export function TenantPresentationProvider({
     // AuthProvider remounts the entire protected subtree on account/role changes.
     // Client navigation, focus and server refreshes do not replace this selection.
   }, [product, accountId, staticMode]);
+  // Keep this provider mounted across entry routing, so an admitted document
+  // never recaptures presentation when client navigation visits the index.
+  if (!selection && routeControl !== null) return <>{routeControl}</>;
   if (!selection)
     return (
       <main className="flex min-h-screen flex-col items-center justify-center gap-4 bg-white p-4 text-black">

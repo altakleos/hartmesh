@@ -8,10 +8,10 @@ import { GatewayOfflineBanner } from "@/components/workspace/gateway-offline-ban
 import { ModelLoadErrorBanner } from "@/components/workspace/model-load-error-banner";
 import { SettingsDialogHost } from "@/components/workspace/settings";
 import { TelegramSetupHost } from "@/components/workspace/telegram/setup-host";
+import { WorkspacePresentationBoundary } from "@/components/workspace/workspace-presentation-boundary";
 import { WorkspaceSettingsDeepLink } from "@/components/workspace/workspace-settings-deep-link";
 import { WorkspaceSidebar } from "@/components/workspace/workspace-sidebar";
 import { ExtensionPageBootstrap } from "@/core/extensions/hooks";
-import { TenantPresentationProvider } from "@/core/features/tenant-presentation";
 import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
 
 function parseSidebarOpenCookie(
@@ -37,7 +37,7 @@ export async function WorkspaceContent({
   return (
     <QueryClientProvider>
       <GatewayOfflineBanner gatewayUnavailable={gatewayUnavailable} />
-      <TenantPresentationProvider>
+      <WorkspacePresentationBoundary route={children}>
         <FileActionLifetimeProvider>
           <ExtensionPageBootstrap />
           <SidebarProvider
@@ -56,7 +56,7 @@ export async function WorkspaceContent({
           <WorkspaceSettingsDeepLink />
           <Toaster position="top-center" />
         </FileActionLifetimeProvider>
-      </TenantPresentationProvider>
+      </WorkspacePresentationBoundary>
     </QueryClientProvider>
   );
 }

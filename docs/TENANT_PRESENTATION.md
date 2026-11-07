@@ -128,6 +128,20 @@ failure displays **Workspace identity unavailable** with Reload. It does not
 render partial tenant context; an already admitted document may retain its
 complete snapshot during a reader outage.
 
+The workspace index's existing pure server redirect runs before private
+presentation admission, preserving entry queries during an auth-service outage.
+This route-only slot exposes no workspace chrome or tenant data. The same
+presentation provider stays mounted across client entry/return navigation, so
+the redirect cannot replace an already admitted document snapshot.
+
+Healthy and uncertain server auth refreshes keep the same account/provider
+component path. A confirmed different server account/role/permission scope clears
+private state and triggers an explicit full-page reload for fresh existing auth
+checks. It never applies late server props as a new client account. Logout
+retires this monitor together with the protected account subtree.
+Once retired, later uncertain or older server responses cannot reopen private
+children before that reload or account retirement.
+
 ## Operator activation and restoration
 
 This is a bounded read-only reader interface, not an activation controller.
