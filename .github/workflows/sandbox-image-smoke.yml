@@ -329,7 +329,6 @@ jobs:
           df -h /
 
       - name: Resolve immutable image references for this run
-        timeout-minutes: 30
         # Pull on the runner's platform, then pass only immutable repo@sha256
         # references to pytest. This keeps both the baseline and the 1.11.0
         # regression run reproducible even if either source tag moves later.
