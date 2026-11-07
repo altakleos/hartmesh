@@ -135,12 +135,14 @@ presentation provider stays mounted across client entry/return navigation, so
 the redirect cannot replace an already admitted document snapshot.
 
 Healthy and uncertain server auth refreshes keep the same account/provider
-component path. A confirmed different server account/role/permission scope clears
+component path. A newly delivered conflicting server account/role/permission scope clears
 private state and triggers an explicit full-page reload for fresh existing auth
 checks. It never applies late server props as a new client account. Logout
 retires this monitor together with the protected account subtree.
 Once retired, later uncertain or older server responses cannot reopen private
-children before that reload or account retirement.
+children before that reload or account retirement. Verified client auth refreshes
+retain their existing account-retirement behavior; unchanged initial server props
+do not override that newer verified admission.
 
 ## Operator activation and restoration
 

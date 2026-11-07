@@ -458,6 +458,47 @@ test("one build admits complete tenant snapshots through authenticated activatio
     expect([403, 404]).toContain(
       (await page.request.get(`/api/langgraph/threads/${threadId}`)).status(),
     );
+    // A verified client refresh also changes account scope. Unchanged initial
+    // SSR props must not force that newer admission back into a reload loop.
+    const third = await page.request.post("/api/v1/auth/register", {
+      headers: {
+        "X-CSRF-Token": (await page.context().cookies()).find(
+          (cookie) => cookie.name === "csrf_token",
+        )!.value,
+      },
+      data: {
+        email: "third@example.com",
+        password: "SyntheticTenant!8642",
+        remember_me: false,
+      },
+    });
+    expect(third.status()).toBe(201);
+    const thirdAccount = await third.json();
+    expect(thirdAccount.id).not.toBe(newAccount.id);
+    await page.evaluate(() => {
+      (
+        window as unknown as { tenantClientRefresh?: boolean }
+      ).tenantClientRefresh = true;
+    });
+    const freshAccount = page.waitForResponse((response) =>
+      response.url().endsWith("/api/v1/auth/me"),
+    );
+    const freshPresentation = page.waitForResponse((response) =>
+      response.url().endsWith("/api/branding/presentation"),
+    );
+    await page.evaluate(() =>
+      document.dispatchEvent(new Event("visibilitychange")),
+    );
+    expect((await (await freshAccount).json()).id).toBe(thirdAccount.id);
+    expect((await freshPresentation).status()).toBe(200);
+    await admitted(page, "Example Tenant One");
+    expect(
+      await page.evaluate(
+        () =>
+          (window as unknown as { tenantClientRefresh?: boolean })
+            .tenantClientRefresh,
+      ),
+    ).toBe(true);
     await page.getByRole("button", { name: /settings and more/i }).click();
     await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
     await page.getByRole("button", { name: "Account", exact: true }).click();

@@ -1,5 +1,6 @@
 import { afterEach, expect, rs, test } from "@rstest/core";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -327,6 +328,130 @@ test.each(["account", "role", "permissions"])(
     }
   },
 );
+
+test.each(["account", "role", "permissions"])(
+  "actual layout permits a verified client %s refresh while SSR props stay unchanged",
+  async (change) => {
+    const one = {
+      id: "one",
+      email: "one@example.com",
+      system_role: "admin" as const,
+      needs_setup: false,
+    };
+    const next =
+      change === "account"
+        ? { ...one, id: "two", email: "two@example.com" }
+        : change === "role"
+          ? { ...one, system_role: "user" as const }
+          : { ...one, permissions: ["threads:read"] };
+    const bodies = await Promise.all(
+      ["One", "Two"].map(async (label) => {
+        const body = {
+          schema_version: 1,
+          mode: "tenant",
+          product_sha256: await presentationDigest(DEFAULT_IDENTITY),
+          tenant: {
+            name: `Example Tenant ${label}`,
+            logo: "data:image/png;base64,iVBORw0KGgo=",
+          },
+        };
+        return { ...body, snapshot_id: await presentationDigest(body) };
+      }),
+    );
+    let selected = 0;
+    let lifetime: ReturnType<typeof useFileActionLifetime> | undefined;
+    rs.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
+      requestURL(input).endsWith("/auth/me")
+        ? Response.json(next)
+        : Response.json(bodies[selected]),
+    );
+    const reload = rs
+      .spyOn(window.location, "reload")
+      .mockImplementation(() => undefined);
+    function Probe() {
+      const auth = useAuth();
+      lifetime = useFileActionLifetime();
+      const snapshot = useTenantPresentation();
+      return (
+        <>
+          <p>{snapshot?.mode === "tenant" ? snapshot.tenant?.name : null}</p>
+          <button onClick={() => void auth.refreshUser()}>
+            Refresh account
+          </button>
+        </>
+      );
+    }
+    server.result = { tag: "authenticated", user: one };
+    const app = render(await resolvedLayout(<Probe />));
+    await screen.findByText("Example Tenant One");
+    const original = lifetime!;
+    selected = 1;
+    fireEvent.click(screen.getByRole("button", { name: "Refresh account" }));
+    await screen.findByText("Example Tenant Two");
+    expect(original.signal.aborted).toBe(true);
+    expect(reload).not.toHaveBeenCalled();
+    // A subsequent consistent SSR result preserves the new account. A newly
+    // delivered conflicting result must still retire it before fresh checks.
+    server.result = { tag: "authenticated", user: { ...next } };
+    app.rerender(await resolvedLayout(<Probe />));
+    expect(screen.queryByText("Example Tenant Two")).not.toBeNull();
+    expect(reload).not.toHaveBeenCalled();
+    server.result = { tag: "authenticated", user: { ...one } };
+    app.rerender(await resolvedLayout(<Probe />));
+    expect(screen.queryByText("Example Tenant Two")).toBeNull();
+    expect(reload).toHaveBeenCalledTimes(1);
+  },
+);
+
+test("a batched client refresh cannot swallow newly delivered conflicting SSR evidence", async () => {
+  const one = {
+    id: "one",
+    email: "one@example.com",
+    system_role: "user" as const,
+    needs_setup: false,
+  };
+  let release: (response: Response) => void = () => undefined;
+  let refresh: Promise<void> | undefined;
+  rs.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
+    requestURL(input).endsWith("/auth/me")
+      ? new Promise<Response>((resolve) => {
+          release = resolve;
+        })
+      : Response.json({ schema_version: 1, mode: "legacy" }),
+  );
+  const reload = rs
+    .spyOn(window.location, "reload")
+    .mockImplementation(() => undefined);
+  function Probe() {
+    const auth = useAuth();
+    return (
+      <>
+        <p>Account {auth.user?.id}</p>
+        <button
+          onClick={() => {
+            refresh = auth.refreshUser();
+          }}
+        >
+          Refresh account
+        </button>
+      </>
+    );
+  }
+  server.result = { tag: "authenticated", user: one };
+  const app = render(await resolvedLayout(<Probe />));
+  await screen.findByText("Account one");
+  fireEvent.click(screen.getByRole("button", { name: "Refresh account" }));
+  server.result = { tag: "authenticated", user: { ...one } };
+  const freshSSR = await resolvedLayout(<Probe />);
+  await act(async () => {
+    release(Response.json({ ...one, id: "two" }));
+    await refresh;
+    app.rerender(freshSSR);
+  });
+  expect(screen.queryByText("Account two")).toBeNull();
+  expect(screen.queryByText("Private workspace chrome")).toBeNull();
+  expect(reload).toHaveBeenCalledTimes(1);
+});
 
 test("logout retires the layout monitor before delayed verified SSR props arrive", async () => {
   const one = {
