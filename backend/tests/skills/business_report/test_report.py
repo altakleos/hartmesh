@@ -203,7 +203,9 @@ def test_warning_action_preserves_business_actions_and_authored_prose_rules(repo
 def test_script_installs_nothing_never_shells_out_and_runs_on_the_image_python() -> None:
     modules = sorted((SKILL_DIR / "scripts").glob("*.py"))
     assert [module.name for module in modules] == [
+        "business_report_charts.py",
         "business_report_common.py",
+        "business_report_presentation.py",
         "business_report_product.py",
         "business_report_publish.py",
         "business_report_render.py",

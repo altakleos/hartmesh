@@ -295,6 +295,13 @@ and restart to retain rich cards. Disable or remove it through the normal extens
 lifecycle; the original report and downloads remain usable.
 
 
+Business-report regeneration now captures one complete current product/tenant
+presentation for all formats. New bundles retain its metadata, sanitized logo and
+original chart draw values, preserve historical preferences and report facts, and
+omit incompatible old formats. Old downloads keep their bytes. Operators expose
+strict projections read-only and verify recreated sandbox readers; see the
+[offline presentation contract](docs/OFFLINE_REPORT_PRESENTATION.md).
+
 Each business-report draft publishes as a complete directory under
 `<report-root>/drafts/<bundle-id>/`, with its JSON, charts and requested formats.
 Failed rendering preserves the preceding draft. Old bundles remain available;

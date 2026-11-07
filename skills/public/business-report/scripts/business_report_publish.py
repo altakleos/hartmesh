@@ -18,7 +18,8 @@ import uuid
 from pathlib import Path
 
 from business_report_common import REPORT_SUFFIX, InputError
-from business_report_product import MEMBER as PRODUCT_MEMBER
+from business_report_product import MEMBER as PRODUCT_MEMBER, _canonical
+from business_report_presentation import MEMBER as PRESENTATION_MEMBER, validate_retained
 from business_report_view import MAX_BYTES, VIEW_SUFFIX, serialize_view
 
 STATE_DIR = Path(".cache/business-report")
@@ -94,6 +95,10 @@ def bundle_manifest(path: Path, *, verify: bool = True) -> dict:
         if not isinstance(files, list) or any(not isinstance(name, str) or name not in members or name not in {f"{base}.{kind}" for kind in ("pdf", "docx", "xlsx", "html")} for name in files):
             raise ValueError("renders")
         if verify:
+            if PRESENTATION_MEMBER in members:
+                validate_retained(path.parent, members)
+            elif any(name.startswith("presentation/") for name in members):
+                raise ValueError("incomplete presentation")
             document = json.loads(path.read_text(encoding="utf-8"))
             if document["meta"]["draft"] != manifest["draft"] or any(chart["png"] not in members for chart in document["charts"]) or json.loads((path.parent / "checks.json").read_text(encoding="utf-8")) != document["checks"]:
                 raise ValueError("report companions")
@@ -137,12 +142,20 @@ def current_identity(root: Path, base: str, *, verify: bool = True):
     return (str(current.resolve()), hashlib.sha256(current.read_bytes()).hexdigest()) if current else None
 
 
-def publish_bundle(root: Path, base: str, report: dict, targets: list[str], tenant_dir, render, prepare, *, bundle_id: str | None, expected_current, verify_current: bool = True, source: Path | None = None, carry: list[str] = (), product_identity=None) -> Path:
+def retained_presentation(directory, members):
+    try:
+        return validate_retained(directory, members)
+    except ValueError:
+        raise InputError("The retained shared identity changed or presentation is invalid. Restore the verified draft.") from None
+
+
+def publish_bundle(root: Path, base: str, report: dict, targets: list[str], tenant_dir, render, prepare, *, bundle_id: str | None, expected_current, verify_current: bool = True, source: Path | None = None, carry: list[str] = (), product_identity=None, presentation) -> Path:
     """Generate privately, then lock only for the conditional publication.
 
     A crash after rename but before pointer replacement leaves a complete,
     unadopted directory. It never exposes half a draft or changes older bytes.
     """
+    product_identity = presentation.product_identity
     identity = bundle_id or f"draft-{report['meta']['draft']}-{uuid.uuid4().hex}"
     require_publication_root(root)
     if not BUNDLE_ID.fullmatch(identity):
@@ -156,20 +169,23 @@ def publish_bundle(root: Path, base: str, report: dict, targets: list[str], tena
     path = stage / f"{base}{REPORT_SUFFIX}"
     try:
         prepare(stage)
+        presentation.write(stage)
         if product_identity is not None:
             (stage / PRODUCT_MEMBER).write_bytes(product_identity.record)
         write_json(path, report)
         write_json(stage / "checks.json", report["checks"])
         if source and carry:
             manifest = bundle_manifest(source)
-            previous = (source.parent / PRODUCT_MEMBER).read_bytes() if PRODUCT_MEMBER in manifest["sha256"] else None
-            if previous is not None and hashlib.sha256(previous).hexdigest() != manifest["sha256"][PRODUCT_MEMBER]:
-                raise InputError("The retained shared identity changed while reading. Restore the verified draft.")
-            selected = product_identity.record if product_identity is not None else None
-            if previous != selected:
-                # Shared attribution changed. Never label a previous HTML/PDF
-                # as a current render; other formats have no shared attribution.
-                carry = [name for name in carry if Path(name).suffix not in {".html", ".pdf"}]
+            source_bytes = source.read_bytes()
+            if hashlib.sha256(source_bytes).hexdigest() != manifest["sha256"][source.name]:
+                raise InputError("The source report changed before format compatibility was checked.")
+            if _canonical(json.loads(source_bytes)) != _canonical(report):
+                carry = []
+            previous = retained_presentation(source.parent, manifest["sha256"]) if PRESENTATION_MEMBER in manifest["sha256"] else None
+            selected = presentation.value() if presentation is not None else None
+            compatible = previous is not None and selected is not None and previous == selected
+            tenant_compatible = previous is not None and selected is not None and previous["tenant"] == selected["tenant"] and previous["palette"] == selected["palette"]
+            carry = [name for name in carry if Path(name).suffix == ".xlsx" or (tenant_compatible if Path(name).suffix == ".docx" else compatible)]
             for name in carry:
                 content = (source.parent / name).read_bytes()
                 if hashlib.sha256(content).hexdigest() != manifest["sha256"][name]:
@@ -191,6 +207,7 @@ def publish_bundle(root: Path, base: str, report: dict, targets: list[str], tena
             view_path.unlink(missing_ok=True)
             sys.stderr.write("Report preview unavailable; continuing with ordinary formats.\n")
         members = {member.relative_to(stage).as_posix(): hashlib.sha256(member.read_bytes()).hexdigest() for member in sorted(stage.rglob("*")) if member.is_file()}
+        retained_presentation(stage, members)
         write_json(stage / "renders.json", {"version": 2, "base": base, "bundle": identity, "draft": report["meta"]["draft"], "files": sorted(set(names)), "sha256": members})
         # Flush every member and child directory before the one visibility boundary.
         for member in stage.rglob("*"):

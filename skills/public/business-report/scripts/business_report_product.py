@@ -36,6 +36,7 @@ class ProductIdentity:
     provider_logo: str
     support_url: str
     record: bytes
+    configured: bool = True
 
 
 def _canonical(value) -> bytes:
@@ -154,7 +155,7 @@ def _image(value, *, icon=False) -> tuple[bytes, bytes]:
     return data, sanitized.getvalue()
 
 
-def _read(selected: str) -> bytes:
+def _read(selected: str, limit: int = MAX_BYTES) -> bytes:
     path = Path(selected)
     if not path.is_absolute() or ".." in path.parts or str(path) != selected:
         raise ValueError("absolute normalized path required")
@@ -174,11 +175,11 @@ def _read(selected: str) -> bytes:
             if (
                 not stat.S_ISREG(info.st_mode)
                 or info.st_nlink != 1
-                or info.st_size > MAX_BYTES
+                or info.st_size > limit
             ):
                 raise ValueError("bounded regular snapshot required")
-            data = stream.read(MAX_BYTES + 1)
-            if len(data) > MAX_BYTES:
+            data = stream.read(limit + 1)
+            if len(data) > limit:
                 raise ValueError("snapshot size")
             return data
     finally:
@@ -201,8 +202,18 @@ def load_product_identity() -> ProductIdentity | None:
             or re.fullmatch(r"[0-9a-f]{64}", expected) is None
         ):
             raise ValueError("explicit selection and binding required")
+        return parse_product_identity(_read(selected), expected)
+    except (OSError, ValueError):
+        raise ValueError(UNAVAILABLE) from None
+
+
+def parse_product_identity(content: bytes, expected: str) -> ProductIdentity:
+    """Validate the same explicit envelope for a retained or current selection."""
+    try:
+        if len(content) > MAX_BYTES:
+            raise ValueError("projection bounds")
         record = _object(
-            json.loads(_read(selected).decode("utf-8"), object_pairs_hook=_unique),
+            json.loads(content.decode("utf-8"), object_pairs_hook=_unique),
             {"schema_version", "identity", "sha256"},
         )
         if type(record["schema_version"]) is not int or record["schema_version"] != 1:
@@ -214,10 +225,22 @@ def load_product_identity() -> ProductIdentity | None:
         if (
             type(identity["schema_version"]) is not int
             or identity["schema_version"] != 1
-            or identity["mode"] != "configured"
+            or identity["mode"] not in {"configured", "default"}
         ):
             raise ValueError("identity version/mode")
         product = _object(identity["product"], {"name", "logo", "browser_icon"})
+        if identity["mode"] == "default":
+            name = product["name"]
+            reordering = "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200b\u200e\u200f\ufeff"
+            if (not isinstance(name, str) or not 1 <= len(name) <= 40 or name != name.strip()
+                or any(ord(c) < 32 or ord(c) == 127 or c in reordering for c in name)
+                or identity["name"] != name or product["logo"] is not None
+                or product["browser_icon"] is not None or identity["provider"] is not None):
+                raise ValueError("default identity")
+            digest = hashlib.sha256(_canonical(identity)).hexdigest()
+            if record["sha256"] != digest or digest != expected:
+                raise ValueError("identity binding")
+            return ProductIdentity(digest, name, "", "", "", "", _canonical(record) + b"\n", False)
         provider = _object(identity["provider"], {"name", "logo", "support_url"})
         _name(product["name"])
         _name(provider["name"])

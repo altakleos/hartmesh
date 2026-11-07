@@ -43,3 +43,6 @@ footer { page-break-inside: avoid; margin-top: 16pt; padding-top: 6pt; border-to
 .attribution-role { display: block; font-weight: normal; }
 .attribution-support { margin: 0; overflow-wrap: anywhere; word-break: break-all; }
 .attribution-support a { color: #0645ad; text-decoration: underline; }
+
+.tenant-context { color: #000000; background: #ffffff; margin-bottom: 8pt; overflow-wrap: anywhere; }
+.saved-label { color: #222222; overflow-wrap: anywhere; }

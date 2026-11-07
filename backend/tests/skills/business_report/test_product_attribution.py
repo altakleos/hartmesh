@@ -457,23 +457,39 @@ def test_carried_html_cannot_use_a_projection_changed_after_manifest_verificatio
             destination.write_bytes(content)
 
     changed = False
-    real_read = Path.read_bytes
+    import business_report_presentation as presentation
 
-    def race(path):
+    real_read = presentation._read
+
+    def race(path, *args):
         nonlocal changed
-        if path == old_record and not changed:
+        if Path(path) == old_record and not changed:
             changed = True
             old_record.write_bytes(selected.record)
-            captured = real_read(path)
+            captured = real_read(path, *args)
             old_record.write_bytes(original_bytes)
             return captured
-        return real_read(path)
+        return real_read(path, *args)
 
     # Freeze the already verified manifest, then change/restore bytes exactly at
     # the subsequent compatibility read. The final current check alone cannot
     # detect this race: its original bytes have already been restored.
     monkeypatch.setattr(publication, "bundle_manifest", lambda *args, **kwargs: manifest)
-    monkeypatch.setattr(Path, "read_bytes", race)
+    monkeypatch.setattr(presentation, "_read", race)
     with pytest.raises(InputError, match="shared identity changed"):
-        publication.publish_bundle(root, "out", document, [], None, report.render, prepare, bundle_id="raced", expected_current=expected, source=source, carry=["out.html"], product_identity=selected)
+        publication.publish_bundle(
+            root,
+            "out",
+            document,
+            [],
+            None,
+            report.render,
+            prepare,
+            bundle_id="raced",
+            expected_current=expected,
+            source=source,
+            carry=["out.html"],
+            product_identity=selected,
+            presentation=presentation.capture_presentation(None, product_identity=selected),
+        )
     assert changed and public_bytes(root) == before

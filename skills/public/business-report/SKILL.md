@@ -182,28 +182,44 @@ explicit resumption. Never manufacture a human decision or claim idle monitoring
 
 ## Branding
 
-When `/mnt/tenant/brand.json` exists the script picks up the company name, logo and colours by itself (`--tenant DIR` points elsewhere). The file looks like `{"company_name": "Example Services Co.", "logo": "logo.png", "colors": {"primary": "#0a6b3d", "secondary": "#9ccdb4"}}`; the logo is a PNG or JPEG next to it. The rules are the workspace header's: a missing or unsupported logo degrades to the name alone, and a name that is blank, longer than 80 characters, or not one plain line is no name (the report is still built). `--company` overrides the name for one report.
+Every build/prose/render/export captures one complete current presentation before
+charts or formats. Shared product/provider attribution belongs to the operator;
+`--company` names report content and does not override the Workspace identity.
+HTML/PDF and DOCX use the same captured tenant name and sanitized logo bytes.
+Configured shared product/provider attribution remains a separate HTML/PDF block;
+DOCX/XLSX do not gain that block. A passive preview uses neutral styling and lists
+only the actual exports in its new bundle.
 
-Operators can separately configure shared product/provider attribution through
-`HARTMESH_REPORT_PRODUCT_IDENTITY` and `HARTMESH_REPORT_PRODUCT_SHA256`. The
-complete read-only projection supplies a distinct block in HTML and its derived
-PDF: product/provider names and logos, plus a support link and readable
-destination. It does not rename the report company. DOCX, XLSX and the passive
-view keep their existing behavior without this shared attribution. Do not edit
-operator inputs or change selectors to repair a failed configured read; report
-the error. No running Gateway, remote fetch or package installation is needed.
+Strict deployments supply the existing product envelope and tenant projection
+through operator-controlled read-only mounts and paired expected digests. The
+projection explicitly selects tenant or product-only mode and binds to the
+selected product, including an explicitly exported default product identity.
+Missing/invalid strict input refuses the operation. Do not edit inputs or change
+selectors to repair it; report the error. No live Gateway, remote fetch, package
+installation or additional shell call is needed by the report command.
 
-Each build/prose/render/export validates and captures one complete shared
-identity before writing; all selected formats use those retained bytes. A
-missing, invalid or digest-mismatched configured input refuses publication and
-preserves earlier drafts. The bounded `product-identity.json` supporting member
-is included in the bundle hashes. Changed shared attribution prevents carrying
-an old HTML/PDF as a current format; select those formats to regenerate them.
-Unconfigured reports retain legacy behavior and invent no provider. Read the
-[operator input and activation contract](../../../docs/OFFLINE_REPORT_PRODUCT_IDENTITY.md)
-for immutable staging, existing sandbox mounts and required reader recreation.
-Tenant activation and the legacy stored-company/current-tenant-logo behavior
-are separate from shared attribution.
+Without strict tenant selectors, `--tenant DIR` or `/mnt/tenant/brand.json` keeps
+its tolerant legacy name/logo/color admission. The complete admitted values and
+sanitized PNG/JPEG bytes are frozen together. Saved `meta.company` and
+`meta.brand.company` are preserved report/legacy labels, not current tenant
+authority; a differing legacy label stays visible as **Saved label**. Strict
+new builds never infer an issuer from the tenant. Current tenant presentation
+appears separately as **Workspace**, never as a guessed tenant assignment.
+
+Each bundle retains a bounded `presentation.json` and relative asset under its
+existing member hashes, alongside the shared identity and original chart draw
+values. Changed presentation prevents incompatible format carry. Changed chart
+primary redraws retained values without reanalysing the export or loading new
+profile/preferences. `preferences-used.json` keeps its exact historical bytes.
+Legacy reports lacking retained chart values refuse affected regeneration;
+retain the old downloads or rebuild explicitly from the inputs. An explicit
+XLSX-only export remains available without chart pictures. Historical fragments
+are not an alternate selection, and old outputs never regenerate on download.
+
+Read the [complete input, compatibility and activation contract](../../../docs/OFFLINE_REPORT_PRESENTATION.md)
+for bounds, supported palette ownership, read-only exposure and actual sandbox
+recreation/admission checks. Operator activation/restoration stays outside the
+report command; source changes do not prove that an old sandbox acquired them.
 
 ## What the checks mean
 

@@ -266,3 +266,23 @@ def test_offline_projection_refuses_to_invent_default_provider():
 
     with pytest.raises(ValueError, match="configured"):
         offline_product_identity(config())
+
+
+def test_explicit_default_offline_projection_binds_legacy_name_without_provider():
+    from deerflow.config.product_identity_export import offline_product_identity
+
+    cfg = config(product_name="Example Shared Product")
+    record = offline_product_identity(cfg, include_default=True)
+    assert record["identity"] == identity_for(cfg)
+    assert record["identity"]["mode"] == "default"
+    assert record["identity"]["provider"] is None
+    assert record["identity"]["product"]["logo"] is None
+
+
+def test_default_offline_fixture_is_an_actual_explicit_gateway_export():
+    from pathlib import Path
+
+    from deerflow.config.product_identity_export import offline_product_identity
+
+    fixture = Path(__file__).parent / "skills/business_report/fixtures/tenant-presentation/default-product.json"
+    assert offline_product_identity(config(product_name="Example Default Product"), include_default=True) == json.loads(fixture.read_text(encoding="utf-8"))

@@ -261,6 +261,5 @@
   "exports": [
     { "path": "summary.pdf", "label": "PDF report" },
     { "path": "summary.docx", "label": "Editable Word report" }
-  ],
-  "accent": "#1F4E79"
+  ]
 }

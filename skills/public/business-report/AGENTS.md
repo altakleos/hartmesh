@@ -59,3 +59,20 @@ and its read-only digest-bound input. No Gateway imports, network or shell calls
 The pure `urllib.parse.urlsplit` parser is allowed; it performs no I/O. Shipped
 Pillow validates/decodes projected PNGs. See the
 [input/activation contract](../../../docs/OFFLINE_REPORT_PRODUCT_IDENTITY.md).
+
+`business_report_presentation.py` captures the existing strict tenant projection
+and product binding once; default product envelopes bind without adding provider
+attribution. Legacy capture sanitizes bytes once with the existing name policy.
+Keep current Workspace context separate from authored/legacy company labels.
+Retain exact effective palette and relative asset as hashed supporting members;
+verify semantic binding before publication/reuse, not only outer member hashes.
+
+`business_report_charts.py` owns bounded retained draw values. Reuse pixels only
+with compatible validated data/primary; redraw changed primary from those values,
+never from source exports or changed profiles. Missing legacy draw data refuses
+presentation-affected rendering; an explicit XLSX export needs no chart pixels.
+Prose/render retain historical preference bytes and never apply current files.
+HTML/PDF carry needs full presentation equality; DOCX needs tenant/palette
+compatibility; XLSX carries unchanged facts. Keep previews neutral and actual
+export lists truthful. Existing schemas, source fences and publication uncertainty
+remain. See [the full contract](../../../docs/OFFLINE_REPORT_PRESENTATION.md).

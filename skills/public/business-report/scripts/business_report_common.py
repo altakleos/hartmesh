@@ -251,6 +251,8 @@ def load_brand(tenant_dir: str | None) -> dict:
         if name and len(name) <= MAX_COMPANY_NAME_CHARS and _one_plain_line(name):
             brand["company"] = name
     colors = data.get("colors") or {}
+    if not isinstance(colors, dict):
+        colors = {}
     for key in ("primary", "secondary"):
         if is_color(colors.get(key)):
             brand[key] = colors[key]

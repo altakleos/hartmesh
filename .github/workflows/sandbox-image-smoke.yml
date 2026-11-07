@@ -68,6 +68,25 @@ jobs:
             --skill /mnt/skill --fixtures /mnt/qualification/fixtures \
             --output /tmp/report-product-qualification
 
+      - name: Qualify complete offline report presentations
+        run: |
+          docker run --rm --network none --cap-drop ALL \
+            --security-opt no-new-privileges --user 1000:1000 --entrypoint python3 \
+            --volume "$PWD/skills/public/business-report:/mnt/skill:ro" \
+            --volume "$PWD/backend/tests/skills/business_report:/mnt/qualification:ro" \
+            deer-flow-sandbox-smoke \
+            /mnt/qualification/check_presentation_reports_on_image.py \
+            --skill /mnt/skill --fixtures /mnt/qualification/fixtures \
+            --output /tmp/report-presentation-qualification
+
+      - name: Verify real report input binds and reader recreation
+        run: |
+          python3 backend/tests/skills/business_report/check_presentation_mounts.py \
+            --image deer-flow-sandbox-smoke \
+            --skill skills/public/business-report \
+            --fixtures backend/tests/skills/business_report/fixtures \
+            --output "$RUNNER_TEMP/report-presentation-mounts"
+
       - name: Exercise the restricted runtime profile
         run: |
           set -euo pipefail

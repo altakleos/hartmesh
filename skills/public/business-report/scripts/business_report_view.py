@@ -6,7 +6,7 @@ import json
 import unicodedata
 from pathlib import PurePosixPath
 
-from business_report_common import cell_format, checks_line, format_value, is_color
+from business_report_common import cell_format, checks_line, format_value
 
 VIEW_SUFFIX = ".view.json"
 MAX_BYTES = 1024 * 1024
@@ -64,6 +64,9 @@ def _base(report: dict, source_name: str, names: list[str]) -> dict:
     subtitle = f"{meta['period']['label']} · {meta['currency']['code']} · Draft {meta['draft']}"
     if meta.get("company"):
         subtitle = f"{meta['company']} · {subtitle}"
+    saved_label = meta.get("brand", {}).get("company")
+    if saved_label and saved_label != meta.get("company"):
+        subtitle = f"Saved label: {saved_label} · {subtitle}"
     view = {
         "format": "hartmesh.artifact-view",
         "version": 1,
@@ -80,9 +83,6 @@ def _base(report: dict, source_name: str, names: list[str]) -> dict:
             for name in names
         ],
     }
-    accent = meta.get("brand", {}).get("primary")
-    if is_color(accent):
-        view["accent"] = accent
     return view
 
 
