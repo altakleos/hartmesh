@@ -2,6 +2,8 @@
 
 Storage and operator CLI: [guide](../../../docs/STORAGE_SPACES.md).
 CLI `settle` edits file-op rows; other verbs use domain APIs. No slot release.
+Storage-init census skips ENOENT/ESRCH only after the PID directory disappears;
+unreadable facts for a visible PID still refuse.
 
 One owner for retries; retain uncertainty.
 Output-view qualification: [contract](../../docs/RUN_OUTPUT_INVENTORY.md).

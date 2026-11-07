@@ -145,6 +145,35 @@ def test_holder_scan_does_not_infer_absence_from_unreadable_process(tmp_path):
         si.container_holders({"a" * 32: "/dev/loop1"}, proc_root=tmp_path)
 
 
+@pytest.mark.parametrize("read_errno", [errno.ENOENT, errno.ESRCH, errno.EACCES], ids=["missing", "exited", "denied"])
+@pytest.mark.parametrize("member", ["cgroup", "mountinfo"])
+@pytest.mark.parametrize("vanished", [False, True], ids=["still-visible", "gone"])
+def test_holder_scan_confirms_process_disappearance_before_ignoring_read_error(tmp_path, monkeypatch, read_errno, member, vanished):
+    (tmp_path / "self").mkdir()
+    (tmp_path / "self/cgroup").write_text("0::/\n", encoding="utf-8")
+    proc = tmp_path / "42"
+    proc.mkdir()
+    (proc / "cgroup").write_text("0::/docker/" + "2" * 64, encoding="utf-8")
+    (proc / "mountinfo").write_text("8 2 7:1 / /data rw - ext4 /dev/loop1 rw\n", encoding="utf-8")
+    read_text = Path.read_text
+
+    def interrupted_read(path, *args, **kwargs):
+        if path == proc / member:
+            if vanished:
+                for child in proc.iterdir():
+                    child.unlink()
+                proc.rmdir()
+            raise OSError(read_errno, os.strerror(read_errno))
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", interrupted_read)
+    if vanished and read_errno in {errno.ENOENT, errno.ESRCH}:
+        assert si.container_holders({"a" * 32: "/dev/loop1"}, proc_root=tmp_path) == []
+    else:
+        with pytest.raises(si.Refused, match="cannot read container mount facts"):
+            si.container_holders({"a" * 32: "/dev/loop1"}, proc_root=tmp_path)
+
+
 @pytest.fixture
 def operator(tmp_path, monkeypatch):
     """Small allocated files and explicit mount facts, with no privileged action."""
