@@ -8,6 +8,28 @@ Cache identity includes input order, filesystem-encoded basenames, per-file cont
 digests, and a namespace version. Directory relocation alone does not change a
 readable input's identity. Bump the namespace if table-mapping semantics change.
 
+Cache publication uses `open_analysis_cache()`: build in a private UUID directory
+under the chat's `.cache/data-analysis/generations-v1/` (or `DATA_ANALYSIS_CACHE_DIR`), close the DuckDB writer, reopen
+read-only, then atomically replace one manifest containing its generation and map.
+Never publish metadata while an import writer still owns the database. Validate
+the manifest, allocator invariants and physical main-schema tables before reuse;
+invalid entries rebuild. Flat legacy caches are ignored, not migrated or deleted.
+Remove private builds if manifest preparation fails or an unsuccessful
+replacement leaves its unique temporary source in place. Retain a generation
+when publication may have happened because another process may be reading it.
+Concurrent cold builders can repeat work but never share a writable database.
+On POSIX, all readers/builders hold a shared lifetime flock on the stable cache
+root `.retention.lock`. After closing the connection, try exclusive nonblocking
+cleanup: keep the newest three completed manifests and remove unreferenced
+completed generations. Never unlink/recreate that lock, delete an incomplete
+private build, or prune while any analysis holds a shared pin. Retention converges
+when analyses close; other platforms retain generations for manual cleanup.
+Stop analyses before manual cleanup. No power-loss durability guarantee.
+Keep real-DuckDB process-barrier and failure-cleanup regressions in
+tests/skills/test_data_analysis_cache_lifecycle.py. Use production CSV loading
+without runtime extension downloads. The reader at the publication barrier must
+reuse the published generation without loading the source again.
+
 Regressions live under the repository's root tests directory. They use
 real DuckDB. Excel and CLI integration additionally run with an already installed
 official spatial extension via `DEERFLOW_TEST_SPATIAL_DIRECTORY`; default tests
@@ -20,9 +42,10 @@ with regular expressions: unique original names resolve through temporary views
 over canonical tables in the main schema, including on read-only cache hits.
 Keep these views connection-local and preserve normal CTE shadowing.
 
-Prepare DuckDB and openpyxl explicitly in the execution environment. Missing
-packages produce setup instructions without launching installers; keep those
-import-failure regressions offline in the root skill tests.
+The sandbox image provides DuckDB, pandas, openpyxl and xlrd. Workbook loading
+uses pandas with the content-appropriate reader, including XLS/XLSM. Never launch
+installers or download DuckDB extensions. CSV analysis does not require the Excel
+reader to import successfully. Preserve unavailable-cache in-memory operation.
 
 Export paths resolve relative to the caller's working directory, including bare
 filenames. Keep real DuckDB regressions for CSV/JSON/Markdown, empty results,

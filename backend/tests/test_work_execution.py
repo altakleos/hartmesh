@@ -259,6 +259,15 @@ async def test_a_work_attempt_run_carries_the_autonomous_interaction_mode(execut
         actual = runner.await_args.kwargs["config"]
         for section in ("configurable", "context"):
             assert actual[section].get("interaction_mode") == ("autonomous" if is_attempt else None)
+        if is_attempt:
+            from deerflow_extension_api import AgentRunError
+
+            from app.subagent_batches.continuation import _require_ordinary_source
+
+            # A real Work admission retains its attempt metadata even when
+            # launched with a session; it cannot become an ordinary followup.
+            with pytest.raises(AgentRunError, match="ordinary chat"):
+                await _require_ordinary_source(request.app, record)
     finally:
         await request.app.state.run_manager.shutdown()
         reset_current_user(token)

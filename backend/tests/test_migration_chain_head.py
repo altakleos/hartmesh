@@ -73,8 +73,8 @@ IMPORTED_UPSTREAM_DIAMOND = {
     "0050_history_seed_authority": "0049_run_producer_fencing",
     "0051_merge_run_inputs_fencing": ("0049_run_inputs", "0050_history_seed_authority"),
 }
-HEAD = "0051_merge_run_inputs_fencing"
-PUBLISHED_FIXTURES = ["release_39_ancestry.json", "release_43_ancestry.json", "release_44_ancestry.json", "release_45_ancestry.json", "release_46_ancestry.json", "release_50_ancestry.json"]
+HEAD = "0052_batch_continuation"
+PUBLISHED_FIXTURES = ["release_39_ancestry.json", "release_43_ancestry.json", "release_44_ancestry.json", "release_45_ancestry.json", "release_46_ancestry.json", "release_50_ancestry.json", "release_53_ancestry.json"]
 
 
 def test_the_chain_has_one_head_and_it_is_the_last_appended_revision():
@@ -89,7 +89,9 @@ def test_the_step_two_import_keeps_upstreams_diamond_on_the_appended_chain():
         assert script.get_revision(revision).down_revision == parent
         assert len(revision) <= 32, "alembic_version.version_num is VARCHAR(32)"
     fresh = [step.revision.revision for step in script._upgrade_revs("head", "base")]
-    assert set(fresh[-len(IMPORTED_UPSTREAM_DIAMOND) :]) == set(IMPORTED_UPSTREAM_DIAMOND)
+    assert fresh[-1] == HEAD
+    assert script.get_revision(HEAD).down_revision == "0051_merge_run_inputs_fencing"
+    assert set(fresh[-len(IMPORTED_UPSTREAM_DIAMOND) - 1 : -1]) == set(IMPORTED_UPSTREAM_DIAMOND)
 
 
 def test_each_distribution_revision_follows_the_one_before():
@@ -106,7 +108,7 @@ def _assert_published_upgrade(script: ScriptDirectory, fixture_name: str = "rele
     published = json.loads((Path(__file__).parent / "fixtures/migrations" / fixture_name).read_text(encoding="utf-8"))
     for revision, ancestry in published["revisions"].items():
         actual = script.get_revision(revision)
-        assert actual.down_revision == ancestry["down_revision"], f"Published parent changed: {revision}"
+        assert actual.down_revision == (tuple(ancestry["down_revision"]) if isinstance(ancestry["down_revision"], list) else ancestry["down_revision"]), f"Published parent changed: {revision}"
         assert actual.dependencies == ancestry["depends_on"], f"Published dependencies changed: {revision}"
     fresh = [step.revision.revision for step in script._upgrade_revs("head", "base")]
     upgrade = [step.revision.revision for step in script._upgrade_revs("head", published["head"])]

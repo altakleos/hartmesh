@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import csv
 import importlib.util
+import json
 import logging
 import os
 import re
@@ -220,7 +221,8 @@ def test_main_inspects_then_reuses_the_cache(analyze, cache_dir, monkeypatch, ca
     assert "paid" in queried
     assert "(3 rows)" in queried
     assert "Cache hit" in caplog.text
-    assert sorted(p.suffix for p in cache_dir.iterdir()) == [".duckdb", ".json"]
+    assert len(list(cache_dir.rglob("data.duckdb"))) == 1
+    assert len(list((cache_dir / "generations-v1").glob("*.json"))) == 1
 
 
 def test_query_accepts_a_sheet_name_quoted_or_bare(analyze, con, capsys) -> None:
@@ -237,10 +239,11 @@ def test_query_accepts_a_sheet_name_quoted_or_bare(analyze, con, capsys) -> None
 
 
 def test_interrupted_load_does_not_leave_a_partial_cache(analyze, cache_dir, monkeypatch, capsys) -> None:
-    # A database with a table already in it but no table map is what a load cut
-    # off part-way leaves behind (the map is written last).
+    # An unpublished generation from a killed writer is never reused or pruned.
     files_hash = analyze.compute_files_hash([str(XLS_FIXTURE)])
-    stale_db = Path(analyze.get_cache_db_path(files_hash))
+    private = cache_dir / "generations-v1" / f"{files_hash}.{'a' * 32}"
+    private.mkdir(parents=True)
+    stale_db = private / "data.duckdb"
     stale = duckdb.connect(str(stale_db))
     stale.execute('CREATE TABLE "Orders" AS SELECT 1 AS order_id')
     stale.close()
@@ -248,23 +251,21 @@ def test_interrupted_load_does_not_leave_a_partial_cache(analyze, cache_dir, mon
     stale_wal.write_bytes(b"not a real write-ahead log")
 
     inspected = _run_main(analyze, monkeypatch, capsys, "--action", "inspect")
-
     assert "Rows: 12" in inspected
-    assert not stale_wal.exists()
+    assert stale_wal.exists()
     queried = _run_main(analyze, monkeypatch, capsys, "--action", "query", "--sql", 'SELECT COUNT(*) FROM "Orders"')
     assert "12" in queried
 
 
 def test_damaged_cache_entry_is_rebuilt(analyze, cache_dir, monkeypatch, capsys, caplog) -> None:
     caplog.set_level(logging.INFO)
-    files_hash = analyze.compute_files_hash([str(XLS_FIXTURE)])
-    Path(analyze.get_cache_db_path(files_hash)).write_bytes(b"garbage, not a database")
-    analyze.save_table_map(files_hash, {"Orders": "Orders"})
-
+    _run_main(analyze, monkeypatch, capsys, "--action", "inspect")
+    database = next(cache_dir.rglob("data.duckdb"))
+    database.write_bytes(b"garbage, not a database")
+    caplog.clear()
     inspected = _run_main(analyze, monkeypatch, capsys, "--action", "inspect")
-
     assert "Rows: 12" in inspected
-    assert "Cached database unusable" in caplog.text
+    assert "Cache hit" not in caplog.text
     assert "Cache hit" in _run_main_log(analyze, monkeypatch, capsys, caplog)
 
 
@@ -288,19 +289,14 @@ def test_unusable_cache_dir_falls_back_to_memory(analyze, tmp_path, monkeypatch,
 
 
 def test_older_cache_entries_are_pruned(analyze, cache_dir, monkeypatch, capsys) -> None:
-    cache_dir.mkdir()
-    for index in range(4):
-        fake_hash = f"{index:064x}"
-        (cache_dir / f"{fake_hash}.duckdb").write_bytes(b"")
-        (cache_dir / f"{fake_hash}{analyze.TABLE_MAP_SUFFIX}").write_text("{}", encoding="utf-8")
-        stamp = 1_600_000_000 + index * 60
-        os.utime(cache_dir / f"{fake_hash}.duckdb", (stamp, stamp))
-
-    _run_main(analyze, monkeypatch, capsys, "--action", "inspect")
-
-    databases = sorted(p.name for p in cache_dir.glob("*.duckdb"))
-    assert len(databases) == analyze.CACHE_ENTRIES_KEPT
-    assert f"{2:064x}.duckdb" in databases
-    assert f"{3:064x}.duckdb" in databases
-    assert not (cache_dir / f"{0:064x}{analyze.TABLE_MAP_SUFFIX}").exists()
-    assert not (cache_dir / f"{1:064x}{analyze.TABLE_MAP_SUFFIX}").exists()
+    for index in range(5):
+        source = cache_dir.parent / f"input-{index}.csv"
+        source.write_text(f"value\n{index}\n", encoding="utf-8")
+        with analyze.open_analysis_cache([str(source)]) as (connection, tables):
+            assert connection.execute(f'SELECT value FROM "{next(iter(tables.values()))}"').fetchone()[0] == index
+    manifests = list((cache_dir / "generations-v1").glob("*.json"))
+    assert len(manifests) == analyze.CACHE_ENTRIES_KEPT
+    assert len(list(cache_dir.rglob("data.duckdb"))) == analyze.CACHE_ENTRIES_KEPT
+    expected = {analyze.compute_files_hash([str(cache_dir.parent / f"input-{index}.csv")]) for index in (2, 3, 4)}
+    assert {path.stem for path in manifests} == expected
+    assert all(json.loads(path.read_text())["format"] == 1 for path in manifests)

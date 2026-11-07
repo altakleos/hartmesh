@@ -45,7 +45,7 @@ import {
   type StorageRefusal,
 } from "../file-areas/storage-state";
 import { useI18n } from "../i18n/hooks";
-import { getMessageRunId } from "../messages/run-duration";
+import { getMessageRunId, parseRunStartTime } from "../messages/run-duration";
 import {
   hasContent,
   hasToolCalls,
@@ -2440,14 +2440,56 @@ export function useThreadStream({
   const reconnectRunId = readReconnectRun(onStreamThreadId);
   if (isThreadLoading && reconnectRunId)
     streamedRunIdsRef.current.add(reconnectRunId);
-  const followRunId = selectRunToFollow({
+  // A newly admitted batch followup can exist before its input queue opens.
+  // Its receipt invalidates this ordinary Run observer; cached old visits
+  // must not be mistaken for a current admission.
+  const runsQuery = useThreadRuns(onStreamThreadId ?? undefined, {
+    enabled: !isMock && !!onStreamThreadId,
+  });
+  const runView = `${onStreamThreadId ?? ""}\u0000${runInputAccount ?? ""}`;
+  const runViewRef = useRef({
+    key: runView,
+    cachedAt: runsQuery.dataUpdatedAt,
+  });
+  if (runViewRef.current.key !== runView) {
+    runViewRef.current = { key: runView, cachedAt: runsQuery.dataUpdatedAt };
+  }
+  const observedActiveRun =
+    !isMock &&
+    runsQuery.dataUpdatedAt > runViewRef.current.cachedAt &&
+    Array.isArray(runsQuery.data)
+      ? runsQuery.data.find((run) =>
+          ["pending", "running"].includes(run.status),
+        )
+      : undefined;
+  const inputFollowRunId = selectRunToFollow({
     state: freshInputState,
     unsettledSeen: runInputViewRef.current.unsettledSeen,
     streamed: streamedRunIdsRef.current,
     pointer: reconnectRunId,
   });
+  const followRunId =
+    inputFollowRunId ??
+    (observedActiveRun &&
+    observedActiveRun.run_id !== reconnectRunId &&
+    !streamedRunIdsRef.current.has(observedActiveRun.run_id)
+      ? observedActiveRun.run_id
+      : null);
   const runInputBusy =
     isThreadLoading || inputActiveRunId !== null || followRunId !== null;
+  const timedRunId =
+    followRunId ??
+    (isThreadLoading ? reconnectRunId : null) ??
+    freshInputState?.active_run_id ??
+    null;
+  const timedRun =
+    timedRunId && Array.isArray(runsQuery.data)
+      ? runsQuery.data.find((run) => run.run_id === timedRunId)
+      : undefined;
+  const activeRunStartedAt =
+    timedRun && ["pending", "running"].includes(timedRun.status)
+      ? parseRunStartTime(timedRun.created_at)
+      : null;
   useEffect(() => {
     if (runInputBusy) lastRunInputBusyAtRef.current = Date.now();
   }, [runInputBusy]);
@@ -3472,6 +3514,7 @@ export function useThreadStream({
       : EMPTY_RUN_INPUTS,
     canSendInput: inputActiveRunId !== null,
     activeRunId: inputActiveRunId ?? undefined,
+    activeRunStartedAt,
     refusedNetworkRequests:
       refusedNetworkByConversation.get(
         JSON.stringify([agentInstanceId, currentViewThreadId]),

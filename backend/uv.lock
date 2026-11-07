@@ -986,7 +986,7 @@ extensions = [{ name = "hartmesh-legacy-report", directory = "extensions/sources
 
 [[package]]
 name = "deerflow-extension-api"
-version = "0.2.10"
+version = "0.2.11"
 source = { editable = "packages/extension-api" }
 
 [[package]]

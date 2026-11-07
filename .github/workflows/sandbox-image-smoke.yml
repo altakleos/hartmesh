@@ -320,7 +320,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Free disk space for sandbox images
+        # This job only needs Python and Docker, not the runner's mobile/.NET/Haskell SDKs.
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc
+          docker image prune --all --force
+          df -h /
+
       - name: Resolve immutable image references for this run
+        timeout-minutes: 30
         # Pull on the runner's platform, then pass only immutable repo@sha256
         # references to pytest. This keeps both the baseline and the 1.11.0
         # regression run reproducible even if either source tag moves later.
@@ -381,5 +390,6 @@ jobs:
         run: uv sync --group dev
 
       - name: Run the live real-image smoke tests
+        timeout-minutes: 10
         working-directory: backend
         run: uv run pytest -m live tests/test_aio_sandbox_local_backend.py -v

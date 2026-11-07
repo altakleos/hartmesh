@@ -266,7 +266,6 @@ def test_parse_memory_update_response_normalizes_reinforcement_entries() -> None
 def test_automatic_update_uses_hybrid_capacity_policy() -> None:
     # Eviction scores decay against the real clock, so "recent" must be
     # relative to now; fixed dates age out of the confirmation half-life.
-    recent = (datetime.now(UTC) - timedelta(days=5)).isoformat().replace("+00:00", "Z")
     updater = _make_updater(
         config=_memory_config(
             fact_eviction_policy="hybrid-v1",
@@ -274,6 +273,9 @@ def test_automatic_update_uses_hybrid_capacity_policy() -> None:
             fact_confidence_threshold=0.7,
         )
     )
+    now = datetime.now(UTC)
+    recent_timestamp = now.isoformat().replace("+00:00", "Z")
+    stale_timestamp = (now - timedelta(days=365)).isoformat().replace("+00:00", "Z")
     current_memory = _make_memory(
         facts=[
             *[
@@ -282,7 +284,7 @@ def test_automatic_update_uses_hybrid_capacity_policy() -> None:
                     "content": f"high {index}",
                     "category": "preference",
                     "confidence": 0.99,
-                    "createdAt": recent,
+                    "createdAt": recent_timestamp,
                 }
                 for index in range(8)
             ],
@@ -291,15 +293,15 @@ def test_automatic_update_uses_hybrid_capacity_policy() -> None:
                 "content": "stale high confidence",
                 "category": "preference",
                 "confidence": 0.9,
-                "createdAt": "2025-01-01T00:00:00Z",
+                "createdAt": stale_timestamp,
             },
             {
                 "id": "confirmed_recently",
                 "content": "recently confirmed preference",
                 "category": "preference",
                 "confidence": 0.7,
-                "createdAt": "2025-01-01T00:00:00Z",
-                "lastConfirmedAt": recent,
+                "createdAt": stale_timestamp,
+                "lastConfirmedAt": recent_timestamp,
             },
         ]
     )

@@ -4,7 +4,11 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 import { toast } from "sonner";
+
+import { threadHistoryQueryKey } from "@/core/threads/hooks";
+import { runInputsKey } from "@/core/threads/run-inputs";
 
 import {
   controlSubagentBatch,
@@ -24,7 +28,9 @@ export function useSubagentBatches(
   threadId: string,
   options: { enabled?: boolean; polling?: boolean } = {},
 ) {
-  return useQuery({
+  const queryClient = useQueryClient();
+  const observed = useRef({ threadId, runs: new Set<string>() });
+  const query = useQuery({
     queryKey: subagentBatchesKey(threadId),
     queryFn: () => fetchSubagentBatches(threadId),
     enabled: options.enabled !== false && Boolean(threadId),
@@ -34,6 +40,27 @@ export function useSubagentBatches(
     },
     refetchIntervalInBackground: false,
   });
+  useEffect(() => {
+    if (observed.current.threadId !== threadId) {
+      observed.current = { threadId, runs: new Set<string>() };
+    }
+    if (options.enabled === false) return;
+    const newRuns =
+      query.data?.flatMap((batch) =>
+        batch.continuation_run_id &&
+        !observed.current.runs.has(batch.continuation_run_id)
+          ? [batch.continuation_run_id]
+          : [],
+      ) ?? [];
+    if (!newRuns.length) return;
+    for (const runId of newRuns) observed.current.runs.add(runId);
+    void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+    void queryClient.invalidateQueries({ queryKey: runInputsKey(threadId) });
+    void queryClient.invalidateQueries({
+      queryKey: threadHistoryQueryKey(threadId),
+    });
+  }, [options.enabled, query.data, queryClient, threadId]);
+  return query;
 }
 
 export function useSubagentBatchItems(

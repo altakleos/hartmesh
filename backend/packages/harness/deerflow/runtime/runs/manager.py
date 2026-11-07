@@ -3093,18 +3093,21 @@ class RunManager:
                         and finalizing_run.user_id == user_id
                         and finalizing_run.owner_worker_id == self.worker_id
                         and finalizing_run.status is RunStatus.success
-                        and finalizing_run.terminal_confirmed
                         and finalizing_run.finalizing
                         and not finalizing_run.ownership_lost
                         and not finalizing_run.abort_event.is_set()
                         and asyncio.current_task() in {finalizing_run.task, finalizing_run.finalization_task} - {None}
                     )
                     try:
+                        capture = capture_from_kwargs(finalizing_run.kwargs)
                         saved = receipt_from_kwargs(finalizing_run.kwargs)
-                        valid = valid and self.supports_output_receipts and capture_from_kwargs(finalizing_run.kwargs) is not None and saved is not None
-                        if valid:
+                        if capture is not None:
+                            valid = valid and finalizing_run.terminal_confirmed and self.supports_output_receipts and saved is not None
+                        else:
+                            valid = valid and finalizing_run.terminal_status_persisted and self._has_final_terminal_ack(finalizing_run)
+                        if valid and capture is not None:
                             validate_receipt_status(saved, finalizing_run.status)
-                            if capture_from_kwargs(finalizing_run.kwargs).version == 2:
+                            if capture.version == 2:
                                 validate_inventory_pair(saved, inventory_evidence_from_kwargs(finalizing_run.kwargs), status=finalizing_run.status)
                             valid = (saved.run_id, saved.thread_id, saved.owner_user_id) == (finalizing_run.run_id, thread_id, user_id)
                     except OutputEvidenceError:

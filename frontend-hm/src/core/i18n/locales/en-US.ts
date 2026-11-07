@@ -1512,6 +1512,9 @@ export function createEnUS(product: string): Translations {
     },
 
     subagentBatches: {
+      followUpPending:
+        "The requested follow-up will continue after this batch.",
+      followUpStopped: "Automatic follow-up has stopped.",
       label: "Batches",
       title: "Subagent batches",
       description: "Durable, restart-safe work for many independent items.",

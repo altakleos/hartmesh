@@ -123,6 +123,7 @@ export default function AgentChatPage() {
     runInputs,
     canSendInput,
     activeRunId,
+    activeRunStartedAt,
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     displayThreadId: threadId,
@@ -357,6 +358,7 @@ export default function AgentChatPage() {
               <div className="flex min-h-0 flex-1 justify-center">
                 <MessageList
                   activeRunId={activeRunId}
+                  activeRunStartedAt={activeRunStartedAt}
                   agentTarget={{ kind: "custom_agent", name: agent_name }}
                   archiveDownloadsEnabled={
                     isNewThread || isMock || threadMetadata.data != null

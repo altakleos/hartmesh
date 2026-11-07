@@ -541,3 +541,9 @@ remain supported; they must not acquire another connection from the writer's poo
 Memory guard/deletion locks are per-thread, so a slow guard cannot block another
 thread. Coverage: `tests/test_recovery_terminal_pool.py` (PostgreSQL via
 `TEST_POSTGRES_URI`).
+
+A confirmed successful Goal finalizer may reserve its checkpoint write while
+retaining its own finalizing barrier. Require the exact registered object, owning
+task/worker, owner/thread and acknowledged current outcome; competing runs still
+win. Captured runs additionally require matching receipt/inventory proofs. Legacy
+non-finalizing paths use ordinary reservation. Never release the barrier early.

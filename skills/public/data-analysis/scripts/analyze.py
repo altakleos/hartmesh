@@ -18,10 +18,19 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import tempfile
+import uuid
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import ExitStack, contextmanager
+from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # Windows can use generations, but cannot qualify POSIX GC.
+    fcntl = None
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -95,122 +104,235 @@ def compute_files_hash(files: list[str]) -> str:
     return hasher.hexdigest()
 
 
-def get_cache_db_path(files_hash: str) -> str:
-    """Get the path to the cached DuckDB database file, creating the cache directory."""
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    return os.path.join(CACHE_DIR, f"{files_hash}.duckdb")
+def _open_cached_generation(root: Path, files_hash: str):
+    """Open one complete generation; invalid cache entries are ordinary misses."""
+    con = None
+    try:
+        manifest = json.loads((root / f"{files_hash}.json").read_text(encoding="utf-8"))
+        if (
+            not isinstance(manifest, dict)
+            or type(manifest.get("format")) is not int
+            or manifest["format"] != 1
+        ):
+            return None
+        generation = manifest.get("generation")
+        table_map = manifest.get("table_map")
+        if not isinstance(generation, str) or not re.fullmatch(
+            rf"{files_hash}\.[0-9a-f]{{32}}", generation
+        ):
+            return None
+        if (
+            not isinstance(table_map, dict)
+            or not table_map
+            or not all(
+                isinstance(k, str) and isinstance(v, str) and k and v
+                for k, v in table_map.items()
+            )
+        ):
+            return None
+        aliases = {name.casefold() for name in table_map}
+        targets = {name.casefold() for name in table_map.values()}
+        if len(aliases) != len(table_map) or len(targets) != len(table_map):
+            return None
+        if any(
+            alias.casefold() in targets and alias.casefold() != target.casefold()
+            for alias, target in table_map.items()
+        ):
+            return None
+        directory = root / generation
+        database = directory / "data.duckdb"
+        if directory.is_symlink() or database.is_symlink():
+            return None
+        con = duckdb.connect(str(database), read_only=True)
+        physical_tables = {
+            row[0].casefold()
+            for row in con.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'main' AND table_type = 'BASE TABLE' "
+                "AND table_catalog = current_database()"
+            ).fetchall()
+        }
+        if targets != physical_tables:
+            raise ValueError("Cached table map does not match its database")
+        for table in table_map.values():
+            quoted = '"' + table.replace('"', '""') + '"'
+            con.execute(f"SELECT * FROM main.{quoted} LIMIT 0")
+        return con, table_map
+    except (OSError, ValueError, duckdb.Error):
+        if con is not None:
+            con.close()
+        logger.debug("Ignoring unreadable analysis cache", exc_info=True)
+        return None
+    except BaseException:
+        if con is not None:
+            con.close()
+        raise
 
 
-def get_table_map_path(files_hash: str) -> str:
-    """Get the path to the cached table map JSON file."""
-    return os.path.join(CACHE_DIR, f"{files_hash}{TABLE_MAP_SUFFIX}")
+@contextmanager
+def _prepare_cache_manifest(
+    root: Path, generation: str, table_map: dict[str, str]
+) -> Iterator[str]:
+    """Write and flush a private manifest before its atomic publication."""
+    fd, temporary = tempfile.mkstemp(prefix=".manifest-", suffix=".tmp", dir=root)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(
+                {"format": 1, "generation": generation, "table_map": table_map},
+                handle,
+                ensure_ascii=False,
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        yield temporary
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
-def save_table_map(files_hash: str, table_map: dict[str, str]) -> None:
-    """Save the table map atomically alongside the cached DB.
+@contextmanager
+def _cache_lifetime(root: Path):
+    """Parallel readers/builders pin the cache; only idle caches can be pruned.
 
-    The map is what marks an entry as complete, so it is written last and in
-    one step: a half-written map would make a partial database look valid.
+    The stable lock lives outside generations and is never unlinked. Keeping a
+    shared pin through analysis also permits readers at the publication barrier.
     """
-    path = get_table_map_path(files_hash)
-    tmp_path = f"{path}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(table_map, f, ensure_ascii=False)
-    os.replace(tmp_path, path)
-
-
-def load_table_map(files_hash: str) -> dict[str, str] | None:
-    """Load table map from cache. Returns None if not found."""
-    path = get_table_map_path(files_hash)
-    if not os.path.exists(path):
-        return None
-    try:
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-
-def discard_cache_entry(files_hash: str) -> None:
-    """Remove one cache entry: database, write-ahead log and table map, whichever exist."""
-    db_path = os.path.join(CACHE_DIR, f"{files_hash}.duckdb")
-    map_path = get_table_map_path(files_hash)
-    for path in (db_path, f"{db_path}.wal", map_path, f"{map_path}.tmp"):
+    root.mkdir(parents=True, exist_ok=True)
+    with (root.parent / ".retention.lock").open("a+b") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
         try:
-            os.remove(path)
-        except FileNotFoundError:
-            pass
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                try:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass  # The last analysis to close will try again.
+                else:
+                    try:
+                        _prune_generations(root)
+                    except OSError:
+                        logger.warning("Cache cleanup unavailable; retained older generations")
+                    finally:
+                        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
-def prune_cache(keep_hash: str) -> None:
-    """Keep the newest CACHE_ENTRIES_KEPT entries, always including keep_hash; discard the rest."""
-    try:
-        names = os.listdir(CACHE_DIR)
-    except OSError:
-        return
-    entries = []
-    for name in names:
-        if not name.endswith(".duckdb"):
+def _prune_generations(root: Path) -> None:
+    """Prune only completed, inactive generations under the exclusive root pin."""
+    manifests = []
+    referenced = set()
+    for path in root.glob("*.json"):
+        if path.is_symlink() or not re.fullmatch(r"[0-9a-f]{64}\.json", path.name):
             continue
-        files_hash = name[: -len(".duckdb")]
         try:
-            mtime = os.path.getmtime(os.path.join(CACHE_DIR, name))
+            data = json.loads(path.read_text(encoding="utf-8"))
+            generation = data.get("generation") if isinstance(data, dict) else None
+            if not isinstance(generation, str) or not re.fullmatch(
+                rf"{path.stem}\.[0-9a-f]{{32}}", generation
+            ):
+                continue
+            referenced.add(generation)
+            directory = root / generation
+            if (
+                data.get("format") == 1
+                and not directory.is_symlink()
+                and (directory / ".complete").is_file()
+            ):
+                manifests.append((path.stat().st_mtime_ns, path, generation))
+        except (OSError, ValueError):
+            continue
+    manifests.sort(reverse=True)
+    for _, path, generation in manifests[CACHE_ENTRIES_KEPT:]:
+        # Leave the manifest if removing its generation fails.
+        shutil.rmtree(root / generation)
+        path.unlink()
+        referenced.discard(generation)
+    for directory in root.iterdir():
+        if (
+            re.fullmatch(r"[0-9a-f]{64}\.[0-9a-f]{32}", directory.name)
+            and directory.name not in referenced
+            and not directory.is_symlink()
+            and directory.is_dir()
+            and (directory / ".complete").is_file()
+        ):
+            shutil.rmtree(directory)
+
+
+@contextmanager
+def open_analysis_cache(files: list[str]):
+    """Own a complete generation, retaining uncached operation on unavailable storage."""
+    root = Path(CACHE_DIR) / "generations-v1"
+    with ExitStack() as lifetime:
+        try:
+            lifetime.enter_context(_cache_lifetime(root))
         except OSError:
-            continue
-        entries.append((files_hash == keep_hash, mtime, files_hash))
-    entries.sort(reverse=True)
-    for _, _, files_hash in entries[CACHE_ENTRIES_KEPT:]:
-        discard_cache_entry(files_hash)
-        logger.info(f"Removed an older cache entry ({files_hash[:12]}...)")
-
-
-def open_cache(files: list[str]) -> tuple[duckdb.DuckDBPyConnection, dict[str, str]]:
-    """Return a connection with the files loaded, reusing the chat's cache when it is intact.
-
-    A cache hit reopens the stored database read-only. A miss, or an entry
-    whose database is damaged or has no table map (the leftover of an
-    interrupted load), is rebuilt from nothing so no partial table survives.
-    If the cache directory cannot be used at all, the files are loaded into
-    memory for this call only.
-    """
-    files_hash = compute_files_hash(files)
-    db_path: str | None = None
-    try:
-        db_path = get_cache_db_path(files_hash)
-        cached_table_map = load_table_map(files_hash)
-        if cached_table_map and os.path.exists(db_path):
+            logger.warning("Cache unavailable; loading files without a cache")
+            con = duckdb.connect(":memory:")
             try:
-                con = duckdb.connect(db_path, read_only=True)
-            except duckdb.Error as e:
-                logger.warning(f"Cached database unusable ({e}); rebuilding it")
-            else:
-                logger.info(f"Cache hit! Using cached database: {db_path}")
-                logger.info(
-                    f"Loaded {len(cached_table_map)} table(s) from cache: {', '.join(cached_table_map.keys())}"
-                )
-                return con, cached_table_map
-        discard_cache_entry(files_hash)
-        con = duckdb.connect(db_path)
-    except (OSError, duckdb.Error) as e:
-        logger.warning(f"Cache unavailable ({e}); loading files without a cache")
-        db_path = None
-        con = duckdb.connect(":memory:")
+                tables = load_files(con, files)
+                if not tables:
+                    raise SystemExit(1)
+                yield con, tables
+            finally:
+                con.close()
+            return
+        with _open_analysis_generation(files, root) as result:
+            yield result
 
-    logger.info("Loading files (first time, will cache for future use)...")
-    table_map = load_files(con, files)
-    if not table_map:
-        logger.error("No tables were loaded. Check file paths and formats.")
+
+@contextmanager
+def _open_analysis_generation(files: list[str], root: Path):
+    files_hash = compute_files_hash(files)
+    cached = _open_cached_generation(root, files_hash)
+    if cached is not None:
+        con, table_map = cached
+        logger.info("Cache hit! Using complete cached generation")
+        try:
+            yield con, table_map
+        finally:
+            con.close()
+        return
+
+    generation = f"{files_hash}.{uuid.uuid4().hex}"
+    directory = root / generation
+    directory.mkdir(mode=0o700)
+    database = directory / "data.duckdb"
+    con = None
+    possibly_published = False
+    try:
+        logger.info("Loading files into a private cache generation...")
+        con = duckdb.connect(str(database))
+        table_map = load_files(con, files)
+        if not table_map:
+            logger.error("No tables were loaded. Check file paths and formats.")
+            raise SystemExit(1)
         con.close()
-        if db_path is not None:
-            discard_cache_entry(files_hash)
-        sys.exit(1)
-
-    logger.info(f"\nLoaded {len(table_map)} table(s): {', '.join(table_map.keys())}")
-    if db_path is not None:
-        save_table_map(files_hash, table_map)
-        prune_cache(files_hash)
-        logger.info(f"Cached database saved to: {db_path}")
-    return con, table_map
+        con = None
+        # Never expose a database still owned by a writer, including the first
+        # invocation's analysis action. Other processes may already be readers.
+        con = duckdb.connect(str(database), read_only=True)
+        (directory / ".complete").write_text("closed-writer-v1\n", encoding="utf-8")
+        destination = root / f"{files_hash}.json"
+        with _prepare_cache_manifest(root, generation, table_map) as temporary:
+            # Replacement may succeed before an interruption reaches Python.
+            possibly_published = True
+            try:
+                os.replace(temporary, destination)
+            except BaseException:
+                # A successful replacement consumes this unique source even
+                # if a concurrent builder has since replaced the destination.
+                if os.path.exists(temporary):
+                    possibly_published = False
+                raise
+        logger.info("Loaded %s table(s): %s", len(table_map), ", ".join(table_map))
+        yield con, table_map
+    finally:
+        if con is not None:
+            con.close()
+        if not possibly_published:
+            shutil.rmtree(directory)
 
 
 def sanitize_table_name(name: str) -> str:
@@ -726,19 +848,16 @@ def main():
     if args.action == "summary" and not args.table:
         parser.error("--table is required for 'summary' action")
 
-    con, table_map = open_cache(args.files)
-
     try:
-        if args.action == "inspect":
-            action_inspect(con, table_map)
-        elif args.action == "query":
-            action_query(con, args.sql, table_map, args.output_file)
-        elif args.action == "summary":
-            action_summary(con, args.table, table_map)
+        with open_analysis_cache(args.files) as (con, table_map):
+            if args.action == "inspect":
+                action_inspect(con, table_map)
+            elif args.action == "query":
+                action_query(con, args.sql, table_map, args.output_file)
+            elif args.action == "summary":
+                action_summary(con, args.table, table_map)
     except ValueError as exc:
         sys.exit(f"Error: {exc}")
-    finally:
-        con.close()
 
 
 if __name__ == "__main__":

@@ -970,6 +970,7 @@ def _qualify_inventory_profile(graph, *, state_schema, middlewares, tools, mode,
     from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+    from deerflow.agents.middlewares.harness_guard_middleware import HarnessGuardMiddleware
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
     from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
     from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
@@ -1008,6 +1009,7 @@ def _qualify_inventory_profile(graph, *, state_schema, middlewares, tools, mode,
         DurableContextMiddleware,
         DynamicContextMiddleware,
         GuardrailMiddleware,
+        HarnessGuardMiddleware,
         InputSanitizationMiddleware,
         KnowledgeScopeMiddleware,
         LLMErrorHandlingMiddleware,

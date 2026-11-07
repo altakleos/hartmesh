@@ -510,7 +510,7 @@ def test_restricted_start_pins_the_proxy_name_in_the_sandbox_hosts_file(monkeypa
     monkeypatch.setattr(backend, "_restricted_resources_status", lambda *_args, **_kwargs: "missing")
     monkeypatch.setattr(backend, "_create_internal_network", lambda *_args: None)
     monkeypatch.setattr(backend, "_create_egress_network", lambda *_args: None)
-    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: "172.24.0.2")
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args, **_kwargs: "172.24.0.2")
     captured: dict[str, object] = {}
 
     def fake_start(container_name, port, extra_mounts, **kwargs):
@@ -604,11 +604,11 @@ def test_restricted_start_refuses_a_proxy_without_an_address_and_tears_down(monk
     monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id: "missing")
     monkeypatch.setattr(backend, "_create_internal_network", lambda _name, _sandbox_id: None)
     monkeypatch.setattr(backend, "_create_egress_network", lambda _name, _sandbox_id: None)
-    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: None)
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args, **_kwargs: None)
     started: list[str] = []
     monkeypatch.setattr(backend, "_start_container", lambda *_args, **_kwargs: started.append("started") or "container-id")
     cleaned: list[str] = []
-    monkeypatch.setattr(backend, "_cleanup_restricted_resources", lambda sandbox_id: cleaned.append(sandbox_id))
+    monkeypatch.setattr(backend, "_cleanup_restricted_resources", lambda sandbox_id, **_kwargs: cleaned.append(sandbox_id))
 
     with pytest.raises(RuntimeError, match="reported no address .* without a resolvable proxy"):
         backend._start_restricted_sandbox("id", "sandbox-id", 18080, None, config_mount_exclusion_root=None, relay_token="test-relay-token")
@@ -629,7 +629,7 @@ def test_restricted_start_configures_shell_and_aio_browser_proxy(monkeypatch):
     monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id: "missing")
     monkeypatch.setattr(backend, "_create_internal_network", lambda _name, _sandbox_id: None)
     monkeypatch.setattr(backend, "_create_egress_network", lambda _name, _sandbox_id: None)
-    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: "172.24.0.2")
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args, **_kwargs: "172.24.0.2")
     captured: dict[str, object] = {}
 
     def fake_start(*_args, **kwargs):
@@ -667,7 +667,7 @@ def test_restricted_start_refuses_to_remove_resources_with_stale_policy(monkeypa
     monkeypatch.setattr(backend, "_cleanup_restricted_resources", cleaned.append)
     monkeypatch.setattr(backend, "_create_internal_network", lambda name, sandbox_id: created.append((name, sandbox_id)))
     monkeypatch.setattr(backend, "_create_egress_network", lambda name, sandbox_id: created.append((name, sandbox_id)))
-    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: "172.24.0.2")
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args, **_kwargs: "172.24.0.2")
     monkeypatch.setattr(backend, "_start_container", lambda *_args, **_kwargs: "container-id")
 
     with pytest.raises(RuntimeError, match="requires ownership-fenced replacement"):
@@ -3188,7 +3188,7 @@ def test_restricted_create_reports_a_fresh_set_as_created(monkeypatch):
     monkeypatch.setattr(backend, "_restricted_resources_status", lambda *_args, **_kwargs: "missing")
     monkeypatch.setattr(backend, "_create_internal_network", lambda *_args: None)
     monkeypatch.setattr(backend, "_create_egress_network", lambda *_args: None)
-    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: "172.24.0.2")
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args, **_kwargs: "172.24.0.2")
     monkeypatch.setattr(backend, "_start_container", lambda *_args, **_kwargs: "container-id")
     monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18080)
 
@@ -3424,7 +3424,7 @@ def test_a_restricted_sandbox_is_labelled_with_its_owner_and_stays_compatible(mo
     monkeypatch.setattr(backend, "_restricted_resources_status", lambda *_args, **_kwargs: "missing")
     monkeypatch.setattr(backend, "_create_internal_network", lambda *_args: None)
     monkeypatch.setattr(backend, "_create_egress_network", lambda *_args: None)
-    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: "10.0.0.2")
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args, **_kwargs: "10.0.0.2")
     monkeypatch.setattr(backend, "_start_container", fake_start)
     monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18080)
 

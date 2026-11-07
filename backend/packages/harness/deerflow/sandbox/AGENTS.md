@@ -1,6 +1,7 @@
-### Sandbox System (`packages/harness/deerflow/sandbox/`)
+### Sandbox System
 
-Sandbox restore requires a thread ID, even forks.
+Lazy projections: [contract](../../../../README.md#sandbox-system).
+Restore needs a thread ID, even forks.
 
 Local Linux abort kills the selected call's process groups, then rescans exact
 environment markers for detached descendants forked during enumeration. Limit
@@ -18,7 +19,7 @@ Unknown environments get generic guidance; runs without bash omit the section.
 Upstream's run-scoped cancellation (`command_scope.py`) is off for Local and AIO
 (`supports_command_cancellation = False`); per-call abort stays the stop path.
 
-On startup failure, close reads and kill/reap the child, preserving the error.
+On startup failure, close reads, kill/reap child; preserve the error.
 Only `finally` closes write ends.
 
 On Linux/macOS, LocalSandbox non-append text writes use `_publish_file_revision` and the shared atomic byte publisher. Check write access without truncation; retain the source descriptor through metadata transfer. Preserve symlink mapping; publish only regular files. Pre-replace failures retain the old file and clean staging. Append/other platforms write in place. Replacement needs parent-directory write and metadata permissions; hard-link aliases retain the old inode. No concurrent-writer arbitration or power-loss recovery. Tests: `tests/test_local_sandbox_atomic_writes.py`.

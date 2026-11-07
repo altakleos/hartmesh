@@ -188,3 +188,12 @@ Personal MCP is owner-only; platform MCP shared.
 ### Web model provider presets
 
 Managed model routes expose provider metadata; routing stays server-owned. Align validation, probing, storage, keys, and revisions.
+
+Native batch followups accept ordinary session/auth-disabled chat only. Preserve
+host role/OAuth/token/route ceilings, owner checks and incarnation/fence checks.
+Reject Work, instance, captured, channel and scheduled sources; recheck instance
+binding at ordinary Run admission. `durable_batch_followup` is host-only and
+propagates through AgentRuns binding/plugin scoping to deny management in descendants.
+Team artifact handoffs currently refuse managed Spaces and instance Homes before
+provider resolution or any file effect (`extension_file_scope.py`). Never use a
+legacy shadow root when a qualified storage adapter is unavailable.

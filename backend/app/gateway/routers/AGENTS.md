@@ -217,3 +217,12 @@ no-store headers. Strict mode additionally requires session provenance; failures
 return fixed 503 detail and never partial tenant fields. Lifespan installs the
 startup-selected reader; features retain live unrelated settings but suppress
 loose strict branding. Never reintroduce live logo reads for strict consumers.
+
+Managed-model `/discover` and `/import` require administrator access before
+reading credentials or making outbound requests. Discovery is read-only and
+bounded (20 seconds, 2 MiB, 2,000 IDs/20 pages); it never follows redirects
+and requests identity encoding, rejecting compressed bodies before decoding.
+Import probes each new profile, saves through the drained writer, and atomically
+deduplicates retries without changing existing disabled profiles. Saved-key reuse
+requires matching connection and revision, checked again under the write lock
+after probing (409 on change); provider errors remain redacted.

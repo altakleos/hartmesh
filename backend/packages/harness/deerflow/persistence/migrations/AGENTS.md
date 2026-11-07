@@ -4,7 +4,9 @@ HartMesh's own chain (`0027_account_access` … `0044_telegram_assistant_ids`) f
 from `0026_mcp_task_lease_tokens`; upstream's `0027_notification_deliveries` …
 `0048_extension_execution_leases` are append-imported after it (`0027_notification_deliveries.down_revision
 = "0044_telegram_assistant_ids"`). Step 2 imports upstream's `0049_run_inputs`/`0049_run_producer_fencing`
-diamond unchanged, so the merged head is `0051_merge_run_inputs_fencing`.
+diamond unchanged, rejoining at `0051_merge_run_inputs_fencing`. The next upstream
+adoption appends `0052_batch_continuation`; release 53 ancestry is frozen in
+`tests/fixtures/migrations/release_53_ancestry.json` from its identified source commit.
 The upgrade is one-way: a previous release refuses the unknown revision.
 `0044_telegram_assistant_ids` widens only the nullable,
 nonindexed inbox assistant-message-ID column from String(64) to Text. Preserve
@@ -81,7 +83,7 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0039_user_disabled` → `0040_scheduled_group_notice` →
 `0041_im_notice_preferences` → `0042_channel_leases` →
 `0043_runtime_im_notices` → `0044_channel_runtime_configs` →
-`0045_completed_run_evidence` → `0046_skill_mutations` → `0047_mcp_oauth_tokens` → `0048_extension_execution_leases`, then `0049_run_inputs` and `0049_run_producer_fencing` → `0050_history_seed_authority`, joined by `0051_merge_run_inputs_fencing` (head).
+`0045_completed_run_evidence` → `0046_skill_mutations` → `0047_mcp_oauth_tokens` → `0048_extension_execution_leases`, then `0049_run_inputs` and `0049_run_producer_fencing` → `0050_history_seed_authority`, joined by `0051_merge_run_inputs_fencing` → `0052_batch_continuation` (head).
 The preference revision uses an owner/key table with a cascading users FK;
 project documents use an owner-scoped shelf. MCP lease tokens, batch evidence,
 and run-idempotency identity add nullable columns without historical backfill or
