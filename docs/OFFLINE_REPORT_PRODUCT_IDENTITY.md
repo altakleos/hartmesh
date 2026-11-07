@@ -6,10 +6,10 @@ provider name/logo and a named support link with its readable destination. The
 report company/issuer, facts, charts, preferences and input provenance keep their
 existing meaning. The browser icon is validated but is not printed.
 
-DOCX, XLSX and the passive view retain their previous behavior; they do not carry
-this shared attribution. Existing tenant report colors/logo still belong to the
-legacy report reader, separately from the shared product/provider. This change
-does not fix or qualify tenant presentation switching or regeneration.
+DOCX, XLSX and the passive view do not add shared attribution. Complete tenant
+selection, chart compatibility and regeneration are now governed by the
+[offline presentation contract](OFFLINE_REPORT_PRESENTATION.md); shared identity
+remains independently owned.
 
 ## Export and read-only exposure
 
@@ -25,10 +25,11 @@ uv run --no-sync --project backend python -m deerflow.config.product_identity_ex
 
 Use a new staging directory, outside active mounts. The exporter applies the
 [runtime product contract](RUNTIME_PRODUCT_IDENTITY.md), including fixed-field
-conflicts. It refuses unconfigured mode rather than inventing a provider. The
-output is public data only: strict UTF-8 JSON with exactly `schema_version: 1`,
+conflicts. Ordinary export refuses unconfigured mode. Explicit `--include-default` may
+export the exact admitted default identity with null assets/provider for strict
+tenant binding; it does not invent provider attribution. The output is public data only: strict UTF-8 JSON with exactly `schema_version: 1`,
 `identity` (the entire configured public API response, including all three inline
-sanitized PNGs), and `sha256`. The digest is lowercase SHA-256 over the identity
+sanitized PNGs when configured), and `sha256`. The digest is lowercase SHA-256 over the identity
 encoded as JSON with sorted keys, comma/colon separators, ASCII escapes and no
 non-finite numbers. It binds names, assets and support together. It is a content
 checksum, not a signature, authorization token or deployment-generation service.
@@ -70,7 +71,7 @@ from writers, just as other operator deployment configuration.
 
 The projection is at most 2 MiB and must be a regular singly linked file selected
 by a normalized absolute POSIX path, without symlink ancestors. Unknown/duplicate
-fields, unsupported versions, incomplete/default projections and digest mismatch
+fields, unsupported versions, incomplete projections and digest mismatch
 refuse. Both embedded and expected digests must equal the recomputed identity.
 A selected but missing/unreadable file is an error, never a default-mode signal.
 
@@ -82,7 +83,9 @@ The reader checks framing/CRC, decodes and re-encodes pixels with bounded output
 and rejects ancillary metadata, animation, malformed data and trailing content.
 It retains the validated already-sanitized source bytes, preserving their digest
 across different supported Pillow encoder versions. Display text is escaped.
-No path or remote URL can supply an image.
+No path or remote URL can supply an image. An explicit exact default-mode
+projection instead requires null assets/provider and the actual validated legacy
+product name; it is retained for binding without printing a provider block.
 
 `build`, `prose`, `render` and explicit single-file export capture the complete
 identity once before preparation or rendering. All selected formats use that
@@ -100,12 +103,12 @@ implicit historical-selection authority. If shared identity changes (including
 configured/default transitions), previous HTML/PDF cannot be carried into a new
 bundle as current formats. They must be selected for rendering or are omitted;
 unchanged DOCX/XLSX remain eligible for existing verified carry. Old bundles and
-downloads keep their bytes. This comparison covers shared attribution only;
-tenant presentation and presentation-dependent chart regeneration are separate.
+downloads keep their bytes. This comparison also participates in the complete presentation contract;
+tenant/palette changes separately fence DOCX and presentation-dependent charts.
 
 Without either report selector and without a locally inherited
-`HARTMESH_PRODUCT_PAYLOAD`, legacy rendering is unchanged and has no invented
-provider. A partial selector pair, or an inherited configured Gateway payload
+`HARTMESH_PRODUCT_PAYLOAD`, legacy shared-attribution behavior has no invented provider. Complete tenant
+regeneration follows the offline presentation contract. A partial selector pair, or an inherited configured Gateway payload
 without a projection pair, refuses. For container deployments the operator must
 explicitly provide the pair whenever shared attribution is configured; a sandbox
 cannot discover its Gateway's environment or prove that an omitted configuration

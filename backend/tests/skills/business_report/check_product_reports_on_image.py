@@ -42,7 +42,7 @@ def current(root):
     return root / json.loads(pointer.read_text(encoding="utf-8"))["report"]
 
 
-def assert_pdf(path, record, company):
+def assert_pdf(path, record, company, *, image_dir=None):
     document = fitz.open(path)
     text = " ".join(page.get_text() for page in document)
     assert company in text
@@ -77,8 +77,10 @@ def assert_pdf(path, record, company):
         assert identity["provider"]["support_url"] in links
         assert "Product" in text and "Provider" in text
         # Retain actual rendered end matter for inspection, including pagination.
+        destination = image_dir or path.parent
+        destination.mkdir(parents=True, exist_ok=True)
         for index in range(max(0, len(document) - 2), len(document)):
-            document[index].get_pixmap(matrix=fitz.Matrix(1.3, 1.3)).save(str(path.with_name(f"attribution-page-{index + 1}.png")))
+            document[index].get_pixmap(matrix=fitz.Matrix(1.3, 1.3)).save(str(destination / f"attribution-page-{index + 1}.png"))
     else:
         assert "Example Provider" not in text
     return len(document)

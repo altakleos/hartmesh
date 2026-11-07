@@ -73,7 +73,7 @@ try:
         is_are,
         is_color,
         is_missing,
-        load_brand,
+        load_brand as load_brand,
         month_period,
         one_line,
         parse_period,
@@ -86,9 +86,11 @@ try:
         utc_now,
         vocab,
     )
-    from business_report_product import load_product_identity
-    from business_report_publish import STATE_DIR, bundle_manifest, current_identity, current_report, publication_lock, publication_root, publish_bundle, require_current, sync_directory, write_json
-    from business_report_render import chart_path, draw_charts, fetch_inline_only, render
+    from business_report_product import _read as read_snapshot, _unique, load_product_identity
+    from business_report_presentation import MEMBER as PRESENTATION_MEMBER, capture_presentation
+    from business_report_charts import stage_charts as stage_retained_charts, write_data as write_chart_data
+    from business_report_publish import STATE_DIR, bundle_manifest, current_identity, current_report, publication_lock, publication_root, publish_bundle, require_current, retained_presentation, sync_directory, write_json
+    from business_report_render import chart_path as chart_path, draw_charts, fetch_inline_only, render
     from business_report_sections import SECTION_BUILDERS, TABLE_ROW_LIMIT, build_report
 except ImportError as error:
     from business_report_common import MISSING_LIBRARY_MESSAGE  # importable without the libraries
@@ -1481,17 +1483,18 @@ def operation_product_identity():
 
 
 def command_build(args) -> int:
-    product_identity = operation_product_identity()
-    renderer = partial(render, product_identity=product_identity)
     tenant_dir = resolve_tenant_dir(args.tenant)
+    presentation = operation_presentation(tenant_dir)
+    product_identity = presentation.product_identity
     profile = load_profile(args.profile, tenant_dir)
-    options = BuildOptions(brand=load_brand(tenant_dir))
+    options = BuildOptions(brand=presentation.brand())
     applied: list[str] = []
     snapshot = settings.read(args.prefs) if args.prefs else None
     if snapshot:
         if snapshot["revision"] == "missing":
             raise InputError("The specified preferences file is missing; use preferences save first or omit --prefs.")
         options, applied = apply_preferences(options, snapshot["preferences"])
+    effective = snapshot["preferences"] if snapshot else {"version": 1}
     override = None
     if args.prefs_override:
         override = settings.read(args.prefs_override)
@@ -1499,7 +1502,16 @@ def command_build(args) -> int:
             raise InputError("The temporary preferences override file is missing.")
         # Fields and collections replace saved choices for this build only.
         effective = {**(snapshot["preferences"] if snapshot else {"version": 1}), **override["preferences"]}
-        options, applied = apply_preferences(BuildOptions(brand=load_brand(tenant_dir)), effective)
+        options, applied = apply_preferences(BuildOptions(brand=presentation.brand()), effective)
+    try:
+        presentation = presentation.with_preferences(effective)
+    except ValueError as error:
+        raise InputError(str(error)) from None
+    options.brand = presentation.brand()
+    if presentation.mode != "legacy":
+        # A strict workspace name is presentation, never an inferred issuer.
+        options.brand["company"] = ""
+    renderer = partial(render, product_identity=product_identity, presentation=presentation)
     for text in args.exclude or []:
         exclusion = normalize_exclusion(text)
         if exclusion is None:
@@ -1534,7 +1546,8 @@ def command_build(args) -> int:
         return EXIT_WITHHELD
 
     def stage_charts(stage):
-        draw_charts(charts, stage, options.brand, ctx.currency)
+        write_chart_data(stage, charts, report)
+        draw_charts(charts, stage, presentation.brand(), ctx.currency)
         if snapshot or override:
             # Supporting bundle member; report and passive-view schemas stay unchanged.
             write_json(
@@ -1551,7 +1564,7 @@ def command_build(args) -> int:
                 },
             )
 
-    report_path = publish_bundle(out_dir, base, report, targets, tenant_dir, renderer, stage_charts, bundle_id=args.bundle_id, expected_current=expected, verify_current=False, product_identity=product_identity)
+    report_path = publish_bundle(out_dir, base, report, targets, tenant_dir, renderer, stage_charts, bundle_id=args.bundle_id, expected_current=expected, verify_current=False, product_identity=product_identity, presentation=presentation)
     print(f"Built draft {report['meta']['draft']}: {report['meta']['title']} -> {report_path}")
     if previous and any(check["id"] == "prose_numbers" for check in previous.get("checks", [])):
         print("The previous draft carried written text (summary or actions); this rebuild replaced it with the computed text. Run prose again if it still applies.")
@@ -1572,23 +1585,43 @@ def command_show(args) -> int:
     return EXIT_OK
 
 
-def _stage_report_charts(report: dict, source: Path, stage: Path) -> None:
+def capture_operation(*, tenant_dir, product_identity, preferences=None):
+    try:
+        return capture_presentation(tenant_dir, product_identity=product_identity).with_preferences(preferences)
+    except ValueError as error:
+        raise InputError(str(error)) from None
+
+
+def operation_presentation(tenant_dir, preferences=None):
+    try:
+        return capture_presentation(tenant_dir, product_identity=operation_product_identity()).with_preferences(preferences)
+    except ValueError as error:
+        raise InputError(str(error)) from None
+
+
+def _retained_preferences(source):
+    if source.parent.parent.name != "drafts":
+        return None, None
+    manifest = bundle_manifest(source)
+    if "preferences-used.json" not in manifest["sha256"]:
+        return None, None
+    try:
+        raw = read_snapshot(str(source.parent.resolve() / "preferences-used.json"), 512 * 1024)
+        if hashlib.sha256(raw).hexdigest() != manifest["sha256"]["preferences-used.json"]:
+            raise ValueError("retained preferences changed")
+        record = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique)
+        effective = settings.validate(record["effective"])
+    except (OSError, ValueError, KeyError, TypeError, RecursionError, OverflowError):
+        raise InputError("The retained report preferences changed or are unsupported or invalid.") from None
+    return raw, effective
+
+
+def _stage_report_charts(report, source, stage, presentation, preferences):
     manifest = bundle_manifest(source) if source.parent.parent.name == "drafts" else None
-    if manifest and "preferences-used.json" in manifest["sha256"]:
-        captured = (source.parent / "preferences-used.json").read_bytes()
-        if hashlib.sha256(captured).hexdigest() != manifest["sha256"]["preferences-used.json"]:
-            raise InputError("The retained preferences snapshot changed. Restore the verified draft.")
-        (stage / "preferences-used.json").write_bytes(captured)
-    for chart in report["charts"]:
-        png = chart_path(source, chart["png"])
-        if png is None:
-            raise InputError(f"Report chart {chart['png']} is missing. Restore it before publishing a new bundle.")
-        content = png.read_bytes()
-        if manifest and hashlib.sha256(content).hexdigest() != manifest["sha256"].get(chart["png"]):
-            raise InputError("A report chart changed while copying. Retry from a verified draft.")
-        destination = stage / chart["png"]
-        destination.parent.mkdir(exist_ok=True)
-        destination.write_bytes(content)
+    previous = retained_presentation(source.parent, manifest["sha256"]) if manifest and PRESENTATION_MEMBER in manifest["sha256"] else None
+    if preferences is not None:
+        (stage / "preferences-used.json").write_bytes(preferences)
+    stage_retained_charts(report, source, stage, presentation, manifest, previous, draw_charts)
 
 
 def _source_report(path: Path):
@@ -1609,7 +1642,6 @@ def _source_report(path: Path):
 
 def command_prose(args) -> int:
     product_identity = operation_product_identity()
-    renderer = partial(render, product_identity=product_identity)
     report_path = Path(args.report)
     summary: list[str] | None = None
     actions: list[str] | None = None
@@ -1627,8 +1659,11 @@ def command_prose(args) -> int:
         raise InputError("Give --from prose.json, --summary text or --action text.")
     targets = parse_targets(args.render, "--render")
     report, root, base, expected = _source_report(report_path)
+    saved_preferences, effective_preferences = _retained_preferences(report_path)
+    presentation = capture_operation(tenant_dir=resolve_tenant_dir(args.tenant), product_identity=product_identity, preferences=effective_preferences)
+    renderer = partial(render, product_identity=product_identity, presentation=presentation)
     updated, removed, notes = apply_prose(report, summary, actions)
-    published = publish_bundle(root, base, updated, targets, resolve_tenant_dir(args.tenant), renderer, lambda stage: _stage_report_charts(updated, report_path, stage), bundle_id=args.bundle_id, expected_current=expected, product_identity=product_identity)
+    published = publish_bundle(root, base, updated, targets, resolve_tenant_dir(args.tenant), renderer, lambda stage: _stage_report_charts(updated, report_path, stage, presentation, saved_preferences), bundle_id=args.bundle_id, expected_current=expected, product_identity=product_identity, presentation=presentation)
     print(f"Draft {updated['meta']['draft']}: {published}")
     if removed:
         print(f"Removed {len(removed)} {plural(len(removed), 'number')} not in the report: {', '.join(removed)}. Sentences with them were dropped; say so to the user.")
@@ -1649,7 +1684,6 @@ def command_prose(args) -> int:
 
 def command_render(args) -> int:
     product_identity = operation_product_identity()
-    renderer = partial(render, product_identity=product_identity)
     targets = parse_targets(args.to, "--to")
     if not targets:
         raise InputError("--to must name at least one format: pdf, docx, xlsx or html.")
@@ -1658,6 +1692,9 @@ def command_render(args) -> int:
     report_path = Path(args.report)
     tenant_dir = resolve_tenant_dir(args.tenant)
     report, root, base, expected = _source_report(report_path)
+    saved_preferences, effective_preferences = _retained_preferences(report_path)
+    presentation = capture_operation(tenant_dir=tenant_dir, product_identity=product_identity, preferences=effective_preferences)
+    renderer = partial(render, product_identity=product_identity, presentation=presentation)
     if args.out:
         # A chosen export is one atomically replaced file, outside bundle ownership.
         import tempfile
@@ -1671,7 +1708,8 @@ def command_render(args) -> int:
         private.mkdir(parents=True, exist_ok=True, mode=0o700)
         with tempfile.TemporaryDirectory(prefix="export-", dir=private) as temporary:
             stage = Path(temporary)
-            _stage_report_charts(report, report_path, stage)
+            if targets != ["xlsx"]:
+                _stage_report_charts(report, report_path, stage, presentation, saved_preferences)
             staged_report = stage / report_path.name
             _write_json(staged_report, report)
             staged = renderer(report, staged_report, targets[0], stage / destination.name, tenant_dir)
@@ -1689,7 +1727,7 @@ def command_render(args) -> int:
     # manifests do not establish which report supplied a format's numbers.
     carry = read_render_manifest(report_path) if report_path.parent.parent.name == "drafts" else []
     carry = [name for name in carry if name not in {_render_name(report_path, target) for target in targets}]
-    published = publish_bundle(root, base, report, targets, tenant_dir, renderer, lambda stage: _stage_report_charts(report, report_path, stage), bundle_id=args.bundle_id, expected_current=expected, source=report_path, carry=carry, product_identity=product_identity)
+    published = publish_bundle(root, base, report, targets, tenant_dir, renderer, lambda stage: _stage_report_charts(report, report_path, stage, presentation, saved_preferences), bundle_id=args.bundle_id, expected_current=expected, source=report_path, carry=carry, product_identity=product_identity, presentation=presentation)
     print(f"Report: {published}")
     print_rendered(published, targets)
     print_unowned_renders(report_path)

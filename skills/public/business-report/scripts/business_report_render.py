@@ -1,14 +1,15 @@
 """Renderers for the business-report skill: HTML, PDF, DOCX, XLSX and the charts.
 
-Every renderer reads only report.json (plus the chart PNGs and the brand logo,
-both confined to the report directory and the tenant bundle). Nothing here
-touches the network: the PDF printer refuses every URL that is not inline data.
+Renderers consume captured tenant bytes and report.json with staged chart PNGs
+confined to the report directory. No renderer reopens a live tenant asset path.
+Nothing here touches the network: the PDF printer refuses every URL that is not inline data.
 """
 
 from __future__ import annotations
 
 import base64
 import datetime as dt
+import io
 import math
 import re
 import sys
@@ -21,7 +22,6 @@ import xlsxwriter.utility
 from business_report_common import (
     CHART_PNG_PATTERN,
     CURRENCY_SYMBOLS,
-    DEFAULT_BRAND,
     EXIT_MISSING_LIBRARY,
     MISSING_LIBRARY_MESSAGE,
     REPORT_SUFFIX,
@@ -31,11 +31,11 @@ from business_report_common import (
     cell_format,
     checks_line,
     format_value,
-    is_color,
-    load_brand,
     picture_inside,
 )
+from business_report_presentation import capture_presentation
 from business_report_product import load_product_identity
+from PIL import Image
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches
 
@@ -57,27 +57,12 @@ def chart_path(report_path: Path, png: str) -> Path | None:
 
 
 def effective_brand(report: dict, report_path: Path, tenant_dir: str | None) -> dict:
-    """The brand the report was built with, the tenant bundle on top when given; pictures confined."""
+    """Select current presentation as a whole; saved labels remain report content."""
+    try:
+        return capture_presentation(tenant_dir).brand()
+    except ValueError as error:
+        raise InputError(str(error)) from None
 
-    brand = dict(DEFAULT_BRAND)
-    stored = report["meta"].get("brand", {})
-    brand["company"] = str(stored.get("company") or report["meta"].get("company") or "")
-    for key in ("primary", "secondary"):
-        if is_color(stored.get(key)):
-            brand[key] = stored[key]
-    roots = [report_path.parent, Path(tenant_dir)] if tenant_dir else [report_path.parent]
-    logo = picture_inside(stored.get("logo"), roots)
-    brand["logo"] = str(logo) if logo else None
-    if tenant_dir:
-        tenant = load_brand(tenant_dir)
-        for key in ("primary", "secondary"):
-            if tenant[key] != DEFAULT_BRAND[key]:
-                brand[key] = tenant[key]
-        if tenant["company"] and not brand["company"]:
-            brand["company"] = tenant["company"]
-        if tenant["logo"]:
-            brand["logo"] = tenant["logo"]
-    return brand
 
 
 _INLINE_FETCHER = []
@@ -107,11 +92,12 @@ def render_html(report: dict, report_path: Path, brand: dict, product_identity=N
         png = chart_path(report_path, chart["png"])
         if png is not None:
             charts[chart["id"]] = data_uri(png)
-    logo = data_uri(Path(brand["logo"])) if brand.get("logo") else None
+    logo = "data:image/png;base64," + base64.b64encode(brand["logo_bytes"]).decode("ascii") if brand.get("logo_bytes") else None
     return template.render(
         report=report,
         brand=brand,
-        company=brand.get("company") or report["meta"].get("company", ""),
+        company=report["meta"].get("company", ""),
+        legacy_label=report["meta"].get("brand", {}).get("company", ""),
         logo=logo,
         charts=charts,
         css=(TEMPLATES_DIR / "report.css").read_text(encoding="utf-8"),
@@ -158,10 +144,18 @@ def _fill_table(word_table, table: dict, currency: str) -> None:
 def render_docx(report: dict, report_path: Path, brand: dict, path: Path) -> None:
     currency = report["meta"]["currency"]["code"]
     document = docx.Document()
-    if brand.get("logo"):
-        document.add_picture(brand["logo"], width=Inches(1.5))
+    if brand.get("logo_bytes"):
+        with Image.open(io.BytesIO(brand["logo_bytes"])) as image:
+            width, height = image.size
+        scale = min(1.5 / width, 0.6 / height)
+        document.add_picture(io.BytesIO(brand["logo_bytes"]), width=Inches(width * scale), height=Inches(height * scale))
+    if brand.get("company"):
+        document.add_paragraph("Workspace: " + brand["company"])
     document.add_heading(report["meta"]["title"], level=0)
-    company = brand.get("company") or report["meta"].get("company", "")
+    company = report["meta"].get("company", "")
+    legacy_label = report["meta"].get("brand", {}).get("company", "")
+    if legacy_label and legacy_label != company:
+        document.add_paragraph("Saved label: " + legacy_label)
     document.add_paragraph(" · ".join(part for part in (company, report["meta"]["period"]["label"], f"draft {report['meta']['draft']}") if part))
     kpi_table = document.add_table(rows=2, cols=max(1, len(report["kpis"])))
     kpi_table.style = "Table Grid"
@@ -369,13 +363,19 @@ def draw_charts(charts: dict[str, dict], out_dir: Path, brand: dict, currency: s
 _UNSET = object()
 
 
-def render(report: dict, report_path: Path, target: str, out_path: Path | None, tenant_dir: str | None, *, product_identity=_UNSET) -> Path:
+def render(report: dict, report_path: Path, target: str, out_path: Path | None, tenant_dir: str | None, *, product_identity=_UNSET, presentation=_UNSET) -> Path:
     if product_identity is _UNSET:
         try:
             product_identity = load_product_identity()
         except ValueError as error:
             raise InputError(str(error)) from None
-    brand = effective_brand(report, report_path, tenant_dir)
+    try:
+        if presentation is _UNSET:
+            presentation = capture_presentation(tenant_dir, product_identity=product_identity)
+        product_identity = presentation.product_identity
+        brand = presentation.brand()
+    except ValueError as error:
+        raise InputError(str(error)) from None
     base = report_path.name[: -len(REPORT_SUFFIX)] if report_path.name.endswith(REPORT_SUFFIX) else report_path.stem
     path = out_path or report_path.with_name(f"{base}.{target}")
     path.parent.mkdir(parents=True, exist_ok=True)

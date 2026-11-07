@@ -25,10 +25,11 @@ Opt in with `strict-v1`. A directory containing starters, roles or report
 settings does not select a presentation mode. Strict mode requires an explicit
 `presentation.json`, even for product-only presentation. It ignores legacy
 `brand.json` for web presentation; that file remains independently owned by
-legacy/report consumers. `starters.json`, `roles.json`, report profiles and
+legacy consumers. Strict offline reports reuse the same projection and ignore
+loose branding through the [report contract](OFFLINE_REPORT_PRESENTATION.md). `starters.json`, `roles.json`, report profiles and
 other settings keep their owners and refresh behavior. The reader never writes,
-copies, enumerates or restores those resources. Report/sandbox snapshots are a
-separate contract; this change does not activate them.
+copies, enumerates or restores those resources. Report/sandbox snapshots use that separate offline exposure contract; workspace
+activation does not automatically refresh existing sandboxes.
 
 Use matching Gateway/frontend versions for strict mode. Older frontends cannot
 display the strict tenant context; the Gateway suppresses loose tenant branding

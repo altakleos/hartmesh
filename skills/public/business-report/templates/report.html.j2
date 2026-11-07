@@ -11,9 +11,13 @@
 </head>
 <body>
 <header class="masthead">
-  {% if logo %}<img class="logo" src="{{ logo }}" alt="">{% endif %}
+  {% if logo or brand.company %}<div class="tenant-context" role="group" aria-label="Workspace: {{ brand.company }}">
+    {% if logo %}<img class="logo" src="{{ logo }}" alt="Workspace logo: {{ brand.company }}">{% endif %}
+    <p>Workspace{% if brand.company %}: <strong>{{ brand.company }}</strong>{% endif %}</p>
+  </div>{% endif %}
   <div class="masthead-text">
     <h1>{{ report.meta.title }}</h1>
+    {% if legacy_label and legacy_label != company %}<p class="saved-label">Saved label: {{ legacy_label }}</p>{% endif %}
     <p class="subtitle">{% if company %}{{ company }} · {% endif %}{{ report.meta.period.label }} · draft {{ report.meta.draft }}</p>
   </div>
 </header>
@@ -79,7 +83,7 @@
 <footer>
   Built from {% for input in report.meta.inputs %}{{ input.name }} (uploaded {{ input.uploaded }}){% if not loop.last %}, {% endif %}{% endfor %}. Checked by the report script.
 </footer>
-{% if product_identity %}
+{% if product_identity and product_identity.configured %}
 <section id="shared-attribution" aria-label="Product and provider attribution">
   <div class="attribution-identity">
     <img src="{{ product_identity.product_logo }}" alt="">
