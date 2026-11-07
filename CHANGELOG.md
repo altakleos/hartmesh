@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.53] - 2026-11-07
+
+### Shared product and provider identity
+
+- One Gateway/frontend build can display an operator-supplied public product
+  name, logo and browser icon, plus a separate provider name, logo and support
+  link. The Gateway validates and freezes the complete read-only payload; the
+  frontend uses that admitted identity across sign-in, workspace and product
+  information. Without a payload, the existing product-name configuration stays
+  available. See [runtime product identity](docs/RUNTIME_PRODUCT_IDENTITY.md).
+- Business-report HTML and PDF can include the same product/provider attribution
+  from an offline export, with embedded images and no network requests. Export
+  with the installed backend and expose the selected envelope and expected digest
+  through the existing read-only sandbox mounts and environment. This requires
+  operator activation; see [offline report attribution](docs/OFFLINE_REPORT_PRODUCT_IDENTITY.md).
+
+### Workspace and report presentation snapshots
+
+- Authenticated workspaces can opt into `tenant_bundle.presentation: strict-v1`
+  with a pinned tenant manifest. A complete Workspace name/logo stays separate
+  from the shared product/provider, and document navigation retains one coherent
+  admitted presentation. The default `legacy` mode preserves existing tolerant
+  branding. Upgrade Gateway and frontend together, then follow the activation and
+  restoration steps in [tenant presentation](docs/TENANT_PRESENTATION.md).
+- Each report build or regeneration captures its current tenant, product and
+  report palette once. Regeneration preserves report facts and saved preferences,
+  redraws retained charts when needed, and publishes a separate immutable bundle.
+  HTML/PDF include the complete presentation; DOCX keeps compatible tenant and
+  palette styling, while XLSX preserves the report data. Historical bundles keep
+  their bytes. Legacy reports without the chart data needed for redraw refuse
+  affected exports with an actionable error.
+- Strict report presentation uses the existing product and tenant exports,
+  including explicit default-product and product-only selections. Configure both
+  selector pairs and immutable read-only inputs. Restart affected Gateway readers,
+  reload browser documents and recreate affected sandboxes when activating or
+  restoring a selection; replacing a host file alone does not refresh an existing
+  file bind mount. See [offline report presentation](docs/OFFLINE_REPORT_PRESENTATION.md).
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.52. The database head stays at
+`0051_merge_run_inputs_fencing`. The configuration template advances from 65 to
+66 for the optional tenant presentation mode and manifest digest. Run
+`make config-upgrade` to merge the new fields into an existing configuration;
+the default presentation mode remains `legacy`. The optional presentation
+manifests, offline envelopes and retained report
+presentation/chart members are file formats, not database migrations. The report
+model and passive-view v1 schemas remain unchanged.
+
 ## [2.2.0+hartmesh.52] - 2026-11-04
 
 ### AI employee workspaces across an upgrade

@@ -854,7 +854,7 @@ wheels = [
 
 [[package]]
 name = "deer-flow"
-version = "2.2.0+hartmesh.52"
+version = "2.2.0+hartmesh.53"
 source = { virtual = "." }
 dependencies = [
     { name = "bcrypt" },
@@ -991,7 +991,7 @@ source = { editable = "packages/extension-api" }
 
 [[package]]
 name = "deerflow-harness"
-version = "2.2.0+hartmesh.52"
+version = "2.2.0+hartmesh.53"
 source = { editable = "packages/harness" }
 dependencies = [
     { name = "agent-client-protocol" },
