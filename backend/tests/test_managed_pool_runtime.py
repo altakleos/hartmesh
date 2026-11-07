@@ -374,18 +374,27 @@ def test_unqualified_conversation_cleanup_does_not_adopt_observed_native(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_outer_lifetime_joins_late_constructor_and_owned_shutdown_worker(pool):
+async def test_outer_lifetime_joins_late_constructor_and_owned_shutdown_worker(pool, monkeypatch):
     from threading import Event
 
     from app.gateway.pool_runtime import managed_pool_runtime
 
     app = SimpleNamespace(state=SimpleNamespace())
     config = SimpleNamespace(enabled=True, plan=object(), inventory_path=str(pool / "inventory.json"))
-    entered, resume, stopping, stopped = Event(), Event(), Event(), Event()
+    entered, resume, closing, stopping, stopped = Event(), Event(), Event(), Event(), Event()
     peer = PoolRuntimeOwner(pool)
     worker = None
     runtime = None
     observed = []
+
+    mark_closing = PoolRuntimeOwner.mark_closing
+
+    def observe_closing(owner):
+        mark_closing(owner)
+        if owner is runtime:
+            closing.set()
+
+    monkeypatch.setattr(PoolRuntimeOwner, "mark_closing", observe_closing)
 
     def shutdown():
         assert runtime.owns(provider) and runtime.closing
@@ -413,7 +422,9 @@ async def test_outer_lifetime_joins_late_constructor_and_owned_shutdown_worker(p
     task = asyncio.create_task(scenario())
     try:
         assert await asyncio.to_thread(entered.wait, 5)
-        await asyncio.sleep(0)
+        # The scenario's executor wait can finish after this coroutine's wait.
+        # Keep construction paused until the real context exit marks closure.
+        assert await asyncio.to_thread(closing.wait, 5)
         assert not task.done()
         with pytest.raises(StorageHostUnqualified):
             peer.acquire()
