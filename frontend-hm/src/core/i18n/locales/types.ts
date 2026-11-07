@@ -1184,6 +1184,8 @@ export interface Translations {
   };
 
   subagentBatches: {
+    followUpPending: string;
+    followUpStopped: string;
     label: string;
     title: string;
     description: string;

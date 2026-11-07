@@ -15,6 +15,19 @@ TENANT_TEMPLATE = REPO_ROOT / "deploy/compose/config.yaml"
 TENANT_COMPOSE = REPO_ROOT / "deploy/compose/compose.yaml"
 
 
+def test_sandbox_workflow_has_no_duplicate_yaml_keys() -> None:
+    """GitHub refuses duplicate keys that PyYAML otherwise silently replaces."""
+    import yaml
+
+    class UniqueKeysLoader(yaml.SafeLoader):
+        def construct_mapping(self, node, deep=False):
+            keys = [key.value for key, _ in node.value]
+            assert len(keys) == len(set(keys)), f"Duplicate workflow key near line {node.start_mark.line + 1}: {keys}"
+            return super().construct_mapping(node, deep=deep)
+
+    yaml.load(SANDBOX_SMOKE_WORKFLOW.read_text(encoding="utf-8"), Loader=UniqueKeysLoader)
+
+
 def test_sandbox_dockerfile_pins_the_verified_base_and_non_root_user() -> None:
     dockerfile = SANDBOX_DOCKERFILE.read_text(encoding="utf-8")
 

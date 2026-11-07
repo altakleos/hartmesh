@@ -360,34 +360,48 @@ class UserScopedSkillStorage(LocalSkillStorage):
         # extensions_config (handled by ``super().load_skills`` above). Re-read
         # from disk here too so another worker's update cannot be masked by
         # this process's singleton cache while rebuilding a user projection.
-        from deerflow.config.extensions_config import ExtensionsConfig
+        from deerflow.config.extensions_config import ExtensionsConfig, _describe_load_failure
 
-        extensions_config = ExtensionsConfig.from_file()
-        origins = self._read_skill_origins()
-        baseline_names = set()
-        if any(s.category == SkillCategory.CUSTOM for s in skills):
-            from deerflow.skills.parser import parse_skill_file
+        try:
+            extensions_config = ExtensionsConfig.from_file()
+        except Exception as e:
+            # Same degraded mode as ``LocalSkillStorage.load_skills``: a config
+            # that cannot be read says nothing about which skills are enabled,
+            # so the per-user AND cannot be evaluated. Raising here would take
+            # the whole user-scoped listing down over an unrelated defect in the
+            # file, so fail closed instead — every skill is listed, none is
+            # enabled. ``from_file`` resolves ``$VAR`` placeholders before
+            # validation, so only the failure shape is safe to log (see
+            # ``_describe_load_failure``).
+            logger.warning("Failed to load extensions config; treating every user-scoped skill as disabled (%s)", _describe_load_failure(e))
+            skills = [dataclasses.replace(s, enabled=False) for s in skills]
+        else:
+            # Private provenance and state errors must remain visible rather
+            # than being mistaken for an unreadable extensions config.
+            origins = self._read_skill_origins()
+            baseline_names = set()
+            if any(s.category == SkillCategory.CUSTOM for s in skills):
+                from deerflow.skills.parser import parse_skill_file
 
-            for category, root, path in self._iter_skill_files():
-                if category == SkillCategory.CUSTOM:
-                    continue
-                baseline = parse_skill_file(path, category=category, relative_path=path.parent.relative_to(root))
-                if baseline is not None:
-                    baseline_names.add(baseline.name)
-        skills = [
-            dataclasses.replace(
-                s,
-                enabled=self.get_skill_enabled_state(s.name)
-                and extensions_config.is_skill_enabled(s.name, s.category.value if hasattr(s.category, "value") else s.category)
-                and (s.name not in origins or extensions_config.is_skill_enabled(origins[s.name]["source_name"], origins[s.name]["source_category"])),
-                origin=origins.get(s.name) if s.category == SkillCategory.CUSTOM else None,
-                overrides_baseline=s.category == SkillCategory.CUSTOM and s.name in baseline_names,
-            )
-            if dataclasses.is_dataclass(s) and not isinstance(s, type) and (s.category.value if hasattr(s.category, "value") else s.category) != SkillCategory.PUBLIC.value
-            else s
-            for s in skills
-        ]
-
+                for category, root, path in self._iter_skill_files():
+                    if category == SkillCategory.CUSTOM:
+                        continue
+                    baseline = parse_skill_file(path, category=category, relative_path=path.parent.relative_to(root))
+                    if baseline is not None:
+                        baseline_names.add(baseline.name)
+            skills = [
+                dataclasses.replace(
+                    s,
+                    enabled=self.get_skill_enabled_state(s.name)
+                    and extensions_config.is_skill_enabled(s.name, s.category.value if hasattr(s.category, "value") else s.category)
+                    and (s.name not in origins or extensions_config.is_skill_enabled(origins[s.name]["source_name"], origins[s.name]["source_category"])),
+                    origin=origins.get(s.name) if s.category == SkillCategory.CUSTOM else None,
+                    overrides_baseline=s.category == SkillCategory.CUSTOM and s.name in baseline_names,
+                )
+                if dataclasses.is_dataclass(s) and not isinstance(s, type) and (s.category.value if hasattr(s.category, "value") else s.category) != SkillCategory.PUBLIC.value
+                else s
+                for s in skills
+            ]
         if enabled_only:
             skills = [s for s in skills if s.enabled]
 

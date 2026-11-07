@@ -105,11 +105,13 @@ from deerflow.runtime.goal import (
     read_thread_goal,
     should_continue_goal,
     visible_conversation_signature,
+    wake_goal_after_external_wait,
     write_thread_goal,
 )
 from deerflow.runtime.goal_progress import observe_goal_operations
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.presented_files import RUNTIME_PRESENTED_FILES_CONTEXT_KEY
+from deerflow.runtime.run_origin import origin_kind_of
 from deerflow.runtime.runs.capture_io import CaptureIOClosed, CaptureIOOwner, CaptureIOUnsupported, capture_io_scope, current_capture_io_owner, run_capture_io
 from deerflow.runtime.runs.schemas import GOAL_RUN_HARD_STOP_REASONS
 from deerflow.runtime.runs.stream_cleanup import close_agent_stream
@@ -860,6 +862,8 @@ class RunContext:
     scheduler_capability: SchedulerRunCapability | None = field(default=None)
     # Server-selected occurrence identity. Metadata alone never activates a goal.
     scheduled_task_runtime: Mapping[str, Any] | None = field(default=None)
+    # Host-only preflight under durable run ownership; failures reject execution.
+    verify_artifacts: Any | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -1761,6 +1765,14 @@ async def _run_agent(
                         "native_package_copy": "mutable_home_data",
                     },
                 )
+
+        goal_wakeup = (record.metadata or {}).get("batch_goal_wakeup") if origin_kind_of(record.metadata) == "subagent_batch" else None
+        if goal_wakeup is not None:
+            if not await wake_goal_after_external_wait(checkpointer, thread_id, run_id, goal_wakeup):
+                await run_manager.set_status(run_id, RunStatus.interrupted, stop_reason="goal_wakeup_superseded")
+                return
+        if ctx.verify_artifacts is not None:
+            await ctx.verify_artifacts()
 
         if ctx.on_run_admitted is not None:
             try:
@@ -2771,7 +2783,7 @@ async def _run_agent(
                                     bridge=bridge,
                                     accessor=accessor,
                                     checkpointer=checkpointer,
-                                    **({"finalizing_run": record} if capture_requested else {}),
+                                    **({"finalizing_run": record} if record.finalizing else {}),
                                 )
                         except Exception:
                             logger.warning("Could not finalize satisfied goal for thread %s", thread_id, exc_info=True)

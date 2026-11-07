@@ -16,6 +16,8 @@ from deerflow.runtime.customer_administration import (
 
 
 def request_customer_administration_policy(request: Request) -> CustomerAdministrationPolicy:
+    if getattr(getattr(request, "state", None), "durable_batch_followup", False) is True:
+        return DENIED_CUSTOMER_ADMINISTRATION
     scope = getattr(request, "scope", None)
     application = scope.get("app") if isinstance(scope, dict) else getattr(request, "app", None)
     state = getattr(application, "state", None)
@@ -55,6 +57,8 @@ async def resolve_customer_management_actor(request: Request, *, internal_owner_
     from app.gateway.deps import is_admin_user
 
     state = getattr(request, "state", None)
+    if getattr(state, "durable_batch_followup", False) is True:
+        return CustomerManagementActor()
     if getattr(state, "auth_source", None) == AUTH_SOURCE_INTERNAL:
         owner = internal_owner_user
         administrator = owner is not None and getattr(owner, "system_role", None) == "admin" and getattr(state, "customer_management_notification", False) is not True

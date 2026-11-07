@@ -46,7 +46,7 @@ async function captureThreadStreamOptions() {
       isLoading: false,
     }),
     useMutation: rs.fn(),
-    useQuery: rs.fn(),
+    useQuery: rs.fn(() => ({ data: undefined, dataUpdatedAt: 0 })),
     useQueryClient: () => ({
       invalidateQueries: rs.fn(),
       setQueriesData: rs.fn(),

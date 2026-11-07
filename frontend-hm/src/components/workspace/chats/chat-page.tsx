@@ -186,6 +186,7 @@ export default function ChatPage() {
     runInputs,
     canSendInput,
     activeRunId,
+    activeRunStartedAt,
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     displayThreadId: threadId,
@@ -623,6 +624,7 @@ export default function ChatPage() {
                   ) : (
                     <MessageList
                       activeRunId={activeRunId}
+                      activeRunStartedAt={activeRunStartedAt}
                       agentTarget={agentTarget}
                       archiveDownloadsEnabled={
                         legacyCapabilities &&

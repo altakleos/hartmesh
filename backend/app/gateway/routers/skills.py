@@ -31,6 +31,7 @@ from deerflow.agents.lead_agent.prompt import (
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
+    _describe_load_failure,
     atomic_write_extensions_config,
     extensions_config_file_lock,
     extensions_config_write_lock,
@@ -369,6 +370,28 @@ async def _publish_skills_cache_reset(user_id: str | None) -> str | None:
     return await asyncio.to_thread(publish_skills_cache_reset, user_id=user_id)
 
 
+def _assert_extensions_config_readable() -> None:
+    """Raise when the extensions config exists but cannot be read.
+
+    The storage layer fails closed on an unreadable config (every skill stays
+    listed, none is enabled), which keeps the runtime activation gate safe
+    without taking the listing down. The read surface must stay loud instead:
+    the ``enabled`` column it reports is derived from this config, so serving
+    a degraded list would present a broken deployment as a legitimately empty
+    one. The raised error reaches each handler's generic 500 branch, which
+    keeps the host path in the server log and out of the response body.
+    Validation may include resolved credentials, so replace its message and
+    suppress its exception chain before a handler logs the failure.
+    """
+    config_path = ExtensionsConfig.resolve_config_path()
+    if config_path is None:
+        return
+    try:
+        ExtensionsConfig.from_file(str(config_path))
+    except Exception as e:
+        raise RuntimeError(f"Failed to load extensions config from {config_path} ({_describe_load_failure(e)})") from None
+
+
 def _load_user_skills(config: AppConfig) -> list[Skill]:
     """Load every skill visible to the caller's storage, enabled or not.
 
@@ -378,6 +401,7 @@ def _load_user_skills(config: AppConfig) -> list[Skill]:
     each ``SKILL.md`` -- work that scales with the number of installed skills
     (#5747 moved the same call off the loop for ``get_custom_skill``).
     """
+    _assert_extensions_config_readable()
     return _get_user_skill_storage(config).load_skills(enabled_only=False)
 
 
@@ -795,9 +819,14 @@ async def list_custom_skills(request: Request, config: AppConfig = Depends(get_c
     surface names the main listing hides.
     """
     await require_private_skill_owner(request)
+
+    def _load_custom_skills() -> list[Skill]:
+        storage = _get_owned_private_skill_storage(config)
+        _assert_extensions_config_readable()
+        return [skill for skill in storage.load_skills(enabled_only=False) if skill.category == SkillCategory.CUSTOM]
+
     try:
-        storage = await asyncio.to_thread(_get_owned_private_skill_storage, config)
-        skills = [skill for skill in await asyncio.to_thread(storage.load_skills, enabled_only=False) if skill.category == SkillCategory.CUSTOM]
+        skills = await asyncio.to_thread(_load_custom_skills)
         visible_skills = await _filter_visible_skills(request, config, skills)
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in visible_skills])
     except HTTPException:

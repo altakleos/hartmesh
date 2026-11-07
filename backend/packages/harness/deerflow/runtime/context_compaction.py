@@ -15,6 +15,7 @@ from deerflow.config.agents_config import validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE
+from deerflow.utils.assembly_io import run_assembly
 
 logger = logging.getLogger(__name__)
 _AGENT_CONFIG_NOT_LOADED = object()
@@ -162,7 +163,7 @@ async def compact_thread_context(
         if agent_execution.thread_id != thread_id:
             raise ValueError("Instance compaction requires its admitted conversation")
         await agent_execution.validate()
-    resolved_app_config = app_config or get_app_config()
+    resolved_app_config = app_config or await run_assembly(get_app_config)
     read_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     snapshot = await accessor.aget(read_config)
     snapshot_config = snapshot.config or {}
@@ -203,7 +204,8 @@ async def compact_thread_context(
         from deerflow.agent_instances.memory import execution_memory_enabled
 
         memory_enabled = await asyncio.to_thread(execution_memory_enabled, agent_execution, resolved_app_config.memory)
-    middleware = _create_compaction_middleware(
+    middleware = await run_assembly(
+        _create_compaction_middleware,
         app_config=resolved_app_config,
         keep=keep,
         run_model_name=run_model_name,

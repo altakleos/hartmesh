@@ -145,7 +145,7 @@ def test_creation_attributes_every_bound_slot_in_both_network_modes(monkeypatch,
     monkeypatch.setattr(backend, "_restricted_resources_status", lambda *args, **kwargs: "missing")
     monkeypatch.setattr(backend, "_create_internal_network", lambda *args: None)
     monkeypatch.setattr(backend, "_create_egress_network", lambda *args: None)
-    monkeypatch.setattr(backend, "_start_network_proxy", lambda *args: "10.0.0.2")
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *args, **kwargs: "10.0.0.2")
     monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda **kwargs: 18080)
     labels = {"hartmesh.storage.space." + "b" * 32: "1", "hartmesh.storage.space." + "c" * 32: "1"}
     info = backend.create("chat-a", "scope", user_id="alice", storage_labels=labels)

@@ -921,6 +921,30 @@ def test_member_skill_reads_keep_load_error_text_out_of_500(monkeypatch, tmp_pat
     assert str(extensions_config) in caplog.text
 
 
+@pytest.mark.parametrize("path", ["/api/skills", "/api/skills/custom", "/api/skills/demo-skill"])
+def test_skill_read_validation_errors_keep_resolved_secrets_out_of_logs(monkeypatch, tmp_path, caplog, path):
+    import logging
+
+    secret = "skill-read-secret-value"
+    monkeypatch.setenv("SKILL_READ_SECRET", secret)
+    extensions_config = tmp_path / "extensions_config.json"
+    extensions_config.write_text(
+        '{"mcpServers":{"demo":{"enabled":true,"type":"stdio","command":"npx","args":"$SKILL_READ_SECRET"}},"skills":{}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_config))
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path, user_factory=lambda: SimpleNamespace(id=skills_router.get_effective_user_id(), email="member-test@example.com", password_hash="x", system_role="user", needs_setup=False))
+
+    with TestClient(app) as client, caplog.at_level(logging.ERROR, logger=skills_router.__name__):
+        response = client.get(path)
+
+    assert response.status_code == 500
+    assert secret not in response.text
+    assert secret not in caplog.text
+    assert str(extensions_config) in caplog.text
+    assert "ValidationError" in caplog.text
+
+
 @pytest.mark.parametrize(
     "path",
     [

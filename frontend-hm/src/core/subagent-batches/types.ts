@@ -30,6 +30,13 @@ export type SubagentBatch = {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  continuation_status?:
+    | "pending"
+    | "dispatching"
+    | "dispatched"
+    | "suppressed"
+    | "cancelled";
+  continuation_run_id?: string | null;
 };
 
 export type SubagentBatchItem = {
@@ -52,7 +59,11 @@ export type SubagentBatchItem = {
 };
 
 export function isActiveSubagentBatch(batch: SubagentBatch): boolean {
-  return ["queued", "running", "paused"].includes(batch.status);
+  return (
+    ["queued", "running", "paused"].includes(batch.status) ||
+    batch.continuation_status === "pending" ||
+    batch.continuation_status === "dispatching"
+  );
 }
 
 export function completedSubagentBatchItems(batch: SubagentBatch): number {

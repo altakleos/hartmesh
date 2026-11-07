@@ -4,7 +4,7 @@ import json
 import subprocess
 import time
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 from test_native_create_bridge import CONTAINER, LABELS, SLOT
@@ -16,11 +16,10 @@ from deerflow.spaces.native_create_evidence import ATTEMPT_LABEL
 
 
 def backend(bridge):
-    result = LocalContainerBackend.__new__(LocalContainerBackend)
-    result._runtime, result._image, result._container_prefix = "docker", "image", "native"
-    result._config_mounts, result._environment = [], {}
-    result._network_mode, result._network_config = "open", {"mode": "open"}
-    result._base_port, result._required_shell_sessions, result._allow_synthetic_dns = 19080, 0, False
+    # Use the actual constructor so cleanup ownership/locks have the same
+    # lifetime as production. Only runtime discovery is external to this fixture.
+    with patch.object(LocalContainerBackend, "_detect_runtime", return_value="docker"):
+        result = LocalContainerBackend(image="image", base_port=19080, container_prefix="native", config_mounts=[], environment={})
     result._managed_native_required, result._native_creation = True, bridge
     return result
 
