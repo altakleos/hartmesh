@@ -4,9 +4,8 @@ import "streamdown/styles.css";
 import { type Metadata } from "next";
 import { redirect } from "next/navigation";
 
-import { GatewayOfflineFallback } from "@/components/workspace/gateway-offline-fallback";
 import { RedirectToLogin } from "@/components/workspace/redirect-to-login";
-import { AuthProvider } from "@/core/auth/AuthProvider";
+import { WorkspaceAuthProvider } from "@/components/workspace/workspace-auth-provider";
 import { getServerSideUser } from "@/core/auth/server";
 import { assertNever } from "@/core/auth/types";
 import { detectLocaleServer } from "@/core/i18n/server";
@@ -39,9 +38,9 @@ export default async function WorkspaceLayout({
   switch (result.tag) {
     case "authenticated":
       content = (
-        <AuthProvider initialUser={result.user}>
+        <WorkspaceAuthProvider verifiedUser={result.user}>
           <WorkspaceContent>{children}</WorkspaceContent>
-        </AuthProvider>
+        </WorkspaceAuthProvider>
       );
       break;
     case "needs_setup":
@@ -52,13 +51,12 @@ export default async function WorkspaceLayout({
       content = <RedirectToLogin />;
       break;
     case "gateway_unavailable":
-      // GatewayOfflineFallback supplies the AuthProvider; WorkspaceContent
-      // already mounts the banner inside its sidebar layout, so renderBanner
-      // stays false here to avoid double-mounting.
+      // Keep the same provider path as authenticated refreshes. Uncertain auth
+      // must not retire an already admitted account/document presentation.
       content = (
-        <GatewayOfflineFallback>
+        <WorkspaceAuthProvider>
           <WorkspaceContent gatewayUnavailable>{children}</WorkspaceContent>
-        </GatewayOfflineFallback>
+        </WorkspaceAuthProvider>
       );
       break;
     case "config_error":

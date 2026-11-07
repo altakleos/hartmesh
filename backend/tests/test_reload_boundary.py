@@ -150,3 +150,13 @@ def test_pydantic_field_descriptions_are_introspectable_at_runtime():
     description = AppConfig.model_fields["database"].description
     assert description is not None
     assert description.startswith(STARTUP_ONLY_PREFIX)
+
+
+def test_tenant_presentation_selection_is_startup_owned_but_other_settings_are_not():
+    from deerflow.config.tenant_bundle import TenantBundleConfig
+
+    for field in ("path", "presentation", "presentation_sha256"):
+        description = TenantBundleConfig.model_fields[field].description
+        assert description.startswith(STARTUP_ONLY_PREFIX)
+        assert STARTUP_ONLY_FIELDS["tenant_bundle." + field] in description
+    assert "tenant_bundle" not in STARTUP_ONLY_FIELDS

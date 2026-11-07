@@ -1456,6 +1456,14 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       },
     }),
   );
+  void page.route("**/api/branding/presentation", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "Cache-Control": "private, no-store" },
+      body: JSON.stringify({ schema_version: 1, mode: "legacy" }),
+    }),
+  );
   void page.route("**/api/features", (route) => {
     if (route.request().method() === "GET") {
       return route.fulfill({

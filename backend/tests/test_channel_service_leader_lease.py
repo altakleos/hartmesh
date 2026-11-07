@@ -479,6 +479,8 @@ async def test_gateway_lifespan_passes_the_gate_signal_and_the_run_worker_id():
     from fastapi import FastAPI
 
     from app.gateway.app import lifespan
+    from deerflow.config.tenant_bundle import TenantBundleConfig
+    from deerflow.config.ui_config import UiConfig
 
     @asynccontextmanager
     async def runtime(app, _startup_config):
@@ -486,6 +488,8 @@ async def test_gateway_lifespan_passes_the_gate_signal_and_the_run_worker_id():
         yield
 
     startup_config = MagicMock()
+    startup_config.tenant_bundle = TenantBundleConfig()
+    startup_config.ui = UiConfig()
     startup_config.log_level = "INFO"
     startup_config.memory.enabled = False
     startup_config.memory.shutdown_flush_timeout_seconds = 5.0

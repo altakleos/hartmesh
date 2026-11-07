@@ -20,6 +20,8 @@ import pytest
 from fastapi import FastAPI
 
 from deerflow.config.storage_spaces_config import StorageSpacesConfig
+from deerflow.config.tenant_bundle import TenantBundleConfig
+from deerflow.config.ui_config import UiConfig
 
 
 @asynccontextmanager
@@ -41,6 +43,8 @@ def test_enabled_scheduler_start_failure_aborts_gateway_lifespan():
     async def scenario():
         app = FastAPI()
         startup_config = MagicMock()
+        startup_config.tenant_bundle = TenantBundleConfig()
+        startup_config.ui = UiConfig()
         startup_config.storage_spaces = StorageSpacesConfig()
         startup_config.log_level = "INFO"
         startup_config.memory.enabled = False
@@ -98,6 +102,8 @@ async def _run_lifespan_with_hanging_stop() -> float:
 
     app = FastAPI()
     startup_config = MagicMock()
+    startup_config.tenant_bundle = TenantBundleConfig()
+    startup_config.ui = UiConfig()
     startup_config.storage_spaces = StorageSpacesConfig()
     startup_config.log_level = "INFO"
     # Keep this test focused on the channel-hang timing: skip the memory drain.
@@ -609,6 +615,8 @@ async def test_lifespan_pins_batch_service_to_app_extensions(monkeypatch):
     app.state.extensions = snapshot
     monkeypatch.setattr(extensions, "_loaded", ExtensionRegistry().build())
     startup_config = MagicMock()
+    startup_config.tenant_bundle = TenantBundleConfig()
+    startup_config.ui = UiConfig()
     startup_config.storage_spaces = StorageSpacesConfig()
     startup_config.log_level = "INFO"
     startup_config.memory.enabled = False
@@ -681,6 +689,8 @@ def test_lifespan_closes_pooled_mcp_sessions_on_shutdown():
     async def scenario():
         app = FastAPI()
         startup_config = MagicMock()
+        startup_config.tenant_bundle = TenantBundleConfig()
+        startup_config.ui = UiConfig()
         startup_config.storage_spaces = StorageSpacesConfig()
         startup_config.log_level = "INFO"
         startup_config.memory.enabled = False
@@ -710,6 +720,8 @@ def test_lifespan_continues_when_mcp_close_fails():
     async def scenario():
         app = FastAPI()
         startup_config = MagicMock()
+        startup_config.tenant_bundle = TenantBundleConfig()
+        startup_config.ui = UiConfig()
         startup_config.storage_spaces = StorageSpacesConfig()
         startup_config.log_level = "INFO"
         startup_config.memory.enabled = False
@@ -740,6 +752,8 @@ def test_lifespan_closes_mcp_sessions_created_during_run_drain():
     async def scenario():
         app = FastAPI()
         startup_config = MagicMock()
+        startup_config.tenant_bundle = TenantBundleConfig()
+        startup_config.ui = UiConfig()
         startup_config.storage_spaces = StorageSpacesConfig()
         startup_config.log_level = "INFO"
         startup_config.memory.enabled = False

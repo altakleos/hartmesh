@@ -38,11 +38,12 @@ export function WorkspaceHeader({ className }: { className?: string }) {
   const productName = useProductName();
   // Nothing until the deployment has answered: the wrong name is worse than
   // a beat with none.
-  const name = configured
-    ? identity.name
-    : branding.isLoading
-      ? ""
-      : (branding.companyName ?? productName);
+  const name =
+    configured || branding.strict
+      ? (identity?.name ?? productName)
+      : branding.isLoading
+        ? ""
+        : (branding.companyName ?? productName);
   const mark = name ? companyMark(name) : "";
   const logo = configured ? (
     <img
@@ -50,7 +51,7 @@ export function WorkspaceHeader({ className }: { className?: string }) {
       alt=""
       className="size-6 shrink-0 rounded bg-white object-contain"
     />
-  ) : branding.hasLogo ? (
+  ) : !branding.strict && branding.hasLogo ? (
     <img
       src={logoURL()}
       alt=""
@@ -94,6 +95,28 @@ export function WorkspaceHeader({ className }: { className?: string }) {
         )}
       </div>
       <ProviderIdentity />
+      {branding.strict && branding.companyName && (
+        <div
+          role="group"
+          aria-label={`Workspace: ${branding.companyName}`}
+          title={`Workspace: ${branding.companyName}`}
+          data-testid="tenant-context"
+          data-snapshot-id={branding.snapshotId}
+          className="mx-1 flex min-w-0 items-center gap-2 rounded bg-white p-2 text-sm text-black group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:p-1"
+        >
+          <img
+            src={branding.logo ?? undefined}
+            alt=""
+            width={32}
+            height={32}
+            className="size-8 shrink-0 object-contain group-data-[collapsible=icon]:size-5"
+            data-testid="tenant-logo"
+          />
+          <span className="min-w-0 wrap-anywhere group-data-[collapsible=icon]:hidden">
+            Workspace: <bdi>{branding.companyName}</bdi>
+          </span>
+        </div>
+      )}
       <SidebarMenu>
         <SidebarMenuItem>
           <SidebarMenuButton

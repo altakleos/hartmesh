@@ -43,6 +43,9 @@ STARTUP_ONLY_PREFIX = "startup-only:"
 #: field is restart-required — so an operator changing the value knows
 #: which subsystem to restart.
 STARTUP_ONLY_FIELDS: dict[str, str] = {
+    "tenant_bundle.presentation": "The workspace presentation reader captures this selection at Gateway startup; restart every affected worker to activate another selection.",
+    "tenant_bundle.presentation_sha256": "The workspace presentation reader pins the strict manifest digest at Gateway startup; restart every affected worker after changing it.",
+    "tenant_bundle.path": "Strict workspace presentation pins its input directory at Gateway startup. Restart every affected worker to change strict presentation; legacy branding and independent tenant settings remain live-read.",
     "storage_spaces": "The provider volume inventory and durable storage service are verified and captured during Gateway startup; changing backing configuration requires a restart.",
     "customer_administration": "Customer management permissions are captured by each hosting runtime at initialization; changing delegation requires restarting that runtime.",
     "approved_local_mcp_definitions": "Operator-approved complete local MCP launch definitions are captured with the customer management policy at initialization; approval changes require a restart.",

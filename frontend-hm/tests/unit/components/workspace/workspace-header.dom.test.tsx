@@ -6,6 +6,9 @@ const branding: {
   companyName: string | null;
   hasLogo: boolean;
   isLoading: boolean;
+  strict?: boolean;
+  logo?: string | null;
+  snapshotId?: string | null;
 } = { companyName: null, hasLogo: false, isLoading: false };
 const sidebar: { state: "expanded" | "collapsed" } = { state: "expanded" };
 
@@ -51,6 +54,9 @@ afterEach(() => {
   branding.companyName = null;
   branding.hasLogo = false;
   branding.isLoading = false;
+  branding.strict = false;
+  branding.logo = null;
+  branding.snapshotId = null;
   sidebar.state = "expanded";
 });
 
@@ -62,6 +68,28 @@ afterEach(() => {
  * the wrong first impression.
  */
 describe("WorkspaceHeader", () => {
+  it("keeps strict tenant context distinct from the product in both navigation states", () => {
+    branding.strict = true;
+    branding.companyName = "Example Tenant One";
+    branding.logo = "data:image/png;base64,AAAA";
+    branding.snapshotId = "a".repeat(64);
+    for (const state of ["expanded", "collapsed"] as const) {
+      sidebar.state = state;
+      renderHeader();
+      expect(
+        screen.getByRole("group", { name: "Workspace: Example Tenant One" }),
+      ).toBeTruthy();
+      expect(screen.getByTestId("tenant-logo").getAttribute("src")).toBe(
+        branding.logo,
+      );
+      expect(
+        screen.getByTestId("tenant-context").getAttribute("data-snapshot-id"),
+      ).toBe(branding.snapshotId);
+      if (state === "expanded")
+        expect(screen.getByText("HartMesh")).toBeTruthy();
+      cleanup();
+    }
+  });
   it("shows the company the deployment named, with its logo", () => {
     branding.companyName = "Example Services Co.";
     branding.hasLogo = true;

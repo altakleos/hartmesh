@@ -5071,6 +5071,13 @@ a browser icon and support link to the same application build. See the
 compatibility, restart behavior and explicit unavailable states. Tenant material
 remains authenticated.
 
+Strict tenant presentation can show a separate authenticated workspace name/logo
+from the existing read-only tenant mount. It binds metadata and sanitized pixels
+to one product-compatible snapshot per document, including across warm-cache
+reloads after activation. The tolerant legacy mode remains the default. See the
+[tenant presentation contract](docs/TENANT_PRESENTATION.md) for strict inputs,
+failure behavior, compatibility and the bounded operator restart procedure.
+
 Business-report HTML and derived PDF can use a complete read-only offline
 projection of that same shared identity, with separate product/provider
 attribution and unchanged report company context. See the

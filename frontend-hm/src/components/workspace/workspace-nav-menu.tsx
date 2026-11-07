@@ -57,8 +57,8 @@ export function WorkspaceNavMenu() {
   const [exportOpen, setExportOpen] = useState(false);
   const { open: isSidebarOpen } = useSidebar();
   const { t } = useI18n();
-  // About is the company's when the tenant bundle names one, else the product's.
-  const { companyName, providerName, supportURL } = useBranding();
+  // Legacy company wording stays compatible; strict About identifies the product.
+  const { companyName, providerName, supportURL, strict } = useBranding();
 
   useEffect(() => {
     setMounted(true);
@@ -122,7 +122,7 @@ export function WorkspaceNavMenu() {
                   }}
                 >
                   <InfoIcon />
-                  {companyName === null
+                  {companyName === null || strict
                     ? t.workspace.about
                     : t.workspace.aboutCompany(companyName)}
                 </DropdownMenuItem>

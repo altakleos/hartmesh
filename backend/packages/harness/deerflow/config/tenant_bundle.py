@@ -27,6 +27,10 @@ journalled -- and it degrades that field alone: a bad logo still leaves the
 name, a bad starter list leaves the grid the config would have shown. Nothing
 here can take a deployment down; ``render_config.py --check`` is where an
 operator sees the problems before a start.
+
+These tolerant field readers remain independent of strict workspace capture
+in ``tenant_presentation.py``. Strict mode uses its own explicit manifest and
+never combines the loose branding fields below into a presentation snapshot.
 """
 
 from __future__ import annotations
@@ -36,10 +40,12 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from deerflow.config.reload_boundary import format_field_description
 from deerflow.config.ui_config import RoleConfig, StarterConfig, UiConfig, first_control_or_reordering_character
 
 logger = logging.getLogger(__name__)
@@ -52,14 +58,30 @@ MAX_SUPPORT_URL_CHARS = 2048
 
 
 class TenantBundleConfig(BaseModel):
-    """Where the bundle is. Nothing about the brand is written in config."""
+    """Mounted resources and the workspace's explicit presentation selection."""
 
     model_config = ConfigDict(extra="forbid")
 
+    presentation: Literal["legacy", "strict-v1"] = Field(
+        default="legacy", description=format_field_description("tenant_bundle.presentation", field_doc="strict-v1 requires presentation.json and its independently pinned canonical digest. legacy retains tolerant branding.")
+    )
+    presentation_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$", description=format_field_description("tenant_bundle.presentation_sha256", field_doc="Canonical presentation.json SHA-256 selected by the operator; required only in strict-v1 mode.")
+    )
+
+    @model_validator(mode="after")
+    def complete_presentation_selection(self):
+        if self.presentation == "strict-v1" and (not self.path or not self.presentation_sha256):
+            raise ValueError("strict presentation requires a path and presentation_sha256")
+        if self.presentation == "legacy" and self.presentation_sha256 is not None:
+            raise ValueError("presentation_sha256 requires strict-v1 presentation")
+        return self
+
     path: str | None = Field(
         default=None,
-        description=(
-            "Directory holding brand.json, an optional logo, provider.json and starters.json. Sandboxes mount the same directory read-only at /mnt/tenant (a sandbox.mounts entry); the Gateway reads it from this path. Unset means no bundle."
+        description=format_field_description(
+            "tenant_bundle.path",
+            field_doc="Directory holding legacy brand.json, optional provider.json and starters.json, or strict presentation.json. Sandboxes may independently mount the same directory read-only at /mnt/tenant. Unset means no bundle.",
         ),
     )
 

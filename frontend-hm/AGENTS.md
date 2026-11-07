@@ -338,28 +338,32 @@ it from and what the agent remembers about them are theirs, not the
 deployment's. Hiding is presentation, not authorization — the routes are
 guarded by attributed owner/admin authority, startup delegation and applicable
 resource visibility. The API remains the authority for every operation.
-The product's name is the deployment's too (`ui.product_name`, HartMesh when
-unset). Each route layout reads it from the public `GET /api/v1/auth/product`
-(`core/product/server.ts`) and hands it to `I18nProvider`, which builds the
-dictionary with it, so every string that names the product says the
-configured name and `useProductName()` reads it back from that dictionary —
-one copy, never a second one to keep in step. The same read titles the tab
-(`generateMetadata`) and heads the sign-in and setup pages; a Gateway that
-does not answer leaves HartMesh. No copy names the framework under the
-product, and nothing links to it (a unit test reads the locale sources).
-`branding` (`useBranding`) is the tenant bundle's company name, colours and
-whether `/api/branding/logo` has a picture: a named company replaces the
-product's name in the sidebar header, the tab title (`useDocumentTitle`) and
-About, and turns the composer disclaimer and the Settings blurb neutral.
-About is that name and the version, nothing else. "Unknown" (still loading,
-or the fetch failed and will retry) is `isLoading`, and every one of those
-surfaces shows neither name until it is false. The sign-in page shows the
-product's name, never the company's: the brand is delivered after sign-in.
-The same authenticated response carries optional provider support from
-`provider.json`: `useBranding` keeps it distinct from company/product identity.
-The workspace menu opens only a validated HTTPS link with no referrer or
-added context. Files tabs derive from `useSearchParams`, including same-page
-navigation and history changes.
+Runtime product identity comes from the public `/api/v1/auth/product-identity`
+(`core/product/server.ts`). Layouts pass one complete validated snapshot to
+`RuntimeProductProvider`, i18n, titles/icons and entry pages. Configured product
+and provider slots never use tenant fields. Default mode retains `ui.product_name`
+and the legacy name API. Keep strict and legacy name validation separate. Retain admitted identity on
+failure; fresh failures show unavailable. See [contract](../docs/RUNTIME_PRODUCT_IDENTITY.md).
+
+Legacy tenant branding (`useBranding`) selects the authenticated features response's
+company name, colors, logo availability and optional provider support. It can
+replace default product naming in the sidebar/title/About; loading or failed
+initial reads show neither name. Colors are metadata, not applied web CSS.
+Configured product mode preserves product slots. Sign-in/setup never show tenant
+material. Support uses validated HTTPS with no referrer or added context.
+
+Strict tenant presentation (`core/features/tenant-presentation.tsx`) captures one
+complete authenticated name/logo snapshot inside the account-owned workspace
+subtree. Validate its bounded schema/content/product binding. Retain it across
+focus, client navigation and server refreshes; retire/cancel with the account.
+Fresh failures show unavailable. `useBranding` ignores live tenant fields in
+strict mode while other features keep refreshing. The header shows a separately
+named Workspace context with fixed readable colors, including collapsed names.
+Static/legacy paths stay compatible. See [the contract](../docs/TENANT_PRESENTATION.md).
+Keep session recovery and the index's pure route control outside private admission.
+Uncertain SSR auth keeps the provider path; new SSR scope conflicts retire it
+until a full reload, including when later SSR responses become uncertain again.
+Files tabs derive from `useSearchParams`, including same-page/history navigation.
 
 One rule governs what happens while the answer is unknown: a control someone
 might need stays offered, and copy the deployment authors waits. So the screens
@@ -462,11 +466,7 @@ Stop is pending. Text and file submissions propagate admission rejection to the
 existing PromptInput cleanup boundary. Draft/reference cleanup happens only on
 confirmed admission; accepted attempts release captured browser File objects.
 
-Runtime identity (`core/product/`): layouts pass one validated public snapshot to
-`RuntimeProductProvider` for i18n and product identity. Retain complete admitted
-identity on failure; fresh failures show unavailable. Configured product/provider
-slots never use tenant fields; collapsed support keeps a named logo link. Keep legacy UiConfig name validation separate from
-strict mounted names. Browser-mocked Playwright suites use
-`tests/fixtures/product-gateway.mjs` for SSR identity only (other routes 503);
+Collapsed provider support keeps its named logo link. Browser-mocked Playwright suites use
+`tests/fixtures/product-gateway.mjs` for product identity and explicit legacy selection (other routes 503);
 retain real-service outage checks. See the
 [runtime contract](../docs/RUNTIME_PRODUCT_IDENTITY.md).

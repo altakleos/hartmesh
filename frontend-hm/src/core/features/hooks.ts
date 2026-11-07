@@ -21,6 +21,7 @@ import {
   type TelegramFeature,
   selectWorkspacePresentation,
 } from "./api";
+import { useTenantPresentation } from "./tenant-presentation";
 
 /** All feature observers share transport, retries and the identity's cache. */
 export function useFeatures<T>(
@@ -55,8 +56,22 @@ export function useFeatures<T>(
  */
 export function useBranding() {
   const { data } = useFeatures(selectBranding);
+  const snapshot = useTenantPresentation();
   const identity = useProductIdentity();
   const provider = identity?.mode === "configured" ? identity.provider : null;
+  if (snapshot && snapshot.mode !== "legacy")
+    return {
+      companyName: snapshot.tenant?.name ?? null,
+      primary: null,
+      secondary: null,
+      hasLogo: snapshot.tenant !== null,
+      logo: snapshot.tenant?.logo ?? null,
+      snapshotId: snapshot.snapshot_id,
+      strict: true,
+      providerName: provider?.name ?? null,
+      supportURL: provider?.support_url ?? null,
+      isLoading: false,
+    };
   return {
     companyName: data?.companyName ?? null,
     primary: data?.primary ?? null,
@@ -65,6 +80,9 @@ export function useBranding() {
     providerName: provider?.name ?? data?.providerName ?? null,
     supportURL: provider?.support_url ?? data?.supportURL ?? null,
     isLoading: data === undefined,
+    logo: null,
+    snapshotId: null,
+    strict: false,
   };
 }
 
@@ -73,15 +91,15 @@ export function useBranding() {
  * product's, else nothing while the deployment has not answered.
  */
 export function useDocumentTitle(page: string, productName: string) {
-  const { companyName, isLoading } = useBranding();
+  const { companyName, isLoading, strict } = useBranding();
   const identity = useProductIdentity();
   const configured = identity?.mode === "configured";
   useEffect(() => {
     document.title =
       isLoading && !configured
         ? page
-        : `${page} - ${configured ? identity.name : (companyName ?? productName)}`;
-  }, [companyName, isLoading, page, productName, configured, identity]);
+        : `${page} - ${configured ? identity.name : strict ? productName : (companyName ?? productName)}`;
+  }, [companyName, isLoading, page, productName, configured, identity, strict]);
 }
 
 /**

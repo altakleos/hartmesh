@@ -211,3 +211,9 @@ config files. Coverage: `tests/blocking_io/test_auth_router_config_reads.py`.
 allowlisted `/api/v1/auth/product-identity`; legacy `/product` retains `{name}`.
 Only explicitly public sanitized payload fields/assets are projected. Protected
 tenant branding routes keep their existing authorization.
+
+`branding/presentation` delivers one complete protected snapshot with private
+no-store headers. Strict mode additionally requires session provenance; failures
+return fixed 503 detail and never partial tenant fields. Lifespan installs the
+startup-selected reader; features retain live unrelated settings but suppress
+loose strict branding. Never reintroduce live logo reads for strict consumers.
