@@ -133,12 +133,13 @@ async def test_clone_rejects_changed_source_and_denied_scanning(variant_store, m
     assert store.get_skill_origin("starter-private") is None
 
 
-def test_corrupt_origin_metadata_never_drops_the_disable_ceiling(variant_store):
+@pytest.mark.parametrize("enabled_only", [False, True])
+def test_corrupt_origin_metadata_never_drops_the_disable_ceiling(variant_store, enabled_only):
     store, _, _, _ = variant_store
     store.write_custom_skill("private-notes", "SKILL.md", "---\nname: private-notes\ndescription: Owner notes\n---\nPrivate content.\n")
     store.skill_origins_file.write_text('{"broken":', encoding="utf-8")
     with pytest.raises(ValueError, match="origin"):
-        store.load_skills(enabled_only=True)
+        store.load_skills(enabled_only=enabled_only)
 
 
 @pytest.mark.asyncio

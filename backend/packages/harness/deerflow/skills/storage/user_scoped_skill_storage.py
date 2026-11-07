@@ -364,6 +364,20 @@ class UserScopedSkillStorage(LocalSkillStorage):
 
         try:
             extensions_config = ExtensionsConfig.from_file()
+        except Exception as e:
+            # Same degraded mode as ``LocalSkillStorage.load_skills``: a config
+            # that cannot be read says nothing about which skills are enabled,
+            # so the per-user AND cannot be evaluated. Raising here would take
+            # the whole user-scoped listing down over an unrelated defect in the
+            # file, so fail closed instead — every skill is listed, none is
+            # enabled. ``from_file`` resolves ``$VAR`` placeholders before
+            # validation, so only the failure shape is safe to log (see
+            # ``_describe_load_failure``).
+            logger.warning("Failed to load extensions config; treating every user-scoped skill as disabled (%s)", _describe_load_failure(e))
+            skills = [dataclasses.replace(s, enabled=False) for s in skills]
+        else:
+            # Private provenance and state errors must remain visible rather
+            # than being mistaken for an unreadable extensions config.
             origins = self._read_skill_origins()
             baseline_names = set()
             if any(s.category == SkillCategory.CUSTOM for s in skills):
@@ -388,18 +402,6 @@ class UserScopedSkillStorage(LocalSkillStorage):
                 else s
                 for s in skills
             ]
-        except Exception as e:
-            # Same degraded mode as ``LocalSkillStorage.load_skills``: a config
-            # that cannot be read says nothing about which skills are enabled,
-            # so the per-user AND cannot be evaluated. Raising here would take
-            # the whole user-scoped listing down over an unrelated defect in the
-            # file, so fail closed instead — every skill is listed, none is
-            # enabled. ``from_file`` resolves ``$VAR`` placeholders before
-            # validation, so only the failure shape is safe to log (see
-            # ``_describe_load_failure``).
-            logger.warning("Failed to load extensions config; treating every user-scoped skill as disabled (%s)", _describe_load_failure(e))
-            skills = [dataclasses.replace(s, enabled=False) for s in skills]
-
         if enabled_only:
             skills = [s for s in skills if s.enabled]
 

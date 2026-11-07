@@ -31,6 +31,7 @@ from deerflow.agents.lead_agent.prompt import (
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
+    _describe_load_failure,
     atomic_write_extensions_config,
     extensions_config_file_lock,
     extensions_config_write_lock,
@@ -379,8 +380,16 @@ def _assert_extensions_config_readable() -> None:
     a degraded list would present a broken deployment as a legitimately empty
     one. The raised error reaches each handler's generic 500 branch, which
     keeps the host path in the server log and out of the response body.
+    Validation may include resolved credentials, so replace its message and
+    suppress its exception chain before a handler logs the failure.
     """
-    ExtensionsConfig.from_file()
+    config_path = ExtensionsConfig.resolve_config_path()
+    if config_path is None:
+        return
+    try:
+        ExtensionsConfig.from_file(str(config_path))
+    except Exception as e:
+        raise RuntimeError(f"Failed to load extensions config from {config_path} ({_describe_load_failure(e)})") from None
 
 
 def _load_user_skills(config: AppConfig) -> list[Skill]:
@@ -810,9 +819,14 @@ async def list_custom_skills(request: Request, config: AppConfig = Depends(get_c
     surface names the main listing hides.
     """
     await require_private_skill_owner(request)
+
+    def _load_custom_skills() -> list[Skill]:
+        storage = _get_owned_private_skill_storage(config)
+        _assert_extensions_config_readable()
+        return [skill for skill in storage.load_skills(enabled_only=False) if skill.category == SkillCategory.CUSTOM]
+
     try:
-        storage = await asyncio.to_thread(_get_owned_private_skill_storage, config)
-        skills = [skill for skill in await asyncio.to_thread(storage.load_skills, enabled_only=False) if skill.category == SkillCategory.CUSTOM]
+        skills = await asyncio.to_thread(_load_custom_skills)
         visible_skills = await _filter_visible_skills(request, config, skills)
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in visible_skills])
     except HTTPException:
