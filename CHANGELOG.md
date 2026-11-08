@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.54] - 2026-11-08
+
 ### Upstream adoption
 
 - Integrate DeerFlow through `d0007090c262cf3806d78f39dfcb4f5aca8226ea`,
@@ -23,6 +25,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add HarnessGuard recovery hints and an opt-in syntax gate, bounded provider
   model-catalog APIs, and MiniMax video resolution/duration options. Port chat
   timer, subtask-history and background-cancellation fixes to HartMesh.
+- Keep skills disabled when their extensions configuration cannot be read.
+  Skill-list API failures remain explicit, with generic responses and diagnostic
+  logs that omit resolved credentials. Corrupt private-skill provenance remains
+  an error rather than being treated as an empty successful listing.
+
+### Schema changes
+
+Compared with v2.2.0+hartmesh.53, migration `0052_batch_continuation` follows
+`0051_merge_run_inputs_fencing`. It adds nullable `continuation_json`,
+`continuation_status` and `continuation_run_id` columns to `subagent_batches`,
+plus an index on `continuation_status`. The new `subagent_batch_dependencies`
+table links each `item_id` to a `prerequisite_id`, with a composite primary key,
+cascading foreign keys to `subagent_batch_items` and an index on `prerequisite_id`.
+No existing tables or columns are removed or renamed. Existing batch rows remain
+valid and require no data rewrite; database initialization applies the migration
+automatically on SQLite and PostgreSQL. Back up the database before upgrading
+and upgrade all Gateway/batch workers and the frontend together before using
+dependencies. The .53 binaries refuse a database stamped with the new revision;
+rolling back requires restoring the matching
+pre-upgrade database backup. Do not downgrade while dependency or follow-up work
+is outstanding: the downgrade drops that state.
+
+The configuration version remains 66. The optional `harness_guard` settings
+enable advisory recovery hints by default; pre-write Python/JSON syntax
+validation remains opt-in. These configuration fields are separate from the
+database migration.
 
 ## [2.2.0+hartmesh.53] - 2026-11-07
 
