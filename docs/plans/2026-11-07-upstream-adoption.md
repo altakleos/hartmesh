@@ -60,8 +60,9 @@ complete reference frontend. Product UI changes belong in `frontend-hm/`.
   cleanup retains the three newest complete entries only when the cache is idle.
 - Focused compatibility regressions and static checks passed, and independent
   review approved the implementation. [PR #377](https://github.com/altakleos/hartmesh/pull/377)
-  records commands, outcomes, reviewed revisions and CI repairs. Integration is
-  gated on all applicable checks passing against its exact published head.
+  records commands, outcomes, reviewed revisions and CI repairs. All 33 applicable
+  checks passed on `15fcf73ca5efec4853004bfb082a4a259c08fddd`; the integration
+  merged as `d72eb9235737490b90695c0b1602aa9b35ab00c2` on November 7, 2026.
 
 ## What upstream is improving
 

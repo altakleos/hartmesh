@@ -74,7 +74,16 @@ IMPORTED_UPSTREAM_DIAMOND = {
     "0051_merge_run_inputs_fencing": ("0049_run_inputs", "0050_history_seed_authority"),
 }
 HEAD = "0052_batch_continuation"
-PUBLISHED_FIXTURES = ["release_39_ancestry.json", "release_43_ancestry.json", "release_44_ancestry.json", "release_45_ancestry.json", "release_46_ancestry.json", "release_50_ancestry.json", "release_53_ancestry.json"]
+PUBLISHED_FIXTURES = [
+    "release_39_ancestry.json",
+    "release_43_ancestry.json",
+    "release_44_ancestry.json",
+    "release_45_ancestry.json",
+    "release_46_ancestry.json",
+    "release_50_ancestry.json",
+    "release_53_ancestry.json",
+    "release_54_ancestry.json",
+]
 
 
 def test_the_chain_has_one_head_and_it_is_the_last_appended_revision():
