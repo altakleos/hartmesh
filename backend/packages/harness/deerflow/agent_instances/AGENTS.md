@@ -165,6 +165,10 @@ Output presentation reads only metadata through confined output descriptors on
 the admitted Home backing, with current resident READ and captured generation.
 It requires the exact prepared execution; container paths are never host paths.
 References remain mutable and confer no human retrieval permission.
+`presentation.capture_instance_outputs` observes the admitted Home's output root
+with the shared confined scanner and no text cache. Revalidate execution after
+scanning; drain cancellation before releasing the Home admission. Missing or
+unavailable roots cannot prove an empty inventory. This evidence grants no export.
 
 `agent_files.py` owns direct host Home mutations through existing `SpaceFiles`:
 resident actor, human provenance, bounded bytes and immutable operation receipts.
