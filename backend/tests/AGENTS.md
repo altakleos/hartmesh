@@ -601,9 +601,10 @@ Windows. The link-free article companion must retain the extractor's exact HTML
 and exclude resolved navigation links from Markdown; checking for raw `href=`
 attributes after Markdown conversion cannot detect an unwanted fallback.
 
-Malformed-markup comparisons reset the optional Node availability and launch-failure
-caches with `monkeypatch`, so earlier environment-failure tests cannot select a
-different parser. Keep their real extraction and Markdown equality assertions.
+Malformed-markup and legacy relative-link comparisons reset optional Node
+availability and launch-failure caches with `monkeypatch`, so earlier environment
+failure tests cannot select a different parser. Keep real extraction and the
+original Markdown assertions.
 
 The authority-tag census also scans parser regexes as raw source. Classify
 Readability's ordinary HTML body tag as a reviewed test exemption, with markup
