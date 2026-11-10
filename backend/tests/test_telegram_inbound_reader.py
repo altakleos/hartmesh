@@ -5,7 +5,7 @@ tests. These cases isolate file state, SDK getFile and byte lease handoff.
 """
 
 import asyncio
-from dataclasses import replace
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -50,7 +50,8 @@ async def fixture(db, monkeypatch, *, size=3, features=None, normal_request=None
         object(),
         SimpleNamespace(authorize=AsyncMock(), current=lambda operation: True),
     )
-    e.context = SimpleNamespace(link=e.link, record=SimpleNamespace(publication_id=e.cap.publication_id, scope=e.cap.scope), file=e.file, text="Use this", files=[e.file], origins=(), current=lambda: True)
+    publication_scope = SimpleNamespace(**asdict(e.cap.scope), agent_kind=e.link.agent_kind, agent_ref=e.link.agent_ref)
+    e.context = SimpleNamespace(link=e.link, record=SimpleNamespace(publication_id=e.cap.publication_id, scope=publication_scope), file=e.file, text="Use this", files=[e.file], origins=(), current=lambda: True)
     e.services.turns = SimpleNamespace(file_context=AsyncMock(return_value=e.context), file_notice=AsyncMock(), retire=AsyncMock())
     e.services.file_bytes_budget = FileBytesBudget(200_000_000)
     e.services.thread_client = SimpleNamespace(get_features=AsyncMock(return_value=features or {"storage_spaces": {"state": "ready", "own": "ready", "reason": None}}))
