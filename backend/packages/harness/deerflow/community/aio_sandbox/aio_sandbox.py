@@ -20,6 +20,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.command_scope import COMMAND_OWNER_ENV, CommandScopeCancelled, command_lock, current_command_scope
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
 from deerflow.sandbox.download import download_limit, read_download_stream
+from deerflow.sandbox.read_file_contract import SandboxReadFailure
 from deerflow.sandbox.remote_list_dir import (
     parse_remote_list_dir_output,
     remote_list_dir_command,
@@ -1765,6 +1766,8 @@ class AioSandbox(Sandbox):
             if end_line is not None:
                 kwargs["end_line"] = max(end_line, 0)
             result = self._client.file.read_file(file=path, **kwargs)
+            if result is not None and getattr(result, "success", True) is False:
+                return SandboxReadFailure(f"Error: file read was not successful: {path}", RuntimeError("The sandbox reported a failed file read"))
             return result.data.content if result.data else ""
         except ValidationError as e:
             # The server reports read failures (e.g. ENOENT) as an error
@@ -1775,10 +1778,10 @@ class AioSandbox(Sandbox):
             # so log quietly and return an explicit, model-actionable result
             # instead of leaking the pydantic error text.
             logger.debug("Sandbox read_file validation failure for %r: %s", path, e)
-            return f"Error: file not found or unreadable: {path}"
+            return SandboxReadFailure(f"Error: file not found or unreadable: {path}", e)
         except Exception as e:
             logger.error(f"Failed to read file in sandbox: {e}")
-            return f"Error: {e}"
+            return SandboxReadFailure(f"Error: {e}", e)
 
     def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
         """Download file bytes from the sandbox.

@@ -175,3 +175,10 @@ symlinks, and visible depth/size bounds.
 - `str_replace` - Substring replacement (single or all occurrences); `_match_line_endings` gives `old_str`/`new_str` a CRLF file's endings; same-path serialization is scoped to `(sandbox.id, path)` so isolated sandboxes do not contend on identical virtual paths inside one process; subject to the read-before-write gate when `read_before_write.enabled` (see Middleware Chain)
 
 **Optional AIO prewarm**: default off, managed async AIO only. Require the server-owned cleanup marker; direct SDK stays lazy. Preserve authorization, execution-owner cleanup, runtime-only handles, permit limits and normal eviction under the [prewarm lifecycle rules](../../../../docs/CONFIGURATION.md#sandbox).
+
+AIO, E2B, OpenSandbox, Tenki and BoxLite use `SandboxReadFailure` from
+`read_file_contract.py` only for caught failures or an explicit failed response.
+Direct callers retain string compatibility. Shared reads detect this exact host
+carrier before empty/range/truncation handling; tool metadata uses the original
+exception type/status and preserved safe text. Plain file text cannot gain this
+identity. Failed reads never receive read marks; unknown causes stay unknown.

@@ -60,6 +60,8 @@ from deerflow.sandbox.read_file_contract import (
     READ_FILE_INVALID_START_LINE,
     READ_FILE_START_LINE_EXCEEDS,
     READ_FILE_TRUNCATION_PREFIX,
+    SandboxReadFailure,
+    SandboxReadFailureError,
 )
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
@@ -3474,8 +3476,14 @@ def _read_file_from_sandbox(
     if is_local_sandbox(runtime):
         path = _resolve_local_read_path(path, get_thread_data(runtime))
     if start_line is None and end_line is None:
-        return sandbox.read_file(path)
-    return sandbox.read_file(path, start_line=start_line, end_line=end_line)
+        content = sandbox.read_file(path)
+    else:
+        content = sandbox.read_file(path, start_line=start_line, end_line=end_line)
+    if isinstance(content, SandboxReadFailure):
+        if isinstance(content.error, (SandboxAuthorizationError, SandboxCapacityExceededError)):
+            raise content.error from None
+        raise SandboxReadFailureError(content) from None
+    return content
 
 
 def read_current_file_content(runtime: Runtime | None, path: str) -> str:
@@ -3587,6 +3595,8 @@ def read_file_tool(
         # Line numbers in the marker are file line numbers, so a ranged read passes its offset along.
         output = _truncate_read_file_output(content, max_chars, line_offset=effective_start - 1, joined_lines=use_line_range, ends_at_eof=end_line is None)
         return _read_file_result(runtime, output, status="partial_success" if max_chars != 0 and len(content) > max_chars else "success")
+    except SandboxReadFailureError as exc:
+        return _read_file_failure(runtime, str(exc.result), exc.result.error)
     except SandboxCapacityExceededError:
         raise
     except SandboxError as e:

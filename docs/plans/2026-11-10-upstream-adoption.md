@@ -42,6 +42,10 @@ intent is retained below, together with concrete requirements for revisiting the
   the exact original short-circuit ToolMessage; JSON/wire copies grant no trust.
   Declared `capacity` and `not_run` refusals retain their existing recovery rules.
   HarnessGuard preserves immutable callable receipts and one qualified hint tag.
+  Legacy remote read adapters retain string compatibility but carry exact failed
+  outcomes from provider exceptions/response flags into tool status before text
+  formatting. The qualification fixture reads existing outputs before rewriting;
+  optional read refusal never substitutes for a successful write or presentation.
 - AIO environment-bearing commands get independent bounded Bash sessions.
   Exact pending admission tokens retain per-call cancellation across queue waits,
   retries and bounded abort-history churn. Uncertain Bash close quarantines

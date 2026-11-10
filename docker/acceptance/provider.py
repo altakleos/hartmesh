@@ -15,7 +15,7 @@ ARTIFACT = "Synthetic acceptance artifact.\nUploaded text: UPLOAD-ACCEPTANCE-726
 FINAL = "Acceptance complete. Your synthetic artifact is ready."
 
 
-def tool_result_content(value: object) -> str:
+def tool_result_content(value: object, *, allow_preflight_failure: bool = False) -> str:
     """Consume one provider-facing envelope; this fixture grants no authority."""
     if not isinstance(value, str):
         raise ValueError("invalid acceptance tool result text")
@@ -31,7 +31,7 @@ def tool_result_content(value: object) -> str:
         not set(envelope) <= {"deerflow_tool_meta", "content", "content_transforms"}
         or not isinstance(metadata, dict)
         or set(metadata) != {"status", "source"}
-        or metadata.get("status") not in ("success", "partial_success")
+        or metadata.get("status") not in (("success", "partial_success", "error") if allow_preflight_failure else ("success", "partial_success"))
         or metadata.get("source") not in ("tool_return", "exception", "progress_middleware")
         or not isinstance(envelope.get("content"), str)
         or not isinstance(transforms, list)
@@ -64,15 +64,24 @@ def reply(body: dict[str, Any]) -> dict[str, Any]:
         (i for i, message in enumerate(messages) if message.get("role") == "user"),
         default=0,
     )
-    turn = [{**message, "content": tool_result_content(message.get("content"))} if message.get("role") == "tool" else message for message in messages[latest:]]
+    turn = messages[latest:]
     if not turn:
         raise ValueError("missing acceptance turn")
-    if any(tool.get("function", {}).get("name") == "report_work" for tool in body["tools"]):
+    work_turn = any(tool.get("function", {}).get("name") == "report_work" for tool in body["tools"])
+    skill_match = re.search(r"acceptance:skill:(supplier-comparison|procedure-summary)(?:\s|$)", str(turn[0].get("content")))
+    file_turn = not work_turn and skill_match is None and "acceptance:file" in str(turn[0].get("content"))
+    normalized = []
+    tool_index = 0
+    for message in turn:
+        if message.get("role") == "tool":
+            # Only this real read is optional. Never promote a failed upload,
+            # actual write or presentation to successful fixture progression.
+            message = {**message, "content": tool_result_content(message.get("content"), allow_preflight_failure=file_turn and tool_index == 1)}
+            tool_index += 1
+        normalized.append(message)
+    turn = normalized
+    if work_turn:
         return work_reply(body, turn)
-    skill_match = re.search(
-        r"acceptance:skill:(supplier-comparison|procedure-summary)(?:\s|$)",
-        str(turn[0].get("content")),
-    )
     if skill_match:
         return skill_reply(body, turn, skill_match.group(1))
     if "acceptance:fallback" in str(turn[0].get("content")):
@@ -85,11 +94,10 @@ def reply(body: dict[str, Any]) -> dict[str, Any]:
     elif len(results) == 1:
         if UPLOAD_MARKER not in str(results[-1].get("content")):
             raise ValueError("uploaded fixture was not read by the real file tool")
-        name, arguments = (
-            "write_file",
-            {"path": "/mnt/user-data/outputs/acceptance.txt", "content": ARTIFACT},
-        )
+        name, arguments = "read_file", {"path": "/mnt/user-data/outputs/acceptance.txt"}
     elif len(results) == 2:
+        name, arguments = "write_file", {"path": "/mnt/user-data/outputs/acceptance.txt", "content": ARTIFACT}
+    elif len(results) == 3:
         name, arguments = (
             "present_files",
             {"filepaths": ["/mnt/user-data/outputs/acceptance.txt"]},

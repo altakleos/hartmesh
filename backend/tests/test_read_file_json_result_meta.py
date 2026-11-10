@@ -172,3 +172,113 @@ async def test_read_file_async_initialization_failure_has_producer_state(monkeyp
     assert message.additional_kwargs[TOOL_META_KEY]["status"] == "error"
     assert message.additional_kwargs[TOOL_META_KEY]["error_type"] == category
     assert message.additional_kwargs[TOOL_META_KEY]["source"] == "tool_return"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("ranged", [False, True])
+@pytest.mark.parametrize("kind,category", [("validation", "unknown"), ("response_failed", "unknown"), ("missing", "not_found"), ("permission", "permission"), ("timeout", "transient"), ("unknown", "unknown"), ("literal", None)])
+async def test_remote_read_status_comes_from_provider_outcome_not_file_text(monkeypatch, mode, ranged, kind, category):
+    from unittest.mock import MagicMock, patch
+
+    from agent_sandbox.types import ResponseFileReadResult
+    from pydantic import ValidationError
+
+    from deerflow.agents.middlewares.read_before_write_middleware import READ_MARK_KEY
+    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+    from deerflow.config.app_config import AppConfig, pop_current_app_config, push_current_app_config
+    from deerflow.sandbox import tools
+
+    push_current_app_config(AppConfig(sandbox={"use": "deerflow.community.aio_sandbox:AioSandboxProvider"}))
+    try:
+        text = "Error: permission denied is literal file content.\n"
+        failure = {"missing": FileNotFoundError("arbitrary wording"), "permission": PermissionError("arbitrary wording"), "timeout": TimeoutError("arbitrary wording"), "unknown": RuntimeError("no such file: prose proves no category")}.get(
+            kind
+        )
+        if kind == "validation":
+            try:
+                ResponseFileReadResult.model_validate({"success": False, "message": "read refused", "data": {}})
+            except ValidationError as exc:
+                failure = exc
+        with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+            sandbox = AioSandbox("remote-read-status", "http://sandbox.invalid")
+        sandbox._client.file.read_file = MagicMock(side_effect=failure, return_value=SimpleNamespace(data=SimpleNamespace(content=text)))
+        if kind == "response_failed":
+            sandbox._client.file.read_file.return_value = ResponseFileReadResult.model_validate({"success": False, "message": "read refused", "data": {"file": "/mnt/user-data/outputs/response.txt", "content": text}})
+        monkeypatch.setattr(tools, "ensure_sandbox_initialized", lambda *_args, **_kwargs: sandbox)
+        monkeypatch.setattr(tools, "ensure_sandbox_initialized_async", AsyncMock(return_value=sandbox))
+        monkeypatch.setattr(tools, "is_local_sandbox", lambda *_args: False)
+        arguments = {"path": "/mnt/user-data/outputs/response.txt", **({"start_line": 1, "end_line": 2} if ranged else {})}
+        model = _ScriptedModel(messages=iter([AIMessage(content="", tool_calls=[{"name": "read_file", "args": arguments, "id": "remote-read"}]), AIMessage(content="Done.")]))
+        graph = create_agent(model, tools=[tools.read_file_tool], middleware=[ToolReceiptMiddleware(render_mode="delegation_only"), ReadBeforeWriteMiddleware(), ToolErrorHandlingMiddleware()], state_schema=ThreadState)
+        state = {"messages": [HumanMessage(content="Read the file.")], "sandbox": {"sandbox_id": sandbox.id}, "thread_directories_created": True}
+        context = {"thread_id": "remote-read-status", "user_id": "default"}
+        result = graph.invoke(state, context=context) if mode == "sync" else await graph.ainvoke(state, context=context)
+        message = next(message for message in result["messages"] if isinstance(message, ToolMessage))
+        expected = "success" if kind == "literal" else "error"
+        assert message.additional_kwargs[TOOL_META_KEY]["status"] == expected
+        assert message.additional_kwargs[TOOL_META_KEY]["error_type"] == category
+        assert message.additional_kwargs[TOOL_RECEIPT_KEY]["status"] == expected
+        if kind == "literal":
+            assert message.content == text
+        else:
+            assert message.content.startswith("Error:")
+            assert READ_MARK_KEY not in message.additional_kwargs
+        if ranged:
+            assert any(call.kwargs.get("start_line") == 0 and call.kwargs.get("end_line") == 2 for call in sandbox._client.file.read_file.call_args_list)
+    finally:
+        pop_current_app_config()
+
+
+@pytest.mark.parametrize(
+    "module,name,api",
+    [
+        ("aio_sandbox.aio_sandbox", "AioSandbox", "aio"),
+        ("e2b_sandbox.e2b_sandbox", "E2BSandbox", "e2b"),
+        ("opensandbox.sandbox", "OpenSandboxSandbox", "open"),
+        ("tenki.sandbox", "TenkiSandbox", "tenki"),
+        ("boxlite.box", "BoxliteBox", "box"),
+    ],
+)
+@pytest.mark.parametrize("ranged", [False, True])
+def test_legacy_provider_errors_remain_strings_and_keep_their_source_exception(module, name, api, ranged):
+    import importlib
+    from unittest.mock import Mock
+
+    from deerflow.sandbox.read_file_contract import SandboxReadFailure
+
+    cls = getattr(importlib.import_module("deerflow.community." + module), name)
+    sandbox = cls.__new__(cls)
+    sandbox._resolve_path = lambda path: path
+    failure = PermissionError("synthetic provider read refusal")
+    read = Mock(side_effect=failure)
+    if api == "aio":
+        sandbox._client = SimpleNamespace(file=SimpleNamespace(read_file=read))
+    elif api == "e2b":
+        sandbox._client = SimpleNamespace(files=SimpleNamespace(read=read))
+    elif api == "open":
+        sandbox._file_op = lambda call: call(SimpleNamespace(read_file=read))
+    elif api == "box":
+        sandbox._exec = read
+    else:
+        sandbox._fs_op = lambda call: call(SimpleNamespace(read_text=read))
+    result = sandbox.read_file("/mnt/user-data/outputs/data.txt", **({"start_line": 1, "end_line": 2} if ranged else {}))
+    assert isinstance(result, str)
+    assert result == "Error: synthetic provider read refusal"
+    assert isinstance(result, SandboxReadFailure)
+    assert result.error is failure
+
+
+@pytest.mark.parametrize("ranged", [False, True])
+def test_boxlite_nonzero_read_is_failed_without_guessing_from_stderr(ranged):
+    from unittest.mock import Mock
+
+    from deerflow.community.boxlite.box import BoxliteBox
+    from deerflow.sandbox.read_file_contract import SandboxReadFailure
+
+    sandbox = BoxliteBox.__new__(BoxliteBox)
+    sandbox._resolve_path = lambda path: path
+    sandbox._exec = Mock(return_value=SimpleNamespace(exit_code=1, stdout="", stderr="synthetic refusal"))
+    result = sandbox.read_file("/mnt/user-data/outputs/file", **({"start_line": 1, "end_line": 2} if ranged else {}))
+    assert result == "Error: synthetic refusal"
+    assert isinstance(result, SandboxReadFailure)

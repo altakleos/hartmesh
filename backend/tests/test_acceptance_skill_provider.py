@@ -243,3 +243,28 @@ def test_fixture_rejects_failed_or_malformed_tool_envelopes(reply, metadata, con
     envelope = json.dumps({"deerflow_tool_meta": metadata, "content": content})
     with pytest.raises(ValueError, match="tool result"):
         reply(work_body([envelope]))
+
+
+def file_body(results):
+    return {"messages": [{"role": "user", "content": "acceptance:file"}, *[{"role": "tool", "content": value} for value in results]], "tools": [{"function": {"name": name}} for name in ("read_file", "write_file", "present_files")]}
+
+
+def tool_envelope(text, status="success"):
+    return json.dumps({"deerflow_tool_meta": {"status": status, "source": "tool_return"}, "content": text})
+
+
+@pytest.mark.parametrize("preflight", [tool_envelope("old artifact bytes"), tool_envelope("read failed", "error")])
+def test_file_fixture_reads_current_output_before_rewrite_and_requires_real_write(reply, preflight):
+    upload = tool_envelope("UPLOAD-ACCEPTANCE-726")
+    assert tool_call(reply(file_body([upload]))) == ("read_file", {"path": "/mnt/user-data/outputs/acceptance.txt"})
+    name, arguments = tool_call(reply(file_body([upload, preflight])))
+    assert name == "write_file" and arguments["path"] == "/mnt/user-data/outputs/acceptance.txt"
+    assert tool_call(reply(file_body([upload, preflight, tool_envelope("written")]))) == ("present_files", {"filepaths": ["/mnt/user-data/outputs/acceptance.txt"]})
+
+
+@pytest.mark.parametrize("failed_stage", [0, 2, 3])
+def test_file_fixture_never_promotes_a_failed_upload_write_or_presentation(reply, failed_stage):
+    results = [tool_envelope("UPLOAD-ACCEPTANCE-726"), tool_envelope("old output"), tool_envelope("written"), tool_envelope("presented")]
+    results[failed_stage] = tool_envelope("reported failure", "error")
+    with pytest.raises(ValueError, match="tool result"):
+        reply(file_body(results[: failed_stage + 1]))

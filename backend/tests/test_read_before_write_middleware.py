@@ -1022,3 +1022,34 @@ class TestStampingGateBugFix:
             lambda r: ToolMessage(content=READ_FILE_EMPTY, tool_call_id="call-1", name="read_file"),
         )
         assert READ_MARK_KEY in res.additional_kwargs, "a full read of a genuinely empty file must stamp a read mark"
+
+
+def test_typed_failed_read_probe_retains_quiet_cannot_inspect_behavior(caplog):
+    import logging
+
+    from deerflow.sandbox.read_file_contract import SandboxReadFailure, SandboxReadFailureError
+
+    path = "/mnt/user-data/outputs/new.txt"
+    failure = SandboxReadFailureError(SandboxReadFailure("Error: file not found or unreadable", RuntimeError("safe synthetic provider failure")))
+    middleware = _middleware({path: failure})
+    handler = MagicMock(return_value=ToolMessage(content="OK", tool_call_id="call-1", name="write_file"))
+    with caplog.at_level(logging.DEBUG, logger="deerflow.agents.middlewares.read_before_write_middleware"):
+        assert middleware.wrap_tool_call(_make_request("write_file", {"path": path, "content": "new content"}), handler).content == "OK"
+    handler.assert_called_once()
+    records = [record for record in caplog.records if record.name == "deerflow.agents.middlewares.read_before_write_middleware"]
+    assert records and all(record.levelno < logging.WARNING and record.exc_info is None for record in records)
+
+
+@pytest.mark.parametrize("kind", ["authorization", "capacity"])
+def test_shared_read_preserves_carried_authorization_and_capacity_failures(kind):
+    from deerflow.sandbox import tools
+    from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxCapacityExceededError
+    from deerflow.sandbox.read_file_contract import SandboxReadFailure
+
+    cause = SandboxAuthorizationError() if kind == "authorization" else SandboxCapacityExceededError()
+    sandbox = MagicMock()
+    sandbox.read_file.return_value = SandboxReadFailure("Error: synthetic refusal", cause)
+    with patch.object(tools, "ensure_sandbox_initialized", return_value=sandbox), patch.object(tools, "ensure_thread_directories_exist"), patch.object(tools, "is_local_sandbox", return_value=False):
+        with pytest.raises(type(cause)) as raised:
+            tools.read_current_file_content(MagicMock(), "/mnt/user-data/outputs/file")
+    assert raised.value is cause

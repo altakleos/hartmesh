@@ -5242,3 +5242,7 @@ projection of that same shared identity, with separate product/provider
 attribution and unchanged report company context. See the
 [offline report contract](docs/OFFLINE_REPORT_PRODUCT_IDENTITY.md) for export,
 sandbox mounts, digest admission and format compatibility.
+
+Native and remote file tools distinguish provider read failures from actual file
+contents. A file beginning with `Error:` remains data; a failed SDK read reports
+an error status and does not create a successful read receipt.

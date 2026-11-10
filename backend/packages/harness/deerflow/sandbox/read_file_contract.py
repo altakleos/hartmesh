@@ -1,4 +1,30 @@
-"""Text markers shared by read_file and its display-only consumers."""
+"""Read outcomes and text markers shared by providers and display consumers."""
+
+from deerflow.sandbox.exceptions import SandboxFileError
+
+
+class SandboxReadFailure(str):
+    """Legacy-compatible error text carrying exact provider failure evidence."""
+
+    def __new__(cls, text: str, error: Exception):
+        value = super().__new__(cls, text)
+        value.error = error
+        return value
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+class SandboxReadFailureError(SandboxFileError):
+    """Transport a provider-owned failed result through shared read consumers."""
+
+    def __init__(self, result: SandboxReadFailure):
+        super().__init__(str(result))
+        self.result = result
+
 
 READ_FILE_EMPTY = "(empty)"
 READ_FILE_START_LINE_EXCEEDS = "(start_line exceeds file length)"

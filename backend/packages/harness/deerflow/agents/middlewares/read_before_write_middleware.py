@@ -54,7 +54,7 @@ from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results, r
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, normalize_tool_result, stamp_exception_meta
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
 from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxCapacityExceededError
-from deerflow.sandbox.read_file_contract import READ_FILE_EMPTY, READ_FILE_NO_CONTENT_RESULTS, count_file_lines
+from deerflow.sandbox.read_file_contract import READ_FILE_EMPTY, READ_FILE_NO_CONTENT_RESULTS, SandboxReadFailureError, count_file_lines
 from deerflow.sandbox.tools import (
     read_current_file_content,
     sandbox_authorization_scope,
@@ -364,6 +364,11 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
             # and the model is told to wait rather than retry. Logged at debug
             # because the fail-open warning below reads like a gate defect.
             logger.debug("read-before-write gate could not inspect %r: the deployment has no sandbox capacity", path)
+            return None
+        except SandboxReadFailureError:
+            # Preserve the legacy error-string channel's quiet cannot-inspect
+            # behavior. The real write still owns its own admission/outcome.
+            logger.debug("read-before-write gate could not inspect %r; allowing the write (provider read failed)", path)
             return None
         except Exception:
             logger.warning("read-before-write gate could not inspect %r; allowing the write (fail-open)", path, exc_info=True)

@@ -72,6 +72,10 @@ def test_synthetic_provider_requires_actual_upload_tool_result() -> None:
     with pytest.raises(ValueError, match="was not read"):
         provider.reply(body)
     body["messages"][-1]["content"] = provider.UPLOAD_MARKER
+    preflight = provider.reply(body)["tool_calls"][0]["function"]
+    assert preflight["name"] == "read_file"
+    assert json.loads(preflight["arguments"])["path"] == "/mnt/user-data/outputs/acceptance.txt"
+    body["messages"].append({"role": "tool", "content": "existing output or missing-file refusal"})
     write = provider.reply(body)["tool_calls"][0]["function"]
     assert write["name"] == "write_file"
     assert json.loads(write["arguments"])["content"] == provider.ARTIFACT

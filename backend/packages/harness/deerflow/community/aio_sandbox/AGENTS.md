@@ -454,7 +454,10 @@ server reports missing files as an error envelope with ``data: {}``, which the
 SDK cannot parse into ``FileReadResult``; the resulting ``ValidationError``
 becomes ``Error: file not found or unreadable: <path>`` logged at debug
 (missing files are expected on ReadBeforeWrite probes of new files), never the
-raw pydantic text. Other exceptions keep the error log.
+raw pydantic text. These failure strings carry `SandboxReadFailure` identity
+for shared tool consumers, which report structured failure before formatting.
+Validation errors establish failure, not a confirmed missing-file cause. An
+explicit SDK `success: false` is also failure. Other exceptions keep the error log.
 Regressions: `test_aio_sandbox.py`.
 
 HartMesh keeps per-tool-call abort authority. Pending Bash admission owns exact
