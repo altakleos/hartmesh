@@ -1852,7 +1852,8 @@ class TelegramBotChannel(TelegramChannel):
             if part.get("url_button_fallback"):
                 text += "\n" + (button["url"] if part.get("plain_fallback") else escape(button["url"]))
             else:
-                markup = InlineKeyboardMarkup([[InlineKeyboardButton(render_plain(button_label, settings.locale), url=button["url"])]])
+                shown = list(markup.inline_keyboard) if isinstance(markup, InlineKeyboardMarkup) else []
+                markup = InlineKeyboardMarkup([[InlineKeyboardButton(render_plain(button_label, settings.locale), url=button["url"])], *shown])
         if part.get("force_reply"):
             from telegram import ForceReply
 

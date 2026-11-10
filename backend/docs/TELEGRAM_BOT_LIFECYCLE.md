@@ -269,3 +269,11 @@ the current status notice. Pasted-token removal and stopping an existing turn st
 work. Status notices recheck lifecycle alongside protection inside the SDK limiter;
 a resumed target cannot receive an obsolete pause, retirement or access notice.
 Automatic rename pushes target only changed links and retain bounded retries.
+
+Instance terminal outcomes preserve the instance identity in observation and
+persisted outcome validation. Only correlated error-status host stop reasons
+select capacity retries (`busy`, `starting-elsewhere`, `run-limit`); restart,
+file maintenance, startup failure and full files require a new person action.
+Instance-specific capacity notices use the current name. Full-files wording reflects
+Manage and its Files link also requires Inspect and a configured public URL.
+Ordinary/custom chat classifications are unchanged.

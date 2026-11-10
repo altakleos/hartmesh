@@ -216,9 +216,34 @@ async def fixed_source(host, link, key):
         from app.telegram_bots.authority import is_administrator
 
         values = {"product": host.product_name, "reader_is_administrator": await is_administrator(link.owner_user_id)}
+    elif link.agent_kind == "instance" and key in {"busy.two_conversations", "busy.starting_elsewhere", "refused.restarting", "refused.files_busy", "start.ws_failed", "refused.files_full"}:
+        from app.telegram_bots.authority import get_local_provider, is_administrator
+        from deerflow.agent_instances.contract import AgentPermission
+
+        view = await await_drained(host.authority.instance_view(link))
+        values = {"name": view.name, "reader_is_administrator": await await_drained(is_administrator(link.owner_user_id))}
+        if key == "refused.files_full":
+            manager = bool(view.permissions & AgentPermission.MANAGE)
+            person = await await_drained(get_local_provider().get_user(view.supervisor.subject_id)) if not manager else None
+            values.update(reader_is_manager=manager, supervisor=person.email if person is not None else None)
     elif key == "refused.interrupted":
         values = {"name": (await host.prepare_ingress_values(link))["name"]}
     return {"key": key, "values": values}
+
+
+async def failure_button(host, link, key):
+    """Only a current manager with Files access gets the full-files action."""
+    if link.agent_kind != "instance" or key != "refused.files_full":
+        return None
+    from app.telegram_bots.pages import page_address
+    from app.telegram_bots.presentation import page_permissions
+    from deerflow.agent_instances.contract import AgentPermission
+
+    access = await await_drained(page_permissions(host.authority, link))
+    if not access["permissions"] & AgentPermission.MANAGE:
+        return None
+    address = await await_drained(asyncio.to_thread(page_address, "web.files", link, **access))
+    return {"page": "web.files", "url": address} if address else None
 
 
 async def conversation_button(link, record):
@@ -676,7 +701,14 @@ class PublicationCoordinator:
         key = "answer.on_web" if on_web else "error.generic" if failure is None else "busy.gave_up" if failure.retry_later else failure.text_key
         source = await fixed_source(self.host, link, key)
         identity = await self.outbox.plan_publication_outcome(
-            record, run=run, source_ref=source, keyboard=() if on_web else _try_again(record), callbacks=self.host.callbacks, guard=guard, undeliverable=failure is None, url_button=await conversation_button(link, record) if on_web else None
+            record,
+            run=run,
+            source_ref=source,
+            keyboard=() if on_web else _try_again(record),
+            callbacks=self.host.callbacks,
+            guard=guard,
+            undeliverable=failure is None,
+            url_button=await conversation_button(link, record) if on_web else await failure_button(self.host, link, key),
         )
         return PublicationObservation("planned", record, outbox_id=identity)
 

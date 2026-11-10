@@ -1982,7 +1982,9 @@ Restoring it discards messages accumulated while it was off.
 Instance links survive lost chat access, a pause, retirement, and temporary
 service failure. A confirmed deletion removes each link and leaves an owner-only
 unseen notice in Telegram settings (subject to event retention). Renames refresh each bot's public
-name and picture.
+name and picture. Instance run failures distinguish capacity waits from restart,
+file-maintenance and startup failures. Full-files replies offer file navigation
+only to a current manager who can inspect the files.
 
 Each person can connect a Telegram bot of their own to the ordinary chat and to each
 custom agent they own. A bot answers only that person, and its conversations are

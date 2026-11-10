@@ -32,6 +32,7 @@ STAGE_ONE_KEYS = frozenset(
     web.timezone web.scheduled web.account web.fileTooLarge web.resultTooLarge
     """.split()
 )
+INSTANCE_FAILURE_KEYS = frozenset("busy.two_conversations busy.starting_elsewhere refused.restarting refused.files_busy start.ws_failed refused.files_full refused.files_full_ask".split())
 LIFECYCLE_KEYS = frozenset("access.agent_off agent.paused agent.retired agent.deleted".split())
 INSTANCE_PRESENTATION_KEYS = frozenset("hello.assistant hello.employee help.agent privacy.company privacy.protected profile.short.agent profile.description.agent".split())
 POLICY_KEYS = frozenset({"policy.off", "policy.on", "policy.on_protected", "policy.protected", "policy.unprotected"})
@@ -39,7 +40,7 @@ POLICY_KEYS = frozenset({"policy.off", "policy.on", "policy.on_protected", "poli
 
 def test_text_catalog_locales_have_equal_keys():
     assert set(catalog("en")) == set(catalog("zh-CN"))
-    assert STAGE_ONE_KEYS | POLICY_KEYS | INSTANCE_PRESENTATION_KEYS | LIFECYCLE_KEYS == {key for key in catalog("en") if not key.startswith(("label.", "menu."))}
+    assert STAGE_ONE_KEYS | POLICY_KEYS | INSTANCE_PRESENTATION_KEYS | LIFECYCLE_KEYS | INSTANCE_FAILURE_KEYS == {key for key in catalog("en") if not key.startswith(("label.", "menu."))}
     assert catalog("zh_cn") is catalog("zh-CN")
     assert catalog("unrecognised") is catalog("en")
     assert all(text and "<br>" not in text for text in catalog("en").values())
