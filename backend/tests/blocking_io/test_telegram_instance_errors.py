@@ -25,3 +25,10 @@ async def test_instance_error_recovery_owns_its_io(publication, name, reason, ke
 @pytest.mark.asyncio
 async def test_recovery_files_delivery_owns_its_io(publication):
     await exercise_files(publication, recovery=True, url_rejected=False, withdraw=None, remaining=3, outcome="recovery")
+
+
+@pytest.mark.asyncio
+async def test_repeated_start_guidance_owns_its_writer_io(publication):
+    from test_telegram_start_failure_history import test_second_failure_guidance_is_durable_and_replay_does_not_recount
+
+    await test_second_failure_guidance_is_durable_and_replay_does_not_recount(publication, "success")

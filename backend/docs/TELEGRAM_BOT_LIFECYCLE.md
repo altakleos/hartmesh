@@ -308,3 +308,11 @@ boundary; full-files deletion wording additionally requires Manage. Public
 provider names come only from the validated public product identity, read off the
 event loop. A manager-only network refusal has no hostname in the host frame, so
 the fixed reply uses its form without a hostname.
+
+Repeated startup guidance retains the `start.ws_failed` source key. Under the
+link writer, its planner reuses an existing primary's frozen boolean hint or
+checks the two nearest durable primary/reset plans in the same binding and topic.
+Only a validated prior startup-failure primary in the same conversation qualifies.
+Other outcomes, terminal prepublication input plans, missing history and tied
+timestamps conservatively reset it. Auxiliary notices and transport retries do
+not count; caller-supplied hints never establish the count.

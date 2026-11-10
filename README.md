@@ -1991,7 +1991,8 @@ unavailable execution keeps the message for an explicit retry; a conversation
 limit waits for up to two minutes and can be cancelled. A busy response from
 the run service rechecks that same conversation and instance before selecting
 a wait or a manual-retry reply. While an instance workspace starts, the chat
-shows its starting status and updates the line after 30 seconds. Interrupted
+shows its starting status and updates the line after 30 seconds. A second
+consecutive startup failure adds guidance on whom to ask for help. Interrupted
 answers explain a manager's restart or a provider's file repair from the original
 run's structured error. Repair replies offer Files to readers who can inspect it,
 and keep the original message for an explicit retry. Provider names use the public

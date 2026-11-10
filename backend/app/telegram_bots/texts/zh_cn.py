@@ -74,6 +74,7 @@ TEXTS: dict[str, str] = {
     "busy.starting_elsewhere": "另一个对话正在启动 {name}。你的消息正在排队。",
     "refused.restarting": "{name} 的工作区正在重启，需等待另一个对话结束。你的消息已保留。请过几分钟重试。",
     "refused.files_busy": "{name} 的文件正在变更，暂时无法使用。你的消息已保留。请过几分钟重试。",
+    "start.ws_failed_again": "如果问题持续，请联系{support}。",
     "start.ws_failed": "{name} 的工作区未能启动，因此未执行任何操作。你的消息已保留。",
     "refused.files_full": "{name} 的文件空间已满，因此 {name} 无法启动。请在网页上删除文件，或请{support}增加空间。你的消息已保留。",
     "refused.files_full_ask": "{name} 的文件空间已满，因此 {name} 无法启动。请{supervisor}删除文件，或请{support}增加空间。你的消息已保留。",

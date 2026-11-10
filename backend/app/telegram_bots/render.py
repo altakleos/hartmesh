@@ -106,6 +106,8 @@ def _render(
         if reader_is_administrator and values.get("code"):
             template += "\n" + texts["unavailable.reference"]
 
+    if key == "start.ws_failed" and values.get("start_failed_again") is True:
+        template += "\n" + texts["start.ws_failed_again"]
     if key == "stop.answer":
         if values.get("written") is False:
             template = variants["unwritten"]
