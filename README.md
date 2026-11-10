@@ -1981,6 +1981,10 @@ Role labels require permission to inspect the adopted definition.
 Stored employee policy also governs existing instance links: protected messages
 carry Telegram's content protection, and switching Telegram off stops polling.
 Restoring it discards messages accumulated while it was off.
+Instance links survive lost chat access, a pause, retirement, and temporary
+service failure. A confirmed deletion removes each link and leaves an owner-only
+unseen notice in Telegram settings (subject to event retention). Renames refresh each bot's public
+name and picture.
 
 Each person can connect a Telegram bot of their own to the ordinary chat and to each
 custom agent they own. A bot answers only that person, and its conversations are

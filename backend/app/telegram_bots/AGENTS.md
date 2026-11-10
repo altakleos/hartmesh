@@ -548,6 +548,8 @@ Instance conversation/publication and employee-policy authority use the same
 host binding and current grant. Read [their lifecycle rules](../../docs/TELEGRAM_BOT_LIFECYCLE.md#instance-conversations-and-policy)
 before changing `publication_authority.py`, `policy.py`, `presentation.py`,
 `roles.py`, or instance delivery.
+Lifecycle deletion requires a confirmed deleted row; missing service authority
+keeps the link. Public profile target evidence lives in `notices.profile_target`.
 The browser add route remains closed pending complete files and presentation.
 
 Managed turns run with `recursion_limit` 1000 (`EXECUTION_RUN_CONFIG` in `app/channels/manager.py`), matching web chats and scheduled runs; a configured channel session value overrides it and the Gateway clamps to `max_recursion_limit`.

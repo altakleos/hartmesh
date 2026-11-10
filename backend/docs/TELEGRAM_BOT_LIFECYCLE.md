@@ -213,6 +213,22 @@ link event.
 
 ## The profile
 
+Instance reconciliation requires the installed `AgentInstances` and matching
+database before interpreting lifecycle facts. Only an actual `deleted` row removes
+links, including colleagues' links after the owner's account has been released.
+Service absence/failure never implies deletion. Pause, retirement and withdrawn
+Use keep polling under `agent_unavailable`; input rechecks these facts before
+dispatch. Fixed status notices contain no retained model content. `access.agent_off`
+uses a durable one-hour claim; `agent.deleted` claims once before the last disposable
+send, then removal records the captured public target/username in `agent_removed`.
+The browser lists only its owner's unseen events; reads do not mark them seen.
+
+`notices.profile_target` records the full public name and custody after a successful
+profile push. Reconciliation compares this, rather than Telegram's truncated name,
+marks changed links owed, and schedules an owner profile pass. Existing pending
+pushes keep their retry bounds. A rename during a push is observed on the next
+pass; profile and language completion still share the owner writer.
+
 `presentation.py` reads current Use before greeting/help/privacy values and
 navigation. `roles.py` reads the actual adopted definition through Inspect and
 matches its generated suffix to the current public role catalog; the definition's
@@ -247,3 +263,9 @@ ledger through adapter/token replacement and bot removal/re-add, and neither
 replenishes the 24-hour pair, per-bot hourly or global per-sender bad-code
 allowance. Overflow suppresses a notice instead of evicting a live charge; all
 state resets on process restart.
+
+Unavailable instance bots answer incoming messages, including fixed commands, with
+the current status notice. Pasted-token removal and stopping an existing turn still
+work. Status notices recheck lifecycle alongside protection inside the SDK limiter;
+a resumed target cannot receive an obsolete pause, retirement or access notice.
+Automatic rename pushes target only changed links and retain bounded retries.

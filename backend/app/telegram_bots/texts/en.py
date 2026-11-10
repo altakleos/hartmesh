@@ -1,6 +1,10 @@
 """English fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "access.agent_off": "You no longer have access to {name}. Ask {supervisor} or an administrator.",
+    "agent.paused": "{name} is paused. A manager of {name} can resume {name} on the web.",
+    "agent.retired": "{name} is retired. Files and past conversations stay readable in {product} on the web.",
+    "agent.deleted": "{name} was deleted.\n{name}'s files were deleted too, and {name} cannot be brought back. This chat will no longer answer. To remove this conversation from Telegram, delete the chat.",
     "hello.assistant": (
         "Connected as {email}. This chat is {name}, your AI assistant ({role}). No other Telegram account can"
         " write here.\n\n{name} starts nothing alone. Write to {name} as to a colleague: ask a question, or say"
@@ -285,3 +289,5 @@ FORMS.update(
         "profile.description.agent": {"company": "{name} is an AI employee. Only the person who connected this bot gets an answer, in this chat.\n\nIf this is your bot, use the Open chat button in your web app, then press Start."},
     }
 )
+
+FORMS["access.agent_off"] = {"no_supervisor": "You no longer have access to {name}. Ask an administrator."}

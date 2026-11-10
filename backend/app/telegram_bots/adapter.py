@@ -140,6 +140,7 @@ class SendContext:
     token_revision: int
     purpose: str
     expected_policy: str | None = None
+    expected_lifecycle: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -158,6 +159,8 @@ class SendContext:
             or self.expected_policy is not None
             and (type(self.expected_policy) is not str or self.expected_policy not in {"allowed", "protected", "off"})
         ):
+            raise ValueError("invalid-send-context")
+        if self.expected_lifecycle is not None and self.expected_lifecycle not in {"access.agent_off", "agent.paused", "agent.retired", "agent.deleted"}:
             raise ValueError("invalid-send-context")
 
 
@@ -757,6 +760,12 @@ class TelegramBotChannel(TelegramChannel):
             if not self._same_scope(link, current) or current.state != "connected":
                 raise ApplicationHandlerStop
             admission.link = current
+        if message is not None and link.agent_kind == "instance" and self._only_the_agent_can_answer(message, word):
+            key, _identity = await self._services.authority.instance_lifecycle(link)
+            if key is not None:
+                self._spawn_ingress(self._services.notice_instance_unavailable(link))
+                self._classified(update)
+                raise ApplicationHandlerStop
         if message is not None and link.health == "agent_unavailable" and link.agent_kind == "custom_agent" and self._only_the_agent_can_answer(message, word):
             # Nothing past here can answer, and the sender holds every ordinary reply on this health.
             now = self._time()
@@ -1590,8 +1599,10 @@ class TelegramBotChannel(TelegramChannel):
             return None
 
         async def check():
+            if not await self._notice_context_current(context):
+                raise DeliveryClaimRetired()
             current_protection = await self._services.protect_notice(context)
-            if type(current_protection) is not bool or current_protection and not protect or not await self._notice_context_current(context):
+            if type(current_protection) is not bool or current_protection and not protect or not self._notice_context_matches(context, self.link):
                 raise DeliveryClaimRetired()
             if _ingress and (self.link.health not in {"ok", "agent_unavailable"} or self.link.state == "held"):
                 raise DeliveryClaimRetired()
@@ -1647,8 +1658,13 @@ class TelegramBotChannel(TelegramChannel):
         if context.link_id != self.link.id or context.token_revision != self.transport_revision:
             return False
         current = await await_drained(self.refresh_link())
+        return self._notice_context_matches(context, current)
+
+    def _notice_context_matches(self, context: SendContext, current) -> bool:
         return (
             current is not None
+            and context.link_id == current.id
+            and context.token_revision == self.transport_revision
             and current.binding_generation == context.binding_generation
             and (context.purpose not in {"bound_message", "optional"} or current.chat_id == context.chat_id or context.purpose == "optional" and current.chat_id is None)
             and self.application.running

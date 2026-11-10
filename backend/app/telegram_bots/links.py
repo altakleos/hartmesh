@@ -70,6 +70,9 @@ _NOTICE_KEYS = {
     "link.token_rejected_other": ("token_rejected_other", None),
     "access.off": ("access_off", None),
     "access.back": ("access_back", None),
+    "access.agent_off": ("agent_off", None),
+    "agent.paused": ("agent_paused", None),
+    "agent.retired": ("agent_retired", None),
     "policy.off": ("policy", "off"),
     "policy.on": ("policy", "allowed"),
     "policy.on_protected": ("policy", "protected"),
@@ -725,7 +728,27 @@ class BotLinkRepository:
                 await session.execute(update(TelegramBotLinkRow).where(TelegramBotLinkRow.owner_user_id == owner_user_id).values(profile_pending=True))
             return saved
 
-    async def finish_profile(self, link_id: str, *, token_revision: int, version: int, bot_name: str, locale: str, at: datetime) -> BotLink | None:
+    async def owe_instance_profile(self, link: BotLink, *, name: str, custody: str) -> bool:
+        """Mark a changed public target owed, including names Telegram truncates."""
+        from deerflow.agent_instances.contract import validate_name
+        from deerflow.utils.file_io import await_drained
+
+        validate_name(name)
+        if custody not in {"personal", "company"} or link.agent_kind != "instance":
+            raise ValueError("invalid-profile-target")
+        target = {"name": name, "custody": custody}
+
+        async def write():
+            async with self._owner_writer(link.owner_user_id) as session:
+                row = await session.scalar(select(TelegramBotLinkRow).where(TelegramBotLinkRow.id == link.id, TelegramBotLinkRow.owner_user_id == link.owner_user_id).with_for_update())
+                if row is None or row.token_revision != link.token_revision or row.agent_kind != "instance" or row.agent_ref != link.agent_ref or row.profile_pending or row.notices.get("profile_target") == target:
+                    return False
+                row.profile_pending, row.updated_at = True, _now()
+                return True
+
+        return await await_drained(write())
+
+    async def finish_profile(self, link_id: str, *, token_revision: int, version: int, bot_name: str, locale: str, at: datetime, target: dict | None = None) -> BotLink | None:
         """Record a completed push, unless its token or language is no longer current.
 
         A language saved during the push keeps the link owed. The owner writer
@@ -741,6 +764,13 @@ class BotLinkRepository:
             if row is None or row.token_revision != token_revision or current != locale:
                 return None
             row.profile_pending, row.profile_version, row.bot_name, row.profile_synced_at, row.updated_at = False, version, bot_name, at.astimezone(UTC), _now()
+            if target is not None:
+                from deerflow.agent_instances.contract import validate_name
+
+                if row.agent_kind != "instance" or set(target) != {"name", "custody"} or target["custody"] not in {"personal", "company"}:
+                    raise ValueError("invalid-profile-target")
+                validate_name(target["name"])
+                row.notices = {**row.notices, "profile_target": deepcopy(target)}
             await session.flush()
             return _snapshot(row)
 
@@ -1294,7 +1324,7 @@ class BotLinkRepository:
             or minimum_interval_seconds < 0
             or type(only_if_unsent) is not bool
             or only_if_unsent
-            and key != "access.off"
+            and key not in {"access.off", "agent.deleted"}
         ):
             raise ValueError("invalid-notice-claim")
         at = at.astimezone(UTC)

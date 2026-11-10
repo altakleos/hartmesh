@@ -162,6 +162,33 @@ class TelegramAuthority:
         identity = await self.instance_identity(link)
         return await InstancePolicy(self.links.session_factory).get(identity.id) if identity.custody == "company" else "allowed"
 
+    async def instance_lifecycle(self, link: BotLink):
+        """Own every lifecycle SQL read through repeated cancellation."""
+        return await await_drained(self._instance_lifecycle(link))
+
+    async def _instance_lifecycle(self, link: BotLink):
+        """Read a real target; unavailable services never imply deletion."""
+        from deerflow.agent_instances.contract import AgentDenied
+        from deerflow.agent_instances.service import AgentInstances
+
+        agents = getattr(getattr(self.app, "state", None), "agent_instances", None)
+        if type(agents) is not AgentInstances or agents.directory.session_factory.kw.get("bind") is not self.links.session_factory.kw.get("bind"):
+            raise AuthorityUnavailable
+        identity = await self.instance_identity(link)
+        if getattr(self.app.state, "agent_instances", None) is not agents:
+            raise AuthorityUnavailable
+        if identity.status == "deleted":
+            return "agent.deleted", identity
+        try:
+            view = await self.instance_view(link)
+        except (AgentDenied, CeilingRefused):
+            if getattr(self.app.state, "agent_instances", None) is not agents:
+                raise AuthorityUnavailable
+            return "access.agent_off", identity
+        if getattr(self.app.state, "agent_instances", None) is not agents:
+            raise AuthorityUnavailable
+        return {"suspended": "agent.paused", "archived": "agent.retired"}.get(view.status), view
+
     async def instance_view(self, link: BotLink):
         from deerflow.agent_instances.contract import AgentPermission
         from deerflow.spaces.contract import PrincipalRef
@@ -172,7 +199,7 @@ class TelegramAuthority:
             raise AuthorityUnavailable
         return await agents.get(actor=PrincipalRef("human", link.owner_user_id), instance_id=link.agent_ref, permission=AgentPermission.USE)
 
-    async def instance_send_policy(self, link: BotLink, *, require_use: bool, bound: bool = True, require_inspect: bool = False) -> str:
+    async def instance_send_policy(self, link: BotLink, *, require_use: bool, bound: bool = True, require_inspect: bool = False, expected_lifecycle: str | None = None) -> str:
         """Final point-in-time grant, target, policy and discard decision.
 
         Live host authority is checked first. The final joined SQL statement
@@ -191,6 +218,17 @@ class TelegramAuthority:
             await self.instance_view(link)
             if agents.directory.session_factory.kw.get("bind") is not self.links.session_factory.kw.get("bind"):
                 raise AuthorityUnavailable
+
+        lifecycle_ceiling = True
+        if expected_lifecycle is not None:
+            actual, _identity = await self.instance_lifecycle(link)
+            if actual != expected_lifecycle:
+                raise AuthorityUnavailable
+            if expected_lifecycle != "agent.deleted":
+                try:
+                    await await_drained(require(link.owner_user_id, "agents:read"))
+                except CeilingRefused:
+                    lifecycle_ceiling = False
 
         async def read():
             async with self.links.session_factory() as session:
@@ -215,6 +253,16 @@ class TelegramAuthority:
                     raise AuthorityUnavailable
                 if require_use and (not permissions or not permissions & int(AgentPermission.USE) or status != "active" or pending_discard(current) is not None):
                     raise AgentDenied("The current Telegram send is unavailable")
+                if expected_lifecycle is not None:
+                    actual = (
+                        "agent.deleted"
+                        if status == "deleted"
+                        else "access.agent_off"
+                        if not lifecycle_ceiling or not permissions or not permissions & int(AgentPermission.USE)
+                        else {"suspended": "agent.paused", "archived": "agent.retired"}.get(status)
+                    )
+                    if actual != expected_lifecycle or getattr(getattr(self.app, "state", None), "agent_instances", None) is not agents:
+                        raise AuthorityUnavailable
                 if require_inspect and (not permissions or not permissions & int(AgentPermission.INSPECT)):
                     raise AgentDenied("The current Telegram presentation is unavailable")
                 if require_use and getattr(getattr(self.app, "state", None), "agent_instances", None) is not agents:
@@ -416,7 +464,7 @@ class TelegramAuthority:
         if link.agent_kind != "instance":
             return False
         try:
-            policy = await self.instance_send_policy(link, require_use=context.purpose == "bound_message", bound=context.purpose == "bound_message")
+            policy = await self.instance_send_policy(link, require_use=context.purpose == "bound_message", bound=context.purpose == "bound_message", expected_lifecycle=context.expected_lifecycle)
             if context.expected_policy is not None and policy != context.expected_policy:
                 raise DeliveryClaimRetired
             if context.purpose == "bound_message" and policy in {"off", "restoring"}:

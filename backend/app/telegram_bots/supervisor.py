@@ -24,8 +24,9 @@ from telegram import Bot
 from telegram.error import RetryAfter, TelegramError
 
 from app.telegram_bots.acts import Acts
-from app.telegram_bots.adapter import LongRetryAfter, SendContext, StrangerLedger, TelegramBotChannel
+from app.telegram_bots.adapter import AGENT_OFF_EVERY_SECONDS, LongRetryAfter, SendContext, StrangerLedger, TelegramBotChannel
 from app.telegram_bots.api_logging import call_failure_fields
+from app.telegram_bots.authority import AccessOff
 from app.telegram_bots.callbacks import CallbackRepository, Prompts
 from app.telegram_bots.capped_download import ManagedHTTPXRequest
 from app.telegram_bots.cipher import token_cipher, unwrap_token, wrap_token
@@ -1064,6 +1065,18 @@ class TelegramSupervisor:
         channel.link = current
         await self._notice(channel, "access.off")
 
+    async def notice_instance_unavailable(self, link: BotLink) -> None:
+        channel = self.channel(link.id)
+        if channel is None or channel.transport_revision != link.token_revision:
+            return
+        key, _identity = await self.authority.instance_lifecycle(link)
+        if key not in {"access.agent_off", "agent.paused", "agent.retired"}:
+            return
+        saved = await self.links.set_health(link.id, "agent_unavailable", holds=True, captured_link=link, expected_token_revision=link.token_revision)
+        if saved is not None and self.channel(link.id) is channel:
+            channel.link = saved
+            await self._notice(channel, key)
+
     async def eligibility(self, link, item, part=None) -> DeliveryEligibility:
         if self._stopping or self._cause is not None or not self._send_ready:
             return DeliveryEligibility.wait()
@@ -1354,8 +1367,8 @@ class TelegramSupervisor:
                         token_revision=channel.transport_revision,
                         binding_generation=link.binding_generation,
                         at=self._clock(),
-                        minimum_interval_seconds=NOTICE_EVERY_HOURS * 3600 if throttle else 0,
-                        only_if_unsent=key == "access.off",
+                        minimum_interval_seconds=AGENT_OFF_EVERY_SECONDS if key == "access.agent_off" else NOTICE_EVERY_HOURS * 3600 if throttle else 0,
+                        only_if_unsent=key in {"access.off", "agent.deleted"},
                     )
                 )
             if not claimed:
@@ -1364,12 +1377,36 @@ class TelegramSupervisor:
             preferences = await await_drained(self.settings.get(link.owner_user_id))
             quiet = await await_drained(asyncio.to_thread(silent_now, link, preferences, self.config, self._clock())) if preferences is not None else True
             expected_policy = {"policy.off": "off", "policy.on": "allowed", "policy.on_protected": "protected", "policy.protected": "protected", "policy.unprotected": "allowed"}.get(key)
-            context = SendContext(link_id=link.id, chat_id=link.chat_id, binding_generation=link.binding_generation, token_revision=channel.transport_revision, purpose="optional", expected_policy=expected_policy)
+            context = SendContext(
+                link_id=link.id,
+                chat_id=link.chat_id,
+                binding_generation=link.binding_generation,
+                token_revision=channel.transport_revision,
+                purpose="optional",
+                expected_policy=expected_policy,
+                expected_lifecycle=key if key in {"access.agent_off", "agent.paused", "agent.retired", "agent.deleted"} else None,
+            )
             render_key, paused = key, channel.link.acts_paused_since is not None
             if key == "link.conflict_over":
                 render_key += (".chat" if link.agent_kind == "lead_agent" else ".custom_agent") if paused else ".plain"
             button = await self._settings_button(link) if key == "link.conflict" or key == "link.conflict_over" and paused else None
             values = {"product": product_name(self._app_config)}
+            if key in {"access.agent_off", "agent.paused", "agent.retired", "agent.deleted"}:
+                state, identity = await self.authority.instance_lifecycle(link)
+                if state != key:
+                    return
+                values["name"] = identity.name
+                if key == "access.agent_off":
+                    from app.telegram_bots.authority import get_local_provider
+
+                    person = await await_drained(get_local_provider().get_user(identity.supervisor.subject_id))
+                    values["supervisor"] = person.email if person is not None else None
+                elif key == "agent.paused":
+                    from app.telegram_bots.presentation import page_permissions
+
+                    access = await await_drained(page_permissions(self.authority, link))
+                    address = await await_drained(asyncio.to_thread(page_address, "web.agentSettings", link, **access))
+                    button = ("label.open_agent_settings", address) if address else None
             if expected_policy is not None:
                 values["name"] = (await self.authority.instance_identity(link)).name
                 if key == "policy.off":
@@ -1398,7 +1435,7 @@ class TelegramSupervisor:
             return None
         return ("label.open_telegram", address) if address else None
 
-    async def remove(self, link_id: str, *, actor_id: str, action="remove", last_text: str | None = "link.removed") -> None:
+    async def remove(self, link_id: str, *, actor_id: str, action="remove", last_text: str | None = "link.removed", detail: dict | None = None) -> None:
         link = await self.links.get(link_id)
         if link is None:
             await self._retire(link_id, reason="removed")
@@ -1419,7 +1456,7 @@ class TelegramSupervisor:
                     self._event("profile_removed_failed", link=link, error=type(error).__name__, level=logging.WARNING)
         finally:
             try:
-                await self.links.remove(link_id, actor_id=actor_id, action=action)
+                await self.links.remove(link_id, actor_id=actor_id, action=action, detail=detail)
                 self._rows.pop(link_id, None)
             finally:
                 async with self._locks[link_id]:
@@ -1466,6 +1503,7 @@ class TelegramSupervisor:
                 self._unsupported.discard(identity)
         transition_notices = []
         close_after_notice = []
+        renamed_links = set()
         try:
             for link in rows:
                 if self._stopping or self._cause is not None:
@@ -1476,7 +1514,17 @@ class TelegramSupervisor:
                     await self._retire(link.id, reason="token-stored")
                     channel = None
                 try:
+                    if link.agent_kind == "instance":
+                        state, identity = await self.authority.instance_lifecycle(link)
+                        if state == "agent.deleted":
+                            detail = {"agent_kind": "instance", "agent_ref": identity.id, "agent_name": identity.name, "bot_username": link.bot_username}
+                            await self.remove(link.id, actor_id="host", action="agent_removed", last_text="agent.deleted", detail=detail)
+                            continue
+                        if await self.links.owe_instance_profile(link, name=identity.name, custody=identity.custody):
+                            renamed_links.add(link.id)
                     target = await self.authority.target(link)
+                except AccessOff:
+                    target = "held"
                 except Exception:
                     continue
                 if target == "unsupported":
@@ -1568,6 +1616,10 @@ class TelegramSupervisor:
                 sounding = self._sounding_link(notices)
                 for channel, key, blocked in notices:
                     await self._notice(channel, key, silent=blocked or channel.link.id != sounding)
+            if renamed_links:
+                task = asyncio.create_task(self.profile_sync.push_owed(link_ids=frozenset(renamed_links)), name="telegram-profile-renamed")
+                self._background.add(task)
+                task.add_done_callback(self._background.discard)
         finally:
             for identity in close_after_notice:
                 await self._retire(identity, reason="held")

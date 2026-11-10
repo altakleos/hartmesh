@@ -1,6 +1,10 @@
 """Simplified Chinese fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "access.agent_off": "你已无法访问 {name}。请联系 {supervisor} 或管理员。",
+    "agent.paused": "{name} 已暂停。{name} 的管理者可以在网页版恢复 {name}。",
+    "agent.retired": "{name} 已退役。文件和以往对话仍可在 {product} 网页版阅读。",
+    "agent.deleted": "{name} 已删除。\n{name} 的文件也已删除，无法恢复 {name}。此聊天不再回答。如需从 Telegram 删除此对话，请删除聊天。",
     "hello.assistant": (
         "已以 {email} 连接。此聊天是 {name}，你的 AI 助理（{role}）。其他 Telegram 账号无法在此发消息。\n\n{na"
         "me} 不会自行开始任何事。像与同事交流一样向 {name} 提问，或说说需要做什么。你在此发送的文件会交给 {name}。\n\n{name}"
@@ -243,3 +247,5 @@ FORMS.update(
         "profile.description.agent": {"company": "{name} 是 AI 员工。此聊天只回答连接此机器人的人。\n\n如果这是你的机器人，请在网页版应用中使用“打开聊天”按钮，然后按“开始”。"},
     }
 )
+
+FORMS["access.agent_off"] = {"no_supervisor": "你已无法访问 {name}。请联系管理员。"}
