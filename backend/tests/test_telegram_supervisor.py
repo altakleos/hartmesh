@@ -161,6 +161,9 @@ async def test_check_has_no_bot_calls_and_publishes_current(db, monkeypatch):
     assert e.supervisor.cause() is None
     assert e.supervisor.reason() is None
     assert e.normal.calls == e.updates.calls == []
+    assert e.supervisor.file_puts.callbacks is e.supervisor.callbacks
+    assert e.supervisor.file_puts.inbox is e.supervisor.outbox.inbox
+    assert e.supervisor.pending_files.instance_receipts == e.supervisor.instance_file_receipts
     assert logging.getLogger("telegram").level == logging.INFO
     assert logging.getLogger("httpx").level == logging.WARNING
     await e.supervisor.stop()

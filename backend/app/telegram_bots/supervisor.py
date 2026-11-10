@@ -147,7 +147,7 @@ class TelegramSupervisor:
         self.forms = self.human_inputs = self.voice_notes = self.profile_sync = None
         self._token_locks = AsyncKeyedLockTable()
         self.file_bytes_budget = FileBytesBudget(config.files.in_memory_max_bytes)
-        self.pending_files = None
+        self.file_puts = self.pending_files = None
         self.recovery = None
         self._recovery_epoch = self._recovery_phase = None
         self._recovery_held = 0
@@ -293,11 +293,14 @@ class TelegramSupervisor:
             self.commands = CallbackCommands(self)
             self.voice_notes = VoiceNotes(self)
             self.profile_sync = ProfileSync(self)
-            self.pending_files = PendingFiles(self.callbacks, self.outbox.inbox, guard_factory=self._pending_file_guard, config=self.config, clock=self._clock)
             if self.authority is None:
                 from app.telegram_bots.authority import TelegramAuthority
 
                 self.authority = TelegramAuthority(links=self.links, connections=connections, app=self.app)
+            from app.telegram_bots.file_puts import FilePuts
+
+            self.file_puts = FilePuts(self.callbacks, self.outbox.inbox, config=self.config.files)
+            self.pending_files = PendingFiles(self.callbacks, self.outbox.inbox, guard_factory=self._pending_file_guard, config=self.config, clock=self._clock, instance_receipts=self.instance_file_receipts)
             self.sender = OutboxSender(self.outbox, run_id=self.run_id, deliver_part=self.deliver_part, eligibility=self.eligibility, cleanup_caption=self.cleanup_caption)
         except Exception as error:
             self._event("supervisor_check_failed", error=type(error).__name__, level=logging.ERROR)
@@ -351,6 +354,7 @@ class TelegramSupervisor:
             self.publication_authority = PublicationAttemptAuthority(links=self.links, authority=self.authority, client=self.thread_client, channel=self.channel, create_allowed=self.send_allowed, read_allowed=self.publication_read_allowed)
             self.publications = PublicationCoordinator(inbox=self.outbox.inbox, outbox=self.outbox, bus=self.channel_service.bus, http_owner=self.thread_client, capture_attempt=self.publication_authority.capture)
             self.publications.file_preflight = self.preflight_inbound_files
+            self.publications.instance_file_receipts = self.instance_file_receipts
             from app.telegram_bots.human_input import HumanInputs
 
             self.human_inputs = HumanInputs(self)
@@ -1019,6 +1023,12 @@ class TelegramSupervisor:
         if channel is None or channel.transport_revision != link.token_revision:
             raise DeliveryClaimRetired()
         return self.commands._guard(channel, link)
+
+    async def instance_file_receipts(self, link, *, current=None):
+        channel = self.channel(link.id)
+        if channel is None or channel.transport_revision != link.token_revision:
+            raise DeliveryClaimRetired()
+        return await self.file_puts.receipt_reader(link, authority=self.authority, current=lambda: channel._callback_current(link) and (current is None or current() is True))
 
     async def preflight_inbound_files(self, link, record, files, *, execution_context):
         channel = self.channel(link.id)

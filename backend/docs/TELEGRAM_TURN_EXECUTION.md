@@ -206,8 +206,9 @@ native work and repeated cancellation. Callback IDs in the closed continuation
 identify completed presses, not delivery dependencies: no extra outbox retention
 pin is needed. The 400-day Act sweep deletes validated done/refused file journals,
 including those whose link was removed; uncertain and malformed records stay.
-The adapter must still install the service, render its results,
-attach composer metadata and integrate captionless files before activation.
+The supervisor installs one shared journal for its handlers and pending readers.
+The adapter must still route incoming saves, render results and integrate
+captionless/retry controls before activation.
 
 
 `FileReceiptReader` prepares current file authority before entering a metadata
@@ -224,8 +225,21 @@ attaching the original descriptors and deleting pending rows in the same writer.
 A replay reuses that frozen attachment set. Reader preparation occurs outside a
 writer, including a second guarded pass when candidates were found; an empty take
 needs no file readiness. Borrowed writers must supply a prepared reader and use its `guard(base)` for
-their outer transaction boundary too. These
-consumer primitives still require adapter installation and publication wiring.
+their outer transaction boundary too.
+
+Instance publication requires an installed `FileReceiptReader` for every retained
+file. After any ordered preflight omissions, it projects completed receipts into
+`human_message_kwargs.files` and clears raw transport descriptors, so the channel
+manager merges uploaded files into the HumanMessage without the legacy uploader.
+The receipt guard wraps the original creating guard through the final dispatch
+writer: changed Home, Use, policy or original lifetime rolls back the marker and
+releases the bus reservation. The original admission also retains that reader
+in process through queueing and the facade's actual creating HTTP fence. Every
+later `run_create` check reauthorizes the captured target without reading bytes,
+so an enqueued path cannot bind to a replacement Home. A refusal after enqueue
+leaves its dispatch marker intact; it grants neither reupload nor redispatch.
+Empty files need no receipt reader. The supervisor
+shares its prepared-reader factory with publication and pending context.
 
 
 `adapter.put_instance_file` owns the direct journal/download/write as one
@@ -236,5 +250,5 @@ before SDK getFile and rechecks authority inside limiter waits and capped reads.
 `FileProgress` shows only fixed saving/waiting lines with the current instance
 name. Protected policy uses a protected temporary message; other policy uses a
 fresh draft ID. Cleanup is best effort and cannot replace a committed file
-receipt. Supervisor installation, captioned publication and captionless/retry
-routing must qualify these leaves before activation.
+receipt. Captioned preflight and captionless/retry routing must qualify these
+leaves before activation.

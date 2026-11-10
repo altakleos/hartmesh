@@ -90,6 +90,7 @@ class _Control:
     final_check: Callable[[], None] | None = None
     deadline: float | None = None
     clock: Callable[[], float] | None = None
+    file_receipts: object | None = None
 
     def in_budget(self):
         return self.deadline is None or self.clock() < self.deadline
@@ -133,6 +134,8 @@ class _Admission:
     async def authorize(self, operation):
         self.check(operation)
         await await_drained(self.actual.authorize(operation))
+        if operation == "run_create" and self.control.file_receipts is not None:
+            await self.control.file_receipts.authorize_creation()
         self.check(operation)
 
 
@@ -301,6 +304,7 @@ class PublicationCoordinator:
         self.human_input_planner = None
         self.file_output_planner = None
         self.file_preflight = None
+        self.instance_file_receipts = None
         self.host = None
 
     def fence(self, record: PublicationRecord) -> None:
@@ -512,6 +516,23 @@ class PublicationCoordinator:
             # The original accepted input remains immutable; only this actual
             # transport can omit a refused attachment before its creating mark.
             message.files = allowed
+        if link.agent_kind == "instance" and message.files:
+            from app.telegram_bots.file_puts import FileReceiptReader
+
+            if self.instance_file_receipts is None:
+                _refuse()
+            reader = await self.instance_file_receipts(link, current=lambda: admission.current("run_create"))
+            if type(reader) is not FileReceiptReader:
+                _refuse()
+            reader.check_link(link)
+            create_guard = reader.guard(create_guard)
+            message.metadata["human_message_kwargs"]["files"] = await reader.composer_files(message.files)
+            # The same admission is held by the queued context and its facade.
+            # Recheck the captured Home at every later creating boundary too.
+            admission.control.file_receipts = reader
+            # The journal's uploaded paths already belong to the instance Home.
+            # Raw SDK descriptors must never enter the legacy thread uploader.
+            message.files = []
         await admission.authorize("run_create")
         reservation = self.bus.reserve_inbound(message)
         try:

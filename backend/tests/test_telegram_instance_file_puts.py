@@ -19,7 +19,7 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow
 pytestmark = pytest.mark.asyncio
 
 
-async def admitted(e, *, name="input.txt", size=4):
+async def admitted(e, *, name="input.txt", size=4, text=""):
     file = dict(type="file", file_id="input-file", file_unique_id="input-unique", filename=name, mime_type="text/plain", size=size, message_id=911, telegram_bot_id=e.link.bot_id)
     incoming = Update(
         2911,
@@ -28,19 +28,20 @@ async def admitted(e, *, name="input.txt", size=4):
             datetime.now(UTC),
             Chat(e.link.chat_id, "private"),
             from_user=User(e.link.telegram_user_id, "Person", False),
+            caption=text or None,
             document=Document(file["file_id"], file["file_unique_id"], file_name=name, mime_type=file["mime_type"], file_size=size),
         ),
     )
-    row, _ = await e.inbox.accept(e.link, incoming, sanitized_input={"type": "media", "text": "", "files": [file]})
+    row, _ = await e.inbox.accept(e.link, incoming, sanitized_input={"type": "media", "text": text, "files": [file]})
     row = await e.inbox.route(row, kind="turn", target_id=e.link.agent_ref, basis={"input_profile": {"version": 2, "kind": "chat_input", "forwarded": False, "origin": None}}, operation_ids=[])
     return row, file
 
 
-async def runner(e, monkeypatch, *, name="input.txt", size=4, download_result=None):
+async def runner(e, monkeypatch, *, name="input.txt", size=4, download_result=None, text=""):
     from app.telegram_bots.callbacks import CallbackRepository
     from app.telegram_bots.file_puts import FilePuts
 
-    origin, file = await admitted(e, name=name, size=size)
+    origin, file = await admitted(e, name=name, size=size, text=text)
     service = FilePuts(CallbackRepository(e.db.sessions), e.inbox, config=e.db.config.files)
     clock, sleeps, hints, releases, calls = [0.0], [], [], [], []
 
