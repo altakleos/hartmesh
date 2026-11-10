@@ -165,3 +165,49 @@ def test_correlation_is_process_only_and_never_reconstructed(fixture):
     _local, _bridge, info, _state, _calls = prepare(fixture)
     restored = SandboxInfo.from_dict(info.to_dict())
     assert getattr(restored, "native_container", None) is None
+
+
+@pytest.mark.parametrize("terminal", ["absent", "present", "name-reused", "unavailable", "daemon-changed", "late"])
+def test_auto_remove_wins_after_stopped_inventory_before_remove(fixture, monkeypatch, terminal):
+    import subprocess
+
+    from deerflow.community.aio_sandbox import local_backend as module
+
+    local, bridge, info, state, calls = prepare(fixture)
+    state["entry"]["State"]["Running"] = True
+    state["entry"]["HostConfig"]["AutoRemove"] = True
+    info.native_container = replace(info.native_container, running=True, auto_remove=True)
+    original = local._runtime_runner
+    now, attempted = [0.0], False
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+
+    def changed():
+        raise RuntimeError("Original daemon no longer qualified")
+
+    def run(command, **kwargs):
+        nonlocal attempted
+        if command[1] == "rm":
+            assert not attempted and command == ["docker", "rm", CID] and kwargs["check"] is True
+            calls.append(command)
+            attempted = True
+            state["gone"] = terminal != "present"
+            if terminal == "daemon-changed":
+                bridge._check_daemon = changed
+            if terminal == "late":
+                now[0] = 61.0
+            # Match the real CLI's check=True contract. Its text cannot
+            # establish absence of the original ID and name.
+            raise subprocess.CalledProcessError(1, command, stderr="removal raced")
+        if attempted and command[1] == "inspect" and "-f" in command:
+            if terminal == "name-reused" and command[-1] == info.container_name:
+                calls.append(command)
+                return SimpleNamespace(stdout="d" * 64, stderr="", returncode=0)
+            if terminal == "unavailable":
+                calls.append(command)
+                return SimpleNamespace(stdout="", stderr="daemon unavailable", returncode=1)
+        return original(command, **kwargs)
+
+    local._runtime_runner = run
+    assert local.destroy(info) is (DestroyOutcome.ABSENT if terminal == "absent" else DestroyOutcome.UNKNOWN)
+    assert attempted
+    assert [command for command in calls if command[1] in {"stop", "rm"}] == [["docker", "stop", "-t", "1", CID], ["docker", "rm", CID]]
