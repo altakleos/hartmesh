@@ -65,8 +65,10 @@ missing Use takes precedence over retirement. Verified instance changes take
 effect before poller health catches up, after transport/policy faults; undefined
 instance means not loaded and explicit null means a completed discovery found none. Policy-off, paused, retired,
 unavailable execution and protected delivery have distinct states. Keep existing
-delivery attention rows when extending the table. Instance discovery/mounting is
-separate from these prepared views. `targetRowsOf` accepts verified instance rows,
+delivery attention rows when extending the table. Settings mounts these views after complete discovery; current detail governs
+Connect and setup, and a pending deep link survives failed reads for explicit retry.
+The sidebar reads its owned instance targets through the same bounded detail cache,
+so paused/retired targets do not count as lost-access attention. `targetRowsOf` accepts verified instance rows,
 keeps own assistants first and preserves inaccessible bots as instance targets.
 `AgentAvatar` and bot pictures share `pictureOf(name, id)`. Setup privacy follows
 `read_by_others` for both custodies; only the server's protected policy adds its
@@ -82,5 +84,7 @@ partial/retired discovery is never published. Instance-detail reads use a
 QueryClient-owned four-request pool; queued reads retire before admission. Page
 controls are account/role/ceiling scoped. Employee rename/delete notes read current
 manager policy counts; personal notes use only the reader's own connected bot and
-never call that company-only route. These components remain unmounted pending
-activation. Initial bot-list failure shows a failure sentence, not endless loading.
+never call that company-only route. Page controls remain unmounted pending activation. The Settings list and setup
+share current availability; Done skips targets whose fresh detail refuses Connect.
+Setup faults supersede Done, while healthy connected rows retain it. Token calls
+own component/account cancellation and drop results after Use or policy retirement. Initial bot-list failure shows a failure sentence, not endless loading.

@@ -2745,7 +2745,7 @@ export function createEnUS(product: string): Translations {
       chatName: `${product}`,
       list: {
         title: "Your Telegram bots",
-        intro: `${product} and each of your custom agents can have a separate bot in your Telegram. A bot answers only you.`,
+        intro: `${product}, AI assistants, AI employees and custom agents can each have a separate bot in your Telegram. A bot answers only you.`,
         count: ({ used, limit }) =>
           `${used} of ${limit} ${limit === 1 ? "bot" : "bots"}`,
       },

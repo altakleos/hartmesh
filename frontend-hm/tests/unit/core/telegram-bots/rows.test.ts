@@ -452,9 +452,11 @@ describe("the rows that need attention", () => {
     }
   });
 
-  it("only a bot that can still hear Start keeps the set-up's own steps", () => {
+  it("waiting and healthy connected bots keep the set-up’s own screens", () => {
     const rows = Array.from({ length: 30 }, (_, row) => row);
-    expect(rows.filter((row) => !stopsSetup(row))).toEqual([21, 22, 23]);
+    expect(rows.filter((row) => !stopsSetup(row))).toEqual([
+      21, 22, 23, 25, 28, 29,
+    ]);
   });
 });
 

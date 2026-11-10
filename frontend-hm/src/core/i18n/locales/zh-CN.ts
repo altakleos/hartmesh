@@ -2570,7 +2570,7 @@ export function createZhCN(product: string): Translations {
       chatName: `${product}`,
       list: {
         title: "你的 Telegram 机器人",
-        intro: `${product} 和你的每个自定义智能体都可以在你的 Telegram 中拥有独立的机器人。机器人只回答你。`,
+        intro: `${product}、AI 助理、AI 员工和自定义智能体都可以在你的 Telegram 中拥有独立的机器人。机器人只回答你。`,
         count: ({ used, limit }) => `${used} / ${limit} 个机器人`,
       },
       kind: {

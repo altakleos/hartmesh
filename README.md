@@ -1977,12 +1977,14 @@ cleanup when migrating from legacy metadata credentials.
 Prepared instance page controls explain why a Telegram bot cannot be connected,
 open an existing bot or its settings, and show rename/delete effects. Assistant
 and employee discovery reads complete lists and retires reads when the account
-changes. The page controls and discovery still await activation.
+changes. Settings now lists these targets and opens setup only after reading
+current access, policy and execution readiness. Page controls still await mounting.
 
 Instance bot views now distinguish access withdrawal, retirement, pauses,
 execution outages and protected delivery. Setup explains who can read the chat
-and its files; deletion notices remain visible while being read. These views
-await activation. Agent avatars already use the same initials and colors as
+and its files; deletion notices remain visible while Settings stays open.
+The Done screen offers the first currently connectable target. Agent avatars use
+the same initials and colors as
 Telegram bot pictures.
 
 The employee policy controls are prepared for the Access tab: managers can allow

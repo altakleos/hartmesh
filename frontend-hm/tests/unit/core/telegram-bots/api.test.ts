@@ -277,3 +277,21 @@ describe("the telegram strings", () => {
     }
   });
 });
+
+it("decodes only supported execution reasons and maps the employee policy refusal", () => {
+  expect(
+    telegramRefusalKey(new TelegramRefusal(409, { reason: "policy-off" })),
+  ).toBe("state.notAllowedConnect");
+  expect(
+    new TelegramRefusal(409, {
+      reason: "execution-unavailable",
+      execution_reason: "operator-hold",
+    }).execution_reason,
+  ).toBe("operator-hold");
+  expect(
+    new TelegramRefusal(409, {
+      reason: "execution-unavailable",
+      execution_reason: "private exception",
+    }).execution_reason,
+  ).toBeNull();
+});

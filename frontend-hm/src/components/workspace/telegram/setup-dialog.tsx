@@ -1,5 +1,6 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
@@ -18,11 +19,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { hasCeiling } from "@/core/agent-instances/presentation";
 import { useAgents } from "@/core/agents/hooks";
-import { useTelegram } from "@/core/features/hooks";
+import { useAuth } from "@/core/auth/AuthProvider";
+import type { ExecutionReason } from "@/core/features/api";
+import { useAgentInstances, useTelegram } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import { enUS } from "@/core/i18n/locales/en-US";
 import { zhCN } from "@/core/i18n/locales/zh-CN";
+import { useSpaceActionSignal } from "@/core/spaces/lifetime";
 import {
   addTelegramBot,
   type Bot,
@@ -38,9 +43,18 @@ import {
   useTelegramReader,
 } from "@/core/telegram-bots/hooks";
 import {
+  useTelegramInstanceDetail,
+  useTelegramInstanceDiscovery,
+} from "@/core/telegram-bots/instance-hooks";
+import {
+  instanceConnectBlock,
+  type InstanceConnectBlock,
+} from "@/core/telegram-bots/instance-state";
+import {
   liveConnectOf,
   rowOf,
   type RowView,
+  type TargetRow,
   sectionNoticeOf,
   setupStageOf,
   stopsSetup,
@@ -58,6 +72,8 @@ import { useIsMobile } from "@/hooks/use-mobile";
 
 import { openSettingsDialog } from "../settings/settings-dialog-store";
 
+import { TelegramExecutionNotice } from "./bot-row";
+import { TelegramConnectNotice } from "./instance-controls";
 import { TelegramQrCode } from "./qr-code";
 import { timeZonesWith } from "./settings-block";
 import {
@@ -101,6 +117,7 @@ interface DialogRefusal {
   reason: string | null;
   other: string;
   linkId: string | null;
+  execution?: { reason: ExecutionReason | null };
 }
 
 function TheParagraph({ hasBot }: { hasBot: boolean }) {
@@ -234,23 +251,31 @@ function StepTwo({
   const [checking, setChecking] = useState(false);
   const [refusal, setRefusal] = useState<DialogRefusal | null>(null);
   const consent = useWebhookConsent();
+  const capture = useSpaceActionSignal(telegramTargetOf(target));
+  const queryClient = useQueryClient();
 
   const send = async (token: string) => {
     setChecking(true);
     setRefusal(null);
     const epoch = telegramConnectEpoch();
+    const signal = capture();
     try {
-      const answer = await addTelegramBot({
-        ...serverTargetOf(target),
-        token,
-        timezone: zone || browserTimeZone(),
-        locale,
-        ...(consent.covers(token) ? { take_over_webhook: true } : {}),
-      });
+      const answer = await addTelegramBot(
+        {
+          ...serverTargetOf(target),
+          token,
+          timezone: zone || browserTimeZone(),
+          locale,
+          ...(consent.covers(token) ? { take_over_webhook: true } : {}),
+        },
+        signal,
+      );
+      signal.throwIfAborted();
       holdTelegramConnect(answer.bot.id, answer.connect, epoch);
       onAdded(isFirst);
       await refresh();
     } catch (error) {
+      if (signal.aborted) return;
       const reason = error instanceof TelegramRefusal ? error.reason : null;
       if (reason === "webhook-set") {
         consent.refuse(token);
@@ -261,6 +286,22 @@ function StepTwo({
       // The bot may exist even so, when only the answer was lost. The list moves
       // the dialog on, where pasting the token again would say to make another.
       await refresh();
+      if (signal.aborted) return;
+      if (
+        target.kind === "agent" &&
+        [
+          "policy-off",
+          "execution-unavailable",
+          "agent-not-found",
+          "ceiling",
+        ].includes(reason ?? "")
+      ) {
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ["agent-instances"] }),
+          queryClient.invalidateQueries({ queryKey: ["features"] }),
+        ]);
+        if (signal.aborted) return;
+      }
       if (reason !== null && TELEGRAM_SECTION_REFUSALS.has(reason)) {
         failure.handled(error);
       }
@@ -274,9 +315,13 @@ function StepTwo({
           error instanceof TelegramRefusal ? refusalOther(strings, error) : "",
         linkId:
           error instanceof TelegramRefusal ? (error.link_id ?? null) : null,
+        ...(reason === "execution-unavailable" &&
+        error instanceof TelegramRefusal
+          ? { execution: { reason: error.execution_reason } }
+          : {}),
       });
     } finally {
-      setChecking(false);
+      if (!signal.aborted) setChecking(false);
     }
   };
 
@@ -332,12 +377,19 @@ function StepTwo({
       ) : null}
       {refusal ? (
         <div className="space-y-2" role="alert">
-          <p className="text-destructive text-sm">
-            {telegramText(strings, refusal.key, {
-              ...values,
-              other: refusal.other,
-            })}
-          </p>
+          {refusal.execution ? (
+            <TelegramExecutionNotice
+              reason={refusal.execution.reason}
+              name={name}
+            />
+          ) : (
+            <p className="text-destructive text-sm">
+              {telegramText(strings, refusal.key, {
+                ...values,
+                other: refusal.other,
+              })}
+            </p>
+          )}
           {refusal.reason === "webhook-set" ? (
             <Button
               type="button"
@@ -483,6 +535,12 @@ function SetupFault({ view, target }: { view: RowView; target: AgentTarget }) {
           {telegramText(strings, line.key, line.values)}
         </p>
       ))}
+      {view.execution ? (
+        <TelegramExecutionNotice
+          reason={view.execution.reason}
+          name={target.kind === "chat" ? undefined : target.name}
+        />
+      ) : null}
       <Button
         type="button"
         onClick={() => {
@@ -495,6 +553,58 @@ function SetupFault({ view, target }: { view: RowView; target: AgentTarget }) {
         {strings.webPage.telegram}
       </Button>
     </section>
+  );
+}
+
+/** Read candidate details in row order; an unreadable candidate never becomes a Connect. */
+function NextTarget({ rows }: { rows: TargetRow[] }) {
+  const row = rows[0];
+  const detail = useTelegramInstanceDetail(row?.instance);
+  const feature = useAgentInstances();
+  const telegram = useTelegram();
+  const { user } = useAuth();
+  const { data } = useTelegramBots();
+  const { t } = useI18n();
+  if (!row) return null;
+  if (row.target.kind === "agent" && detail.isPending) return null;
+  if (
+    row.target.kind === "agent" &&
+    (detail.isError ||
+      !detail.data ||
+      instanceConnectBlock({
+        instance: detail.data,
+        feature,
+        telegram,
+        bots: data,
+        canRead: !!user && hasCeiling(user.permissions, "agents:read"),
+      }))
+  )
+    return (
+      <NextTarget
+        key={telegramTargetOf(rows[1]?.target ?? { kind: "chat" })}
+        rows={rows.slice(1)}
+      />
+    );
+  const target =
+    row.target.kind === "agent" && detail.data
+      ? {
+          kind: "agent" as const,
+          id: detail.data.id,
+          name: detail.data.name,
+          permissions: detail.data.permissions,
+        }
+      : row.target;
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      className={WRAPS}
+      onClick={() => openTelegramSetup(target)}
+    >
+      {t.telegramBots.setup.done.next({
+        nextName: target.kind === "chat" ? row.name : target.name,
+      })}
+    </Button>
   );
 }
 
@@ -513,18 +623,23 @@ function DoneScreen({
   const { data } = useTelegramBots();
   const { agents } = useAgents();
   const leaving = useTelegramDisconnect();
+  const discovery = useTelegramInstanceDiscovery();
+  const { user } = useAuth();
 
   const settings = data?.settings;
   const blocked =
     sectionNoticeOf(feature, true) !== null ||
     (data !== undefined && data.limits.used >= data.limits.per_person);
-  const next = blocked
-    ? undefined
-    : targetRowsOf({
-        chatName: strings.chatName,
-        agentNames: agents.map((agent) => agent.name),
-        bots: data?.bots ?? [],
-      }).find((row) => row.bot === null);
+  const next =
+    blocked || discovery.pending || discovery.error
+      ? []
+      : targetRowsOf({
+          chatName: strings.chatName,
+          agentNames: agents.map((agent) => agent.name),
+          bots: data?.bots ?? [],
+          instances: discovery.instances,
+          ownerId: user?.id,
+        }).filter((row) => row.bot === null);
 
   const language =
     settings?.locale === "zh-CN"
@@ -575,16 +690,10 @@ function DoneScreen({
         </p>
       )}
       <div className="flex flex-wrap gap-2">
-        {next ? (
-          <Button
-            type="button"
-            variant="outline"
-            className={WRAPS}
-            onClick={() => openTelegramSetup(next.target)}
-          >
-            {strings.setup.done.next({ nextName: next.name })}
-          </Button>
-        ) : null}
+        <NextTarget
+          key={next[0] ? telegramTargetOf(next[0].target) : "none"}
+          rows={next}
+        />
         <Button type="button" onClick={closeTelegramSetup}>
           {strings.setup.done.close}
         </Button>
@@ -598,11 +707,18 @@ export function TelegramSetupDialog({ target }: { target: AgentTarget }) {
   const strings = t.telegramBots;
   const isMobile = useIsMobile();
   const feature = useTelegram();
+  const agentsFeature = useAgentInstances();
+  const { user } = useAuth();
+  const detail = useTelegramInstanceDetail(
+    target.kind === "agent"
+      ? { id: target.id, permissions: target.permissions }
+      : undefined,
+  );
   const reader = useTelegramReader();
   const { connects } = useTelegramPageState();
   const [firstBot, setFirstBot] = useState(false);
   const [phoneCode, setPhoneCode] = useState(false);
-  const { data, isPending } = useTelegramBots({
+  const { data, isPending, isError } = useTelegramBots({
     refetchInterval: (query) => {
       const seen = botOf(query.state.data?.bots, target);
       const stage = setupStageOf(seen, Date.now());
@@ -614,11 +730,62 @@ export function TelegramSetupDialog({ target }: { target: AgentTarget }) {
     },
   });
 
-  const name = target.kind === "chat" ? strings.chatName : target.name;
+  const name =
+    target.kind === "chat"
+      ? strings.chatName
+      : (detail.data?.name ?? target.name);
   const now = useTelegramClock();
   const bot = botOf(data?.bots, target);
   const stage = setupStageOf(bot, now);
-  const view = bot ? rowOf({ name, bot, feature, reader, now }) : null;
+  const execution =
+    agentsFeature.execution === "unavailable"
+      ? { execution: "unavailable" as const, reason: agentsFeature.reason }
+      : detail.data?.execution;
+  const view = bot
+    ? rowOf({
+        name,
+        bot,
+        feature,
+        reader,
+        now,
+        instance: target.kind === "agent" ? detail.data : undefined,
+        execution,
+      })
+    : null;
+  const canRead = !!user && hasCeiling(user.permissions, "agents:read");
+  const block: InstanceConnectBlock | null =
+    target.kind !== "agent"
+      ? null
+      : !canRead
+        ? { kind: "ceiling" }
+        : detail.isError
+          ? { kind: "unreadable" }
+          : detail.isPending
+            ? { kind: "loading" }
+            : detail.data
+              ? instanceConnectBlock({
+                  instance: detail.data,
+                  feature: agentsFeature,
+                  telegram: feature,
+                  bots: data,
+                  canRead,
+                })
+              : { kind: "use" };
+  const unread =
+    target.kind === "agent" && (!canRead || detail.isPending || detail.isError);
+  const blocking = unread || (!bot && block);
+  const explanation =
+    block && detail.data ? (
+      <TelegramConnectNotice block={block} instance={detail.data} />
+    ) : block?.kind === "loading" ? (
+      t.common.loading
+    ) : block?.kind === "unreadable" ? (
+      strings.unavailable.loadError
+    ) : block?.kind === "ceiling" ? (
+      strings.refusal.ceiling
+    ) : (
+      strings.refusal.agentGone({ name })
+    );
   const connect = liveConnectOf(
     bot ? connects.get(bot.id) : undefined,
     bot,
@@ -644,11 +811,24 @@ export function TelegramSetupDialog({ target }: { target: AgentTarget }) {
         <div role="status">
           {isPending ? (
             <p className="text-muted-foreground text-sm">{t.common.loading}</p>
+          ) : isError && !data ? (
+            <p>{strings.unavailable.loadError}</p>
+          ) : blocking ? (
+            <div className="text-sm">{explanation}</div>
+          ) : bot && view && stopsSetup(view.row) ? (
+            <SetupFault view={view} target={target} />
           ) : stage !== "steps" && bot && view ? (
             stage === "done" ? (
-              <DoneScreen bot={bot} name={name} firstBot={firstBot} />
-            ) : stopsSetup(view.row) ? (
-              <SetupFault view={view} target={target} />
+              <>
+                {view.execution ? (
+                  <TelegramExecutionNotice
+                    reason={view.execution.reason}
+                    name={name}
+                    custody={detail.data?.custody}
+                  />
+                ) : null}
+                <DoneScreen bot={bot} name={name} firstBot={firstBot} />
+              </>
             ) : (
               <StepThree
                 key={stage}

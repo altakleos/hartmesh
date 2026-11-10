@@ -1,6 +1,7 @@
 import { awaitAbortable } from "@/core/api/abort";
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
+import { EXECUTION_REASONS, type ExecutionReason } from "@/core/features/api";
 
 import type { TelegramKey } from "./text";
 
@@ -122,6 +123,7 @@ export class TelegramRefusal extends Error {
   readonly own?: boolean;
   readonly agent_name?: string | null;
   readonly link_id?: string | null;
+  readonly execution_reason: ExecutionReason | null;
 
   constructor(status: number, body: Record<string, unknown>) {
     super(typeof body.reason === "string" ? body.reason : "telegram-refusal");
@@ -135,6 +137,11 @@ export class TelegramRefusal extends Error {
     this.agent_name =
       typeof body.agent_name === "string" ? body.agent_name : null;
     this.link_id = typeof body.link_id === "string" ? body.link_id : null;
+    this.execution_reason = EXECUTION_REASONS.includes(
+      body.execution_reason as ExecutionReason,
+    )
+      ? (body.execution_reason as ExecutionReason)
+      : null;
   }
 }
 
@@ -158,6 +165,7 @@ const REFUSAL_KEYS = new Map<string, TelegramKey>([
   ["telegram-unreachable", "refusal.unreachable"],
   ["too-many-codes", "refusal.tooManyCodes"],
   ["agent-not-found", "refusal.agentGone"],
+  ["policy-off", "state.notAllowedConnect"],
   ["ceiling", "refusal.ceiling"],
   ["timezone-required", "refusal.noTimezone"],
   ["invalid-timezone", "refusal.noTimezone"],
@@ -201,9 +209,14 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   return (response.status === 204 ? undefined : read()) as Promise<T>;
 }
 
-function post<T>(path: string, body?: unknown): Promise<T> {
+function post<T>(
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
   return call<T>(path, {
     method: "POST",
+    ...(signal ? { signal: policySignal(signal) } : {}),
     ...(body === undefined
       ? {}
       : {
@@ -224,8 +237,9 @@ export function listTelegramBots(): Promise<BotList> {
 /** A plain call, never a mutation: the query library would keep the token as its variables. */
 export function addTelegramBot(
   request: AddBotRequest,
+  signal?: AbortSignal,
 ): Promise<{ bot: Bot; connect: Connect }> {
-  return post("", request);
+  return post("", request, signal);
 }
 
 /** A plain call for the same reason as `addTelegramBot`. */

@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
-import { cleanup, screen } from "@testing-library/react";
+import { cleanup, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 
 rs.mock("@/core/api/fetcher", () => ({ fetch: rs.fn() }));
 rs.mock("@/core/config", () => ({ getBackendBaseURL: () => "" }));
-const auth = rs.hoisted(() => ({ user: { id: "alice", system_role: "user" } }));
+const auth = rs.hoisted(() => ({
+  user: { id: "alice", system_role: "user", permissions: ["agents:read"] },
+}));
 const i18n = rs.hoisted(() => ({ t: {} as unknown }));
 const channels = rs.hoisted(() => ({
   enabled: true,
@@ -42,6 +44,8 @@ import { useTelegram } from "@/core/features/hooks";
 import { createEnUS } from "@/core/i18n/locales/en-US";
 
 import {
+  bot,
+  instance,
   clearClients,
   json,
   listOf,
@@ -93,3 +97,35 @@ describe("the channels group in the sidebar", () => {
     expect(screen.queryByRole("heading")).toBeNull();
   });
 });
+
+it.each([
+  ["suspended", 7, "agent_unavailable", "1 connected"],
+  ["archived", 7, "agent_unavailable", "1 connected"],
+  ["suspended", 2, "agent_unavailable", "1 to check"],
+  ["suspended", 7, "token_rejected", "1 to check"],
+] as const)(
+  "uses current instance facts in sidebar attention for %s/%s/%s",
+  async (status, permissions, health, label) => {
+    const target = instance({ status, permissions });
+    const { calls, handle } = server({
+      "GET /api/features": () =>
+        json({ telegram: { enabled: true, bots: "ready", reason: null } }),
+      "GET /api/telegram-bots": () =>
+        json(
+          listOf([
+            bot({ agent_kind: "instance", agent_ref: target.id, health }),
+          ]),
+        ),
+      [`GET /api/agent-instances/${target.id}?include_deleted=true`]: () =>
+        json(target),
+    });
+    rs.mocked(fetch).mockImplementation(handle);
+    renderWithClient(<WorkspaceChannelsList />);
+    await waitFor(() =>
+      expect(calls.some((call) => call.url.includes("include_deleted"))).toBe(
+        true,
+      ),
+    );
+    await screen.findByRole("button", { name: label });
+  },
+);
