@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.55] - 2026-11-10
+
 ### Upstream adoption
 
 - Review DeerFlow through `10bbcc92de5b8106fb6eceb46946eed34de0d515`.
@@ -23,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lifecycle, storage and output-proof contracts are integrated. See the
   [adoption record](docs/plans/2026-11-10-upstream-adoption.md).
 
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.54.
 
 ## [2.2.0+hartmesh.54] - 2026-11-08
 

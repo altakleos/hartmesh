@@ -1,6 +1,6 @@
 [project]
 name = "deerflow-harness"
-version = "2.2.0+hartmesh.54"
+version = "2.2.0+hartmesh.55"
 description = "DeerFlow agent harness framework"
 requires-python = ">=3.12"
 dependencies = [
