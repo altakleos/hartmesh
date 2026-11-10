@@ -421,3 +421,13 @@ the current account, Use, policy, delivery claim, parent acknowledgement and
 whether the wording still matches current Manage. Source work owns cancellation
 through cleanup. A lost publication lifetime rolls both plans back together.
 Topic relocation preserves acknowledged hosts and replaces only unsent notices.
+
+Question-only V5 and mixed V7 primaries can retain earlier denied-site artifacts.
+Only pure denial artifacts with intact host receipts are excluded when selecting
+the question; unknown structured content still refuses qualification. Selection
+examines every denial, independently of the three-host display cap. The existing
+opaque human-input read supplies the denial proof and original writer guard,
+avoiding another HTTP/SQL read inside its borrowed writer. Primary, controls and
+trailer commit or roll back together. Form steps never create another trailer.
+Every trailer send still rereads the original run, even after the question was
+answered. Existing document-1 questions retain their original behavior.

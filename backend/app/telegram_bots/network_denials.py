@@ -64,7 +64,7 @@ def _denial_projection(record, value):
         or (output.owner_user_id, output.thread_id, output.run_id, channel.publication_id, channel.assistant_id, channel.agent_name)
         != (scope.owner_user_id, scope.thread_id, record.run_id, record.publication_id, scope.assistant_id, scope.agent_name)
         or output.run_status != "success"
-        or not (output.state == "complete" or output.state == "unavailable" and output.reason == "unsupported_output")
+        or not (output.state == "complete" or output.state == "unavailable" and output.reason in {"unsupported_output", "human_input_required"})
         or inventory.state != "matched"
         or inventory.document.coverage != "complete"
         or inventory.document.version != 2
@@ -73,7 +73,7 @@ def _denial_projection(record, value):
     return projection
 
 
-def _denial_entries(record, basis):
+def _denial_entries(record, basis, *, all_entries=False):
     """Pure consistency proof; current source admission remains mandatory."""
     from app.telegram_bots.inbox import publication_identity
     from deerflow.runtime.runs.output_inventory import presentation_fragment_digest
@@ -159,6 +159,8 @@ def _denial_entries(record, basis):
             if not host:
                 _refuse()
             hosts.append({"first_seq": first[content["id"]], "event_seq": row["seq"], "message_id": content["id"], "artifact_sha256": digest, "host": host, "port": value["port"]})
+        if all_entries:
+            return sorted(hosts, key=lambda value: value["first_seq"])
         selected = {}
         for value in sorted(hosts, key=lambda value: value["first_seq"]):
             selected.setdefault(value["host"], value)
@@ -174,6 +176,16 @@ def denied_hosts(record, basis):
 def freeze_denials(record, basis):
     """Retain only source identities/digests and the three displayed sites."""
     return {"version": 1, "publication": deepcopy(basis["publication"]), "projection": deepcopy(basis["projection"]), "denials": _denial_entries(record, basis)}
+
+
+def request_content_items(record, basis, items):
+    """Separate only pure, host-proven denial artifacts from a question."""
+    if record.scope.agent_kind != "instance" or basis["projection"]["inventory"]["document"].get("version") != 2:
+        return items
+    entries = _denial_entries(record, {**basis, "version": 1}, all_entries=True)
+    latest = {row["content"].get("id"): row["content"] for row in basis["messages"] if row.get("event_type") == "llm.tool.result"}
+    pure = {(value["message_id"], value["artifact_sha256"]) for value in entries if set(latest[value["message_id"]].get("artifact") or {}) == {"sandbox_network_denied"}}
+    return [item for item in items if not (item.kind == "structured" and item.carrier == "message_artifact" and item.witness.kind in {"root_snapshot", "message_event"} and (item.witness.message_id, item.value_sha256) in pure)]
 
 
 def notice_hosts(record, basis):
@@ -252,6 +264,25 @@ def checked_denials(source, record):
     return source.basis
 
 
+def from_human_input(source, record):
+    """Reuse the original host-issued read and writer guard, without nested I/O."""
+    from app.telegram_bots.human_input_source import check_qualified_request
+
+    basis = check_qualified_request(source, record)
+    if basis["projection"]["inventory"]["document"].get("version") != 2:
+        return None
+    frozen = freeze_denials(record, {**basis, "version": 1})
+    check_qualified_request(source, record)
+    return _issued(record, frozen, source._guard, source._check)
+
+
+def _issued(record, basis, guard, check):
+    result = object.__new__(QualifiedNetworkDenials)
+    for key, value in {"_basis": deepcopy(basis), "_hosts": notice_hosts(record, basis), "_record": deepcopy(record), "_guard": guard, "_check": check, "_issuer": _ISSUER}.items():
+        object.__setattr__(result, key, value)
+    return result
+
+
 class NetworkDenialSource:
     def __init__(self, *, http_owner, capture_attempt):
         self.http_owner, self.capture_attempt = http_owner, capture_attempt
@@ -272,7 +303,7 @@ class NetworkDenialSource:
             output.output.run_status != "success"
             or output.output.state not in {"complete", "unavailable"}
             or output.output.state == "unavailable"
-            and output.output.reason != "unsupported_output"
+            and output.output.reason not in {"unsupported_output", "human_input_required"}
             or output.inventory.state != "matched"
             or output.inventory.document.coverage != "complete"
         ):
@@ -320,7 +351,6 @@ class NetworkDenialSource:
         await admission.authorize("source_read")
         basis = {"version": 1, "publication": publication_identity(record), "projection": output.model_dump(mode="json"), "messages": rows}
         basis = await await_drained(asyncio.to_thread(freeze_denials, record, basis))
-        hosts = notice_hosts(record, basis)
         if admission.current("source_read") is not True:
             _refuse()
 
@@ -339,7 +369,4 @@ class NetworkDenialSource:
                     _refuse()
                 return result
 
-        result = object.__new__(QualifiedNetworkDenials)
-        for key, value in {"_basis": basis, "_hosts": hosts, "_record": record, "_guard": SourceGuard(), "_check": lambda: admission.current("source_read"), "_issuer": _ISSUER}.items():
-            object.__setattr__(result, key, value)
-        return result
+        return _issued(record, basis, SourceGuard(), lambda: admission.current("source_read"))

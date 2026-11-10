@@ -54,6 +54,8 @@ and the action writer; [network admission](../../docs/TELEGRAM_TURN_EXECUTION.md
 `network_denials.py` qualifies dropped denials from exact-run artifacts and complete
 inventory. `network_notices.py` saves button-free V8 trailers with their primary;
 delivery requires its acknowledgement and fresh scope/manager wording checks.
+Terminal questions separate only pure host-proven denial artifacts; other structured
+content stays accounted for. Their original source guard also owns the V8 writer.
 `human_input_source.py`
 qualifies one exact lead/tool request using the persisted document-2 output,
 complete inventory and actual messages. V5 human-input plans freeze that source and their input
