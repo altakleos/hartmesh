@@ -1990,7 +1990,8 @@ only to a current manager who can inspect the files. Before a run starts,
 unavailable execution keeps the message for an explicit retry; a conversation
 limit waits for up to two minutes and can be cancelled. A busy response from
 the run service rechecks that same conversation and instance before selecting
-a wait or a manual-retry reply.
+a wait or a manual-retry reply. While an instance workspace starts, the chat
+shows its starting status and updates the line after 30 seconds.
 
 Each person can connect a Telegram bot of their own to the ordinary chat and to each
 custom agent they own. A bot answers only that person, and its conversations are

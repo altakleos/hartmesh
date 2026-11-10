@@ -290,3 +290,9 @@ execution authority and resident admission. Only the four send refusals select
 an alternative to thread waiting. The closed saved outcome retains the original
 publication and instance binding; no manager sentence is classified. Structured
 run interruption frames remain separate work.
+
+Instance workspace startup uses only the original run's closed `turn_progress`
+frames. It shows the starting line immediately and the longer line after 30
+seconds still in that phase. Current Use supplies the name; frame wording never
+enters presentation. The observer owns and drains both the timer and stream,
+including repeated cancellation. These lines are advisory, not completion proof.

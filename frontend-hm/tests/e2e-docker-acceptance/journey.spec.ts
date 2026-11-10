@@ -223,6 +223,14 @@ print("export verified")`,
   page.on("request", (request) => {
     if (request.method() === "DELETE") deletionRequests.push(request.url());
   });
+  // The artifact panel may have collapsed the sidebar at this viewport.
+  const sidebar = page.locator('[data-slot="sidebar"][data-state]');
+  if ((await sidebar.getAttribute("data-state")) === "collapsed") {
+    await page
+      .getByRole("button", { name: "Toggle Sidebar", exact: true })
+      .click();
+  }
+  await expect(sidebar).toHaveAttribute("data-state", "expanded");
   const row = page
     .locator("[data-sidebar='menu-item']")
     .filter({ has: page.locator(`a[href='/workspace/chats/${thread}']`) });
