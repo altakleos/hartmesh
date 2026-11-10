@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 import pytest_asyncio
+from _channel_execution_test_support import TABLES
 from _run_output_store_test_support import output_store as output_store
 from fastapi import FastAPI, HTTPException
 from sqlalchemy import event, insert, text
@@ -21,6 +22,7 @@ from app.gateway.authz import AuthContext
 from app.gateway.channel_execution import CHANNEL_EXECUTION_REQUEST_HEADER, CHANNEL_EXECUTION_RESPONSE_HEADER
 from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, get_internal_user
 from app.gateway.routers import thread_runs
+from deerflow.agent_instances.conversations import AgentConversations
 from deerflow.config import app_config as app_config_module
 from deerflow.config.app_config import AppConfig, set_app_config
 from deerflow.persistence.run.model import RunRow
@@ -64,7 +66,7 @@ async def lookup_environment(output_store, monkeypatch):
     async with db.engine.begin() as connection:
         if db.dialect == "sqlite":
             await connection.execute(text("BEGIN"))
-        await connection.run_sync(lambda sync: ThreadMetaRow.metadata.create_all(sync, tables=[ThreadMetaRow.__table__]))
+        await connection.run_sync(lambda sync: ThreadMetaRow.metadata.create_all(sync, tables=[ThreadMetaRow.__table__, *TABLES]))
     threads = ThreadMetaRepository(db.sf)
     await threads.create(THREAD, user_id=OWNER)
     await threads.create("other-lookup-thread", user_id=OWNER)
@@ -80,6 +82,7 @@ async def lookup_environment(output_store, monkeypatch):
     app = FastAPI()
     app.add_middleware(HostAuthentication, state=state)
     app.state.thread_store, app.state.run_manager = threads, manager
+    app.state.agent_conversations = AgentConversations(None, session_factory=db.sf)
     app.include_router(thread_runs.router)
     headers = {INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER, CHANNEL_EXECUTION_REQUEST_HEADER: "1", "Idempotency-Key": KEY}
     try:
