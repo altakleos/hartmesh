@@ -964,6 +964,7 @@ def _qualify_inventory_profile(graph, *, state_schema, middlewares, tools, mode,
     if any(type(tool) is not StructuredTool for tool in tools):
         return None
 
+    from deerflow.agent_instances.middleware import InstanceAuthorityMiddleware
     from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
     from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
     from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
@@ -1011,6 +1012,7 @@ def _qualify_inventory_profile(graph, *, state_schema, middlewares, tools, mode,
         GuardrailMiddleware,
         HarnessGuardMiddleware,
         InputSanitizationMiddleware,
+        InstanceAuthorityMiddleware,
         KnowledgeScopeMiddleware,
         LLMErrorHandlingMiddleware,
         LoopDetectionMiddleware,

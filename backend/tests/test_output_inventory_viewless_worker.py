@@ -127,12 +127,17 @@ async def test_default_document1_does_not_call_host_qualifier(capture_environmen
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("unsupported", ["instance", "missing_qualifier"])
-async def test_identifiable_unsupported_doc2_refuses_before_environment_or_model(capture_environment, monkeypatch, unsupported):
+@pytest.mark.parametrize("unsupported,document_version", [("untyped_instance", 1), ("untyped_instance", 2), ("work", 1), ("work", 2), ("missing_qualifier", 2)])
+async def test_identifiable_unsupported_inventory_refuses_before_environment_or_model(capture_environment, monkeypatch, unsupported, document_version):
+    from dataclasses import replace
+
+    from test_agent_chat_tools import execution
+
     from deerflow.agent_instances import runtime as instances
 
     e = capture_environment
-    record = await e.manager.create_or_reject(uuid4().hex, "lead_agent", user_id="view-owner", kwargs={"output_capture": {"version": 2, "inventory_document_version": 2}})
+    capture = {"version": 2, **({"inventory_document_version": 2} if document_version == 2 else {})}
+    record = await e.manager.create_or_reject(uuid4().hex, "lead_agent", user_id="view-owner", kwargs={"output_capture": capture})
     prepare = AsyncMock(side_effect=AssertionError("Unsupported instance must not prepare"))
     monkeypatch.setattr(instances, "prepare_environment", prepare)
     factory = AsyncMock(side_effect=AssertionError("Unsupported view must not assemble or invoke"))
@@ -145,14 +150,14 @@ async def test_identifiable_unsupported_doc2_refuses_before_environment_or_model
         checkpointer=None,
         event_store=e.event_store,
         schedule_stream_cleanup=lambda *_args: None,
-        qualify_output_view=OutputViewQualifier(issue) if unsupported == "instance" else None,
-        agent_execution=SimpleNamespace(work=None) if unsupported == "instance" else None,
+        qualify_output_view=OutputViewQualifier(issue) if unsupported != "missing_qualifier" else None,
+        agent_execution=replace(execution("personal"), work=object()) if unsupported == "work" else SimpleNamespace(work=None) if unsupported == "untyped_instance" else None,
     )
     await run_agent(bridge, e.manager, record, ctx=ctx, agent_factory=factory, graph_input={"messages": [HumanMessage("Question")]}, config={"configurable": {"thread_id": record.thread_id}})
     prepare.assert_not_awaited()
     factory.assert_not_called()
     row = await e.repository.get(record.run_id, user_id="view-owner")
     assert row["status"] == "error"
-    assert row["kwargs"]["output_capture"] == {"version": 2, "inventory_document_version": 2}
+    assert row["kwargs"]["output_capture"] == capture
     assert row["kwargs"]["output_evidence"]["kind"] == "unavailable"
     assert row["kwargs"]["inventory_evidence"]["reason"] == "prestart_not_enumerated"

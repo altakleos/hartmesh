@@ -132,8 +132,9 @@ view, empty input, failed scan or absent provider is not that fact. The actual
 host qualifier must be available before preparation. A viewless completion also
 needs its original run/path/I/O-owner lease freshly confirmed, independently of
 the qualified terminal presentation profile. Unqualified routing remains
-incomplete; instance execution refuses this explicit format. Existing callers
-retain their behavior.
+incomplete. Host-owned ordinary instance runs can capture their admitted Home
+through this format; the correlated channel admission remains a separate gate.
+Work attempts do not qualify. Existing callers retain their behavior.
 
 The output endpoint uses the existing strict channel-read header plus
 `X-DeerFlow-Require-Output-Inventory: 1` or `2`. Exactly one supported value is

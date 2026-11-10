@@ -2070,6 +2070,10 @@ with an inventory of what it presented
 ([terminal output inventory](backend/docs/RUN_OUTPUT_INVENTORY.md)). Output capture is
 for the Gateway's own callers.
 
+Output capture also supports ordinary persistent-agent conversations through
+their admitted Home. A missing root or changed access yields incomplete evidence;
+output observations do not grant permission to download the files.
+
 ##### Other channels
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.

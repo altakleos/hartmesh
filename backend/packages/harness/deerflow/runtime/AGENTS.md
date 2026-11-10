@@ -86,7 +86,10 @@ typed support object is not evidence: a run-bound lease freshly confirms the
 original paths/owner/routing before publication and retires before scope exit.
 Qualified no-view routing replaces no scan facts and never suppresses carriers
 or grants file access. Model-only qualification must not acquire a sandbox;
-AgentExecution remains unsupported for this format.
+Ordinary host `AgentExecution` uses admitted before/final Home scans instead of
+the ordinary routing qualifier. Work and untyped execution claims refuse inventory
+before preparation. A failed Home scan stays incomplete; it cannot mint no-view
+or empty evidence. Non-captured instance execution keeps its existing behavior.
 
 SQL terminal writes use `runs/terminal.py` and `RunRepository.finalize_owned`.
 Read committed state before recovery; CAS the original change sequence, owner,
