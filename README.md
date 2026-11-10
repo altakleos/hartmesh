@@ -1980,6 +1980,9 @@ person without starting a workspace. The file journal preserves operation IDs
 across bounded transient retries and records explicit Send again presses separately.
 Completed receipts provide the pending-attachment and model-composer handoff,
 checking their original Home before reuse.
+File messages sent while the target is paused or retired receive a file-specific
+reply. Unavailable execution closes the message without downloading its files
+or starting a conversation; withdrawn chat access takes precedence.
 Instance presentation names the assistant or employee, explains who can read
 the conversation, and offers web links according to the person's access.
 Role labels require permission to inspect the adopted definition.

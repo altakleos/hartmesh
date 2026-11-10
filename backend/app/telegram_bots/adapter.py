@@ -764,7 +764,7 @@ class TelegramBotChannel(TelegramChannel):
         if message is not None and link.agent_kind == "instance" and self._only_the_agent_can_answer(message, word):
             key, _identity = await self._services.authority.instance_lifecycle(link)
             if key is not None:
-                self._spawn_ingress(self._services.notice_instance_unavailable(link))
+                self._spawn_ingress(self._services.notice_instance_unavailable(link, file_input=bool(message.photo or message.document)))
                 self._classified(update)
                 raise ApplicationHandlerStop
         if message is not None and link.health == "agent_unavailable" and link.agent_kind == "custom_agent" and self._only_the_agent_can_answer(message, word):
