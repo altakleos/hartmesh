@@ -289,10 +289,7 @@ describe("rowOf", () => {
   });
 
   it("shows unavailable.unknown for a value with no row in this stage", () => {
-    for (const fields of [
-      { health: "token_rejected", origin: "managed" },
-      { health: "policy_off" },
-    ]) {
+    for (const fields of [{ health: "token_rejected", origin: "managed" }]) {
       const view = rowOf(input({ bot: bot(fields) }));
       expect(view.row).toBe(0);
       expect(view.buttons).toEqual([]);

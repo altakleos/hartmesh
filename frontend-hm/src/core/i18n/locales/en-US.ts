@@ -2750,6 +2750,9 @@ export function createEnUS(product: string): Translations {
           `${used} of ${limit} ${limit === 1 ? "bot" : "bots"}`,
       },
       kind: {
+        assistant: ({ owner }) =>
+          owner ? `${owner}'s AI assistant` : "AI assistant",
+        employee: "AI employee",
         custom_agent: "Custom agent",
       },
       row: {
@@ -2799,7 +2802,13 @@ export function createEnUS(product: string): Translations {
         waiting: "Press Start",
         paused: "Paused",
       },
+      notice: {
+        agentDeleted: ({ name }) =>
+          `${name} was deleted, and the Telegram bot for ${name} was disconnected. You can delete the leftover bot in BotFather with /deletebot.`,
+      },
       setup: {
+        protected: ({ name }) =>
+          `A manager has set Telegram for ${name} so that what ${name} sends cannot be forwarded or saved, and messages ${name} sends first show their details only after a tap.`,
         title: ({ name }) => `Connect ${name} to Telegram`,
         intro: ({ name }) =>
           `${name} gets a bot in your Telegram: a chat that answers only you. You create the bot with BotFather, Telegram's own tool. This takes a few minutes.`,
@@ -2810,6 +2819,8 @@ export function createEnUS(product: string): Translations {
         onPhoneQr:
           "Scan with your phone's camera and sign in; this set-up opens there.",
         before: {
+          company: ({ name }) =>
+            `People at your company who can see all of ${name}'s work can read this conversation in ${product}, as they can read one started there. Files you send are kept in ${name}'s files, which everyone who can see all of ${name}'s work can open.`,
           title: "Before you connect",
           body: `Telegram carries these chats. Everything you and ${product} send there, including files and voice notes, passes through Telegram's servers and stays in your Telegram account until you delete it. Bot chats are not end-to-end encrypted, so Telegram can read them, and ${product} cannot delete them for you. A notification can show the start of a message on a locked phone; Telegram and your phone can hide previews. Anyone who can open your Telegram can write to your bots as you. Use a screen lock. If you lose your phone, end its session from another device (Telegram, Settings, Devices) and disconnect your bots here.`,
           voice: ({ transcriber }) =>
@@ -2903,6 +2914,19 @@ export function createEnUS(product: string): Translations {
         failed: "That did not work. Try again.",
       },
       state: {
+        notAllowed: ({ name }) =>
+          `Telegram is turned off for ${name} by the people who manage ${name}. The bot is kept and works again when Telegram is turned on.`,
+        notAllowedConnect: ({ name }) =>
+          `Telegram is turned off for ${name} by the people who manage ${name}.`,
+        noAccess: ({ name }) =>
+          `You no longer have access to ${name}, so this bot no longer answers.`,
+        retired: ({ name }) =>
+          `${name} is retired, so this bot no longer answers.`,
+        paused: ({ name }) =>
+          `Connected. ${name} is paused and answers again when resumed.`,
+        cannotWork: ({ name }) => `Connected. ${name} cannot work right now.`,
+        connectedProtected: ({ name, telegramName }) =>
+          `Connected as ${telegramName}. What ${name} sends cannot be forwarded or saved.`,
         sectionPaused: "Paused",
         none: "Not connected",
         preparing: "Setting up…",
@@ -2925,6 +2949,8 @@ export function createEnUS(product: string): Translations {
         conflictStopped: "Checking stopped after 24 hours.",
         conflictWebhook: `This bot is connected to another service, so nothing reaches ${product}.`,
         afterConflict: {
+          agent: ({ time }) =>
+            `Another program began using this bot's token at ${time}. That has stopped, and the bot answers again. Allowing a blocked site stays paused on this bot until you press That was me or replace the token.`,
           chat: ({ time }) =>
             `Another program began using this bot's token at ${time}. That has stopped, and the bot answers again. Allowing a blocked site stays paused on this bot until you press That was me or replace the token.`,
           custom_agent: ({ time }) =>

@@ -66,10 +66,13 @@ rs.mock("@/components/workspace/workspace-container", () => ({
   WorkspaceHeader: () => null,
 }));
 
+
 import InstancesPage from "@/app/workspace/instances/page";
+import { AgentAvatar } from "@/components/workspace/instances/agent-avatar";
 import * as api from "@/core/agent-instances/api";
 import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
 import { I18nProvider } from "@/core/i18n/context";
+import { pictureOf } from "@/core/telegram-bots/picture";
 
 function instance(): api.AgentInstanceDetail {
   return {
@@ -318,5 +321,21 @@ it("continues observing a locally pending deletion after detail becomes deleted 
     expect(state.push).toHaveBeenCalledWith(
       "/workspace/employees?deleted=Resident+analyst&clearing=1",
     ),
+  );
+});
+
+it("the avatar takes its initials and colour from pictureOf", () => {
+  const entry = { ...instance(), name: "  ßeta--Mira ", id: "shared-avatar" };
+  const { initials, color } = pictureOf(entry.name, entry.id);
+  render(
+    <I18nProvider initialLocale="en-US">
+      <AgentAvatar instance={entry} />
+    </I18nProvider>,
+  );
+  const text = screen.getByText(initials);
+  const swatch = document.createElement("span");
+  swatch.style.backgroundColor = color;
+  expect(text.parentElement?.style.backgroundColor).toBe(
+    swatch.style.backgroundColor,
   );
 });

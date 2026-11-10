@@ -2160,6 +2160,8 @@ export interface Translations {
       count: (values: { used: number; limit: number }) => string;
     };
     kind: {
+      assistant: (values: { owner?: string }) => string;
+      employee: string;
       custom_agent: string;
     };
     row: {
@@ -2209,7 +2211,9 @@ export interface Translations {
       waiting: string;
       paused: string;
     };
+    notice: { agentDeleted: (values: { name: string }) => string };
     setup: {
+      protected: (values: { name: string }) => string;
       title: (values: { name: string }) => string;
       intro: (values: { name: string }) => string;
       fault: string;
@@ -2217,6 +2221,7 @@ export interface Translations {
       onPhoneLink: string;
       onPhoneQr: string;
       before: {
+        company: (values: { name: string }) => string;
         title: string;
         body: string;
         voice: (values: { transcriber: string }) => string;
@@ -2292,6 +2297,16 @@ export interface Translations {
       failed: string;
     };
     state: {
+      notAllowed: (values: { name: string }) => string;
+      notAllowedConnect: (values: { name: string }) => string;
+      noAccess: (values: { name: string }) => string;
+      retired: (values: { name: string }) => string;
+      paused: (values: { name: string }) => string;
+      cannotWork: (values: { name: string }) => string;
+      connectedProtected: (values: {
+        name: string;
+        telegramName: string;
+      }) => string;
       sectionPaused: string;
       none: string;
       preparing: string;
@@ -2309,6 +2324,7 @@ export interface Translations {
       conflictStopped: string;
       conflictWebhook: string;
       afterConflict: {
+        agent: (values: { time: string }) => string;
         chat: (values: { time: string }) => string;
         custom_agent: (values: { time: string }) => string;
       };

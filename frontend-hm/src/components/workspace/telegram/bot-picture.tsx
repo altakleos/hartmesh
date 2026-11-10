@@ -10,7 +10,9 @@ export function BotPicture({ target }: { target: AgentTarget }) {
   const { initials, color } =
     target.kind === "custom_agent"
       ? pictureOf(target.name, target.name)
-      : { initials: "", color: CHAT_COLOR };
+      : target.kind === "agent"
+        ? pictureOf(target.name, target.id)
+        : { initials: "", color: CHAT_COLOR };
   return (
     <span
       aria-hidden="true"

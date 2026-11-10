@@ -682,6 +682,20 @@ export function TelegramSetupDialog({ target }: { target: AgentTarget }) {
                 </div>
               )}
               <TheParagraph hasBot={(data?.bots.length ?? 0) > 0} />
+              {target.kind === "agent" &&
+              data?.read_by_others.includes(target.id) ? (
+                <p className="text-sm">
+                  {strings.setup.before.company({ name })}
+                </p>
+              ) : null}
+              {target.kind === "agent" &&
+              data?.policies.some(
+                (policy) =>
+                  policy.instance_id === target.id &&
+                  policy.policy === "protected",
+              ) ? (
+                <p className="text-sm">{strings.setup.protected({ name })}</p>
+              ) : null}
               <StepOne target={target} name={name} />
               <StepTwo
                 target={target}
