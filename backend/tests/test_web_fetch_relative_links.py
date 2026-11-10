@@ -126,7 +126,13 @@ def test_invalid_document_base_does_not_lose_valid_relative_links(base):
         '<a href="https://example.com/next">Outer <a href="https://example.com/inner">Inner</a> Tail</a>',
     ],
 )
-def test_url_resolution_preserves_malformed_markup_extraction(fragment):
+def test_url_resolution_preserves_malformed_markup_extraction(fragment, monkeypatch):
+    from deerflow.utils import readability
+
+    # Compare the real Node parser on both paths, independently of a previous
+    # test's cached missing-executable/probe outcome. Restore that state afterward.
+    monkeypatch.setattr(readability, "_readability_js_available_cached", None)
+    monkeypatch.setattr(readability, "_readability_js_launch_failed", False)
     html = _article(fragment + '<a href="../next">Next</a>')
     extractor = ReadabilityExtractor()
     assert extractor.extract_article(html, url=PAGE_URL).to_markdown() == extractor.extract_article(html).to_markdown().replace("(../next)", "(https://example.com/next)")
