@@ -69,3 +69,9 @@ async def test_snapshot_fresh_headers_json_and_public_sse_decoder_workers_stay_o
         if stream is not None:
             await stream.aclose()
         await owner.stop()
+
+
+async def test_structured_error_replay_and_snapshot_remain_loop_safe():
+    from test_channel_run_error_evidence import test_scoped_error_retains_codes_and_discards_native_wording
+
+    await test_scoped_error_retains_codes_and_discards_native_wording()
