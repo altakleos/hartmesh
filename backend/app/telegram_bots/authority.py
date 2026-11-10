@@ -36,6 +36,8 @@ class LiveOwnerCheck(Protocol):
 
     async def __call__(self, owner_user_id: str, writer: AsyncSession) -> None: ...
 
+    def check_snapshot(self, user, disabled_identities) -> None: ...
+
 
 @dataclass(frozen=True)
 class _PreparedLiveOwner:
@@ -44,6 +46,33 @@ class _PreparedLiveOwner:
     sign_on_only_mode: bool
     _users: object
     _bind: object
+
+    def check_snapshot(self, user, disabled_identities) -> None:
+        """Validate account facts returned by the caller's one final SQL read.
+
+        Match the auth repository's local/legacy-provider identity semantics;
+        an unrelated provider's identical subject cannot disable a local user.
+        No I/O follows the caller's grant, policy and account snapshot.
+        """
+        from app.gateway.auth.mode import account_refusal
+        from deerflow.config.auth_config import LOCAL_ACCOUNT_ISSUER
+        from deerflow.persistence.user.access import issuer_key, local_account
+
+        if user is None or user.id != self.owner_user_id:
+            raise AccessOff
+        disabled_at = None
+        for fact in disabled_identities:
+            if fact is None:
+                continue
+            if local_account(user):
+                matches = fact.issuer == LOCAL_ACCOUNT_ISSUER and fact.subject == user.id
+            else:
+                matches = fact.issuer != LOCAL_ACCOUNT_ISSUER and fact.subject == user.oauth_id and (not user.oauth_issuer or fact.issuer == issuer_key(user.oauth_issuer))
+            if matches:
+                disabled_at = fact.disabled_at
+                break
+        if account_refusal(self._users._row_to_user(user, disabled_at), sign_on_only_mode=self.sign_on_only_mode) is not None:
+            raise AccessOff
 
     async def __call__(self, owner_user_id: str, writer: AsyncSession) -> None:
         from app.gateway.auth.mode import account_refusal

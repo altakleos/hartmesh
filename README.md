@@ -1970,7 +1970,9 @@ cleanup when migrating from legacy metadata credentials.
 Employee Telegram policy can be read and stored through the browser-session API
 by a person with both Manage and Inspect. Personal assistants use their access
 settings instead. Persistent-agent bot creation remains unavailable while its
-delivery integration is being completed.
+delivery integration is being completed. The host publication path checks the
+connecting person's current access and original instance conversation binding,
+and carries their stored time zone into the request.
 Stored employee policy also governs existing instance links: protected messages
 carry Telegram's content protection, and switching Telegram off stops polling.
 Restoring it discards messages accumulated while it was off.

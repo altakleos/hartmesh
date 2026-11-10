@@ -544,43 +544,9 @@ profiles and strangers are in [the bot lifecycle](../../docs/TELEGRAM_BOT_LIFECY
 Read it before changing `recovery.py`, `recovery_authority.py`, `threads.py`, `polling.py`,
 `supervisor.py`, `profile.py`, `avatar.py`, `strangers.py`, or those paths of `links.py`.
 
-Instance conversation preparation uses the existing `AgentConversations` service
-as the binding's human owner. Preserve the saved creation identity and drain its
-writer before cancellation returns. Current Use precedes execution readiness and
-resident admission; `work=False` reserves no workspace. Both the authoritative
-Gateway projection and in-process binding must match the target before mapping.
-The browser add route still refuses instance targets until their complete delivery
-and policy paths are available.
-
-`policy.py` stores employee Telegram settings in the existing policy table. Its
-reads and upserts drain admitted SQL through cancellation. Browser policy routes
-require a session, route ceilings and current Manage plus Inspect; personal
-assistants have no policy. The upsert borrows its writer for a fresh human and
-locked instance/grant admission on the authority's exact engine; no second
-session or provider call belongs in that writer. Counts intersect Use grants with connected links.
-List restrictions and privacy indicators include only Use-visible instances,
-including those without bots. A view without Manage always has other readers;
-for managers, inspect the current grants instead of inferring from custody.
-
-Delivery checks current instance policy at claim, each part and raw transport.
-Off skips pending delivery; protected strengthens saved parts before sending.
-Instance raw-send fences preflight the live host authority, then read link,
-instance, Use grant, custody, policy and discard intent in one final SQL snapshot;
-no separate grant/policy refresh can publish an earlier protection decision.
-Lifecycle notices retain exact destination/revision and optional expected policy
-through SDK limiter waits. Live instance previews additionally need current Use;
-protected policies admit no draft, including voice preparation. Optional fixed
-lifecycle notices can still explain disabled access, with protection preserved.
-Policy-off reconciliation stops polling after its one bounded notice and ends
-pending work without consuming callbacks. Restoration drops buffered updates;
-policy notice values and transition events prevent repeated announcements.
-The policy writer records a unique `notices.policy_discard` intent on every
-instance link in the same transaction as off. It locks links in ID order before
-the policy row; discard acknowledgement uses link → policy and never takes an
-instance/grant lock afterward. Restoration and startup retain that intent through
-constructor/SQL failures, end pending work without consuming callbacks, and
-confirm the negative-offset result with its positive successor before clearing
-only the captured intent. The poll owner retains fetched/confirmed state through
-SQL acknowledgement retries; a new intent retires an older poll before admission.
+Instance conversation/publication and employee-policy authority use the same
+host binding and current grant. Read [their lifecycle rules](../../docs/TELEGRAM_BOT_LIFECYCLE.md#instance-conversations-and-policy)
+before changing `publication_authority.py`, `policy.py`, or instance delivery.
+The browser add route remains closed pending complete files and presentation.
 
 Managed turns run with `recursion_limit` 1000 (`EXECUTION_RUN_CONFIG` in `app/channels/manager.py`), matching web chats and scheduled runs; a configured channel session value overrides it and the Gateway clamps to `max_recursion_limit`.

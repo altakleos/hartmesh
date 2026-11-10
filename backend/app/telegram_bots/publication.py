@@ -237,7 +237,9 @@ def channel_execution_scope(record: PublicationRecord) -> ChannelExecutionScope:
 
 def _channel_scope(record):
     scope = record.scope
-    return ChannelExecutionScope(record.publication_id, scope.owner_user_id, scope.connection_id, str(scope.chat_id), scope.thread_id, scope.endpoint_id, scope.assistant_id, scope.agent_name)
+    return ChannelExecutionScope(
+        record.publication_id, scope.owner_user_id, scope.connection_id, str(scope.chat_id), scope.thread_id, scope.endpoint_id, scope.assistant_id, scope.agent_name, instance_id=scope.agent_ref if scope.agent_kind == "instance" else None
+    )
 
 
 class PublicationCoordinator:
@@ -366,7 +368,17 @@ class PublicationCoordinator:
             after_response=lambda: admission.authorize("thread_read"),
         )
         value = response.body
-        if response.status_code != 200 or type(value) is not dict or value.get("thread_id") != thread_id or value.get("owner_user_id") != link.owner_user_id or "agent_instance" not in value or value["agent_instance"] is not None:
+        if response.status_code != 200 or type(value) is not dict or value.get("thread_id") != thread_id or value.get("owner_user_id") != link.owner_user_id or "agent_instance" not in value:
+            _refuse()
+        if link.agent_kind == "instance":
+            binding = value["agent_instance"]
+            if type(binding) is not dict or binding.get("id") != link.agent_ref:
+                _refuse()
+            # The host attempt separately checks its original SQL binding on
+            # both sides of this HTTP read. Editable metadata confers nothing.
+            admission.check("thread_read")
+            return
+        if value["agent_instance"] is not None:
             _refuse()
         metadata = value.get("metadata")
         expected = link.agent_ref if link.agent_kind == "custom_agent" else None
@@ -405,6 +417,17 @@ class PublicationCoordinator:
         human_kwargs = {}
         if record.owner_callback_id is not None or any("submission" in row.route_basis for row in origins):
             text, human_kwargs, files = await self.inbox.read_publication_message(record, guard=create_guard)
+        if link.agent_kind == "instance":
+            from deerflow.persistence.telegram_bots.model import TelegramPersonSettingsRow
+
+            async def timezone():
+                async with self.inbox.session_factory() as session:
+                    settings = await session.get(TelegramPersonSettingsRow, link.owner_user_id)
+                    if settings is None:
+                        _refuse()
+                    return settings.timezone
+
+            human_kwargs = {**human_kwargs, "person_timezone": await await_drained(timezone())}
         message = InboundMessage(
             channel_name="telegram",
             chat_id=str(link.chat_id),

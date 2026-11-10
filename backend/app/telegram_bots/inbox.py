@@ -234,7 +234,7 @@ class PublicationScope:
     link_id: str
     owner_user_id: str
     bot_id: int
-    agent_kind: Literal["lead_agent", "custom_agent"]
+    agent_kind: Literal["lead_agent", "custom_agent", "instance"]
     agent_ref: str
     assistant_id: Literal["lead_agent"]
     agent_name: str | None
@@ -254,12 +254,14 @@ class PublicationScope:
             or self.chat_id != self.telegram_user_id
             or type(self.binding_generation) is not int
             or self.binding_generation < 0
-            or self.agent_kind not in {"lead_agent", "custom_agent"}
+            or self.agent_kind not in {"lead_agent", "custom_agent", "instance"}
             or self.assistant_id != "lead_agent"
             or self.agent_kind == "lead_agent"
             and (self.agent_ref != "lead_agent" or self.agent_name is not None)
             or self.agent_kind == "custom_agent"
             and (type(self.agent_name) is not str or self.agent_name != self.agent_ref)
+            or self.agent_kind == "instance"
+            and (self.agent_name is not None or re.fullmatch(r"[0-9a-f]{32}", self.agent_ref) is None)
             or type(self.endpoint_id) is not str
             or not _PUBLICATION_DIGEST.fullmatch(self.endpoint_id)
         ):
