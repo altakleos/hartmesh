@@ -294,11 +294,13 @@ async def test_roles_route_serves_the_template_list_or_the_tenant_file(tmp_path,
 
     from app.gateway import deps
     from app.gateway.routers import agent_instances as routes
+    from deerflow.agent_instances import roles as role_catalog
     from deerflow.config.app_config import AppConfig
     from deerflow.skills.types import SkillCategory
 
     config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}, "tenant_bundle": {"path": str(tmp_path)}, "ui": {"roles": [_role()]}})
     monkeypatch.setattr("deerflow.config.app_config.get_app_config", lambda: config)
+    monkeypatch.setattr(role_catalog, "get_app_config", lambda: config)
     monkeypatch.setattr(
         "deerflow.agents.lead_agent.prompt.get_enabled_skills_for_config", lambda *_args, **_kwargs: [SimpleNamespace(name="data-analysis", category=SkillCategory.PUBLIC), SimpleNamespace(name="private-value", category="custom")]
     )
