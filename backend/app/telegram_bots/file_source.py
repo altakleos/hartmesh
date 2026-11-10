@@ -76,6 +76,26 @@ def media_source(files):
     return {"output_files": [{"path": file["path"], "sha256": None} for file in files]}
 
 
+def validate_export_scope(agent_kind, files):
+    if agent_kind != "instance" and any(file.get("state") == "export" for file in files):
+        raise ValueError("publication-source-conflict") from None
+
+
+async def describe_output(record, path, *, http_owner, check):
+    """Instance plans retain only a path; human export happens in the sender."""
+    await check()
+    if record.scope.agent_kind == "instance":
+        return {"path": path, "filename": PurePosixPath(path).name, "size": None, "mime_type": "application/octet-stream", "state": "export"}
+    try:
+        metadata = await http_owner.describe_artifact(record.scope.owner_user_id, record.scope.thread_id, path, before_dispatch=check)
+        if metadata.path != path:
+            raise ValueError("publication-source-conflict")
+        return {"path": path, "filename": metadata.filename, "size": metadata.size, "mime_type": metadata.mime_type, "state": "ready"}
+    except Exception:
+        await check()
+        return {"path": path, "filename": PurePosixPath(path).name, "size": None, "mime_type": "application/octet-stream", "state": "unavailable"}
+
+
 def prepare_file_reply(record, output, *, files, capacity, max_bytes, display=None, conversation_url=None):
     from app.telegram_bots.files import plan_output_files
     from app.telegram_bots.inbox import publication_identity
@@ -86,6 +106,7 @@ def prepare_file_reply(record, output, *, files, capacity, max_bytes, display=No
     paths = qualify_file_output(record, output)
     if type(files) is not list or tuple(file.get("path") for file in files) != paths:
         raise ValueError("publication-source-conflict")
+    validate_export_scope(record.scope.agent_kind, files)
     result = output.output
     frozen = freeze_reply_presentation(result.source.text, text_sha256=result.output_evidence.text_sha256) if result.state == "complete" else None
     answer = "".join(chunk.visible_text for chunk in frozen.chunks) if frozen is not None else ""
@@ -246,6 +267,7 @@ def validate_file_parts(item):
     if type(version) is not int or version < 0:
         raise ValueError
     for value in item.parts:
+        validate_export_scope(payload["reply_basis"]["publication"]["scope"]["agent_kind"], value.get("files", []))
         if type(value) is not dict or type(value.get("part_id")) is not str or len(value["part_id"]) != 32 or any(char not in "0123456789abcdef" for char in value["part_id"]):
             raise ValueError
         if (
@@ -384,7 +406,7 @@ async def plan_file_reply(source, record, link, output, *, guard, shown=None):
         paths = qualify_file_output(record, output)
     except ValueError:
         return None
-    if source._outbox is None or source._http_owner is None:
+    if source._outbox is None or source._http_owner is None and record.scope.agent_kind != "instance":
         return None
     identity = publication_identity(record)
     if shown is None and source._file_output_active is not None and source._file_output_active(record, link):
@@ -401,19 +423,7 @@ async def plan_file_reply(source, record, link, output, *, guard, shown=None):
     existing = await source._outbox.read_display_primary(record, output=output, guard=guard)
     if existing is not None:
         return existing
-    files = []
-    for path in paths:
-        await check()
-        try:
-            metadata = await source._http_owner.describe_artifact(record.scope.owner_user_id, record.scope.thread_id, path, before_dispatch=check)
-            if metadata.path != path:
-                raise ValueError("publication-source-conflict")
-            files.append({"path": path, "filename": metadata.filename, "size": metadata.size, "mime_type": metadata.mime_type, "state": "ready"})
-        except Exception:
-            # Failure to read metadata cannot erase an independently verified
-            # text answer. Lifetime failure is rechecked before any writer.
-            await check()
-            files.append({"path": path, "filename": PurePosixPath(path).name, "size": None, "mime_type": "application/octet-stream", "state": "unavailable"})
+    files = [await describe_output(record, path, http_owner=source._http_owner, check=check) for path in paths]
     display = None
     if shown is not None:
         saved = take_shown_preview(shown, publication_identity=identity, run_id=record.run_id)

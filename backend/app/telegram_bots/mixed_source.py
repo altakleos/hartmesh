@@ -4,8 +4,7 @@ from copy import deepcopy
 
 
 async def prepare_mixed_files(record, source, *, http_owner, guard, capacity, max_bytes, conversation_url=None):
-    from pathlib import PurePosixPath
-
+    from app.telegram_bots.file_source import describe_output
     from app.telegram_bots.human_input_source import check_qualified_request, mixed_file_paths
     from app.telegram_bots.links import prepare_publication_guard
 
@@ -18,23 +17,13 @@ async def prepare_mixed_files(record, source, *, http_owner, guard, capacity, ma
         await prepare_publication_guard(guard)
         check_qualified_request(source, record)
 
-    files = []
-    for path in paths:
-        await check()
-        try:
-            metadata = await http_owner.describe_artifact(record.scope.owner_user_id, record.scope.thread_id, path, before_dispatch=check)
-            if metadata.path != path:
-                raise ValueError
-            files.append({"path": path, "filename": metadata.filename, "size": metadata.size, "mime_type": metadata.mime_type, "state": "ready"})
-        except Exception:
-            await check()
-            files.append({"path": path, "filename": PurePosixPath(path).name, "size": None, "mime_type": "application/octet-stream", "state": "unavailable"})
+    files = [await describe_output(record, path, http_owner=http_owner, check=check) for path in paths]
     await check()
     return {"files": files, "capacity": capacity, "max_bytes": max_bytes, "conversation_url": conversation_url}
 
 
 def prepare_mixed_reply(record, source_basis, *, parts, keyboard, inputs, file_plan):
-    from app.telegram_bots.file_source import media_source
+    from app.telegram_bots.file_source import media_source, validate_export_scope
     from app.telegram_bots.files import plan_output_files
     from app.telegram_bots.human_input_source import freeze_human_input_parts, mixed_file_paths, validate_request_basis
     from app.telegram_bots.inbox import publication_identity, validate_publication_inputs
@@ -45,6 +34,7 @@ def prepare_mixed_reply(record, source_basis, *, parts, keyboard, inputs, file_p
     validate_publication_inputs(record, inputs)
     if type(file_plan) is not dict or set(file_plan) != {"files", "capacity", "max_bytes", "conversation_url"} or type(file_plan["files"]) is not list or tuple(file.get("path") for file in file_plan["files"]) != paths:
         raise ValueError("human-input-source-conflict")
+    validate_export_scope(record.scope.agent_kind, file_plan["files"])
     ui, controls = freeze_human_input_parts(record, request, parts=parts, keyboard=keyboard)
     plan = plan_output_files(file_plan["files"], answer_visible="", capacity=file_plan["capacity"], max_bytes=file_plan["max_bytes"], caption_allowed=False)
     anchor = ui[0]["reply_to_message_id"]

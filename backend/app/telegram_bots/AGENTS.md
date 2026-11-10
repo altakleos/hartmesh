@@ -481,8 +481,8 @@ outcome and runs again. Send again is a new turn, and a restart forgets it.
 
 `file_source.py` qualifies V6 file replies from complete matched output
 inventory. Metadata grants no authority. Artifact HEAD/GET retain owner/Space
-checks and client response ownership. Instance exports
-use [human grants](../../docs/TELEGRAM_TURN_EXECUTION.md#instance-file-writes).
+checks and response ownership. Instance plans/exports use
+[human grants](../../docs/TELEGRAM_TURN_EXECUTION.md#instance-file-writes).
 `outbound.py` reserves the whole batch
 before reading, records first-read SHA before upload and refuses changed retries.
 Every SDK dispatch rechecks the artifact door after limiter waits; thread/run

@@ -179,6 +179,14 @@ Native work drains through repeated cancellation. This bridge supplies read
 authority only: the sender must still own its claimed original output source,
 reserve its byte budget before export and retain it through transport cleanup.
 
+File-only, mixed-request and explicit output-retry planners use a closed `export`
+descriptor with unknown size for instance outputs. Planning performs no artifact
+HEAD or Home read. Each member's ceiling is `max_outbound_bytes`; deterministic
+album groups fit configured capacity before any export. The default budget splits
+five photos into four and one, ten into four/four/two; the minimum sends singles.
+A lower capacity after restart uses the saved-part replacement ledger. Ordinary
+and custom-agent sources cannot adopt export descriptors, including retry events.
+
 `instance_file_authority.prepare_file_write` owns current Use before execution
 readiness and Home diagnostics. It captures the installed same-engine instance
 and file services, original instance/Home generations and Telegram binding.
