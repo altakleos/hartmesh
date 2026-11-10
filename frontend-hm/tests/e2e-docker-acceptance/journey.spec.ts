@@ -83,6 +83,10 @@ test("production Docker login, upload, streamed tools, files, history and confir
   await input.fill(
     "acceptance:file — read my upload and create the synthetic artifact.",
   );
+  // The textbox can appear before model discovery enables submission.
+  await expect(
+    page.getByRole("button", { name: "Submit", exact: true }),
+  ).toBeEnabled();
   await input.press("Enter");
   const stream = await streamed;
   expect(stream.status()).toBe(200);
