@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import weakref
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
@@ -52,6 +53,10 @@ class _State:
     activities: dict = field(default_factory=dict)
     cursor: str | None = None
     final_read: dict = field(default_factory=dict)
+    progress_stage: int = 0
+    workspace_since: float | None = None
+    workspace_long: bool = False
+    workspace_timer: asyncio.Task | None = None
 
 
 def _final_read(output):
@@ -127,8 +132,9 @@ class ObservedPreview:
 
 
 class RunObserver:
-    def __init__(self, *, coordinator, http_owner, capture_attempt, is_current):
+    def __init__(self, *, coordinator, http_owner, capture_attempt, is_current, clock=time.monotonic, sleep=asyncio.sleep):
         self.coordinator, self.http_owner, self.capture_attempt, self.is_current = coordinator, http_owner, capture_attempt, is_current
+        self._clock, self._sleep = clock, sleep
         self._states, self._operations = {}, set()
         self._closed = False
 
@@ -216,10 +222,13 @@ class RunObserver:
                         await self._apply_stop(state)
             self._check(state)
             state.stream = facade.join_run(state.record.run_id, after_event_id=state.cursor)
+            self._start_workspace_timer(state, on_line)
             async for part in state.stream:
                 self._check(state)
                 if state.stop_accepted:
                     continue
+                if part.event == "custom":
+                    await self._progress(state, part.data, on_line)
                 if part.event in {"messages", "messages-tuple"}:
                     preview = self._preview(state, part.data)
                     if preview is not None:
@@ -241,12 +250,67 @@ class RunObserver:
             state.active = False
             raise
         finally:
-            state.watching = False
-            if state.stream is not None:
-                await await_drained(state.stream.aclose())
-                state.stream = None
-            if not state.active and self._states.get(state.key) is state:
-                self._states.pop(state.key)
+
+            async def cleanup():
+                state.watching = False
+                await self._stop_workspace_timer(state)
+                if state.stream is not None:
+                    await state.stream.aclose()
+                    state.stream = None
+                if not state.active and self._states.get(state.key) is state:
+                    self._states.pop(state.key)
+
+            await await_drained(cleanup())
+
+    async def _progress(self, state, data, on_line):
+        # Host progress is advisory; only this exact instance run and the closed
+        # runtime vocabulary select text. Model/tool payloads are never copied.
+        if (
+            state.link.agent_kind != "instance"
+            or type(data) is not dict
+            or set(data) != {"type", "run_id", "stage", "at_ms"}
+            or data["type"] != "turn_progress"
+            or data["run_id"] != state.record.run_id
+            or type(data["stage"]) is not str
+            or data["stage"] not in {"preparing", "workspace_starting", "thinking"}
+            or type(data["at_ms"]) is not int
+            or data["at_ms"] < 0
+        ):
+            return
+        stage = {"preparing": 0, "workspace_starting": 1, "thinking": 2}[data["stage"]]
+        if stage <= state.progress_stage:
+            return
+        state.progress_stage = stage
+        if stage == 1:
+            state.workspace_since = self._clock()
+            await on_line("start.ws_1", {})
+            self._check(state)
+            self._start_workspace_timer(state, on_line)
+        else:
+            await self._stop_workspace_timer(state)
+            self._check(state)
+            await on_line(None, {})
+
+    def _start_workspace_timer(self, state, on_line):
+        if state.progress_stage != 1 or state.workspace_since is None or state.workspace_long or state.workspace_timer is not None and not state.workspace_timer.done():
+            return
+
+        async def later():
+            await self._sleep(max(0, 30 - (self._clock() - state.workspace_since)))
+            self._check(state)
+            if state.progress_stage != 1 or state.stop_accepted:
+                return
+            await on_line("start.ws_30", {})
+            self._check(state)
+            state.workspace_long = True
+
+        state.workspace_timer = asyncio.create_task(later(), name="telegram-workspace-progress")
+
+    async def _stop_workspace_timer(self, state):
+        task, state.workspace_timer = state.workspace_timer, None
+        if task is not None:
+            task.cancel()
+            await await_drained(asyncio.gather(task, return_exceptions=True))
 
     @staticmethod
     def _activity_line(name, args):

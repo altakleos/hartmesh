@@ -221,7 +221,7 @@ async def fixed_source(host, link, key):
 
         view = await await_drained(host.authority.instance_view(link))
         values = {"name": view.name, "custody": view.custody, "reader_is_administrator": await await_drained(is_administrator(link.owner_user_id))}
-    elif link.agent_kind == "instance" and key in {"busy.two_conversations", "busy.starting_elsewhere", "refused.restarting", "refused.files_busy", "start.ws_failed", "refused.files_full"}:
+    elif link.agent_kind == "instance" and key in {"start.ws_1", "start.ws_30", "busy.two_conversations", "busy.starting_elsewhere", "refused.restarting", "refused.files_busy", "start.ws_failed", "refused.files_full"}:
         from app.telegram_bots.authority import get_local_provider, is_administrator
         from deerflow.agent_instances.contract import AgentPermission
 

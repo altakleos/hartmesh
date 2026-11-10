@@ -120,6 +120,9 @@ bound to the original refusal and publication; the saved closed outcome retains
 that scope. Retry creation continues to use the original host refusal.
 
 `streaming.py` consumes only opaque qualified lead previews from `progress.py`.
+Exact instance `turn_progress` frames select fixed workspace-starting lines.
+The 30-second timer belongs to the original observer; stage advance, Stop and
+retirement suppress it, and timer plus stream cleanup drains as one unit.
 Raw source offsets and UTF-16 chunk limits stay separate. Earlier acknowledged
 edit parts remain fixed; the newest anchor may be replaced. Drafts coalesce,
 keep alive and redisplay after chat sends. Thinking placeholders require an actual

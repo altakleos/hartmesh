@@ -1616,6 +1616,9 @@ class ChatTurns:
             await turn.presentation.preview(value)
 
     async def _activity(self, turn, key, values):
+        if key in {"start.ws_1", "start.ws_30"}:
+            source = await self._source(turn, key)
+            values = source["values"]
         if self._current(turn) and getattr(turn, "presentation", None) is not None:
             await turn.presentation.activity(key, values)
 
