@@ -243,15 +243,16 @@ async def fixed_source(host, link, key):
         "file.saved_ask",
         "file.saved",
         "file.too_large_in",
+        "file.no_access",
     }:
         from app.telegram_bots.authority import get_local_provider, is_administrator
         from deerflow.agent_instances.contract import AgentPermission
 
         view = await await_drained(host.authority.instance_view(link))
         values = {"name": view.name, "reader_is_administrator": await await_drained(is_administrator(link.owner_user_id))}
-        if key in {"refused.files_full", "net.blocked_ask", "file.files_full", "file.too_large_in"}:
+        if key in {"refused.files_full", "net.blocked_ask", "file.files_full", "file.too_large_in", "file.no_access"}:
             manager = bool(view.permissions & AgentPermission.MANAGE)
-            person = await await_drained(get_local_provider().get_user(view.supervisor.subject_id)) if not manager or key == "net.blocked_ask" else None
+            person = await await_drained(get_local_provider().get_user(view.supervisor.subject_id)) if not manager or key in {"net.blocked_ask", "file.no_access"} else None
             values.update(reader_is_manager=manager, supervisor=person.email if person is not None else None)
     elif key == "refused.interrupted":
         values = {"name": (await host.prepare_ingress_values(link))["name"]}

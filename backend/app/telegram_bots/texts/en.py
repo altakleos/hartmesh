@@ -10,6 +10,7 @@ TEXTS: dict[str, str] = {
     "file.files_busy": "{name}'s files are being changed right now. The service cannot confirm whether {file} was saved. Try Send again in a few minutes.",
     "file.unconfirmed": "The service cannot confirm whether {file} was saved. Try Send again.",
     "file.not_active": "{name} is paused or retired, so files cannot be added.",
+    "file.no_access": '{file} is ready. To open files that {name} produces you need "Can see all work". Ask {supervisor}.',
     "file.bad_name": "A file with that name cannot be saved. Rename it and send it again.",
     "file.saving": "Saving {file} for {name}…",
     "file.waiting": "Still saving {file} for {name}…",

@@ -429,7 +429,11 @@ class ModelSource:
                 from app.telegram_bots.producer import _canonical_primary
 
                 fresh = await self._read_output(proof.record, private.link)
-                if fresh is None or _canonical_primary(fresh.model_dump(mode="json")) != _canonical_primary(proof.output.model_dump(mode="json")) or private.part["source_ref"].get("key") not in {"file.out_failed", "file.too_large_out"}:
+                if (
+                    fresh is None
+                    or _canonical_primary(fresh.model_dump(mode="json")) != _canonical_primary(proof.output.model_dump(mode="json"))
+                    or private.part["source_ref"].get("key") not in {"file.out_failed", "file.too_large_out", "file.no_access"}
+                ):
                     raise SourceGone
                 return None
             if proof.kind in {"human_input", "human_input_files"}:

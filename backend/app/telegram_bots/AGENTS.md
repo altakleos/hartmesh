@@ -479,20 +479,16 @@ notice is that outcome, and `_file_notice` records it, so no later attempt reads
 tells the person twice or makes the notice false. A read nobody was told about is no
 outcome and runs again. Send again is a new turn, and a restart forgets it.
 
-`file_source.py` qualifies V6 file replies from complete matched output
-inventory. Metadata grants no authority. Artifact HEAD/GET retain owner/Space
-checks and response ownership. Instance plans/exports use
-[human grants](../../docs/TELEGRAM_TURN_EXECUTION.md#instance-file-writes).
-`outbound.py` reserves the whole batch
-before reading, records first-read SHA before upload and refuses changed retries.
-Every SDK dispatch rechecks the artifact door after limiter waits; thread/run
-rights alone do not cover independently revoked Space access. Classification and fallback replace saved unsent parts, preserving every ACK.
-`outbound_upload.py` uses distinct multipart attachments with bounded memory-only
-readers, emptied after SDK drain so retained request cycles keep no leased bytes.
-It returns closed failures; drain native users before releasing `OutputBatch`.
-Failed HTTP closes retain only member-close signals; the shared charge releases
-after both transport cleanup and the batch owner settle. File Retry repairs
-saved delivery in its original thread without publishing another model input.
+`file_source.py` qualifies V6 file replies from complete matched output inventories.
+Metadata grants no authority. Ordinary artifact HEAD/GET retain owner/Space checks
+and client response ownership. Instance planning and direct human exports follow
+[the output contract](../../docs/TELEGRAM_TURN_EXECUTION.md#instance-output-delivery).
+`outbound.py` reserves each full batch before reads, records first-read SHA before
+upload and refuses changed retries. SDK dispatch reacquires current file rights
+after limiter waits. Classification/fallback preserve every ACK.
+`outbound_upload.py` owns distinct bounded memory-only readers through SDK drain;
+failed HTTP cleanup retains its shared charge until owner and transport settle.
+File Retry repairs saved delivery in its original thread without new model input.
 
 Transport facts use narrow `update_if_current`; health callbacks supply
 `expected_token_revision`. A no-facts status guard writes no timestamp.
