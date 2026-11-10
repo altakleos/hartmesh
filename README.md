@@ -1973,6 +1973,9 @@ settings instead. Persistent-agent bot creation remains unavailable while its
 delivery integration is being completed. The host publication path checks the
 connecting person's current access and original instance conversation binding,
 and carries their stored time zone into the request.
+Instance presentation names the assistant or employee, explains who can read
+the conversation, and offers web links according to the person's access.
+Role labels require permission to inspect the adopted definition.
 Stored employee policy also governs existing instance links: protected messages
 carry Telegram's content protection, and switching Telegram off stops polling.
 Restoring it discards messages accumulated while it was off.

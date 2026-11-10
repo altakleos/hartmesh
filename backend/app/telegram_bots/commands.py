@@ -55,8 +55,10 @@ class CallbackCommands:
     async def _web_keyboard(self, link):
         from app.telegram_bots.authority import is_administrator
         from app.telegram_bots.pages import page_address
+        from app.telegram_bots.presentation import page_permissions
 
         administrator = await is_administrator(link.owner_user_id) if link.agent_kind == "lead_agent" else False
+        access = await page_permissions(self.services.authority, link) if link.agent_kind == "instance" else {}
         entries = [("web.conversations", "label.open_conversations"), ("web.telegram", "label.open_telegram"), ("web.scheduled", "label.open_scheduled"), ("web.account", "label.open_product")]
         if link.agent_kind == "lead_agent":
             entries = [
@@ -66,9 +68,11 @@ class CallbackCommands:
                 *(([("web.addEmployee", "label.add_employee")]) if administrator else []),
                 *entries[1:],
             ]
+        elif link.agent_kind == "instance":
+            entries = [("web.files", "label.open_files"), ("web.memory", "label.open_memory"), ("web.work", "label.open_work"), ("web.access", "label.open_access"), ("web.agentSettings", "label.open_agent_settings"), *entries]
 
         def prepare():
-            return [[{"label": label, "url": address}] for key, label in entries if (address := page_address(key, link, reader_is_administrator=administrator)) is not None]
+            return [[{"label": label, "url": address}] for key, label in entries if (address := page_address(key, link, reader_is_administrator=administrator, **access)) is not None]
 
         return await await_drained(asyncio.to_thread(prepare))
 
@@ -78,8 +82,12 @@ class CallbackCommands:
 
     async def _presentation(self, word, link):
         values = await self.services.prepare_ingress_values(link)
-        if link.agent_kind not in {"lead_agent", "custom_agent"}:
+        if link.agent_kind not in {"lead_agent", "custom_agent", "instance"}:
             raise CallbackRefused() from None
+        if link.agent_kind == "instance":
+            from app.telegram_bots.presentation import instance_values
+
+            values = await instance_values(self.services.authority, link, product=values["product"])
         if word == "new":
             return {"key": "new.confirm_plain", "values": {}, "keyboard_template": "new.confirm_plain"}
         if word == "settings":
@@ -88,9 +96,9 @@ class CallbackCommands:
                 raise CallbackRefused() from None
             return {"key": "settings.state_basic", "values": {"language": "中文" if settings.locale == "zh-CN" else "English"}, "keyboard": canonical_keyboard(KEYBOARDS["settings.state_basic"](link=link))}
         if word == "help":
-            key = "help.chat" if link.agent_kind == "lead_agent" else "help.custom_agent"
+            key = {"lead_agent": "help.chat", "custom_agent": "help.custom_agent", "instance": "help.agent"}[link.agent_kind]
             transcriber = await self._transcriber()
-            return {"key": key, "values": {"product": values["product"], "agent": values["agent"], "voice_enabled": transcriber is not None}, "keyboard": canonical_keyboard(KEYBOARDS[key](link=link))}
+            return {"key": key, "values": {**values, "voice_enabled": transcriber is not None}, "keyboard": canonical_keyboard(KEYBOARDS[key](link=link))}
         if word == "web":
             return {"key": "web.list", "values": {"product": values["product"]}, "keyboard": canonical_keyboard(await self._web_keyboard(link))}
         if word == "privacy":
@@ -100,7 +108,7 @@ class CallbackCommands:
             keyboard = [[{"label": "label.open_telegram", "url": address}]] if address else []
             transcriber = await self._transcriber()
             named = {} if transcriber is None else {"transcriber": PROVIDER_NAMES[transcriber.provider]}
-            return {"key": "privacy.full", "values": {"product": values["product"], **named}, "keyboard": canonical_keyboard(keyboard)}
+            return {"key": "privacy.full", "values": {**values, **named}, "keyboard": canonical_keyboard(keyboard)}
         raise CallbackRefused() from None
 
     async def handle(self, channel, update, word):

@@ -958,9 +958,13 @@ class TelegramBotChannel(TelegramChannel):
             return
         checker = await self._services.prepare_live_owner(link.owner_user_id)
         values = await self._services.prepare_ingress_values(link)
+        if link.agent_kind == "instance":
+            from app.telegram_bots.presentation import instance_values
+
+            values = await instance_values(self._services.authority, link, product=values["product"])
         if not await self._input_current(link):
             return
-        hello = "hello.chat" if link.agent_kind == "lead_agent" else "hello.custom_agent"
+        hello = ("hello.assistant" if values["custody"] == "personal" else "hello.employee") if link.agent_kind == "instance" else "hello.chat" if link.agent_kind == "lead_agent" else "hello.custom_agent"
         try:
             saved = await await_drained(
                 self._services.links.bind(
@@ -970,7 +974,7 @@ class TelegramBotChannel(TelegramChannel):
                     first_name=message.from_user.first_name,
                     username=message.from_user.username,
                     start_identity={"update_id": update.update_id, "message_id": message.message_id, "chat_id": message.chat_id, "message_thread_id": message.message_thread_id},
-                    hello_parts=[{"source_ref": {"key": hello, "values": {"email": checker.email, "product": values["product"], "agent": values["agent"]}}}, {"source_ref": {"key": "hello.privacy", "values": {}}, "silent": True}],
+                    hello_parts=[{"source_ref": {"key": hello, "values": {**values, "email": checker.email}}}, {"source_ref": {"key": "hello.privacy", "values": {}}, "silent": True}],
                     code=arguments[0] if len(arguments) == 1 else None,
                     check_live_owner=checker,
                 )
@@ -1066,6 +1070,8 @@ class TelegramBotChannel(TelegramChannel):
             await self._cmd_start(update, context)
         elif word in FIXED_COMMANDS:
             await self._on_command(update, context)
+        elif self._admission(update).link.agent_kind == "instance":
+            await self._fixed_reply(update, "cmd.unknown", word)
         else:
             outcome = await await_drained(asyncio.to_thread(slash_skill_outcome, self._admission(update).link, self.command_text(update.message)))
             if outcome == "run":
@@ -1177,9 +1183,11 @@ class TelegramBotChannel(TelegramChannel):
     async def _page_buttons(self, link, keys):
         from app.telegram_bots.authority import is_administrator
         from app.telegram_bots.pages import page_buttons
+        from app.telegram_bots.presentation import page_permissions
 
         administrator = "addEmployee" in keys and await is_administrator(link.owner_user_id)
-        return await await_drained(asyncio.to_thread(page_buttons, keys, link, reader_is_administrator=administrator))
+        access = await page_permissions(self._services.authority, link) if link.agent_kind == "instance" else {}
+        return await await_drained(asyncio.to_thread(page_buttons, keys, link, reader_is_administrator=administrator, **access))
 
     async def _get_download_bot(self):
         return self.bot

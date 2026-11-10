@@ -67,6 +67,8 @@ def _render(
         raise ValueError("custody must be personal, company or None")
     if custody is not None:
         template = variants.get(custody, template)
+    if key == "hello.assistant" and values.get("owner"):
+        template = variants["colleague"]
     if reader_is_administrator:
         template = variants.get(f"{custody}.administrator", variants.get("administrator", template))
     if "supervisor" in values and values["supervisor"] is None:
@@ -105,14 +107,22 @@ def _render(
             template = variants["unwritten"]
         if values.get("waiting"):
             template += variants["waiting"]  # Chinese sentences take no space between them.
-    if key == "privacy.full" and values.get("transcriber") is not None:
-        template += "\n\n" + texts["privacy.voice"]
+    if key in {"hello.assistant", "hello.employee"} and values.get("read_by_others"):
+        first, rest = template.split("\n\n", 1)
+        template = first + " " + texts["privacy.company"] + "\n\n" + rest
+    if key == "privacy.full":
+        if values.get("read_by_others"):
+            template += "\n\n" + texts["privacy.company"]
+        if values.get("protected"):
+            template += "\n\n" + texts["privacy.protected"]
+        if values.get("transcriber") is not None:
+            template += "\n\n" + texts["privacy.voice"]
     if values.get("voice_enabled") is False:
-        template = variants.get("no_voice", template)
+        template = variants.get(f"{custody}.no_voice", variants.get("no_voice", template))
 
     # A role may be absent. Only product-owned punctuation and its empty line go.
     if values.get("role", True) in (None, ""):
-        template = template.replace(" ({role})", "").replace(": {role}", "")
+        template = template.replace(" ({role})", "").replace(": {role}", "").replace("（{role}）", "").replace("：{role}", "")
         values["role"] = ""
     if values.get("role_description", True) in (None, ""):
         template = template.replace("{role_description}\n", "").replace("\n{role_description}", "")

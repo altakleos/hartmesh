@@ -1033,6 +1033,10 @@ class TelegramSupervisor:
         from app.telegram_bots.pages import page_address
         from deerflow.config.agents_config import load_agent_config
 
+        if link.agent_kind == "instance":
+            identity = await self.authority.instance_identity(link)
+            return {"product": product_name(self._app_config), "name": identity.name, "agent": identity.name, "custody": identity.custody, "memory_url": None}
+
         def prepare():
             product = product_name(self._app_config)
             name = product

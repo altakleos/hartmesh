@@ -17,6 +17,9 @@ _TABS = {"web.access": "access", "web.files": "files", "web.memory": "memory", "
 _MANAGE = {"web.access", "web.agentSettings"}
 WEB_PAGE_BUTTONS_MAX = 3
 _PAGE_BUTTONS = {
+    "work": ("web.work", "label.open_work"),
+    "access": ("web.access", "label.open_access"),
+    "agentSettings": ("web.agentSettings", "label.open_agent_settings"),
     "files": ("web.files", "label.open_files"),
     "memory": ("web.memory", "label.open_memory"),
     "conversations": ("web.conversations", "label.open_conversations"),
@@ -126,12 +129,12 @@ def page_address(
     return workspace("/instances", instance=link.agent_ref, tab=_TABS[key])
 
 
-def page_buttons(keys: tuple[str, ...], link: BotLink, *, reader_is_administrator: bool = False) -> list[tuple[str, str]]:
+def page_buttons(keys: tuple[str, ...], link: BotLink, *, reader_is_administrator: bool = False, permissions: AgentPermission | None = None, ceilings: frozenset[str] | None = None) -> list[tuple[str, str]]:
     """(label, address) for a turn's first offers. The model only ever names a key."""
     buttons = []
     for key in keys[:WEB_PAGE_BUTTONS_MAX]:
         page, label = _PAGE_BUTTONS.get(key, (None, None))
-        address = page_address(page, link, reader_is_administrator=reader_is_administrator) if page is not None else None
+        address = page_address(page, link, reader_is_administrator=reader_is_administrator, permissions=permissions, ceilings=ceilings) if page is not None else None
         if address is not None:
             buttons.append((label, address))
     return buttons

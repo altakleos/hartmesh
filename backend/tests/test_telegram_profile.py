@@ -345,7 +345,7 @@ def test_a_font_licence_keeps_every_notice_the_font_carries():
 
 def test_an_unknown_kind_of_bot_owes_nothing_yet():
     sync = ProfileSync(SimpleNamespace())
-    assert not sync._owed(SimpleNamespace(agent_kind="instance", profile_pending=True, profile_version=0))
+    assert not sync._owed(SimpleNamespace(agent_kind="unknown", profile_pending=True, profile_version=0))
 
 
 @pytest.mark.asyncio

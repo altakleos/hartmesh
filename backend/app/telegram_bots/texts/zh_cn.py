@@ -1,6 +1,24 @@
 """Simplified Chinese fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "hello.assistant": (
+        "已以 {email} 连接。此聊天是 {name}，你的 AI 助理（{role}）。其他 Telegram 账号无法在此发消息。\n\n{na"
+        "me} 不会自行开始任何事。像与同事交流一样向 {name} 提问，或说说需要做什么。你在此发送的文件会交给 {name}。\n\n{name}"
+        " 是 AI，可能出错。采取行动前请核实相关信息。"
+    ),
+    "hello.employee": (
+        "已以 {email} 连接。此聊天是 {name}，一位 AI 员工（{role}）。其他 Telegram 账号无法在此发消息。\n\n{na"
+        "me} 不会自行开始任何事。像与同事交流一样向 {name} 提问，或说说需要做什么。你在此发送的文件会交给 {name}。\n\n{name}"
+        " 是 AI，可能出错。采取行动前请核实相关信息。"
+    ),
+    "help.agent": "{name} 是 AI 助理：{role}。\n{role_description}\n\n在此聊天中：\n- 发消息，或发送文件、照片或语音消息\n- /new 开始新对话\n- /stop 停止正在进行的事\n- /settings 设置语言\n\n{name} 不会自行开始任何事。",
+    "privacy.company": "有权查看 {name} 全部工作的人，可以在 {product} 中阅读此对话。你发送的文件保存在 {name} 的文件中，有权查看 {name} 全部工作的人都可以打开。",
+    "privacy.protected": "{name} 的管理者已关闭此聊天的转发和保存功能。{name} 主动发送的消息需要点按“显示”才能查看详情。",
+    "profile.short.agent": "AI 助理。私人聊天：只回答连接此机器人的人。",
+    "profile.description.agent": "{name} 是 AI 助理。此聊天只回答连接此机器人的人。\n\n如果这是你的机器人，请在网页版应用中使用“打开聊天”按钮，然后按“开始”。",
+    "label.open_work": "打开任务",
+    "label.open_access": "打开访问设置",
+    "label.open_agent_settings": "打开设置",
     "policy.protected": "这里已关闭转发和保存。\n{name} 在这里发送的内容不能再转发或保存；{name} 主动发送的消息需点按“显示”后才能查看详情。这是 {name} 的管理者的设置。",
     "policy.unprotected": "转发和保存已恢复。\n{name} 在这里发送的内容可以再次转发和保存，主动发送的消息会直接显示详情。此前发送的消息保持原样。这是 {name} 的管理者的设置。",
     "policy.off": "{name} 的 Telegram 已关闭。\n这是 {name} 的管理者的设置。此聊天将不再回复。{name} 仍在 {product} 网页中。",
@@ -204,5 +222,24 @@ FORMS.update(
         "help.chat": {"no_voice": TEXTS["help.chat"].replace("、照片或语音消息", "或照片")},
         "help.custom_agent": {"no_voice": TEXTS["help.custom_agent"].replace("、照片或语音消息", "或照片")},
         "media.unsupported": {"no_voice": TEXTS["media.unsupported"].replace("语音消息、", "")},
+    }
+)
+
+FORMS.update(
+    {
+        "hello.assistant": {
+            "colleague": (
+                "已以 {email} 连接。此聊天是 {name}，{owner} 的 AI 助理（{role}）。其他 Telegram 账号无法在此发消"
+                "息。\n\n{name} 不会自行开始任何事。像与同事交流一样向 {name} 提问，或说说需要做什么。你在此发送的文件会交给 {name}。\n"
+                "\n{name} 是 AI，可能出错。采取行动前请核实相关信息。"
+            )
+        },
+        "help.agent": {
+            "company": "{name} 是 AI 员工：{role}。\n{role_description}\n\n在此聊天中：\n- 发消息，或发送文件、照片或语音消息\n- /new 开始新对话\n- /stop 停止正在进行的事\n- /settings 设置语言\n\n{name} 不会自行开始任何事。",
+            "no_voice": "{name} 是 AI 助理：{role}。\n{role_description}\n\n在此聊天中：\n- 发消息，或发送文件、照片\n- /new 开始新对话\n- /stop 停止正在进行的事\n- /settings 设置语言\n\n{name} 不会自行开始任何事。",
+            "company.no_voice": "{name} 是 AI 员工：{role}。\n{role_description}\n\n在此聊天中：\n- 发消息，或发送文件、照片\n- /new 开始新对话\n- /stop 停止正在进行的事\n- /settings 设置语言\n\n{name} 不会自行开始任何事。",
+        },
+        "profile.short.agent": {"company": "AI 员工。私人聊天：只回答连接此机器人的人。"},
+        "profile.description.agent": {"company": "{name} 是 AI 员工。此聊天只回答连接此机器人的人。\n\n如果这是你的机器人，请在网页版应用中使用“打开聊天”按钮，然后按“开始”。"},
     }
 )

@@ -172,7 +172,7 @@ class TelegramAuthority:
             raise AuthorityUnavailable
         return await agents.get(actor=PrincipalRef("human", link.owner_user_id), instance_id=link.agent_ref, permission=AgentPermission.USE)
 
-    async def instance_send_policy(self, link: BotLink, *, require_use: bool, bound: bool = True) -> str:
+    async def instance_send_policy(self, link: BotLink, *, require_use: bool, bound: bool = True, require_inspect: bool = False) -> str:
         """Final point-in-time grant, target, policy and discard decision.
 
         Live host authority is checked first. The final joined SQL statement
@@ -215,6 +215,8 @@ class TelegramAuthority:
                     raise AuthorityUnavailable
                 if require_use and (not permissions or not permissions & int(AgentPermission.USE) or status != "active" or pending_discard(current) is not None):
                     raise AgentDenied("The current Telegram send is unavailable")
+                if require_inspect and (not permissions or not permissions & int(AgentPermission.INSPECT)):
+                    raise AgentDenied("The current Telegram presentation is unavailable")
                 if require_use and getattr(getattr(self.app, "state", None), "agent_instances", None) is not agents:
                     raise AuthorityUnavailable
                 if pending_discard(current) is not None and value != "off":
@@ -343,7 +345,8 @@ class TelegramAuthority:
                 return DeliveryEligibility.skip("policy-off")
 
             async def allowed():
-                value = await self.instance_send_policy(current, require_use=target == "ok") if current.agent_kind == "instance" else "allowed"
+                role_visible = any(value.get("source_ref", {}).get("key") in {"hello.assistant", "hello.employee", "help.agent"} and value.get("source_ref", {}).get("values", {}).get("role") for value in selected)
+                value = await self.instance_send_policy(current, require_use=target == "ok", require_inspect=bool(role_visible)) if current.agent_kind == "instance" else "allowed"
                 if value == "off":
                     return DeliveryEligibility.skip("policy-off")
                 if value == "restoring":
