@@ -142,7 +142,7 @@ async def test_unsupported_initial_meanings_are_refused_before_instance_preparat
 
 
 @pytest.mark.asyncio
-async def test_instance_binding_is_refused_without_execution_or_readiness_effects(gateway_environment, monkeypatch):
+async def test_unavailable_instance_binding_is_refused_without_execution_or_readiness_effects(gateway_environment, monkeypatch):
     from app.gateway import agent_conversations
 
     e = gateway_environment
@@ -153,13 +153,13 @@ async def test_instance_binding_is_refused_without_execution_or_readiness_effect
 
     async def no_preparation(*args, **kwargs):
         calls.append(True)
-        raise AssertionError("Creating v1 does not prepare instance execution")
+        raise AssertionError("Unreadable instance binding cannot prepare execution")
 
     monkeypatch.setattr(e.bindings, "binding", bound)
     monkeypatch.setattr(agent_conversations, "execution_for_run", no_preparation)
     with pytest.raises(HTTPException) as failure:
         await launched(e, body())
-    assert failure.value.status_code == 409
+    assert failure.value.status_code == 404
     assert not calls and not e.worker_inputs
 
 

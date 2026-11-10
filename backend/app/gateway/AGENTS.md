@@ -70,6 +70,11 @@ persistence: [details](../../docs/gateway-guidance-details.md#browser-transport-
 
 Channel proof: [input](../../docs/channel-execution.md) and
 [output](../../docs/RUN_OUTPUT_EVIDENCE.md); status alone is insufficient.
+Correlated instance runs retain host `AgentExecution` and normal resident admission.
+Their v1 receipt's custom-agent slot stays null; the durable conversation binding
+owns instance identity. Strict reads refresh current Inspect and exact owner,
+binding/incarnation after source I/O, including acknowledged misses. Ordinary
+Memory reads need startup's exact-store proof; SQL authority never downgrades to it.
 
 Local credentials use conditional/atomic repository writes, never whole-user updates; see `deerflow/persistence/user/AGENTS.md`.
 

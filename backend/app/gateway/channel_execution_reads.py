@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -33,6 +34,58 @@ def channel_read_headers() -> dict[str, str]:
 
 def channel_lookup_unavailable() -> HTTPException:
     return HTTPException(503, "Channel execution lookup is unavailable")
+
+
+@dataclass(frozen=True, eq=False)
+class OrdinaryMemoryThreads:
+    """Startup proof of an ordinary memory store's no-instance lifetime."""
+
+    store: object
+    _retired: bool = field(default=False, init=False)
+
+    def __post_init__(self):
+        from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+
+        if type(self.store) is not MemoryThreadMetaStore:
+            raise TypeError("Ordinary memory thread authority requires its exact store")
+
+    def retire(self):
+        object.__setattr__(self, "_retired", True)
+
+
+async def _thread_scope(request, thread_id, owner):
+    from deerflow.agent_instances.contract import AgentPermission
+    from deerflow.agent_instances.conversations import AgentConversations
+    from deerflow.spaces.contract import PrincipalRef
+
+    store = get_thread_store(request)
+    authority = getattr(request.app.state, "agent_conversations", None)
+    memory = getattr(request.app.state, "channel_memory_threads", None)
+    try:
+        if type(authority) is AgentConversations:
+            if type(memory) is OrdinaryMemoryThreads:
+                memory.retire()
+        elif not (authority is None and type(memory) is OrdinaryMemoryThreads and not memory._retired and memory.store is store):
+            raise channel_lookup_unavailable()
+        row = await store.get(thread_id, user_id=None)
+        if not isinstance(row, Mapping) or row.get("thread_id") != thread_id or row.get("user_id") != owner:
+            raise ChannelReadDenied()
+        binding = await authority.binding(thread_id) if authority is not None else None
+        if binding is not None and not await authority.allowed(actor=PrincipalRef("human", owner), thread_id=thread_id, permission=AgentPermission.INSPECT):
+            raise ChannelReadDenied()
+        if (
+            get_thread_store(request) is not store
+            or getattr(request.app.state, "agent_conversations", None) is not authority
+            or getattr(request.app.state, "channel_memory_threads", None) is not memory
+            or authority is None
+            and memory._retired
+        ):
+            raise ChannelReadDenied()
+    except ChannelReadDenied:
+        raise
+    except Exception:
+        raise channel_lookup_unavailable() from None
+    return store, authority, memory, binding, row.get("incarnation")
 
 
 class ChannelReadDenied(HTTPException):
@@ -82,15 +135,23 @@ async def channel_read_scope(request: Request, thread_id: str):
     owner = await live_channel_human(request)
     token = set_current_user(SimpleNamespace(id=owner))
     try:
-        try:
-            row = await get_thread_store(request).get(thread_id, user_id=None)
-        except Exception:
-            raise channel_lookup_unavailable() from None
-        if not isinstance(row, Mapping) or row.get("thread_id") != thread_id or row.get("user_id") != owner:
-            raise HTTPException(404, "Thread not found")
+        captured = await await_drained(_thread_scope(request, thread_id, owner))
+
+        async def refresh():
+            if await live_channel_human(request) != owner or await await_drained(_thread_scope(request, thread_id, owner)) != captured:
+                raise ChannelReadDenied()
+
         # In particular, DbRunEventStore's AUTO identity must see this raw
         # human owner rather than an internal request's path-safe alias.
-        yield owner
+        try:
+            yield owner
+        except ChannelReadMissing:
+            # Supported absence acknowledges authority just like returned data.
+            await refresh()
+            raise
+        else:
+            # Recheck after awaited source/store work before acknowledging data.
+            await refresh()
     finally:
         reset_current_user(token)
 

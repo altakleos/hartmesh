@@ -47,6 +47,7 @@ class ChannelExecutionScope:
     endpoint_id: str
     assistant_id: str
     agent_name: str | None
+    instance_id: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.publication_id) is not str or re.fullmatch(r"[0-9a-f]{32}", self.publication_id) is None:
@@ -54,9 +55,11 @@ class ChannelExecutionScope:
         for value in (self.owner_user_id, self.chat_id, self.thread_id, self.endpoint_id, self.assistant_id):
             if type(value) is not str or not value or value != value.strip() or any(not character.isprintable() for character in value):
                 raise ChannelExecutionProtocolError()
-        for value in (self.connection_id, self.agent_name):
+        for value in (self.connection_id, self.agent_name, self.instance_id):
             if value is not None and (type(value) is not str or not value or value != value.strip() or any(not character.isprintable() for character in value)):
                 raise ChannelExecutionProtocolError()
+        if self.instance_id is not None and (self.agent_name is not None or self.assistant_id != "lead_agent"):
+            raise ChannelExecutionProtocolError()
 
 
 class ChannelRunAdmission(Protocol):
@@ -117,6 +120,10 @@ class ChannelExecutionContext:
     @property
     def agent_name(self) -> str | None:
         return self.scope.agent_name
+
+    @property
+    def instance_id(self) -> str | None:
+        return self.scope.instance_id
 
 
 @dataclass(frozen=True)

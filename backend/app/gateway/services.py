@@ -2355,7 +2355,9 @@ async def _channel_execution_preflight(body, thread_id, request, normalized_inpu
 
 
 async def _require_channel_thread(request, run_ctx, thread_id, owner):
+    from deerflow.agent_instances.contract import AgentPermission
     from deerflow.agent_instances.conversations import AgentConversations
+    from deerflow.spaces.contract import PrincipalRef
 
     authority = getattr(request.app.state, "agent_conversations", None)
     if not isinstance(authority, AgentConversations):
@@ -2365,10 +2367,15 @@ async def _require_channel_thread(request, run_ctx, thread_id, owner):
         row = await run_ctx.thread_store.get(thread_id, user_id=None)
     except Exception:
         raise channel_lookup_unavailable() from None
-    if binding is not None:
-        raise HTTPException(409, "Channel execution does not support instance conversations")
     if not isinstance(row, Mapping) or row.get("thread_id") != thread_id or row.get("user_id") != owner:
         raise HTTPException(404, "Thread not found")
+    if binding is not None:
+        try:
+            allowed = await authority.allowed(actor=PrincipalRef("human", owner), thread_id=thread_id, permission=AgentPermission.USE)
+        except Exception:
+            raise channel_lookup_unavailable() from None
+        if not allowed:
+            raise HTTPException(404, "Thread not found")
 
 
 class OwnerRefusedLaunchError(ValueError):
@@ -2556,7 +2563,7 @@ async def _start_run(
     if publication is not None:
         owner_user_id = publication_owner
         require_existing_thread = True
-    instance_execution = None if publication is not None else await execution_for_run(request, thread_id, require_ready=work_attempt is None)
+    instance_execution = await execution_for_run(request, thread_id, require_ready=work_attempt is None)
     if instance_execution is not None and getattr(request.state, "durable_batch_followup", False) is True:
         raise HTTPException(422, "Automatic batch follow-ups are unavailable for instance conversations")
     if work_attempt is not None:
@@ -2753,15 +2760,19 @@ async def _start_run(
         )
         execution_receipt = None
         if publication is not None:
-            agent_name = agent_config.name if agent_config is not None else None
+            # The v1 receipt's agent slot describes custom-agent selection.
+            # Instance authority is the immutable thread binding and host
+            # execution, never a definition name supplied by the channel.
+            agent_name = agent_config.name if agent_config is not None and instance_execution is None else None
             if body.assistant_id not in (None, _DEFAULT_ASSISTANT_ID) and body.assistant_id.strip().lower().replace("_", "-") != agent_name:
                 raise HTTPException(422, "Channel execution assistant does not match its agent")
             execution_receipt = ChannelExecutionReceipt(version=publication.version, publication_id=publication.publication_id, owner_user_id=owner_user_id, thread_id=thread_id, assistant_id=_DEFAULT_ASSISTANT_ID, agent_name=agent_name)
             # Attest the definition the worker actually receives, rather than
             # retaining a caller spelling with different validation/loading.
-            for section in ("configurable", "context"):
-                config.setdefault(section, {})["agent_name"] = agent_name
-            scope_assistant_id = agent_name or _DEFAULT_ASSISTANT_ID
+            if instance_execution is None:
+                for section in ("configurable", "context"):
+                    config.setdefault(section, {})["agent_name"] = agent_name
+                scope_assistant_id = agent_name or _DEFAULT_ASSISTANT_ID
         # Keep the pre-default identity even when the agent is initially
         # unbound: adding a default must not reject an already-accepted retry.
         # The durable input still exposes the original accepted scope.

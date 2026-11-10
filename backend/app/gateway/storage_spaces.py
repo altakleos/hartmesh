@@ -1295,6 +1295,17 @@ async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session
     app.state.agent_instances = None
     app.state.agent_conversations = AgentConversations(None, session_factory=session_factory) if session_factory is not None else None
     thread_store = getattr(app.state, "thread_store", None)
+    from app.gateway.channel_execution_reads import OrdinaryMemoryThreads
+
+    previous_memory = getattr(app.state, "channel_memory_threads", None)
+    if type(previous_memory) is OrdinaryMemoryThreads:
+        previous_memory.retire()
+    app.state.channel_memory_threads = None
+    if session_factory is None:
+        from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+
+        if type(thread_store) is MemoryThreadMetaStore:
+            app.state.channel_memory_threads = OrdinaryMemoryThreads(thread_store)
     if thread_store is not None and hasattr(thread_store, "instance_authority"):
         thread_store.instance_authority = app.state.agent_conversations
     if not config.enabled:

@@ -67,6 +67,27 @@ def answered():
     return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, content=b'event: values\ndata: {"part":1}\n\n')
 
 
+@pytest.mark.parametrize("binding", ["instance", "other", None])
+async def test_instance_scope_requires_authoritative_thread_binding(binding):
+    from app.channels.execution_client import ChannelExecutionFacade
+
+    response = {"thread_id": "thread", "owner_user_id": "human", "agent_instance": {"id": binding} if binding else None, "metadata": {"agent_instance_id": "instance"}}
+    client, owner, admission, scope = facade(lambda request: httpx.Response(200, json=response))
+    try:
+        instance = ChannelExecutionFacade(owner, scope=replace(scope, instance_id="instance"), admission=admission)
+        if binding == "instance":
+            assert await instance.threads.get("thread") == response
+        else:
+            with pytest.raises(ChannelExecutionProtocolError):
+                await instance.threads.get("thread")
+        # An ordinary scope cannot adopt an instance just because the receipt's
+        # custom-agent slot is also None.
+        with pytest.raises(ChannelExecutionProtocolError):
+            await client.threads.get("thread")
+    finally:
+        await owner.stop()
+
+
 async def create(client, assistant="lead_agent", **payload):
     """One creating POST, read to its first frame as the manager reads it."""
     stream = client.runs.stream("thread", assistant, **(payload or creating()))

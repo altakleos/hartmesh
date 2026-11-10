@@ -2075,6 +2075,8 @@ for the Gateway's own callers.
 Output capture also supports ordinary persistent-agent conversations through
 their admitted Home. A missing root or changed access yields incomplete evidence;
 output observations do not grant permission to download the files.
+Trusted channel runs can use the same persistent conversation authority, with
+current access checked again before a saved reply is returned.
 
 ##### Other channels
 
