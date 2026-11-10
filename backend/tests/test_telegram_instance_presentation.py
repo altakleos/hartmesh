@@ -7,6 +7,7 @@ from sqlalchemy import update
 from test_telegram_instance import instance_environment
 from test_telegram_threads import close
 
+from deerflow.agent_instances import roles as role_catalog
 from deerflow.agent_instances.contract import DefinitionSnapshot
 from deerflow.persistence.agent_instances.model import AgentDefinitionRevisionRow, AgentInstanceGrantRow, AgentInstanceRow
 from deerflow.spaces.contract import PrincipalRef
@@ -19,6 +20,7 @@ async def presentation(db, monkeypatch):
     e = await instance_environment(db, monkeypatch)
     e.db = db
     e.live.config.ui.roles = []
+    monkeypatch.setattr(role_catalog, "get_app_config", lambda: e.live.config)
     e.services = e.channel._services
     e.services.authority = e.live.authority
     e.services._app_config = e.live.config
