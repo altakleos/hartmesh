@@ -19,20 +19,22 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow
 pytestmark = pytest.mark.asyncio
 
 
-async def admitted(e, *, name="input.txt", size=4, text=""):
-    file = dict(type="file", file_id="input-file", file_unique_id="input-unique", filename=name, mime_type="text/plain", size=size, message_id=911, telegram_bot_id=e.link.bot_id)
+async def admitted(e, *, name="input.txt", size=4, text="", message_id=911, topic=None, album=None):
+    file = dict(type="file", file_id="input-file", file_unique_id="input-unique", filename=name, mime_type="text/plain", size=size, message_id=message_id, telegram_bot_id=e.link.bot_id)
     incoming = Update(
-        2911,
+        2000 + message_id,
         message=Message(
-            911,
+            message_id,
             datetime.now(UTC),
             Chat(e.link.chat_id, "private"),
             from_user=User(e.link.telegram_user_id, "Person", False),
             caption=text or None,
+            message_thread_id=topic,
+            media_group_id=album,
             document=Document(file["file_id"], file["file_unique_id"], file_name=name, mime_type=file["mime_type"], file_size=size),
         ),
     )
-    row, _ = await e.inbox.accept(e.link, incoming, sanitized_input={"type": "media", "text": text, "files": [file]})
+    row, _ = await e.inbox.accept(e.link, incoming, sanitized_input={"type": "media", "text": text, "files": [file], **({"media_group_id": album} if album else {})})
     row = await e.inbox.route(row, kind="turn", target_id=e.link.agent_ref, basis={"input_profile": {"version": 2, "kind": "chat_input", "forwarded": False, "origin": None}}, operation_ids=[])
     return row, file
 
@@ -392,7 +394,10 @@ async def test_home_change_after_access_capture_refuses_saved_path(file_admissio
         return access
 
     monkeypatch.setattr(module, "prepare_file_write", changed)
-    with pytest.raises(ValueError, match="file-target-changed"):
+    from deerflow.agent_instances.contract import AgentDenied
+
+    # The composite writer now refuses the changed Home before reading the Act.
+    with pytest.raises(AgentDenied):
         await service.put(e.link, origin, file, **args)
 
 

@@ -2886,6 +2886,7 @@ class InboxRepository:
                 "message_id": actual.message_id,
                 "telegram_bot_id": link.bot_id,
             }
+            retained_input = None
             if link.agent_kind == "instance":
                 from app.telegram_bots.file_puts import FileReceiptReader
 
@@ -2895,8 +2896,16 @@ class InboxRepository:
                 saved = await instance_receipts.completed(descriptor, session=session)
                 if actual.agent_file_path != saved.result["path"]:
                     raise ValueError("pending-file-conflict") from None
+                retained_input = saved.continuation.get("input")
+                if retained_input is not None and (not retained_input["captionless"] or retained_input["topic"] != fresh.message_thread_id):
+                    raise ValueError("pending-file-conflict") from None
             source = await session.get(TelegramInboundMarkRow, (link.id, actual.message_id, actual.chat_id), with_for_update=True, populate_existing=True)
-            if source is None or (source.message_thread_id, source.binding_generation) != (fresh.message_thread_id, link.binding_generation) or descriptor not in source.sanitized_input.get("files", []):
+            if (
+                source is None
+                and retained_input is None
+                or source is not None
+                and ((source.message_thread_id, source.binding_generation) != (fresh.message_thread_id, link.binding_generation) or descriptor not in source.sanitized_input.get("files", []))
+            ):
                 raise ValueError("pending-file-conflict") from None
             files.append(descriptor)
             actuals.append(actual)

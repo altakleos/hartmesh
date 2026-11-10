@@ -269,3 +269,20 @@ explicit retry execution and lifecycle/status refusal routing remain the callers
 responsibility and must be qualified before activation.
 
 Unconfirmed file writes and pending workflow writes use cannot-confirm wording: native bytes may already exist even when the completion receipt is unavailable. Their retry controls remain explicit and journal-fenced.
+
+A file writer supplied the actual joined `origins` records a closed version-2
+input capsule: captionlessness of the whole group, its topic and source message
+IDs. It validates every original inbox snapshot and joining scope under the
+journal writer. A caption on another album member therefore prevents an extra
+pending attachment. Legacy version-1 journals remain readable and are never
+upgraded by replay.
+
+For a version-2 captionless input, completion and its pending attachment commit
+in the same writer. The terminal journal prevents re-creating that context after
+it is taken or swept; an explicit successful retry can create it even after the
+original inbound mark has been collected. Pending consumption then validates the
+retained source capsule and original Home receipt. A retry in another topic is
+refused before its keyboard is consumed. Every file journal writer now retains
+the original Home/Use/policy guard through its final commit check. Incoming
+routing must supply the joined origins; this metadata support alone does not
+activate instance file input.
