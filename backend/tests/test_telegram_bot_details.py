@@ -368,7 +368,7 @@ async def test_a_notice_survives_telegram_refusing_its_address(db, monkeypatch):
 async def test_full_files_and_a_refused_model_ask_the_right_person(monkeypatch, administrator, ask):
     monkeypatch.setattr(authority, "is_administrator", AsyncMock(return_value=administrator))
     host = SimpleNamespace(product_name="HartMesh")
-    link = SimpleNamespace(owner_user_id="owner")
+    link = SimpleNamespace(owner_user_id="owner", agent_kind="lead_agent")
     for key in ("chat.files_full", "new.files_full", "error.model_refused"):
         source = await fixed_source(host, link, key)
         assert ask in render(source["key"], "en-US", **source["values"])
