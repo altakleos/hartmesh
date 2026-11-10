@@ -275,7 +275,7 @@ class _PublicationGuard:
             or captured.state != "connected"
             or row.state != "connected"
             or row.health != "ok"
-            or captured.agent_kind not in {"lead_agent", "custom_agent"}
+            or captured.agent_kind not in {"lead_agent", "custom_agent", "instance"}
             or captured.agent_kind == "lead_agent"
             and captured.agent_ref != "lead_agent"
             or not isinstance(captured.agent_ref, str)

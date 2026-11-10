@@ -120,15 +120,55 @@ outlast grace; no new SQL retry survives the database owner.
 Do not install future-stage no-op schedulers or trust manager text as a model
 source.
 
-Employee policy is read from SQL at delivery and reconcile boundaries. Off stops
-polling, skips pending work without spending callbacks, and attempts one fixed
-notice before closing the client. Restoring allowed/protected starts with a
-pending-update discard recorded with the off write, even when no supervisor
-observed the off interval. A failed launch leaves that intent intact. The poller
-confirms the last discarded update before acknowledging the exact intent in SQL;
-SQL retries reuse the fetched result and never issue another negative-offset
-request in that poll owner. Policy notices retain their expected setting through
-limiter waits; an obsolete announcement cannot borrow the new setting's authority.
+## Instance conversations and policy
+
+Instance conversation preparation uses the existing `AgentConversations` service
+as the binding's human owner. Preserve the saved creation identity and drain its
+writer before cancellation returns. Current Use precedes execution readiness and
+resident admission; `work=False` reserves no workspace. Both the authoritative
+Gateway projection and in-process binding must match the target before mapping.
+Instance publication captures the original `AgentConversations` service, exact
+thread binding and owning engine. Current Use precedes execution readiness and
+non-reserving resident admission before enqueue/POST. Retained Telegram content
+reads still require an active target, current Use and conversation audience,
+but do not require execution readiness or a workspace. Paused/retired targets
+retain only fixed status delivery; generic web Inspect reads are broader. The borrowed writer rechecks the
+joined link, binding, owner, Use/Inspect provenance and policy/discard snapshot.
+The HTTP binding projection must agree; metadata is never an instance identity.
+The channel scope carries the instance ID separately from custom-agent names and
+adds the owner's stored time zone to human-message context. The browser add route
+still refuses instance targets until files and presentation paths are qualified.
+
+`policy.py` stores employee Telegram settings in the existing policy table. Its
+reads and upserts drain admitted SQL through cancellation. Browser policy routes
+require a session, route ceilings and current Manage plus Inspect; personal
+assistants have no policy. The upsert borrows its writer for a fresh human and
+locked instance/grant admission on the authority's exact engine; no second
+session or provider call belongs in that writer. Counts intersect Use grants with connected links.
+List restrictions and privacy indicators include only Use-visible instances,
+including those without bots. A view without Manage always has other readers;
+for managers, inspect the current grants instead of inferring from custody.
+
+Delivery checks current instance policy at claim, each part and raw transport.
+Off skips pending delivery; protected strengthens saved parts before sending.
+Instance raw-send fences preflight the live host authority, then read link,
+instance, Use grant, custody, policy and discard intent in one final SQL snapshot;
+no separate grant/policy refresh can publish an earlier protection decision.
+Lifecycle notices retain exact destination/revision and optional expected policy
+through SDK limiter waits. Live instance previews additionally need current Use;
+protected policies admit no draft, including voice preparation. Optional fixed
+lifecycle notices can still explain disabled access, with protection preserved.
+Policy-off reconciliation stops polling after its one bounded notice and ends
+pending work without consuming callbacks. Restoration drops buffered updates;
+policy notice values and transition events prevent repeated announcements.
+The policy writer records a unique `notices.policy_discard` intent on every
+instance link in the same transaction as off. It locks links in ID order before
+the policy row; discard acknowledgement uses link → policy and never takes an
+instance/grant lock afterward. Restoration and startup retain that intent through
+constructor/SQL failures, end pending work without consuming callbacks, and
+confirm the negative-offset result with its positive successor before clearing
+only the captured intent. The poll owner retains fetched/confirmed state through
+SQL acknowledgement retries; a new intent retires an older poll before admission.
 
 ## Binding, codes, tokens and health
 

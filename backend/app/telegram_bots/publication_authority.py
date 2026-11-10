@@ -38,6 +38,9 @@ class _Admission:
     channel: object
     client: object
     endpoint_id: str
+    thread_id: str
+    conversations: object | None = None
+    live_owner: object | None = None
     retired: bool = False
 
     def current(self, operation: ChannelOperation) -> bool:
@@ -57,6 +60,9 @@ class _Admission:
                 and self.channel.link.state == "connected"
                 and self.channel.link.health == "ok"
             )
+            if self.link.agent_kind == "instance":
+                state = getattr(getattr(host._authority, "app", None), "state", None)
+                valid = valid and self.conversations is not None and getattr(state, "agent_conversations", None) is self.conversations and getattr(state, "agent_instances", None) is self.conversations.instances
             if not valid:
                 self.retired = True
                 return False
@@ -73,6 +79,65 @@ class _Admission:
         if self.current(operation) is not True:
             raise ChannelExecutionProtocolError() from None
 
+    async def instance_rows(self, operation, *, writer=None):
+        if self.link.agent_kind != "instance":
+            return
+        from sqlalchemy import and_, or_, select
+
+        from app.telegram_bots.policy import POLICIES, pending_discard
+        from deerflow.agent_instances.contract import AgentPermission
+        from deerflow.persistence.agent_instances.model import AgentConversationRow, AgentInstanceGrantRow, AgentInstanceRow, AgentProtectedContextRow
+        from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramInstancePolicyRow
+        from deerflow.persistence.thread_meta.model import ThreadMetaRow
+        from deerflow.persistence.user.access import DisabledIdentityRow
+        from deerflow.persistence.user.model import UserRow
+
+        async def read(session):
+            bot, instance, grant, policy = TelegramBotLinkRow, AgentInstanceRow, AgentInstanceGrantRow, TelegramInstancePolicyRow
+            conversation, thread, protected = AgentConversationRow, ThreadMetaRow, AgentProtectedContextRow
+            result = (
+                await session.execute(
+                    select(bot, instance.status, instance.custody, grant.permissions, policy.policy, protected.thread_id, UserRow, DisabledIdentityRow)
+                    .join(instance, instance.id == bot.agent_ref)
+                    .join(conversation, and_(conversation.instance_id == instance.id, conversation.thread_id == self.thread_id, conversation.requester_id == bot.owner_user_id))
+                    .join(thread, and_(thread.thread_id == conversation.thread_id, thread.user_id == bot.owner_user_id))
+                    .join(grant, and_(grant.instance_id == instance.id, grant.user_id == bot.owner_user_id))
+                    .join(UserRow, UserRow.id == bot.owner_user_id)
+                    .outerjoin(DisabledIdentityRow, or_(DisabledIdentityRow.subject == UserRow.id, DisabledIdentityRow.subject == UserRow.oauth_id))
+                    .outerjoin(policy, policy.instance_id == instance.id)
+                    .outerjoin(protected, protected.thread_id == thread.thread_id)
+                    .where(bot.id == self.link.id)
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+            if not result or self.live_owner is None:
+                raise ChannelExecutionProtocolError()
+            current, status, custody, permissions, value, protected_thread, user, _ = result[0]
+            self.live_owner.check_snapshot(user, [row[-1] for row in result])
+            value = "allowed" if custody == "personal" or value is None else value
+            if (
+                not _same(current, self.link)
+                or current.state != "connected"
+                or current.health != "ok"
+                or status != "active"
+                or custody not in {"personal", "company"}
+                or type(permissions) is not int
+                or not permissions & int(AgentPermission.USE)
+                or protected_thread is not None
+                and not permissions & int(AgentPermission.INSPECT)
+                or value not in POLICIES
+                or value == "off"
+                or pending_discard(current) is not None
+            ):
+                raise ChannelExecutionProtocolError()
+            self._check(operation)
+
+        if writer is not None:
+            await read(writer)
+        else:
+            async with self.host._links.session_factory() as session:
+                await read(session)
+
     async def authorize(self, operation: ChannelOperation) -> None:
         self._check(operation)
         try:
@@ -86,6 +151,16 @@ class _Admission:
             self._check(operation)
             if target != "ok":
                 raise ChannelExecutionProtocolError()
+            if actual.agent_kind == "instance":
+                from deerflow.agent_instances.contract import AgentPermission
+                from deerflow.spaces.contract import PrincipalRef
+
+                if operation == "run_create":
+                    await await_drained(self.host._authority.admit_instance(actual))
+                if not await await_drained(self.conversations.allowed(actor=PrincipalRef("human", actual.owner_user_id), thread_id=self.thread_id, permission=AgentPermission.INSPECT)):
+                    raise ChannelExecutionProtocolError()
+                await await_drained(self.instance_rows(operation))
+                self._check(operation)
         except asyncio.CancelledError:
             self.retired = True
             raise
@@ -108,7 +183,13 @@ class _Guard:
         await self.admission.authorize(self.operation)
 
     async def check(self, writer):
-        return await self.borrowed.check(writer)
+        async def check():
+            result = await self.borrowed.check(writer)
+            await self.admission.instance_rows(self.operation, writer=writer)
+            self.admission._check(self.operation)
+            return result
+
+        return await await_drained(check())
 
 
 @dataclass(frozen=True)
@@ -145,7 +226,7 @@ class PublicationAttemptAuthority:
                 raise ChannelExecutionProtocolError()
             captured = deepcopy(link)
             if (
-                captured.agent_kind not in {"lead_agent", "custom_agent"}
+                captured.agent_kind not in {"lead_agent", "custom_agent", "instance"}
                 or captured.agent_kind == "lead_agent"
                 and captured.agent_ref != "lead_agent"
                 or captured.connection_id is None
@@ -155,9 +236,17 @@ class PublicationAttemptAuthority:
             ):
                 raise ChannelExecutionProtocolError()
             channel = self._channel(captured.id)
-            admission = _Admission(self, captured, channel, self._client, endpoint_id)
+            conversations = None
+            if captured.agent_kind == "instance":
+                from deerflow.agent_instances.conversations import AgentConversations
+
+                conversations = getattr(getattr(self._authority.app, "state", None), "agent_conversations", None)
+                if type(conversations) is not AgentConversations or conversations._sf.kw.get("bind") is not self._links.session_factory.kw.get("bind"):
+                    raise ChannelExecutionProtocolError()
+            admission = _Admission(self, captured, channel, self._client, endpoint_id, thread_id, conversations)
             admission._check("thread_read")
             owner = await await_drained(self._authority.prepare_live_owner(captured.owner_user_id))
+            admission.live_owner = owner
             admission._check("thread_read")
             return PublicationAttempt(
                 admission=admission,
