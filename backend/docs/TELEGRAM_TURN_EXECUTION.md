@@ -166,3 +166,21 @@ retry. There is no additional after-manager observation pass or shutdown grace;
 late durable results wait for the next startup. A worker lets go of a run at its first
 frame, so a manager with an empty queue stops at once, and a run still going then is
 recovery's to end.
+
+## Instance file writes
+
+`instance_file_authority.prepare_file_write` owns current Use before execution
+readiness and Home diagnostics. It captures the installed same-engine instance
+and file services, original instance/Home generations and Telegram binding.
+Its direct `AgentFiles.apply` call neither creates a conversation nor consults
+a resident. The agent principal writes the bytes; the bound human is recorded
+as requester, without requiring that human's Inspect or Home Write grant.
+
+The Space writer's controller admission locks the instance before Telegram
+custody, then reads the current binding, Use, employee policy and human account
+in one final joined statement. It checks the Home generation already admitted
+by that writer and the original caller lifetime after the final await. The whole
+write drains through cancellation so seekable content remains owned until the
+file effect and its receipt settle. Native limits still require the storage CI
+tier. The input journal, bounded transport and saved retry controls own operation
+IDs and bytes outside this bridge; they must be integrated before bot activation.

@@ -1974,7 +1974,9 @@ by a person with both Manage and Inspect. Personal assistants use their access
 settings instead. Persistent-agent bot creation remains unavailable while its
 delivery integration is being completed. The host publication path checks the
 connecting person's current access and original instance conversation binding,
-and carries their stored time zone into the request.
+and carries their stored time zone into the request. Its direct file-write
+boundary checks current chat access and attributes writes to the connecting
+person without starting a workspace.
 Instance presentation names the assistant or employee, explains who can read
 the conversation, and offers web links according to the person's access.
 Role labels require permission to inspect the adopted definition.
