@@ -71,12 +71,20 @@ class ThreadCoordinator:
         self._check(attempt)
 
     async def _permission(self, attempt: _Attempt, *actions: str) -> None:
-        await await_drained(require(attempt.link.owner_user_id, *actions))
+        needed = (*actions, "agents:read") if attempt.link.agent_kind == "instance" else actions
+        await await_drained(require(attempt.link.owner_user_id, *needed))
         await self._guard(attempt)
 
     @staticmethod
     def _validate(response, link, identity):
-        if not isinstance(response, dict) or response.get("thread_id") != identity or response.get("owner_user_id") != link.owner_user_id or "agent_instance" not in response or response["agent_instance"] is not None:
+        if not isinstance(response, dict) or response.get("thread_id") != identity or response.get("owner_user_id") != link.owner_user_id or "agent_instance" not in response:
+            raise ValueError("invalid-thread-proof")
+        if link.agent_kind == "instance":
+            binding = response["agent_instance"]
+            if not isinstance(binding, dict) or binding.get("id") != link.agent_ref:
+                raise ValueError("invalid-thread-target")
+            return "instance", link.agent_ref
+        if response["agent_instance"] is not None:
             raise ValueError("invalid-thread-proof")
         metadata = response.get("metadata")
         if not isinstance(metadata, dict):
@@ -116,11 +124,20 @@ class ThreadCoordinator:
         await self._permission(attempt, "threads:read")
         response = await self.client.get_thread(attempt.link.owner_user_id, identity, before_dispatch=lambda: self._dispatch(attempt, preparation, "threads:read"))
         await self._permission(attempt, "threads:read")
+        if attempt.link.agent_kind == "instance":
+            binding = await await_drained(self.authority.app.state.agent_conversations.binding(identity))
+            await self._guard(attempt)
+            if binding != attempt.link.agent_ref:
+                return "instance", binding
         return self._validate(response, attempt.link, identity)
 
     async def _target(self, attempt, origin, *, owner_callback_id=None):
         link = attempt.link
         if link.agent_kind == "lead_agent" and link.agent_ref == "lead_agent":
+            return
+        if link.agent_kind == "instance":
+            await await_drained(self.authority.admit_instance(link))
+            await self._guard(attempt)
             return
         if link.agent_kind != "custom_agent":
             raise ValueError("unsupported-thread-target")
@@ -212,13 +229,24 @@ class ThreadCoordinator:
                 if link.agent_kind == "custom_agent":
                     metadata["agent_name"] = link.agent_ref
                 try:
-                    response = await self.client.create_thread(link.owner_user_id, thread_id=identity, metadata=metadata, before_dispatch=lambda: self._dispatch(attempt, preparation, "threads:write"))
+                    if link.agent_kind == "instance":
+                        from deerflow.spaces.contract import PrincipalRef
+
+                        await self._dispatch(attempt, preparation, "threads:write")
+                        response = await await_drained(
+                            self.authority.app.state.agent_conversations.create(
+                                actor=PrincipalRef("human", link.owner_user_id), instance_id=link.agent_ref, thread_id=identity, creation_id=preparation.creation_id, metadata={"channel_source": metadata["channel_source"]}
+                            )
+                        )
+                    else:
+                        response = await self.client.create_thread(link.owner_user_id, thread_id=identity, metadata=metadata, before_dispatch=lambda: self._dispatch(attempt, preparation, "threads:write"))
                 except httpx.HTTPStatusError as error:
                     if error.response.status_code == 507:
                         raise ThreadPreparationFailure("files_full") from None
                     raise
                 await self._guard(attempt)
-                if not isinstance(response, dict) or response.get("thread_id") != identity or response.get("owner_user_id") != link.owner_user_id:
+                owner_key = "user_id" if link.agent_kind == "instance" else "owner_user_id"
+                if not isinstance(response, dict) or response.get("thread_id") != identity or response.get(owner_key) != link.owner_user_id:
                     raise ValueError("invalid-thread-proof")
                 if await self._read(attempt, identity, preparation) != target:
                     raise ValueError("invalid-thread-target")

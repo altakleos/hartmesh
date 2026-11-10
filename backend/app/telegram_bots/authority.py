@@ -106,9 +106,34 @@ class TelegramAuthority:
     `runs:read`, and `delivery` validates its basis.
     """
 
-    def __init__(self, *, links: BotLinkRepository, connections: ChannelConnectionRepository):
+    def __init__(self, *, links: BotLinkRepository, connections: ChannelConnectionRepository, app=None):
         self.links = links
         self.connections = connections
+        self.app = app
+
+    async def instance_view(self, link: BotLink):
+        from deerflow.agent_instances.contract import AgentPermission
+        from deerflow.spaces.contract import PrincipalRef
+
+        await require(link.owner_user_id, "agents:read")
+        agents = getattr(getattr(self.app, "state", None), "agent_instances", None)
+        if agents is None:
+            raise AuthorityUnavailable
+        return await agents.get(actor=PrincipalRef("human", link.owner_user_id), instance_id=link.agent_ref, permission=AgentPermission.USE)
+
+    async def admit_instance(self, link: BotLink):
+        """The Gateway order: current Use, execution readiness, resident admission."""
+        from app.gateway.storage_spaces import require_execution
+        from deerflow.agent_instances.contract import AgentDenied
+
+        view = await self.instance_view(link)
+        if view.status != "active":
+            raise AgentDenied("The agent is not active")
+        await require_execution(self.app, link.agent_ref)
+        residents = getattr(self.app.state.agent_instances, "residents", None)
+        if residents is not None:
+            await residents.admit(view, work=False)
+        return view
 
     async def prepare_live_owner(self, owner_user_id: str) -> LiveOwnerCheck:
         """Prepare strict policy off-writer, then recheck the human in its writer.
@@ -153,8 +178,7 @@ class TelegramAuthority:
             and connection["bot_user_id"] == str(link.bot_id)
         )
 
-    @staticmethod
-    async def _supported_target(link: BotLink) -> str:
+    async def _supported_target(self, link: BotLink) -> str:
         if link.agent_kind == "lead_agent" and link.agent_ref == "lead_agent":
             return "ok"
         if link.agent_kind == "custom_agent":
@@ -165,7 +189,14 @@ class TelegramAuthority:
             except FileNotFoundError:
                 return "agent_unavailable"
             return "ok"
-        # Instance grants/protection are a later consumer; never infer permission.
+        if link.agent_kind == "instance":
+            from deerflow.agent_instances.contract import AgentDenied
+
+            try:
+                view = await self.instance_view(link)
+            except AgentDenied:
+                return "agent_unavailable"
+            return "ok" if view.status == "active" else "agent_unavailable"
         return "unsupported"
 
     async def target(self, link: BotLink) -> str:
@@ -185,6 +216,10 @@ class TelegramAuthority:
     async def delivery(self, link: BotLink, item: OutboxItem, part: dict | None = None) -> DeliveryEligibility:
         from app.telegram_bots.producer import DeliveryEligibility, uses_model_source
 
+        # Conversation admission alone cannot authorize an unprotected send.
+        # Keep stored instance replies held until their policy consumer lands.
+        if link.agent_kind == "instance":
+            return DeliveryEligibility.wait()
         try:
             await require(link.owner_user_id)
             current = await self.links.get(link.id)

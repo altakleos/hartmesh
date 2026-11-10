@@ -52,6 +52,12 @@ so a frozen timestamp cannot hide an A-to-B-to-A mapping change. Expected absenc
 uses atomic insertion; it makes no claim about arbitrary absent-present-absent
 history under unchanged authority.
 
+For persistent targets the host creates the conversation through
+`AgentConversations.create` as the bound person, retaining the reserved creation
+UUID through cancellation and retry. Only channel provenance is written into its
+metadata. Reuse requires the authoritative instance binding as well as a fresh
+owner-scoped Gateway read; an unrelated stored conversation is replaced.
+
 ## Polling
 
 `polling.py` owns retained suffixes and startup-held batches. A poll failure ends

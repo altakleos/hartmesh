@@ -296,7 +296,7 @@ class TelegramSupervisor:
             if self.authority is None:
                 from app.telegram_bots.authority import TelegramAuthority
 
-                self.authority = TelegramAuthority(links=self.links, connections=connections)
+                self.authority = TelegramAuthority(links=self.links, connections=connections, app=self.app)
             self.sender = OutboxSender(self.outbox, run_id=self.run_id, deliver_part=self.deliver_part, eligibility=self.eligibility, cleanup_caption=self.cleanup_caption)
         except Exception as error:
             self._event("supervisor_check_failed", error=type(error).__name__, level=logging.ERROR)

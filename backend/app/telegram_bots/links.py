@@ -943,7 +943,7 @@ class BotLinkRepository:
             row is None
             or row.state != "connected"
             or captured.state != "connected"
-            or row.agent_kind not in {"lead_agent", "custom_agent"}
+            or row.agent_kind not in {"lead_agent", "custom_agent", "instance"}
             or type(captured.token_revision) is not int
             or type(captured.binding_generation) is not int
             or type(row.telegram_user_id) is not int
