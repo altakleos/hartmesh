@@ -44,11 +44,13 @@ class ProfileSync:
     def _owed(self, link) -> bool:
         return link.agent_kind in _MENUS and (link.profile_pending or link.profile_version < PROFILE_VERSION)
 
-    async def push_owed(self, *, owner_user_id: str | None = None) -> None:
+    async def push_owed(self, *, owner_user_id: str | None = None, link_ids: frozenset[str] | None = None) -> None:
         """Pushes owed links; naming an owner is a person's act, so it reopens their retries."""
         limit = timedelta(hours=self.services.config.profile.retry_hours)
         now = datetime.now(UTC)
         for channel in self.services.channels():
+            if link_ids is not None and channel.link.id not in link_ids:
+                continue
             if owner_user_id is not None and channel.link.owner_user_id != owner_user_id:
                 continue
             async with self._locks.hold(channel.link.id):
@@ -115,6 +117,7 @@ class ProfileSync:
             # Last: Telegram rations this call, and its long wait must not strand the rest.
             await bot.set_my_name(name=name)
             check()
-        saved = await services.links.finish_profile(link.id, token_revision=link.token_revision, version=PROFILE_VERSION, bot_name=name, locale=locale, at=datetime.now(UTC))
+        target = {"name": values["name"], "custody": values["custody"]} if link.agent_kind == "instance" else None
+        saved = await await_drained(services.links.finish_profile(link.id, token_revision=link.token_revision, version=PROFILE_VERSION, bot_name=name, locale=locale, at=datetime.now(UTC), target=target))
         if saved is None:
             raise _Retired()

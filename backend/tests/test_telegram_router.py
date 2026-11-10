@@ -589,3 +589,21 @@ async def test_inspect_token_builds_its_own_client_without_an_injected_factory(d
     e.updates.enqueue("getWebhookInfo", result={"url": "", "has_custom_certificate": False, "pending_update_count": 0})
     assert await e.supervisor.inspect_token(TOKEN) == (123456789, "fixture_bot", None)
     assert made[0]["connection_pool_size"] == 1 and e.supervisor.tls_context is not None
+
+
+@pytest.mark.asyncio
+async def test_removed_notice_is_owner_scoped_and_read_does_not_mark_seen(api):
+    result = await add(api)
+    link = await api.db.links.get(result["bot"]["id"])
+    await api.db.links.remove(link.id, actor_id="host", action="agent_removed", detail={"agent_kind": "instance", "agent_ref": "a" * 32, "agent_name": "Fixture assistant", "bot_username": link.bot_username})
+    first = (await api.client.get("/api/telegram-bots")).json()["removed_bots"]
+    assert len(first) == 1 and first[0]["reason"] == "agent-deleted"
+    assert (await api.client.get("/api/telegram-bots")).json()["removed_bots"] == first
+    api.state.owner = "different-owner"
+    assert (await api.client.get("/api/telegram-bots")).json()["removed_bots"] == []
+    path = f"/api/telegram-bots/removed/{first[0]['id']}/seen"
+    assert (await api.client.post(path)).status_code == 404
+    api.state.owner = OWNER
+    assert (await api.client.post(path)).status_code == 204
+    assert (await api.client.get("/api/telegram-bots")).json()["removed_bots"] == []
+    assert (await api.client.post(path)).status_code == 404

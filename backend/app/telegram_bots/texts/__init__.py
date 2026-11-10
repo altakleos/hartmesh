@@ -10,6 +10,7 @@ _CATALOGS = {"en": MappingProxyType(en.TEXTS), "zh-CN": MappingProxyType(zh_cn.T
 FIRST_KEYS: frozenset[str] = frozenset(
     {
         "hello.privacy",
+        "agent.deleted",
         "link.conflict",
         "link.conflict_over.plain",
         "link.conflict_over.chat",

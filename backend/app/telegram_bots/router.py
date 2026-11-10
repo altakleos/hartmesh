@@ -383,10 +383,16 @@ async def list_bots(request: Request, owner: str = Depends(_caller)) -> dict:
         "settings": _settings(await links.settings.get(owner)) if links is not None else None,
         "quick_setup": {"available": False, "manager_link_id": None, "manager_username": None},
         "pending_creation": None,
-        "removed_bots": [],
+        "removed_bots": await await_drained(links.removed_for_owner(owner)) if links is not None else [],
         "policies": policies,
         "read_by_others": readers,
     }
+
+
+@router.post("/removed/{event_id}/seen", status_code=204)
+async def removed_seen(event_id: str, request: Request, owner: str = Depends(_caller)) -> None:
+    if not await await_drained(_links(request).mark_seen(owner, event_id)):
+        raise Refusal("not-found")
 
 
 async def _visible_instance_settings(request, owner, links):

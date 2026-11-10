@@ -257,3 +257,40 @@ async def test_invalid_adopted_definition_omits_role_without_blocking_fixed_comm
     assert help_["values"]["role"] is None and help_["values"]["role_description"] is None
     assert (await commands._presentation("privacy", e.link))["key"] == "privacy.full"
     assert (await commands._presentation("settings", e.link))["key"] == "settings.state_basic"
+
+
+async def test_rename_pushes_name_and_picture_to_every_bot_and_records_full_target(presentation):
+    from test_telegram_bot_adapter import build, start
+    from test_telegram_profile import count, script
+
+    from app.telegram_bots.profile import ProfileSync
+
+    e = presentation
+    await e.db.settings.ensure("second-reader", timezone="UTC", locale="en-US")
+    other = await e.db.links.add(owner_user_id="second-reader", agent_kind="instance", agent_ref=e.link.agent_ref, bot_id=9_000_000_003, bot_username="second_fixture_bot", encrypted_token="wrapped-fixture", actor_id="second-reader")
+    second = await build(e.db, connected=False, link=other)
+    await start(second)
+    e.request = e.channel.bot.request
+    sync = ProfileSync(e.services)
+    e.services.channels = lambda: (e.channel, second.channel)
+    e.services.channel = lambda identity: {e.link.id: e.channel, other.id: second.channel}.get(identity)
+    try:
+        for transport in (e, second):
+            script(transport)
+            assert await sync.push(transport.link)
+        renamed = "A long public name " * 4
+        async with e.db.sessions.begin() as writer:
+            await writer.execute(update(AgentInstanceRow).where(AgentInstanceRow.id == e.link.agent_ref).values(name=renamed))
+        identity = await e.live.authority.instance_identity(e.link)
+        for transport in (e, second):
+            assert await e.db.links.owe_instance_profile(await e.db.links.get(transport.link.id), name=identity.name, custody=identity.custody)
+            script(transport)
+        await sync.push_owed()
+        for transport in (e, second):
+            assert count(transport, "setMyName") == count(transport, "setMyProfilePhoto") == 2
+            row = await e.db.links.get(transport.link.id)
+            assert row.notices["profile_target"] == {"name": renamed, "custody": "company"}
+            assert not await e.db.links.owe_instance_profile(row, name=renamed, custody="company")
+            assert row.profile_pending is False
+    finally:
+        await second.channel.stop()
