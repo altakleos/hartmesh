@@ -181,6 +181,11 @@ TEXTS: dict[str, str] = {
     "access.back": "Your access to {product} is back.\nMessages sent while it was off were not received. Send them again.",
     "custom_agent.deleted": "{agent} no longer exists in {product}, so this chat cannot answer. Remove this bot on the web.",
     "update.refused": "That message could not be read, so it was not passed on. Send it another way.",
+    "unavailable.off": "AI assistants are not offered here. {name} and {name}'s files are kept. Ask an administrator.",
+    "unavailable.paused": "AI assistants and AI employees are paused by {provider}. {name} and {name}'s files are kept.",
+    "unavailable.moved": "{name} cannot work yet: the service moved to a new server, and {provider} has to confirm the move. {name}'s files are kept.",
+    "unavailable.files_unchecked": "{name}'s files did not pass the safety check, so {name} cannot work. The files are kept. Nothing else is affected.",
+    "unavailable.fix": "{name} cannot work right now. Nothing is lost.",
     "unavailable.ask_admin": "Ask an administrator.",
     "unavailable.next": "Ask {provider} to fix this.",
     "unavailable.reference": "Reference for support: {code}",
@@ -298,3 +303,9 @@ FORMS.update(
 )
 
 FORMS["access.agent_off"] = {"no_supervisor": "You no longer have access to {name}. Ask an administrator."}
+
+FORMS["unavailable.off"] = {
+    "company": "AI employees are not offered here. {name} and {name}'s files are kept. Ask an administrator.",
+    "administrator": "AI assistants are not offered here. {name} and {name}'s files are kept. Ask {provider} to offer AI assistants here.",
+    "company.administrator": "AI employees are not offered here. {name} and {name}'s files are kept. Ask {provider} to offer AI employees here.",
+}

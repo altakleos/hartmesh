@@ -277,3 +277,13 @@ file maintenance, startup failure and full files require a new person action.
 Instance-specific capacity notices use the current name. Full-files wording reflects
 Manage and its Files link also requires Inspect and a configured public URL.
 Ordinary/custom chat classifications are unchanged.
+
+Before publication, `ChatTurns` keeps the same input through the four instance
+send refusals. Only `run-limit` repeats admission, at the configured interval
+and deadline; its Cancel is bound to the original request while no publication
+exists. Stop ends that input before any dispatch. A new run is never inferred
+from a manager sentence. Restart and storage maintenance require manual retry.
+Execution-unavailable diagnostics recheck Use before reading storage state and
+use public support reference words. Existing agents are not gated by quota counts.
+This prepublication handler is separate from rechecking an acknowledged creating
+refusal and from structured run interruption frames.

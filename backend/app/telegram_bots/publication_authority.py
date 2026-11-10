@@ -42,6 +42,7 @@ class _Admission:
     conversations: object | None = None
     live_owner: object | None = None
     retired: bool = False
+    instance_refusal: object | None = None
 
     def current(self, operation: ChannelOperation) -> bool:
         if type(operation) is not str or operation not in _PERMISSIONS or self.retired:
@@ -152,11 +153,18 @@ class _Admission:
             if target != "ok":
                 raise ChannelExecutionProtocolError()
             if actual.agent_kind == "instance":
-                from deerflow.agent_instances.contract import AgentPermission
+                from deerflow.agent_instances.contract import AgentPermission, Refusal
                 from deerflow.spaces.contract import PrincipalRef
 
                 if operation == "run_create":
-                    await await_drained(self.host._authority.admit_instance(actual))
+                    try:
+                        await await_drained(self.host._authority.admit_instance(actual))
+                    except Refusal as error:
+                        # Preserve only this actual admission result for the
+                        # pre-reservation caller. The generic guard still fails
+                        # closed and retires this attempt as before.
+                        self.instance_refusal = error
+                        raise
                 if not await await_drained(self.conversations.allowed(actor=PrincipalRef("human", actual.owner_user_id), thread_id=self.thread_id, permission=AgentPermission.INSPECT)):
                     raise ChannelExecutionProtocolError()
                 await await_drained(self.instance_rows(operation))

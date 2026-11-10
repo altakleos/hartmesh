@@ -152,6 +152,11 @@ TEXTS: dict[str, str] = {
     "access.back": "你的 {product} 访问权限已恢复。\n关闭期间发送的消息未被接收。请重新发送。",
     "custom_agent.deleted": "{agent} 已不在 {product} 中，此聊天无法回答。请在网页版移除此机器人。",
     "update.refused": "无法读取这条消息，因此未转交。请换一种方式发送。",
+    "unavailable.off": "这里不提供 AI 助理。{name} 及其文件均已保留。请联系管理员。",
+    "unavailable.paused": "{provider} 已暂停 AI 助理和 AI 员工。{name} 及其文件均已保留。",
+    "unavailable.moved": "{name} 暂时无法工作：服务已迁移至新服务器，需要{provider}确认迁移。{name} 的文件已保留。",
+    "unavailable.files_unchecked": "{name} 的文件未通过安全检查，因此 {name} 无法工作。文件已保留。其他功能不受影响。",
+    "unavailable.fix": "{name} 暂时无法工作。没有丢失任何内容。",
     "unavailable.ask_admin": "请联系管理员。",
     "unavailable.next": "请联系{provider}修复此问题。",
     "unavailable.reference": "供支持人员参考：{code}",
@@ -256,3 +261,9 @@ FORMS.update(
 )
 
 FORMS["access.agent_off"] = {"no_supervisor": "你已无法访问 {name}。请联系管理员。"}
+
+FORMS["unavailable.off"] = {
+    "company": "这里不提供 AI 员工。{name} 及其文件均已保留。请联系管理员。",
+    "administrator": "这里不提供 AI 助理。{name} 及其文件均已保留。请联系{provider}在这里提供 AI 助理。",
+    "company.administrator": "这里不提供 AI 员工。{name} 及其文件均已保留。请联系{provider}在这里提供 AI 员工。",
+}

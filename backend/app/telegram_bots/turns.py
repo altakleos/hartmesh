@@ -704,10 +704,12 @@ class ChatTurns:
             raise ValueError("chat-turn-retired") from None
         return source
 
-    async def _input_outcome(self, turn, key, *, keyboard=()):
+    async def _input_outcome(self, turn, key, *, keyboard=(), values=None):
         if not self._current(turn):
             return None
         source = await self._source(turn, key)
+        if values:
+            source["values"].update(values)
         identity = await self.services.outbox.plan_input_outcome(
             turn.link,
             source_id=f"chat-input:{turn.link.chat_id}:{turn.link.binding_generation}:" + (turn.callback_id or str(turn.origins[0].message_id)),
@@ -722,6 +724,73 @@ class ChatTurns:
         return identity
 
     async def _prepare(self, turn):
+        from app.telegram_bots.instance_refusals import describe_send_refusal
+        from deerflow.agent_instances.contract import Refusal
+
+        while self._current(turn):
+            try:
+                prepared = await self._prepare_once(turn)
+                if prepared:
+                    turn.capacity_waiting = False
+                    turn.capacity_notice_sent = False
+                return prepared
+            except Refusal as error:
+                if turn.link.agent_kind != "instance" or turn.record is not None:
+                    raise
+                failure = await describe_send_refusal(self.services.authority, turn.link, error)
+                if turn.stop_requested:
+                    await self._input_outcome(turn, "busy.cancelled")
+                    self._drop_waiting(turn)
+                    return False
+                if failure.retry_later:
+                    if await self._wait_preparation(turn, failure):
+                        continue
+                else:
+                    target = turn.callback_id or str(turn.origins[0].message_id)
+                    await self._input_outcome(turn, failure.text_key, values=failure.values, keyboard=self._button("retry_message", target, target_kind="request"))
+                return False
+        return False
+
+    async def _wait_preparation(self, turn, failure):
+        """Wait without a publication; only this original input owns its Cancel."""
+        target = turn.callback_id or str(turn.origins[0].message_id)
+        if turn.waiting_since is None:
+            self.queue.retry_later(turn.link, turn.inbound)
+            turn.waiting_since = turn.channel._time()
+        turn.capacity_waiting = True
+        turn.retry_at = turn.channel._time() + self.services.config.queue.retry_seconds
+        if not turn.capacity_notice_sent and not turn.stop_requested:
+            await self.services.outbox.plan_product_keyboard(
+                turn.link,
+                source_id=f"preparation-capacity:{turn.link.chat_id}:{turn.link.binding_generation}:{target}",
+                parts=[{"kind": "text", "source_ref": await self._source(turn, failure.text_key), "reply_to_message_id": turn.origins[0].message_id}],
+                keyboard=self._button("cancel_wait", target, target_kind="request"),
+                callbacks=self.services.callbacks,
+                guard=self._guard(turn, creating=True, repair=True),
+                message_thread_id=turn.topic,
+            )
+            turn.capacity_notice_sent = True
+        while self._current(turn):
+            if turn.stop_requested:
+                await self._input_outcome(turn, "busy.cancelled")
+                self._drop_waiting(turn)
+                return False
+            now = turn.channel._time()
+            remaining = self.services.config.queue.max_wait_seconds - (now - turn.waiting_since)
+            if remaining <= 0:
+                await self._input_outcome(turn, "busy.gave_up", keyboard=self._button("retry_message", target, target_kind="request"))
+                return False
+            if now >= turn.retry_at:
+                turn.capacity_waiting = False
+                return True
+            turn.wake.clear()
+            try:
+                await asyncio.wait_for(turn.wake.wait(), min(remaining, turn.retry_at - now))
+            except TimeoutError:
+                pass
+        return False
+
+    async def _prepare_once(self, turn):
         from app.telegram_bots.threads import ThreadPreparationFailure
 
         # Grouping and staged-input reads grant no execution privilege. The
@@ -779,10 +848,18 @@ class ChatTurns:
         endpoint = self.services.thread_client.endpoint_id
         attempt = await self.services.publication_authority.capture(turn.link, thread_id=thread, endpoint_id=endpoint)
         guard = self._guard(turn, creating=True, borrowed=attempt.create_guard)
-        if turn.callback_id is None:
-            record = await self.services.outbox.inbox.reserve_publication(turn.link, turn.origins, thread_id=thread, endpoint_id=endpoint, guard=guard)
-        else:
-            record = await self.services.outbox.inbox.reserve_callback_publication(turn.link, turn.callback_id, thread_id=thread, endpoint_id=endpoint, guard=guard)
+        try:
+            if turn.callback_id is None:
+                record = await self.services.outbox.inbox.reserve_publication(turn.link, turn.origins, thread_id=thread, endpoint_id=endpoint, guard=guard)
+            else:
+                record = await self.services.outbox.inbox.reserve_callback_publication(turn.link, turn.callback_id, thread_id=thread, endpoint_id=endpoint, guard=guard)
+        except Exception:
+            # This proof can only be issued by the creating guard before its
+            # writer starts. Other protocol or uncertain writer failures retain
+            # their existing behavior and never authorize another publication.
+            if attempt.admission.instance_refusal is not None:
+                raise attempt.admission.instance_refusal from None
+            raise
         # The immutable publication is owned before any marker/enqueue. Stop can
         # now bind its barrier to this exact identity even while dispatch awaits.
         turn.record = record
@@ -1359,7 +1436,8 @@ class ChatTurns:
                 if turn.stop_requested:
                     return  # A repeat tap: the first one is doing this.
                 if row.kind == "cancel_wait":
-                    if turn.record is None or row.target_kind != "attempt" or row.target_id != turn.record.turn_id:
+                    expected = ("request", turn.callback_id or str(turn.origins[0].message_id)) if turn.record is None else ("attempt", turn.record.turn_id)
+                    if (row.target_kind, row.target_id) != expected:
                         raise CallbackRefused() from None
                     if turn.capacity_waiting is not True:
                         raise CallbackRefused("stop.failed") from None  # It is being tried right now, and may yet wait again.
@@ -1568,6 +1646,17 @@ class ChatTurns:
         return not (turn is not None and turn.channel is channel and self._current(turn) and view is not None and not view.closed and view.mode == "draft" and view.started and not view.paused)
 
     def preview_allowed(self, channel, item):
+        if item.dedupe_key.startswith("notice:preparation-capacity:"):
+            return any(
+                turn.channel is channel
+                and self._current(turn)
+                and turn.record is None
+                and turn.capacity_waiting
+                and not turn.stop_requested
+                and not turn.input_closed
+                and item.dedupe_key == f"notice:preparation-capacity:{turn.link.chat_id}:{turn.link.binding_generation}:" + (turn.callback_id or str(turn.origins[0].message_id))
+                for turn in tuple(self._turns.values())
+            )
         return any(turn.channel is channel and self._current(turn) and turn.presentation is not None and turn.presentation.allows_placeholder(item) is True for turn in tuple(self._turns.values()))
 
     def _retire_now(self, channel):
