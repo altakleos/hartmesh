@@ -135,6 +135,9 @@ Bounded details added by tool middleware remain in saved conversation results;
 the terminal output inventory confirms the enriched artifact when it is retained.
 Interactive agent conversations offer human managers temporary site approval;
 ordinary chats retain their existing network approval options.
+AI assistants and employees read blocked-site events through their prepared
+workspace provider, so manager prompts and denied-result details reach the same
+conversation path without reading another workspace's events.
 [Attention](docs/HUMAN_INPUT_REQUESTS.md) gives human collaborators addressed
 requests for information, decisions and review, with current-access counts,
 routing recovery and attributed replies. Responses never start an AI employee

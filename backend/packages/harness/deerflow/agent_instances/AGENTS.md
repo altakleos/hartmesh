@@ -258,7 +258,10 @@ uncertain cleanup stays uncertain and success may win.
 Runtime network rules live in `runtime.py`; sandbox middleware calls its three
 helpers. Work/unattended/subagent calls deny and mark their own tool result;
 only interactive human managers receive an agent card, with temporary access.
-The instance provider delegates network mode, TTL and decisions to its baseline.
+The instance provider delegates network mode, TTL, event claims, pending denials
+and decisions to its baseline. Event and decision operations accept only its
+prepared sandbox ID; another sandbox or absent baseline yields no authority.
+Inherited async wrappers retain off-loop I/O and cancellation drainage.
 Work's server-owned autonomous mode follows caller-key scrubbing, and its prompt
 adds the question rule only with `report_work`, outside delegated scopes.
 

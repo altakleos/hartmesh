@@ -256,9 +256,19 @@ class InstanceSandboxProvider(SandboxProvider):
     def sandbox_network_temporary_grant_ttl(self):
         return self.baseline.sandbox_network_temporary_grant_ttl() if self.baseline is not None else super().sandbox_network_temporary_grant_ttl()
 
+    def consume_network_policy_events(self, sandbox_id):
+        if self.baseline is None or sandbox_id != self.sandbox.id:
+            return []
+        return self.baseline.consume_network_policy_events(sandbox_id)
+
+    def deny_pending_network_policy_events(self, sandbox_id):
+        if self.baseline is None or sandbox_id != self.sandbox.id:
+            return False
+        return self.baseline.deny_pending_network_policy_events(sandbox_id)
+
     def decide_network_policy_request(self, sandbox_id, request_id, decision):
-        if self.baseline is None:
-            return super().decide_network_policy_request(sandbox_id, request_id, decision)
+        if self.baseline is None or sandbox_id != self.sandbox.id:
+            return False
         return self.baseline.decide_network_policy_request(sandbox_id, request_id, decision)
 
     def acquire(self, thread_id=None, *, user_id=None):

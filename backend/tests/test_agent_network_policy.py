@@ -102,7 +102,7 @@ def test_manage_is_checked_again_when_the_answer_is_applied(context, decision, r
         runtime.check_network_decision(context, decision)
 
 
-def blocked_tool(context, *, async_path=False):
+def blocked_tool(context, *, async_path=False, instance_provider=False):
     provider = _NetworkPolicyProvider()
     provider.events = [{"request_id": "oldest", "host": "example.org", "port": 443}]
     request = _make_tool_call_request({"sandbox": {"sandbox_id": "existing"}})
@@ -112,7 +112,8 @@ def blocked_tool(context, *, async_path=False):
     async def handler(_request):
         return original
 
-    set_sandbox_provider(provider)
+    installed = runtime.InstanceSandboxProvider(context[AGENT_EXECUTION_CONTEXT_KEY], SimpleNamespace(id="existing"), baseline=provider) if instance_provider else provider
+    set_sandbox_provider(installed)
     try:
         result = asyncio.run(SandboxMiddleware().awrap_tool_call(request, handler)) if async_path else SandboxMiddleware().wrap_tool_call(request, lambda _request: original)
     finally:
@@ -121,8 +122,9 @@ def blocked_tool(context, *, async_path=False):
 
 
 @pytest.mark.parametrize("async_path", [False, True])
-def test_network_card_for_an_agent_offers_deny_and_temporary_only(async_path):
-    _, _, result = blocked_tool(agent_context(), async_path=async_path)
+@pytest.mark.parametrize("instance_provider", [False, True])
+def test_network_card_for_an_agent_offers_deny_and_temporary_only(async_path, instance_provider):
+    _, _, result = blocked_tool(agent_context(), async_path=async_path, instance_provider=instance_provider)
     payload = result.update["messages"][0].artifact["human_input"]
     assert [item["id"] for item in payload["options"]] == ["deny", "allow_temporary"]
 
@@ -137,14 +139,31 @@ def test_every_network_request_carries_details_with_host_port_and_ttl(context):
 
 
 @pytest.mark.parametrize("async_path", [False, True])
+@pytest.mark.parametrize("instance_provider", [False, True])
 @pytest.mark.parametrize("context", [agent_context(manage=False), agent_context(interaction_mode="autonomous"), agent_context(work=True, interaction_mode="interactive"), agent_context(is_subagent=True)])
-def test_denied_agent_connection_marks_its_own_result_without_ending_the_turn(context, async_path):
-    provider, original, result = blocked_tool(context, async_path=async_path)
+def test_denied_agent_connection_marks_its_own_result_without_ending_the_turn(context, async_path, instance_provider):
+    provider, original, result = blocked_tool(context, async_path=async_path, instance_provider=instance_provider)
     assert isinstance(result, ToolMessage) and result.content == original.content
     assert result.artifact == {"sandbox_network_denied": {"host": "example.org", "port": 443}}
     assert original.artifact is None
     assert provider.decisions == [("existing", "oldest", "deny")]
     assert provider.deny_pending_calls == []
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_instance_network_operations_stay_on_its_prepared_sandbox(bound):
+    baseline = _NetworkPolicyProvider() if bound else None
+    if baseline is not None:
+        baseline.events = [{"request_id": "oldest", "host": "example.org", "port": 443}]
+    provider = runtime.InstanceSandboxProvider(execution(), SimpleNamespace(id="own"), baseline=baseline)
+    assert provider.consume_network_policy_events("other") == []
+    assert provider.deny_pending_network_policy_events("other") is False
+    assert provider.decide_network_policy_request("other", "request", "allow_temporary") is False
+    if baseline is not None:
+        assert baseline.events and baseline.consume_calls == baseline.deny_pending_calls == baseline.decisions == []
+    assert provider.deny_pending_network_policy_events("own") is bound
+    if baseline is not None:
+        assert baseline.deny_pending_calls == ["own"] and baseline.decisions == [("own", "oldest", "deny")]
 
 
 def test_an_ordinary_chat_never_carries_sandbox_network_denied():
@@ -197,7 +216,8 @@ async def test_async_agent_denial_runs_off_loop_and_drains_repeated_cancellation
     async def handler(_request):
         return ToolMessage(content="blocked", tool_call_id="call-1")
 
-    set_sandbox_provider(provider)
+    installed = runtime.InstanceSandboxProvider(request.runtime.context[AGENT_EXECUTION_CONTEXT_KEY], SimpleNamespace(id="existing"), baseline=provider)
+    set_sandbox_provider(installed)
     task = asyncio.create_task(SandboxMiddleware().awrap_tool_call(request, handler))
     try:
         assert await asyncio.to_thread(entered.wait, 5)
