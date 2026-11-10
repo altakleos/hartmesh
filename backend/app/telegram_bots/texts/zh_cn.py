@@ -306,3 +306,5 @@ TEXTS.update(
     }
 )
 FORMS["employees.none"] = {"administrator": "还没有你可以聊天的 AI 员工。"}
+
+TEXTS["agents.presentation"] = "{lines}"

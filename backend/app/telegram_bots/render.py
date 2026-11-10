@@ -59,6 +59,10 @@ def _render(
     topics_hint: bool,
     values: dict[str, Any],
 ) -> str:
+    if key == "agents.presentation":
+        from app.telegram_bots.agent_lists import render_lines
+
+        return render_lines(values["lines"], locale, html=html)
     texts = catalog(locale)
     template = texts[key]  # Missing keys are always an error, including gated lines.
     if key in {"refused.files_full", "file.files_full"} and values.get("reader_is_manager") is not True:

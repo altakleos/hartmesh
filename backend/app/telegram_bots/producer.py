@@ -471,6 +471,10 @@ class DeliveryClaimRetired(Exception):
     """The transport admission no longer authorizes a request; no payload fault."""
 
 
+class ProductSourceRetired(DeliveryClaimRetired):
+    """An obsolete private fixed presentation must not obstruct later delivery."""
+
+
 class PreviewExpired(DeliveryClaimRetired):
     """An actual host view ended; only its strict temporary plan may retire."""
 
@@ -1047,6 +1051,16 @@ class Outbox:
             if inbox_rows:
                 await self.inbox.register_delivery(inbox_rows, outbox_id=identity, finish=finish_route, session=writer)
             return identity
+
+    async def plan_agent_list(self, link, *, source_id, parts, keyboard, callbacks, guard, inbox_rows, message_thread_id=None):
+        from app.telegram_bots.agent_list_authority import AgentListGuard, validate_basis
+
+        if not isinstance(guard, AgentListGuard) or any(part.get("source_ref", {}).get("key") != "agents.presentation" for part in parts):
+            raise ValueError("invalid-agent-list-source")
+        basis = validate_basis(guard.basis)
+        return await self._plan_product_keyboard(
+            link, source_id=source_id, parts=parts, keyboard=keyboard, callbacks=callbacks, guard=guard, inbox_rows=inbox_rows, finish_route=True, message_thread_id=message_thread_id, _extra={"agent_list_basis": basis}
+        )
 
     async def plan_product_keyboard(
         self,
@@ -2463,6 +2477,12 @@ class OutboxSender:
                 logger.warning("telegram_bots delivery_source_unread link=%s delivery=%s attempts=%s", link_id, row_id, row.attempts + 1)
                 await self._failure(link_id, row_id, generation, claim, error)
                 return
+            except ProductSourceRetired:
+                async with self.outbox._writer(link_id) as (writer, _binding):
+                    obsolete = await writer.get(TelegramOutboxRow, row_id, with_for_update=True)
+                    if self.outbox._fenced(obsolete, generation=generation, owner=self.run_id, claim=claim):
+                        await self._skip(writer, obsolete, "superseded")
+                return
             except DeliveryClaimRetired:
                 return
             except Exception as error:
@@ -2565,7 +2585,7 @@ class OutboxSender:
         parts = []
         for part in row.parts:
             basis = row.payload.get("reply_basis", {})
-            display = type(basis) is dict and (basis.get("version") in {4, 8} or basis.get("version") == 5 and basis.get("outcome", {}).get("request_basis", {}).get("version") == 2)
+            display = "agent_list_basis" in row.payload or type(basis) is dict and (basis.get("version") in {4, 8} or basis.get("version") == 5 and basis.get("outcome", {}).get("request_basis", {}).get("version") == 2)
             if part["presentation_version"] != version or (display or part["kind"] in {"document", "photo", "album"}) and part["state"] in {"sent", "unavailable"}:
                 continue
             replacement = {

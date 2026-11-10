@@ -4,7 +4,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import aliased
 
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied, AgentPermission, Refusal
@@ -198,6 +198,32 @@ class AgentWork:
                 if parent.id not in states:
                     states[parent.id] = await self.agents.execution_probe(parent.id)
         return [self._execution_projection(record, states.get(parent.id)) for record, (_row, parent, _attempt) in zip(records, results, strict=True)]
+
+    async def count_active(self, *, actor, instance_id):
+        """Count durable unresolved assignments, independent of pagination/residents."""
+        return await await_drained(self._count_active(actor=actor, instance_id=instance_id))
+
+    async def _count_active(self, *, actor, instance_id):
+        await self.agents._human(actor)
+        async with self._sf() as session:
+            count = await session.scalar(
+                select(func.count(AgentWorkAttemptRow.id))
+                .select_from(AgentInstanceRow)
+                .join(AgentInstanceGrantRow, AgentInstanceGrantRow.instance_id == AgentInstanceRow.id)
+                .outerjoin(AgentWorkRow, AgentWorkRow.instance_id == AgentInstanceRow.id)
+                .outerjoin(AgentWorkAttemptRow, and_(AgentWorkAttemptRow.work_id == AgentWorkRow.id, AgentWorkAttemptRow.status.in_(UNRESOLVED)))
+                .where(
+                    AgentInstanceRow.id == instance_id,
+                    AgentInstanceRow.status != "provisioning",
+                    AgentInstanceGrantRow.user_id == actor.subject_id,
+                    AgentInstanceGrantRow.permissions.between(1, 7),
+                    AgentInstanceGrantRow.permissions.op("&")(int(INSPECT)) != 0,
+                )
+                .group_by(AgentInstanceRow.id)
+            )
+            if count is None:
+                raise AgentDenied("Work requires current instance visibility and Inspect")
+            return int(count)
 
     async def get(self, *, actor, instance_id, work_id):
         async with self._sf() as session:

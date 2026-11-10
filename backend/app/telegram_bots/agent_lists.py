@@ -45,6 +45,7 @@ class AgentListDetails:
 class AgentListPresentation:
     text: str
     keyboard: list[list[dict]]
+    lines: tuple[dict, ...]
 
 
 def select_agents(body, *, owner_user_id: str, custody: str) -> AgentList:
@@ -87,7 +88,7 @@ def present_list(snapshot: AgentList, *, link, bots, details: dict[str, AgentLis
     for entry in snapshot.entries:
         info = details.get(entry.id) if entry.permissions & 2 else None
         key = "agents.line_plain" if info is None else "agents.line_work" if info.working or info.waiting else "agents.line_idle"
-        line = render_plain(key, locale, name=entry.name, role=info.role if info else None, working=info.working if info else 0, waiting=info.waiting if info else 0)
+        line = {"key": key, "values": {"name": entry.name, "role": info.role if info else None, "working": info.working if info else 0, "waiting": info.waiting if info else 0}}
         (own if entry.own else shared).append(line)
         lines.append(line)
         bot = owned_bots.get(entry.id)
@@ -101,19 +102,53 @@ def present_list(snapshot: AgentList, *, link, bots, details: dict[str, AgentLis
             raise ChannelExecutionProtocolError()
         keyboard.append([{"label": label, "label_values": {"name": entry.name}, "url": address}])
     if snapshot.custody == "personal":
-        text = render("assistants.list", locale, lines="\n".join(own)) if own else render("assistants.none", locale)
+        display = [{"key": "assistants.list", "values": {"lines": ""}}, *own] if own else [{"key": "assistants.none", "values": {}}]
         if shared:
-            text += "\n" + render("assistants.colleagues", locale, lines="\n".join(shared))
+            display.extend([{"key": "assistants.colleagues", "values": {"lines": ""}}, *shared])
         add = "Assistant" if snapshot.can_add else None
     else:
         # Preserve the HTTP list's order for company custody.
-        text = render("employees.list", locale, lines="\n".join(lines)) if lines else render("employees.none", locale, reader_is_administrator=administrator)
+        display = [{"key": "employees.list", "values": {"lines": ""}}, *lines] if lines else [{"key": "employees.none", "values": {"reader_is_administrator": administrator}}]
         add = "Employee" if administrator else None
     if snapshot.more:
-        text += "\n" + render("agents.more", locale, product=product)
+        display.append({"key": "agents.more", "values": {"product": product}})
     if add:
         address = page_address("web.add" + add, link, reader_is_administrator=administrator)
         if address is None:
             raise ChannelExecutionProtocolError()
         keyboard.append([{"label": "label.add_assistant" if add == "Assistant" else "label.add_employee", "url": address}])
-    return AgentListPresentation(text, canonical_keyboard(keyboard))
+    return AgentListPresentation(render_lines(display, locale), canonical_keyboard(keyboard), tuple(display))
+
+
+_LINE_KEYS = frozenset({"assistants.list", "assistants.none", "assistants.colleagues", "employees.list", "employees.none", "agents.line_plain", "agents.line_work", "agents.line_idle", "agents.more"})
+
+
+def render_lines(lines, locale, *, html=True):
+    """Render saved semantic lines in the recipient's current language."""
+    if not isinstance(lines, (list, tuple)) or not 1 <= len(lines) <= AGENT_LIST_LINES + 3:
+        raise ChannelExecutionProtocolError()
+    result = []
+    for line in lines:
+        if type(line) is not dict or set(line) != {"key", "values"} or line["key"] not in _LINE_KEYS or type(line["values"]) is not dict:
+            raise ChannelExecutionProtocolError()
+        result.append((render if html else render_plain)(line["key"], locale, **line["values"]).rstrip("\n"))
+    return "\n".join(result)
+
+
+def list_parts(presentation: AgentListPresentation) -> list[dict]:
+    """Keep line boundaries and fit both supported locales before publication."""
+    from app.telegram_bots.split import utf16_units
+
+    chunks, current = [], []
+    for line in presentation.lines:
+        candidate = [*current, line]
+        if any(utf16_units(render_lines(candidate, locale, html=False)) > 4096 for locale in ("en", "zh-CN")):
+            if not current:
+                raise ChannelExecutionProtocolError()
+            chunks.append(current)
+            current = [line]
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return [{"kind": "text", "source_ref": {"key": "agents.presentation", "values": {"lines": chunk}}} for chunk in chunks]
