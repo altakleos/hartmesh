@@ -461,7 +461,7 @@ content is refused before hashes/inbox/task payloads; disposable tasks retain
 safe identities only and drain before SDK teardown. Text/photos/documents use the
 managed turn controller; voice notes use `VoiceNotes`.
 
-`files.py` owns one Supervisor byte budget and pending attachment descriptors.
+`files.py` owns the byte budget and pending files. Instance writes: [turn guide](../../docs/TELEGRAM_TURN_EXECUTION.md#instance-file-writes).
 Reserve whole batches before reads, shrink only, and retain each charge until
 native writes and transport cleanup finish. `capped_download.py` reuses the
 normal bot request's HTTPX client with raw bounded streaming and no redirects;
@@ -471,9 +471,8 @@ Pending add/take uses real admitted rows and the same guarded writer: original
 input plus even an empty take is saved, so replay never adopts later attachments.
 Source-bound file notices are auxiliary to the actual publication. File Retry
 keeps the original thread and input snapshot across restart, /new and collection;
-its control is consumed only after actual enqueue/bind confirmation. Storage
-preflight and the write both use the separately configured Gateway as the bound
-human: the manager posts each file to `POST /api/threads/{id}/uploads`, the web's route.
+its control is consumed only after actual enqueue/bind confirmation. Ordinary/custom files use the configured Gateway as the bound
+human: `POST /api/threads/{id}/uploads`, the web's route.
 Capacity is discovered only from that write: 507 is `file.own_full`, 503
 `file.own_unavailable`, anything else `file.not_saved`, and the message goes on.
 `_Turn.saved_files` gives each file one outcome across busy and capacity retries. A planned
