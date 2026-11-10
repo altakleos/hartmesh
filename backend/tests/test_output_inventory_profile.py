@@ -16,7 +16,7 @@ class OfflineProfileModel(FakeMessagesListChatModel):
         return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
 
-def assemble_offline(monkeypatch, *, mode="full", custom=False, tools=(), transform_middlewares=None, bootstrap=False, plan=False, tool_objects=None):
+def assemble_offline(monkeypatch, *, mode="full", custom=False, tools=(), transform_middlewares=None, bootstrap=False, plan=False, tool_objects=None, runtime_context=None):
     """Actual first-party builder/SDK; isolate operator files and provider I/O."""
     import deerflow.tools
     from deerflow.agents.lead_agent import agent
@@ -62,7 +62,10 @@ def assemble_offline(monkeypatch, *, mode="full", custom=False, tools=(), transf
     monkeypatch.setattr(agent, "create_agent", create)
     with bind_agent_build_extensions(ExtensionRegistry().build()):
         result = agent.assemble_lead_agent(
-            {"configurable": {"thread_id": "profile-fixture", "thinking_enabled": False, "is_bootstrap": bootstrap, "is_plan_mode": plan, **({"agent_name": "profile-agent"} if custom else {})}},
+            {
+                "configurable": {"thread_id": "profile-fixture", "thinking_enabled": False, "is_bootstrap": bootstrap, "is_plan_mode": plan, **({"agent_name": "profile-agent"} if custom else {})},
+                **({"context": runtime_context} if runtime_context is not None else {}),
+            },
             app_config=config,
         )
     return result, captured, model

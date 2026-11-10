@@ -523,12 +523,18 @@ async def _produced_output_paths(
     user_id: str | None,
     extra_excluded_dir_names: frozenset[str] | None = None,
     inventory_capture: OutputInventoryCapture | None = None,
+    agent_execution: Any | None = None,
 ) -> list[str] | None:
     """Detect regular output files created or modified by this run."""
     if before is None or before.truncated:
         return None
     try:
-        after = await run_capture_io(lambda: capture_output_snapshot(thread_id, user_id=user_id, extra_excluded_dir_names=extra_excluded_dir_names, **({"observe_roots": True} if inventory_capture is not None else {})))
+        if agent_execution is not None:
+            from deerflow.agent_instances.presentation import capture_instance_outputs
+
+            after = await run_capture_io(lambda: capture_instance_outputs(agent_execution, extra_excluded_dir_names=extra_excluded_dir_names, observe_roots=True))
+        else:
+            after = await run_capture_io(lambda: capture_output_snapshot(thread_id, user_id=user_id, extra_excluded_dir_names=extra_excluded_dir_names, **({"observe_roots": True} if inventory_capture is not None else {})))
         if inventory_capture is not None:
             inventory_capture.observe_scan(after)
         if after.truncated:
@@ -1135,10 +1141,15 @@ async def run_agent(bridge: StreamBridge, run_manager: RunManager, record: RunRe
         ctx = kwargs.get("ctx")
         supported = callable(getattr(ctx, "schedule_stream_cleanup", None)) and all(value is None or getattr(value, "supports_capture_io", False) is True for value in (getattr(ctx, "checkpointer", None), getattr(ctx, "store", None)))
         intent = capture_from_kwargs(record.kwargs)
-        if intent is not None and intent.document_version == 2:
-            # Refuse an identifiable unsupported profile before instance
-            # preparation can acquire a provider/environment.
-            supported = supported and getattr(ctx, "agent_execution", None) is None and type(getattr(ctx, "qualify_output_view", None)) is OutputViewQualifier
+        if intent is not None and intent.version == 2:
+            from deerflow.agent_instances.conversations import AgentExecution
+
+            # Only the host's ordinary instance chat can qualify its Home.
+            # Work and untyped execution claims still refuse before preparation.
+            execution = getattr(ctx, "agent_execution", None)
+            supported = supported and (execution is None or type(execution) is AgentExecution and execution.work is None)
+            if intent.document_version == 2:
+                supported = supported and type(getattr(ctx, "qualify_output_view", None)) is OutputViewQualifier
         if not supported:
             if not record.terminal_confirmed and record.startup_phase is RunStartupPhase.unstarted:
                 await run_manager.fail_start_if_pending(record.run_id, error="Capture I/O profile is unsupported")
@@ -1373,6 +1384,8 @@ async def _run_agent(
     input_control = None
     scheduled_goal: GoalState | None = None
     final_goal_verdict: dict[str, Any] | None = None
+    captured_instance = False
+    output_scan_options: dict[str, Any] = {}
     produced_output_paths: list[str] | None = [] if ctx.agent_execution is not None else None
     terminal_error_frame: dict[str, str] | None = None
     # Journal construction moved ahead of preflight so every terminal run can
@@ -1581,6 +1594,7 @@ async def _run_agent(
                         user_id=workspace_changes_user_id,
                         extra_excluded_dir_names=workspace_excluded_dir_names,
                         **({"inventory_capture": inventory_capture} if inventory_capture is not None else {}),
+                        **output_scan_options,
                     )
                 delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), paths, _runtime_presented_files(getattr(runtime, "context", None)))
             if not await _persist_delivery_receipt(event_store, thread_id=thread_id, run_id=run_id, content=delivery_content):
@@ -1664,6 +1678,10 @@ async def _run_agent(
                 if getattr(run_manager, "supports_output_inventory", False) is not True or getattr(event_store, "supports_durable_output_inventory", False) is not True:
                     raise OutputEvidenceError()
                 inventory_capture = OutputInventoryCapture(document_version=intent.document_version)
+                if ctx.agent_execution is not None:
+                    captured_instance = True
+                    output_scan_options = {"agent_execution": ctx.agent_execution}
+                    produced_output_paths = None
             output_capture = OutputCaptureObserver(
                 owner_user_id=record.user_id, thread_id=thread_id, run_id=run_id, publication_id=_preview_publication_id(record), **({"inventory": inventory_capture} if inventory_capture is not None else {})
             )
@@ -1855,6 +1873,14 @@ async def _run_agent(
                     output_view_request = OutputViewRequest(record.user_id, thread_id, run_id, peek_scoped_paths(), prepared_chat, io_owner)
                     output_view_lease = await ctx.qualify_output_view(output_view_request)
 
+        if event_store is not None and captured_instance:
+            from deerflow.agent_instances.presentation import capture_instance_outputs
+
+            workspace_excluded_dir_names = _workspace_excluded_dir_names(ctx.app_config)
+            try:
+                pre_run_output_snapshot = await run_capture_io(lambda: capture_instance_outputs(ctx.agent_execution, extra_excluded_dir_names=workspace_excluded_dir_names, observe_roots=True))
+            except Exception:
+                logger.warning("Could not capture pre-run Home output snapshot for run %s", run_id, exc_info=True)
         if event_store is not None and ctx.agent_execution is None and chat_files_available:
             workspace_changes_user_id = get_effective_user_id()
             workspace_excluded_dir_names = _workspace_excluded_dir_names(ctx.app_config)
@@ -2435,8 +2461,9 @@ async def _run_agent(
                     user_id=workspace_changes_user_id,
                     extra_excluded_dir_names=workspace_excluded_dir_names,
                     **({"inventory_capture": inventory_capture} if inventory_capture is not None else {}),
+                    **output_scan_options,
                 )
-                if event_store is not None and ctx.agent_execution is None and chat_files_available
+                if event_store is not None and (ctx.agent_execution is None or captured_instance) and chat_files_available
                 else []
             )
             delivery_content = _delivery_content_with_outputs(
@@ -2497,6 +2524,7 @@ async def _run_agent(
                 thread_id=thread_id,
                 user_id=workspace_changes_user_id,
                 extra_excluded_dir_names=workspace_excluded_dir_names,
+                **output_scan_options,
             )
             delivery_content = _delivery_content_with_outputs(
                 journal.get_delivery_content() if journal is not None else _empty_delivery_content(),

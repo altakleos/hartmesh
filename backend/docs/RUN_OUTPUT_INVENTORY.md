@@ -57,8 +57,12 @@ for this qualification. It grants no resource credentials, file access,
 continuous role-history proof or global filesystem/containment claim.
 
 Missing qualification, a `None` preparation result or a failed scan never proves
-the no-view variant. AgentExecution is outside this profile and refuses before
-environment preparation. The graph/profile/root and all carrier checks remain
+the no-view variant. An ordinary persistent-agent conversation uses its exact
+host `AgentExecution` and prepared Home instead: before/final scans retain Home
+READ admission through filesystem qualification and scanning, then revalidate
+execution authority. Its output view is always the managed scan variant, never
+the no-view variant or requester-owned routing. Work attempts remain outside
+the inventory profile. The graph/profile/root and all carrier checks remain
 independent: file reoffers, artifacts and controls still count on a viewless run.
 
 | Document coverage | Meaning |
