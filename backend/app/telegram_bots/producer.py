@@ -187,7 +187,7 @@ _TURN_OUTCOME_KEYS = frozenset(
 _NO_RUN_KEYS = frozenset({"error.generic", "busy.cancelled", "chat.restarted"})
 _UNDELIVERABLE_KEYS = frozenset({"answer.on_web", "error.generic"})
 _DELETED_SOURCE = {"key": "chat.conversation_deleted", "values": {}}
-_TURN_OUTCOME_KEYS |= frozenset(INSTANCE_RUN_STOP_REASONS.values())
+_TURN_OUTCOME_KEYS |= frozenset(INSTANCE_RUN_STOP_REASONS.values()) | {"unavailable.off", "unavailable.paused", "unavailable.moved", "unavailable.files_unchecked", "unavailable.fix"}
 INPUT_OUTCOME_KEYS = (_TURN_OUTCOME_KEYS - {"answer.on_web"} - CAPACITY_KEYS) | {
     "custom_agent.deleted",
     "busy.followup_full",
@@ -235,6 +235,12 @@ def _prepare_publication_outcome(record, *, run, creation_refusal, source_ref, u
     if classified is None or source_ref["key"] != classified.text_key and not (classified.retry_later and source_ref["key"] in {"busy.gave_up", "busy.cancelled"}) or source_ref["key"] in CAPACITY_KEYS:
         raise ValueError("publication-outcome-conflict") from None
     proof = {"kind": "run", "row": dict(run.row)} if run is not None else {"kind": "creation_refusal", "scope": asdict(execution)}
+    from app.telegram_bots.instance_refusals import RecheckedCreationRefusal, saved_rechecked_refusal
+
+    if type(creation_refusal) is RecheckedCreationRefusal:
+        proof = saved_rechecked_refusal(creation_refusal, execution)
+        if source_ref["values"].get("code") != proof["code"]:
+            raise ValueError("publication-outcome-conflict") from None
     return _safe_json({"version": 1, "publication": _publication_identity(record), "proof": proof, "source_ref": source_ref, "finish_route": True})
 
 
@@ -279,6 +285,14 @@ def validate_publication_outcome(item: OutboxItem) -> PublicationOutcomeBasis:
             # The run succeeded, and what it produced cannot be carried by a chat.
             run = ValidatedRun(MappingProxyType(proof["row"]), receipt_from_run_kwargs(proof["row"].get("kwargs")))
             if proof["row"].get("status") != "success" or classify_run(run, execution) is not None or source["key"] not in _UNDELIVERABLE_KEYS:
+                raise ValueError
+        elif proof.get("kind") == "instance_creation_refusal":
+            from app.telegram_bots.instance_refusals import read_saved_recheck
+
+            classified = read_saved_recheck(proof, execution)
+            if source["values"].get("code") != proof["code"]:
+                raise ValueError
+            if source["key"] != classified.text_key and not (classified.retry_later and source["key"] in {"busy.gave_up", "busy.cancelled"}):
                 raise ValueError
         elif proof.get("kind") == "creation_refusal" and set(proof) == {"kind", "scope"}:
             saved_scope = proof["scope"]

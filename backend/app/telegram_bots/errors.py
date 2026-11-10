@@ -96,5 +96,10 @@ def classify_creation_refusal(proof: CreationRefusal, scope: ChannelExecutionSco
     """Only the captured original host refusal may select thread waiting."""
     if type(scope) is not ChannelExecutionScope or scope.assistant_id != "lead_agent":
         _refuse()
+    from app.telegram_bots.instance_refusals import RecheckedCreationRefusal, validate_rechecked_refusal
+
+    if type(proof) is RecheckedCreationRefusal:
+        failure = validate_rechecked_refusal(proof, scope)
+        return TurnFailure(failure.text_key, failure.retry_later)
     validate_creation_refusal(proof, scope)
     return TurnFailure("busy.thread", True)

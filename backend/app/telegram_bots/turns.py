@@ -93,6 +93,7 @@ class _Turn:
     done: asyncio.Event = field(default_factory=asyncio.Event)
     wake: asyncio.Event = field(default_factory=asyncio.Event)
     refusal: object = None
+    rechecked_refusal: object = None
     stop_requested: bool = False
     waiting_since: float | None = None
     active: bool = True
@@ -968,6 +969,13 @@ class ChatTurns:
         from app.telegram_bots.publication import conversation_button, failure_button
 
         source = await self._source(turn, key)
+        from app.telegram_bots.instance_refusals import RecheckedCreationRefusal, validate_rechecked_refusal
+        from app.telegram_bots.publication import channel_execution_scope
+
+        if run is None and refusal is not None and turn.rechecked_refusal is not None:
+            refusal = turn.rechecked_refusal
+        if type(refusal) is RecheckedCreationRefusal:
+            source["values"].update(validate_rechecked_refusal(refusal, channel_execution_scope(turn.record)).values)
         on_web = key == "answer.on_web"
         return await self.services.outbox.plan_publication_outcome(
             turn.record,
@@ -1124,7 +1132,11 @@ class ChatTurns:
                     if run.row.get("run_id") != turn.run_id or run.row.get("status") not in _RUN_ENDED:
                         turn.quiet_since = None
                     turn.run_id = run.row.get("run_id")
-                failure = classify_creation_refusal(turn.refusal, channel_execution_scope(record)) if turn.refusal is not None else None
+                if turn.refusal is not None and run is None and turn.link.agent_kind == "instance":
+                    from app.telegram_bots.instance_refusals import recheck_creation_refusal
+
+                    turn.rechecked_refusal = await self._observe(turn, lambda: recheck_creation_refusal(self.services, turn.link, record, turn.refusal))
+                failure = classify_creation_refusal(turn.rechecked_refusal or turn.refusal, channel_execution_scope(record)) if turn.refusal is not None else None
                 if run is not None and run.row.get("status") in _RUN_ENDED:
                     failure = classify_run(run, channel_execution_scope(record))
                     stopped = turn.stop_requested and run.row.get("status") == "interrupted"
@@ -1200,6 +1212,7 @@ class ChatTurns:
                                 turn.record = successor
                                 turn.run_id = None
                                 turn.refusal = None
+                                turn.rechecked_refusal = None
                                 turn.stop_status = None
                                 turn.stop_marker_checked = False
                                 turn.capacity_waiting = False

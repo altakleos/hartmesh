@@ -114,6 +114,10 @@ a refused Stop preserves it. A guarded read failure holds the same publication
 and retries observation, never model dispatch. Callback-owned input retains its
 actual original-message snapshots across inbox collection. Reservation and the
 dispatch marker alone never consume the retry control.
+Acknowledged creating refusals are paired with a drained recheck of the exact
+conversation's execution authority and resident admission. Its opaque proof is
+bound to the original refusal and publication; the saved closed outcome retains
+that scope. Retry creation continues to use the original host refusal.
 
 `streaming.py` consumes only opaque qualified lead previews from `progress.py`.
 Raw source offsets and UTF-16 chunk limits stay separate. Earlier acknowledged

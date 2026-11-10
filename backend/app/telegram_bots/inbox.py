@@ -1684,7 +1684,7 @@ class InboxRepository:
             # A 404 for the thread says nothing about a run. Its run went with it, and the row may still name one.
             or proof.kind != "conversation_deleted"
             and proof.run_id != fresh.run_id
-            or proof.kind not in {"run", "undeliverable", "creation_refusal", "no_run", "conversation_deleted"}
+            or proof.kind not in {"run", "undeliverable", "creation_refusal", "instance_creation_refusal", "no_run", "conversation_deleted"}
             or proof.kind in {"run", "undeliverable"}
             and fresh.run_id is None
         ):

@@ -285,5 +285,8 @@ exists. Stop ends that input before any dispatch. A new run is never inferred
 from a manager sentence. Restart and storage maintenance require manual retry.
 Execution-unavailable diagnostics recheck Use before reading storage state and
 use public support reference words. Existing agents are not gated by quota counts.
-This prepublication handler is separate from rechecking an acknowledged creating
-refusal and from structured run interruption frames.
+An acknowledged creating refusal is rechecked through the same conversation's
+execution authority and resident admission. Only the four send refusals select
+an alternative to thread waiting. The closed saved outcome retains the original
+publication and instance binding; no manager sentence is classified. Structured
+run interruption frames remain separate work.
