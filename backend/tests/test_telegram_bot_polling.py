@@ -793,3 +793,26 @@ async def test_pending_drop_logs_info_with_last_discarded_update(env, caplog):
     logs = [record for record in caplog.records if "pending_dropped" in record.getMessage()]
     assert len(logs) == 1 and logs[0].levelno == logging.INFO
     assert "through=40" in logs[0].getMessage()
+
+
+async def test_policy_discard_confirms_last_update_and_retries_sql_ack_without_new_drop(env):
+    calls = 0
+
+    async def ack():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OperationalError("fixture ack", {}, Exception("SQL unavailable"))
+        return True
+
+    task = PollTask(env.channel, on_health=env.on_health, record=PollRecord(), on_drop_complete=ack, discard_intent="a" * 32)
+    env.updates.enqueue("getUpdates", result=[update_payload(75)])
+    env.updates.enqueue("getUpdates", result=[update_payload(76)])
+    with pytest.raises(OperationalError):
+        await task.complete_pending_drop()
+    assert task.pending_drop
+    assert [call.parameters["offset"] for call in env.updates.calls] == [-1, 76]
+    assert env.channel.accepted == []
+    await task.complete_pending_drop()
+    assert not task.pending_drop and task.offset == 76 and calls == 2
+    assert len(env.updates.calls) == 2

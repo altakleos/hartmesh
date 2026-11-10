@@ -111,6 +111,28 @@ class TelegramAuthority:
         self.connections = connections
         self.app = app
 
+    async def instance_identity(self, link: BotLink):
+        """Host lifecycle metadata; this does not grant access to private data."""
+        from deerflow.agent_instances.contract import InstanceIdentity
+        from deerflow.persistence.agent_instances.model import AgentInstanceRow
+
+        async def read():
+            async with self.links.session_factory() as session:
+                row = await session.get(AgentInstanceRow, link.agent_ref)
+                if row is None:
+                    raise AuthorityUnavailable
+                return InstanceIdentity.from_row(row)
+
+        return await await_drained(read())
+
+    async def instance_policy(self, link: BotLink) -> str:
+        from app.telegram_bots.policy import InstancePolicy
+
+        if link.agent_kind != "instance":
+            return "allowed"
+        identity = await self.instance_identity(link)
+        return await InstancePolicy(self.links.session_factory).get(identity.id) if identity.custody == "company" else "allowed"
+
     async def instance_view(self, link: BotLink):
         from deerflow.agent_instances.contract import AgentPermission
         from deerflow.spaces.contract import PrincipalRef
@@ -120,6 +142,57 @@ class TelegramAuthority:
         if agents is None:
             raise AuthorityUnavailable
         return await agents.get(actor=PrincipalRef("human", link.owner_user_id), instance_id=link.agent_ref, permission=AgentPermission.USE)
+
+    async def instance_send_policy(self, link: BotLink, *, require_use: bool, bound: bool = True) -> str:
+        """Final point-in-time grant, target, policy and discard decision.
+
+        Live host authority is checked first. The final joined SQL statement
+        observes all mutable send facts together; no link refresh or separate
+        policy/grant read can carry an earlier decision past a newer one.
+        """
+        from sqlalchemy import and_, select
+
+        from app.telegram_bots.policy import POLICIES, pending_discard
+        from deerflow.agent_instances.contract import AgentDenied, AgentPermission
+        from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow, AgentInstanceRow
+        from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramInstancePolicyRow
+
+        agents = getattr(getattr(self.app, "state", None), "agent_instances", None)
+        if require_use:
+            await self.instance_view(link)
+            if agents.directory.session_factory.kw.get("bind") is not self.links.session_factory.kw.get("bind"):
+                raise AuthorityUnavailable
+
+        async def read():
+            async with self.links.session_factory() as session:
+                bot, instance, grant, policy = TelegramBotLinkRow, AgentInstanceRow, AgentInstanceGrantRow, TelegramInstancePolicyRow
+                result = (
+                    await session.execute(
+                        select(bot, instance.custody, instance.status, grant.permissions, policy.policy)
+                        .join(instance, instance.id == bot.agent_ref)
+                        .outerjoin(grant, and_(grant.instance_id == instance.id, grant.user_id == bot.owner_user_id))
+                        .outerjoin(policy, policy.instance_id == instance.id)
+                        .where(bot.id == link.id)
+                    )
+                ).one_or_none()
+                if result is None:
+                    raise AuthorityUnavailable
+                current, custody, status, permissions, value = result
+                basis = ("owner_user_id", "agent_kind", "agent_ref", "bot_id", "token_revision", "binding_generation", "connection_id", "chat_id", "telegram_user_id")
+                if any(getattr(current, key) != getattr(link, key) for key in basis) or custody not in {"personal", "company"} or bound and current.state != "connected":
+                    raise AuthorityUnavailable
+                value = "allowed" if custody == "personal" or value is None else value
+                if value not in POLICIES:
+                    raise AuthorityUnavailable
+                if require_use and (not permissions or not permissions & int(AgentPermission.USE) or status != "active" or pending_discard(current) is not None):
+                    raise AgentDenied("The current Telegram send is unavailable")
+                if require_use and getattr(getattr(self.app, "state", None), "agent_instances", None) is not agents:
+                    raise AuthorityUnavailable
+                if pending_discard(current) is not None and value != "off":
+                    return "restoring"
+                return value
+
+        return await await_drained(read())
 
     async def admit_instance(self, link: BotLink):
         """The Gateway order: current Use, execution readiness, resident admission."""
@@ -192,10 +265,16 @@ class TelegramAuthority:
         if link.agent_kind == "instance":
             from deerflow.agent_instances.contract import AgentDenied
 
+            if await self.instance_policy(link) == "off":
+                return "policy_off"
             try:
                 view = await self.instance_view(link)
             except AgentDenied:
                 return "agent_unavailable"
+            from app.telegram_bots.policy import pending_discard
+
+            if pending_discard(link) is not None:
+                return "policy_restoring"
             return "ok" if view.status == "active" else "agent_unavailable"
         return "unsupported"
 
@@ -216,10 +295,6 @@ class TelegramAuthority:
     async def delivery(self, link: BotLink, item: OutboxItem, part: dict | None = None) -> DeliveryEligibility:
         from app.telegram_bots.producer import DeliveryEligibility, uses_model_source
 
-        # Conversation admission alone cannot authorize an unprotected send.
-        # Keep stored instance replies held until their policy consumer lands.
-        if link.agent_kind == "instance":
-            return DeliveryEligibility.wait()
         try:
             await require(link.owner_user_id)
             current = await self.links.get(link.id)
@@ -234,6 +309,18 @@ class TelegramAuthority:
                 or not await self._connection_matches(current)
             ):
                 return DeliveryEligibility.skip("link-not-connected")
+            policy = await self.instance_policy(current)
+            if policy == "off":
+                return DeliveryEligibility.skip("policy-off")
+
+            async def allowed():
+                value = await self.instance_send_policy(current, require_use=target == "ok") if current.agent_kind == "instance" else "allowed"
+                if value == "off":
+                    return DeliveryEligibility.skip("policy-off")
+                if value == "restoring":
+                    return DeliveryEligibility.wait()
+                return DeliveryEligibility.allow(protect_content=value == "protected")
+
             selected = [part] if part is not None else item.parts
             if uses_model_source(item) or not selected or any(not isinstance(value, dict) or set(value.get("source_ref", {})) != {"key", "values"} for value in selected):
 
@@ -249,9 +336,10 @@ class TelegramAuthority:
                 ):
                     return DeliveryEligibility.wait()
                 await require(link.owner_user_id, "threads:read", "runs:read")
-                if await self._supported_target(current) != "ok":
+                target = await self._supported_target(current)
+                if target != "ok":
                     return DeliveryEligibility.wait()
-                return DeliveryEligibility.allow()
+                return await allowed()
             if type(item.payload.get("reply_basis")) is dict and item.payload["reply_basis"].get("version") == 3:
                 from app.telegram_bots.producer import validate_restart_reply_basis
 
@@ -264,10 +352,10 @@ class TelegramAuthority:
             target = await self._supported_target(current)
             # The producer validates the reserved status allowlist and shape.
             if target == "agent_unavailable" and item.payload.get("delivery_kind") == "status_notice":
-                return DeliveryEligibility.allow()
+                return await allowed()
             if target != "ok":
                 return DeliveryEligibility.wait()
-            return DeliveryEligibility.allow()
+            return await allowed()
         except AccessOff:
             return DeliveryEligibility.skip("disabled")
         except CeilingRefused:
@@ -290,10 +378,22 @@ class TelegramAuthority:
             or link.binding_generation != context.binding_generation
             or context.purpose == "bound_message"
             and link.chat_id != context.chat_id
-            or link.agent_kind not in {"lead_agent", "custom_agent"}
+            or link.agent_kind not in {"lead_agent", "custom_agent", "instance"}
         ):
             raise DeliveryClaimRetired
-        return False
+        if link.agent_kind != "instance":
+            return False
+        try:
+            policy = await self.instance_send_policy(link, require_use=context.purpose == "bound_message", bound=context.purpose == "bound_message")
+            if context.expected_policy is not None and policy != context.expected_policy:
+                raise DeliveryClaimRetired
+            if context.purpose == "bound_message" and policy in {"off", "restoring"}:
+                raise DeliveryClaimRetired
+            # Optional lifecycle notices remain possible after Use/account
+            # withdrawal. Off or restoration never weakens their protection.
+            return policy in {"protected", "off", "restoring"}
+        except Exception:
+            raise DeliveryClaimRetired from None
 
 
 async def is_administrator(owner_user_id: str) -> bool:

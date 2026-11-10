@@ -72,6 +72,8 @@ class PollTask:
         record: PollRecord,
         on_result: Callable[[], bool] | None = None,
         on_dispatch: Callable[[], None] | None = None,
+        on_drop_complete: Callable[[], Awaitable[bool]] | None = None,
+        discard_intent: str | None = None,
         decision_pending: Callable[[], bool] | None = None,
         control_allowed: Callable[[str], bool] | None = None,
         is_current: Callable[[], bool] | None = None,
@@ -104,7 +106,11 @@ class PollTask:
         self._last_probe: datetime | None = None
         self._fence_pending: tuple[datetime, bool, dict] | None = None
         self._fence_committed = False
-        self._drop_required = False
+        self._drop_required = discard_intent is not None
+        self.discard_intent = discard_intent
+        self._drop_fetched = False
+        self._drop_confirmed = False
+        self._on_drop_complete = on_drop_complete
         self._network_since: datetime | None = None
         # A saved `unreachable` is cleared by the first good poll of any process.
         self._had_failure = channel.link.health == "unreachable"
@@ -144,6 +150,13 @@ class PollTask:
             if current is None or current.token_revision != self.transport_revision or current.health == "token_rejected":
                 self._retired = True
                 return None
+            if getattr(current, "agent_kind", None) == "instance":
+                from app.telegram_bots.policy import pending_discard
+
+                intent = pending_discard(current)
+                if intent is not None and intent != self.discard_intent:
+                    self._retired = True
+                    return None
             # A sender may start verification during the awaited SQL guard.
             # With no checker this await returns without yielding, so dispatch
             # follows the last verification gate rather than an earlier CAS.
@@ -373,21 +386,25 @@ class PollTask:
         return False
 
     async def _fetch_locked(self, *, mode: str = "poll") -> str:
-        if mode in {"drop", "confirm"} and self._control_allowed is not None and not self._control_allowed(mode):
+        if mode in {"drop", "confirm", "drop_confirm"} and self._control_allowed is not None and not self._control_allowed(mode):
             return "held"
         if await self._current() is None:
             return "invalid-token"
+        if mode == "drop" and self._drop_fetched:
+            return await self._complete_drop()
         if self._fence_pending is not None:
             return await self._finish_conflict()
         if self._pending_health:
             return await self._retry_health()
         if self._rate_pending():
             return "rate"
-        parameters = {"timeout": 0 if mode in {"confirm", "drop"} else POLL_TIMEOUT_SECONDS, "allowed_updates": ALLOWED}
+        parameters = {"timeout": 0 if mode in {"confirm", "drop", "drop_confirm"} else POLL_TIMEOUT_SECONDS, "allowed_updates": ALLOWED}
         if mode == "drop":
             parameters.update(offset=-1, limit=1)
         elif self.offset is not None:
             parameters["offset"] = self.offset
+        if mode == "drop_confirm":
+            parameters["limit"] = 1
         count = mode in {"poll", "probe"}
         if not count and self._control_allowed is not None and not self._control_allowed(mode):
             return "held"
@@ -428,13 +445,22 @@ class PollTask:
                 self._result()
             await self._network(error)
             return "network"
+        if mode == "drop_confirm":
+            self._drop_confirmed = True
+            if await self._current() is None:
+                return "invalid-token"
+            return await self._complete_drop()
+        if mode == "drop":
+            # Keep the received result before any SQL await. A retry after a
+            # failed acknowledgement must not discard newer arrivals again.
+            self.offset = updates[-1].update_id + 1 if updates else None
+            self._drop_fetched = True
+            if await self._current() is None:
+                return "invalid-token"
+            self._event("pending_dropped", level=logging.INFO, through=updates[-1].update_id if updates else "none")
+            return await self._complete_drop()
         if await self._current() is None:
             return "invalid-token"
-        if mode == "drop":
-            self.offset = updates[-1].update_id + 1 if updates else None
-            self._drop_required = False
-            self._event("pending_dropped", level=logging.INFO, through=updates[-1].update_id if updates else "none")
-            return "ok"
         if mode == "confirm":
             self._event("offset_confirmed", offset=self.offset)
             return "ok"
@@ -617,10 +643,24 @@ class PollTask:
         """A start writes `last_ok_at` before the first poll, so the saved value is handed over."""
         self._last_contact = last_ok_at
 
+    async def _complete_drop(self) -> str:
+        # A negative offset leaves its returned last update unconfirmed. The
+        # positive offset confirms it; any newer returned update remains
+        # unconfirmed and will be read normally after the durable ack.
+        if self.discard_intent is not None and self.offset is not None and not self._drop_confirmed:
+            return await self._fetch_locked(mode="drop_confirm")
+        if self._on_drop_complete is not None and not await self._on_drop_complete():
+            return "held"
+        self._drop_required = False
+        return "ok"
+
     def require_drop_pending(self) -> None:
         """Transfer a restore's discard intent before the poll owner starts."""
         if self._pending or self._held or self._fence_pending or self._pending_health:
             raise ValueError("pending-admission-batch")
+        if not self._drop_required:
+            self._drop_fetched = False
+            self._drop_confirmed = False
         self._drop_required = True
 
     async def complete_pending_drop(self) -> None:

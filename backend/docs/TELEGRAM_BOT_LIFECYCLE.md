@@ -120,6 +120,16 @@ outlast grace; no new SQL retry survives the database owner.
 Do not install future-stage no-op schedulers or trust manager text as a model
 source.
 
+Employee policy is read from SQL at delivery and reconcile boundaries. Off stops
+polling, skips pending work without spending callbacks, and attempts one fixed
+notice before closing the client. Restoring allowed/protected starts with a
+pending-update discard recorded with the off write, even when no supervisor
+observed the off interval. A failed launch leaves that intent intact. The poller
+confirms the last discarded update before acknowledging the exact intent in SQL;
+SQL retries reuse the fetched result and never issue another negative-offset
+request in that poll owner. Policy notices retain their expected setting through
+limiter waits; an obsolete announcement cannot borrow the new setting's authority.
+
 ## Binding, codes, tokens and health
 
 Binding saves account ownership, channel identity, generation, event, sanitized

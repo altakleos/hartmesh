@@ -32,11 +32,12 @@ STAGE_ONE_KEYS = frozenset(
     web.timezone web.scheduled web.account web.fileTooLarge web.resultTooLarge
     """.split()
 )
+POLICY_KEYS = frozenset({"policy.off", "policy.on", "policy.on_protected", "policy.protected", "policy.unprotected"})
 
 
 def test_text_catalog_locales_have_equal_keys():
     assert set(catalog("en")) == set(catalog("zh-CN"))
-    assert STAGE_ONE_KEYS == {key for key in catalog("en") if not key.startswith(("label.", "menu."))}
+    assert STAGE_ONE_KEYS | POLICY_KEYS == {key for key in catalog("en") if not key.startswith(("label.", "menu."))}
     assert catalog("zh_cn") is catalog("zh-CN")
     assert catalog("unrecognised") is catalog("en")
     assert all(text and "<br>" not in text for text in catalog("en").values())
@@ -91,8 +92,8 @@ def test_alert_texts_fit_200_characters():
             assert len(render_plain(key, locale, product="P" * 64)) <= 200
 
 
-def test_first_keys_are_exact_stage_one_proactive_subset():
-    assert FIRST_KEYS == frozenset(
+def test_first_keys_are_exact_fixed_notice_subset():
+    assert FIRST_KEYS == POLICY_KEYS | frozenset(
         {"hello.privacy", "link.conflict", "link.conflict_over.plain", "link.conflict_over.chat", "link.conflict_over.custom_agent", "link.back_online", "link.removed", "access.off", "access.back", "delivery.failed"}
     )
 

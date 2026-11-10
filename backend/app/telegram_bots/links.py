@@ -398,6 +398,8 @@ def _health_event(cause: str | None, holds: bool, causes: set[str], *, in_confli
     """
     if cause == "conflict":
         return None if holds is in_conflict else "conflict" if holds else "conflict_ended"
+    if cause == "policy_off":
+        return None if holds == (cause in causes) else "policy_off" if holds else "policy_on"
     return cause if holds and cause in {"token_rejected", "stopped"} and cause not in causes else None
 
 
@@ -1316,6 +1318,8 @@ class BotLinkRepository:
                 if policy_value is not None:
                     if not isinstance(previous, dict) or set(previous) != {"value", "at"} or not isinstance(previous["value"], str) or previous["value"] not in {"off", "allowed", "protected"}:
                         return False
+                    if previous["value"] == policy_value:
+                        return False
                     previous = previous["at"]
                 try:
                     if not isinstance(previous, str):
@@ -1400,6 +1404,10 @@ class BotLinkRepository:
                         return None
                 if check_attempt_current is not None and check_attempt_current() is not True:
                     return None
+                if cause == "policy_off" and holds and row.agent_kind == "instance":
+                    from app.telegram_bots.policy import mark_discard
+
+                    mark_discard(row)
                 cached = self._health_causes.get(link_id) if self._health_revisions.get(link_id) == row.token_revision else None
                 causes = set(cached if cached is not None else {row.health} if row.health != "ok" else set())
                 event = _health_event(cause, holds, causes, in_conflict=row.conflict_since is not None)

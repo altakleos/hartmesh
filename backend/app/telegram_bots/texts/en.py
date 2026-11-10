@@ -1,6 +1,13 @@
 """English fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "policy.protected": "Forwarding and saving are switched off here.\nWhat {name} sends here can no longer be forwarded or saved, and messages {name} sends first show their details after a tap on Show. A manager of {name} chose this.",
+    "policy.unprotected": "Forwarding and saving are back.\nWhat {name} sends here can be forwarded and saved again, and messages {name} sends first show their details at once. "
+    "Messages sent before now stay as they were. A manager of {name} chose this.",
+    "policy.off": "Telegram is turned off for {name}.\nA manager of {name} chose this. This chat will not answer. {name} is still there in {product} on the web.",
+    "policy.on": "Telegram is on again for {name}.\nThis chat works again.",
+    "policy.on_protected": "Telegram is on again for {name}.\nThis chat works again. What {name} sends here cannot be forwarded or saved, and messages {name} sends first show their details after a tap on Show.",
+    "label.open_agent_web": "Open {name} on the web",
     "hello.chat": "Connected as {email}. This chat is {product}. No other Telegram account can write here.\n"
     "\n"
     "Ask anything or send a file. Everything here is also kept in {product} on the web.\n"

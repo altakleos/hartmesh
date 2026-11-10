@@ -144,7 +144,7 @@ async def test_lost_instance_service_is_uncertain_and_preserves_link(db, monkeyp
         await close(e)
 
 
-async def test_live_instance_does_not_enable_delivery_without_policy_consumer(db, monkeypatch):
+async def test_live_instance_delivery_uses_current_policy_and_notice_context(db, monkeypatch):
     from app.telegram_bots.adapter import SendContext
     from app.telegram_bots.producer import DeliveryClaimRetired, OutboxItem
 
@@ -154,9 +154,10 @@ async def test_live_instance_does_not_enable_delivery_without_policy_consumer(db
         async with db.sessions() as reader:
             row = await reader.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == e.link.id))
             item = OutboxItem(**{name: getattr(row, name) for name in OutboxItem.__dataclass_fields__})
-        assert (await e.live.authority.delivery(e.link, item)).decision == "wait"
+        assert (await e.live.authority.delivery(e.link, item)).decision == "allow"
+        assert await e.live.authority.protect_notice(SendContext(e.link.id, e.link.chat_id, e.link.binding_generation, e.link.token_revision, "bound_message")) is False
         with pytest.raises(DeliveryClaimRetired):
-            await e.live.authority.protect_notice(SendContext(e.link.id, e.link.chat_id, e.link.binding_generation, e.link.token_revision, "bound_message"))
+            await e.live.authority.protect_notice(SendContext(e.link.id, e.link.chat_id, e.link.binding_generation + 1, e.link.token_revision, "bound_message"))
     finally:
         await close(e)
 
