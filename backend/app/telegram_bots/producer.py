@@ -55,6 +55,7 @@ _URL_SOURCES = {
     "chat.restarted": ("web.conversation", "label.open_conversation"),
     "answer.on_web": ("web.conversation", "label.open_conversation"),
     "refused.files_full": ("web.files", "label.open_files"),
+    "refused.interrupted_recovery": ("web.files", "label.open_files"),
 }
 _TRANSPORT_RECEIPTS = frozenset({"sent_at", "dispatched_at", "unavailable_reason", "invalid_token_verification_pending", "url_button_fallback", "plain_fallback"})
 _PART_IDENTITY = frozenset({"part_id", "presentation_version", "ordinal", "state", "message_ids"})
@@ -180,6 +181,9 @@ _TURN_OUTCOME_KEYS = frozenset(
         "chat.conversation_deleted",
         "chat.files_full",
         "refused.interrupted",
+        "refused.interrupted_manager",
+        "refused.interrupted_recovery",
+        "net.blocked_ask",
         "busy.queued",
         "busy.thread",
     }
@@ -235,6 +239,10 @@ def _prepare_publication_outcome(record, *, run, creation_refusal, source_ref, u
     if classified is None or source_ref["key"] != classified.text_key and not (classified.retry_later and source_ref["key"] in {"busy.gave_up", "busy.cancelled"}) or source_ref["key"] in CAPACITY_KEYS:
         raise ValueError("publication-outcome-conflict") from None
     proof = {"kind": "run", "row": dict(run.row)} if run is not None else {"kind": "creation_refusal", "scope": asdict(execution)}
+    if run is not None and run.error_evidence is not None:
+        from app.channels.run_errors import saved_run_error
+
+        proof["error"] = saved_run_error(run.error_evidence, execution, run.row["run_id"])
     from app.telegram_bots.instance_refusals import RecheckedCreationRefusal, saved_rechecked_refusal
 
     if type(creation_refusal) is RecheckedCreationRefusal:
@@ -251,7 +259,7 @@ def validate_publication_outcome(item: OutboxItem) -> PublicationOutcomeBasis:
     from app.channels.execution import ChannelExecutionScope
     from app.channels.execution_client import ValidatedRun
     from app.gateway.channel_execution import receipt_from_run_kwargs
-    from app.telegram_bots.errors import classify_run
+    from app.telegram_bots.errors import classify_run, classify_saved_run
     from app.telegram_bots.inbox import PublicationOrigin, PublicationRecord, PublicationScope
 
     try:
@@ -276,9 +284,9 @@ def validate_publication_outcome(item: OutboxItem) -> PublicationOutcomeBasis:
             scope.agent_name,
             instance_id=scope.agent_ref if scope.agent_kind == "instance" else None,
         )
-        if proof.get("kind") == "run" and set(proof) == {"kind", "row"}:
+        if proof.get("kind") == "run" and set(proof) in ({"kind", "row"}, {"kind", "row", "error"}):
             run = ValidatedRun(MappingProxyType(proof["row"]), receipt_from_run_kwargs(proof["row"].get("kwargs")))
-            classified = classify_run(run, execution)
+            classified = classify_saved_run(run, execution, proof["error"]) if "error" in proof else classify_run(run, execution)
             if classified is None or source["key"] != classified.text_key and not (classified.retry_later and source["key"] in {"busy.gave_up", "busy.cancelled"}):
                 raise ValueError
         elif proof.get("kind") == "undeliverable" and set(proof) == {"kind", "row"}:
@@ -324,7 +332,7 @@ def validate_publication_outcome(item: OutboxItem) -> PublicationOutcomeBasis:
         if type(source) is not dict or set(source) != {"key", "values"} or source["key"] not in _TURN_OUTCOME_KEYS or source["key"] in CAPACITY_KEYS:
             raise ValueError
         parts = item.payload["product_basis"]["parts"]
-        button = parts[0].get("url_button") if source["key"] in {"answer.on_web", "refused.files_full"} else None
+        button = parts[0].get("url_button") if source["key"] in {"answer.on_web", "refused.files_full", "refused.interrupted_recovery"} else None
         if button is not None:
             url_button_label(source, button)
         if _canonical_primary({"parts": parts}) != _canonical_primary({"parts": [{"kind": "text", "source_ref": source, **({"url_button": button} if button is not None else {})}]}):

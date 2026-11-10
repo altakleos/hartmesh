@@ -104,7 +104,7 @@ use the existing Application/turn lifetime and never occupy a manager worker.
 `queue.py` never owns workers or authorization. A terminal durable plan releases
 one logical turn; transport retries do not hold it. Only exact typed terminal
 reasons or opaque host creating-refusals authorize capacity retry.
-Instance outcomes retain `instance_id` through observation and saved proofs;
+Instance outcomes and error frames retain `instance_id` through observation and saved proofs;
 capacity auxiliaries never seal a terminal outcome. `instance_refusals.py` handles
 the four actual send refusal codes before publication; details: the lifecycle guide. Explicit retry
 owns a new saved callback input identity. Stop binds the original publication,

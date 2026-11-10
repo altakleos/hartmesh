@@ -221,31 +221,48 @@ async def fixed_source(host, link, key):
 
         view = await await_drained(host.authority.instance_view(link))
         values = {"name": view.name, "custody": view.custody, "reader_is_administrator": await await_drained(is_administrator(link.owner_user_id))}
-    elif link.agent_kind == "instance" and key in {"start.ws_1", "start.ws_30", "busy.two_conversations", "busy.starting_elsewhere", "refused.restarting", "refused.files_busy", "start.ws_failed", "refused.files_full"}:
+    elif link.agent_kind == "instance" and key in {
+        "start.ws_1",
+        "start.ws_30",
+        "busy.two_conversations",
+        "busy.starting_elsewhere",
+        "refused.restarting",
+        "refused.files_busy",
+        "start.ws_failed",
+        "refused.files_full",
+        "refused.interrupted_manager",
+        "refused.interrupted_recovery",
+        "net.blocked_ask",
+    }:
         from app.telegram_bots.authority import get_local_provider, is_administrator
         from deerflow.agent_instances.contract import AgentPermission
 
         view = await await_drained(host.authority.instance_view(link))
         values = {"name": view.name, "reader_is_administrator": await await_drained(is_administrator(link.owner_user_id))}
-        if key == "refused.files_full":
+        if key in {"refused.files_full", "net.blocked_ask"}:
             manager = bool(view.permissions & AgentPermission.MANAGE)
-            person = await await_drained(get_local_provider().get_user(view.supervisor.subject_id)) if not manager else None
+            person = await await_drained(get_local_provider().get_user(view.supervisor.subject_id)) if not manager or key == "net.blocked_ask" else None
             values.update(reader_is_manager=manager, supervisor=person.email if person is not None else None)
     elif key == "refused.interrupted":
         values = {"name": (await host.prepare_ingress_values(link))["name"]}
+    if link.agent_kind == "instance" and values:
+        from deerflow.config.product_identity import identity_for
+
+        identity = await await_drained(asyncio.to_thread(identity_for, getattr(host, "_app_config", None)))
+        values["provider"] = (identity.get("provider") or {}).get("name")
     return {"key": key, "values": values}
 
 
 async def failure_button(host, link, key):
-    """Only a current manager with Files access gets the full-files action."""
-    if link.agent_kind != "instance" or key != "refused.files_full":
+    """Recovery needs Files access; deleting full files additionally needs Manage."""
+    if link.agent_kind != "instance" or key not in {"refused.files_full", "refused.interrupted_recovery"}:
         return None
     from app.telegram_bots.pages import page_address
     from app.telegram_bots.presentation import page_permissions
     from deerflow.agent_instances.contract import AgentPermission
 
     access = await await_drained(page_permissions(host.authority, link))
-    if not access["permissions"] & AgentPermission.MANAGE:
+    if key == "refused.files_full" and not access["permissions"] & AgentPermission.MANAGE:
         return None
     address = await await_drained(asyncio.to_thread(page_address, "web.files", link, **access))
     return {"page": "web.files", "url": address} if address else None
@@ -697,10 +714,12 @@ class PublicationCoordinator:
 
         return await self._call(perform, timeout=OBSERVATION_TIMEOUT_SECONDS, expired=lambda: PublicationRunObservation("budget_exhausted", record, reason="budget_exhausted"), deadline=deadline)
 
-    async def _close_run(self, record, link, run, guard, *, answered):
+    async def _close_run(self, record, link, run, guard, *, answered, facade=None):
         """A finished run that cannot be delivered ends in what it was: its answer on the web, or a way to try again."""
-        from app.telegram_bots.errors import classify_run
+        from app.telegram_bots.errors import classify_run, read_error_evidence
 
+        if facade is not None:
+            run = await read_error_evidence(run, channel_execution_scope(record), facade)
         failure = classify_run(run, channel_execution_scope(record))
         on_web = failure is None and answered
         key = "answer.on_web" if on_web else "error.generic" if failure is None else "busy.gave_up" if failure.retry_later else failure.text_key
@@ -709,7 +728,7 @@ class PublicationCoordinator:
             record,
             run=run,
             source_ref=source,
-            keyboard=() if on_web else _try_again(record),
+            keyboard=() if on_web or key == "net.blocked_ask" else _try_again(record),
             callbacks=self.host.callbacks,
             guard=guard,
             undeliverable=failure is None,
@@ -779,7 +798,7 @@ class PublicationCoordinator:
                 async def unfinished(reason):
                     if closing is None:
                         return PublicationObservation("held", fresh, reason=reason)
-                    return await self._close_run(fresh, current_link, located.run, read_guard, answered=output.output.state == "complete")
+                    return await self._close_run(fresh, current_link, located.run, read_guard, answered=output.output.state == "complete", facade=facade)
 
                 output = await facade.get_run_output(fresh.run_id)
                 admission.check("source_read")

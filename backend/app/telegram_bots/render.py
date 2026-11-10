@@ -80,6 +80,8 @@ def _render(
         values["supervisor"] = vocabulary["administrator"]
     elif reader_is_supervisor:
         values["supervisor"] = vocabulary["manager"]
+    if key == "net.blocked_ask" and not values.get("host"):
+        template = variants["no_host"]
     if topics_hint:
         template += variants.get("topics_hint", "")
 

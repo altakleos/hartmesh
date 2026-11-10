@@ -467,6 +467,9 @@ class RunObserver:
         run = await facade.lookup_run()
         if run is not None and run.row["run_id"] != state.record.run_id:
             _refuse()
+        from app.telegram_bots.errors import read_error_evidence
+
+        run = await read_error_evidence(run, facade.scope, facade)
         self._check(state)
         return run
 
