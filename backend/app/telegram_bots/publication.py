@@ -241,6 +241,7 @@ async def fixed_source(host, link, key):
         "file.not_active",
         "file.same",
         "file.saved_ask",
+        "file.saved",
         "file.too_large_in",
     }:
         from app.telegram_bots.authority import get_local_provider, is_administrator

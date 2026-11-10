@@ -286,3 +286,18 @@ refused before its keyboard is consumed. Every file journal writer now retains
 the original Home/Use/policy guard through its final commit check. Incoming
 routing must supply the joined origins; this metadata support alone does not
 activate instance file input.
+
+The adapter's direct file method now supplies its actual input group to that
+journal. An instance `file_retry` Act control takes the owned SDK/file task path,
+never the ordinary message retry. Its descriptor and topic come from the current
+original-target receipt; the saved callback group still authorizes the child
+operation. A failed live owner can close only its already-recorded press as
+uncertain, without a download or write. This is not an automatic effect retry.
+
+Retry outcome delivery belongs to that recorded press, independently of the
+original inbox route. It can therefore confirm a save or provide the next exact
+retry control after the old route closes or its mark is collected. Frozen outcome
+plans deduplicate simultaneous presses; replaying an older press cannot publish
+a newer child's result. Successful captioned retries only confirm the file;
+captionless completion retains the one-time pending context. This does not yet
+connect ordinary incoming media routing or qualify process-restart recovery.

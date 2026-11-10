@@ -14,6 +14,7 @@ import secrets
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Sequence
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from html import escape
@@ -859,6 +860,8 @@ class TelegramBotChannel(TelegramChannel):
         await self.send_text(key, source_id=f"press:{row.id}:{update_id}", reply_to=row.message_id, thread=row.message_thread_id, _captured_link=link)
 
     async def execute_callback(self, row, *, query_id=None, update_id=None):
+        if self.link.agent_kind == "instance" and row.kind == "file_retry" and row.target_kind == "act":
+            return await self.retry_instance_file(deepcopy(self.link), row)
         human_inputs = getattr(self._services, "human_inputs", None)
         if human_inputs is not None and (
             row.kind in {"clarify_option", "clarify_other", "form_option", "form_next", "form_skip", "form_send", "form_change", "form_field", "network", "prompt_reopen", "prompt_send_new", "prompt_discard"}
@@ -1204,7 +1207,22 @@ class TelegramBotChannel(TelegramChannel):
     async def _drain_file_reads(self):
         await asyncio.gather(*tuple(self._file_tasks), return_exceptions=True)
 
-    async def put_instance_file(self, link, origin, file, *, current=None):
+    async def put_instance_file(self, link, origin, file, *, current=None, origins=None):
+        return await self._own_instance_file(link, origin, file, current=current, origins=(origin,) if origins is None else origins)
+
+    async def retry_instance_file(self, link, callback):
+        from types import SimpleNamespace
+
+        from app.telegram_bots.file_outcomes import FileOutcomes
+
+        reader = await self._services.file_puts.receipt_reader(link, authority=self._services.authority, current=lambda: self._callback_current(link))
+        captured = await reader.act(callback.target_id)
+        file = dict(captured.continuation["file"])
+        origin = SimpleNamespace(message_thread_id=captured.continuation.get("input", {}).get("topic", callback.message_thread_id))
+        await self._own_instance_file(link, origin, file, callback=callback)
+        return await FileOutcomes(self._services).plan(self, link, None, file, callback=callback)
+
+    async def _own_instance_file(self, link, origin, file, *, current=None, origins=None, callback=None):
         """Own the SDK download, journal and native write through retirement."""
         from app.telegram_bots.file_progress import FileProgress
         from app.telegram_bots.producer import DeliveryClaimRetired
@@ -1218,6 +1236,23 @@ class TelegramBotChannel(TelegramChannel):
         async def perform():
             progress = FileProgress(self, link, origin, file, live)
             try:
+                if callback is not None:
+                    try:
+                        return await self._services.file_puts.retry(
+                            link,
+                            callback.target_id,
+                            callback_id=callback.id,
+                            chat_id=callback.chat_id,
+                            message_id=callback.message_id,
+                            message_thread_id=callback.message_thread_id,
+                            authority=self._services.authority,
+                            current=live,
+                            download=lambda descriptor, check: self._download(link, descriptor, check),
+                            progress=progress.show,
+                        )
+                    except Exception as error:
+                        self._log_failure("file_retry", error)
+                        return await self._services.file_puts.settle_failed_retry(link, callback.target_id, callback_id=callback.id, authority=self._services.authority, current=live)
                 return await self._services.file_puts.put(
                     link,
                     origin,
@@ -1226,6 +1261,7 @@ class TelegramBotChannel(TelegramChannel):
                     current=live,
                     download=lambda descriptor, check: self._download(link, descriptor, check),
                     progress=progress.show,
+                    origins=origins,
                 )
             finally:
                 # Presentation cleanup cannot undo a committed file receipt.

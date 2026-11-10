@@ -401,6 +401,23 @@ class FilePuts:
 
         return await await_drained(perform())
 
+    async def settle_failed_retry(self, link, identity, *, callback_id, authority, current):
+        """Close only a consumed press's failed live owner; never retry its effect."""
+
+        async def perform():
+            async with self._locks.hold(identity):
+                access = await prepare_file_write(authority, link, current=current)
+                async with self.callbacks.writer(link, _FileReceiptGuard(access, access.guard)) as writer:
+                    row = await self._row(writer, link, identity, access)
+                    if not row.continuation["presses"] or row.continuation["presses"][-1]["callback_id"] != callback_id:
+                        raise ValueError("file-retry-source-conflict") from None
+                    captured = _snapshot(row)
+                if captured.state in {"draft", "pending", "waiting"}:
+                    return await self._transition(link, captured, access, state="uncertain", reason="interrupted")
+                return captured
+
+        return await await_drained(perform())
+
     async def _run(self, link, row, access, authority, current, download, progress):
         row = await self._transition(link, row, access, state="pending", begin=True)
         file = dict(row.continuation["file"])
@@ -488,18 +505,25 @@ class FileReceiptReader:
 
         return await await_drained(perform())
 
-    async def outcome(self, file, *, session=None):
-        file = validate_chat_file(file)
+    async def act(self, identity, *, session=None):
+        """Read one original-target journal without accepting caller file metadata."""
+        if type(identity) is not str or re.fullmatch(r"[0-9a-f]{32}", identity) is None:
+            raise ValueError("file-receipt-unavailable") from None
 
         async def perform():
             link = self.access.link
             async with self.journal.callbacks.writer(link, self.guard(), session=session) as writer:
-                row = await self.journal._row(writer, link, file_act_id(link, file), self.access)
-                if row.continuation["file"] != file:
-                    raise ValueError("file-receipt-unavailable") from None
+                row = await self.journal._row(writer, link, identity, self.access)
                 return _snapshot(row)
 
         return await await_drained(perform())
+
+    async def outcome(self, file, *, session=None):
+        file = validate_chat_file(file)
+        row = await self.act(file_act_id(self.access.link, file), session=session)
+        if dict(row.continuation["file"]) != file:
+            raise ValueError("file-receipt-unavailable") from None
+        return row
 
     async def completed(self, file, *, session=None):
         row = await self.outcome(file, session=session)
