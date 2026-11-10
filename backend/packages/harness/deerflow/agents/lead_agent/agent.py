@@ -1601,6 +1601,10 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
             from deerflow.agent_instances.work_tools import read_work_context, report_work
 
             raw_tools.extend([read_work_context, report_work])
+        elif not cfg.get("is_subagent"):
+            from deerflow.agent_instances.chat_tools import chat_tools
+
+            raw_tools.extend(chat_tools(instance_execution))
     selected_child_model = cfg.get("subagent_model_name")
     if selected_child_model is not None:
         from deerflow.models.selection import authorize_selected_model, bind_selected_task_model

@@ -69,6 +69,8 @@ see produced filenames; opening files requires Can see all work. Managers can
 update the brief and access, pause, retire or delete the AI assistant or AI employee.
 Messages that supply a valid time zone give the model the person's current local
 date and UTC offset without adding that context to the saved conversation.
+Normal AI assistant and AI employee conversations can offer a web-page link when
+a task belongs in the web app; the receiving client resolves it with current access.
 Work shows starting, running, stopped and interrupted attempts, with explicit
 Resume. Attention routes questions to eligible people by name; a reply starts no run.
 Qualified workspaces support the provider's restricted network and read-only
