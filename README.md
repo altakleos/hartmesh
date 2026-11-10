@@ -1986,7 +1986,9 @@ service failure. A confirmed deletion removes each link and leaves an owner-only
 unseen notice in Telegram settings (subject to event retention). Renames refresh each bot's public
 name and picture. Instance run failures distinguish capacity waits from restart,
 file-maintenance and startup failures. Full-files replies offer file navigation
-only to a current manager who can inspect the files.
+only to a current manager who can inspect the files. Before a run starts,
+unavailable execution keeps the message for an explicit retry; a conversation
+limit waits for up to two minutes and can be cancelled.
 
 Each person can connect a Telegram bot of their own to the ordinary chat and to each
 custom agent they own. A bot answers only that person, and its conversations are

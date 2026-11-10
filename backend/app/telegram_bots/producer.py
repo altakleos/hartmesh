@@ -188,7 +188,16 @@ _NO_RUN_KEYS = frozenset({"error.generic", "busy.cancelled", "chat.restarted"})
 _UNDELIVERABLE_KEYS = frozenset({"answer.on_web", "error.generic"})
 _DELETED_SOURCE = {"key": "chat.conversation_deleted", "values": {}}
 _TURN_OUTCOME_KEYS |= frozenset(INSTANCE_RUN_STOP_REASONS.values())
-INPUT_OUTCOME_KEYS = (_TURN_OUTCOME_KEYS - {"answer.on_web"} - CAPACITY_KEYS) | {"custom_agent.deleted", "busy.followup_full", "voice.failed"}
+INPUT_OUTCOME_KEYS = (_TURN_OUTCOME_KEYS - {"answer.on_web"} - CAPACITY_KEYS) | {
+    "custom_agent.deleted",
+    "busy.followup_full",
+    "voice.failed",
+    "unavailable.off",
+    "unavailable.paused",
+    "unavailable.moved",
+    "unavailable.files_unchecked",
+    "unavailable.fix",
+}
 
 
 @dataclass(frozen=True)

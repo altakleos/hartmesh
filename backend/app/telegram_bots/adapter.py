@@ -1762,7 +1762,7 @@ class TelegramBotChannel(TelegramChannel):
         capture = dict(link_id=self.link.id, outbox_id=outbox_id, part_id=part_id, claim_owner=claim_owner, claim_id=claim_id, token_revision=self.transport_revision)
         saved = await self._services.outbox.capture_sending_part(**capture)
         turns = getattr(self._services, "turns", None)
-        if saved.item.dedupe_key.startswith("notice:chat-stream:") and (turns is None or turns.preview_allowed(self, saved.item) is not True):
+        if saved.item.dedupe_key.startswith(("notice:chat-stream:", "notice:preparation-capacity:")) and (turns is None or turns.preview_allowed(self, saved.item) is not True):
             raise PreviewExpired()
         part = saved.part
         pending = part.get("invalid_token_verification_pending")
@@ -1891,13 +1891,13 @@ class TelegramBotChannel(TelegramChannel):
             if await self._services.callbacks.read_keyboard(latest) != stored_keyboard or not self._callback_current(latest.link):
                 raise DeliveryClaimRetired()
         current = latest
-        if current.item.dedupe_key.startswith("notice:chat-stream:") and (turns is None or turns.preview_allowed(self, current.item) is not True):
+        if current.item.dedupe_key.startswith(("notice:chat-stream:", "notice:preparation-capacity:")) and (turns is None or turns.preview_allowed(self, current.item) is not True):
             raise PreviewExpired()
         self.link = current.link
         context = SendContext(current.link.id, current.item.chat_id, current.link.binding_generation, self.transport_revision, "bound_message")
         method = "sendMessage" if part["kind"] != "edit" else "editMessageReplyMarkup" if part.get("remove_keyboard") else "editMessageText"
         preview_fence = None
-        preview = current.item.dedupe_key.startswith("notice:chat-stream:")
+        preview = current.item.dedupe_key.startswith(("notice:chat-stream:", "notice:preparation-capacity:"))
         if preview:
 
             async def check_preview():
@@ -1955,6 +1955,10 @@ class TelegramBotChannel(TelegramChannel):
                 verdict = await self._services.eligibility(latest_part.link, latest_part.item, latest_part.part)
                 if not isinstance(verdict, DeliveryEligibility) or verdict.decision != "allow" or verdict.protect_content and not part.get("protect_content") or not self._callback_current(current.link):
                     raise DeliveryClaimRetired()
+                # Waiting/preview custody can end during the final SQL read.
+                # Keep this local check synchronous with the raw SDK callback.
+                if preview and turns.preview_allowed(self, latest_part.item) is not True:
+                    raise PreviewExpired()
 
             preview_fence = LiveRequestFence(check_instance_part)
         try:
