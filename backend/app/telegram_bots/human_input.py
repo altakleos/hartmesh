@@ -160,9 +160,10 @@ def present_form(raw, form, *, thread_id, reply_to_message_id, locale, view="fie
 
 
 class _InputGuard:
-    def __init__(self, service, channel, link, *, retained=False, original=None):
+    def __init__(self, service, channel, link, *, retained=False, original=None, network=False):
         self.service, self.channel, self.captured_link = service, channel, link
         self.retained, self.actual, self.original = retained, None, original
+        self.network, self.owner = network and link.agent_kind == "instance", None
 
     def current(self):
         from app.telegram_bots.callbacks import CallbackRefused
@@ -178,7 +179,12 @@ class _InputGuard:
             await prepare_publication_guard(self.original)
             self.current()
         host, link = self.service.services, self.captured_link
-        owner = await host.prepare_live_owner(link.owner_user_id)
+        if self.network:
+            from app.telegram_bots.authority import require
+
+            await require(link.owner_user_id, "agents:read")
+            self.current()
+        owner = self.owner = await host.prepare_live_owner(link.owner_user_id)
         self.current()
         self.actual = host.links.publication_guard(link, check_live_owner=owner, check_attempt_current=lambda: self.service.current(self.channel, link, retained=self.retained))
 
@@ -190,6 +196,11 @@ class _InputGuard:
         self.current()
         if self.original is not None:
             result = await self.original.check(session)
+            self.current()
+        if self.network:
+            from app.telegram_bots.network import check_network_manager
+
+            await check_network_manager(self.service.services, self.captured_link, session, self.owner)
             self.current()
         return result
 
@@ -279,6 +290,7 @@ class HumanInputs:
             source_name = source.request.get("source")
             classification = source_name if source_name in ("ask_clarification", "sandbox_network") else "unsupported"
             logger.warning("telegram_bots human_input_invalid source=%s link=%s", classification, link.id)
+        guard.network = link.agent_kind == "instance" and request is not None and request["source"] == "sandbox_network"
         file_plan = None
         if source.basis["version"] == 2:
             import asyncio
@@ -363,7 +375,7 @@ class HumanInputs:
         if item is None:
             raise CallbackRefused() from None
         source = await self._waiting_source(link, item)
-        return link, item, source, _InputGuard(self, channel, link)
+        return link, item, source, _InputGuard(self, channel, link, network=row.kind == "network")
 
     async def execute_callback(self, channel, row, *, update_id, query_id=None):
         from deerflow.utils.file_io import await_drained

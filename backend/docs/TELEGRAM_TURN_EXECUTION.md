@@ -384,3 +384,25 @@ Missing Inspect or human READ/EXPORT produces `file.no_access` without controls.
 A failed captioned file restores the independently verified text first. The
 access explanation resolves the current instance name and supervisor as the
 recipient, and every instance text dispatch keeps its current Use/policy fence.
+
+
+## Instance network cards
+
+Only the qualified `sandbox_network` human-input request supplies a card. The
+runtime already excludes non-managers and assignment execution from raising it.
+A retained request cannot keep manager authority after a grant changes:
+`HumanInputs` checks current Use/Manage, instance/link/account and policy in its
+borrowed action writer, including before commit. A refused press stages no answer
+and writes no network Act; `net.blocked_ask` uses current instance/supervisor and
+support values. Current manager responses retain the existing durable publication
+confirmation and next-run network middleware protocol.
+
+After closed source validation, `network.is_network_card` selects request UI with
+network controls. Whole-row eligibility selects the next unfinished part in the current presentation,
+so an independent file can finish after Manage is withdrawn. At the SDK limiter,
+one final joined read checks current Manage, policy, live account, captured
+outbox claim and the complete unconsumed control group together. Only synchronous
+transport-lifetime checks follow it. Mixed file parts, completed receipts and keyboard
+cleanup do not acquire permission to offer network choices. Ordinary/custom cards
+continue through their existing source and action guards. The bounded denial
+notices are a separate presentation path and never create permission cards.
