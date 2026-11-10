@@ -89,6 +89,32 @@ def descriptors(document):
     return document.items if document.coverage == "complete" else document.observed_items
 
 
+@pytest.mark.parametrize("terminal", ["enriched", "removed", "other_id", "hidden", "changed"])
+def test_journal_enrichment_requires_exact_terminal_confirmation(trace, terminal):
+    trace.model_call()
+    raw = ToolMessage(id="unit-tool", content="result", tool_call_id="current-call", artifact={"existing": 1})
+    trace.tool(raw)
+    enriched = raw.model_copy(update={"artifact": {"existing": 1, "extra": 2}})
+    trace.capture.tool_artifact_enriched(raw.id, raw.tool_call_id, presentation_fragment_digest(raw.artifact), presentation_fragment_digest(enriched.artifact))
+    if terminal == "other_id":
+        enriched.id = "unrelated-result"
+    elif terminal == "hidden":
+        enriched.additional_kwargs = {"hide_from_ui": True}
+    elif terminal == "changed":
+        enriched.artifact = {"unrelated": 3}
+    trace.end(messages=[INPUT, *([] if terminal == "removed" else [enriched]), AIMessage("answer", id="unit-answer")])
+    document = trace.document()
+    if terminal == "enriched":
+        assert document.coverage == "complete"
+        assert len(document.items) == 1
+        assert document.items[0].value_sha256 == presentation_fragment_digest(enriched.artifact)
+        assert document.items[0].witness.kind == "root_snapshot"
+    else:
+        assert document.coverage == "incomplete" and document.reason == "terminal_membership_unknown"
+    trace.capture.detach()
+    assert not trace.capture._artifact_enrichments
+
+
 def test_qualified_opened_empty_trace_is_positive_empty(trace):
     trace.end()
     document = trace.document()

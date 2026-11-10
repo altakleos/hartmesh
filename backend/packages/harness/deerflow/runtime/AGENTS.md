@@ -171,6 +171,14 @@ rollback, read the [checkpoint contracts](../../../../docs/runtime-guidance-deta
 
 **Message sequence placement:** Keep backend and frontend message identity rules aligned. Tool results use their own message IDs, assigned on missing-ID callback results before persistence; provider call IDs may repeat. Restore pre-capture ID-less copies from the current lead-call result ID; reset it on a new canonical call, not a usage replay. Keep ID-less legacy rows independent. Details: `backend/docs/runtime-guidance-details.md`.
 
+Post-tool artifact enrichment appends one same-ID revision for new bounded mapping
+keys while preserving earlier values, body, status and metadata. Only the standard
+tool normalization and receipt stamps may be newly added outside the artifact. Require the current lead-call result,
+keep original events and message counts, and deduplicate unchanged reconciliation.
+Inventory accepts the earlier fragment only when the actual visible terminal
+result confirms the enriched digest and exact identity; removal stays incomplete.
+Tests: `test_run_post_tool_artifacts.py`, `test_output_inventory_collector.py`.
+
 **Thread message cursors:** `list_messages` applies both exclusive bounds before `limit`, paging forward whenever `after_seq` is supplied.
 
 **Journal capture**: Image-only input stops batch scans and later human-event
@@ -184,39 +192,11 @@ hidden, subgraph, unpublished, and ID-less chunks are not recovered. Partial
 events never enter authoritative checkpoint state. Tests: `test_run_journal*.py`
 (callbacks, full/delta) and `test_run_worker_rollback.py` (interruption recovery).
 
-**Per-call LLM telemetry** (`runtime/journal.py`): `RunJournal` adds observation-only keys
-to `llm.ai.response` metadata and to `llm.error` metadata (previously empty): `langchain_run_id`,
-`langchain_parent_run_id`, `caller_category` (`lead_agent` / `middleware` / `subagent` /
-`fallback` / `other`), `provider`, `model`, `stop_reason`, `status`, provider-reported token counts,
-and the rendered request size measured at `on_chat_model_start` (`request_chars`,
-`request_message_chars`, `request_tools_chars`, `request_message_count`, `request_started_at`).
-Sizes count string-leaf characters without serializing the request (the callback runs inline on
-the event loop); there is no pre-call token count, so `input_tokens` is the provider's figure.
-Unavailable values are `None` or absent, never estimated. Every helper fails soft: a telemetry
-error is logged and must not change the call, the staged events' existing fields, or token
-accounting. The contract lists the optional keys in `contracts/run_event_stream_contract.json`.
-Retries are not distinguishable from first attempts.
-
-**LLM response callback coalescing** (`runtime/journal.py`): a provider may fire
-`on_llm_end` twice for one LangChain run id, first without usage (or with all token
-counts zero) and immediately again with usage populated. The first callback's generation
-set is always canonical: `RunJournal` stages only its response events and immutable
-message-summary fields while retaining the first caller, and applies that callback's
-fallback state and tool-call bookkeeping immediately; those effects remain canonical.
-It must not retain provider-owned message objects because a provider may mutate and
-reuse the same response for the usage replay. Usage metadata is deep-snapshotted,
-including nested token-detail mappings, before it enters a staged or buffered event.
-An adjacent same-id positive-usage replay may enrich only each corresponding staged
-event's metadata/content usage fields, including the `input_tokens`, `output_tokens`,
-and `total_tokens` aliases derived from the accepted usage snapshot. Request size,
-identity, caller, stop reason, and status retain their canonical values. Replay
-generation-count differences never add, remove, or replace canonical messages. The next
-unrelated event, an effective buffer size (committed plus pending events) reaching the
-flush threshold, or an explicit flush commits the staged unit and updates the message
-summary. Once that ordering boundary is crossed, a late usage replay can still update the
-authoritative run token summary, but it cannot mutate the append-only message event,
-caller attribution, fallback state, or tool-call bookkeeping. Closed journals return
-from `on_llm_end` before inspecting the response or touching any run state.
+**LLM callbacks:** Telemetry is observation-only and fail-soft. The first response
+callback is canonical; only adjacent positive-usage replays may enrich staged
+usage. Never retain provider-owned messages or mutate committed events. Preserve
+caller, fallback, tool-call and summary bookkeeping across replay and closure.
+See [telemetry and coalescing](../../../../docs/runtime-guidance-details.md#llm-callback-telemetry-and-coalescing).
 
 **Skill history:** `record_skill_usage` saves lead-run snapshots on terminal
 answers for paginated history. See `docs/skill-usage-ui.md`.

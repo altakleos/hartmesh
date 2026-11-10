@@ -3,6 +3,7 @@
 import pytest
 import test_output_inventory_api as inventory_cases
 import test_output_inventory_execution_client as client_cases
+import test_run_post_tool_artifacts as artifact_cases
 from _run_output_capture_test_support import capture_environment as capture_environment  # noqa: F401
 from _run_output_capture_test_support import output_store as output_store  # noqa: F401
 from test_run_output_route import route_environment as route_environment  # noqa: F401
@@ -20,3 +21,7 @@ async def test_actual_sql_inventory_read_cancellation(capture_environment, monke
 
 async def test_actual_owned_http_inventory_read():
     await client_cases.test_real_owner_negotiates_exact_read_under_retained_source_authority()
+
+
+async def test_actual_worker_artifact_enrichment_stays_off_loop(capture_environment, monkeypatch, tmp_path):
+    await artifact_cases.test_actual_assembly_seals_enriched_result_in_inventory(capture_environment, monkeypatch, tmp_path, {"existing": {"value": "preserved"}})

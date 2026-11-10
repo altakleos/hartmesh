@@ -91,6 +91,7 @@ class OutputInventoryCapture:
         self._calls = set()
         self._files = []
         self._fragments = []
+        self._artifact_enrichments = {}
         self._rich = {}
         self._current_messages = set()
         self._terminal = None
@@ -364,6 +365,20 @@ class OutputInventoryCapture:
         if len(messages) > 8192:
             self._incomplete("enumeration_overflow")
 
+    def tool_artifact_enriched(self, message_id, tool_call_id, previous_digest, digest):
+        """Journal-confirmed additions still require the actual terminal result."""
+        if self._closed:
+            return
+        key = (message_id, tool_call_id, previous_digest)
+        if len(self._artifact_enrichments) >= MAX_INVENTORY_DESCRIPTORS and key not in self._artifact_enrichments:
+            self._incomplete("enumeration_overflow")
+            return
+        # Carry earlier additions forward without retaining mutable artifacts.
+        for old, current in tuple(self._artifact_enrichments.items()):
+            if old[:2] == key[:2] and current == previous_digest:
+                self._artifact_enrichments[old] = digest
+        self._artifact_enrichments[key] = digest
+
     def chain_end(self, outputs, *, run_id, parent_run_id):
         if self._closed:
             return
@@ -571,7 +586,14 @@ class OutputInventoryCapture:
                                 structured.append(dict(kind="structured", carrier="terminal_field", value_sha256=digest, witness=dict(kind="root_snapshot", root_epoch=self._root, message_id=identity)))
             # A current opaque tool fragment disappearing cannot prove no offer.
             retained = {message["artifact_digest"] for message in self._terminal[0]}
-            if any(digest not in retained for _, _, digest, _ in self._fragments):
+            enriched = {
+                key
+                for key, digest in self._artifact_enrichments.items()
+                if key[0] not in self._baseline
+                and key[1] in self._calls
+                and any(message["id"] == key[0] and message["tool_call_id"] == key[1] and message["artifact_digest"] == digest and not message["hidden"] for message in self._terminal[0])
+            }
+            if any(digest not in retained and (mid, call, digest) not in enriched for mid, call, digest, _ in self._fragments):
                 self._incomplete("terminal_membership_unknown")
             retained_content = {digest for message in self._terminal[0] for digest in message["content_digests"]}
             if any(key[2] not in retained_content for key in self._rich):
@@ -634,6 +656,7 @@ class OutputInventoryCapture:
         self._calls.clear()
         self._files.clear()
         self._fragments.clear()
+        self._artifact_enrichments.clear()
         self._rich.clear()
         self._current_messages.clear()
         self._terminal = None

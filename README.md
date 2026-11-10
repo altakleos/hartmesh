@@ -131,6 +131,8 @@ assignment. It requires the run cancellation capability and current Inspect,
 plus Manage or Use as that attempt's requester. Work attempts run autonomously:
 questions go through `report_work` to the supervisor, and blocked workspace
 connections are denied and marked on the tool result while the attempt continues.
+Bounded details added by tool middleware remain in saved conversation results;
+the terminal output inventory confirms the enriched artifact when it is retained.
 Interactive agent conversations offer human managers temporary site approval;
 ordinary chats retain their existing network approval options.
 [Attention](docs/HUMAN_INPUT_REQUESTS.md) gives human collaborators addressed
