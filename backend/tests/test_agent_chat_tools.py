@@ -156,3 +156,25 @@ def test_show_web_page_tool_node_injects_runtime_and_preserves_artifact():
     assert result.tool_call_id == "graph-page"
     assert result.content == OFFER
     assert result.artifact == {"web_page": {"version": 1, "kind": "web_page", "key": "files"}}
+
+
+@pytest.mark.parametrize("custody", ["personal", "company"])
+@pytest.mark.parametrize("mode", ["chat", "work", "subagent"])
+def test_actual_instance_assembly_offers_page_tool_only_for_normal_chat(monkeypatch, custody, mode):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from test_agent_assembly_descriptor import TestLeadAgentAssembly
+
+    from deerflow.agents.lead_agent import agent
+
+    config = TestLeadAgentAssembly._isolate_from_the_ambient_config(monkeypatch)
+    bound = replace(execution(custody), work=SimpleNamespace() if mode == "work" else None)
+    context = {AGENT_EXECUTION_CONTEXT_KEY: bound, "is_subagent": mode == "subagent"}
+    if mode == "work":
+        context["interaction_mode"] = "autonomous"
+    assembly = agent.assemble_lead_agent({"context": context, "configurable": {"thread_id": "chat"}}, app_config=config)
+    names = [tool.name for tool in assembly.graph["tools"]]
+    assert names.count("show_web_page") == (1 if mode == "chat" else 0)
+    if mode == "work":
+        assert {"read_work_context", "report_work"} <= set(names)
