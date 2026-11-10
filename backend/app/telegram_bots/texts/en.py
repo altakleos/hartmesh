@@ -103,6 +103,7 @@ TEXTS: dict[str, str] = {
     "busy.starting_elsewhere": "Another conversation is starting {name}. Your message is in line.",
     "refused.restarting": "{name}'s workspace is restarting and waits for another conversation to finish. Your message is kept. Try again in a few minutes.",
     "refused.files_busy": "{name}'s files are being changed right now and cannot be used. Your message is kept. Try again in a few minutes.",
+    "start.ws_failed_again": "If this keeps happening, ask {support}.",
     "start.ws_failed": "{name}'s workspace did not start, so nothing was done. Your message is kept.",
     "refused.files_full": "{name}'s files are full, so {name} cannot start. Delete files on the web, or ask {support} for more room. Your message is kept.",
     "refused.files_full_ask": "{name}'s files are full, so {name} cannot start. Ask {supervisor} to delete files, or ask {support} for more room. Your message is kept.",

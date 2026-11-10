@@ -331,6 +331,8 @@ def validate_publication_outcome(item: OutboxItem) -> PublicationOutcomeBasis:
             raise ValueError
         if type(source) is not dict or set(source) != {"key", "values"} or source["key"] not in _TURN_OUTCOME_KEYS or source["key"] in CAPACITY_KEYS:
             raise ValueError
+        if "start_failed_again" in source["values"] and (source["key"] != "start.ws_failed" or type(source["values"]["start_failed_again"]) is not bool):
+            raise ValueError
         parts = item.payload["product_basis"]["parts"]
         button = parts[0].get("url_button") if source["key"] in {"answer.on_web", "refused.files_full", "refused.interrupted_recovery"} else None
         if button is not None:
@@ -1331,26 +1333,82 @@ class Outbox:
 
         return await await_drained(perform())
 
+    async def _repeat_start_failure(self, writer, record):
+        """Read bounded durable plans under the current link's writer lock."""
+        scope = record.scope
+        current = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == scope.link_id, TelegramOutboxRow.dedupe_key == "reply:" + record.turn_id))
+        if current is not None:
+            proof = await await_drained(asyncio.to_thread(validate_publication_outcome, _item(current)))
+            if proof.record.scope != scope or proof.record.publication_id != record.publication_id or proof.source_ref["key"] != "start.ws_failed":
+                raise ValueError("publication-outcome-conflict") from None
+            return proof.source_ref["values"].get("start_failed_again", False)
+        rows = list(
+            await writer.scalars(
+                select(TelegramOutboxRow)
+                .where(
+                    TelegramOutboxRow.link_id == scope.link_id,
+                    TelegramOutboxRow.owner_user_id == scope.owner_user_id,
+                    TelegramOutboxRow.binding_generation == scope.binding_generation,
+                    TelegramOutboxRow.chat_id == scope.chat_id,
+                    TelegramOutboxRow.message_thread_id == scope.message_thread_id,
+                    TelegramOutboxRow.class_ == "reply",
+                    or_(TelegramOutboxRow.dedupe_key.startswith("reply:"), TelegramOutboxRow.dedupe_key.startswith("notice:chat-input:"), TelegramOutboxRow.dedupe_key.startswith("notice:chat-restart:")),
+                )
+                .order_by(TelegramOutboxRow.created_at.desc(), TelegramOutboxRow.id.desc())
+                .limit(2)
+            )
+        )
+        # UUID order cannot prove which of two simultaneous plans came last.
+        if not rows or len(rows) == 2 and rows[0].created_at == rows[1].created_at:
+            return False
+        try:
+            proof = await await_drained(asyncio.to_thread(validate_publication_outcome, _item(rows[0])))
+        except ValueError:
+            # Other primaries, prepublication endings and malformed history
+            # reset the sequence; none permits looking past a nearer outcome.
+            return False
+        return proof.record.scope == scope and proof.kind == "run" and proof.source_ref["key"] == "start.ws_failed"
+
     async def plan_publication_outcome(self, record, *, run=None, creation_refusal=None, source_ref, keyboard, callbacks, guard, undeliverable=False, no_run=False, deleted=False, url_button=None):
+        from app.telegram_bots.links import prepare_publication_guard
+
         link = _guard_publication_link(record, guard)
-        basis = await await_drained(asyncio.to_thread(_prepare_publication_outcome, record, run=run, creation_refusal=creation_refusal, source_ref=source_ref, undeliverable=undeliverable, no_run=no_run, deleted=deleted))
+        source_ref = deepcopy(source_ref)
 
         async def attach(writer, identity):
             await self.inbox.seal_publication_outcome(record, outbox_id=identity, session=writer)
 
-        return await self._plan_product_keyboard(
-            link,
-            source_id="turn-outcome:" + record.publication_id,
-            parts=[{"kind": "text", "source_ref": source_ref}],
-            keyboard=keyboard,
-            callbacks=callbacks,
-            guard=guard,
-            message_thread_id=record.scope.message_thread_id,
-            _extra={"turn_outcome_basis": basis},
-            _dedupe="reply:" + record.turn_id,
-            _attach=attach,
-            _url_button=url_button,
-        )
+        async def plan(writer=None):
+            source = deepcopy(source_ref)
+            if writer is not None:
+                source["values"].pop("start_failed_again", None)
+                if await self._repeat_start_failure(writer, record):
+                    source["values"]["start_failed_again"] = True
+            basis = await await_drained(asyncio.to_thread(_prepare_publication_outcome, record, run=run, creation_refusal=creation_refusal, source_ref=source, undeliverable=undeliverable, no_run=no_run, deleted=deleted))
+            return await self._plan_product_keyboard(
+                link,
+                source_id="turn-outcome:" + record.publication_id,
+                parts=[{"kind": "text", "source_ref": source}],
+                keyboard=keyboard,
+                callbacks=callbacks,
+                guard=guard,
+                message_thread_id=record.scope.message_thread_id,
+                session=writer,
+                _extra={"turn_outcome_basis": basis},
+                _dedupe="reply:" + record.turn_id,
+                _attach=attach,
+                _url_button=url_button,
+            )
+
+        async def own():
+            if record.scope.agent_kind != "instance" or source_ref.get("key") != "start.ws_failed":
+                return await plan()
+            await prepare_publication_guard(guard)
+            async with self._writer(link.id) as (writer, _):
+                await guard.check(writer)
+                return await plan(writer)
+
+        return await await_drained(own())
 
     async def plan_cancelled_before_dispatch(self, record, *, stop_id, guard, callbacks, keyboard=(), key="busy.cancelled"):
         link = _guard_publication_link(record, guard)
