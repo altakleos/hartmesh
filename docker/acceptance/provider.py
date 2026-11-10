@@ -15,6 +15,33 @@ ARTIFACT = "Synthetic acceptance artifact.\nUploaded text: UPLOAD-ACCEPTANCE-726
 FINAL = "Acceptance complete. Your synthetic artifact is ready."
 
 
+def tool_result_content(value: object) -> str:
+    """Consume one provider-facing envelope; this fixture grants no authority."""
+    if not isinstance(value, str):
+        raise ValueError("invalid acceptance tool result text")
+    try:
+        envelope = json.loads(value)
+    except ValueError:
+        return value
+    if not isinstance(envelope, dict) or "deerflow_tool_meta" not in envelope:
+        return value
+    metadata = envelope["deerflow_tool_meta"]
+    transforms = envelope.get("content_transforms", [])
+    if (
+        not set(envelope) <= {"deerflow_tool_meta", "content", "content_transforms"}
+        or not isinstance(metadata, dict)
+        or set(metadata) != {"status", "source"}
+        or metadata.get("status") not in ("success", "partial_success")
+        or metadata.get("source") not in ("tool_return", "exception", "progress_middleware")
+        or not isinstance(envelope.get("content"), str)
+        or not isinstance(transforms, list)
+        or len(transforms) > 2
+        or any(transform not in ("truncated", "externalized") for transform in transforms)
+    ):
+        raise ValueError("invalid or failed acceptance tool result envelope")
+    return envelope["content"]
+
+
 def reply(body: dict[str, Any]) -> dict[str, Any]:
     messages = body.get("messages", [])
     if not body.get("tools"):
@@ -37,7 +64,7 @@ def reply(body: dict[str, Any]) -> dict[str, Any]:
         (i for i, message in enumerate(messages) if message.get("role") == "user"),
         default=0,
     )
-    turn = messages[latest:]
+    turn = [{**message, "content": tool_result_content(message.get("content"))} if message.get("role") == "tool" else message for message in messages[latest:]]
     if not turn:
         raise ValueError("missing acceptance turn")
     if any(tool.get("function", {}).get("name") == "report_work" for tool in body["tools"]):

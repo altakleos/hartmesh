@@ -801,12 +801,18 @@ def test_a_capacity_refusal_is_not_something_the_model_retries(tmp_path, monkeyp
     assert "room for" in message.content, "the model is told what is true, not 'the tool failed'"
 
 
-def test_an_ordinary_sandbox_failure_keeps_its_old_classification(tmp_path, monkeypatch):
-    """Only a declaring exception skips the text rules; nothing else changes."""
+def test_command_failure_prose_does_not_determine_recovery_authority():
+    """Only exception types/status or a declared category establish the cause."""
     from deerflow.sandbox.exceptions import SandboxCommandError
 
     _message, meta = _refusal_result(SandboxCommandError("no such file or directory"))
 
+    assert meta["error_type"] == "unknown"
+    assert meta["recoverable_by_model"] is True
+
+
+def test_real_missing_file_exception_preserves_its_structured_cause():
+    _message, meta = _refusal_result(FileNotFoundError("arbitrary wording"))
     assert meta["error_type"] == "not_found"
     assert meta["recoverable_by_model"] is True
 

@@ -16,6 +16,8 @@ for (const { status, body, message } of [
   },
 ]) {
   test(`shows the expected chat error for HTTP ${status}`, async ({ page }) => {
+    // SDK maxRetries=5 uses randomized exponential waits (up to ~62s).
+    test.setTimeout(status >= 500 ? 90_000 : 30_000);
     mockLangGraphAPI(page);
     await page.route(
       /\/api\/langgraph\/(?:threads\/[^/]+\/)?runs\/stream$/,
@@ -32,6 +34,8 @@ for (const { status, body, message } of [
 
     await expect(page.locator("[data-sonner-toast]").last()).toHaveText(
       message,
+      // The real SDK exhausts its bounded HTTP retries before reporting 5xx.
+      { timeout: status >= 500 ? 70_000 : 5_000 },
     );
   });
 }

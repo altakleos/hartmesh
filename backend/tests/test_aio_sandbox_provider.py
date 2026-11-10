@@ -3893,8 +3893,8 @@ def test_register_created_sandbox_hands_request_headers_to_the_sandbox(tmp_path,
 
     assert constructed == [
         # Upstream added the Lark CLI broker flag to the same single call shape.
-        {"id": "sb-h", "base_url": "http://sb", "request_headers": headers, "default_command_timeout": 600.0, "lark_cli_broker": False},
-        {"id": "sb-p", "base_url": "http://sb", "request_headers": {}, "default_command_timeout": 600.0, "lark_cli_broker": False},
+        {"id": "sb-h", "base_url": "http://sb", "request_headers": headers, "default_command_timeout": 600.0, "lark_cli_broker": False, "max_bash_sessions": 50},
+        {"id": "sb-p", "base_url": "http://sb", "request_headers": {}, "default_command_timeout": 600.0, "lark_cli_broker": False, "max_bash_sessions": 50},
     ]
 
 

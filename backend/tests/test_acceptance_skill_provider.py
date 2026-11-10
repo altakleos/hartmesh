@@ -70,7 +70,8 @@ def test_fixture_rejects_unknown_optional_model_prompt(reply):
         reply({"messages": [{"role": "user", "content": "Unregistered fixture request"}]})
 
 
-def test_skill_presentation_uses_actual_bounded_producer_manifest(reply):
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_skill_presentation_uses_actual_bounded_producer_manifest(reply, wrapped):
     body = {
         "messages": [
             {"role": "user", "content": "acceptance:skill:procedure-summary"},
@@ -83,14 +84,14 @@ def test_skill_presentation_uses_actual_bounded_producer_manifest(reply):
         ],
         "tools": [{"function": {"name": "present_files"}}],
     }
-    result = reply(body)["tool_calls"][0]["function"]
+    result = reply(wrap_tool_messages(body) if wrapped else body)["tool_calls"][0]["function"]
     assert json.loads(result["arguments"])["filepaths"] == ["/mnt/user-data/outputs/skill-results/procedure-012345abcdef/procedure.pdf"]
     body["messages"][-1]["content"] = json.dumps({"files": ["../elsewhere.pdf"]})
     with pytest.raises(ValueError, match="unexpected path"):
-        reply(body)
+        reply(wrap_tool_messages(body) if wrapped else body)
     body["messages"][-1]["content"] = "producer failed"
     with pytest.raises(ValueError, match="producer did not return"):
-        reply(body)
+        reply(wrap_tool_messages(body) if wrapped else body)
 
 
 def work_body(results=(), *, message="Work on the explicitly activated assignment.", tools=("read_work_context", "bash", "report_work")):
@@ -221,3 +222,24 @@ def test_work_branch_refuses_a_request_that_offers_ask_clarification_or_lacks_th
         server.server_close()
         worker.join(timeout=5)
         assert not worker.is_alive()
+
+
+def wrap_tool_messages(body):
+    return {
+        **body,
+        "messages": [{**message, "content": json.dumps({"deerflow_tool_meta": {"status": "success", "source": "tool_return"}, "content": message["content"]})} if message.get("role") == "tool" else message for message in body["messages"]],
+    }
+
+
+def test_work_context_accepts_the_real_provider_tool_envelope(reply):
+    result = reply(wrap_tool_messages(work_body([work_context()])))
+    assert tool_call(result) == ("bash", {"command": "mkdir -p /mnt/user-data/outputs && printf 'WORK-ACCEPTANCE-PROOF\\n' > /mnt/user-data/outputs/proof.txt"})
+
+
+@pytest.mark.parametrize(
+    "metadata,content", [({"status": "error", "source": "exception"}, work_context()), ({"status": "success", "source": "unknown"}, work_context()), ({}, work_context()), ({"status": "success", "source": "tool_return"}, [])]
+)
+def test_fixture_rejects_failed_or_malformed_tool_envelopes(reply, metadata, content):
+    envelope = json.dumps({"deerflow_tool_meta": metadata, "content": content})
+    with pytest.raises(ValueError, match="tool result"):
+        reply(work_body([envelope]))

@@ -2350,11 +2350,15 @@ export function useThreadStream({
       pendingPreparedReplayRef.current = null;
       setPendingSupersededRunIds(new Set());
       setPendingSupersededMessageIds(new Set());
+      const reporting = origin ? pendingSend.current : null;
       if (
         !recordAgentRefusal(error, "send", meta) &&
-        !recordStorageRefusal(error, undefined, meta)
-      )
+        !recordStorageRefusal(error, undefined, meta) &&
+        !reporting?.reported
+      ) {
+        if (reporting) reporting.reported = true;
         toast.error(getStreamErrorToastMessage(error, t));
+      }
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
           .map(messageIdentity)
@@ -3140,9 +3144,21 @@ export function useThreadStream({
           queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
         });
       } catch (error) {
-        if (!recordAgentRefusal(error, "send", undefined, pending))
+        const handled =
+          recordAgentRefusal(error, "send", undefined, pending) ||
           recordStorageRefusal(error, pending.phase, undefined, pending);
         if (pending.retired || pendingSend.current !== pending) throw error;
+        // Admission may reject before the SDK's later onError callback. Report
+        // from this still-owned attempt before finally retires its pointer.
+        if (
+          !handled &&
+          pending.phase === "send" &&
+          !pending.reported &&
+          pending.threadId === currentViewThreadIdRef.current
+        ) {
+          pending.reported = true;
+          toast.error(getStreamErrorToastMessage(pending.failure ?? error, t));
+        }
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
@@ -3161,7 +3177,7 @@ export function useThreadStream({
     },
     [
       thread,
-      t.uploads.uploadingFiles,
+      t,
       context,
       queryClient,
       humanMessageCount,
