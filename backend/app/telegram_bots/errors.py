@@ -1,7 +1,7 @@
 """Fixed ordinary-chat outcomes from correlated host evidence, never wording."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from app.channels.execution import ChannelExecutionProtocolError, ChannelExecutionScope
@@ -48,7 +48,31 @@ def _refuse():
     raise ChannelExecutionProtocolError() from None
 
 
+async def read_error_evidence(run, scope, facade):
+    """Enrich only an unclassified instance error, using its original facade."""
+    if run is not None and scope.instance_id is not None and run.row.get("status") == "error" and classify_run(run, scope).text_key == "error.generic":
+        return replace(run, error_evidence=await facade.get_run_error(run.row["run_id"]))
+    return run
+
+
 def classify_run(run: ValidatedRun, scope: ChannelExecutionScope) -> TurnFailure | None:
+    from app.channels.run_errors import validate_run_error
+
+    try:
+        facts = validate_run_error(run.error_evidence, scope, run.row["run_id"]) if type(run) is ValidatedRun and run.error_evidence is not None else None
+        return _classify_run(run, scope, facts)
+    except Exception:
+        _refuse()
+
+
+def classify_saved_run(run, scope, saved_error):
+    """Saved server facts select wording without issuing a live capability."""
+    from app.channels.run_errors import validate_saved_run_error
+
+    return _classify_run(run, scope, validate_saved_run_error(saved_error, scope, run.row["run_id"]))
+
+
+def _classify_run(run: ValidatedRun, scope: ChannelExecutionScope, facts=None) -> TurnFailure | None:
     """Classify a terminal snapshot already read for this exact publication.
 
     This selects product wording; the controller still owns current authority,
@@ -85,6 +109,11 @@ def classify_run(run: ValidatedRun, scope: ChannelExecutionScope) -> TurnFailure
             return TurnFailure(key, key in CAPACITY_KEYS)
         if status == "error" and reason in RUN_STOP_REASONS:
             return TurnFailure(RUN_STOP_REASONS[reason], reason == "sandbox_capacity_exceeded")
+        if status == "error" and scope.instance_id is not None and facts is not None:
+            if facts["name"] == "ResidentInterrupted":
+                return TurnFailure({"lifecycle": "refused.interrupted_manager", "storage-recovery": "refused.interrupted_recovery"}.get(facts["reason"], "refused.interrupted"))
+            if facts["name"] == "Refusal" and facts["reason"] == "managers-only":
+                return TurnFailure("net.blocked_ask")
         # An externally interrupted run is not evidence of this chat's Stop.
         # Explicit original-turn Stop has its separate owned completion path.
         return TurnFailure("error.generic")

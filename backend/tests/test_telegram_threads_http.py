@@ -36,7 +36,7 @@ pytestmark = pytest.mark.asyncio
 
 
 async def http_environment(db, monkeypatch):
-    e = await environment(db, monkeypatch)
+    e = await environment(db, monkeypatch, off_loop=True)
     monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "0")
     tables = [SpaceRow.__table__, AgentDefinitionRevisionRow.__table__, AgentInstanceRow.__table__, AgentInstanceGrantRow.__table__, AgentConversationRow.__table__, ThreadMetaRow.__table__]
     async with db.engine.begin() as connection:

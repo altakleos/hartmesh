@@ -113,6 +113,9 @@ TEXTS: dict[str, str] = {
     "error.generic": "Something went wrong and the message was not answered. It is kept.",
     "error.model_refused": "The AI service refused this request, so the message was not answered. Ask {support} to check it.",
     "answer.on_web": "This answer cannot be shown here. It is in {product} on the web.",
+    "refused.interrupted_manager": "A manager of {name} changed {name}'s settings, which restarted {name}'s workspace and stopped this answer. Nothing saved in {name}'s files was lost. Your message is kept.",
+    "refused.interrupted_recovery": "{provider} restored or repaired {name}'s files, which closed {name}'s workspace and stopped this answer. Your message is kept. Check the files first, then try again in a few minutes.",
+    "net.blocked_ask": "{name} could not reach {host}, which is not on the list of sites allowed here. Ask {supervisor} to allow {host} for a short time, or ask {support} to have {host} added to the list.",
     "refused.interrupted": "{name}'s workspace was restarted, which stopped this answer. Your message is kept.",
     "chat.restarted": "The service restarted before this was answered. Your message is kept.",
     "chat.conversation_deleted": "This conversation was deleted on the web, so no answer to this message can be shown here. Send it again to start a new one.",
@@ -311,3 +314,5 @@ FORMS["unavailable.off"] = {
     "administrator": "AI assistants are not offered here. {name} and {name}'s files are kept. Ask {provider} to offer AI assistants here.",
     "company.administrator": "AI employees are not offered here. {name} and {name}'s files are kept. Ask {provider} to offer AI employees here.",
 }
+
+FORMS["net.blocked_ask"] = {"no_host": "{name} could not reach a site that is not on the list of sites allowed here. Ask {supervisor} to allow it for a short time, or ask {support} to have it added to the list."}

@@ -115,7 +115,8 @@ async def test_instance_creation_refusal_cannot_omit_its_binding(publication):
         (False, False, "limiter", 5),
     ],
 )
-async def test_manager_full_files_sdk_keeps_files_and_retry_controls(publication, recovery, url_rejected, withdraw, remaining):
+@pytest.mark.parametrize("outcome", ["full", "recovery"])
+async def test_manager_full_files_sdk_keeps_files_and_retry_controls(publication, recovery, url_rejected, withdraw, remaining, outcome):
     import asyncio
 
     from test_telegram_bot_adapter import fail, message
@@ -135,6 +136,18 @@ async def test_manager_full_files_sdk_keeps_files_and_retry_controls(publication
     row = run_row(record, run_id=record.run_id)
     row.update(status="error", stop_reason="files-full", metadata={"channel_turn_id": record.publication_id})
     run = ValidatedRun(MappingProxyType(row), receipt_from_run_kwargs(row["kwargs"]))
+    key = "refused.files_full"
+    if outcome == "recovery":
+        from test_telegram_instance_error_frames import observed_error
+
+        run = await observed_error(e, record, {"name": "ResidentInterrupted", "reason": "storage-recovery"})
+        attempt = await e.host.capture(e.link, thread_id=e.thread_id, endpoint_id=e.http_client.endpoint_id)
+        key = "refused.interrupted_recovery"
+        # Recovery links are valid for Inspect readers without Manage.
+        async with e.db.sessions.begin() as writer:
+            await writer.execute(update(AgentInstanceGrantRow).values(permissions=3))
+        if withdraw:
+            remaining = 1
     services = e.channel._services
     services.authority = e.live.authority
     services.eligibility = e.live.authority.delivery
@@ -153,7 +166,7 @@ async def test_manager_full_files_sdk_keeps_files_and_retry_controls(publication
         turns = ChatTurns(services)
         turn = _Turn(e.channel, e.link, inbound(e), (e.origin,), record=record)
         turns._turns[(e.link.id, None)] = turn
-        identity = await turns._publication_outcome(turn, "refused.files_full", run=run)
+        identity = await turns._publication_outcome(turn, key, run=run)
     request = e.channel.bot.request
     if url_rejected:
         fail(request, endpoint="sendMessage", code=400, description="Button URL invalid")

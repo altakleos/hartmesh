@@ -79,6 +79,7 @@ class RunCursor:
 class ValidatedRun:
     row: Mapping[str, JsonValue]
     receipt: ChannelExecutionReceipt | None
+    error_evidence: object = None
 
 
 @dataclass(frozen=True)

@@ -84,6 +84,9 @@ TEXTS: dict[str, str] = {
     "error.generic": "出现问题，消息未获回答。消息已保留。",
     "error.model_refused": "AI 服务拒绝了此请求，消息未获回答。请联系{support}检查。",
     "answer.on_web": "此回答无法在这里显示。它保存在 {product} 网页版中。",
+    "refused.interrupted_manager": "{name} 的一位管理者更改了设置，导致 {name} 的工作区重启，本次回答已停止。{name} 文件中已保存的内容没有丢失。你的消息已保留。",
+    "refused.interrupted_recovery": "{provider}恢复或修复了 {name} 的文件，导致 {name} 的工作区关闭，本次回答已停止。你的消息已保留。请先检查文件，几分钟后再试。",
+    "net.blocked_ask": "{name} 无法访问 {host}，因为该网站不在这里允许访问的列表中。请{supervisor}临时允许访问 {host}，或请{support}将 {host} 添加到列表。",
     "refused.interrupted": "{name} 的工作区已重启，导致本次回答停止。你的消息已保留。",
     "chat.restarted": "服务在回答完成前重启。你的消息已保留。",
     "chat.conversation_deleted": "这个会话已在网页版删除，因此这条消息的回复无法在此显示。重新发送即可开始新会话。",
@@ -269,3 +272,5 @@ FORMS["unavailable.off"] = {
     "administrator": "这里不提供 AI 助理。{name} 及其文件均已保留。请联系{provider}在这里提供 AI 助理。",
     "company.administrator": "这里不提供 AI 员工。{name} 及其文件均已保留。请联系{provider}在这里提供 AI 员工。",
 }
+
+FORMS["net.blocked_ask"] = {"no_host": "{name} 无法访问一个不在这里允许访问列表中的网站。请{supervisor}临时允许访问，或请{support}将其添加到列表。"}

@@ -983,7 +983,7 @@ class ChatTurns:
             creation_refusal=refusal,
             source_ref=source,
             # The answer exists, so the way to it is the web. Running it again would end the same way.
-            keyboard=() if on_web else self._button("retry_message", turn.record.publication_id),
+            keyboard=() if on_web or key == "net.blocked_ask" else self._button("retry_message", turn.record.publication_id),
             callbacks=self.services.callbacks,
             guard=self._guard(turn),
             undeliverable=undeliverable,

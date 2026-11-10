@@ -62,7 +62,7 @@ async def instance_environment(db, monkeypatch):
         start_identity={"update_id": 202, "message_id": 102, "chat_id": 7_000_000_001},
         hello_parts=[{"source_ref": {"key": "hello.employee", "values": {"agent": "Fixture employee", "email": "fixture@example.test"}}}, {"source_ref": {"key": "hello.privacy", "values": {}}}],
     )
-    transport = await build(db, connected=False, link=link)
+    transport = await build(db, connected=False, link=link, construct_off_loop=True)
     transport.services.send_allowed = lambda: e.active[0]
     await start(transport)
     e.channel, e.link, e.current[0] = transport.channel, link, transport.channel

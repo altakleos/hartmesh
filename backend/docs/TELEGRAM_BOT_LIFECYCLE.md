@@ -296,3 +296,15 @@ frames. It shows the starting line immediately and the longer line after 30
 seconds still in that phase. Current Use supplies the name; frame wording never
 enters presentation. The observer owns and drains both the timer and stream,
 including repeated cancellation. These lines are advisory, not completion proof.
+
+### Structured instance errors
+
+Unclassified instance errors read bounded structured error evidence from the
+original scoped facade, in live observation and recovery. Only validated host
+codes select interruption wording; native text never does. Closed saved error
+facts remain bound to the original instance, publication and run and never become
+live capabilities. Recovery Files links require current Inspect at the final SDK
+boundary; full-files deletion wording additionally requires Manage. Public
+provider names come only from the validated public product identity, read off the
+event loop. A manager-only network refusal has no hostname in the host frame, so
+the fixed reply uses its form without a hostname.

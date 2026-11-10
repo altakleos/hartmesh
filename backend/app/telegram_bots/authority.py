@@ -396,10 +396,13 @@ class TelegramAuthority:
 
             async def allowed():
                 role_visible = any(value.get("source_ref", {}).get("key") in {"hello.assistant", "hello.employee", "help.agent"} and value.get("source_ref", {}).get("values", {}).get("role") for value in selected)
-                files_replies = [value for value in selected if value.get("source_ref", {}).get("key") == "refused.files_full"]
+                files_replies = [value for value in selected if value.get("source_ref", {}).get("key") in {"refused.files_full", "refused.interrupted_recovery"}]
                 files_link = any(value.get("url_button", {}).get("page") == "web.files" for value in files_replies)
-                manager_text = any(value.get("source_ref", {}).get("values", {}).get("reader_is_manager") is True for value in files_replies)
-                value = await self.instance_send_policy(current, require_use=target == "ok", require_inspect=bool(role_visible) or files_link, require_manage=manager_text or files_link) if current.agent_kind == "instance" else "allowed"
+                manager_text = any(
+                    value.get("source_ref", {}).get("key") == "refused.files_full" and (value.get("source_ref", {}).get("values", {}).get("reader_is_manager") is True or value.get("url_button", {}).get("page") == "web.files")
+                    for value in files_replies
+                )
+                value = await self.instance_send_policy(current, require_use=target == "ok", require_inspect=bool(role_visible) or files_link, require_manage=manager_text) if current.agent_kind == "instance" else "allowed"
                 if value == "off":
                     return DeliveryEligibility.skip("policy-off")
                 if value == "restoring":
