@@ -18,6 +18,8 @@ Qualified open sets use full-ID stop/removal and positive CID+name absence, incl
 retries after lost proof. If auto-removal finishes between post-stop inventory
 reads, require fresh CID AND name absence with current host proof and the same
 deadline; send no additional destructive command from an ambiguous inventory.
+If auto-removal wins after stopped inventory, a failed `rm` still requires that
+same fresh absence proof; the command's error alone never settles teardown.
 Restricted sets use `native_resource_set.py` to inspect original primary, relay
 and networks, labels and exact membership. Persist the complete set before any
 effect; survivor recovery never derives identities from current names or policy.

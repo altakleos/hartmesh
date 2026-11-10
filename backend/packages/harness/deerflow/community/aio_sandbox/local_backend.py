@@ -2097,7 +2097,13 @@ class LocalContainerBackend(SandboxBackend):
                     if self._native_primary_absent(expected, bridge):
                         return DestroyOutcome.ABSENT
                     raise
-                self._run(["docker", "rm", expected.container_id], capture_output=True, text=True, encoding="utf-8", errors="replace", check=True, timeout=15)
+                try:
+                    self._run(["docker", "rm", expected.container_id], capture_output=True, text=True, encoding="utf-8", errors="replace", check=True, timeout=15)
+                except subprocess.CalledProcessError:
+                    # --rm may win after the stopped inventory. The command's
+                    # error proves nothing; require the same fresh terminal
+                    # ID AND name absence proof below, without another remove.
+                    pass
             elif absent is not True:
                 raise StorageHostUnqualified("Native stop has no qualified absence result")
             # A reused name is never removed or counted as the old set's absence.
