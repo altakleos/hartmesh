@@ -313,3 +313,13 @@ async def test_a_result_the_model_never_read_is_still_output_the_reply_must_carr
     record = await _managed_turn(e)
     with pytest.raises(ValueError):
         prepare_verified_reply(record, projection(record, structured=("terminal_field",)))
+
+
+@pytest.mark.parametrize("permissions,expected", [(1, []), (3, ["work"]), (5, ["access", "settings"]), (7, ["work", "access", "settings"])])
+def test_instance_model_page_offers_follow_inspect_and_manage(permissions, expected):
+    from urllib.parse import parse_qs, urlsplit
+
+    from deerflow.agent_instances.contract import AgentPermission
+
+    offered = page_buttons(("work", "access", "agentSettings"), link("instance", "a" * 32), permissions=AgentPermission(permissions), ceilings=frozenset())
+    assert [parse_qs(urlsplit(address).query)["tab"][0] for _, address in offered] == expected

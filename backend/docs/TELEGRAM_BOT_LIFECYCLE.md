@@ -213,6 +213,19 @@ link event.
 
 ## The profile
 
+`presentation.py` reads current Use before greeting/help/privacy values and
+navigation. `roles.py` reads the actual adopted definition through Inspect and
+matches its generated suffix to the current public role catalog; the definition's
+private description and soul never become Telegram text. Role-bearing saved
+greetings/help retain Inspect checks at delivery, including inside the SDK limiter.
+Privacy disclosure follows other Inspect readers (conservatively true for a
+non-manager), always including a colleague's assistant. `page_permissions` supplies
+fresh grants and route ceilings to the shared URL builder; web routes still own
+actual authorization. Instance slash words never fall through to custom skills.
+Public profiles use only host name/custody metadata, with no role or owner label.
+Instance menus currently contain new/stop/settings/help. The profile version
+stays unchanged until the complete menu and public instance setup are activated.
+
 `profile.py` owns a bot's public name, descriptions, menu and picture. `ProfileSync`
 borrows each running client and owns no worker: the supervisor runs `push_owed` at
 start and hourly, `add` pushes a new bot, and a saved language marks the person's

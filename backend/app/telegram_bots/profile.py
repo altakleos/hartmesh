@@ -16,8 +16,8 @@ from deerflow.utils.file_io import await_drained
 logger = logging.getLogger(__name__)
 PROFILE_VERSION = 1
 ALL_PARTS = frozenset({"name", "descriptions", "commands", "picture"})
-_MENUS = {"lead_agent": ("new", "stop", "settings", "help"), "custom_agent": ("new", "stop", "help")}
-_TEXTS = {"lead_agent": "chat", "custom_agent": "custom_agent"}
+_MENUS = {"lead_agent": ("new", "stop", "settings", "help"), "custom_agent": ("new", "stop", "help"), "instance": ("new", "stop", "settings", "help")}
+_TEXTS = {"lead_agent": "chat", "custom_agent": "custom_agent", "instance": "agent"}
 _NAME_MAX = 64
 
 
@@ -89,14 +89,15 @@ class ProfileSync:
         settings = await services.settings.get(link.owner_user_id)
         values = await services.prepare_ingress_values(link)
         locale, product, kind = settings.locale, values["product"], _TEXTS[link.agent_kind]
+        description_values = {"product": product, "name": values["name"], "custody": values.get("custody")}
         lead = link.agent_kind == "lead_agent"
         name = render_plain("profile.name.chat", locale, product=product) if lead else display_name_of(values["name"])
         bot = channel.bot
         check()
         if "descriptions" in parts:
-            await bot.set_my_short_description(short_description=render_plain(f"profile.short.{kind}", locale, product=product))
+            await bot.set_my_short_description(short_description=render_plain(f"profile.short.{kind}", locale, **description_values))
             check()
-            await bot.set_my_description(description=render_plain(f"profile.description.{kind}", locale, product=product))
+            await bot.set_my_description(description=render_plain(f"profile.description.{kind}", locale, **description_values))
             check()
         if "commands" in parts:
             commands = [BotCommand(word, render_plain(f"menu.{word}", locale)) for word in _MENUS[link.agent_kind]]

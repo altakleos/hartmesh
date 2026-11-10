@@ -49,6 +49,7 @@ KEYBOARDS: dict[str, Callable] = {
     "new.confirm_plain": _new_keyboard,
     "help.chat": _help_keyboard,
     "help.custom_agent": _help_keyboard,
+    "help.agent": _help_keyboard,
     "voice.first_notice": _voice_keyboard,
 }
 

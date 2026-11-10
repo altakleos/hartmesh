@@ -1,6 +1,30 @@
 """English fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "hello.assistant": (
+        "Connected as {email}. This chat is {name}, your AI assistant ({role}). No other Telegram account can"
+        " write here.\n\n{name} starts nothing alone. Write to {name} as to a colleague: ask a question, or say"
+        " what needs doing. A file you send here is passed on to {name}.\n\n{name} is an AI and can be wrong. C"
+        "heck anything you will act on."
+    ),
+    "hello.employee": (
+        "Connected as {email}. This chat is {name}, an AI employee ({role}). No other Telegram account can wr"
+        "ite here.\n\n{name} starts nothing alone. Write to {name} as to a colleague: ask a question, or say wh"
+        "at needs doing. A file you send here is passed on to {name}.\n\n{name} is an AI and can be wrong. Chec"
+        "k anything you will act on."
+    ),
+    "help.agent": (
+        "{name} is an AI assistant: {role}.\n{role_description}\n\nIn this chat:\n- write, or send a file, a phot"
+        "o or a voice note\n- /new starts a new conversation\n- /stop stops what is in progress\n- /settings set"
+        "s the language\n\n{name} starts nothing alone."
+    ),
+    "privacy.company": ("People who can see all of {name}'s work can read this conversation in {product}. Files you send are kept in {name}'s files, which everyone who can see all of {name}'s work can open."),
+    "privacy.protected": "{name}'s managers have switched off forwarding and saving in this chat. Messages {name} sends first show their details after a tap on Show.",
+    "profile.short.agent": "AI assistant. Private: answers only the person who connected this bot.",
+    "profile.description.agent": ("{name} is an AI assistant. Only the person who connected this bot gets an answer, in this chat.\n\nIf this is your bot, use the Open chat button in your web app, then press Start."),
+    "label.open_work": "Open assignments",
+    "label.open_access": "Open access settings",
+    "label.open_agent_settings": "Open settings",
     "policy.protected": "Forwarding and saving are switched off here.\nWhat {name} sends here can no longer be forwarded or saved, and messages {name} sends first show their details after a tap on Show. A manager of {name} chose this.",
     "policy.unprotected": "Forwarding and saving are back.\nWhat {name} sends here can be forwarded and saved again, and messages {name} sends first show their details at once. "
     "Messages sent before now stay as they were. A manager of {name} chose this.",
@@ -227,5 +251,37 @@ FORMS.update(
         "help.chat": {"no_voice": TEXTS["help.chat"].replace(", a photo or a voice note", " or a photo")},
         "help.custom_agent": {"no_voice": TEXTS["help.custom_agent"].replace(", a photo or a voice note", " or a photo")},
         "media.unsupported": {"no_voice": TEXTS["media.unsupported"].replace("voice notes, ", "")},
+    }
+)
+
+FORMS.update(
+    {
+        "hello.assistant": {
+            "colleague": (
+                "Connected as {email}. This chat is {name}, {owner}'s AI assistant ({role}). No other Telegram accoun"
+                "t can write here.\n\n{name} starts nothing alone. Write to {name} as to a colleague: ask a question, o"
+                "r say what needs doing. A file you send here is passed on to {name}.\n\n{name} is an AI and can be wro"
+                "ng. Check anything you will act on."
+            )
+        },
+        "help.agent": {
+            "company": (
+                "{name} is an AI employee: {role}.\n{role_description}\n\nIn this chat:\n- write, or send a file, a photo"
+                " or a voice note\n- /new starts a new conversation\n- /stop stops what is in progress\n- /settings sets"
+                " the language\n\n{name} starts nothing alone."
+            ),
+            "no_voice": (
+                "{name} is an AI assistant: {role}.\n{role_description}\n\nIn this chat:\n- write, or send a file, a phot"
+                "o\n- /new starts a new conversation\n- /stop stops what is in progress\n- /settings sets the language\n\n"
+                "{name} starts nothing alone."
+            ),
+            "company.no_voice": (
+                "{name} is an AI employee: {role}.\n{role_description}\n\nIn this chat:\n- write, or send a file, a photo"
+                "\n- /new starts a new conversation\n- /stop stops what is in progress\n- /settings sets the language\n\n{"
+                "name} starts nothing alone."
+            ),
+        },
+        "profile.short.agent": {"company": "AI employee. Private: answers only the person who connected this bot."},
+        "profile.description.agent": {"company": "{name} is an AI employee. Only the person who connected this bot gets an answer, in this chat.\n\nIf this is your bot, use the Open chat button in your web app, then press Start."},
     }
 )

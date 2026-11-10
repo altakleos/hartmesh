@@ -32,12 +32,13 @@ STAGE_ONE_KEYS = frozenset(
     web.timezone web.scheduled web.account web.fileTooLarge web.resultTooLarge
     """.split()
 )
+INSTANCE_PRESENTATION_KEYS = frozenset("hello.assistant hello.employee help.agent privacy.company privacy.protected profile.short.agent profile.description.agent".split())
 POLICY_KEYS = frozenset({"policy.off", "policy.on", "policy.on_protected", "policy.protected", "policy.unprotected"})
 
 
 def test_text_catalog_locales_have_equal_keys():
     assert set(catalog("en")) == set(catalog("zh-CN"))
-    assert STAGE_ONE_KEYS | POLICY_KEYS == {key for key in catalog("en") if not key.startswith(("label.", "menu."))}
+    assert STAGE_ONE_KEYS | POLICY_KEYS | INSTANCE_PRESENTATION_KEYS == {key for key in catalog("en") if not key.startswith(("label.", "menu."))}
     assert catalog("zh_cn") is catalog("zh-CN")
     assert catalog("unrecognised") is catalog("en")
     assert all(text and "<br>" not in text for text in catalog("en").values())
@@ -106,3 +107,24 @@ def test_no_text_sends_a_user_to_the_provider():
             text = render_plain(key, locale, **values)
             assert "SERVICE-PROVIDER" not in text
             assert "storage-missing" not in text
+
+
+@pytest.mark.parametrize("locale", ["en", "zh-CN"])
+@pytest.mark.parametrize("custody", ["personal", "company"])
+def test_instance_help_and_hello_hide_missing_roles_and_keep_kind(locale, custody):
+    values = {"name": "A & B", "product": "HartMesh", "email": "reader@example.test", "role": None, "role_description": None, "custody": custody, "voice_enabled": False}
+    hello = render_plain("hello.assistant" if custody == "personal" else "hello.employee", locale, **values)
+    help_ = render_plain("help.agent", locale, **values)
+    kind = ("AI assistant" if custody == "personal" else "AI employee") if locale == "en" else ("AI 助理" if custody == "personal" else "AI 员工")
+    assert kind in hello and kind in help_
+    assert all(text not in hello + help_ for text in ("None", "()", "（）", "/work", "/assign", "voice note", "语音消息"))
+    shared = render_plain("hello.assistant" if custody == "personal" else "hello.employee", locale, read_by_others=True, **values)
+    disclosure = render_plain("privacy.company", locale, **values)
+    assert disclosure in shared and disclosure not in hello
+    full = render_plain("privacy.full", locale, read_by_others=True, protected=True, **values)
+    assert disclosure in full and render_plain("privacy.protected", locale, **values) in full
+
+
+def test_colleague_hello_names_the_owner_without_an_empty_role():
+    text = render_plain("hello.assistant", "en", name="Helper", owner="colleague@example.test", email="reader@example.test", product="HartMesh", role=None, read_by_others=True)
+    assert "colleague@example.test's AI assistant" in text and "People who can see all" in text and "()" not in text
