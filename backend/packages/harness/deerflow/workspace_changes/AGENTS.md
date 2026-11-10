@@ -16,6 +16,8 @@ behavior. Native text evidence uses the existing memory budget, with no legacy
 disk cache. Cancellation drains the complete native scan before closing the
 volume. A chat without personal files returns empty evidence without filesystem
 work; a lost admission cannot publish a partial successful delivery scan.
+The same `scan_confined_roots` leaf serves persistent-agent Home output evidence;
+its caller owns current instance and resident READ admission instead of User routing.
 
 `scanner.py` enumerates only run-owned workspace/outputs roots. Open files
 relative to the walked directory descriptor with no-follow/nonblocking flags;

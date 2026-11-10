@@ -32,51 +32,53 @@ async def capture_chat_snapshot(paths, thread_id, *, user_id, limits=None, inclu
     if not outputs_only:
         roots.insert(0, WorkspaceRoot("workspace", admitted.paths.sandbox_work_dir(thread_id, user_id=user_id), "/mnt/user-data/workspace"))
 
-    def scan():
-        with volume.filesystem() as filesystem:
-
-            def relative_path(root, child="."):
-                base = root.host_path.relative_to(volume.data_path).as_posix()
-                return base if child == "." else base + "/" + child.removeprefix("./")
-
-            def open_confined(relative, flags):
-                try:
-                    return filesystem._open(relative, flags, follow_symlinks=False)
-                except UnsafeSpacePath:
-                    raise OSError(errno.EXDEV, "Native evidence requires its confined mount") from None
-
-            def open_root(root):
-                return open_confined(relative_path(root), os.O_RDONLY | os.O_DIRECTORY)
-
-            def validate_directory(root, child, walked_fd):
-                admitted_fd = open_confined(relative_path(root, child), os.O_PATH | os.O_DIRECTORY)
-                try:
-                    admitted, walked = os.fstat(admitted_fd), os.fstat(walked_fd)
-                    if (admitted.st_dev, admitted.st_ino) != (walked.st_dev, walked.st_ino):
-                        raise OSError(errno.ESTALE, "Native evidence directory changed during enumeration")
-                finally:
-                    os.close(admitted_fd)
-
-            def open_file(root, child):
-                try:
-                    return filesystem.open_regular(relative_path(root, child), follow_symlinks=False)
-                except UnsafeSpacePath:
-                    raise OSError(errno.EXDEV, "Native evidence file crossed its confined mount") from None
-
-            # Native text evidence is bounded in memory. It creates no legacy
-            # text-cache directory containing a copy of conversation data.
-            return scan_workspace_roots(
-                roots,
-                limits=limits,
-                include_text=include_text,
-                text_paths=text_paths,
-                extra_excluded_dir_names=extra_excluded_dir_names,
-                root_opener=open_root,
-                directory_validator=validate_directory,
-                file_opener=open_file,
-                **({"observe_roots": True} if observe_roots else {}),
-            )
-
-    result = await await_drained(asyncio.to_thread(scan))
+    result = await await_drained(asyncio.to_thread(scan_confined_roots, volume, roots, limits=limits, include_text=include_text, text_paths=text_paths, extra_excluded_dir_names=extra_excluded_dir_names, observe_roots=observe_roots))
     await prepare()  # Do not publish evidence admitted before a slow scan revoked.
     return result
+
+
+def scan_confined_roots(volume, roots, *, limits=None, include_text=True, text_paths=None, extra_excluded_dir_names=None, observe_roots=False):
+    """Scan one admitted volume with the same confined descriptors at every entry."""
+    with volume.filesystem() as filesystem:
+
+        def relative_path(root, child="."):
+            base = root.host_path.relative_to(volume.data_path).as_posix()
+            return base if child == "." else base + "/" + child.removeprefix("./")
+
+        def open_confined(relative, flags):
+            try:
+                return filesystem._open(relative, flags, follow_symlinks=False)
+            except UnsafeSpacePath:
+                raise OSError(errno.EXDEV, "Native evidence requires its confined mount") from None
+
+        def open_root(root):
+            return open_confined(relative_path(root), os.O_RDONLY | os.O_DIRECTORY)
+
+        def validate_directory(root, child, walked_fd):
+            admitted_fd = open_confined(relative_path(root, child), os.O_PATH | os.O_DIRECTORY)
+            try:
+                admitted, walked = os.fstat(admitted_fd), os.fstat(walked_fd)
+                if (admitted.st_dev, admitted.st_ino) != (walked.st_dev, walked.st_ino):
+                    raise OSError(errno.ESTALE, "Native evidence directory changed during enumeration")
+            finally:
+                os.close(admitted_fd)
+
+        def open_file(root, child):
+            try:
+                return filesystem.open_regular(relative_path(root, child), follow_symlinks=False)
+            except UnsafeSpacePath:
+                raise OSError(errno.EXDEV, "Native evidence file crossed its confined mount") from None
+
+        # Native text evidence is bounded in memory. It creates no legacy
+        # text-cache directory containing a copy of conversation data.
+        return scan_workspace_roots(
+            roots,
+            limits=limits,
+            include_text=include_text,
+            text_paths=text_paths,
+            extra_excluded_dir_names=extra_excluded_dir_names,
+            root_opener=open_root,
+            directory_validator=validate_directory,
+            file_opener=open_file,
+            **({"observe_roots": True} if observe_roots else {}),
+        )

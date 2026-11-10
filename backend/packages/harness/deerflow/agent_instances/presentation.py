@@ -65,3 +65,30 @@ def upload_metadata(execution, filename):
     except (FileNotFoundError, UnsafeSpacePath):
         return None
     return result if stat.S_ISREG(result.st_mode) else None
+
+
+async def capture_instance_outputs(execution, *, limits=None, extra_excluded_dir_names=None, observe_roots=False):
+    """Observe complete output roots, never borrowing a requester's file routing."""
+    from deerflow.spaces.chat_snapshots import scan_confined_roots
+    from deerflow.workspace_changes.types import WorkspaceRoot
+
+    environment = current_environment()
+    if environment is None or environment.execution is not execution or not isinstance(environment.provider, InstanceSandboxProvider) or environment.provider.execution is not execution:
+        raise ValueError("The exact prepared Home is unavailable")
+    provider = environment.provider
+    await execution.validate()
+
+    async def read():
+        files = execution.authority.instances.files
+        async with files.registry.admitted(actor=execution.instance.principal, requests={execution.instance.home_id: (Permission.READ, execution.home_generation)}) as (session, rows):
+            volume = await files._volume(session, rows[execution.instance.home_id][0])
+            roots = [WorkspaceRoot("outputs", volume.data_path / "outputs", "/mnt/user-data/outputs")]
+            return await run_file_io(scan_confined_roots, volume, roots, limits=limits, include_text=False, extra_excluded_dir_names=extra_excluded_dir_names, observe_roots=observe_roots)
+
+    # Qualification also uses file workers. Own the entire admitted read until
+    # every worker and descriptor has closed, even if the caller is cancelled.
+    result = await await_drained(read())
+    await execution.validate()
+    if current_environment() is not environment or environment.provider is not provider:
+        raise ValueError("The prepared Home changed during observation")
+    return result
