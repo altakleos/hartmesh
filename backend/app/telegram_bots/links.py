@@ -506,7 +506,15 @@ class BotLinkRepository:
         await session.execute(select(TelegramBotLinkRow).where(TelegramBotLinkRow.owner_user_id == owner).order_by(TelegramBotLinkRow.id).with_for_update().execution_options(populate_existing=True))
 
     @asynccontextmanager
-    async def capacity_writer(self, owner_user_id: str, *, timezone: str | None = None, locale: str | None = None, admit: Callable[[AsyncSession], Awaitable[None]] | None = None, confirm: Callable[[AsyncSession], Awaitable[None]] | None = None) -> AsyncIterator[AsyncSession]:
+    async def capacity_writer(
+        self,
+        owner_user_id: str,
+        *,
+        timezone: str | None = None,
+        locale: str | None = None,
+        admit: Callable[[AsyncSession], Awaitable[None]] | None = None,
+        confirm: Callable[[AsyncSession], Awaitable[None]] | None = None,
+    ) -> AsyncIterator[AsyncSession]:
         async with self._transaction() as session:
             if session.get_bind().dialect.name == "postgresql":
                 await session.execute(_insert(session)(TelegramDeploymentRow).values(id=1, host_id=None, polling_state="running", adopted_at=None, updated_at=_now()).on_conflict_do_nothing(index_elements=["id"]))
@@ -1765,7 +1773,18 @@ class BotLinkRepository:
         async with self.session_factory() as session:
             return await self._receipt(session, owner_user_id, operation_id, request_digest)
 
-    async def replace_from_token(self, *, owner_user_id: str, old_link_id: str, operation_id: str, request_digest: str, validated_bot: dict, encrypted_token: str, check_current: Callable[[AsyncSession], Awaitable[None]] | None = None, check_final: Callable[[AsyncSession], Awaitable[None]] | None = None) -> dict:
+    async def replace_from_token(
+        self,
+        *,
+        owner_user_id: str,
+        old_link_id: str,
+        operation_id: str,
+        request_digest: str,
+        validated_bot: dict,
+        encrypted_token: str,
+        check_current: Callable[[AsyncSession], Awaitable[None]] | None = None,
+        check_final: Callable[[AsyncSession], Awaitable[None]] | None = None,
+    ) -> dict:
         """Commit one idempotent token repair or net-zero bot replacement.
 
         ``validated_bot`` carries getMe's id/username. A ``token_changed=True``

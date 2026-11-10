@@ -66,7 +66,6 @@ rs.mock("@/components/workspace/workspace-container", () => ({
   WorkspaceHeader: () => null,
 }));
 
-
 import InstancesPage from "@/app/workspace/instances/page";
 import { AgentAvatar } from "@/components/workspace/instances/agent-avatar";
 import * as api from "@/core/agent-instances/api";
