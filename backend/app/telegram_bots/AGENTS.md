@@ -205,9 +205,8 @@ mark's deliveries, and the `reply:<turn>` row of a live anchor's turn, which a f
 later steps read by key. A new kind of outbox reference must be added there. A mark
 is done once its deliveries are sent or skipped, so inbound retention needs only the
 open-act check. `retry_message` gets no pin: its mark holds the person's text, so
-the seven days stand and a later press refuses as `stale.not_waiting`. A stage that
-writes a `stop_dispatch`, `continuation`, digest or attempt status message states its
-dependency here and in `_pinned_deliveries`. Callbacks and pending files sweep hourly
+the seven days stand and a later press refuses as `stale.not_waiting`. Declare delivery pins here and in `_pinned_deliveries`. Validated done/refused file
+journals expire after 400 days and pin no outbox. Callbacks and pending files sweep hourly
 on their own tasks, so one failing never skips the other.
 
 `skills.py` answers whether a slash word names a skill, from the owner's own storage
@@ -461,7 +460,7 @@ content is refused before hashes/inbox/task payloads; disposable tasks retain
 safe identities only and drain before SDK teardown. Text/photos/documents use the
 managed turn controller; voice notes use `VoiceNotes`.
 
-`files.py` owns the byte budget and pending files. Instance writes: [turn guide](../../docs/TELEGRAM_TURN_EXECUTION.md#instance-file-writes).
+`files.py`: byte budgets and pending files. Instance writes/journal: [turn guide](../../docs/TELEGRAM_TURN_EXECUTION.md#instance-file-writes).
 Reserve whole batches before reads, shrink only, and retain each charge until
 native writes and transport cleanup finish. `capped_download.py` reuses the
 normal bot request's HTTPX client with raw bounded streaming and no redirects;

@@ -3,9 +3,8 @@
 Each table is swept in its own short transaction. Outbox candidates are locked
 before their dependencies are read, so the check holds where the deletion runs.
 
-Stage one writes neither ``stop_dispatch`` nor ``continuation`` on an act, so a
-row carrying either is simply kept, and it produces no digest and no attempt
-status message, so neither pins an outbox row yet.
+Unknown Act continuations and stop dispatches are retained. A validated settled
+file journal has no live continuation or outbox dependency and expires normally.
 """
 
 from __future__ import annotations
@@ -108,6 +107,19 @@ async def sweep_pending_files(sessions, now: datetime, *, ttl_hours: int) -> int
     return await _sweep(sessions, delete(TelegramPendingFileRow).where(TelegramPendingFileRow.created_at <= _aware(now) - timedelta(hours=ttl_hours)))
 
 
+async def _sweep_acts(sessions, now):
+    from app.telegram_bots.file_puts import settled_file_journal
+
+    async with _writer(sessions) as session:
+        expired = (TelegramActRow.created_at < now - timedelta(days=ACT_RETENTION_DAYS), TelegramActRow.state.in_(_SETTLED_ACTS), TelegramActRow.stop_dispatch.is_(None))
+        ordinary = await session.execute(delete(TelegramActRow).where(*expired, TelegramActRow.kind != "file_put", TelegramActRow.continuation.is_(None)))
+        candidates = list(await session.scalars(select(TelegramActRow).where(*expired, TelegramActRow.kind == "file_put").with_for_update(skip_locked=True)))
+        identities = [row.id for row in candidates if settled_file_journal(row)]
+        for start in range(0, len(identities), _BATCH):
+            await session.execute(delete(TelegramActRow).where(TelegramActRow.id.in_(identities[start : start + _BATCH])))
+        return ordinary.rowcount + len(identities)
+
+
 async def sweep_rows(sessions, now: datetime, *, callback_max_age_days: int) -> dict[str, int]:
     now = _aware(now)
     mark = TelegramInboundMarkRow
@@ -115,14 +127,6 @@ async def sweep_rows(sessions, now: datetime, *, callback_max_age_days: int) -> 
     # A mark is done only once every delivery it lists is sent or skipped.
     inbound = await _sweep(sessions, delete(mark).where(mark.closed_at < now - timedelta(days=INBOUND_RETENTION_DAYS), mark.state == "done", ~open_act.exists()))
     outbox = await _sweep_outbox(sessions, now, callback_max_age_days)
-    acts = await _sweep(
-        sessions,
-        delete(TelegramActRow).where(
-            TelegramActRow.created_at < now - timedelta(days=ACT_RETENTION_DAYS),
-            TelegramActRow.state.in_(_SETTLED_ACTS),
-            TelegramActRow.continuation.is_(None),
-            TelegramActRow.stop_dispatch.is_(None),
-        ),
-    )
+    acts = await _sweep_acts(sessions, now)
     events = await _sweep(sessions, delete(TelegramBotLinkEventRow).where(TelegramBotLinkEventRow.created_at < now - timedelta(days=LINK_EVENT_RETENTION_DAYS)))
     return {"inbound": inbound, "outbox": outbox, "acts": acts, "events": events}
