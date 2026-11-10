@@ -28,6 +28,17 @@ def test_scope_and_context_are_frozen_and_expose_the_original_primitives(protoco
         context.scope = scope
 
 
+@pytest.mark.parametrize("agent,instance,valid", [(None, "instance", True), ("custom", "instance", False), (None, "", False), (None, {}, False)])
+def test_instance_target_is_a_separate_host_scope(protocol, agent, instance, valid):
+    values = dict(publication_id="a" * 32, owner_user_id="owner", connection_id="connection", chat_id="chat", thread_id="thread", endpoint_id="endpoint", assistant_id="lead_agent", agent_name=agent, instance_id=instance)
+    if valid:
+        scope = protocol.ChannelExecutionScope(**values)
+        assert protocol.ChannelExecutionContext(scope, object(), object()).instance_id == instance
+    else:
+        with pytest.raises(protocol.ChannelExecutionProtocolError):
+            protocol.ChannelExecutionScope(**values)
+
+
 def test_transport_response_and_error_are_detached_and_diagnostics_are_fixed(protocol):
     body = {"detail": {"code": "private-value"}}
     headers = {"content-type": "application/json"}

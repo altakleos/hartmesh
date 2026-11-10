@@ -211,7 +211,13 @@ class _Threads:
         supplied["X-DeerFlow-Require-Thread-Binding"] = "true"
         response = await f._request("thread_read", f._thread_path, headers=supplied)
         body = response.body
-        if response.status_code != 200 or type(body) is not dict or body.get("thread_id") != thread_id or body.get("owner_user_id") != f.scope.owner_user_id or "agent_instance" not in body or body["agent_instance"] is not None:
+        if response.status_code != 200 or type(body) is not dict or body.get("thread_id") != thread_id or body.get("owner_user_id") != f.scope.owner_user_id or "agent_instance" not in body:
+            _refuse()
+        if f.scope.instance_id is not None:
+            if type(body["agent_instance"]) is not dict or body["agent_instance"].get("id") != f.scope.instance_id:
+                _refuse()
+            return body
+        if body["agent_instance"] is not None:
             _refuse()
         metadata = body.get("metadata")
         if type(metadata) is not dict:

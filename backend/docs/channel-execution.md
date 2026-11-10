@@ -49,8 +49,9 @@ and drained. Errors carry fixed protocol text, never provider payloads or secret
 32-character lowercase hexadecimal publication ID. Its presence requires trusted
 internal authentication and a currently available real human owner. The Gateway
 requires an existing thread owned by that exact human and an actual configured
-`AgentConversations` authority proving no instance binding. Missing authority
-returns 503; an instance conversation returns 409 without preparing execution.
+`AgentConversations` authority. A bound instance also requires current Use and
+conversation readability before its normal host execution admission. Missing
+authority returns 503; unavailable access returns 404 before readiness effects.
 
 Version 1 admits one genuine visible human message, optionally carrying a closed
 canonical `human_input_response`. The shared strict output-source reader rejects
@@ -73,6 +74,12 @@ raw human owner, thread, canonical factory (`lead_agent`) and the actual loaded
 `AgentConfig.name` or null. The private worker carriers are pinned to that actual
 definition. The run row's requested assistant alias can differ from its canonical
 factory. The receipt is never recovered from request metadata or worker text.
+
+For persistent instances, the custom-agent slot stays null. The durable thread
+binding and host `AgentExecution` select the adopted definition; the v1 receipt
+does not attest an instance ID or definition revision. A host channel scope can
+carry a separate `instance_id`, which its thread read matches against the
+Gateway's authoritative binding projection, never editable metadata.
 
 Every idempotent reuse checks protocol presence in both directions, full receipt,
 owner/thread, canonical input, requested assistant and disconnect mode. Existing
@@ -97,6 +104,15 @@ any present receipt before projecting a response. Explicit scope denials return
 a fixed 503 without acknowledgement, even if a backend raises HTTP 404 itself.
 An already-started SQL source read drains before cancellation leaves its owner
 scope and session; teardown must not abandon a database connection.
+
+Bound conversation reads additionally require current Inspect, including the
+existing permission for a Use-only requester to read their own unprotected chat.
+They need no execution readiness. Every strict lookup refreshes the human,
+stored owner, original binding, thread incarnation and grants after source reads,
+before acknowledging data or absence. SQL requires its actual binding reader;
+missing authority cannot become an ordinary thread. Memory-only startup issues
+a no-instance proof bound to the exact Memory thread store. SQL startup clears
+it, and observing a real binding reader retires any older memory proof.
 
 `RunManager.get`/`aget` and `list_by_thread` use `require_store=True` together with
 `raise_on_store_error=True`. Configured MemoryRunStore is valid authority. A cached

@@ -852,6 +852,30 @@ async def test_disabled_storage_startup_installs_tombstone_authority(instances):
 
 
 @pytest.mark.asyncio
+async def test_memory_startup_pins_ordinary_channel_reads_to_the_actual_store():
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.channel_execution_reads import OrdinaryMemoryThreads
+    from app.gateway.storage_spaces import initialize_storage_spaces
+    from deerflow.config.storage_spaces_config import StorageSpacesConfig
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+
+    threads = MemoryThreadMetaStore(InMemoryStore())
+    app = SimpleNamespace(state=SimpleNamespace(thread_store=threads))
+    await initialize_storage_spaces(app, StorageSpacesConfig(), session_factory=None)
+    proof = app.state.channel_memory_threads
+    assert type(proof) is OrdinaryMemoryThreads and proof.store is threads
+    assert app.state.agent_conversations is None
+    await initialize_storage_spaces(app, StorageSpacesConfig(), session_factory=None)
+    assert proof._retired and app.state.channel_memory_threads is not proof
+    proof = app.state.channel_memory_threads
+    # Any later SQL lifetime clears the no-instance proof even with storage off.
+    await initialize_storage_spaces(app, StorageSpacesConfig(), session_factory=object())
+    assert app.state.channel_memory_threads is None
+    assert proof._retired
+
+
+@pytest.mark.asyncio
 async def test_managed_runtime_ownership_failure_retries_without_losing_history(startup):
     from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
 

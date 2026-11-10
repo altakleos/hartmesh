@@ -12,6 +12,7 @@ from test_thread_runs_internal_scope import _ScopeAuthMiddleware
 
 from app.gateway.auth.models import User
 from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
+from app.gateway.channel_execution_reads import OrdinaryMemoryThreads
 from app.gateway.routers import thread_runs
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
@@ -36,6 +37,7 @@ async def environment():
     app = FastAPI()
     app.add_middleware(_ScopeAuthMiddleware, user=user, auth_source=AUTH_SOURCE_SESSION)
     app.state.thread_store = threads
+    app.state.channel_memory_threads = OrdinaryMemoryThreads(threads)
     app.state.run_store = store
     app.state.run_manager = RunManager(store=store)
     app.state.run_event_store = MemoryRunEventStore()
@@ -49,6 +51,38 @@ def cached(environment, *, owner=OWNER, kwargs=None):
     record = RunRecord(run_id="channel-real-run", thread_id=THREAD, user_id=owner, assistant_id="lead_agent", status=RunStatus.success, on_disconnect=DisconnectMode.continue_, kwargs={"input": {}} if kwargs is None else kwargs)
     environment.app.state.run_manager._runs[record.run_id] = record
     return record
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["missing", "replaced", "retired"])
+async def test_strict_memory_reads_need_the_original_live_startup_proof(environment, change):
+    cached(environment)
+    if change == "missing":
+        environment.app.state.channel_memory_threads = None
+    elif change == "retired":
+        environment.app.state.channel_memory_threads.retire()
+    else:
+        replacement = MemoryThreadMetaStore(InMemoryStore())
+        await replacement.create(THREAD, user_id=OWNER)
+        environment.app.state.thread_store = replacement
+    response = await environment.client.get(f"/api/threads/{THREAD}/runs/channel-real-run", headers={REQUEST_HEADER: "1"})
+    assert response.status_code == 503 and RESPONSE_HEADER not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_reissued_memory_proof_cannot_acknowledge_an_earlier_read(environment, monkeypatch):
+    cached(environment)
+    manager = environment.app.state.run_manager
+    read = manager.get
+
+    async def reissued(*args, **kwargs):
+        result = await read(*args, **kwargs)
+        environment.app.state.channel_memory_threads = OrdinaryMemoryThreads(environment.threads)
+        return result
+
+    monkeypatch.setattr(manager, "get", reissued)
+    response = await environment.client.get(f"/api/threads/{THREAD}/runs/channel-real-run", headers={REQUEST_HEADER: "1"})
+    assert response.status_code == 404 and RESPONSE_HEADER not in response.headers
 
 
 @pytest.mark.asyncio

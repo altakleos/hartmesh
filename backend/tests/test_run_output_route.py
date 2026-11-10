@@ -29,17 +29,23 @@ TEXT = "Original café\n exact "
 
 @pytest_asyncio.fixture
 async def route_environment(capture_environment, monkeypatch):
+    from _channel_execution_test_support import TABLES
     from fastapi import FastAPI
+
+    from deerflow.agent_instances.conversations import AgentConversations
 
     config = app_config.AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
     for key in ("_app_config", "_app_config_path", "_app_config_mtime", "_app_config_signature", "_app_config_is_custom"):
         monkeypatch.setattr(app_config, key, getattr(app_config, key))
     app_config.set_app_config(config)
     e = capture_environment
+    async with e.engine.begin() as connection:
+        await connection.run_sync(lambda sync: TABLES[0].metadata.create_all(sync, tables=TABLES))
     app = FastAPI()
     user = User(id=UUID(OWNER), email="output@example.com", system_role="user")
     app.add_middleware(_ScopeAuthMiddleware, user=user, auth_source=AUTH_SOURCE_SESSION)
     app.state.thread_store = e.thread_store
+    app.state.agent_conversations = AgentConversations(None, session_factory=e.sf)
     app.state.run_manager = e.manager
     app.state.run_event_store = e.event_store
     app.include_router(run_output.router, prefix="/api/threads")
