@@ -37,6 +37,7 @@ from langgraph.types import Command
 
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.skill_usage import MAX_SKILL_SNAPSHOT_CHARS, SKILL_USAGES_KEY
+from deerflow.agents.middlewares.tool_result_meta import restore_tool_result_for_journal
 from deerflow.runtime.events.catalog import (
     LLM_AI_RESPONSE_EVENT,
     LLM_ERROR_EVENT,
@@ -1203,6 +1204,7 @@ class RunJournal(BaseCallbackHandler):
         for message in messages:
             if not isinstance(message, ToolMessage):
                 continue
+            message = restore_tool_result_for_journal(message)
             if self._should_reconcile_tool_message(message):
                 self._persist_tool_result_message(message)
 

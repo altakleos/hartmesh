@@ -461,7 +461,7 @@ def _delivery_content_with_outputs(
         **content,
         "verification": {
             "source": "outputs_changed",
-            "requirement": "present_files_matches_produced_output",
+            "requirement": "verified_presentation_matches_produced_output",
         },
         "produced_paths": produced_paths,
         "presented_paths": presented_paths,

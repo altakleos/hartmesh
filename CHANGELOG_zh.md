@@ -21,7 +21,62 @@
   Queue 等当前任务结束后再执行下一条消息；Steer 让主 Agent 先处理新要求，原生子 Agent 可暂停后恢复。
   Gateway 重启后，尚未确认生效的消息可以手动重试。([#7729])
 
+- **模型：** 管理员可在 **设置 → 模型** 中选择 StepFun（阶跃星辰），
+  填写 API Key 和模型 ID 即可接入普通 API。([#7988](https://github.com/bytedance/deer-flow/pull/7988))
+
 ### 修复
+
+- **网关：** 同一用户对同一次运行重复提交反馈时，现在返回 409 而不是 500。
+  `POST /api/threads/{id}/runs/{run_id}/feedback` 每个用户每次运行只允许一条反馈；此前重试，
+  或对同一次运行的另一条消息提交反馈，会触发该唯一约束，Gateway 因未处理的数据库错误而失败。
+  409 会提示调用方改用同一路由的 `PUT` 更新已有反馈。([#8064])
+
+- **网关：** 删除线程时不再在对话仍可读取的情况下返回成功。此前
+  `DELETE /api/threads/{id}` 在检查点存储失败时只记录 DEBUG 日志，仍删除线程元数据行并
+  返回成功；之后任何已登录用户都能通过 `GET /threads/{id}`、`/state`、`/history` 和
+  `/goal` 读取残留的标题和消息，所有者也无法重试。现在删除会返回 500 并保留线程，所有者
+  可以再次删除。([#7992])
+
+- **中间件：** 启用 PII 脱敏时，不含空格的长文本（例如粘贴的十六进制转储）不再让 Gateway
+  卡住。此前邮箱检测器的耗时与这类文本长度呈平方关系，而脱敏会在每次模型调用时重新扫描全部
+  用户消息，因此一次 100 KB 的粘贴会让每次模型调用阻塞所有线程约 6 秒。现在扫描为线性耗时，
+  且脱敏的地址与此前完全相同。([#8006])
+
+- **调度器：** 一个已保存的计划无法再计算的定时任务，不再让其他所有任务停止运行。此前
+  已保存的时区或 cron 表达式失效时（例如升级后时区数据库中缺少该时区，或新版 croniter
+  不再接受该表达式），在调度器轮询中计算其下一次运行时间会抛出异常；其启动租约过期后，
+  之后每次轮询都会在接纳到期任务之前失败。现在该任务会被暂停，并把原因记录为最近错误；
+  在修复计划之前，恢复该任务会提示具体问题。([#7993])
+- **社区工具：** 以换行结尾的搜索或抓取 API 密钥不再泄露到对话中。GroundRoute
+  （`GROUNDROUTE_API_KEY`）、InfoQuest、Tavily、Exa、Jina、Firecrawl、fastCRW 和
+  Crawl4AI 此前把读取到的密钥原样写入 HTTP 请求头；从文件读取的密钥（例如用
+  `--from-file` 创建的 Kubernetes Secret）会让传输层报出 `Illegal header value
+  b'Bearer <key>\n'`，这条包含完整密钥的消息成为模型和对话历史保存的工具结果，
+  其中四个提供方还会把它写入日志。现在这些密钥与其他提供方一样经过
+  `provider_credentials.resolve_api_key` 处理；Tavily、Exa、Firecrawl 和 fastCRW
+  的配置密钥为空时会回退到环境变量。fastCRW 没有自己的密钥时，不再让 Firecrawl SDK
+  把 `FIRECRAWL_API_KEY` 发送到 fastCRW 端点；`TAVILY_API_KEY`、`EXA_API_KEY` 或
+  `FIRECRAWL_API_KEY` 只含空白时按未设置处理，不再原样交给 SDK。([#7981])
+
+- **社区工具：** Browserless 是最后一个直接读取原始 token 的搜索/抓取提供方。从文件读取的
+  `BROWSERLESS_TOKEN` 或配置 `token` 会保留尾部换行，并被原样用作鉴权查询参数，导致
+  `web_fetch` 和 `web_capture` 在密钥本身正确时也全部鉴权失败。现在两者都经过
+  `provider_credentials.resolve_api_key` 处理，且只有省略 `token` 键时才回退到环境变量：
+  显式配置 `""` 或 `null` 仍可让自建 capture 端点跳过鉴权。([#8043])
+
+- **docker：** 从本地 checkout 构建的镜像不再包含本地配置。`.dockerignore`
+  此前没有排除 `config.yaml`、`config.yaml.bak`、`extensions_config.json` 和
+  `mcp_config.json`，因此配置放在旧位置 `backend/` 时，`COPY backend ./backend`
+  会把模型 API 密钥和 MCP 凭据写进每一层 gateway 镜像；`frontend/.env.local`
+  也以同样方式进入前端镜像。现在根目录和 `backend/` 下的这些文件、任意层级的
+  `.env*.local`、`frontend/*.pem`，以及扩展管理器拒绝写入扩展快照的凭据文件都会
+  被排除。本地构建的前端镜像不再内联 `frontend/.env.local` 中的 `NEXT_PUBLIC_*`
+  值；Docker 栈通过同一个 nginx 源提供前端和 Gateway，不需要这些变量。CI 发布的
+  镜像不受影响；已推送或分享过的本地镜像请重新构建。([#7958])
+
+- **智能体：** 循环检测、运行 token 预算、模型服务安全限制或输出长度限制触发停止后，
+  未完成的 Todo 不再触发额外的模型调用或工具执行。Todo 状态仍会保留，
+  用户可在后续运行中继续处理。([#7953])
 
 - **渠道：** 飞书/Lark 的长回答不再丢失。此前卡片文本没有长度上限，并以 ASCII 转义
   序列化，约 4,400 个中日韩字符就会让卡片请求超过飞书 30 KB 的限制（`230025`）：
@@ -48,10 +103,14 @@
   `TaskInfo`，即使没有注册生命周期贡献者也会放入。手动 `/compact` 仍收到分离存储，
   id 为 `None`。`deerflow-extension-api` 升级到 0.2.10，已有扩展不受影响。([#7831])
 
+- **智能体：** 即使模型提供方复用消息 ID，Token 预算也会分别统计已接受的模型调用，
+  避免重复 ID 绕过配置的上限；触发硬停止时保留已完成的结构化输出工具结果。
+  ([#8050](https://github.com/bytedance/deer-flow/pull/8050))
+
 - **渠道：** 钉钉 AI 卡片模式（`card_template_id`）下，卡片请求失败（例如缺少卡片权限或钉钉服务异常）时
   不再丢失回复。dingtalk-stream 会记录失败的卡片请求后按成功返回，因此文本形式的运行中提示和最终答案的
   `sampleMarkdown` 兜底都不会执行。现在渠道自行发送卡片请求，并在失败时回退。([#7781])
-  
+
 - **harness：** 重试失败条目不再重新打开已取消的持久子智能体批次。`retry_item`
   此前只保留已暂停批次的状态，因此重试已取消批次中的失败条目会把批次改回
   `queued`，worker 随即认领并执行该条目，批次最终变为 `completed`。现在对已取消
@@ -3666,7 +3725,9 @@
 
 - **沙箱：** 远程沙箱提供方对 `read_file` 行号范围的切分现在与 `LocalSandbox`
   一致。E2B、BoxLite、Tenki 与 OpenSandbox 提供方此前用 `str.splitlines()` 切分
-  范围读取，该函数还会在裸 `\r`、`\f`、`\v`、`\x85`、` `/` ` 及其它控制分隔符处
+  范围读取，该函数还会在裸 `\r`、`\f`、`\v`、`\x85`、`
+`/`
+` 及其它控制分隔符处
   断行，因此同一个行号 N 在远程与本地沙箱指向不同的行：更新以裸 `\r` 结尾的
   进度日志读出来是截断的，而标记里写的是 `start_line=30`；在这些提供方上
   `read_file(start_line=30)` 返回的却是第 15 行的下半段。新增
@@ -4461,7 +4522,7 @@
   Gateway 在运行记录中按原样保存无 id 的消息，而检查点中的副本会被分配新的 uuid；网页客户端重连时按 id
   合并这两份副本，因此在运行结束前两条都会显示。现在渠道发送的人类消息自带 id，两份副本共享同一 id。([#6401])
 
-- **部署：** 在全新检出的仓库上，`make up`、`make down` 与 `make prod-logs` 
+- **部署：** 在全新检出的仓库上，`make up`、`make down` 与 `make prod-logs`
   不再因 `env file .../.env not found` 而中止。`.env` 与
   `frontend/.env` 已被 gitignore，`make up` 也不会创建它们，但生产 compose 文件此前要求两者都存在。
   现在其 `env_file` 条目与开发 compose 文件一样为可选：文件存在时加载，不存在时跳过。此写法需要
@@ -12780,3 +12841,11 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7798]: https://github.com/bytedance/deer-flow/pull/7798
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7782]: https://github.com/bytedance/deer-flow/pull/7782
+[#7953]: https://github.com/bytedance/deer-flow/issues/7953
+[#7958]: https://github.com/bytedance/deer-flow/pull/7958
+[#7981]: https://github.com/bytedance/deer-flow/pull/7981
+[#7992]: https://github.com/bytedance/deer-flow/pull/7992
+[#7993]: https://github.com/bytedance/deer-flow/pull/7993
+[#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8043]: https://github.com/bytedance/deer-flow/pull/8043
+[#8064]: https://github.com/bytedance/deer-flow/pull/8064

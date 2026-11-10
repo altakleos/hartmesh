@@ -45,6 +45,7 @@ import {
   type StorageRefusal,
 } from "../file-areas/storage-state";
 import { useI18n } from "../i18n/hooks";
+import type { Translations } from "../i18n/locales";
 import { getMessageRunId, parseRunStartTime } from "../messages/run-duration";
 import {
   hasContent,
@@ -1784,6 +1785,14 @@ function getHttpStatus(error: unknown): number | undefined {
   return undefined;
 }
 
+function getStreamErrorToastMessage(error: unknown, t: Translations): string {
+  const status = getHttpStatus(error);
+  if (status !== undefined && status >= 500 && status < 600) {
+    return t.conversation.streamServerError(status);
+  }
+  return getStreamErrorMessage(error);
+}
+
 function isThreadMissingError(error: unknown): boolean {
   const status = getHttpStatus(error);
   // Treat 403 like 404 here to avoid disclosing whether an inaccessible thread
@@ -2345,7 +2354,7 @@ export function useThreadStream({
         !recordAgentRefusal(error, "send", meta) &&
         !recordStorageRefusal(error, undefined, meta)
       )
-        toast.error(getStreamErrorMessage(error));
+        toast.error(getStreamErrorToastMessage(error, t));
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
           .map(messageIdentity)
@@ -2690,7 +2699,7 @@ export function useThreadStream({
     } catch (error) {
       if (!stoppedOwner.active || viewOwner.current !== stoppedOwner) return;
       if (!recordAgentRefusal(error, "stop"))
-        toast.error(getStreamErrorMessage(error));
+        toast.error(getStreamErrorToastMessage(error, t));
     } finally {
       stoppingThreadIdRef.current = null;
       setStoppingThreadId(null);
@@ -2703,6 +2712,7 @@ export function useThreadStream({
     followRunId,
     isMock,
     queryClient,
+    t,
     thread,
     threadId,
   ]);
@@ -3278,13 +3288,13 @@ export function useThreadStream({
             removeSetItems(current, preparedSupersededMessageIds),
           );
         }
-        toast.error(getStreamErrorMessage(error));
+        toast.error(getStreamErrorToastMessage(error, t));
         return false;
       } finally {
         sendInFlightRef.current = false;
       }
     },
-    [context, humanMessageCount, persistedMessages, queryClient, thread],
+    [context, humanMessageCount, persistedMessages, queryClient, t, thread],
   );
 
   const regenerateMessage = useCallback(

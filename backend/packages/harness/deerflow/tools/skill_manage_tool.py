@@ -260,7 +260,7 @@ async def _skill_manage_impl_undrained(
 
     if not customer_management_actor_can_manage_private_skills(context):
         raise CustomerManagementDenied("Private skill management requires the attributed owner.")
-    name = SkillStorage.validate_skill_name(name)
+    name = SkillStorage.validate_skill_name(name, for_creation=action == "create")
     user_id = resolve_runtime_user_id(runtime)
     lock = _get_lock(user_id, name)
     thread_id = _get_thread_id(runtime)

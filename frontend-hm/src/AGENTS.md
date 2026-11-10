@@ -1,5 +1,9 @@
 ### Data Flow
 
+Chat stream HTTP 5xx failures show localized retry guidance with the status code.
+Retain current agent/storage refusal handling and captured draft restoration;
+never log arbitrary server response bodies for this presentation.
+
 These contracts belong to Hartmesh's `frontend-hm/src/`. Keep API/stream
 clients and application assets in this app; the upstream `frontend/` snapshot
 is not a dependency. Existing shared fixtures under `contracts/` remain the

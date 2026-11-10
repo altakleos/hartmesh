@@ -296,3 +296,7 @@ containment. Late/reused terminal observations remain uncertain. Qualified recov
 requires current Home ADMIN, exact completed lifecycle scope and captured IDs fenced;
 it preserves effects/candidates without success. Additive0040 owns candidate/settled
 columns and request/event attribution; never rewrite0038/0039.
+
+Instance AIO clients use the baseline provider's validated `max_bash_sessions`,
+matching the native container's Bash capacity; preserve distinct persistent-shell
+headroom and scoped command cancellation.

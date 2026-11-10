@@ -466,7 +466,14 @@ async def _prepare_client(execution, baseline_provider, attached, capture, app_c
         raise StorageAdapterUnsupported("Instance readiness is unconfirmed; retain its storage attachment")
 
     await await_drained(run_file_io(ready))
-    sandbox = AioSandbox(attached.id, url, home_dir="/mnt/spaces/home", control_transport=transport, download_roots=("/mnt/spaces/home", "/mnt/user-data/workspace", "/mnt/user-data/uploads", "/mnt/user-data/outputs"))
+    sandbox = AioSandbox(
+        attached.id,
+        url,
+        home_dir="/mnt/spaces/home",
+        control_transport=transport,
+        max_bash_sessions=baseline_provider._config.get("max_bash_sessions", 50),
+        download_roots=("/mnt/spaces/home", "/mnt/user-data/workspace", "/mnt/user-data/uploads", "/mnt/user-data/outputs"),
+    )
     try:
         await await_drained(run_file_io(transport.prepare_home_aliases))
         layout = await await_drained(

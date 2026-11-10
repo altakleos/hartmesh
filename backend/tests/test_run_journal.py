@@ -1682,7 +1682,8 @@ class TestFinalToolMessageReconciliation:
         assert tool_results[0]["content"]["content"] == "Current"
 
     @pytest.mark.anyio
-    async def test_model_start_persists_consumed_short_circuited_tool_result_before_later_run_error(self, journal_setup):
+    @pytest.mark.parametrize("project_for_model", [False, True])
+    async def test_model_start_persists_consumed_short_circuited_tool_result_before_later_run_error(self, journal_setup, project_for_model):
         from langchain_core.messages import AIMessage, ToolMessage
 
         j, store = journal_setup
@@ -1701,7 +1702,12 @@ class TestFinalToolMessageReconciliation:
             status="error",
         )
 
-        j.on_chat_model_start({}, [[current_ai, blocked]], run_id=uuid4(), tags=["lead_agent"])
+        from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, tool_result_for_model
+
+        blocked.additional_kwargs[TOOL_META_KEY] = {"status": "error", "source": "exception"}
+        raw = blocked.model_dump()
+        consumed = tool_result_for_model(blocked) if project_for_model else blocked
+        j.on_chat_model_start({}, [[current_ai, consumed]], run_id=uuid4(), tags=["lead_agent"])
         j.on_chain_error(RuntimeError("provider failed"), run_id=uuid4())
         await j.flush()
 
@@ -1709,6 +1715,8 @@ class TestFinalToolMessageReconciliation:
         tool_results = [event for event in messages if event["event_type"] == "llm.tool.result"]
         assert len(tool_results) == 1
         assert tool_results[0]["content"]["id"] == "blocked-write"
+        assert tool_results[0]["content"]["content"] == raw["content"]
+        assert tool_results[0]["content"]["additional_kwargs"] == raw["additional_kwargs"]
 
     @pytest.mark.anyio
     async def test_model_start_does_not_duplicate_tool_result_captured_by_on_tool_end(self, journal_setup):

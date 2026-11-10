@@ -91,12 +91,10 @@ async def schedule_task(
     to this conversation, so never promise to report back or tell the user
     here unless the task runs in this chat.
 
-    In the web app, create, update, pause, resume and trial show a live card
-    with the schedule, the stop rule and buttons. Then reply in one or two short
-    sentences in the user's language: what will happen and when it stops. Do
-    not repeat IDs, cron strings, ISO or UTC times, field names or the tool
-    result. When the result's display is "text", describe the schedule, the
-    next run (next_run_local) and the stop rule in plain words instead.
+    Describe the schedule, next run (next_run_local) and stop rule in one or
+    two short sentences in the user's language. Do not promise a chat card or
+    repeat IDs, cron strings, ISO or UTC times, field names or the tool result.
+    The scheduled-tasks page owns the authenticated management controls.
 
     List returns the tasks of this conversation, including the task whose run
     this conversation is, each with its last run; use it to answer how a task is
@@ -108,12 +106,11 @@ async def schedule_task(
     tool result or older messages. At most 10 notes of 500 characters.
 
     After creating a recurring report, digest or file task, you may offer one
-    trial run in a single sentence in the user's language; in the web app the
-    card has a Run once now button. Call trial only when the current user
-    message directly asks to run the task now. An offer by itself is not
-    consent. A trial does not count toward max_runs or the automatic pause. If
-    the trial result has existing true, a run was already waiting to start and
-    no extra trial was added; say so.
+    trial run in a single sentence in the user's language. The trial action
+    returns instructions for the authenticated Run once now button on
+    /workspace/scheduled-tasks; it never dispatches a run from natural-language
+    consent. Do not claim a trial has started from this
+    tool result. Manual trials do not count toward max_runs.
 
     Args:
         action: The operation: create, update, list, pause, resume, delete, note, or trial.

@@ -1846,6 +1846,8 @@ export function createEnUS(product: string): Translations {
       branchFailed: "Failed to branch conversation.",
       streamReplayGap:
         "Some live updates expired. The conversation was restored from saved state.",
+      streamServerError: (status) =>
+        `The service is temporarily unavailable (HTTP ${status}). Please try again.`,
       outlineLabel: "Conversation outline",
       outlineAttachmentFallback: "Image or file message",
     },
