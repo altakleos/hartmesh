@@ -13,6 +13,9 @@ Management requires `agents_api.enabled: true`, a durable database, and enabled
 Storage Spaces with qualified provider inventory. Existing default/custom chats
 retain their behavior. Creation needs no conversation or running sandbox.
 
+When a message supplies a valid time zone, the agent's model receives the person's
+current local date, weekday and UTC offset without storing that context in the conversation.
+
 ## Management API
 
 Managed-storage availability is separate from agent identity. `/api/features`

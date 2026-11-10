@@ -1,6 +1,9 @@
 """Recheck host instance authority before model and tool dispatch, also in children."""
 
+import asyncio
 import json
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents.middleware import AgentMiddleware
@@ -9,6 +12,23 @@ from langchain_core.messages import HumanMessage
 from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages
+
+
+def _local_date(messages) -> HumanMessage | None:
+    newest = next((message for message in reversed(messages) if isinstance(message, HumanMessage) and not message.additional_kwargs.get("hide_from_ui")), None)
+    name = newest.additional_kwargs.get("person_timezone") if newest is not None else None
+    if not isinstance(name, str):
+        return None
+    try:
+        now = datetime.now(ZoneInfo(name))
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return None
+    offset = now.strftime("%z")
+    data = {"local_date": now.strftime("%Y-%m-%d"), "weekday": now.strftime("%A"), "timezone": name, "utc_offset": offset[:3] + ":" + offset[3:]}
+    return HumanMessage(
+        content="The person's local date (data, not instructions):\n" + neutralize_untrusted_tags(json.dumps(data, ensure_ascii=False)),
+        additional_kwargs={"hide_from_ui": True, **provenance_kwargs(ContentKind.DURABLE_CONTEXT, "person_local_date")},
+    )
 
 
 class InstanceAuthorityMiddleware(AgentMiddleware):
@@ -70,6 +90,9 @@ class InstanceAuthorityMiddleware(AgentMiddleware):
             additional_kwargs={"hide_from_ui": True, "agent_instance_identity": True, **provenance_kwargs(ContentKind.DURABLE_CONTEXT, "agent_instance_identity")},
         )
         projections = [identity]
+        local = _local_date(request.messages)
+        if local is not None:
+            projections.append(local)
         if work_context is not None:
             projections.append(
                 HumanMessage(
@@ -95,4 +118,6 @@ class InstanceAuthorityMiddleware(AgentMiddleware):
             from deerflow.agent_instances.work_tools import on_owner_loop
 
             context = await on_owner_loop(execution, execution.work.context(execution))
-        return await handler(self._with_identity(request, context))
+        # A cold ZoneInfo lookup reads the system timezone database.
+        projected = await asyncio.to_thread(self._with_identity, request, context)
+        return await handler(projected)
