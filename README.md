@@ -1988,7 +1988,9 @@ name and picture. Instance run failures distinguish capacity waits from restart,
 file-maintenance and startup failures. Full-files replies offer file navigation
 only to a current manager who can inspect the files. Before a run starts,
 unavailable execution keeps the message for an explicit retry; a conversation
-limit waits for up to two minutes and can be cancelled. A busy response from
+limit waits for up to two minutes and can be cancelled. Messages still waiting
+when chat access is withdrawn or the assistant is paused or retired are closed
+without starting a run; restoring access does not resend them. A busy response from
 the run service rechecks that same conversation and instance before selecting
 a wait or a manual-retry reply. While an instance workspace starts, the chat
 shows its starting status and updates the line after 30 seconds. A second

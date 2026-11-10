@@ -101,7 +101,8 @@ async def wait_for_line(e, key):
             if e.watch.done():
                 await e.watch
                 pytest.fail("Stream ended before progress")
-            await asyncio.sleep(0)
+            # Let SQLite authority preparation settle; retain the same deadline.
+            await asyncio.sleep(0.01)
 
     await asyncio.wait_for(wait(), 1)
 

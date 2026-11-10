@@ -252,6 +252,7 @@ class _PublicationGuard:
     _captured: BotLink
     _live_owner: LiveOwnerCheck
     _attempt: Callable[[], bool]
+    _input_closure: bool = False
 
     @property
     def captured_link(self) -> BotLink:
@@ -277,7 +278,7 @@ class _PublicationGuard:
             row is None
             or captured.state != "connected"
             or row.state != "connected"
-            or row.health != "ok"
+            or row.health not in ({"ok", "agent_unavailable"} if self._input_closure and captured.agent_kind == "instance" else {"ok"})
             or captured.agent_kind not in {"lead_agent", "custom_agent", "instance"}
             or captured.agent_kind == "lead_agent"
             and captured.agent_ref != "lead_agent"
@@ -458,6 +459,11 @@ class BotLinkRepository:
         if not isinstance(captured_link, BotLink) or not callable(check_live_owner) or not callable(check_attempt_current):
             raise ValueError("publication-stale") from None
         return _PublicationGuard(self, deepcopy(captured_link), check_live_owner, check_attempt_current)
+
+    def input_closure_guard(self, captured_link: BotLink, *, check_live_owner: LiveOwnerCheck, check_attempt_current: Callable[[], bool]) -> PublicationGuard:
+        """Custody for closing unpublished metadata while an instance is unavailable."""
+        guard = self.publication_guard(captured_link, check_live_owner=check_live_owner, check_attempt_current=check_attempt_current)
+        return replace(guard, _input_closure=True)
 
     def _health_lock(self, link_id: str) -> asyncio.Lock:
         return self._health_locks.setdefault(link_id, asyncio.Lock())
