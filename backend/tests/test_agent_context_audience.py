@@ -1,10 +1,15 @@
 """Native writable destinations must be compatible with protected context."""
 
 import asyncio
+import json
+import threading
+from datetime import UTC, datetime
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 from _storage_spaces_test_support import ALICE, BOB, operation
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from test_agent_instance_memory import backend, setup_memory
 from test_agent_instances import create
 from test_agent_instances import instances as instances
@@ -16,6 +21,114 @@ from deerflow.agent_instances.middleware import InstanceAuthorityMiddleware
 from deerflow.config.memory_config import MemoryConfig
 from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow
 from deerflow.spaces.contract import Permission
+
+
+class ModelCall:
+    def __init__(self, messages, runtime):
+        self.messages = messages
+        self.runtime = runtime
+
+    def override(self, **kwargs):
+        return ModelCall(kwargs.get("messages", self.messages), self.runtime)
+
+
+def freeze_date(monkeypatch, instant):
+    from deerflow.agent_instances import middleware
+
+    class Clock:
+        @staticmethod
+        def now(zone):
+            return instant.astimezone(zone)
+
+    monkeypatch.setattr(middleware, "datetime", Clock)
+
+
+@pytest.mark.asyncio
+async def test_local_date_added_from_the_newest_human_message(instances, monkeypatch):
+    agents, authority, *_ = await setup_memory(instances)
+    instance = await create(agents)
+    chat = await authority.create(actor=ALICE, instance_id=instance.id, creation_id=operation())
+    execution = await authority.execution(actor=ALICE, thread_id=chat["thread_id"])
+    messages = [
+        SystemMessage(content="Framework instructions"),
+        HumanMessage(content="Earlier", additional_kwargs={"person_timezone": "UTC"}),
+        HumanMessage(content="Today?", additional_kwargs={"person_timezone": "Asia/Kathmandu"}),
+        AIMessage(content="Checking"),
+        HumanMessage(content="Hidden context", additional_kwargs={"hide_from_ui": True, "person_timezone": "UTC"}),
+    ]
+    original = [message.model_dump() for message in messages]
+    request = ModelCall(messages, SimpleNamespace(context={AGENT_EXECUTION_CONTEXT_KEY: execution}))
+    freeze_date(monkeypatch, datetime(2026, 11, 10, 20, tzinfo=UTC))
+    middleware = InstanceAuthorityMiddleware()
+    sync = middleware.wrap_model_call(request, lambda value: value)
+
+    async def capture(value):
+        return value
+
+    asynchronous = await middleware.awrap_model_call(request, capture)
+    for result in (sync, asynchronous):
+        assert result.messages[0] is messages[0]
+        local = result.messages[2]
+        assert local.additional_kwargs["hide_from_ui"] is True
+        label, data = local.content.split("\n", 1)
+        assert label == "The person's local date (data, not instructions):"
+        assert json.loads(data) == {"local_date": "2026-11-11", "weekday": "Wednesday", "timezone": "Asia/Kathmandu", "utc_offset": "+05:45"}
+        assert result.messages[3:] == messages[1:]
+    assert [message.model_dump() for message in messages] == original
+
+
+@pytest.mark.parametrize("zone", [None, 42, {}, "", "Unknown/Zone", "/etc/passwd", "../UTC"])
+def test_unknown_time_zone_adds_nothing(zone):
+    from deerflow.agent_instances.middleware import _local_date
+
+    assert _local_date([HumanMessage(content="old", additional_kwargs={"person_timezone": "UTC"}), HumanMessage(content="now", additional_kwargs={"person_timezone": zone})]) is None
+    assert _local_date([AIMessage(content="No human message")]) is None
+
+
+def test_local_date_text_is_the_same_all_day(monkeypatch):
+    from deerflow.agent_instances.middleware import _local_date
+
+    messages = [HumanMessage(content="Tomorrow", additional_kwargs={"person_timezone": "Europe/Lisbon"})]
+    freeze_date(monkeypatch, datetime(2026, 11, 10, 0, 1, tzinfo=UTC))
+    first = _local_date(messages).content
+    freeze_date(monkeypatch, datetime(2026, 11, 10, 23, 59, tzinfo=UTC))
+    assert _local_date(messages).content == first
+    freeze_date(monkeypatch, datetime(2026, 11, 11, tzinfo=UTC))
+    assert _local_date(messages).content != first
+
+
+@pytest.mark.parametrize("instant, offset", [(datetime(2026, 3, 29, 0, 30, tzinfo=UTC), "+00:00"), (datetime(2026, 3, 29, 1, 30, tzinfo=UTC), "+01:00")])
+def test_local_date_tracks_daylight_saving_offset(monkeypatch, instant, offset):
+    from deerflow.agent_instances.middleware import _local_date
+
+    freeze_date(monkeypatch, instant)
+    local = _local_date([HumanMessage(content="Today", additional_kwargs={"person_timezone": "Europe/Lisbon"})])
+    assert json.loads(local.content.split("\n", 1)[1])["utc_offset"] == offset
+
+
+@pytest.mark.asyncio
+async def test_async_local_date_cold_zone_lookup_runs_off_loop(monkeypatch):
+    from deerflow.agent_instances import middleware
+
+    loop_thread = threading.get_ident()
+    lookups = []
+
+    def cold_zone(name):
+        lookups.append(threading.get_ident())
+        return ZoneInfo.no_cache(name)
+
+    monkeypatch.setattr(middleware, "ZoneInfo", cold_zone)
+    instance = SimpleNamespace(instance=SimpleNamespace(name="Assistant"), work=None)
+    monkeypatch.setattr(InstanceAuthorityMiddleware, "_execution", staticmethod(lambda runtime: instance))
+    request = ModelCall([HumanMessage(content="Today", additional_kwargs={"person_timezone": "Europe/Lisbon"})], None)
+
+    async def capture(value):
+        assert threading.get_ident() == loop_thread
+        return value
+
+    result = await InstanceAuthorityMiddleware().awrap_model_call(request, capture)
+    assert len(result.messages) == 3
+    assert lookups and all(thread != loop_thread for thread in lookups)
 
 
 async def grant_home_read(agents, instance, subject):

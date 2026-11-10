@@ -221,6 +221,10 @@ The authority middleware adds the current AI employee display name only as
 sanitized transient human-role data; never interpolate editable identity into
 system text or persist this projection in checkpoints. Scope disclosures do not
 include principal IDs, grants, credentials or host paths.
+The newest visible human message may supply `person_timezone`: a valid IANA zone
+adds a transient local date, weekday and UTC offset at each model call. Hidden
+messages and older preferences do not override it. Async projection runs off-loop
+because a cold timezone lookup reads files.
 
 `agents/runtime_scope.py` builds an immutable per-assembly description after tool
 filtering. Instance file facts require the exact host `AgentExecution` and its
