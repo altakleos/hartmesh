@@ -166,7 +166,8 @@ async def test_instance_delivery_and_notice_protection_fail_closed_until_policy_
 
     link, item = await basis(db, kind="instance")
     policy = authority.TelegramAuthority(links=db.links, connections=db.connections)
-    assert await policy.target(link) == "unsupported"
+    with pytest.raises(authority.AuthorityUnavailable):
+        await policy.target(link)
     assert (await policy.delivery(link, item)).decision == "wait"
     with pytest.raises(DeliveryClaimRetired):
         await policy.protect_notice(SendContext(link.id, link.chat_id, link.binding_generation, link.token_revision, "bound_message"))

@@ -543,4 +543,12 @@ profiles and strangers are in [the bot lifecycle](../../docs/TELEGRAM_BOT_LIFECY
 Read it before changing `recovery.py`, `recovery_authority.py`, `threads.py`, `polling.py`,
 `supervisor.py`, `profile.py`, `avatar.py`, `strangers.py`, or those paths of `links.py`.
 
+Instance conversation preparation uses the existing `AgentConversations` service
+as the binding's human owner. Preserve the saved creation identity and drain its
+writer before cancellation returns. Current Use precedes execution readiness and
+resident admission; `work=False` reserves no workspace. Both the authoritative
+Gateway projection and in-process binding must match the target before mapping.
+The browser add route still refuses instance targets until their complete delivery
+and policy paths are available.
+
 Managed turns run with `recursion_limit` 1000 (`EXECUTION_RUN_CONFIG` in `app/channels/manager.py`), matching web chats and scheduled runs; a configured channel session value overrides it and the Gateway clamps to `max_recursion_limit`.
