@@ -1976,6 +1976,8 @@ and carries their stored time zone into the request. Its direct file-write
 boundary checks current chat access and attributes writes to the connecting
 person without starting a workspace. The file journal preserves operation IDs
 across bounded transient retries and records explicit Send again presses separately.
+Completed receipts provide the pending-attachment and model-composer handoff,
+checking their original Home before reuse.
 Instance presentation names the assistant or employee, explains who can read
 the conversation, and offers web links according to the person's access.
 Role labels require permission to inspect the adopted definition.

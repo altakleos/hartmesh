@@ -2858,7 +2858,7 @@ class InboxRepository:
         await guard.check(session)
         return _snapshot(mark), None if receipt is None else receipt["files"]
 
-    async def attach_pending_files(self, link, row, pending_rows, *, session, guard):
+    async def attach_pending_files(self, link, row, pending_rows, *, session, guard, instance_receipts=None):
         """Append actual pending descriptors and consume their rows atomically."""
         fresh, taken = await self.pending_file_take(link, row, session=session, guard=guard)
         if taken is not None:
@@ -2869,7 +2869,12 @@ class InboxRepository:
         files, actuals = [], []
         for item in sorted(selected, key=lambda value: (_time(value.created_at), value.message_id)):
             actual = await session.get(TelegramPendingFileRow, (item.link_id, item.message_id), with_for_update=True, populate_existing=True)
-            if actual is None or (actual.link_id, actual.chat_id, actual.message_thread_id, actual.binding_generation) != (link.id, fresh.chat_id, fresh.message_thread_id, link.binding_generation) or actual.agent_file_path is not None:
+            if (
+                actual is None
+                or (actual.link_id, actual.chat_id, actual.message_thread_id, actual.binding_generation) != (link.id, fresh.chat_id, fresh.message_thread_id, link.binding_generation)
+                or link.agent_kind != "instance"
+                and actual.agent_file_path is not None
+            ):
                 raise ValueError("pending-file-conflict") from None
             descriptor = {
                 "type": "image" if actual.is_image else "file",
@@ -2881,6 +2886,15 @@ class InboxRepository:
                 "message_id": actual.message_id,
                 "telegram_bot_id": link.bot_id,
             }
+            if link.agent_kind == "instance":
+                from app.telegram_bots.file_puts import FileReceiptReader
+
+                if type(instance_receipts) is not FileReceiptReader:
+                    raise ValueError("pending-file-reader-required") from None
+                instance_receipts.check_link(link)
+                saved = await instance_receipts.completed(descriptor, session=session)
+                if actual.agent_file_path != saved.result["path"]:
+                    raise ValueError("pending-file-conflict") from None
             source = await session.get(TelegramInboundMarkRow, (link.id, actual.message_id, actual.chat_id), with_for_update=True, populate_existing=True)
             if source is None or (source.message_thread_id, source.binding_generation) != (fresh.message_thread_id, link.binding_generation) or descriptor not in source.sanitized_input.get("files", []):
                 raise ValueError("pending-file-conflict") from None

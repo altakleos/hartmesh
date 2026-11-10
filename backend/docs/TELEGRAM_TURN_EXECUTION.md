@@ -208,3 +208,21 @@ pin is needed. The 400-day Act sweep deletes validated done/refused file journal
 including those whose link was removed; uncertain and malformed records stay.
 The adapter must still install the service, render its results,
 attach composer metadata and integrate captionless files before activation.
+
+
+`FileReceiptReader` prepares current file authority before entering a metadata
+writer. Completed-file reads recheck the original descriptor, closed receipt and
+Home target plus current Use, policy and account in that borrowed writer.
+The reader composes these checks into the writer's final guard, then checks the
+original caller lifetime synchronously after the last authority await. They
+read no file bytes and repeat no file operation. `composer_files` projects those
+receipts as `filename`, `size`, `/mnt/user-data/` path and `status: uploaded`.
+
+`PendingFiles` can retain an instance receipt's actual `agent_file_path`; it never
+accepts a caller-supplied path. Taking pending files validates each receipt before
+attaching the original descriptors and deleting pending rows in the same writer.
+A replay reuses that frozen attachment set. Reader preparation occurs outside a
+writer, including a second guarded pass when candidates were found; an empty take
+needs no file readiness. Borrowed writers must supply a prepared reader and use its `guard(base)` for
+their outer transaction boundary too. These
+consumer primitives still require adapter installation and publication wiring.
