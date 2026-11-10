@@ -34,6 +34,6 @@ async def seeded_timezone():
 
 
 @pytest_asyncio.fixture
-async def lists(list_environment):
+async def lists(list_environment):  # noqa: F811 -- pytest injects the imported fixture under its registered name.
     ZoneInfo.clear_cache()
     return list_environment
