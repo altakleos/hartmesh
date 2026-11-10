@@ -1040,12 +1040,13 @@ class InboxRepository:
         if bind is None or not session.in_transaction() or not session.is_active or session.get_bind() is not getattr(bind, "sync_engine", bind):
             raise ValueError("publication-writer-required") from None
 
-    async def lock_callback_input(self, link: BotLink, callback_id: str, *, session: AsyncSession) -> CallbackInputStage:
+    async def lock_callback_input(self, link: BotLink, callback_id: str, *, session: AsyncSession, input_closure: bool = False) -> CallbackInputStage:
         """Borrow an owner's writer; receipt replay needs no usable button."""
         self._publication_borrow(session)
         current = await self._link(session, link.id)
         names = ("owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "binding_generation", "token_revision")
-        if current.state != "connected" or current.health != "ok" or any(getattr(current, key) != getattr(link, key) for key in names):
+        health = {"ok", "agent_unavailable"} if input_closure and link.agent_kind == "instance" else {"ok"}
+        if current.state != "connected" or current.health not in health or any(getattr(current, key) != getattr(link, key) for key in names):
             raise ValueError("callback-publication-conflict") from None
         row = await session.get(TelegramCallbackRow, callback_id)
         if row is None:
@@ -3030,6 +3031,62 @@ class InboxRepository:
             if mark.state != "done":
                 mark.state = "reply_pending"
         await self.settle_deliveries(link_id=link_id, session=session)
+
+    async def close_unpublished_input(self, link: BotLink, rows: Sequence[InboxRow], *, callback_id: str | None = None, guard: PublicationGuard) -> None:
+        """Seal only an original unpublished input, without private output or dispatch."""
+        from app.telegram_bots.links import prepare_publication_guard
+        from deerflow.utils.file_io import await_drained
+
+        rows = tuple(deepcopy(rows))
+        self._publication_guard_matches(guard, link=link)
+        if bool(rows) == (callback_id is not None) or rows and self._requested(rows) != link.id:
+            raise ValueError("inbox-group-conflict") from None
+
+        async def perform():
+            await prepare_publication_guard(guard)
+            async with self._transaction() as writer:
+                checked = await guard.check(writer)
+                if callback_id is not None:
+                    stage = await self.lock_callback_input(link, callback_id, session=writer, input_closure=True)
+                    row = await writer.get(TelegramCallbackRow, callback_id)
+                    data, _stage = _callback_owner(row.payload, callback_id)
+                    if stage.record is not None or data["outbox_id"] is not None or data["delivery_ids"]:
+                        raise ValueError("input-already-published") from None
+                    data.update(route_complete=True, state="done", closed_at=data["closed_at"] or _now().isoformat())
+                    row.payload = {**deepcopy(row.payload), CALLBACK_PUBLICATION_KEY: data}
+                    await self._close_callback_group(callback_id, writer)
+                    await self._retire_input_waits(writer, link, stage.origins, callback_id=callback_id)
+                else:
+                    marks = await self._rows(writer, rows)
+                    self._group(marks)
+                    self._prepublication_members(marks)
+                    for mark, captured in zip(marks, sorted(rows, key=_identity), strict=True):
+                        self._current(checked, mark)
+                        if mark.turn_id is not None or mark.thread_id is not None or mark.run_id is not None or mark.assistant_message_id is not None or mark.outbox_id is not None or "publications" in mark.route_basis:
+                            raise ValueError("input-already-published") from None
+                        self._publication_snapshot_matches(mark, captured)
+                        if mark.route_kind != "turn" or mark.route_target_id != link.agent_ref:
+                            raise ValueError("inbox-group-conflict") from None
+                        mark.route_complete = True
+                    await self._retire_input_waits(writer, link, rows)
+                    await self.settle_deliveries(link_id=link.id, session=writer)
+                await writer.flush()
+                await guard.check(writer)
+
+        await await_drained(perform())
+
+    async def _retire_input_waits(self, writer, link, rows, *, callback_id=None):
+        """Withdraw only these inputs' obsolete queue promises, including live claims."""
+        keys = {f"notice:preparation-capacity:{link.chat_id}:{link.binding_generation}:{callback_id or rows[0].message_id}"}
+        if callback_id is None:
+            keys.update(f"notice:chat-wait:{link.chat_id}:{row.message_id}" for row in rows)
+        notices = await writer.scalars(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key.in_(keys)).order_by(TelegramOutboxRow.id).with_for_update())
+        for notice in notices:
+            if (notice.owner_user_id, notice.chat_id, notice.message_thread_id, notice.binding_generation) != (link.owner_user_id, link.chat_id, rows[0].message_thread_id, link.binding_generation):
+                raise ValueError("inbox-group-conflict") from None
+            if notice.state in {"pending", "sending"}:
+                notice.state, notice.skip_reason, notice.closed_at = "skipped", "superseded", _now()
+                notice.claim_owner = notice.claim_id = notice.claimed_at = None
 
     async def finish_route(self, row: InboxRow, *, session: AsyncSession | None = None) -> None:
         if session is None:

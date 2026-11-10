@@ -285,6 +285,17 @@ exists. Stop ends that input before any dispatch. A new run is never inferred
 from a manager sentence. Restart and storage maintenance require manual retry.
 Execution-unavailable diagnostics recheck Use before reading storage state and
 use public support reference words. Existing agents are not gated by quota counts.
+Each preparation attempt rechecks instance lifecycle before storage admission.
+Known lost Use, pause or retirement closes the original unpublished input through
+an owned custody writer, then uses the supervisor's existing throttled status notice.
+The metadata-only closure guard permits `agent_unavailable`; creation guards still
+require `ok`. Complete grouped input or callback ownership must prove no publication
+or primary outcome exists. An uncertain reservation is retained for reconciliation.
+Waiting followups close in order, including after reconciliation holds the link;
+restoring access never dispatches these closed inputs. Whole writers drain through
+repeated cancellation and recheck the original lifetime before commit.
+The same writer retires the exact followup/capacity notices and clears their claims,
+so an SDK limiter wait cannot deliver an obsolete queue promise after restoration.
 An acknowledged creating refusal is rechecked through the same conversation's
 execution authority and resident admission. Only the four send refusals select
 an alternative to thread waiting. The closed saved outcome retains the original

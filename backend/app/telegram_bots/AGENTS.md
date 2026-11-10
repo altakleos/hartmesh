@@ -106,7 +106,7 @@ one logical turn; transport retries do not hold it. Only exact typed terminal
 reasons or opaque host creating-refusals authorize capacity retry.
 Instance outcomes and error frames retain `instance_id` through observation and saved proofs;
 capacity notices never seal an outcome; startup hints use saved primaries. `instance_refusals.py` handles
-the four actual send refusal codes before publication; details: the lifecycle guide. Explicit retry
+the four send refusals and queued lifecycle closure; details: the lifecycle guide. Explicit retry
 owns a new saved callback input identity. Stop binds the original publication,
 including before a run exists, and never guesses a newest run.
 Only an accepted cancellation or a proven undispatched input drops waiting input;

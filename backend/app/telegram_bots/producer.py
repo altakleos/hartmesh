@@ -2515,6 +2515,13 @@ class OutboxSender:
             row = await writer.get(TelegramOutboxRow, row_id, with_for_update=True)
             if binding is None or not self.outbox._fenced(row, generation=generation, owner=self.run_id, claim=claim):
                 return
+            if row.dedupe_key.startswith(("notice:chat-wait:", "notice:preparation-capacity:")):
+                basis = row.payload.get("product_basis", {})
+                parts = basis.get("parts")
+                if row.class_ != "reply" or basis.get("finish_route") is not False or type(parts) is not list or len(parts) != 1 or parts[0].get("source_ref", {}).get("key") not in {"busy.followup", "busy.two_conversations"}:
+                    raise ValueError("queue-notice-conflict") from None
+                await self._skip(writer, row, "superseded")
+                return
             row, saved = await self.outbox._locked_stream_placeholder(writer, BotLink.from_row(binding), row_id)
             row.state, row.skip_reason, row.closed_at = "skipped", "superseded", self.outbox.clock()
             row.claim_owner = row.claim_id = row.claimed_at = None

@@ -50,10 +50,11 @@ def forward_origin(message):
 class _Guard:
     """Original host lifetime around the existing borrowed SQL custody guard."""
 
-    def __init__(self, services, channel, link, current, *, repair=False, borrowed=None):
+    def __init__(self, services, channel, link, current, *, repair=False, borrowed=None, input_closure=False):
         self.services, self.channel, self.captured_link = services, channel, link
         self._current, self.repair, self.actual = current, repair, borrowed
         self.borrowed = borrowed
+        self.input_closure = input_closure
 
     def current(self):
         if self._current() is not True:
@@ -72,7 +73,8 @@ class _Guard:
             self.current()
         owner = await self.services.prepare_live_owner(self.captured_link.owner_user_id)
         self.current()
-        self.actual = self.services.links.publication_guard(self.captured_link, check_live_owner=owner, check_attempt_current=self._current)
+        factory = self.services.links.input_closure_guard if self.input_closure else self.services.links.publication_guard
+        self.actual = factory(self.captured_link, check_live_owner=owner, check_attempt_current=self._current)
 
     async def check(self, writer):
         self.current()
@@ -576,7 +578,7 @@ class ChatTurns:
         if turn.callback_id is None and len(origins) == 1 and "submission" in origins[0].route_basis:
             turn.submission = self.services.outbox.inbox.typed_submission_stage(origins[0])
         self._turns[(link.id, turn.topic)] = turn
-        if self._creating(turn):
+        if self._creating(turn) or link.agent_kind == "instance" and self._current(turn):
             turn.task = self._spawn(self._own(turn), channel=channel, turn=turn)
 
     async def _own(self, turn):
@@ -725,10 +727,38 @@ class ChatTurns:
         return identity
 
     async def _prepare(self, turn):
+        try:
+            return await self._prepare_available(turn)
+        except Exception:
+            # A lost reserve response is not proof that no publication exists.
+            # The closure writer checks the actual input before sealing it.
+            if await self._close_unavailable_input(turn):
+                return False
+            raise
+
+    async def _close_unavailable_input(self, turn):
+        if turn.link.agent_kind != "instance" or turn.record is not None or not self._current(turn):
+            return False
+        key, _identity = await self.services.authority.instance_lifecycle(turn.link)
+        if key not in {"access.agent_off", "agent.paused", "agent.retired"}:
+            return False
+        guard = _Guard(self.services, turn.channel, turn.link, lambda: self._current(turn), repair=True, input_closure=True)
+        await self.services.outbox.inbox.close_unpublished_input(turn.link, () if turn.callback_id else turn.origins, callback_id=turn.callback_id, guard=guard)
+        turn.input_closed = True
+        # The existing notice owns throttling and current lifecycle admission.
+        try:
+            await await_drained(self.services.notice_instance_unavailable(turn.link))
+        except Exception as error:
+            turn.held("chat_unavailable_notice_held", error)
+        return True
+
+    async def _prepare_available(self, turn):
         from app.telegram_bots.instance_refusals import describe_send_refusal
         from deerflow.agent_instances.contract import Refusal
 
         while self._current(turn):
+            if await self._close_unavailable_input(turn):
+                return False
             try:
                 prepared = await self._prepare_once(turn)
                 if prepared:
@@ -1075,7 +1105,7 @@ class ChatTurns:
         from app.telegram_bots.errors import classify_creation_refusal, classify_run
         from app.telegram_bots.publication import channel_execution_scope
 
-        if not self._creating(turn):
+        if not self._current(turn) or turn.link.agent_kind != "instance" and not self._creating(turn):
             return
         try:
             prepared = await self._prepare(turn)
@@ -1662,6 +1692,19 @@ class ChatTurns:
         return not (turn is not None and turn.channel is channel and self._current(turn) and view is not None and not view.closed and view.mode == "draft" and view.started and not view.paused)
 
     def preview_allowed(self, channel, item):
+        if item.dedupe_key.startswith("notice:chat-wait:"):
+            for turn in tuple(self._turns.values()):
+                if turn.channel is not channel or not self._current(turn) or item.message_thread_id != turn.topic or item.binding_generation != turn.link.binding_generation:
+                    continue
+                sources = []
+                if turn.callback_id is None and turn.record is None and not turn.input_closed and not turn.stop_requested:
+                    sources.extend(row.message_id for row in turn.origins)
+                for entry in self.queue.waiting_inputs(turn.link, turn.topic):
+                    if entry.callback_id is None:
+                        sources.extend(entry.inbound.metadata[_SOURCES])
+                if any(item.dedupe_key == f"notice:chat-wait:{turn.link.chat_id}:{identity}" for identity in sources):
+                    return True
+            return False
         if item.dedupe_key.startswith("notice:preparation-capacity:"):
             return any(
                 turn.channel is channel
