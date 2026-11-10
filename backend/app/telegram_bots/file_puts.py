@@ -427,18 +427,24 @@ class FileReceiptReader:
 
         return await await_drained(perform())
 
-    async def completed(self, file, *, session=None):
+    async def outcome(self, file, *, session=None):
         file = validate_chat_file(file)
 
         async def perform():
             link = self.access.link
             async with self.journal.callbacks.writer(link, self.guard(), session=session) as writer:
                 row = await self.journal._row(writer, link, file_act_id(link, file), self.access)
-                if row.state != "done" or row.continuation["file"] != file:
+                if row.continuation["file"] != file:
                     raise ValueError("file-receipt-unavailable") from None
                 return _snapshot(row)
 
         return await await_drained(perform())
+
+    async def completed(self, file, *, session=None):
+        row = await self.outcome(file, session=session)
+        if row.state != "done":
+            raise ValueError("file-receipt-unavailable") from None
+        return row
 
 
 @dataclass(frozen=True)

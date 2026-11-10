@@ -61,8 +61,8 @@ def _render(
 ) -> str:
     texts = catalog(locale)
     template = texts[key]  # Missing keys are always an error, including gated lines.
-    if key == "refused.files_full" and values.get("reader_is_manager") is not True:
-        template = texts["refused.files_full_ask"]
+    if key in {"refused.files_full", "file.files_full"} and values.get("reader_is_manager") is not True:
+        template = texts[key + "_ask"]
     variants = forms(locale).get(key, {})
     vocabulary = words(locale)
     if custody not in {None, "personal", "company"}:
