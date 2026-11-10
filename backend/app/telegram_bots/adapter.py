@@ -1252,17 +1252,27 @@ class TelegramBotChannel(TelegramChannel):
                         )
                     except Exception as error:
                         self._log_failure("file_retry", error)
-                        return await self._services.file_puts.settle_failed_retry(link, callback.target_id, callback_id=callback.id, authority=self._services.authority, current=live)
-                return await self._services.file_puts.put(
-                    link,
-                    origin,
-                    file,
-                    authority=self._services.authority,
-                    current=live,
-                    download=lambda descriptor, check: self._download(link, descriptor, check),
-                    progress=progress.show,
-                    origins=origins,
-                )
+                        try:
+                            return await self._services.file_puts.settle_failed_retry(link, callback.target_id, callback_id=callback.id, authority=self._services.authority, current=live)
+                        except Exception:
+                            raise error
+                try:
+                    return await self._services.file_puts.put(
+                        link,
+                        origin,
+                        file,
+                        authority=self._services.authority,
+                        current=live,
+                        download=lambda descriptor, check: self._download(link, descriptor, check),
+                        progress=progress.show,
+                        origins=origins,
+                    )
+                except Exception as error:
+                    self._log_failure("file_put", error)
+                    try:
+                        return await self._services.file_puts.settle_failed_put(link, file, authority=self._services.authority, current=live)
+                    except Exception:
+                        raise error
             finally:
                 # Presentation cleanup cannot undo a committed file receipt.
                 try:
@@ -1355,6 +1365,13 @@ class TelegramBotChannel(TelegramChannel):
         """Preflight a real captionless row without creating a conversation."""
         from app.telegram_bots.producer import DeliveryClaimRetired
 
+        if link.agent_kind == "instance":
+            reader = await self._services.file_puts.receipt_reader(link, authority=self._services.authority, current=lambda: self._callback_current(link))
+            saved = await reader.outcome(file)
+            if saved.state not in {"done", "refused", "uncertain"}:
+                raise ValueError("file-outcome-unsettled") from None
+            return saved.state == "done"
+
         async def check():
             if not await self._input_current(link):
                 raise DeliveryClaimRetired()
@@ -1404,10 +1421,11 @@ class TelegramBotChannel(TelegramChannel):
             return False
         try:
             scope = context.record.scope
-            expected = (context.record.publication_id, scope.owner_user_id, scope.connection_id, str(scope.chat_id), scope.thread_id, scope.endpoint_id, scope.assistant_id, scope.agent_name)
+            instance_id = scope.agent_ref if scope.agent_kind == "instance" else None
+            expected = (context.record.publication_id, scope.owner_user_id, scope.connection_id, str(scope.chat_id), scope.thread_id, scope.endpoint_id, scope.assistant_id, scope.agent_name, instance_id)
             actual = execution_context.scope
             return (
-                (actual.publication_id, actual.owner_user_id, actual.connection_id, actual.chat_id, actual.thread_id, actual.endpoint_id, actual.assistant_id, actual.agent_name) == expected
+                (actual.publication_id, actual.owner_user_id, actual.connection_id, actual.chat_id, actual.thread_id, actual.endpoint_id, actual.assistant_id, actual.agent_name, actual.instance_id) == expected
                 and context.current() is True
                 and self._callback_current(context.link)
                 and execution_context.admission.current("run_create") is True
@@ -1455,6 +1473,13 @@ class TelegramBotChannel(TelegramChannel):
             if fresh is None or fresh.record.publication_id != publication_id or not self._file_current(execution_context, fresh):
                 raise DeliveryClaimRetired()
 
+        if context.link.agent_kind == "instance":
+            await check()
+            reader = await self._services.file_puts.receipt_reader(context.link, authority=self._services.authority, current=lambda: self._file_current(execution_context, context))
+            saved = await reader.outcome(file)
+            if saved.state not in {"done", "refused", "uncertain"}:
+                raise ValueError("file-outcome-unsettled") from None
+            return saved.state == "done"
         key, features = await self._file_preflight(context.link, file, check)
         if key is not None:
             await self._file_notice(file, key, context=context, features=features, execution_context=execution_context)

@@ -460,7 +460,7 @@ content is refused before hashes/inbox/task payloads; disposable tasks retain
 safe identities only and drain before SDK teardown. Text/photos/documents use the
 managed turn controller; voice notes use `VoiceNotes`.
 
-`files.py`: byte budgets and pending files. File input/retry: [turn guide](../../docs/TELEGRAM_TURN_EXECUTION.md#instance-file-writes).
+`files.py`: byte budgets and pending files. File routing/retry: [turn guide](../../docs/TELEGRAM_TURN_EXECUTION.md#instance-file-writes).
 Reserve whole batches before reads, shrink only, and retain each charge until
 native writes and transport cleanup finish. `capped_download.py` reuses the
 normal bot request's HTTPX client with raw bounded streaming and no redirects;

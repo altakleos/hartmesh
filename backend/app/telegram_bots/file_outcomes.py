@@ -42,6 +42,61 @@ class FileOutcomes:
     def __init__(self, services):
         self.services = services
 
+    async def question(self, channel, link, saved, *, current=None):
+        """One captionless question closes only actually saved input members."""
+        if not saved or len(saved) > 64:
+            raise ValueError("file-question-conflict") from None
+
+        def live():
+            return channel._callback_current(link) and (current is None or current() is True)
+
+        async def perform():
+            reader = await self.services.file_puts.receipt_reader(link, authority=self.services.authority, current=live)
+            key = "file.saved_ask" if len(saved) == 1 else "file.saved_ask_many"
+            source = await fixed_source(self.services, link, key)
+            guard = reader.guard()
+            async with self.services.callbacks.writer(link, guard) as writer:
+                receipts, origins = [], []
+                for origin, file in saved:
+                    mark = await writer.get(TelegramInboundMarkRow, (link.id, origin.message_id, link.chat_id), with_for_update=True, populate_existing=True)
+                    if mark is None:
+                        raise ValueError("file-origin-unavailable") from None
+                    self.services.file_puts.inbox._publication_snapshot_matches(mark, origin)
+                    text, descriptors = chat_input_parts(origin, bot_id=link.bot_id)
+                    if text.strip() or file not in descriptors or file["message_id"] != mark.message_id:
+                        raise ValueError("file-question-conflict") from None
+                    receipt = await reader.completed(file, session=writer)
+                    capsule = receipt.continuation.get("input")
+                    if capsule is not None and (not capsule["captionless"] or capsule["topic"] != mark.message_thread_id):
+                        raise ValueError("file-question-conflict") from None
+                    receipts.append(receipt)
+                    origins.append(origin)
+                self.services.file_puts.inbox._group(origins)
+                first = origins[0]
+                identity = f"file-received:{link.chat_id}:{first.message_id}"
+                basis = dict(version=1, sources=[row.message_id for row in origins], files=[_basis(row) for row in receipts])
+                existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == "notice:" + identity).with_for_update())
+                if existing is not None:
+                    if existing.owner_user_id != link.owner_user_id or existing.binding_generation != link.binding_generation or existing.chat_id != link.chat_id or existing.payload.get("file_question_basis") != basis:
+                        raise ValueError("file-question-conflict") from None
+                    return existing.id
+                source["values"].update({"file": receipts[0].result["path"].rsplit("/", 1)[-1]} if len(saved) == 1 else {"n": len(saved)})
+                return await self.services.outbox._plan_product_keyboard(
+                    link,
+                    source_id=identity,
+                    parts=[{"kind": "text", "source_ref": source, "reply_to_message_id": first.message_id}],
+                    keyboard=[],
+                    callbacks=self.services.callbacks,
+                    guard=guard,
+                    inbox_rows=origins,
+                    finish_route=True,
+                    message_thread_id=first.message_thread_id,
+                    session=writer,
+                    _extra={"file_question_basis": basis},
+                )
+
+        return await await_drained(perform())
+
     async def plan(self, channel, link, origin, file, *, current=None, callback=None):
         file = validate_chat_file(file)
         if (origin is None) != (callback is not None):
