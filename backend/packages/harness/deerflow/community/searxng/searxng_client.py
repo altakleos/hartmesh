@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Any
 
@@ -142,7 +143,7 @@ class SearxngClient:
         # The query is a person's question; it stays out of the log at every level.
         logger.debug("Searching SearXNG at %s (page %s)", self.base_url, pageno)
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with await asyncio.to_thread(httpx.AsyncClient, timeout=30) as client:
                 # POST, not GET: SearXNG accepts either, and a GET would put
                 # the person's question in a URL that httpx logs at INFO and
                 # that any proxy or access log would keep. In the body it

@@ -572,3 +572,108 @@ describe("storage refusal at the send boundary", () => {
     expect(toasts.error).not.toHaveBeenCalled();
   });
 });
+
+describe("generic stream admission failures", () => {
+  it.each([502, 409])(
+    "reports HTTP %s once even when onError follows admission cleanup",
+    async (status) => {
+      sdk.submit.mockResolvedValue(undefined);
+      const { result } = start();
+      const error = Object.assign(
+        new Error(`HTTP ${status}: synthetic server detail`),
+        { status },
+      );
+      const onSent = rs.fn();
+      let sending!: Promise<void>;
+      act(() => {
+        sending = result.current.sendMessage(
+          "new-thread",
+          { text: "saved draft", files: [] },
+          undefined,
+          { onSent },
+        );
+      });
+      const outcome = sending.catch((failure: unknown) => failure);
+      await act(async () => {
+        submissionFailed(metadata(), error);
+        await outcome;
+      });
+      act(() => sdk.options!.onError(error));
+      expect(await outcome).toBe(error);
+      expect(onSent).not.toHaveBeenCalled();
+      expect(toasts.error).toHaveBeenCalledTimes(1);
+      expect(toasts.error).toHaveBeenCalledWith(
+        status === 502
+          ? enUS.conversation.streamServerError(status)
+          : error.message,
+      );
+    },
+  );
+
+  it("does not duplicate an error already reported by the stream callback", async () => {
+    const error = Object.assign(new Error("synthetic gateway failure"), {
+      status: 502,
+    });
+    sdk.submit.mockImplementation(async () => fail(error));
+    const { result } = start();
+    await act(async () => {
+      await result.current
+        .sendMessage("new-thread", { text: "draft", files: [] })
+        .catch(() => undefined);
+    });
+    expect(toasts.error).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not report a retired conversation's generic failure", async () => {
+    sdk.submit.mockResolvedValue(undefined);
+    const { result, rerender } = start();
+    const error = Object.assign(new Error("old server failure"), {
+      status: 502,
+    });
+    let sending!: Promise<void>;
+    act(() => {
+      sending = result.current.sendMessage("new-thread", {
+        text: "old draft",
+        files: [],
+      });
+    });
+    const outcome = sending.catch(() => undefined);
+    rerender({ id: "other-thread" });
+    await act(async () => {
+      submissionFailed(metadata(), error);
+      await outcome;
+      sdk.options!.onError(error);
+    });
+    expect(toasts.error).not.toHaveBeenCalled();
+  });
+});
+
+it("reports a generic upload failure only once and never admits its draft", async () => {
+  const error = new Error("synthetic upload failure");
+  rs.mocked(uploadFiles).mockRejectedValue(error);
+  const { result } = start();
+  const file = new File(["fixture"], "statement.txt", { type: "text/plain" });
+  const onSent = rs.fn();
+  const message = {
+    text: "saved draft",
+    files: [
+      {
+        type: "file" as const,
+        url: "blob:fixture",
+        mediaType: "text/plain",
+        filename: file.name,
+        file,
+      },
+    ],
+  };
+  let outcome: unknown;
+  await act(async () => {
+    outcome = await result.current
+      .sendMessage("new-thread", message, undefined, { onSent })
+      .catch((failure: unknown) => failure);
+  });
+  expect(outcome).toBe(error);
+  expect(onSent).not.toHaveBeenCalled();
+  expect(sdk.submit).not.toHaveBeenCalled();
+  expect(toasts.error).toHaveBeenCalledTimes(1);
+});

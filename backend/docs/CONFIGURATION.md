@@ -334,6 +334,7 @@ are:
 | `zai` | Z.AI, international ordinary API | `https://api.z.ai/api/paas/v4` | Chat Completions / Bearer |
 | `minimax` | MiniMax, international API | `https://api.minimax.io/v1` | Chat Completions / Bearer |
 | `minimax-cn` | MiniMax, China API | `https://api.minimaxi.com/v1` | Chat Completions / Bearer |
+| `stepfun` | StepFun, ordinary API | `https://api.stepfun.com/v1` | Chat Completions / Bearer |
 | `openai-compatible` | Custom OpenAI-compatible, including unauthenticated local endpoints | Administrator-supplied HTTP(S) base URL | Chat Completions / optional key |
 
 Keys for different regions and Coding Plans are not interchangeable. These
@@ -341,6 +342,16 @@ presets do not route China keys to international endpoints or infer a Coding
 Plan from the model name. Plans/regions without a preset can use the custom
 OpenAI-compatible option if their documented protocol is compatible; native
 protocols need a verified backend preset or operator YAML configuration.
+
+The StepFun preset uses the existing `PatchedChatStepFun` adapter to capture
+`reasoning` / `reasoning_content` in responses and replay reasoning history.
+Both connection probes and chat send the documented `max_tokens` output bound.
+Model IDs remain free-form; this provider registration does not infer thinking,
+vision or context-window capabilities from their names. The preset is for
+ordinary API credentials. Step Plan has a separate `/step_plan/v1` endpoint;
+use the custom OpenAI-compatible option for that channel. See the official
+[OpenAI migration guide](https://platform.stepfun.com/docs/zh/guides/developer/openai)
+and [Chat Completions reference](https://platform.stepfun.com/docs/zh/api-reference/chat/chat-completion-create).
 
 Settings → Models → **Fetch and add models** reads the connection's model
 catalog without changing configuration. Administrators can reuse an existing
@@ -1293,8 +1304,8 @@ offline mocked tests verify request composition and local filtering, not provide
 retrieval behavior. No paid API calls are needed for the regression suite.
 
 **Built-in Tools**:
-- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya, You.com)
-- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, Unbrowse)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com)
+- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Unbrowse)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
 - `ls` - List directory contents
@@ -2086,6 +2097,7 @@ models:
 - `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`
+- `SPECSTREAM_API_KEY` - [SpecStream](https://specstream.ai) key for `web_search` and `web_fetch`
 - `UNBROWSE_API_KEY` - [Unbrowse](https://unbrowse.ai) key for `web_fetch`
 - `YDC_API_KEY` - You.com Search API key for `web_search` (optional: without it the provider uses You.com's keyless free-tier endpoint)
 - `BROWSERLESS_TOKEN` - Browserless token for `web_fetch` (Browserless provider) and `web_capture`, sent as the `token` query parameter (required by Browserless Cloud and by a self-hosted instance started with `TOKEN`)

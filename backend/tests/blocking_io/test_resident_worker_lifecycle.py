@@ -61,7 +61,13 @@ async def test_client_readiness_aliases_package_copy_and_completion_offload_sync
     execution = replace(make_execution(), authority=authority)
     config = SimpleNamespace(skills=SimpleNamespace(model_copy=lambda **_kwargs: "scoped"), model_copy=lambda **_kwargs: "config")
     attached = SimpleNamespace(id="d" * 32, container_id="e" * 64)
-    provider = await runtime._prepare_client(execution, SimpleNamespace(sandbox_ready_timeout=lambda: 1), attached, SimpleNamespace(revision="capture", files=[("folder/README.md", b"public bytes")]), config)
+    provider = await runtime._prepare_client(
+        execution,
+        SimpleNamespace(sandbox_ready_timeout=lambda: 1, _config={"max_bash_sessions": 3}),
+        attached,
+        SimpleNamespace(revision="capture", files=[("folder/README.md", b"public bytes")]),
+        config,
+    )
     environment = runtime.ExecutionEnvironment(execution, provider, attached.id)
     await runtime.complete_environment(execution, environment, SimpleNamespace(), SimpleNamespace(run_id="run", user_id="requester", status=RunStatus.success))
     assert observed == ["readiness", "aliases", "command", "command", "update", "download", "close"]

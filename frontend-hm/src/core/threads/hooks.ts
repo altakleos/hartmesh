@@ -45,6 +45,7 @@ import {
   type StorageRefusal,
 } from "../file-areas/storage-state";
 import { useI18n } from "../i18n/hooks";
+import type { Translations } from "../i18n/locales";
 import { getMessageRunId, parseRunStartTime } from "../messages/run-duration";
 import {
   hasContent,
@@ -1784,6 +1785,14 @@ function getHttpStatus(error: unknown): number | undefined {
   return undefined;
 }
 
+function getStreamErrorToastMessage(error: unknown, t: Translations): string {
+  const status = getHttpStatus(error);
+  if (status !== undefined && status >= 500 && status < 600) {
+    return t.conversation.streamServerError(status);
+  }
+  return getStreamErrorMessage(error);
+}
+
 function isThreadMissingError(error: unknown): boolean {
   const status = getHttpStatus(error);
   // Treat 403 like 404 here to avoid disclosing whether an inaccessible thread
@@ -2341,11 +2350,15 @@ export function useThreadStream({
       pendingPreparedReplayRef.current = null;
       setPendingSupersededRunIds(new Set());
       setPendingSupersededMessageIds(new Set());
+      const reporting = origin ? pendingSend.current : null;
       if (
         !recordAgentRefusal(error, "send", meta) &&
-        !recordStorageRefusal(error, undefined, meta)
-      )
-        toast.error(getStreamErrorMessage(error));
+        !recordStorageRefusal(error, undefined, meta) &&
+        !reporting?.reported
+      ) {
+        if (reporting) reporting.reported = true;
+        toast.error(getStreamErrorToastMessage(error, t));
+      }
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
           .map(messageIdentity)
@@ -2690,7 +2703,7 @@ export function useThreadStream({
     } catch (error) {
       if (!stoppedOwner.active || viewOwner.current !== stoppedOwner) return;
       if (!recordAgentRefusal(error, "stop"))
-        toast.error(getStreamErrorMessage(error));
+        toast.error(getStreamErrorToastMessage(error, t));
     } finally {
       stoppingThreadIdRef.current = null;
       setStoppingThreadId(null);
@@ -2703,6 +2716,7 @@ export function useThreadStream({
     followRunId,
     isMock,
     queryClient,
+    t,
     thread,
     threadId,
   ]);
@@ -3130,9 +3144,21 @@ export function useThreadStream({
           queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
         });
       } catch (error) {
-        if (!recordAgentRefusal(error, "send", undefined, pending))
+        const handled =
+          recordAgentRefusal(error, "send", undefined, pending) ||
           recordStorageRefusal(error, pending.phase, undefined, pending);
         if (pending.retired || pendingSend.current !== pending) throw error;
+        // Admission may reject before the SDK's later onError callback. Report
+        // from this still-owned attempt before finally retires its pointer.
+        if (
+          !handled &&
+          pending.phase === "send" &&
+          !pending.reported &&
+          pending.threadId === currentViewThreadIdRef.current
+        ) {
+          pending.reported = true;
+          toast.error(getStreamErrorToastMessage(pending.failure ?? error, t));
+        }
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
@@ -3151,7 +3177,7 @@ export function useThreadStream({
     },
     [
       thread,
-      t.uploads.uploadingFiles,
+      t,
       context,
       queryClient,
       humanMessageCount,
@@ -3278,13 +3304,13 @@ export function useThreadStream({
             removeSetItems(current, preparedSupersededMessageIds),
           );
         }
-        toast.error(getStreamErrorMessage(error));
+        toast.error(getStreamErrorToastMessage(error, t));
         return false;
       } finally {
         sendInFlightRef.current = false;
       }
     },
-    [context, humanMessageCount, persistedMessages, queryClient, thread],
+    [context, humanMessageCount, persistedMessages, queryClient, t, thread],
   );
 
   const regenerateMessage = useCallback(

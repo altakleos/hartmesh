@@ -1,0 +1,41 @@
+import { expect, test } from "@playwright/test";
+
+import { mockLangGraphAPI } from "./utils/mock-api";
+
+for (const { status, body, message } of [
+  {
+    status: 502,
+    body: '{"detail":"upstream failed"}',
+    message:
+      "The service is temporarily unavailable (HTTP 502). Please try again.",
+  },
+  {
+    status: 409,
+    body: '{"detail":"Another run is active"}',
+    message: 'HTTP 409: {"detail":"Another run is active"}',
+  },
+]) {
+  test(`shows the expected chat error for HTTP ${status}`, async ({ page }) => {
+    // SDK maxRetries=5 uses randomized exponential waits (up to ~62s).
+    test.setTimeout(status >= 500 ? 90_000 : 30_000);
+    mockLangGraphAPI(page);
+    await page.route(
+      /\/api\/langgraph\/(?:threads\/[^/]+\/)?runs\/stream$/,
+      (route) =>
+        route.fulfill({ status, contentType: "application/json", body }),
+    );
+
+    await page.goto("/workspace/chats/new");
+    const composer = page.getByRole("textbox", {
+      name: /how can i assist you/i,
+    });
+    await composer.fill("Send a message");
+    await composer.press("Enter");
+
+    await expect(page.locator("[data-sonner-toast]").last()).toHaveText(
+      message,
+      // The real SDK exhausts its bounded HTTP retries before reporting 5xx.
+      { timeout: status >= 500 ? 70_000 : 5_000 },
+    );
+  });
+}

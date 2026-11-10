@@ -299,6 +299,26 @@ Upstream's run-scoped command ownership (#7772: owner markers, owned shell/bash
 polling, pidfd cleanup) stays off: `supports_command_cancellation = False`, so
 no scope binds and the worker's run-cancel hook is a no-op (decision e).
 
+Scoped env calls register in the same scope table and hold its lock through
+fresh Bash creation, synchronous execution and cleanup. Only that private path
+skips the shared implicit-shell lock. Releasing entries reject admission and stay
+visible to close until drained; queued calls recheck identity. Exact per-call
+pending tokens retain cancellation through all lock/permit waits, retries and
+cleanup, independently of bounded abort-ID history. Scope release/close drains
+the lock while the actual in-flight call remains available to the abort hook;
+concurrent releases stay idempotent.
+`scope_lock_held=True` requires ownership of the registered scope lock for the
+whole invocation, including retries. Release has no separate drain deadline;
+HTTP cleanup bounds do not bound that lock wait. A timed-out release must retain
+ownership until work drains before client detach or reuse can be safe.
+All env calls share a cancellable Bash semaphore, held through cleanup. Scoped
+calls acquire it after the scope lock, then recheck registry admission; unscoped
+calls acquire it after the shared lock. `AIO_BASH_MAX_SESSIONS` (default 50) sets
+both provisioning and client limits. Docker reuse checks persisted env; remote
+reuse requires Pod-attested capacity. Unknown metadata defers, never proves a
+need for replacement. Keep this pool independent of persistent Shell capacity.
+Regressions: `tests/test_aio_scoped_env_concurrency.py`, `tests/test_aio_bash_capacity.py`.
+
 ## Readiness polling
 
 Build the async readiness client off the event loop. Drain construction and
@@ -434,5 +454,13 @@ server reports missing files as an error envelope with ``data: {}``, which the
 SDK cannot parse into ``FileReadResult``; the resulting ``ValidationError``
 becomes ``Error: file not found or unreadable: <path>`` logged at debug
 (missing files are expected on ReadBeforeWrite probes of new files), never the
-raw pydantic text. Other exceptions keep the error log.
+raw pydantic text. These failure strings carry `SandboxReadFailure` identity
+for shared tool consumers, which report structured failure before formatting.
+Validation errors establish failure, not a confirmed missing-file cause. An
+explicit SDK `success: false` is also failure. Other exceptions keep the error log.
 Regressions: `test_aio_sandbox.py`.
+
+HartMesh keeps per-tool-call abort authority. Pending Bash admission owns exact
+cancellation events through lock/permit waits, dispatch, recovery and cleanup;
+bounded abort-ID history is never the only pending-call fence. An uncertain
+Bash close quarantines further session creation until sandbox recycle.

@@ -27,7 +27,8 @@ from typing import TYPE_CHECKING, TypeVar
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
 from deerflow.sandbox.download import download_limit
-from deerflow.sandbox.read_file_contract import split_file_lines
+from deerflow.sandbox.exceptions import SandboxFileError
+from deerflow.sandbox.read_file_contract import SandboxReadFailure, split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
@@ -235,9 +236,9 @@ class BoxliteBox(Sandbox):
             r = self._exec("cat", "--", resolved)
         except Exception as e:
             logger.error("read_file %s failed: %s", resolved, e)
-            return f"Error: {e}"
+            return SandboxReadFailure(f"Error: {e}", e)
         if r.exit_code not in (0, None):
-            return f"Error: {(r.stderr or '').strip() or 'cannot read file'}"
+            return SandboxReadFailure(f"Error: {(r.stderr or '').strip() or 'cannot read file'}", SandboxFileError("File read returned a nonzero exit status", path=resolved, operation="read"))
         content = r.stdout or ""
         if start_line is None and end_line is None:
             return content

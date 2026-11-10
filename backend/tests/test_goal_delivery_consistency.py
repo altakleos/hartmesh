@@ -48,9 +48,9 @@ async def _run_goal_delivery(
 ):
     """Keep graphs, checkpoints, output scanning and delivery verification real.
 
-    The graph writes a real file and calls the real present_files body. Its
-    deterministic node emits the tool callbacks normally supplied by the agent;
-    only the evaluator model response is fixed, without provider/network access.
+    The graph writes or imports a real file and calls the selected presentation
+    tool body. Its deterministic node emits the tool callbacks normally supplied
+    by the agent; only the evaluator model response is fixed, without provider/network access.
     """
     checkpointer = InMemorySaver()
     failed_terminal_writes = []
@@ -87,7 +87,6 @@ async def _run_goal_delivery(
     monkeypatch.setattr(importlib.import_module("deerflow.tools.builtins.present_file_tool"), "get_paths", lambda: paths)
     monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
-
     turns = []
     model_calls = []
     goals_at_receipt = []
@@ -135,7 +134,8 @@ async def _run_goal_delivery(
         messages = []
         if present_on_turn == turn:
             tool_id = f"present-{turn}"
-            ai = AIMessage(content="", tool_calls=[{"id": tool_id, "name": "present_files", "args": {"filepaths": [OUTPUT_PATH]}}])
+            tool_name = "present_files"
+            ai = AIMessage(content="", tool_calls=[{"id": tool_id, "name": tool_name, "args": {"filepaths": [OUTPUT_PATH]}}])
             runtime = SimpleNamespace(state={**state, "thread_data": {"outputs_path": str(output_dir)}}, context=context, config=config)
             command = present_file_tool.func(runtime=runtime, filepaths=[OUTPUT_PATH], tool_call_id=tool_id)
             journal = context["__run_journal"]

@@ -535,7 +535,8 @@ async def test_late_attached_task_is_stopped_under_original_absolute_deadline(ou
 @pytest.mark.asyncio
 @pytest.mark.parametrize("state", ["success", "prestart_failed", "active", "uncertain", "close_failed"])
 @pytest.mark.parametrize("cleanup_first", [False, True])
-async def test_eviction_releases_only_confirmed_fully_drained_original_lifetimes(output_store, state, cleanup_first):
+@pytest.mark.parametrize("deleting_thread", [False, True])
+async def test_eviction_releases_only_confirmed_fully_drained_original_lifetimes(output_store, state, cleanup_first, deleting_thread):
     from deerflow.runtime.runs.capture_io import CaptureIOUnsupported
 
     manager, record = await pending(output_store)
@@ -559,15 +560,22 @@ async def test_eviction_releases_only_confirmed_fully_drained_original_lifetimes
     resource = Resource()
     owner.register_resource(resource)
     lifetime = manager._capture_lifetime(record)
+
+    async def evict():
+        if deleting_thread:
+            await manager.discard_thread_runs(record.thread_id)
+        else:
+            await manager.cleanup(record.run_id, delay=0)
+
     try:
         if cleanup_first:
-            await manager.cleanup(record.run_id, delay=0)
+            await evict()
         try:
             await manager.finish_capture_io(record)
         except CaptureIOCleanupError:
             assert state == "close_failed"
         if not cleanup_first:
-            await manager.cleanup(record.run_id, delay=0)
+            await evict()
         assert record.run_id not in manager._runs
         if state in {"success", "prestart_failed"}:
             assert id(record) not in manager._capture_records, "Normal eviction permanently retained a confirmed, fully drained original record"

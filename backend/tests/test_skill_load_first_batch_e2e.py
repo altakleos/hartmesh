@@ -97,6 +97,18 @@ def _text(message: BaseMessage) -> str:
     return message.content if isinstance(message.content, str) else str(message.content)
 
 
+def _model_result_text(message: ToolMessage) -> str:
+    """Assert the provider envelope before inspecting the tool's original data."""
+    import json
+
+    envelope = json.loads(_text(message))
+    metadata = message.additional_kwargs["deerflow_tool_meta"]
+    assert envelope["deerflow_tool_meta"] == {"status": metadata["status"], "source": metadata["source"]}
+    assert set(envelope) <= {"deerflow_tool_meta", "content", "content_transforms"}
+    assert isinstance(envelope["content"], str)
+    return envelope["content"]
+
+
 def _bash(command: str, call_id: str, **extra: Any) -> dict:
     return {"name": "bash", "args": {"description": call_id, "command": command, **extra}, "id": call_id, "type": "tool_call"}
 
@@ -232,12 +244,12 @@ def test_the_first_thing_the_sandbox_runs_for_a_report_is_the_build(report_app):
     # The read ran, and the inspection chosen beside it did not. Its result
     # names the instructions it was chosen without and the command they start with.
     after_first_batch = _tool_results(requests[1])
-    assert "# Business Report Skill" in _text(after_first_batch["read-skill"])
+    assert "# Business Report Skill" in _model_result_text(after_first_batch["read-skill"])
     beside = after_first_batch["inspect-beside-read"]
     assert beside.status == "error"
-    assert _text(beside).startswith("Not run: this call was chosen in the same message that loads the business-report skill's instructions"), _text(beside)
-    assert "`scripts/report.py`" in _text(beside)
-    assert "xl/workbook.xml" not in _text(beside)
+    assert _model_result_text(beside).startswith("Not run: this call was chosen in the same message that loads the business-report skill's instructions"), _model_result_text(beside)
+    assert "`scripts/report.py`" in _model_result_text(beside)
+    assert "xl/workbook.xml" not in _model_result_text(beside)
 
     # Each inspection chosen after the read returned is refused, however often
     # the model asks and whichever sandbox tool it uses, and none of them
@@ -245,19 +257,20 @@ def test_the_first_thing_the_sandbox_runs_for_a_report_is_the_build(report_app):
     for request, call_id in ((requests[2], "inspect-again"), (requests[3], "inspect-months"), (requests[4], "read-upload")):
         refused = _tool_results(request)[call_id]
         assert refused.status == "error"
-        assert _text(refused).startswith("Not run: The business-report skill's work starts with `scripts/report.py`"), _text(refused)
-        assert "xl/workbook.xml" not in _text(refused)
-        assert "parts" not in _text(refused)
-        assert "[Content_Types]" not in _text(refused)
+        assert _model_result_text(refused).startswith("Not run: The business-report skill's work starts with `scripts/report.py`"), _model_result_text(refused)
+        assert "xl/workbook.xml" not in _model_result_text(refused)
+        assert "parts" not in _model_result_text(refused)
+        assert "[Content_Types]" not in _model_result_text(refused)
         assert refused.additional_kwargs["deerflow_tool_meta"]["error_type"] == "not_run"
 
     # The build then runs, as the first thing the sandbox does in this chat.
     built = _tool_results(requests[5])["build"]
-    assert built.status != "error", _text(built)
-    assert _text(built).startswith("Built draft 1: August 2026 Business Review"), _text(built)
+    assert built.status != "error", _model_result_text(built)
+    assert _model_result_text(built).startswith("Built draft 1: August 2026 Business Review"), _model_result_text(built)
     sandbox_calls = [call["id"] for message in state["values"]["messages"] if message["type"] == "ai" for call in message["tool_calls"] if call["name"] == "bash" or call["id"] == "read-upload"]
     ran = [call_id for call_id in sandbox_calls if not _text_of(state, call_id).startswith("Not run:")]
     assert ran == ["build"]
+    assert _text_of(state, "build").startswith("Built draft 1:")
 
 
 def _text_of(state: dict[str, Any], call_id: str) -> str:
@@ -270,6 +283,6 @@ def test_after_the_build_the_model_may_inspect(report_app):
     requests, _run, _state = _run_report_chat(report_app, after_build=True)
 
     assert len(requests) == 7
-    assert _text(_tool_results(requests[5])["build"]).startswith("Built draft 1:")
+    assert _model_result_text(_tool_results(requests[5])["build"]).startswith("Built draft 1:")
     inspected = _tool_results(requests[6])["inspect-after-build"]
-    assert "parts" in _text(inspected), _text(inspected)
+    assert "parts" in _model_result_text(inspected), _model_result_text(inspected)

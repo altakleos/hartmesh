@@ -128,3 +128,34 @@ def test_control_timeout_preserves_default_command_reply_and_remains_bounded(req
         assert client.get("http://127.0.0.1:8080/v1/shell", timeout=requested).status_code == 200
     assert json.loads(calls[0]["input"])["timeout"] == forwarded
     assert calls[0]["timeout"] == forwarded + 5
+
+
+@pytest.mark.asyncio
+async def test_instance_client_uses_configured_bash_capacity(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from deerflow.agent_instances import runtime
+    from deerflow.config.app_config import AppConfig
+
+    captured = {}
+    sandbox = MagicMock()
+    sandbox.execute_command.return_value = "HARTMESH_HOME_READY\n"
+
+    def build_sandbox(*args, **kwargs):
+        captured.update(kwargs)
+        return sandbox
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={}))
+    transport.prepare_home_aliases = lambda: None
+    monkeypatch.setattr("deerflow.agent_instances.docker_transport.DockerControlTransport", lambda container_id: transport)
+    monkeypatch.setattr("deerflow.community.aio_sandbox.aio_sandbox.AioSandbox", build_sandbox)
+    monkeypatch.setattr(runtime, "InstanceSandboxProvider", lambda execution, client, **kwargs: client)
+    baseline = SimpleNamespace(_config={"max_bash_sessions": 3}, sandbox_ready_timeout=lambda: 5)
+    execution = SimpleNamespace(authority=SimpleNamespace(validate=AsyncMock()))
+    attached = SimpleNamespace(id="attachment", container_id="a" * 64)
+    capture = SimpleNamespace(revision="fixed-package", files=[])
+    assert await runtime._prepare_client(execution, baseline, attached, capture, AppConfig(sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"})) is sandbox
+    assert captured["max_bash_sessions"] == 3
+    assert captured["home_dir"] == "/mnt/spaces/home"
+    assert captured["download_roots"][0] == "/mnt/spaces/home"
+    execution.authority.validate.assert_awaited_once_with(execution)

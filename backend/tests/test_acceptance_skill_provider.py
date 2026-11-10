@@ -70,7 +70,8 @@ def test_fixture_rejects_unknown_optional_model_prompt(reply):
         reply({"messages": [{"role": "user", "content": "Unregistered fixture request"}]})
 
 
-def test_skill_presentation_uses_actual_bounded_producer_manifest(reply):
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_skill_presentation_uses_actual_bounded_producer_manifest(reply, wrapped):
     body = {
         "messages": [
             {"role": "user", "content": "acceptance:skill:procedure-summary"},
@@ -83,14 +84,14 @@ def test_skill_presentation_uses_actual_bounded_producer_manifest(reply):
         ],
         "tools": [{"function": {"name": "present_files"}}],
     }
-    result = reply(body)["tool_calls"][0]["function"]
+    result = reply(wrap_tool_messages(body) if wrapped else body)["tool_calls"][0]["function"]
     assert json.loads(result["arguments"])["filepaths"] == ["/mnt/user-data/outputs/skill-results/procedure-012345abcdef/procedure.pdf"]
     body["messages"][-1]["content"] = json.dumps({"files": ["../elsewhere.pdf"]})
     with pytest.raises(ValueError, match="unexpected path"):
-        reply(body)
+        reply(wrap_tool_messages(body) if wrapped else body)
     body["messages"][-1]["content"] = "producer failed"
     with pytest.raises(ValueError, match="producer did not return"):
-        reply(body)
+        reply(wrap_tool_messages(body) if wrapped else body)
 
 
 def work_body(results=(), *, message="Work on the explicitly activated assignment.", tools=("read_work_context", "bash", "report_work")):
@@ -221,3 +222,49 @@ def test_work_branch_refuses_a_request_that_offers_ask_clarification_or_lacks_th
         server.server_close()
         worker.join(timeout=5)
         assert not worker.is_alive()
+
+
+def wrap_tool_messages(body):
+    return {
+        **body,
+        "messages": [{**message, "content": json.dumps({"deerflow_tool_meta": {"status": "success", "source": "tool_return"}, "content": message["content"]})} if message.get("role") == "tool" else message for message in body["messages"]],
+    }
+
+
+def test_work_context_accepts_the_real_provider_tool_envelope(reply):
+    result = reply(wrap_tool_messages(work_body([work_context()])))
+    assert tool_call(result) == ("bash", {"command": "mkdir -p /mnt/user-data/outputs && printf 'WORK-ACCEPTANCE-PROOF\\n' > /mnt/user-data/outputs/proof.txt"})
+
+
+@pytest.mark.parametrize(
+    "metadata,content", [({"status": "error", "source": "exception"}, work_context()), ({"status": "success", "source": "unknown"}, work_context()), ({}, work_context()), ({"status": "success", "source": "tool_return"}, [])]
+)
+def test_fixture_rejects_failed_or_malformed_tool_envelopes(reply, metadata, content):
+    envelope = json.dumps({"deerflow_tool_meta": metadata, "content": content})
+    with pytest.raises(ValueError, match="tool result"):
+        reply(work_body([envelope]))
+
+
+def file_body(results):
+    return {"messages": [{"role": "user", "content": "acceptance:file"}, *[{"role": "tool", "content": value} for value in results]], "tools": [{"function": {"name": name}} for name in ("read_file", "write_file", "present_files")]}
+
+
+def tool_envelope(text, status="success"):
+    return json.dumps({"deerflow_tool_meta": {"status": status, "source": "tool_return"}, "content": text})
+
+
+@pytest.mark.parametrize("preflight", [tool_envelope("old artifact bytes"), tool_envelope("read failed", "error")])
+def test_file_fixture_reads_current_output_before_rewrite_and_requires_real_write(reply, preflight):
+    upload = tool_envelope("UPLOAD-ACCEPTANCE-726")
+    assert tool_call(reply(file_body([upload]))) == ("read_file", {"path": "/mnt/user-data/outputs/acceptance.txt"})
+    name, arguments = tool_call(reply(file_body([upload, preflight])))
+    assert name == "write_file" and arguments["path"] == "/mnt/user-data/outputs/acceptance.txt"
+    assert tool_call(reply(file_body([upload, preflight, tool_envelope("written")]))) == ("present_files", {"filepaths": ["/mnt/user-data/outputs/acceptance.txt"]})
+
+
+@pytest.mark.parametrize("failed_stage", [0, 2, 3])
+def test_file_fixture_never_promotes_a_failed_upload_write_or_presentation(reply, failed_stage):
+    results = [tool_envelope("UPLOAD-ACCEPTANCE-726"), tool_envelope("old output"), tool_envelope("written"), tool_envelope("presented")]
+    results[failed_stage] = tool_envelope("reported failure", "error")
+    with pytest.raises(ValueError, match="tool result"):
+        reply(file_body(results[: failed_stage + 1]))

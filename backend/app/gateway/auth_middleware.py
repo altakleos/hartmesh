@@ -29,7 +29,7 @@ from app.gateway.auth_disabled import (
 from app.gateway.authz import AuthContext, resolve_route_permissions
 from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token
 from app.gateway.request_path import get_request_route_path
-from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.runtime.user_context import bind_authenticated_user, reset_current_user, set_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -225,17 +225,19 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         token = set_current_user(user)
         try:
-            # A token's legacy route scopes do not imply resource capability.
-            # Child run/service tasks inherit this restriction with the actor.
-            with storage_credential_scope(supports_storage_credentials(request)):
-                from app.gateway.agent_conversations import admit_request
+            verified_user_id = str(user.id) if auth_source in {AUTH_SOURCE_SESSION, AUTH_SOURCE_PAT} else None
+            with bind_authenticated_user(verified_user_id):
+                # A token's legacy route scopes do not imply resource capability.
+                # Child run/service tasks inherit this restriction with the actor.
+                with storage_credential_scope(supports_storage_credentials(request)):
+                    from app.gateway.agent_conversations import admit_request
 
-                try:
-                    await admit_request(request)
-                except HTTPException as exc:
-                    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-                from app.gateway.agent_conversations import guard_response
+                    try:
+                        await admit_request(request)
+                    except HTTPException as exc:
+                        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+                    from app.gateway.agent_conversations import guard_response
 
-                return guard_response(request, await call_next(request))
+                    return guard_response(request, await call_next(request))
         finally:
             reset_current_user(token)
