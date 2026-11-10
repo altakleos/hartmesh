@@ -1204,6 +1204,48 @@ class TelegramBotChannel(TelegramChannel):
     async def _drain_file_reads(self):
         await asyncio.gather(*tuple(self._file_tasks), return_exceptions=True)
 
+    async def put_instance_file(self, link, origin, file, *, current=None):
+        """Own the SDK download, journal and native write through retirement."""
+        from app.telegram_bots.file_progress import FileProgress
+        from app.telegram_bots.producer import DeliveryClaimRetired
+
+        def live():
+            return self._callback_current(link) and (current is None or current() is True)
+
+        if link.agent_kind != "instance" or not live():
+            raise DeliveryClaimRetired()
+
+        async def perform():
+            progress = FileProgress(self, link, origin, file, live)
+            try:
+                return await self._services.file_puts.put(
+                    link,
+                    origin,
+                    file,
+                    authority=self._services.authority,
+                    current=live,
+                    download=lambda descriptor, check: self._download(link, descriptor, check),
+                    progress=progress.show,
+                )
+            finally:
+                # Presentation cleanup cannot undo a committed file receipt.
+                try:
+                    await await_drained(progress.close())
+                except Exception as error:
+                    self._log_failure("file_progress_cleanup", error)
+
+        task = self.application.create_task(perform(), name="telegram-instance-file-put")
+        self._file_tasks.add(task)
+        try:
+            return await asyncio.shield(task)
+        finally:
+            try:
+                if not task.done():
+                    task.cancel()
+                await await_drained(self._join_file_read(task))
+            finally:
+                self._file_tasks.discard(task)
+
     async def read_inbound_file(self, file, *, execution_context=None):
         """Own the whole getFile/stream operation through adapter retirement."""
         if self._stopping or not self.application.running or type(execution_context) is not ChannelExecutionContext:
