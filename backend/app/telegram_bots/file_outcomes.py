@@ -1,6 +1,7 @@
 """Fixed direct-file replies and retry controls over original journal evidence."""
 
 import asyncio
+from dataclasses import replace
 
 from sqlalchemy import select
 
@@ -28,11 +29,15 @@ def _basis(row):
     return dict(version=1, act_id=row.id, operation_id=row.operation_ids[-1], state=row.state, reason=row.reason, result=dict(row.result) if row.result is not None else None)
 
 
+def _without_delivery(row):
+    return replace(row, continuation={key: value for key, value in row.continuation.items() if key != "delivery"})
+
+
 def _retry_source(row, callback, link):
     if callback.kind != "file_retry" or callback.target_kind != "act" or callback.target_id != row.id or callback.chat_id != link.chat_id:
         raise ValueError("file-retry-source-conflict") from None
     presses = row.continuation["presses"]
-    press = dict(callback_id=callback.id, message_id=callback.message_id, topic=_topic(callback.message_thread_id) if row.continuation["version"] == 2 else callback.message_thread_id)
+    press = dict(callback_id=callback.id, message_id=callback.message_id, topic=_topic(callback.message_thread_id) if row.continuation["version"] >= 2 else callback.message_thread_id)
     if not presses or press not in presses:
         raise ValueError("file-retry-source-conflict") from None
     return press == presses[-1]
@@ -42,13 +47,20 @@ class FileOutcomes:
     def __init__(self, services):
         self.services = services
 
-    async def question(self, channel, link, saved, *, current=None):
+    def _live(self, channel, link, current, recovery):
+        if recovery is not None:
+            from app.telegram_bots.file_recovery import check_recovery
+
+            return check_recovery(recovery, self.services, channel, link) and (current is None or current() is True)
+        return channel._callback_current(link) and (current is None or current() is True)
+
+    async def question(self, channel, link, saved, *, current=None, _recovery=None):
         """One captionless question closes only actually saved input members."""
         if not saved or len(saved) > 64:
             raise ValueError("file-question-conflict") from None
 
         def live():
-            return channel._callback_current(link) and (current is None or current() is True)
+            return self._live(channel, link, current, _recovery)
 
         async def perform():
             reader = await self.services.file_puts.receipt_reader(link, authority=self.services.authority, current=live)
@@ -97,13 +109,13 @@ class FileOutcomes:
 
         return await await_drained(perform())
 
-    async def plan(self, channel, link, origin, file, *, current=None, callback=None):
+    async def plan(self, channel, link, origin, file, *, current=None, callback=None, _recovery=None):
         file = validate_chat_file(file)
         if (origin is None) != (callback is not None):
             raise ValueError("file-outcome-source-conflict") from None
 
         def live():
-            return channel._callback_current(link) and (current is None or current() is True)
+            return self._live(channel, link, current, _recovery)
 
         async def perform():
             reader = await self.services.file_puts.receipt_reader(link, authority=self.services.authority, current=live)
@@ -114,11 +126,10 @@ class FileOutcomes:
             key = _key(captured, file)
             if callback is not None and key is None:
                 key = "file.saved_ask" if captured.continuation.get("input", {}).get("captionless") is True else "file.saved"
-            if key is None:
-                return None
-            source = await fixed_source(self.services, link, key)
-            source["values"].update(file=captured.result["path"].rsplit("/", 1)[-1] if captured.result else captured.body["name"], product=self.services.product_name)
-            button = await failure_button(self.services, link, key)
+            source = await fixed_source(self.services, link, key) if key is not None else None
+            if source is not None:
+                source["values"].update(file=captured.result["path"].rsplit("/", 1)[-1] if captured.result else captured.body["name"], product=self.services.product_name)
+            button = await failure_button(self.services, link, key) if key is not None else None
             if key == "file.too_large_in" and button is None:
                 topic = str(topic_id) if topic_id not in (None, 1) else None
                 # A size refusal never creates a conversation just for a link.
@@ -133,7 +144,7 @@ class FileOutcomes:
             guard = reader.guard()
             async with self.services.callbacks.writer(link, guard) as writer:
                 actual = await reader.outcome(file, session=writer)
-                if actual != captured:
+                if _without_delivery(actual) != _without_delivery(captured):
                     raise ValueError("file-outcome-changed") from None
                 if callback is not None:
                     if not _retry_source(actual, callback, link):
@@ -146,17 +157,24 @@ class FileOutcomes:
                     _text, descriptors = chat_input_parts(origin, bot_id=link.bot_id)
                     if file not in descriptors or file["message_id"] != mark.message_id:
                         raise ValueError("file-origin-conflict") from None
+                delivery = actual.continuation.get("delivery")
+                if delivery is not None:
+                    return delivery["outbox_id"]
+                if key is None:
+                    await reader.record_delivery(actual, None, session=writer)
+                    return None
                 existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == "notice:" + identity).with_for_update())
                 if existing is not None:
                     if existing.owner_user_id != link.owner_user_id or existing.binding_generation != link.binding_generation or existing.chat_id != link.chat_id or existing.payload.get("file_put_basis") != basis:
                         raise ValueError("file-outcome-conflict") from None
                     # Frozen wording and controls survive display-name/grant
                     # changes; delivery still checks their actual authority.
+                    await reader.record_delivery(actual, existing.id, session=writer)
                     return existing.id
                 keyboard = []
                 if key in {"file.not_saved", "file.files_busy", "file.unconfirmed"}:
                     keyboard = [[dict(label="label.send_again", kind="file_retry", target_kind="act", target_id=actual.id, payload={"act_id": actual.id})]]
-                return await self.services.outbox._plan_product_keyboard(
+                identity = await self.services.outbox._plan_product_keyboard(
                     link,
                     source_id=identity,
                     parts=[{"kind": "text", "source_ref": source, "reply_to_message_id": file["message_id"]}],
@@ -169,5 +187,7 @@ class FileOutcomes:
                     _url_button=button,
                     _extra={"file_put_basis": basis},
                 )
+                await reader.record_delivery(actual, identity, session=writer)
+                return identity
 
         return await await_drained(perform())

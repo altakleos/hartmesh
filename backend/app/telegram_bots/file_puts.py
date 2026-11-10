@@ -80,11 +80,11 @@ def _file_journal(row, *, max_bytes=None):
     if row.kind != "file_put" or type(row.id) is not str or re.fullmatch(r"[0-9a-f]{32}", row.id) is None:
         raise ValueError("file-act-conflict") from None
     continuation = row.continuation
-    if type(continuation) is not dict or type(continuation.get("version")) is not int or continuation["version"] not in {1, 2}:
+    if type(continuation) is not dict or type(continuation.get("version")) is not int or continuation["version"] not in {1, 2, 3}:
         raise ValueError("file-act-conflict") from None
-    if set(continuation) != {"version", "file", "labels", "presses", "target"} | ({"input"} if continuation["version"] == 2 else set()):
+    if set(continuation) != {"version", "file", "labels", "presses", "target"} | ({"input"} if continuation["version"] >= 2 else set()) | ({"delivery"} if continuation["version"] == 3 else set()):
         raise ValueError("file-act-conflict") from None
-    if continuation["version"] == 2:
+    if continuation["version"] >= 2:
         source = continuation["input"]
         if (
             type(source) is not dict
@@ -133,7 +133,7 @@ def _file_journal(row, *, max_bytes=None):
         )
     ):
         raise ValueError("file-act-conflict") from None
-    if continuation["version"] == 2 and any(press["topic"] != continuation["input"]["topic"] for press in presses):
+    if continuation["version"] >= 2 and any(press["topic"] != continuation["input"]["topic"] for press in presses):
         raise ValueError("file-act-conflict") from None
     if [label for label in labels[1:] if label != "rename"] != [f"retry:{number}" for number in range(2, len(presses) + 2)] or len({press["callback_id"] for press in presses}) != len(presses):
         raise ValueError("file-act-conflict") from None
@@ -146,6 +146,16 @@ def _file_journal(row, *, max_bytes=None):
         raise ValueError("file-act-conflict") from None
     expected_ops = [row.id] + [child_operation(row.id, label) for label in labels[1:]]
     if row.operation_ids != expected_ops or type(row.attempts) is not int or row.attempts < 0:
+        raise ValueError("file-act-conflict") from None
+    delivery = continuation.get("delivery")
+    if delivery is not None and (
+        type(delivery) is not dict
+        or set(delivery) != {"operation_id", "outbox_id"}
+        or delivery["operation_id"] != row.operation_ids[-1]
+        or delivery["outbox_id"] is not None
+        and (type(delivery["outbox_id"]) is not str or re.fullmatch(r"[0-9a-f]{32}", delivery["outbox_id"]) is None)
+        or row.state not in {"done", "refused", "uncertain"}
+    ):
         raise ValueError("file-act-conflict") from None
     if any(getattr(row, key) is not None for key in ("work_id", "request_id", "stop_dispatch", "cancel_requested_at")) or row.state not in {"draft", "pending", "waiting", "done", "refused", "uncertain"}:
         raise ValueError("file-act-conflict") from None
@@ -183,7 +193,7 @@ def settled_file_journal(row):
 
 
 class FilePuts:
-    """One journal per source file, with no recovery worker or retained bytes.
+    """One journal per source file; recovery never resumes bytes or file effects.
 
     SQL writers fence every transition. The process lock spans download, bounded
     retries and completion; cancellation drains the whole unit and its lease.
@@ -267,7 +277,7 @@ class FilePuts:
                 operation_ids=[identity],
                 attempts=0,
                 first_attempt_at=None,
-                continuation=dict(version=2 if source is not None else 1, file=file, labels=["initial"], presses=[], target=_target(access), **({"input": source} if source is not None else {})),
+                continuation=dict(version=3 if source is not None else 1, file=file, labels=["initial"], presses=[], target=_target(access), **({"input": source, "delivery": None} if source is not None else {})),
                 created_at=now,
                 updated_at=now,
             )
@@ -367,8 +377,8 @@ class FilePuts:
                 access = await prepare_file_write(authority, link, current=current)
                 async with self.callbacks.writer(link, _FileReceiptGuard(access, access.guard)) as writer:
                     row = await self._row(writer, link, identity, access, lock=False)
-                    topic = _topic(message_thread_id) if row.continuation["version"] == 2 else message_thread_id
-                    if row.continuation["version"] == 2 and row.continuation["input"]["topic"] != topic:
+                    topic = _topic(message_thread_id) if row.continuation["version"] >= 2 else message_thread_id
+                    if row.continuation["version"] >= 2 and row.continuation["input"]["topic"] != topic:
                         raise CallbackRefused() from None
                     previous = next((press for press in row.continuation["presses"] if press["callback_id"] == callback_id), None)
                     if previous is not None:
@@ -391,6 +401,8 @@ class FilePuts:
                         raise CallbackRefused() from None
                     label = f"retry:{len(row.continuation['presses']) + 2}"
                     row.continuation = {**row.continuation, "labels": [*row.continuation["labels"], label], "presses": [*row.continuation["presses"], dict(callback_id=callback_id, message_id=message_id, topic=topic)]}
+                    if row.continuation["version"] == 3:
+                        row.continuation = {**row.continuation, "delivery": None}
                     row.operation_ids = [*row.operation_ids, child_operation(identity, label)]
                     row.state, row.reason, row.updated_at = "draft", None, datetime.now(UTC)
                     await self.callbacks.consume_group(group, reason="done", session=writer)
@@ -423,6 +435,26 @@ class FilePuts:
                 if captured.state in {"draft", "pending", "waiting"}:
                     return await self._transition(link, captured, access, state="uncertain", reason="interrupted")
                 return captured
+
+        return await await_drained(perform())
+
+    async def reconcile_input(self, link, origin, file, *, origins, authority, current):
+        """A held startup may settle metadata, never resume the file effect."""
+        file = validate_chat_file(file)
+
+        async def perform():
+            if current() is not True:
+                raise ValueError("file-recovery-unavailable") from None
+            async with self._locks.hold(file_act_id(link, file)):
+                access = await prepare_file_write(authority, link, current=current)
+                row = await self._prepare(link, origin, file, access, origins)
+                if row.continuation["version"] < 3 and row.state in {"done", "refused", "uncertain"}:
+                    # An open original input does not prove a legacy child's
+                    # outcome was never delivered and then collected.
+                    raise ValueError("legacy-file-outcome-unconfirmed") from None
+                if row.state in {"draft", "pending", "waiting"}:
+                    return await self._transition(link, row, access, state="uncertain", reason="interrupted", begin=row.attempts == 0)
+                return row
 
         return await await_drained(perform())
 
@@ -532,6 +564,19 @@ class FileReceiptReader:
         if dict(row.continuation["file"]) != file:
             raise ValueError("file-receipt-unavailable") from None
         return row
+
+    async def record_delivery(self, captured, outbox_id, *, session):
+        """Keep a terminal planning receipt after ordinary outbox retention."""
+        row = await self.journal._row(session, self.access.link, captured.id, self.access)
+        if row.continuation["version"] != 3:
+            return  # Legacy journals remain readable and are never upgraded.
+        if _snapshot(row) != captured or row.state not in {"done", "refused", "uncertain"}:
+            raise ValueError("file-outcome-changed") from None
+        delivery = dict(operation_id=row.operation_ids[-1], outbox_id=outbox_id)
+        if row.continuation["delivery"] not in (None, delivery):
+            raise ValueError("file-outcome-conflict") from None
+        row.continuation = {**row.continuation, "delivery": delivery}
+        await session.flush()
 
     async def completed(self, file, *, session=None):
         row = await self.outcome(file, session=session)
