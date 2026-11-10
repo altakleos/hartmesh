@@ -51,3 +51,11 @@ which every link from a bot depends on. The workspace layout sends a signed-out
 person to sign-in from the browser through `RedirectToLogin`, because a layout
 receives no query. `qrcode.react` is imported only by `qr-code.tsx`, behind the
 dynamic set-up host, so it stays out of the workspace's first load.
+
+`TelegramPolicySection` is prepared for the employee Access tab; activation is
+separate. Only current company Manage+Inspect with `agents:read` reads policy;
+`agents:write` enables Save, including while Telegram is off. Off requires the
+connected-count confirmation. Account, role, ceilings, instance and grant changes
+remount the controls and abort owned reads/actions; a late response cannot toast
+or refresh a replacement account. Refusals reread policy; `manage-required` also
+refreshes instance authority. Policy query keys share the bot refresh prefix.

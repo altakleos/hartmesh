@@ -2527,6 +2527,45 @@ export function createZhCN(product: string): Translations {
       },
     },
     telegramBots: {
+      policy: {
+        heading: "Telegram",
+        count: ({ name, connected, people }) =>
+          connected === 0
+            ? `还没有人为 ${name} 连接 Telegram 机器人。`
+            : `可与 ${name} 聊天的 ${people} 人中，有 ${connected} 人已连接 Telegram 机器人。`,
+        label: ({ name }) => `允许大家在 Telegram 上与 ${name} 聊天吗？`,
+        allowed: {
+          title: "是",
+          help: ({ name }) =>
+            `所有可与 ${name} 聊天的人都可以连接 Telegram 机器人。${name} 发送的内容可以像普通 Telegram 消息一样转发和保存。`,
+        },
+        protected: {
+          title: "是，但不允许转发或保存",
+          help: ({ name }) =>
+            `Telegram 会阻止转发或保存 ${name} 发送的内容，包括文件。${name} 主动发送的消息需要点按后才显示详情；对用户消息的回复则正常显示。如需在 Telegram 之外使用文件，请在 ${product} 中打开。仍然可以截图。`,
+        },
+        off: {
+          title: "否",
+          help: ({ name }) =>
+            `任何人都不能在 Telegram 上与 ${name} 聊天。已连接的机器人会停止回复，并告知一次原因。${product} 中的对话不受影响。`,
+        },
+        save: "保存",
+        offConfirm: {
+          title: ({ name }) => `为 ${name} 关闭 Telegram？`,
+          none: "还没有人连接机器人。关闭后将无法连接。",
+          some: ({ count }) =>
+            `${count} 个机器人将立即停止回复，并在 Telegram 中通知各自的用户一次。重新开启 Telegram 后即可恢复，无需重新设置。`,
+          button: "关闭",
+        },
+        saved: {
+          allowed: ({ name }) =>
+            `已保存。大家可以在 Telegram 上与 ${name} 聊天。`,
+          protected: ({ name }) =>
+            `已保存。从现在起，Telegram 会阻止转发和保存 ${name} 发送的内容。主动发送的消息需要点按后才显示详情；对用户消息的回复则正常显示。已发送的消息不受影响。`,
+          off: ({ name }) => `已保存。${name} 的 Telegram 机器人已停止回复。`,
+        },
+        failed: "无法保存设置，请重试。",
+      },
       sectionLabel: "Telegram",
       chatName: `${product}`,
       list: {

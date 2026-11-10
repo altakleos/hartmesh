@@ -1974,6 +1974,10 @@ cleanup when migrating from legacy metadata credentials.
 
 ##### Telegram bots
 
+The employee policy controls are prepared for the Access tab: managers can allow
+Telegram, prevent forwarding and saving, or turn it off with a connected-bot
+confirmation. They remain unmounted until instance-bot activation is complete.
+
 Assistant and employee list preparation reads the bound person’s discovery page,
 filters chat access and shows at most twenty agents, with the person’s own
 assistants first. Names link to the person’s bot or its Telegram settings row.
