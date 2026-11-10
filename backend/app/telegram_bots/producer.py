@@ -711,6 +711,7 @@ class Outbox:
         self.inbox = inbox if inbox is not None else InboxRepository(session_factory)
         self.config = config or TelegramBotsConfig()
         self.clock = clock
+        self.network_denials = None
 
     async def get(self, link, outbox_id, *, session=None):
         async def read(reader):
@@ -1871,6 +1872,14 @@ class Outbox:
         dedupe = f"reply:{basis['publication']['turn_id']}"
         from app.telegram_bots.links import prepare_publication_guard
 
+        denials = None
+        if self.network_denials is not None and record.scope.agent_kind == "instance":
+            from app.gateway.run_output import RunOutputProjectionV2
+
+            output = RunOutputProjectionV2.model_validate(basis["outcome"]["projection"])
+            denials = await self.network_denials.read(record, link, output=output, guard=guard)
+            if denials is not None:
+                guard = denials._guard
         await prepare_publication_guard(guard)
         async with self._writer(link.id) as (writer, _):
             await guard.check(writer)
@@ -1915,6 +1924,10 @@ class Outbox:
                         if "shown_message_id" in part:
                             part.update(state="sent", message_ids=[part["shown_message_id"]], sent_at=self.clock().isoformat())
                     saved_row.parts = saved_parts
+                if denials is not None and denials.hosts:
+                    from app.telegram_bots.network_notices import add_notice
+
+                    await add_notice(self, fresh, denials, identity, writer=writer, link=link)
             await self.inbox.seal_publication(fresh, outbox_id=identity, assistant_message_id=assistant, session=writer)
             await writer.flush()
             # The complete owning unit retains commit/session cleanup. No SQL
@@ -2543,7 +2556,7 @@ class OutboxSender:
         parts = []
         for part in row.parts:
             basis = row.payload.get("reply_basis", {})
-            display = type(basis) is dict and (basis.get("version") == 4 or basis.get("version") == 5 and basis.get("outcome", {}).get("request_basis", {}).get("version") == 2)
+            display = type(basis) is dict and (basis.get("version") in {4, 8} or basis.get("version") == 5 and basis.get("outcome", {}).get("request_basis", {}).get("version") == 2)
             if part["presentation_version"] != version or (display or part["kind"] in {"document", "photo", "album"}) and part["state"] in {"sent", "unavailable"}:
                 continue
             replacement = {

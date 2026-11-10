@@ -991,14 +991,19 @@ class RunJournal(BaseCallbackHandler):
         """Handle tool end event, append message and clear node data"""
         if self._owned_producers_closed():
             return
+        active_tool_name = self._active_tool_names.pop(str(run_id), None)
         messages = output.update.get("messages", ()) if isinstance(output, Command) and isinstance(output.update, Mapping) else (output,)
         for message in messages:
-            if isinstance(message, ToolMessage) and not message.id:
-                message.id = str(uuid4())
+            if isinstance(message, ToolMessage):
+                if not message.id:
+                    message.id = str(uuid4())
+                # The SDK fills a Command result's missing name after this
+                # callback. Normalize it before freezing the immutable body.
+                if not message.name and active_tool_name:
+                    message.name = active_tool_name
         inventory = getattr(self._output_capture, "inventory", None)
         if inventory is not None and not self._closed:
             inventory.tool_end(output, run_id=run_id, parent_run_id=parent_run_id)
-        active_tool_name = self._active_tool_names.pop(str(run_id), None)
         try:
             if isinstance(output, ToolMessage):
                 msg = cast(ToolMessage, output)
@@ -1108,7 +1113,7 @@ class RunJournal(BaseCallbackHandler):
             self._current_tool_result_ids.pop(tool_call_id, None)
             self._terminal_task_results.discard(tool_call_id)
 
-    def _persist_tool_result_message(self, message: BaseMessage, *, enrichment: bool = False) -> None:
+    def _persist_tool_result_message(self, message: BaseMessage, *, enrichment: tuple[str, str] | None = None) -> None:
         # Tool callbacks run before the graph reducer assigns missing ids.
         # Assign on the returned object so the feed and checkpoint share the
         # same result identity even when a provider reuses its tool_call_id.
@@ -1119,10 +1124,15 @@ class RunJournal(BaseCallbackHandler):
 
             if read_subagent_result_metadata(message.additional_kwargs) is not None:
                 self._terminal_task_results.add(message.tool_call_id)
+        metadata = None
+        if enrichment is not None:
+            previous = self._tool_artifact_snapshots[self._message_identity(message)]
+            metadata = {"tool_artifact_enrichment": {"version": 1, "previous_sha256": enrichment[0], "added_keys": sorted(set(message.artifact).difference(previous.artifact_keys))}}
         self._put(
             event_type=LLM_TOOL_RESULT_EVENT.event_type,
             category=LLM_TOOL_RESULT_EVENT.category,
             content=message.model_dump(),
+            metadata=metadata,
         )
         identity = self._message_identity(message)
         if identity:
@@ -1270,7 +1280,7 @@ class RunJournal(BaseCallbackHandler):
             elif not message.additional_kwargs.get("hide_from_ui") and message.tool_call_id in self._current_run_tool_call_names:
                 enrichment = self._artifact_enrichment(message)
                 if enrichment is not None:
-                    self._persist_tool_result_message(message, enrichment=True)
+                    self._persist_tool_result_message(message, enrichment=enrichment)
                     inventory = getattr(self._output_capture, "inventory", None)
                     if inventory is not None:
                         inventory.tool_artifact_enriched(message.id, message.tool_call_id, *enrichment)

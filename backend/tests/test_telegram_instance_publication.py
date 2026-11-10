@@ -17,13 +17,21 @@ pytestmark = pytest.mark.asyncio
 
 
 @pytest_asyncio.fixture
-async def publication(db, monkeypatch):
+async def publication(db, monkeypatch, request):
     e = await instance_environment(db, monkeypatch)
     e.db = db
     incoming = message(e, 907, content="Original employee question")
+    if getattr(request, "param", None) is not None:
+        from telegram import Update
+
+        payload = incoming.to_dict()
+        payload["message"]["message_thread_id"] = request.param
+        incoming = Update.de_json(payload, e.channel.bot)
     row, _ = await e.inbox.accept(e.link, incoming, sanitized_input={"type": "text", "text": incoming.message.text})
     e.origin = await e.inbox.route(row, kind="turn", target_id=e.link.agent_ref, basis={"input_profile": {"version": 1, "kind": "plain_text", "forwarded": False}}, operation_ids=[])
-    e.thread_id = await e.threads.ensure_thread(e.link, inbound(e), origin=e.origin)
+    bound_input = inbound(e)
+    bound_input.topic_id = str(e.origin.message_thread_id) if e.origin.message_thread_id is not None else None
+    e.thread_id = await e.threads.ensure_thread(e.link, bound_input, origin=e.origin)
     e.bus = MessageBus(inbound_queue_maxsize=4)
     e.host = PublicationAttemptAuthority(links=db.links, authority=e.live.authority, client=e.http_client, channel=lambda identity: e.current[0], create_allowed=lambda: e.active[0], read_allowed=lambda: e.active[0])
     e.coordinator = PublicationCoordinator(inbox=e.inbox, outbox=e.channel._services.outbox, bus=e.bus, http_owner=e.http_client, capture_attempt=e.host.capture)

@@ -34,7 +34,7 @@ from deerflow.sandbox.lease import (
 )
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.prewarm import close_sandbox_prewarm, start_sandbox_prewarm
-from deerflow.sandbox.sandbox_provider import get_initialized_sandbox_provider
+from deerflow.sandbox.sandbox_provider import get_initialized_execution_provider
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -637,7 +637,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if sandbox_id is None:
             return result
         context = getattr(request.runtime, "context", None) or {}
-        provider = get_initialized_sandbox_provider()
+        provider = get_initialized_execution_provider()
         if provider is None:
             return result
         if provider.sandbox_network_mode() != "allowlist":
@@ -660,7 +660,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if sandbox_id is None:
             return result
         context = getattr(request.runtime, "context", None) or {}
-        provider = get_initialized_sandbox_provider()
+        provider = get_initialized_execution_provider()
         if provider is None:
             return result
         if provider.sandbox_network_mode() != "allowlist":

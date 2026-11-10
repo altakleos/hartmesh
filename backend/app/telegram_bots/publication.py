@@ -236,6 +236,7 @@ async def fixed_source(host, link, key):
         "refused.interrupted_manager",
         "refused.interrupted_recovery",
         "net.blocked_ask",
+        "net.blocked",
         "file.files_full",
         "file.files_busy",
         "file.not_active",
@@ -250,7 +251,7 @@ async def fixed_source(host, link, key):
 
         view = await await_drained(host.authority.instance_view(link))
         values = {"name": view.name, "reader_is_administrator": await await_drained(is_administrator(link.owner_user_id))}
-        if key in {"refused.files_full", "net.blocked_ask", "file.files_full", "file.too_large_in", "file.no_access"}:
+        if key in {"refused.files_full", "net.blocked_ask", "net.blocked", "file.files_full", "file.too_large_in", "file.no_access"}:
             manager = bool(view.permissions & AgentPermission.MANAGE)
             person = await await_drained(get_local_provider().get_user(view.supervisor.subject_id)) if not manager or key in {"net.blocked_ask", "file.no_access"} else None
             values.update(reader_is_manager=manager, supervisor=person.email if person is not None else None)
@@ -302,7 +303,10 @@ def _channel_scope(record):
 
 class PublicationCoordinator:
     def __init__(self, *, inbox: InboxRepository, outbox: Outbox, bus: MessageBus, http_owner: ChannelHttpOwner, capture_attempt: Callable[..., Awaitable[PublicationAttempt]]):
+        from app.telegram_bots.network_denials import NetworkDenialSource
+
         self.inbox, self.outbox, self.bus = inbox, outbox, bus
+        self.outbox.network_denials = NetworkDenialSource(http_owner=http_owner, capture_attempt=capture_attempt)
         self._http_owner, self._capture_attempt = http_owner, capture_attempt
         self._creating = self._reading = True
         self._operations: set[asyncio.Task] = set()

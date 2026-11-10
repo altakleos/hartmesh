@@ -2,6 +2,7 @@
 
 import asyncio
 import threading
+from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -113,12 +114,31 @@ def blocked_tool(context, *, async_path=False, instance_provider=False):
         return original
 
     installed = runtime.InstanceSandboxProvider(context[AGENT_EXECUTION_CONTEXT_KEY], SimpleNamespace(id="existing"), baseline=provider) if instance_provider else provider
-    set_sandbox_provider(installed)
+    # The real worker installs instance providers in its execution context,
+    # never in the process-wide provider slot.
+    set_sandbox_provider(provider)
     try:
-        result = asyncio.run(SandboxMiddleware().awrap_tool_call(request, handler)) if async_path else SandboxMiddleware().wrap_tool_call(request, lambda _request: original)
+        scope = runtime.execution_scope(context[AGENT_EXECUTION_CONTEXT_KEY]) if instance_provider else nullcontext()
+        with scope as environment:
+            if instance_provider:
+                environment.provider = installed
+            result = asyncio.run(SandboxMiddleware().awrap_tool_call(request, handler)) if async_path else SandboxMiddleware().wrap_tool_call(request, lambda _request: original)
     finally:
         reset_sandbox_provider()
     return provider, original, result
+
+
+def test_unprepared_instance_never_reads_the_process_provider():
+    from deerflow.sandbox.sandbox_provider import get_initialized_execution_provider
+
+    provider = _NetworkPolicyProvider()
+    set_sandbox_provider(provider)
+    try:
+        assert get_initialized_execution_provider() is provider
+        with runtime.execution_scope(execution()):
+            assert get_initialized_execution_provider() is None
+    finally:
+        reset_sandbox_provider()
 
 
 @pytest.mark.parametrize("async_path", [False, True])

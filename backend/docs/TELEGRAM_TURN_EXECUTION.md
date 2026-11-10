@@ -406,3 +406,18 @@ transport-lifetime checks follow it. Mixed file parts, completed receipts and ke
 cleanup do not acquire permission to offer network choices. Ordinary/custom cards
 continue through their existing source and action guards. The bounded denial
 notices are a separate presentation path and never create permission cards.
+
+Dropped-denial notices qualify the exact run's latest visible lead-tool artifacts
+against its complete document-2 inventory and host journal enrichment receipts.
+A raw producer marker cannot claim a platform denial. Receipt chains preserve
+original tool order across artifact enrichment. Only host/port, message/event
+identities and artifact digests are retained alongside the projection; full tool
+history stays in the original run. The first three distinct hosts become a closed V8
+plan in the primary reply's writer. Existing completed primaries are never
+backfilled. No callback group or Act is created. The primary must finish with an
+acknowledged message before any trailer can send, including after file delivery.
+Each attempt rereads the admitted source; the final SDK snapshot jointly checks
+the current account, Use, policy, delivery claim, parent acknowledgement and
+whether the wording still matches current Manage. Source work owns cancellation
+through cleanup. A lost publication lifetime rolls both plans back together.
+Topic relocation preserves acknowledged hosts and replaces only unsent notices.

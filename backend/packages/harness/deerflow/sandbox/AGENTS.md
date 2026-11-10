@@ -42,6 +42,9 @@ unattended and GitHub-fallback runs auto-deny; explicit interactive overrides
 legacy hints. Subagents always auto-deny. Never show approval cards without a
 human responder. Async claim/deny/decision workers drain through repeated
 cancellation before propagating it.
+Post-tool network reads use `get_initialized_execution_provider`: a prepared
+instance provider takes precedence, and an unprepared instance never falls back
+to the process provider. The baseline lifecycle getter remains unchanged.
 
 Agent network policy stays in `agent_instances.runtime`: middleware asks
 `network_card_allowed`, marks both denial paths through `network_denial_artifact`,

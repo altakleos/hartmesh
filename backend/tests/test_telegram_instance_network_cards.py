@@ -60,7 +60,7 @@ async def network(publication):
     e.services.thread_client, e.services.publications, e.services.publication_authority = e.http_client, e.coordinator, e.host
     e.services.turns = SimpleNamespace(accept_staged=AsyncMock(return_value=True), retire=AsyncMock(), message_sent=lambda *args, **kwargs: None)
     reader = HumanInputSource(coordinator=e.coordinator, http_owner=e.http_client, capture_attempt=e.host.capture)
-    e.services.model_source = ModelSource(read_output=e.coordinator.read_output, human_input_source=reader)
+    e.services.model_source = ModelSource(read_output=e.coordinator.read_output, human_input_source=reader, outbox=e.services.outbox, http_owner=e.http_client)
     e.services.human_inputs = HumanInputs(e.services, source=reader)
     saved = await e.coordinator.dispatch(e.link, [e.origin], thread_id=e.thread_id)
     guard = (await e.host.capture(e.link, thread_id=e.thread_id, endpoint_id=e.http_client.endpoint_id)).read_guard

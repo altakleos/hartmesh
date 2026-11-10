@@ -1919,7 +1919,16 @@ class TelegramBotChannel(TelegramChannel):
                 raise PermanentDeliveryError("invalid-url-button")
             button = validate_url_button(button)
             button_label = url_button_label(part["source_ref"], button)
-        if model_part is None:
+        notice_manager = None
+        if model_part is not None and model_part.network_denial_host is not None:
+            from app.telegram_bots.publication import fixed_source
+
+            source = await fixed_source(self._services, saved.link, "net.blocked_ask")
+            notice_manager = source["values"]["reader_is_manager"]
+            source["key"] = "net.blocked" if notice_manager else "net.blocked_ask"
+            source["values"]["host"] = model_part.network_denial_host
+            text = await self._render_source(saved.link, source, plain=part.get("plain_fallback", False))
+        elif model_part is None:
             text = await self._render_source(saved.link, part["source_ref"], plain=part.get("plain_fallback", False))
         else:
             text = model_part.plain_text if part.get("plain_fallback", False) else model_part.html
@@ -2067,6 +2076,12 @@ class TelegramBotChannel(TelegramChannel):
 
                 if is_network_card(latest_part.item, latest_part.part):
                     await authorize_network_card(self._services, latest_part)
+                    if not self._callback_current(current.link):
+                        raise DeliveryClaimRetired()
+                if notice_manager is not None:
+                    from app.telegram_bots.network import authorize_network_notice
+
+                    await authorize_network_notice(self._services, latest_part, manager=notice_manager)
                     if not self._callback_current(current.link):
                         raise DeliveryClaimRetired()
                 # Waiting/preview custody can end during the final SQL read.
