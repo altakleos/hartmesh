@@ -44,9 +44,14 @@ INSTANCE_PRESENTATION_KEYS = frozenset("hello.assistant hello.employee help.agen
 POLICY_KEYS = frozenset({"policy.off", "policy.on", "policy.on_protected", "policy.protected", "policy.unprotected"})
 
 
+AGENT_LIST_KEYS = frozenset("assistants.list assistants.none assistants.colleagues employees.list employees.none agents.line_work agents.line_idle agents.line_plain agents.more".split())
+
+
 def test_text_catalog_locales_have_equal_keys():
     assert set(catalog("en")) == set(catalog("zh-CN"))
-    assert STAGE_ONE_KEYS | INSTANCE_FILE_KEYS | POLICY_KEYS | INSTANCE_PRESENTATION_KEYS | LIFECYCLE_KEYS | INSTANCE_FAILURE_KEYS | INSTANCE_AVAILABILITY_KEYS == {key for key in catalog("en") if not key.startswith(("label.", "menu."))}
+    assert AGENT_LIST_KEYS | STAGE_ONE_KEYS | INSTANCE_FILE_KEYS | POLICY_KEYS | INSTANCE_PRESENTATION_KEYS | LIFECYCLE_KEYS | INSTANCE_FAILURE_KEYS | INSTANCE_AVAILABILITY_KEYS == {
+        key for key in catalog("en") if not key.startswith(("label.", "menu."))
+    }
     assert catalog("zh_cn") is catalog("zh-CN")
     assert catalog("unrecognised") is catalog("en")
     assert all(text and "<br>" not in text for text in catalog("en").values())
