@@ -13,6 +13,7 @@ import json
 import logging
 import re
 from datetime import UTC, datetime
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -70,6 +71,8 @@ _REFUSALS = {
     "not-connected": (409, "This bot is not connected to a Telegram account."),
     "too-many-codes": (429, "Five of your bots are waiting for Start."),
     "no-conflict": (409, "This bot has nothing to acknowledge."),
+    "manage-required": (403, "You must manage this AI employee and be able to see all its work."),
+    "agent-personal": (409, "An AI assistant's owner controls who can reach it through its access settings."),
 }
 
 
@@ -182,14 +185,34 @@ async def _agent_name(request: Request, link) -> str | None:
         if link.agent_kind == "lead_agent":
             supervisor = _supervisor(request)
             return supervisor.product_name if supervisor is not None else None
+        if link.agent_kind == "instance":
+            view = await _instance_view(request, link)
+            return view.name if view is not None else None
         target = await await_drained(asyncio.to_thread(load_agent_config, link.agent_ref, user_id=link.owner_user_id))
         return target.display_name or target.name
     except Exception:
         return None
 
 
+async def _instance_view(request, link):
+    from deerflow.agent_instances.contract import AgentDenied, AgentPermission
+    from deerflow.spaces.contract import PrincipalRef
+
+    agents = getattr(request.app.state, "agent_instances", None)
+    if agents is None or link.agent_kind != "instance":
+        return None
+    try:
+        await _require(request, "agents:read")
+        return await await_drained(agents.get(actor=PrincipalRef("human", link.owner_user_id), instance_id=link.agent_ref, permission=AgentPermission.USE))
+    except (AgentDenied, Refusal):
+        return None
+
+
 async def _bot(request: Request, link) -> dict:
+    from app.telegram_bots.policy import InstancePolicy
+
     links = _links(request)
+    instance = await _instance_view(request, link)
     now = datetime.now(UTC)
     open_rows = TelegramOutboxRow.state.in_(("pending", "sending"))
     counts = select(func.count().filter(open_rows), func.count().filter(open_rows, TelegramOutboxRow.degraded_at.is_not(None)), func.count().filter(TelegramOutboxRow.state == "failed"))
@@ -200,7 +223,7 @@ async def _bot(request: Request, link) -> dict:
         "bot_id": link.bot_id,
         "agent_kind": link.agent_kind,
         "agent_ref": link.agent_ref,
-        "agent_name": await _agent_name(request, link),
+        "agent_name": instance.name if instance is not None else None if link.agent_kind == "instance" else await _agent_name(request, link),
         "bot_username": link.bot_username,
         "bot_name": link.bot_name,
         "url": f"https://t.me/{link.bot_username}",
@@ -221,7 +244,7 @@ async def _bot(request: Request, link) -> dict:
         "delivery_failed": failed,
         "webhook_host": link.webhook_host,
         "topics_enabled": link.topics_enabled,
-        "policy": None,
+        "policy": await InstancePolicy(links.session_factory).get(instance.id) if instance is not None and instance.custody == "company" else None,
         "last_update_at": link.last_update_at,
         "created_at": link.created_at,
     }
@@ -353,6 +376,7 @@ async def list_bots(request: Request, owner: str = Depends(_caller)) -> dict:
     except Refusal:
         links = None  # No database: nothing is kept, and the answer says so.
     rows = await links.list_for_owner(owner) if links is not None else []
+    policies, readers = await _visible_instance_settings(request, owner, links) if links is not None else ([], [])
     return {
         "bots": [await _bot(request, row) for row in rows],
         "limits": {"per_person": config.max_bots_per_person, "used": len(rows)},
@@ -360,9 +384,38 @@ async def list_bots(request: Request, owner: str = Depends(_caller)) -> dict:
         "quick_setup": {"available": False, "manager_link_id": None, "manager_username": None},
         "pending_creation": None,
         "removed_bots": [],
-        "policies": [],
-        "read_by_others": [],
+        "policies": policies,
+        "read_by_others": readers,
     }
+
+
+async def _visible_instance_settings(request, owner, links):
+    from app.telegram_bots.authority import read_by_others
+    from app.telegram_bots.policy import InstancePolicy
+    from deerflow.agent_instances.contract import AgentPermission
+    from deerflow.spaces.contract import PrincipalRef
+
+    agents = getattr(request.app.state, "agent_instances", None)
+    if agents is None:
+        return [], []
+    try:
+        await _require(request, "agents:read")
+    except Refusal:
+        return [], []
+    policies, readers, offset = [], [], 0
+    policy = InstancePolicy(links.session_factory)
+    while True:
+        views = await await_drained(agents.list(actor=PrincipalRef("human", owner), limit=500, offset=offset, include_provisioning=False))
+        for view in views:
+            if not view.permissions & AgentPermission.USE:
+                continue
+            if view.custody == "company" and (value := await policy.get(view.id)) != "allowed":
+                policies.append({"instance_id": view.id, "policy": value})
+            if await read_by_others(owner, view, session_factory=links.session_factory):
+                readers.append(view.id)
+        if len(views) < 500:
+            return policies, readers
+        offset += len(views)
 
 
 @router.post("/disconnect-all")
@@ -372,6 +425,76 @@ async def disconnect_all(request: Request, owner: str = Depends(_caller)) -> dic
     if supervisor is not None:
         supervisor.reconcile_soon()
     return {"disconnected": count}
+
+
+async def _policy_manager(request: Request, owner: str, instance_id: str, *, writer=None):
+    from deerflow.agent_instances.contract import AgentDenied, AgentPermission
+    from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow, AgentInstanceRow
+    from deerflow.spaces.contract import PrincipalRef
+
+    agents = getattr(request.app.state, "agent_instances", None)
+    if agents is None:
+        raise Refusal("manage-required")
+    try:
+        actor = PrincipalRef("human", owner)
+        required = AgentPermission.MANAGE | AgentPermission.INSPECT
+        if writer is None:
+            view = await await_drained(agents.get(actor=actor, instance_id=instance_id, permission=required))
+        else:
+            # Match the instance lifecycle/grant writer's row lock. Do not open
+            # a second session while the policy writer owns the connection.
+            bind = agents.directory.session_factory.kw.get("bind")
+            if bind is None or writer.get_bind() is not getattr(bind, "sync_engine", bind) or not callable(getattr(agents.directory.human, "in_session", None)):
+                raise Refusal("manage-required")
+            view = await writer.scalar(select(AgentInstanceRow).where(AgentInstanceRow.id == instance_id).with_for_update())
+            grant = await writer.scalar(select(AgentInstanceGrantRow).where(AgentInstanceGrantRow.instance_id == instance_id, AgentInstanceGrantRow.user_id == owner).with_for_update())
+            await agents._human(actor, session=writer)
+            if view is None or view.status == "deleted" or grant is None or grant.permissions & int(required) != int(required):
+                raise Refusal("manage-required")
+    except AgentDenied:
+        raise Refusal("manage-required") from None
+    if view.custody == "personal":
+        raise Refusal("agent-personal")
+    return view
+
+
+async def _policy_response(policy, instance_id):
+    value = await policy.get(instance_id)
+    people, connected = await policy.counts(instance_id)
+    return {"policy": value, "people": people, "connected": connected}
+
+
+@router.get("/instances/{instance_id}/policy")
+async def read_policy(instance_id: str, request: Request, owner: str = Depends(_caller)) -> dict:
+    from app.telegram_bots.policy import InstancePolicy
+
+    await _require(request, "agents:read")
+    await _policy_manager(request, owner, instance_id)
+    return await _policy_response(InstancePolicy(_links(request).session_factory), instance_id)
+
+
+class _PolicyChange(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    policy: Literal["allowed", "protected", "off"]
+
+
+@router.put("/instances/{instance_id}/policy")
+async def write_policy(instance_id: str, body: _PolicyChange, request: Request, owner: str = Depends(_caller)) -> dict:
+    from app.telegram_bots.policy import InstancePolicy
+
+    await _require(request, "agents:read", "agents:write")
+    await _policy_manager(request, owner, instance_id)
+    policy = InstancePolicy(_links(request).session_factory)
+
+    async def check_current(writer):
+        await _policy_manager(request, owner, instance_id, writer=writer)
+
+    await policy.set(instance_id, body.policy, updated_by=owner, check_current=check_current)
+    supervisor = _supervisor(request)
+    if supervisor is not None:
+        supervisor.reconcile_soon()
+    return await _policy_response(policy, instance_id)
 
 
 @router.get("/settings")

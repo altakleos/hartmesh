@@ -304,3 +304,21 @@ async def is_administrator(owner_user_id: str) -> bool:
     except Exception:
         # Missing or unreadable accounts confer no administrator presentation.
         return False
+
+
+async def read_by_others(owner_user_id: str, view, *, session_factory) -> bool:
+    """Privacy presentation from a current authorized view, never a new grant."""
+    from sqlalchemy import select
+
+    from deerflow.agent_instances.contract import AgentPermission
+    from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow
+
+    if not view.permissions & AgentPermission.MANAGE:
+        return True
+
+    async def read():
+        async with session_factory() as session:
+            grant = AgentInstanceGrantRow
+            return bool(await session.scalar(select(select(grant.user_id).where(grant.instance_id == view.id, grant.user_id != owner_user_id, grant.permissions.bitwise_and(int(AgentPermission.INSPECT)) != 0).exists())))
+
+    return await await_drained(read())

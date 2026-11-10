@@ -551,4 +551,14 @@ Gateway projection and in-process binding must match the target before mapping.
 The browser add route still refuses instance targets until their complete delivery
 and policy paths are available.
 
+`policy.py` stores employee Telegram settings in the existing policy table. Its
+reads and upserts drain admitted SQL through cancellation. Browser policy routes
+require a session, route ceilings and current Manage plus Inspect; personal
+assistants have no policy. The upsert borrows its writer for a fresh human and
+locked instance/grant admission on the authority's exact engine; no second
+session or provider call belongs in that writer. Counts intersect Use grants with connected links.
+List restrictions and privacy indicators include only Use-visible instances,
+including those without bots. A view without Manage always has other readers;
+for managers, inspect the current grants instead of inferring from custody.
+
 Managed turns run with `recursion_limit` 1000 (`EXECUTION_RUN_CONFIG` in `app/channels/manager.py`), matching web chats and scheduled runs; a configured channel session value overrides it and the Gateway clamps to `max_recursion_limit`.
