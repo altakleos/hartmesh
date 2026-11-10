@@ -139,6 +139,7 @@ class SendContext:
     binding_generation: int
     token_revision: int
     purpose: str
+    expected_policy: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -154,6 +155,8 @@ class SendContext:
             or self.purpose not in {"bound_message", "stranger", "profile", "group", "callback", "optional"}
             or self.purpose == "bound_message"
             and (self.chat_id is None or self.chat_id <= 0)
+            or self.expected_policy is not None
+            and (type(self.expected_policy) is not str or self.expected_policy not in {"allowed", "protected", "off"})
         ):
             raise ValueError("invalid-send-context")
 
@@ -1132,8 +1135,12 @@ class TelegramBotChannel(TelegramChannel):
                 raise DeliveryClaimRetired()
             await self._services.prepare_live_owner(link.owner_user_id)
             await require(link.owner_user_id, "threads:read", "runs:read")
+            if is_current() is not True or not await self._input_current(link):
+                raise DeliveryClaimRetired()
             policy = await self._services.protect_notice(context)
-            if type(policy) is not bool or protected is not None and policy != protected or is_current() is not True or not await self._input_current(link):
+            if policy and method == "send_message_draft":
+                raise DeliveryClaimRetired()
+            if type(policy) is not bool or protected is not None and policy != protected or is_current() is not True:
                 raise DeliveryClaimRetired()
             if is_current() is not True or not self._callback_current(link):
                 raise DeliveryClaimRetired()
@@ -1551,6 +1558,8 @@ class TelegramBotChannel(TelegramChannel):
 
     async def send_notice(self, key: str, *, context: SendContext, reply_to: int | None = None, silent: bool = False, thread: int | None = None, _ingress=False, button: tuple[str, str] | None = None, **values) -> int | None:
         """`button` is a (label key, address) pair. Losing it to a refused address is better than losing the notice."""
+        from app.telegram_bots.producer import DeliveryClaimRetired
+
         if context.chat_id is None:
             raise ValueError("notice-destination-required")
         if not self.application.running:
@@ -1566,15 +1575,31 @@ class TelegramBotChannel(TelegramChannel):
         markup = None
         if button is not None:
             settings = await await_drained(self._services.settings.get(self.link.owner_user_id))
-            markup = InlineKeyboardMarkup([[InlineKeyboardButton(render_plain(button[0], settings.locale), url=button[1])]])
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton(render_plain(button[0], settings.locale, **values), url=button[1])]])
         if not await self._notice_context_current(context):
             return None
         if _ingress and (self.link.health not in {"ok", "agent_unavailable"} or self.link.state == "held"):
             return None
 
+        async def check():
+            current_protection = await self._services.protect_notice(context)
+            if type(current_protection) is not bool or current_protection and not protect or not await self._notice_context_current(context):
+                raise DeliveryClaimRetired()
+            if _ingress and (self.link.health not in {"ok", "agent_unavailable"} or self.link.state == "held"):
+                raise DeliveryClaimRetired()
+
         async def send(buttons):
+            await check()
             return await self.bot.send_message(
-                chat_id=context.chat_id, text=text, parse_mode=ParseMode.HTML, reply_to_message_id=reply_to, disable_notification=silent, message_thread_id=thread, protect_content=protect, reply_markup=buttons
+                chat_id=context.chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_to_message_id=reply_to,
+                disable_notification=silent,
+                message_thread_id=thread,
+                protect_content=protect,
+                reply_markup=buttons,
+                rate_limit_args=LiveRequestFence(check),
             )
 
         try:
@@ -1584,6 +1609,8 @@ class TelegramBotChannel(TelegramChannel):
                 if markup is None or "url" not in str(error).lower():
                     raise
                 message = await send(None)
+        except DeliveryClaimRetired:
+            return None
         except Forbidden as error:
             self._failure()
             self._log_failure("sendMessage", error)
@@ -1889,6 +1916,22 @@ class TelegramBotChannel(TelegramChannel):
                     raise DeliveryClaimRetired()
 
             preview_fence = LiveRequestFence(check_human_input)
+        if current.link.agent_kind == "instance":
+            presentation_fence = preview_fence
+
+            async def check_instance_part():
+                # Preserve specialized preview/HITL checks, then make current
+                # target and policy the last awaited authorization decision.
+                if presentation_fence is not None:
+                    await presentation_fence.check()
+                latest_part = await self._services.outbox.capture_sending_part(**capture)
+                if latest_part.part != part or latest_part.item != current.item or any(getattr(latest_part.link, name) != getattr(current.link, name) for name in basis):
+                    raise DeliveryClaimRetired()
+                verdict = await self._services.eligibility(latest_part.link, latest_part.item, latest_part.part)
+                if not isinstance(verdict, DeliveryEligibility) or verdict.decision != "allow" or verdict.protect_content and not part.get("protect_content") or not self._callback_current(current.link):
+                    raise DeliveryClaimRetired()
+
+            preview_fence = LiveRequestFence(check_instance_part)
         try:
             if part["kind"] == "edit":
                 target = part.get("target_message_id")

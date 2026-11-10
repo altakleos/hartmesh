@@ -238,3 +238,15 @@ async def test_current_human_is_checked_after_the_writer_acquires_grant_locks(po
     assert disabled and response.status_code == 403
     async with api.db.sessions() as session:
         assert await session.get(TelegramInstancePolicyRow, api.instance_id) is None
+
+
+async def test_off_records_discard_intent_even_if_restored_before_reconcile(policy_api):
+    api = policy_api
+    link = await api.db.links.add(owner_user_id=api.state.owner, agent_kind="instance", agent_ref=api.instance_id, bot_id=9_000_000_001, bot_username="policy_fixture_bot", encrypted_token="wrapped-fixture", actor_id=api.state.owner)
+    assert (await api.client.put(api.path, json={"policy": "off"})).status_code == 200
+    intent = (await api.db.links.get(link.id)).notices.get("policy_discard")
+    assert isinstance(intent, str) and len(intent) == 32
+    assert (await api.client.put(api.path, json={"policy": "protected"})).status_code == 200
+    assert (await api.db.links.get(link.id)).notices["policy_discard"] == intent
+    assert (await api.client.put(api.path, json={"policy": "off"})).status_code == 200
+    assert (await api.db.links.get(link.id)).notices["policy_discard"] != intent

@@ -735,6 +735,8 @@ class TelegramSupervisor:
                 await poll.complete_pending_drop()
 
     async def _start_link(self, link: BotLink, token: str | None, *, fresh_start: bool, drop_pending: bool) -> None:
+        from app.telegram_bots.policy import pending_discard
+
         captured_revision = link.token_revision
         async with self._start_limit, self._locks[link.id]:
             retirement = self._retire_by_link.get(link.id)
@@ -767,6 +769,11 @@ class TelegramSupervisor:
                 if link is None:
                     return
                 self._observe(link, reason="policy" if target == "policy_off" else "agent")
+            if pending_discard(link) is not None and target not in {None, "held", "policy_off"}:
+                await self.links.end_pending(link.id, skip_reason="policy-off", consume_callbacks=False)
+                link = await self.links.set_health(link.id, "policy_off", holds=False, expected_token_revision=link.token_revision)
+                if link is None:
+                    return
             # A secret changes only with a restart, so one reading per process
             # settles a token: it recovers, or follows a rotation while idle.
             unread = (link.id, link.token_revision) not in self._tokens_read
@@ -836,7 +843,11 @@ class TelegramSupervisor:
                 raise
 
     def _make_poll(self, channel: TelegramBotChannel) -> PollTask:
+        from app.telegram_bots.policy import InstancePolicy, pending_discard
+
         poll = None
+        captured = channel.link
+        intent = pending_discard(captured)
 
         async def health(cause, holds):
             async with self._locks[channel.link.id]:
@@ -892,8 +903,22 @@ class TelegramSupervisor:
                 return False
             return self._copy_decision is False if mode == "confirm" else self._send_ready and not self._stopping
 
+        async def drop_complete():
+            return intent is None or await InstancePolicy(self.links.session_factory).complete_discard(captured, intent, check_current=current_pair)
+
         poll = PollTask(
-            channel, on_health=health, record=record, on_result=on_result, on_dispatch=on_dispatch, decision_pending=self._pending_copy_decision, control_allowed=control_allowed, is_current=current_pair, clock=self._clock, sleep=self._sleep
+            channel,
+            on_health=health,
+            record=record,
+            on_result=on_result,
+            on_dispatch=on_dispatch,
+            decision_pending=self._pending_copy_decision,
+            control_allowed=control_allowed,
+            is_current=current_pair,
+            on_drop_complete=drop_complete,
+            discard_intent=intent,
+            clock=self._clock,
+            sleep=self._sleep,
         )
 
         return poll
@@ -1334,12 +1359,26 @@ class TelegramSupervisor:
                 return
             preferences = await await_drained(self.settings.get(link.owner_user_id))
             quiet = await await_drained(asyncio.to_thread(silent_now, link, preferences, self.config, self._clock())) if preferences is not None else True
-            context = SendContext(link_id=link.id, chat_id=link.chat_id, binding_generation=link.binding_generation, token_revision=channel.transport_revision, purpose="optional")
+            expected_policy = {"policy.off": "off", "policy.on": "allowed", "policy.on_protected": "protected", "policy.protected": "protected", "policy.unprotected": "allowed"}.get(key)
+            context = SendContext(link_id=link.id, chat_id=link.chat_id, binding_generation=link.binding_generation, token_revision=channel.transport_revision, purpose="optional", expected_policy=expected_policy)
             render_key, paused = key, channel.link.acts_paused_since is not None
             if key == "link.conflict_over":
                 render_key += (".chat" if link.agent_kind == "lead_agent" else ".custom_agent") if paused else ".plain"
             button = await self._settings_button(link) if key == "link.conflict" or key == "link.conflict_over" and paused else None
-            message = await asyncio.wait_for(channel.send_notice(render_key, context=context, silent=silent or quiet, button=button, product=product_name(self._app_config)), STOP_TIMEOUT_SECONDS)
+            values = {"product": product_name(self._app_config)}
+            if expected_policy is not None:
+                values["name"] = (await self.authority.instance_identity(link)).name
+                if key == "policy.off":
+                    try:
+                        view = await self.authority.instance_view(link)
+                        from app.telegram_bots.authority import ceilings
+
+                        rights = await ceilings(link.owner_user_id)
+                        address = await await_drained(asyncio.to_thread(page_address, key, link, permissions=view.permissions, ceilings=rights))
+                        button = ("label.open_agent_web", address) if address else None
+                    except Exception:
+                        button = None
+            message = await asyncio.wait_for(channel.send_notice(render_key, context=context, silent=silent or quiet, button=button, **values), STOP_TIMEOUT_SECONDS)
             self._event("notice", link=link, key=key, result="sent" if message is not None else "failed")
         except asyncio.CancelledError:
             raise
@@ -1472,9 +1511,25 @@ class TelegramSupervisor:
                     if saved is not None:
                         self._observe(saved, reason="policy")
                         await self.links.end_pending(link.id, skip_reason="policy-off", consume_callbacks=False)
-                    await self._retire(link.id, reason="policy-off")
+                    try:
+                        if channel is not None and saved is not None:
+                            channel.link = saved
+                            await self._retire(link.id, reason="policy-off", close=False)
+                            await self._notice(channel, "policy.off")
+                    finally:
+                        await self._retire(link.id, reason="policy-off")
                     continue
-                if link.health == "policy_off":
+                from app.telegram_bots.policy import pending_discard
+
+                intent = pending_discard(link)
+                was_policy_off = intent is not None or link.health == "policy_off" or link.notices.get("policy", {}).get("value") == "off"
+                if intent is not None:
+                    poll = self._polls.get(link.id)
+                    if channel is not None and (poll is None or poll.discard_intent != intent):
+                        await self._retire(link.id, reason="policy-restore")
+                        channel = None
+                    await self.links.end_pending(link.id, skip_reason="policy-off", consume_callbacks=False)
+                if link.agent_kind == "instance" or link.health == "policy_off":
                     saved = await self.links.set_health(link.id, "policy_off", holds=False, expected_token_revision=link.token_revision)
                     if saved is None:
                         continue
@@ -1486,9 +1541,23 @@ class TelegramSupervisor:
                     link = saved
                 self._observe(link, reason="agent" if target == "agent_unavailable" else "recovered")
                 if channel is None:
-                    await self._launch_contained(link)
+                    await self._launch_contained(link, drop_pending=was_policy_off)
+                    channel = self.channel(link.id)
                 else:
                     channel.link = link
+                if link.agent_kind == "instance" and channel is not None:
+                    latest = await self.links.get(link.id)
+                    if latest is None or pending_discard(latest) is not None:
+                        continue
+                    link = latest
+                    try:
+                        value = await self.authority.instance_policy(link)
+                    except Exception:
+                        continue
+                    previous = link.notices.get("policy", {}).get("value", "allowed")
+                    key = ("policy.on_protected" if value == "protected" else "policy.on") if was_policy_off else ("policy.protected" if value == "protected" else "policy.unprotected")
+                    if value != "off" and (was_policy_off or value != previous):
+                        await self._notice(channel, key)
             owners = {channel.link.owner_user_id for channel, _, _ in transition_notices}
             for owner in owners:
                 notices = [entry for entry in transition_notices if entry[0].link.owner_user_id == owner]

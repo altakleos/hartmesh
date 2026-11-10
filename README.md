@@ -1973,6 +1973,9 @@ Employee Telegram policy can be read and stored through the browser-session API
 by a person with both Manage and Inspect. Personal assistants use their access
 settings instead. Persistent-agent bot creation remains unavailable while its
 delivery integration is being completed.
+Stored employee policy also governs existing instance links: protected messages
+carry Telegram's content protection, and switching Telegram off stops polling.
+Restoring it discards messages accumulated while it was off.
 
 Each person can connect a Telegram bot of their own to the ordinary chat and to each
 custom agent they own. A bot answers only that person, and its conversations are

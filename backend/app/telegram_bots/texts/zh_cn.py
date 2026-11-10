@@ -1,6 +1,12 @@
 """Simplified Chinese fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "policy.protected": "这里已关闭转发和保存。\n{name} 在这里发送的内容不能再转发或保存；{name} 主动发送的消息需点按“显示”后才能查看详情。这是 {name} 的管理者的设置。",
+    "policy.unprotected": "转发和保存已恢复。\n{name} 在这里发送的内容可以再次转发和保存，主动发送的消息会直接显示详情。此前发送的消息保持原样。这是 {name} 的管理者的设置。",
+    "policy.off": "{name} 的 Telegram 已关闭。\n这是 {name} 的管理者的设置。此聊天将不再回复。{name} 仍在 {product} 网页中。",
+    "policy.on": "{name} 的 Telegram 已恢复。\n此聊天可以再次使用。",
+    "policy.on_protected": "{name} 的 Telegram 已恢复。\n此聊天可以再次使用。{name} 在这里发送的内容不能转发或保存，主动发送的消息需点按“显示”后才能查看详情。",
+    "label.open_agent_web": "在网页中打开 {name}",
     "hello.chat": "已连接为 {email}。此聊天是 {product}。其他 Telegram 账号无法在这里发消息。\n\n可以提问或发送文件。这里的内容也会保留在 {product} 网页版中。\n\n这里的回答来自 AI，可能有误。采取行动前请核实。",
     "hello.custom_agent": "已连接为 {email}。此聊天是 {agent}，你在 {product} 中的一个自定义智能体。其他 Telegram 账号无法在这里发消息。\n"
     "\n"

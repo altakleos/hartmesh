@@ -161,7 +161,7 @@ async def test_held_target_requires_external_connection_restore_and_current_live
     assert await policy.target(held) == "held"
 
 
-async def test_instance_delivery_and_notice_protection_fail_closed_until_policy_consumer(db, current_owner):
+async def test_instance_delivery_and_notice_protection_fail_closed_without_instance_authority(db, current_owner):
     from app.telegram_bots.producer import DeliveryClaimRetired
 
     link, item = await basis(db, kind="instance")
