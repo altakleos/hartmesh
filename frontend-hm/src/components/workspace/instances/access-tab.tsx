@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { PeoplePicker } from "@/components/workspace/people-picker";
 import { usePersonNames } from "@/components/workspace/person-name";
+import { TelegramPolicySection } from "@/components/workspace/telegram/policy-section";
 import * as api from "@/core/agent-instances/api";
 import {
   agentBlock,
@@ -159,6 +160,7 @@ function AccessControls() {
       >
         {copy.add}
       </Button>
+      <TelegramPolicySection instance={instance} />
       {adding && (
         <PeoplePicker
           disabled={disabled}

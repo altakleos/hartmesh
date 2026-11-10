@@ -52,8 +52,7 @@ person to sign-in from the browser through `RedirectToLogin`, because a layout
 receives no query. `qrcode.react` is imported only by `qr-code.tsx`, behind the
 dynamic set-up host, so it stays out of the workspace's first load.
 
-`TelegramPolicySection` is prepared for the employee Access tab; activation is
-separate. Only current company Manage+Inspect with `agents:read` reads policy;
+`TelegramPolicySection` follows Add a colleague on the employee Access tab. Only current company Manage+Inspect with `agents:read` reads policy;
 `agents:write` enables Save, including while Telegram is off. Off requires the
 connected-count confirmation. Account, role, ceilings, instance and grant changes
 remount the controls and abort owned reads/actions; a late response cannot toast
@@ -76,7 +75,7 @@ protection sentence. `TelegramRemovedNotices` retains rendered deletion notices
 until settings closes, acknowledges each only on a visible Channels page, and
 never consumes an unknown reason. Its owned acknowledgement aborts on retirement.
 
-Prepared instance controls share `instanceConnectBlock` for section, policy,
+Instance controls share `instanceConnectBlock` for section, policy,
 Use, lifecycle, kind count, execution and quota precedence. A paused instance or
 busy Home alone does not prevent connecting. Full discovery reads both custody
 lists through their last 100-row page before interpreting absence as lost access;
@@ -84,7 +83,9 @@ partial/retired discovery is never published. Instance-detail reads use a
 QueryClient-owned four-request pool; queued reads retire before admission. Page
 controls are account/role/ceiling scoped. Employee rename/delete notes read current
 manager policy counts; personal notes use only the reader's own connected bot and
-never call that company-only route. Page controls remain unmounted pending activation. The Settings list and setup
+never call that company-only route. Header Connect/state, rename/delete notes and the bound-chat welcome tip mount
+these controls. Keep Telegram Connect and employee policy independent of the
+page’s general execution/Home-busy disabling. The Settings list and setup
 share current availability; Done skips targets whose fresh detail refuses Connect.
 Setup faults supersede Done, while healthy connected rows retain it. Token calls
 own component/account cancellation and drop results after Use or policy retirement. Initial bot-list failure shows a failure sentence, not endless loading.

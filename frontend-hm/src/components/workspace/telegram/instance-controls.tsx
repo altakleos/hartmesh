@@ -120,7 +120,7 @@ export function TelegramConnectNotice({
   }
 }
 
-/** Prepared header controls; mounting is a separate activation change. */
+/** Header controls share the same current availability as Settings. */
 export function TelegramInstanceConnect({
   instance,
 }: {

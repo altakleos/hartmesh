@@ -51,6 +51,7 @@ rs.mock("@/core/agents/api", () => ({
   listAgents: rs.fn().mockResolvedValue([]),
 }));
 rs.mock("next/navigation", () => ({
+  usePathname: () => "/workspace/instances",
   useSearchParams: () =>
     new URLSearchParams("instance=" + "a".repeat(32) + "&tab=" + state.tab),
   useRouter: () => ({ push: state.push, replace: rs.fn() }),

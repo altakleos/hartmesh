@@ -33,7 +33,7 @@ import {
   useRefreshTelegramBots,
 } from "@/core/telegram-bots/hooks";
 
-/** Prepared independently of page activation. The service still checks current Manage. */
+/** Employee Access policy; the service still checks current Manage. */
 export function TelegramPolicySection({
   instance,
 }: {
