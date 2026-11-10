@@ -154,3 +154,21 @@ async def test_retry_handoff_never_awaits_a_callback_or_enqueues_after_malformed
     with pytest.raises(RuntimeError):
         await e.coordinator.retry(old, e.link, on_reserved=malformed)
     assert not entered and e.bus.inbound_queue.empty()
+
+
+async def test_saved_ordinary_refusal_before_optional_instance_scope_still_validates(coordinator_environment):
+    from test_telegram_publication_primary import _primary
+
+    from app.telegram_bots.callbacks import CallbackRepository
+    from app.telegram_bots.producer import _item, validate_publication_outcome
+
+    e = coordinator_environment
+    record = await e.coordinator.dispatch(e.link, e.origins, thread_id=e.thread_id)
+    message = e.bus.get_inbound_nowait()
+    e.bus.inbound_task_done()
+    refusal = capture_creation_refusal(message.execution_context, ChannelExecutionBusyError())
+    attempt = await e.host.capture(e.link, thread_id=e.thread_id, endpoint_id=e.http.endpoint_id)
+    identity = await e.outbox.plan_publication_outcome(record, creation_refusal=refusal, source_ref={"key": "busy.gave_up", "values": {}}, keyboard=[], callbacks=CallbackRepository(e.db.sessions), guard=attempt.read_guard)
+    item = _item(await _primary(e.db, identity))
+    item.payload["turn_outcome_basis"]["proof"]["scope"].pop("instance_id")
+    assert validate_publication_outcome(item).kind == "creation_refusal"

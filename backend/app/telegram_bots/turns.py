@@ -847,7 +847,7 @@ class ChatTurns:
         await self.services.outbox.plan_product_keyboard(
             turn.link,
             source_id="capacity:" + turn.record.turn_id,
-            parts=[{"kind": "text", "source_ref": {"key": failure.text_key, "values": {}}, "reply_to_message_id": turn.origins[0].message_id}],
+            parts=[{"kind": "text", "source_ref": await self._source(turn, failure.text_key), "reply_to_message_id": turn.origins[0].message_id}],
             keyboard=self._button("cancel_wait", turn.record.turn_id),
             callbacks=self.services.callbacks,
             guard=self._guard(turn),
@@ -888,7 +888,7 @@ class ChatTurns:
         return now - turn.quiet_since >= (self.services.config.queue.max_wait_seconds if limit is None else limit)
 
     async def _publication_outcome(self, turn, key, *, run=None, refusal=None, undeliverable=False):
-        from app.telegram_bots.publication import conversation_button
+        from app.telegram_bots.publication import conversation_button, failure_button
 
         source = await self._source(turn, key)
         on_web = key == "answer.on_web"
@@ -902,7 +902,7 @@ class ChatTurns:
             callbacks=self.services.callbacks,
             guard=self._guard(turn),
             undeliverable=undeliverable,
-            url_button=await conversation_button(turn.link, turn.record) if on_web else None,
+            url_button=await conversation_button(turn.link, turn.record) if on_web else await failure_button(self.services, turn.link, key),
         )
 
     async def _settle_cancelled_inputs(self, turn):

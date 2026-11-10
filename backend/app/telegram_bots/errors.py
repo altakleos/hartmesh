@@ -13,6 +13,18 @@ from deerflow.runtime.runs.terminal import MODEL_REFUSED_STOP_REASON
 RUN_STOP_REASONS: Mapping[str, str] = MappingProxyType(
     {"sandbox_capacity_exceeded": "busy.queued", "files-full": "chat.files_full", "orphan_recovered": "refused.interrupted", "gateway_stopped": "chat.restarted", MODEL_REFUSED_STOP_REASON: "error.model_refused"}
 )
+INSTANCE_RUN_STOP_REASONS: Mapping[str, str] = MappingProxyType(
+    {
+        "busy": "busy.queued",
+        "starting-elsewhere": "busy.starting_elsewhere",
+        "run-limit": "busy.two_conversations",
+        "restarting": "refused.restarting",
+        "storage-busy": "refused.files_busy",
+        "start-failed": "start.ws_failed",
+        "files-full": "refused.files_full",
+    }
+)
+CAPACITY_KEYS = frozenset({"busy.queued", "busy.thread", "busy.starting_elsewhere", "busy.two_conversations"})
 STORAGE_REFERENCE_WORDS: Mapping[str, str] = MappingProxyType(
     {
         "disk-too-small": "disk-too-small",
@@ -68,6 +80,9 @@ def classify_run(run: ValidatedRun, scope: ChannelExecutionScope) -> TurnFailure
             return None
         if reason in {"orphan_recovered", "gateway_stopped"}:
             return TurnFailure(RUN_STOP_REASONS[reason])
+        if status == "error" and scope.instance_id is not None and reason in INSTANCE_RUN_STOP_REASONS:
+            key = INSTANCE_RUN_STOP_REASONS[reason]
+            return TurnFailure(key, key in CAPACITY_KEYS)
         if status == "error" and reason in RUN_STOP_REASONS:
             return TurnFailure(RUN_STOP_REASONS[reason], reason == "sandbox_capacity_exceeded")
         # An externally interrupted run is not evidence of this chat's Stop.

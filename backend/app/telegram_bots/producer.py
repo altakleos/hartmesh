@@ -29,6 +29,7 @@ from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 
 from app.telegram_bots.api_logging import log_call_failure
 from app.telegram_bots.config import TelegramBotsConfig
+from app.telegram_bots.errors import CAPACITY_KEYS, INSTANCE_RUN_STOP_REASONS
 from app.telegram_bots.links import BotLink
 from app.telegram_bots.token_pattern import TOKEN_IN_TEXT
 from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow, TelegramOutboxRow
@@ -53,6 +54,7 @@ _URL_SOURCES = {
     "custom_agent.deleted": ("web.telegram", "label.open_telegram"),
     "chat.restarted": ("web.conversation", "label.open_conversation"),
     "answer.on_web": ("web.conversation", "label.open_conversation"),
+    "refused.files_full": ("web.files", "label.open_files"),
 }
 _TRANSPORT_RECEIPTS = frozenset({"sent_at", "dispatched_at", "unavailable_reason", "invalid_token_verification_pending", "url_button_fallback", "plain_fallback"})
 _PART_IDENTITY = frozenset({"part_id", "presentation_version", "ordinal", "state", "message_ids"})
@@ -185,7 +187,8 @@ _TURN_OUTCOME_KEYS = frozenset(
 _NO_RUN_KEYS = frozenset({"error.generic", "busy.cancelled", "chat.restarted"})
 _UNDELIVERABLE_KEYS = frozenset({"answer.on_web", "error.generic"})
 _DELETED_SOURCE = {"key": "chat.conversation_deleted", "values": {}}
-INPUT_OUTCOME_KEYS = (_TURN_OUTCOME_KEYS - {"answer.on_web", "busy.queued", "busy.thread"}) | {"custom_agent.deleted", "busy.followup_full", "voice.failed"}
+_TURN_OUTCOME_KEYS |= frozenset(INSTANCE_RUN_STOP_REASONS.values())
+INPUT_OUTCOME_KEYS = (_TURN_OUTCOME_KEYS - {"answer.on_web"} - CAPACITY_KEYS) | {"custom_agent.deleted", "busy.followup_full", "voice.failed"}
 
 
 @dataclass(frozen=True)
@@ -212,13 +215,15 @@ def _prepare_publication_outcome(record, *, run, creation_refusal, source_ref, u
     if (run is None) == (creation_refusal is None) or type(source_ref) is not dict or set(source_ref) != {"key", "values"}:
         raise ValueError("publication-outcome-conflict") from None
     scope = record.scope
-    execution = ChannelExecutionScope(record.publication_id, scope.owner_user_id, scope.connection_id, str(scope.chat_id), scope.thread_id, scope.endpoint_id, scope.assistant_id, scope.agent_name)
+    execution = ChannelExecutionScope(
+        record.publication_id, scope.owner_user_id, scope.connection_id, str(scope.chat_id), scope.thread_id, scope.endpoint_id, scope.assistant_id, scope.agent_name, instance_id=scope.agent_ref if scope.agent_kind == "instance" else None
+    )
     if undeliverable:
         if run is None or run.row.get("status") != "success" or classify_run(run, execution) is not None or source_ref["key"] not in _UNDELIVERABLE_KEYS:
             raise ValueError("publication-outcome-conflict") from None
         return _safe_json({"version": 1, "publication": _publication_identity(record), "proof": {"kind": "undeliverable", "row": dict(run.row)}, "source_ref": source_ref, "finish_route": True})
     classified = classify_run(run, execution) if run is not None else classify_creation_refusal(creation_refusal, execution)
-    if classified is None or source_ref["key"] != classified.text_key and not (classified.retry_later and source_ref["key"] in {"busy.gave_up", "busy.cancelled"}) or source_ref["key"] in {"busy.queued", "busy.thread"}:
+    if classified is None or source_ref["key"] != classified.text_key and not (classified.retry_later and source_ref["key"] in {"busy.gave_up", "busy.cancelled"}) or source_ref["key"] in CAPACITY_KEYS:
         raise ValueError("publication-outcome-conflict") from None
     proof = {"kind": "run", "row": dict(run.row)} if run is not None else {"kind": "creation_refusal", "scope": asdict(execution)}
     return _safe_json({"version": 1, "publication": _publication_identity(record), "proof": proof, "source_ref": source_ref, "finish_route": True})
@@ -245,7 +250,17 @@ def validate_publication_outcome(item: OutboxItem) -> PublicationOutcomeBasis:
         )
         if (item.link_id, item.owner_user_id, item.binding_generation, item.chat_id, item.dedupe_key, item.class_) != (scope.link_id, scope.owner_user_id, scope.binding_generation, scope.chat_id, "reply:" + record.turn_id, "reply"):
             raise ValueError
-        execution = ChannelExecutionScope(record.publication_id, scope.owner_user_id, scope.connection_id, str(scope.chat_id), scope.thread_id, scope.endpoint_id, scope.assistant_id, scope.agent_name)
+        execution = ChannelExecutionScope(
+            record.publication_id,
+            scope.owner_user_id,
+            scope.connection_id,
+            str(scope.chat_id),
+            scope.thread_id,
+            scope.endpoint_id,
+            scope.assistant_id,
+            scope.agent_name,
+            instance_id=scope.agent_ref if scope.agent_kind == "instance" else None,
+        )
         if proof.get("kind") == "run" and set(proof) == {"kind", "row"}:
             run = ValidatedRun(MappingProxyType(proof["row"]), receipt_from_run_kwargs(proof["row"].get("kwargs")))
             classified = classify_run(run, execution)
@@ -257,7 +272,12 @@ def validate_publication_outcome(item: OutboxItem) -> PublicationOutcomeBasis:
             if proof["row"].get("status") != "success" or classify_run(run, execution) is not None or source["key"] not in _UNDELIVERABLE_KEYS:
                 raise ValueError
         elif proof.get("kind") == "creation_refusal" and set(proof) == {"kind", "scope"}:
-            if _canonical_primary(proof["scope"]) != _canonical_primary(asdict(execution)) or source["key"] not in {"busy.gave_up", "busy.cancelled"}:
+            saved_scope = proof["scope"]
+            # Ordinary outcomes written before optional instance binding remain
+            # readable. An instance proof must explicitly name its binding.
+            if type(saved_scope) is dict and "instance_id" not in saved_scope and execution.instance_id is None:
+                saved_scope = {**saved_scope, "instance_id": None}
+            if _canonical_primary(saved_scope) != _canonical_primary(asdict(execution)) or source["key"] not in {"busy.gave_up", "busy.cancelled"}:
                 raise ValueError
         elif proof.get("kind") == "before_dispatch_stop" and set(proof) == {"kind", "stop_id"}:
             if (
@@ -278,10 +298,10 @@ def validate_publication_outcome(item: OutboxItem) -> PublicationOutcomeBasis:
                 raise ValueError
         else:
             raise ValueError
-        if type(source) is not dict or set(source) != {"key", "values"} or source["key"] not in _TURN_OUTCOME_KEYS or source["key"] in {"busy.queued", "busy.thread"}:
+        if type(source) is not dict or set(source) != {"key", "values"} or source["key"] not in _TURN_OUTCOME_KEYS or source["key"] in CAPACITY_KEYS:
             raise ValueError
         parts = item.payload["product_basis"]["parts"]
-        button = parts[0].get("url_button") if source["key"] == "answer.on_web" else None
+        button = parts[0].get("url_button") if source["key"] in {"answer.on_web", "refused.files_full"} else None
         if button is not None:
             url_button_label(source, button)
         if _canonical_primary({"parts": parts}) != _canonical_primary({"parts": [{"kind": "text", "source_ref": source, **({"url_button": button} if button is not None else {})}]}):

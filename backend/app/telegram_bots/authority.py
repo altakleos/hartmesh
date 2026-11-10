@@ -199,7 +199,7 @@ class TelegramAuthority:
             raise AuthorityUnavailable
         return await agents.get(actor=PrincipalRef("human", link.owner_user_id), instance_id=link.agent_ref, permission=AgentPermission.USE)
 
-    async def instance_send_policy(self, link: BotLink, *, require_use: bool, bound: bool = True, require_inspect: bool = False, expected_lifecycle: str | None = None) -> str:
+    async def instance_send_policy(self, link: BotLink, *, require_use: bool, bound: bool = True, require_inspect: bool = False, require_manage: bool = False, expected_lifecycle: str | None = None) -> str:
         """Final point-in-time grant, target, policy and discard decision.
 
         Live host authority is checked first. The final joined SQL statement
@@ -263,6 +263,8 @@ class TelegramAuthority:
                     )
                     if actual != expected_lifecycle or getattr(getattr(self.app, "state", None), "agent_instances", None) is not agents:
                         raise AuthorityUnavailable
+                if require_manage and (not permissions or not permissions & int(AgentPermission.MANAGE)):
+                    raise AgentDenied("The current Telegram manager action is unavailable")
                 if require_inspect and (not permissions or not permissions & int(AgentPermission.INSPECT)):
                     raise AgentDenied("The current Telegram presentation is unavailable")
                 if require_use and getattr(getattr(self.app, "state", None), "agent_instances", None) is not agents:
@@ -394,7 +396,10 @@ class TelegramAuthority:
 
             async def allowed():
                 role_visible = any(value.get("source_ref", {}).get("key") in {"hello.assistant", "hello.employee", "help.agent"} and value.get("source_ref", {}).get("values", {}).get("role") for value in selected)
-                value = await self.instance_send_policy(current, require_use=target == "ok", require_inspect=bool(role_visible)) if current.agent_kind == "instance" else "allowed"
+                files_replies = [value for value in selected if value.get("source_ref", {}).get("key") == "refused.files_full"]
+                files_link = any(value.get("url_button", {}).get("page") == "web.files" for value in files_replies)
+                manager_text = any(value.get("source_ref", {}).get("values", {}).get("reader_is_manager") is True for value in files_replies)
+                value = await self.instance_send_policy(current, require_use=target == "ok", require_inspect=bool(role_visible) or files_link, require_manage=manager_text or files_link) if current.agent_kind == "instance" else "allowed"
                 if value == "off":
                     return DeliveryEligibility.skip("policy-off")
                 if value == "restoring":

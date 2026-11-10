@@ -173,7 +173,17 @@ class RunObserver:
             state.attempt = attempt
             if attempt.cancel_guard is not None:
                 state.cancel_guard = _Guard(self, state, attempt.cancel_guard)
-            execution = ChannelExecutionScope(state.record.publication_id, scope.owner_user_id, scope.connection_id, str(scope.chat_id), scope.thread_id, scope.endpoint_id, scope.assistant_id, scope.agent_name)
+            execution = ChannelExecutionScope(
+                state.record.publication_id,
+                scope.owner_user_id,
+                scope.connection_id,
+                str(scope.chat_id),
+                scope.thread_id,
+                scope.endpoint_id,
+                scope.assistant_id,
+                scope.agent_name,
+                instance_id=scope.agent_ref if scope.agent_kind == "instance" else None,
+            )
             state.facade = ChannelExecutionFacade(self.http_owner, scope=execution, admission=_Admission(self, state, attempt.admission), capture_output=True, capture_inventory=True, inventory_document_version=2)
         return state.facade
 
