@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+import pytest_asyncio
 from _telegram_bot_test_support import ManualClock
 from _telegram_repository_test_support import add_link, rows
 from _telegram_repository_test_support import db as db
@@ -32,6 +33,41 @@ REFUSED = {
     "host-changed": dict(config=TelegramBotsConfig(), environ=GOOD, verdict="host_changed"),
     "polled-elsewhere": dict(config=TelegramBotsConfig(), environ=GOOD, verdict="polled_elsewhere"),
 }
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def retention_wait_diagnostics(request, capsys, caplog):
+    """Keep coroutine waits visible when CI's thread dump only shows an idle loop."""
+    phase = SimpleNamespace(name="setup")
+
+    async def watch():
+        while True:
+            await asyncio.sleep(60)
+            with capsys.disabled():
+                print(f"\nRetention wait: {request.node.nodeid}; phase={phase.name}", flush=True)
+                for task in asyncio.all_tasks():
+                    if task is asyncio.current_task():
+                        continue
+                    # No task names, locals, object reprs or exception messages: those
+                    # may carry caller input. Only code locations describe the wait.
+                    current, seen = task.get_coro(), set()
+                    locations = []
+                    while current is not None and id(current) not in seen:
+                        seen.add(id(current))
+                        frame = getattr(current, "cr_frame", None) or getattr(current, "gi_frame", None)
+                        if frame is not None:
+                            locations.append(f"{frame.f_code.co_filename}:{frame.f_lineno}:{frame.f_code.co_name}")
+                        current = getattr(current, "cr_await", None) or getattr(current, "gi_yieldfrom", None)
+                    print("await: " + " -> ".join(locations), flush=True)
+                failures = sum("copy_latch_write_failed" in record.getMessage() for record in caplog.records)
+                print(f"copy_latch_write_failed count={failures}", flush=True)
+
+    task = asyncio.create_task(watch())
+    try:
+        yield phase
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 class Verdict:
@@ -173,16 +209,20 @@ async def test_a_start_that_goes_wrong_stops_the_bots_and_not_the_sweeps(db, mon
     assert not SWEEP_TASKS & {task.get_name() for task in asyncio.all_tasks()}
 
 
-async def test_a_copy_found_while_running_stops_the_bots_and_not_the_sweeps(db, monkeypatch):
+async def test_a_copy_found_while_running_stops_the_bots_and_not_the_sweeps(db, monkeypatch, retention_wait_diagnostics):
     e = environment(db, monkeypatch)
     link, _token = await credential(db, e.env)
     await seed_aged_rows(db, link, e.clock.now())
     try:
+        retention_wait_diagnostics.name = "start"
         await e.supervisor.start()
+        retention_wait_diagnostics.name = "latch"
         await e.supervisor._latch_copy_conflict()
+        retention_wait_diagnostics.name = "sweep"
         assert e.supervisor.cause() == "polled-elsewhere"
         e.clock.advance(3600)
         await swept_all(db)
     finally:
+        retention_wait_diagnostics.name = "stop"
         await stop_environment(e)
     assert not SWEEP_TASKS & {task.get_name() for task in asyncio.all_tasks()}
