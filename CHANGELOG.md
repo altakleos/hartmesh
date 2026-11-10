@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Connect personal Telegram bots to AI assistants and AI employees with current
+  chat access. Instance pages and Telegram Settings show connection state,
+  current availability, shared-reader notices and the effects of rename/deletion.
+- Let employee managers allow Telegram, protect messages from forwarding/saving,
+  or turn it off. Existing connections follow current policy and access; retained
+  deliveries recheck their original conversation, recipient and file permissions.
+- Add `/assistants` and `/employees` to the ordinary bot. Instance chats support
+  messages, saved files, questions and manager-authorized site permission cards;
+  starting and managing assignments remains on the web.
+
+### Reliability
+
+- Preserve instance input/file receipts and original output evidence across
+  cancellation and restart. Recover saved delivery without rerunning a completed
+  turn or repeating a confirmed file write. Explain lifecycle, startup and
+  capacity failures with explicit retry where permitted.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.55.
+
+### Configuration and deployment
+
+- No configuration migration is required; the configuration version remains 66.
+  Connected bots receive the updated command menu at their first start.
+- An earlier release that already supported Telegram bots may use a database
+  written by this release only with `HARTMESH_TELEGRAM=off`, and only temporarily:
+  its retention cleanup still runs and recognizes only the older records. Leave
+  Telegram off until this release is installed again, or restore the pre-upgrade
+  snapshot. See the [rollback instructions](deploy/compose/README.md#upgrading-and-rolling-back).
+
 ## [2.2.0+hartmesh.55] - 2026-11-10
 
 ### Upstream adoption

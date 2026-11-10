@@ -579,7 +579,8 @@ borrows the capacity writer for locked instance/grant and policy checks on the
 same service/engine. Final human/service authority follows every capacity read.
 Same-bot token repair keeps current Use checks but remains available during
 policy/execution holds or archival; a different-bot replacement uses new-setup
-rules. Exact committed replacement receipts still settle without fresh mutation. Suspended instances remain connectable;
+rules. Exact committed replacement receipts still settle without fresh mutation.
+Suspended instances remain connectable;
 provisioning, deleted and archived instances do not. No readiness/provider read
 opens another session inside that writer. Profile version 2 adds the ordinary
 bot’s assistant/employee menu entries; instance/custom menus retain their scope.

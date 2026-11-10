@@ -2064,15 +2064,15 @@ run's structured error. Repair replies offer Files to readers who can inspect it
 and keep the original message for an explicit retry. Provider names use the public
 product identity; native diagnostic text is never included.
 
-Each person can connect a Telegram bot of their own to the ordinary chat and to each
-custom agent they own. A bot answers only that person, and its conversations are
+Each person can connect a Telegram bot of their own to the ordinary chat, their
+custom agents, and AI assistants or AI employees they can chat with. A bot answers only that person, and its conversations are
 ordinary conversations that also appear on the web. The Compose bundle offers this
 unless `HARTMESH_TELEGRAM=off`. Its [README](deploy/compose/README.md#telegram-bots)
 covers the keys, the secret that protects bot tokens, the operator's commands, the log
 and what is kept.
 
-Bots are managed under **Settings → Telegram**, which lists one row for the ordinary
-chat and for each custom agent. **Connect Telegram** walks through BotFather, the token
+Bots are managed under **Settings → Telegram**, which lists the ordinary
+chat, accessible AI assistants and AI employees, and custom agents. **Connect Telegram** walks through BotFather, the token
 and pressing Start; the Telegram entry in the sidebar, a card on the new-chat page and
 a button on a custom agent's card lead to the same place. A link a bot sends can be
 opened signed out: after sign-in the person lands on the page it named. The
@@ -2107,7 +2107,8 @@ prompt asks first before it becomes new input, and a button press that cannot ac
 why.
 
 **Files.** Photos and documents are saved as a file added on the web is, in the
-person's own Space when Storage Spaces are on. A caption sends the file with the
+person's own Space when Storage Spaces are on, or in the instance's Home for an
+AI assistant or AI employee. A caption sends the file with the
 message; a file without a caption waits for the next message in the same chat and topic
 for up to 24 hours. Albums, split long messages and forwarded material keep their
 order. Unavailable storage, oversized files and failed saves each get their own notice,

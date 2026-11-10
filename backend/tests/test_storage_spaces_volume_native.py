@@ -1122,14 +1122,48 @@ def test_full_filesystem_edit_leaves_the_existing_file_intact(backing):
     assert not list(volume.control_path.glob("stage-*"))
 
 
+def _backing_allocation_facts(catalog, volume):
+    """Failure-only fixture evidence: numeric metadata and scoped mount options."""
+    facts = {"expected_bytes": volume.spec.max_bytes}
+    paths = {"image": volume.spec.image_path, "disk": catalog.data_disk, "mount": volume.spec.mount_path}
+    for label, path in paths.items():
+        try:
+            value = path.stat(follow_symlinks=False)
+            facts[label] = {key: getattr(value, key) for key in ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_blocks", "st_uid", "st_gid")}
+        except OSError as error:
+            facts[label] = {"errno": error.errno}
+    from deerflow.spaces.backings import _mount_record
+
+    mounts = {}
+    for label in ("disk", "mount"):
+        descriptor = None
+        try:
+            descriptor = os.open(paths[label], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            record = _mount_record(descriptor)
+            mounts[label] = {"mount_id": record["mount_id"], "device": record["device"], "filesystem": record["type"], "options": sorted(record["options"])}
+        except (OSError, BackingUnavailable) as error:
+            mounts[label] = {"error": type(error).__name__}
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+    facts["mounts"] = mounts
+    return facts
+
+
 def test_private_backup_growth_counts_against_the_same_bound(backing):
     volume = backing[1]
+    before = _backing_allocation_facts(backing[0], volume)
     with pytest.raises(OSError) as raised:
         with (volume.control_path / "retained-backup").open("wb", buffering=0) as backup:
             while True:
                 backup.write(b"x" * (1 << 20))
     assert raised.value.errno == errno.ENOSPC
-    assert backing[0].verify(volume.spec.slot_id, previous=volume).available_bytes < 1 << 20
+    try:
+        qualified = backing[0].verify(volume.spec.slot_id, previous=volume)
+    except BackingUnavailable as error:
+        facts = {"before": before, "after": _backing_allocation_facts(backing[0], volume)}
+        raise AssertionError("Backing qualification after private ENOSPC: " + json.dumps(facts, sort_keys=True)) from error
+    assert qualified.available_bytes < 1 << 20
     backing[0].verify_reserve()
 
 
