@@ -184,3 +184,27 @@ write drains through cancellation so seekable content remains owned until the
 file effect and its receipt settle. Native limits still require the storage CI
 tier. The input journal, bounded transport and saved retry controls own operation
 IDs and bytes outside this bridge; they must be integrated before bot activation.
+
+
+`file_puts.FilePuts` journals an exact admitted SDK descriptor before downloading.
+Its stable Act identity derives from the link, provider file identity and original
+message; only file identifiers and metadata persist. Its closed target records
+the original instance principal, generation, definition and Home ID/generation.
+A replacement target refuses receipt reuse and retry instead of rebinding a path. Current custody guards each
+journal writer, while the direct file boundary independently authorizes the actual
+Home effect. The installed instance of this service must be shared by handlers:
+its per-Act lock owns download, native write, bounded retry and lease cleanup.
+
+Only `file-write-failed` repeats until the configured deadline; workflow file
+maintenance repeats once; an invalid name gets one fallback under `rename`.
+An actual adopted `file_retry` button targeting the Act allocates `retry:2`, then
+`retry:3`, and so on, and consumes its group in the same writer. Redelivery reads
+the saved result. An interrupted call becomes uncertain and waits for a new press;
+there is no file Act recovery worker. Attempt/operation comparisons reject stale
+outcomes, and a saved completion wins over a late error. The byte lease survives
+native work and repeated cancellation. Callback IDs in the closed continuation
+identify completed presses, not delivery dependencies: no extra outbox retention
+pin is needed. The 400-day Act sweep deletes validated done/refused file journals,
+including those whose link was removed; uncertain and malformed records stay.
+The adapter must still install the service, render its results,
+attach composer metadata and integrate captionless files before activation.
