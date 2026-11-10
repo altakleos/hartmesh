@@ -425,24 +425,33 @@ class SpaceFiles:
         with volume.filesystem() as filesystem:
             return call(filesystem)
 
-    async def _read(self, *, actor, space_id, permission, call):
+    async def _read(self, *, actor, space_id, permission, call, controller_admission=None):
         async def perform():
             async with self.registry.admitted(actor=actor, requests={space_id: (permission, None)}) as (session, rows):
                 volume = await self._volume(session, rows[space_id][0])
-                return await run_file_io(self._io, volume, call)
+                if controller_admission is not None:
+                    await controller_admission(session, rows)
+                result = None
+                try:
+                    result = await run_file_io(self._io, volume, call)
+                    if controller_admission is not None:
+                        await controller_admission(session, rows)
+                    return result
+                finally:
+                    result = None
 
         return await await_drained(perform())
 
     async def read(self, *, actor: PrincipalRef, space_id: str, path: str, max_bytes: int) -> bytes:
         return await self._bounded_read(actor=actor, space_id=space_id, permission=Permission.READ, path=path, max_bytes=max_bytes)
 
-    async def export_file(self, *, actor: PrincipalRef, space_id: str, path: str, max_bytes: int = MAX_TRANSFER_BYTES) -> bytes:
-        return await self._bounded_read(actor=actor, space_id=space_id, permission=Permission.READ | Permission.EXPORT, path=path, max_bytes=max_bytes)
+    async def export_file(self, *, actor: PrincipalRef, space_id: str, path: str, max_bytes: int = MAX_TRANSFER_BYTES, controller_admission=None) -> bytes:
+        return await self._bounded_read(actor=actor, space_id=space_id, permission=Permission.READ | Permission.EXPORT, path=path, max_bytes=max_bytes, controller_admission=controller_admission)
 
-    async def _bounded_read(self, *, actor, space_id, permission, path, max_bytes):
+    async def _bounded_read(self, *, actor, space_id, permission, path, max_bytes, controller_admission=None):
         for attempt in range(2):
             try:
-                return await self._read(actor=actor, space_id=space_id, permission=permission, call=lambda fs: fs.read_bytes(path, max_bytes=max_bytes))
+                return await self._read(actor=actor, space_id=space_id, permission=permission, call=lambda fs: fs.read_bytes(path, max_bytes=max_bytes), controller_admission=controller_admission)
             except FileConflict as exc:
                 if attempt or str(exc) != "File changed during its bounded read; retry":
                     raise

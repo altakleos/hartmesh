@@ -169,6 +169,16 @@ recovery's to end.
 
 ## Instance file writes
 
+`instance_file_exports.prepare_file_export` separately authorizes outbound files
+as the bound human. Current Use and Inspect precede original Home READ/EXPORT;
+exports never require execution readiness or consult a resident. A final joined
+snapshot under the Space writer checks the binding, instance and Home generations,
+current grants, policy and live account before and after native reads. The same
+authorization can be repeated without reading bytes at the SDK dispatch boundary.
+Native work drains through repeated cancellation. This bridge supplies read
+authority only: the sender must still own its claimed original output source,
+reserve its byte budget before export and retain it through transport cleanup.
+
 `instance_file_authority.prepare_file_write` owns current Use before execution
 readiness and Home diagnostics. It captures the installed same-engine instance
 and file services, original instance/Home generations and Telegram binding.
