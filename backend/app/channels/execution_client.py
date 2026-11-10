@@ -22,6 +22,8 @@ from deerflow.runtime.runs.output import OUTPUT_CAPTURE_KEY, capture_intent_to_d
 from deerflow.utils.file_io import await_drained
 
 FRAME_AUTHORIZE_SECONDS = 1.0
+RUN_ERROR_MAX_FRAMES = 65536
+RUN_ERROR_TIMEOUT_SECONDS = 30
 
 
 def _refuse():
@@ -545,6 +547,42 @@ class ChannelExecutionFacade:
         if after_event_id is not None and (type(after_event_id) is not str or not after_event_id or len(after_event_id) > 256 or not after_event_id.isprintable()):
             _refuse()
         return _JoinedRunStream(self, run_id, after_event_id)
+
+    async def get_run_error(self, run_id: str):
+        """Read bounded structured error facts for this exact error-status run.
+
+        No text is classified, no POST is issued and a partial/conflicting replay
+        cannot establish evidence. Absence of a supported shape returns None.
+        """
+        from app.channels.run_errors import _issue_run_error, error_facts
+
+        run_id = _identity(run_id)
+        original = await self._require_publication_run(run_id)
+        if original.row["status"] != "error":
+            return None
+        stream = self.join_run(run_id)
+        try:
+            async with asyncio.timeout(RUN_ERROR_TIMEOUT_SECONDS):
+                seen, facts, count = False, None, 0
+                async for part in stream:
+                    count += 1
+                    if count > RUN_ERROR_MAX_FRAMES or part.event == "gap":
+                        _refuse()
+                    if part.event != "error":
+                        continue
+                    current = error_facts(part.data)
+                    if seen and current != facts:
+                        _refuse()
+                    seen, facts = True, current
+                final = await self._require_publication_run(run_id)
+                if final.row["status"] != "error" or final.receipt != original.receipt:
+                    _refuse()
+        except TimeoutError:
+            _refuse()
+        finally:
+            await await_drained(stream.aclose())
+        self._check_current("run_read")
+        return _issue_run_error(self.scope, run_id, facts) if facts is not None else None
 
     async def get_run_output(self, run_id: str) -> RunOutputProjection | RunOutputProjectionV2 | None:
         run_id = _identity(run_id)
