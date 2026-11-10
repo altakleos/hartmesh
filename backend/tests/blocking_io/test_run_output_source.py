@@ -30,4 +30,6 @@ async def test_actual_sql_projection_owns_cold_account_preparation(route_environ
     record, _ = await seed(route_environment)
     response = await get(route_environment, record.run_id)
     assert response.status_code == 200 and response.json()["state"] == "complete"
-    assert len(workers) == 2 and all(worker != main for worker in workers)
+    # The outer route and inner source each check the current account before
+    # and after their awaited reads; all four cold checks stay off-loop.
+    assert len(workers) == 4 and all(worker != main for worker in workers)
