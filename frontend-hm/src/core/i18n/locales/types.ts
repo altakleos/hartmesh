@@ -2179,7 +2179,13 @@ export interface Translations {
     card: {
       state: (values: { state: string }) => string;
     };
+    page: {
+      label: string;
+      renameNote: (values: { name: string }) => string;
+      deleteNote: (values: { name: string; count: number }) => string;
+    };
     action: {
+      settings: string;
       connect: string;
       open: string;
       openChat: (values: { name: string }) => string;
@@ -2196,6 +2202,7 @@ export interface Translations {
       useHere: string;
     };
     offer: {
+      tip: (values: { name: string }) => string;
       chatTitle: string;
       chatBody: string;
       /** For a tenant with a company name, which the product's name does not replace here. */

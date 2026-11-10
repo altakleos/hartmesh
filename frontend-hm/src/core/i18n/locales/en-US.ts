@@ -2770,7 +2770,15 @@ export function createEnUS(product: string): Translations {
       card: {
         state: ({ state }) => `Telegram: ${state}`,
       },
+      page: {
+        label: "Telegram",
+        renameNote: ({ name }) =>
+          `Renaming ${name} also renames ${name}'s Telegram bots.`,
+        deleteNote: ({ name, count }) =>
+          `${count} Telegram ${count === 1 ? "bot" : "bots"} connected to ${name} ${count === 1 ? "stops" : "stop"} answering.`,
+      },
       action: {
+        settings: "Telegram settings",
         connect: "Connect Telegram",
         open: "Open in Telegram",
         openChat: ({ name }) => `Open chat with ${name}`,
@@ -2787,6 +2795,7 @@ export function createEnUS(product: string): Translations {
         useHere: "Use it here",
       },
       offer: {
+        tip: ({ name }) => `Chat with ${name} on Telegram.`,
         chatTitle: `Take ${product} with you`,
         chatBody: `Chat with ${product} on Telegram: ask, send files and get answers on your phone. A few minutes to set up.`,
         companyTitle: "Take this chat with you",
