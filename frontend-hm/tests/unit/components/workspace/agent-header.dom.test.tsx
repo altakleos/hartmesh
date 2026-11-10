@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test, rs } from "@rstest/core";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   cleanup,
   fireEvent,
@@ -6,6 +7,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import type { ReactNode } from "react";
 
 const state = rs.hoisted(() => ({
   feature: {
@@ -16,7 +18,11 @@ const state = rs.hoisted(() => ({
   },
   push: rs.fn(),
 }));
-rs.mock("next/navigation", () => ({ useRouter: () => ({ push: state.push }) }));
+rs.mock("next/navigation", () => ({
+  useRouter: () => ({ push: state.push }),
+  usePathname: () => "/workspace/instances",
+  useSearchParams: () => new URLSearchParams(),
+}));
 rs.mock("@/core/auth/AuthProvider", () => ({
   useAuth: () => ({
     user: { id: "reader", system_role: "user", permissions: ["threads:write"] },
@@ -63,13 +69,23 @@ function instance(): api.AgentInstanceDetail {
     execution: { execution: "ready", reason: null },
   };
 }
+const clients: QueryClient[] = [];
 function show(agent = instance(), pending = false) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  clients.push(client);
   return render(
     <I18nProvider initialLocale="en-US">
       <FileActionLifetimeProvider>
         <AgentHeader instance={agent} lifecyclePending={pending} />
       </FileActionLifetimeProvider>
     </I18nProvider>,
+    {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    },
   );
 }
 beforeEach(() => {
@@ -84,7 +100,10 @@ beforeEach(() => {
     .mockReset()
     .mockResolvedValue({ thread_id: "new" });
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  clients.splice(0).forEach((client) => client.clear());
+});
 test("shows a named AI identity, readable access levels and idle state", () => {
   show();
   expect(screen.getByText("Your AI assistant")).toBeDefined();

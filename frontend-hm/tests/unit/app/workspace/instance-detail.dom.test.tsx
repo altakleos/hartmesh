@@ -17,6 +17,7 @@ const state = rs.hoisted(() => ({
   work: rs.fn(),
 }));
 rs.mock("next/navigation", () => ({
+  usePathname: () => "/workspace/instances",
   useSearchParams: () => new URLSearchParams(state.query),
   useRouter: () => ({ replace: state.replace, push: rs.fn() }),
 }));
