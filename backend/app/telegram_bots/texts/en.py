@@ -53,7 +53,7 @@ TEXTS: dict[str, str] = {
     "label.open_agent_web": "Open {name} on the web",
     "hello.chat": "Connected as {email}. This chat is {product}. No other Telegram account can write here.\n"
     "\n"
-    "Ask anything or send a file. Everything here is also kept in {product} on the web.\n"
+    "Ask anything or send a file. Everything here is also kept in {product} on the web. /assistants shows your AI assistants, and /employees the AI employees you can chat with.\n"
     "\n"
     "Answers here come from an AI and can be wrong. Check anything you will act on.",
     "hello.custom_agent": "Connected as {email}. This chat is {agent}, one of your custom agents in {product}. No other Telegram account can write here.\n"
@@ -72,6 +72,8 @@ TEXTS: dict[str, str] = {
     "\n"
     "In this chat:\n"
     "- write, or send a file, a photo or a voice note\n"
+    "- /assistants shows your AI assistants and opens their chats\n"
+    "- /employees shows the AI employees you can chat with and opens their chats\n"
     "- /new starts a new conversation\n"
     "- /stop stops the current answer\n"
     "- /settings sets the language\n"
@@ -188,6 +190,7 @@ TEXTS: dict[str, str] = {
     "new.kept": "Kept. This conversation goes on.",
     "new.in_topic": "/new works in the main chat, not in a topic.",
     "new.files_full": "Your files are full, so a new conversation cannot start. Delete files or old conversations in {product} on the web, then try again. If that is not enough, ask {support} for more room.",
+    "cmd.other_chat": "This is the ordinary chat. /assistants and /employees open the chats of AI assistants and AI employees. Start and manage assignments on the web.",
     "cmd.unknown": "/{command} is not a command in this chat. Tap the menu button to see the commands.",
     "cmd.agent": "This chat is always {name}. Each custom agent has a separate chat.",
     "cmd.skill_off": "The skill /{skill} is switched off.",
@@ -273,6 +276,8 @@ TEXTS: dict[str, str] = {
     "label.open_files": "Open Files",
     "label.form_field": "{label}",
     "label.choice": "{label}",
+    "menu.assistants": "Your AI assistants",
+    "menu.employees": "AI employees you can chat with",
     "menu.new": "Start a new conversation",
     "menu.stop": "Stop the current answer",
     "menu.settings": "Language",

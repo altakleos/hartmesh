@@ -12,7 +12,7 @@ legacy-channel closure; an absent environment key means on. See
 Keep bot network, supervisor and router startup outside configuration loading.
 Use socket-free transports and synthetic credentials in offline tests.
 
-Product text lives in `texts/` in English and Chinese; keep stage-one keys equal
+Product text lives in `texts/` in English and Chinese; keep locale keys equal
 and copy English wording from the design. `render` escapes values; `render_plain`
 preserves them for plain labels/alerts. `markdown` accepts only Telegram markup,
 and `split` counts visible UTF-16 units while retaining balanced tags and complete
@@ -40,8 +40,9 @@ their message in the writer that spends them.
 Inspect gates details and Attention owns recipient eligibility. Semantic lines
 fit both locales and render in the current language. `agent_list_authority.py`
 joins owner/role limits/binding/targets/Open-bots/claim in the final SDK check.
-Stale lists retire without blocking later messages. `handle_list` remains
-unmounted until the public activation change.
+Stale lists retire without blocking later messages. Ordinary bots dispatch
+`/assistants` and `/employees` to `handle_list`; their Work words only point to
+those chats. Instance/custom bots do not acquire these ordinary-chat commands.
 
 `commands.py` handles fixed navigation and language settings only. A command closes
 only a typing prompt; `/new` and `/stop` also end the forms and cards in scope.
@@ -301,7 +302,9 @@ Try again in line included; both an unbind and a hold end one. The startup read 
 `next_after`, and a late answer held for its person's choice is not on it.
 
 `links.py` owns capacity and connection transactions. Capacity changes lock the
-deployment singleton, then owner settings, then links in ID order. SQLite takes
+deployment singleton, optional target instance/grants, owner settings, then links
+in ID order. Target admission precedes owner link locks to agree with policy
+writers; optional final confirmation follows flush and capacity reads. SQLite takes
 `BEGIN IMMEDIATE` before any read. Retain the writer's initial deployment/owner
 counts through nested remove/add helpers so net-zero replacements keep their
 place after limits fall. First settings, link, event and code commit together.
@@ -570,6 +573,15 @@ before changing `publication_authority.py`, `policy.py`, `presentation.py`,
 `roles.py`, or instance delivery.
 Lifecycle deletion requires a confirmed deleted row; missing service authority
 keeps the link. Public profile target evidence lives in `notices.profile_target`.
-The browser add route remains closed pending complete files and presentation.
+Browser setup requires current Use, employee policy and execution readiness
+before token inspection. It repeats preflight after the token roundtrip, then
+borrows the capacity writer for locked instance/grant and policy checks on the
+same service/engine. Final human/service authority follows every capacity read.
+Same-bot token repair keeps current Use checks but remains available during
+policy/execution holds or archival; a different-bot replacement uses new-setup
+rules. Exact committed replacement receipts still settle without fresh mutation. Suspended instances remain connectable;
+provisioning, deleted and archived instances do not. No readiness/provider read
+opens another session inside that writer. Profile version 2 adds the ordinary
+bot’s assistant/employee menu entries; instance/custom menus retain their scope.
 
 Managed turns run with `recursion_limit` 1000 (`EXECUTION_RUN_CONFIG` in `app/channels/manager.py`), matching web chats and scheduled runs; a configured channel session value overrides it and the Gateway clamps to `max_recursion_limit`.

@@ -72,6 +72,8 @@ _REFUSALS = {
     "too-many-codes": (429, "Five of your bots are waiting for Start."),
     "no-conflict": (409, "This bot has nothing to acknowledge."),
     "manage-required": (403, "You must manage this AI employee and be able to see all its work."),
+    "policy-off": (409, "A manager turned Telegram off for this AI employee."),
+    "execution-unavailable": (409, "AI assistants and AI employees cannot run on this deployment right now."),
     "agent-personal": (409, "An AI assistant's owner controls who can reach it through its access settings."),
 }
 
@@ -351,7 +353,7 @@ async def _inspect(supervisor, sent: str, *, takeover: bool):
     return token, bot_id, username
 
 
-async def _target(request: Request, owner: str, kind, ref) -> None:
+async def _target(request: Request, owner: str, kind, ref, *, writer=None, expected_service=None, creating=True):
     from deerflow.config.agents_config import load_agent_config
 
     if type(kind) is not str or type(ref) is not str or not ref or kind not in {"lead_agent", "custom_agent", "instance"}:
@@ -361,11 +363,81 @@ async def _target(request: Request, owner: str, kind, ref) -> None:
             raise Refusal("agent-not-found")
         return
     if kind == "instance":
-        raise Refusal("agent-not-found")  # AI assistants and AI employees arrive in a later stage.
+        return await _instance_target(request, owner, ref, writer=writer, expected_service=expected_service, creating=creating)
     try:
         await await_drained(asyncio.to_thread(load_agent_config, ref, user_id=owner))
     except Exception:
         raise Refusal("agent-not-found") from None
+
+
+async def _instance_target(request, owner, ref, *, writer=None, expected_service=None, creating=True):
+    """Use precedes policy/readiness; the final writer borrows current grant authority."""
+    from app.gateway.storage_spaces import require_execution
+    from app.telegram_bots.policy import POLICIES, InstancePolicy
+    from deerflow.agent_instances.contract import AgentDenied, AgentPermission, ExecutionUnavailable
+    from deerflow.agent_instances.service import AgentInstances
+    from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow, AgentInstanceRow
+    from deerflow.persistence.telegram_bots.model import TelegramInstancePolicyRow
+    from deerflow.spaces.contract import PrincipalRef
+
+    await _require(request, "agents:read")
+    agents = getattr(request.app.state, "agent_instances", None)
+    if type(agents) is not AgentInstances or expected_service is not None and agents is not expected_service:
+        raise Refusal("agent-not-found")
+    if agents.directory.session_factory.kw.get("bind") is not _links(request).session_factory.kw.get("bind"):
+        raise Refusal("agent-not-found")
+    actor = PrincipalRef("human", owner)
+    try:
+        if writer is None:
+            view = await agents.get(actor=actor, instance_id=ref, permission=AgentPermission.USE)
+        else:
+            # The instance lock is also the policy writer's first lock. Reading
+            # an absent policy here cannot race an off upsert past this commit.
+            view = await writer.scalar(select(AgentInstanceRow).where(AgentInstanceRow.id == ref).with_for_update())
+            grant = await writer.scalar(select(AgentInstanceGrantRow).where(AgentInstanceGrantRow.instance_id == ref, AgentInstanceGrantRow.user_id == owner).with_for_update())
+            if not callable(getattr(agents.directory.human, "in_session", None)):
+                raise Refusal("agent-not-found")
+            if grant is None or not grant.permissions & int(AgentPermission.USE):
+                raise Refusal("agent-not-found")
+    except AgentDenied:
+        raise Refusal("agent-not-found") from None
+    if view is None or view.status not in ({"active", "suspended"} if creating else {"active", "suspended", "archived"}):
+        raise Refusal("agent-not-found")
+    if creating and view.custody == "company":
+        if writer is None:
+            policy = await InstancePolicy(_links(request).session_factory).get(ref)
+        else:
+            row = await writer.get(TelegramInstancePolicyRow, ref)
+            policy = row.policy if row is not None else "allowed"
+        if policy not in POLICIES or policy == "off":
+            raise Refusal("policy-off")
+    if creating and writer is None:
+        try:
+            await require_execution(request.app, ref)
+        except ExecutionUnavailable as refusal:
+            raise Refusal("execution-unavailable", execution_reason=refusal.extra["execution_reason"]) from None
+    if writer is not None:
+        await _confirm_instance_target(request, owner, agents, writer)
+    if getattr(request.app.state, "agent_instances", None) is not agents:
+        raise Refusal("agent-not-found")
+    return agents
+
+
+async def _confirm_instance_target(request, owner, agents, writer):
+    """Final borrowed account authority after target/owner/capacity reads."""
+    from deerflow.agent_instances.contract import AgentDenied
+    from deerflow.spaces.contract import PrincipalRef
+
+    _live(request)
+    await _require(request, "threads:write", "runs:create", "agents:read")
+    if getattr(request.app.state, "agent_instances", None) is not agents:
+        raise Refusal("agent-not-found")
+    try:
+        await agents._human(PrincipalRef("human", owner), session=writer)
+    except AgentDenied:
+        raise Refusal("agent-not-found") from None
+    if getattr(request.app.state, "agent_instances", None) is not agents:
+        raise Refusal("agent-not-found")
 
 
 @router.get("")
@@ -586,7 +658,7 @@ async def add_bot(request: Request, owner: str = Depends(_caller)) -> dict:
         raise Refusal("invalid-request")
     await _require(request, "threads:write", "runs:create", *(("agents:read",) if kind == "instance" else ()))
     supervisor = _live(request)
-    await _target(request, owner, kind, ref)
+    target_service = await await_drained(_target(request, owner, kind, ref))
     timezone, locale = None, None
     if await supervisor.settings.get(owner) is None:
         if "timezone" not in body:
@@ -595,9 +667,22 @@ async def add_bot(request: Request, owner: str = Depends(_caller)) -> dict:
         locale = _locale(body.get("locale", "en-US"))
     token, bot_id, username = await _inspect(supervisor, body["token"], takeover=takeover)
     encrypted = await supervisor.encrypt_token(bot_id, token)
+    if kind == "instance":
+        await _require(request, "threads:write", "runs:create", "agents:read")
+        _live(request)
+        await await_drained(_target(request, owner, kind, ref, expected_service=target_service))
     links = supervisor.links
+
+    async def admit(session):
+        _live(request)
+        await _require(request, "threads:write", "runs:create", "agents:read")
+        await await_drained(_target(request, owner, kind, ref, writer=session, expected_service=target_service))
+
+    async def confirm(session):
+        await await_drained(_confirm_instance_target(request, owner, target_service, session))
+
     try:
-        async with links.capacity_writer(owner, timezone=timezone, locale=locale) as session:
+        async with links.capacity_writer(owner, timezone=timezone, locale=locale, **({"admit": admit, "confirm": confirm} if kind == "instance" else {})) as session:
             link = await links.add(owner_user_id=owner, agent_kind=kind, agent_ref=ref, bot_id=bot_id, bot_username=username, encrypted_token=encrypted, actor_id=owner, session=session)
             connect = await links.mint_code(link, session=session)
     except BotLinked as refusal:
@@ -638,7 +723,7 @@ async def replace_token(link_id: str, request: Request, owner: str = Depends(_ca
         token = match.group(0)
         if receipt is None:
             current = await _own(request, link_id, owner)
-            await _target(request, owner, current.agent_kind, current.agent_ref)
+            target_service = await await_drained(_target(request, owner, current.agent_kind, current.agent_ref, creating=False))
             token, bot_id, username = await _inspect(supervisor, body["token"], takeover=takeover)
             comparison = {}
             if bot_id == current.bot_id:
@@ -647,6 +732,20 @@ async def replace_token(link_id: str, request: Request, owner: str = Depends(_ca
                     raise Refusal("token-same")
                 comparison = {"token_changed": same is False, "expected_token_revision": current.token_revision} if same is not None else {}
             encrypted = await supervisor.encrypt_token(bot_id, token)
+            creating = bot_id != current.bot_id
+            if current.agent_kind == "instance":
+                await _require(request, "threads:write", "runs:create", "agents:read")
+                _live(request)
+                await await_drained(_target(request, owner, current.agent_kind, current.agent_ref, expected_service=target_service, creating=creating))
+
+            async def admit(session):
+                _live(request)
+                await _require(request, "threads:write", "runs:create", "agents:read")
+                await await_drained(_target(request, owner, current.agent_kind, current.agent_ref, writer=session, expected_service=target_service, creating=creating))
+
+            async def confirm(session):
+                await await_drained(_confirm_instance_target(request, owner, target_service, session))
+
             try:
                 receipt = await links.replace_from_token(
                     owner_user_id=owner,
@@ -655,6 +754,7 @@ async def replace_token(link_id: str, request: Request, owner: str = Depends(_ca
                     request_digest=digest,
                     validated_bot={"id": bot_id, "username": username, "take_over_webhook": takeover, **comparison},
                     encrypted_token=encrypted,
+                    **({"check_current": admit, "check_final": confirm} if current.agent_kind == "instance" else {}),
                 )
             except BotLinked as refusal:
                 raise _bot_linked(refusal, await _linked_name(request, bot_id)) from None

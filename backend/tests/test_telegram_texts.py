@@ -1,4 +1,4 @@
-"""Stage-one Telegram product wording and complete presentation contracts."""
+"""Telegram product wording and complete presentation contracts."""
 
 import re
 from string import Formatter
@@ -44,7 +44,7 @@ INSTANCE_PRESENTATION_KEYS = frozenset("hello.assistant hello.employee help.agen
 POLICY_KEYS = frozenset({"policy.off", "policy.on", "policy.on_protected", "policy.protected", "policy.unprotected"})
 
 
-AGENT_LIST_KEYS = frozenset("assistants.list assistants.none assistants.colleagues employees.list employees.none agents.line_work agents.line_idle agents.line_plain agents.more agents.presentation".split())
+AGENT_LIST_KEYS = frozenset("cmd.other_chat assistants.list assistants.none assistants.colleagues employees.list employees.none agents.line_work agents.line_idle agents.line_plain agents.more agents.presentation".split())
 
 
 def test_text_catalog_locales_have_equal_keys():
@@ -83,16 +83,20 @@ def test_chat_texts_use_no_internal_term():
         assert not re.search(r"\bruns?\b", verbs_removed)
 
 
-def test_localized_templates_keep_the_same_placeholders_and_stage_one_wording():
+def test_localized_templates_keep_the_same_placeholders_and_current_commands():
     def placeholders(text):
         return {name for _, name, _, _ in Formatter().parse(text) if name}
 
     for key, english in catalog("en").items():
         assert placeholders(english) == placeholders(catalog("zh-CN")[key])
         assert "!" not in english
-    assert "/assistants" not in catalog("en")["hello.chat"]
-    assert "/assistants" not in catalog("en")["help.chat"]
+    for locale in ("en", "zh-CN"):
+        for key in ("hello.chat", "help.chat"):
+            assert "/assistants" in catalog(locale)[key] and "/employees" in catalog(locale)[key]
     assert "- /settings sets the language" in catalog("en")["help.chat"]
+    for locale in ("en", "zh-CN"):
+        for key in ("help.agent", "help.custom_agent"):
+            assert "/assistants" not in catalog(locale)[key] and "/employees" not in catalog(locale)[key]
 
 
 def test_chat_texts_name_no_storage_term_and_no_size():

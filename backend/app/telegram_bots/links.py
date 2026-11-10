@@ -1,6 +1,6 @@
 """Durable bot ownership, capacity and binding transactions.
 
-Capacity changes serialize deployment -> owner -> sorted links. Connection-only
+Capacity changes serialize deployment -> optional target admission -> owner -> sorted links. Connection-only
 writers start at the owner and never acquire deployment capacity afterward.
 Borrowed helpers only use their caller's session and leave its commit to it.
 """
@@ -14,7 +14,7 @@ import math
 import re
 import secrets
 import sqlite3
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, fields, replace
@@ -506,13 +506,17 @@ class BotLinkRepository:
         await session.execute(select(TelegramBotLinkRow).where(TelegramBotLinkRow.owner_user_id == owner).order_by(TelegramBotLinkRow.id).with_for_update().execution_options(populate_existing=True))
 
     @asynccontextmanager
-    async def capacity_writer(self, owner_user_id: str, *, timezone: str | None = None, locale: str | None = None) -> AsyncIterator[AsyncSession]:
+    async def capacity_writer(self, owner_user_id: str, *, timezone: str | None = None, locale: str | None = None, admit: Callable[[AsyncSession], Awaitable[None]] | None = None, confirm: Callable[[AsyncSession], Awaitable[None]] | None = None) -> AsyncIterator[AsyncSession]:
         async with self._transaction() as session:
             if session.get_bind().dialect.name == "postgresql":
                 await session.execute(_insert(session)(TelegramDeploymentRow).values(id=1, host_id=None, polling_state="running", adopted_at=None, updated_at=_now()).on_conflict_do_nothing(index_elements=["id"]))
                 await session.scalar(select(TelegramDeploymentRow).where(TelegramDeploymentRow.id == 1).with_for_update())
             else:
                 await session.execute(_insert(session)(TelegramDeploymentRow).values(id=1, host_id=None, polling_state="running", adopted_at=None, updated_at=_now()).on_conflict_do_nothing(index_elements=["id"]))
+            if admit is not None:
+                # Target policy writers lock instance/grants before bot links.
+                # Their admission must precede the owner's sorted link locks.
+                await admit(session)
             await self._owner_lock(session, owner_user_id, timezone=timezone, locale=locale)
             baseline = await self._counts(session, owner_user_id)
             session.info[_WRITER] = (self, owner_user_id, baseline)
@@ -520,6 +524,10 @@ class BotLinkRepository:
                 yield session
                 await session.flush()
                 self._capacity(await self._counts(session, owner_user_id), baseline)
+                if confirm is not None:
+                    # No further reads may carry this final authority past a
+                    # later observation; transaction commit follows directly.
+                    await confirm(session)
             finally:
                 session.info.pop(_WRITER, None)
 
@@ -1757,7 +1765,7 @@ class BotLinkRepository:
         async with self.session_factory() as session:
             return await self._receipt(session, owner_user_id, operation_id, request_digest)
 
-    async def replace_from_token(self, *, owner_user_id: str, old_link_id: str, operation_id: str, request_digest: str, validated_bot: dict, encrypted_token: str) -> dict:
+    async def replace_from_token(self, *, owner_user_id: str, old_link_id: str, operation_id: str, request_digest: str, validated_bot: dict, encrypted_token: str, check_current: Callable[[AsyncSession], Awaitable[None]] | None = None, check_final: Callable[[AsyncSession], Awaitable[None]] | None = None) -> dict:
         """Commit one idempotent token repair or net-zero bot replacement.
 
         ``validated_bot`` carries getMe's id/username. A ``token_changed=True``
@@ -1766,12 +1774,26 @@ class BotLinkRepository:
         this repository performs no network call and returns no connect code.
         """
         self._operation(operation_id, request_digest)
+
+        async def admission(session):
+            # A committed exact receipt settles metadata even after authority
+            # changes. Only a first mutation requires target admission.
+            if check_current is not None and await self._receipt(session, owner_user_id, operation_id, request_digest) is None:
+                await check_current(session)
+
+        fresh = False
+
+        async def confirmation(session):
+            if fresh and check_final is not None:
+                await check_final(session)
+
         async with self._health_lock(old_link_id):
             changed_link = None
-            async with self.capacity_writer(owner_user_id) as session:
+            async with self.capacity_writer(owner_user_id, **({"admit": admission} if check_current is not None else {}), **({"confirm": confirmation} if check_final is not None else {})) as session:
                 previous = await self._receipt(session, owner_user_id, operation_id, request_digest)
                 if previous is not None:
                     return previous
+                fresh = True
                 row = await self._locked(session, old_link_id)
                 if row.owner_user_id != owner_user_id:
                     raise ValueError("link-not-found")

@@ -44,7 +44,7 @@ TEXTS: dict[str, str] = {
     "policy.on": "{name} 的 Telegram 已恢复。\n此聊天可以再次使用。",
     "policy.on_protected": "{name} 的 Telegram 已恢复。\n此聊天可以再次使用。{name} 在这里发送的内容不能转发或保存，主动发送的消息需点按“显示”后才能查看详情。",
     "label.open_agent_web": "在网页中打开 {name}",
-    "hello.chat": "已连接为 {email}。此聊天是 {product}。其他 Telegram 账号无法在这里发消息。\n\n可以提问或发送文件。这里的内容也会保留在 {product} 网页版中。\n\n这里的回答来自 AI，可能有误。采取行动前请核实。",
+    "hello.chat": "已连接为 {email}。此聊天是 {product}。其他 Telegram 账号无法在这里发消息。\n\n可以提问或发送文件。这里的内容也会保留在 {product} 网页版中。/assistants 显示你的 AI 助手，/employees 显示你可以聊天的 AI 员工。\n\n这里的回答来自 AI，可能有误。采取行动前请核实。",
     "hello.custom_agent": "已连接为 {email}。此聊天是 {agent}，你在 {product} 中的一个自定义智能体。其他 Telegram 账号无法在这里发消息。\n"
     "\n"
     "可以提问或发送文件。这里的内容也会保留在 {product} 网页版中。\n"
@@ -57,7 +57,7 @@ TEXTS: dict[str, str] = {
     "hello.again": "此聊天已连接。发送 /help 查看能做什么。",
     "stranger": "这是私人机器人，只回答连接它的人。",
     "stranger.waiting": "此机器人尚未连接。如果这是你的机器人，请使用网页版中的“打开聊天”按钮，再按 Start。",
-    "help.chat": "这是你的 {product} 机器人。\n\n在此聊天中：\n- 发消息，或发送文件、照片或语音消息\n- /new 开始新对话\n- /stop 停止当前回答\n- /settings 设置语言\n- 在斜杠后输入技能名称，可为一条消息使用该技能",
+    "help.chat": "这是你的 {product} 机器人。\n\n在此聊天中：\n- 发消息，或发送文件、照片或语音消息\n- /assistants 显示你的 AI 助手并打开他们的聊天\n- /employees 显示你可以聊天的 AI 员工并打开他们的聊天\n- /new 开始新对话\n- /stop 停止当前回答\n- /settings 设置语言\n- 在斜杠后输入技能名称，可为一条消息使用该技能",
     "help.custom_agent": "这是 {agent}，你在 {product} 中的一个自定义智能体。\n\n在此聊天中：\n- 发消息，或发送文件、照片或语音消息\n- /new 开始新对话\n- /stop 停止当前回答\n- 在斜杠后输入技能名称，可为一条消息使用该技能",
     "privacy.full": (
         "关于此聊天与 Telegram\n\n这里发送的所有内容，包括文件和语音消息，都经过 Telegram，并保留在你的 Telegram 账号中，直到你将其删除。"
@@ -155,6 +155,7 @@ TEXTS: dict[str, str] = {
     "new.kept": "已保留。继续此对话。",
     "new.in_topic": "/new 只能在主聊天中使用，不能在话题中使用。",
     "new.files_full": "你的文件已满，无法开始新对话。请在 {product} 网页版删除文件或旧对话，然后重试。如果仍不够，请联系{support}增加容量。",
+    "cmd.other_chat": "这是普通聊天。/assistants 和 /employees 可以打开 AI 助手和 AI 员工的聊天。请在网页上开始和管理任务。",
     "cmd.unknown": "/{command} 不是此聊天的命令。请点菜单按钮查看命令。",
     "cmd.agent": "此聊天始终是 {name}。每个自定义智能体都有独立的聊天。",
     "cmd.skill_off": "技能 /{skill} 已关闭。",
@@ -240,6 +241,8 @@ TEXTS: dict[str, str] = {
     "label.open_files": "打开文件",
     "label.form_field": "{label}",
     "label.choice": "{label}",
+    "menu.assistants": "你的 AI 助手",
+    "menu.employees": "你可以聊天的 AI 员工",
     "menu.new": "开始新对话",
     "menu.stop": "停止当前回答",
     "menu.settings": "语言",

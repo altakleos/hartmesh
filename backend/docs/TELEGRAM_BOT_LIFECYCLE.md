@@ -136,8 +136,13 @@ retain only fixed status delivery; generic web Inspect reads are broader. The bo
 joined link, binding, owner, Use/Inspect provenance and policy/discard snapshot.
 The HTTP binding projection must agree; metadata is never an instance identity.
 The channel scope carries the instance ID separately from custom-agent names and
-adds the owner's stored time zone to human-message context. The browser add route
-still refuses instance targets until files and presentation paths are qualified.
+adds the owner's stored time zone to human-message context. Browser setup checks
+current Use, employee policy and execution readiness before token inspection;
+the atomic writer locks instance/grants before owner links and checks policy.
+Final human/service authority is reread after all capacity reads. Same-bot token
+repair needs current Use but remains available during policy/execution holds or
+archival; swapping to a different bot uses new-setup admission.
+Setup keeps suspended instances connectable without reserving a workspace.
 
 `policy.py` stores employee Telegram settings in the existing policy table. Its
 reads and upserts drain admitted SQL through cancellation. Browser policy routes
@@ -239,8 +244,9 @@ non-manager), always including a colleague's assistant. `page_permissions` suppl
 fresh grants and route ceilings to the shared URL builder; web routes still own
 actual authorization. Instance slash words never fall through to custom skills.
 Public profiles use only host name/custody metadata, with no role or owner label.
-Instance menus currently contain new/stop/settings/help. The profile version
-stays unchanged until the complete menu and public instance setup are activated.
+Instance menus contain new/stop/settings/help. Profile version 2 adds assistants
+and employees before new/stop/settings/help on ordinary bots; custom bots keep
+new/stop/help. Existing links receive owed menus at their next start.
 
 `profile.py` owns a bot's public name, descriptions, menu and picture. `ProfileSync`
 borrows each running client and owns no worker: the supervisor runs `push_owed` at
