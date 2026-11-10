@@ -30,3 +30,8 @@ def show_web_page(page: WebPageKey, runtime: ToolRuntime[dict | None]) -> ToolMe
         content="A link to this page is shown with your reply where this chat can show one. Say in one sentence what the page is for. Do not write an address.",
         artifact={"web_page": {"version": 1, "kind": "web_page", "key": page}},
     )
+
+
+def chat_tools(execution: AgentExecution) -> list:
+    """Tools for a normal conversation with an AI assistant or AI employee."""
+    return [show_web_page]

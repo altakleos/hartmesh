@@ -93,6 +93,8 @@ loop before model/tool calls, including isolated child loops and worker threads.
 never an address or reader authority. Agent-only pages require host `AgentExecution`;
 custom-agent chats cannot offer memory. Clients resolve links and recheck access.
 The tool returns a plain `ToolMessage` so the conversation continues.
+`chat_tools(execution)` registers it for normal instance conversations in lead
+assembly, before tool authorization; Work attempts and subagents do not receive it.
 
 Workspace refusal types in `contract.py` use the existing `Refusal` HTTP envelope.
 All eight `ResidentUnavailable` subclasses default to 409, including workspace
