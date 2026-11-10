@@ -16,6 +16,9 @@ from test_telegram_agent_list_delivery import (
     test_lost_use_never_reaches_the_raw_sdk as test_lost_use_never_reaches_the_raw_sdk,
 )
 from test_telegram_agent_list_source import (
+    lists as list_environment,  # noqa: F401 -- pytest resolves the renamed fixture by argument.
+)
+from test_telegram_agent_list_source import (
     test_cancellation_at_final_owner_read_retains_complete_list_unit as test_cancellation_at_final_owner_read_retains_complete_list_unit,
 )
 from test_telegram_instance_presentation import presentation as presentation
