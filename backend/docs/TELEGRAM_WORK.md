@@ -34,7 +34,15 @@ capping six recipient buttons. Information needs Use+Inspect; decisions/reviews
 need Manage+Inspect. The latest wrong recipient is excluded; names, never IDs,
 label choices. `Acts.route` serializes body capture and exact receipt recovery;
 HumanInput's borrowed admission fences binding/account/policy at commit. Routing
-grants no access and ignores the action pause. Presentation/handlers stay dormant.
+grants no access and ignores the action pause. `work_routing_delivery.py` freezes initial recipient selection in a closed V5
+request basis. Its dedicated source requires current manager authority and a
+final joined snapshot of every candidate's grants and account state, including
+the current recipient before wrong-person exclusion. No password hashes enter
+that compact projection. Full ACK alone arms the final button group. Protected
+notifications show only a teaser; ordinary question recovery cannot turn routing
+into an answer prompt. Routing-specific reveal/refresh, selected-recipient
+admission and reply-owned follow-ups remain prerequisites for installation.
+Presentation/handlers stay dormant.
 
 `work_interactions.py` renders complete unsubmitted confirmation/prompt views.
 Its closed JSON state retains normalized text and the displayed `seen` basis;
@@ -206,8 +214,9 @@ complete Telegram ACK. Collected outbox history cannot republish an acknowledged
 phase; pending deliveries retain their action through cleanup. Obsolete unsent
 plans can be replaced while their captured input remains unfinished.
 
-This planner and source remain uninstalled. Source-aware relocation/protection
-repair is an activation prerequisite: generic replacement holds these frozen
+This planner and source remain uninstalled. Source-aware protection repair is
+an activation prerequisite; assignment topics and their relocation belong to
+the later topic feature. For either replacement, generic replacement holds these frozen
 plans with `work-outcome-refresh-required`, preserving ACKed parts, original
 input and action identity. It cannot silently move them or replay the prefix.
 The full controller still owns fresh-request and routing follow-ups, explicit

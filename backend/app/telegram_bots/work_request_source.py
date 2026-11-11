@@ -80,9 +80,10 @@ def frozen(captured, *, acknowledged=False):
             | ({"reveal", "cleanup_id"} if basis.get("version") in {2, 3, 4} else set())
             | ({"interaction", "origin"} if basis.get("version") in {3, 4} else set())
             | ({"input"} if basis.get("version") == 4 else set())
+            | ({"routing"} if basis.get("version") == 5 else set())
             | ({"prompt_id"} if basis.get("version") == 3 and type(basis.get("interaction")) is dict and basis["interaction"].get("view") == "prompt" else set())
             or type(basis["version"]) is not int
-            or basis["version"] not in {1, 2, 3, 4}
+            or basis["version"] not in {1, 2, 3, 4, 5}
         ):
             raise ValueError()
         if (
@@ -103,7 +104,12 @@ def frozen(captured, *, acknowledged=False):
             raise ValueError()
         data = basis["source"]
         source = WorkRequestRead(**{**data, "responses": tuple(data["responses"])})
-        if source.request["instance_id"] != captured.link.agent_ref or captured.link.agent_kind != "instance" or source.request["work_id"] != source.work["id"] or source.request["recipient_id"] != captured.link.owner_user_id:
+        if (
+            source.request["instance_id"] != captured.link.agent_ref
+            or captured.link.agent_kind != "instance"
+            or source.request["work_id"] != source.work["id"]
+            or (basis["version"] != 5 and source.request["recipient_id"] != captured.link.owner_user_id)
+        ):
             raise ValueError()
         if (captured.item.instance_id, captured.item.work_id, captured.item.request_id) != (source.request["instance_id"], source.work["id"], source.request["id"]):
             raise ValueError()
@@ -139,6 +145,23 @@ def frozen(captured, *, acknowledged=False):
             presentation = present_interaction(source, basis["interaction"], locale=basis["locale"])
             if basis["interaction"]["view"] == "prompt" and (type(basis["prompt_id"]) is not str or len(basis["prompt_id"]) != 32 or any(ch not in "0123456789abcdef" for ch in basis["prompt_id"])):
                 raise ValueError()
+        elif basis["version"] == 5:
+            from app.telegram_bots.work_routing import RoutingRead, present_routing
+
+            routing = basis["routing"]
+            if captured.item.payload["presentation_version"] != 0 or captured.item.message_thread_id is not None:
+                raise ValueError()
+            if (
+                type(routing) is not dict
+                or set(routing) != {"recipients", "after_wrong", "public_base_url"}
+                or type(routing["after_wrong"]) is not bool
+                or type(routing["recipients"]) is not list
+                or (routing["public_base_url"] is not None and type(routing["public_base_url"]) is not str)
+            ):
+                raise ValueError()
+            presentation = present_routing(
+                RoutingRead(source, tuple(routing["recipients"]), routing["after_wrong"]), locale=basis["locale"], link=captured.link, public_base_url=routing["public_base_url"], concealed=basis["concealed"], outbox_id=captured.item.id
+            )
         else:
             presentation = present_request(source, locale=basis["locale"], concealed=basis["concealed"], outbox_id=captured.item.id)
         if reveal is not None and len(presentation.parts) > 1 and cleanup_id is None:
@@ -208,6 +231,8 @@ def frozen(captured, *, acknowledged=False):
 
 
 class WorkRequestSources:
+    projection_type = None
+
     def __init__(self, *, reader, outbox, callbacks, recovery=None):
         self.recovery = recovery
         self.reader, self.outbox, self.callbacks = reader, outbox, callbacks
@@ -217,6 +242,8 @@ class WorkRequestSources:
 
     async def _prepare(self, captured):
         basis, source, part = frozen(captured)
+        if basis["version"] == 5:
+            raise ProductSourceRetired()
         current = await self.reader.read_request(captured.link, source.request["id"])
         if current.request["state"] != "pending" or current.request["needs_routing"]:
             raise ProductSourceRetired()
@@ -256,7 +283,7 @@ class WorkRequestSources:
             if settings is None:
                 raise DeliveryClaimRetired()
             zone = await asyncio.to_thread(ZoneInfo, settings.timezone)
-            projection = _RequestProjection(self, captured, basis, source, settings, zone, silent, now)
+            projection = (self.projection_type or _RequestProjection)(self, captured, basis, source, settings, zone, silent, now)
             held, _target = await current_attention(self.reader, captured.link, projection=projection)
             if "agents:write" not in held:
                 raise ProductSourceRetired()
@@ -354,13 +381,13 @@ class _RequestProjection:
         if (request.revision, request.request_revision, request.state, request.recipient_id) != (
             self.source.request["revision"],
             self.source.request["request_revision"],
-            "pending",
-            current.owner_user_id,
+            self.source.request["state"] if self.basis["version"] == 5 else "pending",
+            self.source.request["recipient_id"] if self.basis["version"] == 5 else current.owner_user_id,
         ):
             raise ProductSourceRetired()
         if work.revision != self.source.work["revision"]:
             raise DeliveryRetry(timedelta(seconds=5))
-        if self.source.request["purpose"] != "information" and permissions & 6 != 6:
+        if (self.basis["version"] == 5 or self.source.request["purpose"] != "information") and permissions & 6 != 6:
             raise ProductSourceRetired()
         protected = target.custody == "company" and policy == "protected"
         if protected != self.source.protected or protected != self.basis["concealed"] and not self.basis.get("reveal") and self.basis["version"] not in {3, 4} or protected and not self.captured.part.get("protect_content"):

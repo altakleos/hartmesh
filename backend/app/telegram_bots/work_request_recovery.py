@@ -105,6 +105,8 @@ class WorkRequestRecovery:
             raise AgentDenied("The request is unavailable")
 
     async def _replace(self, writer, link, row, source, settings, *, reveal=None):
+        if row.payload.get("work_request_basis", {}).get("version") == 5:
+            raise ProductSourceRetired()
         if (row.instance_id, row.work_id, row.request_id) != (source.request["instance_id"], source.work["id"], source.request["id"]):
             raise ProductSourceRetired()
         work = await writer.get(AgentWorkRow, source.work["id"], populate_existing=True)
