@@ -82,13 +82,14 @@ def frozen(captured, *, acknowledged=False):
             | ({"input"} if basis.get("version") == 4 else set())
             | ({"routing"} if basis.get("version") in {5, 6} else set())
             | ({"reply_origin"} if basis.get("version") in {2, 6} and "reply_origin" in basis else set())
+            | ({"choice_origin"} if basis.get("version") == 6 and "choice_origin" in basis else set())
             | ({"prompt_id"} if basis.get("version") == 3 and type(basis.get("interaction")) is dict and basis["interaction"].get("view") == "prompt" else set())
             or type(basis["version"]) is not int
             or basis["version"] not in {1, 2, 3, 4, 5, 6}
         ):
             raise ValueError()
         if (
-            captured.item.class_ != ("reply" if basis["version"] in {3, 4} or basis.get("reply_origin") is not None else "question")
+            captured.item.class_ != ("reply" if basis["version"] in {3, 4} or basis.get("reply_origin") is not None or basis.get("choice_origin") is not None else "question")
             or type(basis["concealed"]) is not bool
             or type(basis["locale"]) is not str
             or type(captured.item.payload.get("presentation_version")) is not int
@@ -97,6 +98,9 @@ def frozen(captured, *, acknowledged=False):
             raise ValueError()
         reply_origin = basis.get("reply_origin")
         if reply_origin is not None and (type(reply_origin) is not str or len(reply_origin) != 32 or any(ch not in "0123456789abcdef" for ch in reply_origin)):
+            raise ValueError()
+        choice_origin = basis.get("choice_origin")
+        if "choice_origin" in basis and (type(choice_origin) is not str or len(choice_origin) != 32 or any(ch not in "0123456789abcdef" for ch in choice_origin)):
             raise ValueError()
         reveal = basis.get("reveal")
         if reveal is not None and (type(reveal) is not str or len(reveal) != 32 or any(ch not in "0123456789abcdef" for ch in reveal)):
@@ -119,7 +123,7 @@ def frozen(captured, *, acknowledged=False):
             raise ValueError()
         if type(source.protected) is not bool or json.dumps(source.seen, sort_keys=True) != json.dumps(seen_basis(source.work, source.request, source.responses), sort_keys=True):
             raise ValueError()
-        if source.protected and not basis["concealed"] and reveal is None and reply_origin is None and basis["version"] not in {3, 4}:
+        if source.protected and not basis["concealed"] and reveal is None and reply_origin is None and choice_origin is None and basis["version"] not in {3, 4}:
             raise ValueError()
         if basis["version"] in {3, 4}:
             from app.telegram_bots.work_interactions import present_interaction
@@ -285,7 +289,7 @@ class WorkRequestSources:
             raise ProductSourceRetired()
         if not (current.request["can_respond"] if current.request["purpose"] == "information" else current.request["can_manage"]):
             raise ProductSourceRetired()
-        revealed = bool(basis.get("reveal") or basis.get("reply_origin"))
+        revealed = bool(basis.get("reveal") or basis.get("reply_origin") or basis.get("choice_origin"))
         changed = not same_displayed_basis(current, source) or current.protected != basis["concealed"] and not revealed and basis["version"] not in {3, 4}
         if basis["version"] in {3, 4} and changed:
             raise ProductSourceRetired()
@@ -370,7 +374,7 @@ class _RequestProjection:
             .where(
                 or_(
                     callback.group_id == self.controls_part.get("callback_group_id") if self.controls_part is not None else false(),
-                    callback.id.in_({self.basis.get("reveal"), self.basis.get("reply_origin")} - {None}),
+                    callback.id.in_({self.basis.get("reveal"), self.basis.get("reply_origin"), self.basis.get("choice_origin")} - {None}),
                     callback.group_id == origin_group if origin else false(),
                     callback.id == self.basis.get("prompt_id") if self.basis.get("prompt_id") else false(),
                 )
@@ -429,7 +433,7 @@ class _RequestProjection:
         if (
             protected != self.source.protected
             or protected != self.basis["concealed"]
-            and not (self.basis.get("reveal") or self.basis.get("reply_origin"))
+            and not (self.basis.get("reveal") or self.basis.get("reply_origin") or self.basis.get("choice_origin"))
             and self.basis["version"] not in {3, 4}
             or protected
             and not self.captured.part.get("protect_content")
@@ -459,6 +463,11 @@ class _RequestProjection:
         for identity in {self.basis.get("reveal"), self.basis.get("reply_origin")} - {None}:
             reveal = next((row for row in callback_facts if row.id == identity), None)
             require_show(reveal, delivery)
+        if self.basis.get("choice_origin") is not None:
+            from app.telegram_bots.work_routing_origin import require_choice
+
+            choice = next((row for row in callback_facts if row.id == self.basis["choice_origin"]), None)
+            require_choice(choice, delivery)
         if not cleanup_ready(delivery, rows[0][14]):
             raise DeliveryRetry(timedelta(seconds=5))
         if self.basis["version"] == 3:

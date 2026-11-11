@@ -6,13 +6,16 @@ from copy import deepcopy
 from app.telegram_bots.authority import AccessOff, CeilingRefused
 from app.telegram_bots.callbacks import CallbackRefused
 from app.telegram_bots.errors import text_key_for
+from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.work_action_retries import WorkActionRetries
 from app.telegram_bots.work_control_admission import WorkControlAdmissions
 from app.telegram_bots.work_followup_refresh import WorkRoutingFollowupRecovery
 from app.telegram_bots.work_interaction_delivery import WorkInteractionPlans
+from app.telegram_bots.work_refusal_recovery import WorkRefusalRecovery
 from app.telegram_bots.work_request_recovery import WorkRequestRecovery
 from app.telegram_bots.work_routing_admission import WorkRoutingAdmissions
 from app.telegram_bots.work_routing_recovery import WorkRoutingRecovery
+from app.telegram_bots.work_stale_recovery import WorkStaleRecovery
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied
 from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
@@ -27,6 +30,8 @@ class WorkCallbacks:
         self.services, self.outcomes, self.acts = services, outcomes, outcomes.acts
         self.interactions = WorkInteractionPlans(outcomes.plans)
         self.controls = WorkControlAdmissions(outcomes.plans, self.acts)
+        self.refusals = WorkRefusalRecovery(self.controls)
+        self.stale = WorkStaleRecovery(self.controls, self.interactions)
         self.recovery = WorkRequestRecovery(outcomes.plans)
         self.routing = WorkRoutingAdmissions(outcomes.routing, self.acts) if outcomes.routing is not None else None
         self.routing_recovery = WorkRoutingRecovery(outcomes.routing) if outcomes.routing is not None else None
@@ -69,13 +74,20 @@ class WorkCallbacks:
                     try:
                         staged = await admission.stage(link, row.id, **scope)
                     except AgentDenied as error:
-                        if row.kind == "route_to" and error.reason == "recipient-ineligible" and "work_outcome_basis" in parent.payload:
-                            await self.followups.refresh(link, row.id, **scope)
+                        if row.kind == "route_to" and error.reason == "recipient-ineligible":
+                            await self._refresh_routing(link, row, parent, scope)
                             return True
                         raise
                     # This is the saved operation, never another call to the
                     # action constructor. Unknown results remain journal-owned.
                     try:
+                        if family == 4 and staged.state == "pending" and staged.reason == "attempt-unresolved":
+                            # Retained typed decisions/notes need their own recovery.
+                            await self._observe(link, staged.id, guard=guard)
+                            return True
+                        if staged.kind in {"decide", "accept"} and staged.state == "pending" and staged.reason == "attempt-unresolved":
+                            if await self.refusals.refresh(link, row.id, **scope) is not None:
+                                return True
                         if staged.attempts == 0 or staged.state == "pending" and staged.reason in {"attempt-unresolved", "actions-paused"}:
                             expected = {"id": staged.id, "kind": staged.kind, "body": staged.body, "attempts": staged.attempts}
                             result = await self.acts.check(staged.id, expected=expected, attempt_current=current)
@@ -84,11 +96,22 @@ class WorkCallbacks:
                     except Exception as error:
                         logger.warning("Work action observation deferred (%s)", type(error).__name__)
                         return True
-                    if result.kind == "route" and result.state == "refused" and result.reason == "recipient-ineligible" and "work_outcome_basis" in parent.payload:
-                        await self.followups.refresh(link, row.id, **scope)
+                    if result.kind == "route" and result.state == "refused" and result.reason == "recipient-ineligible":
+                        await self._refresh_routing(link, row, parent, scope)
+                    elif result.state == "conflict" and row.kind != "route_to":
+                        if await self.stale.refresh(link, row.id, **scope) is None:
+                            await self._observe(link, result.id, guard=guard)
                     else:
                         await self._observe(link, result.id, guard=guard)
-            except (AgentDenied, AgentConflict, AccessOff, CeilingRefused) as error:
+            except AgentConflict as error:
+                if row.kind != "route_to" and error.reason != "attempt-unresolved":
+                    try:
+                        if await self.stale.refresh(link, row.id, **scope) is not None:
+                            return True
+                    except ProductSourceRetired:
+                        raise CallbackRefused("stale.not_waiting") from None
+                raise CallbackRefused(text_key_for(_ACTIONS.get(row.kind, "respond"), error)) from None
+            except (AgentDenied, AccessOff, CeilingRefused) as error:
                 raise CallbackRefused(text_key_for(_ACTIONS.get(row.kind, "respond"), error)) from None
             except CallbackRefused:
                 raise
@@ -100,6 +123,14 @@ class WorkCallbacks:
             return True
 
         return await await_drained(perform())
+
+    async def _refresh_routing(self, link, row, parent, scope):
+        if "work_outcome_basis" in parent.payload:
+            await self.followups.refresh(link, row.id, **scope)
+        elif self.routing_recovery is not None:
+            await self.routing_recovery.refresh_choice(link, row.id, **scope)
+        else:
+            raise CallbackRefused()
 
     async def _observe(self, link, act_id, *, guard):
         try:

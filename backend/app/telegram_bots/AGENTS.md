@@ -13,7 +13,10 @@ Keep bot network, supervisor and router startup outside configuration loading.
 Use socket-free transports and synthetic credentials in offline tests.
 
 The optional `work_callbacks.py` dispatcher composes existing Work owners; the
-supervisor does not install it yet. Explicit Retry validates the whole shown
+supervisor does not install it yet. Stale callbacks can refresh only unreserved
+controls or exact conclusive conflicts; retained input has its own owner. Known
+non-effect confirmation refusals use `work_refusal_recovery.py` before retry.
+Routing refresh preserves unresolved and collected journals. Explicit Retry validates the whole shown
 outcome and original Act body, then serializes one attempt for that displayed
 attempt count. Delivery ACK and both kinds of shown controls share
 `acknowledged_parts`; keep full typed receipts before any control authority.

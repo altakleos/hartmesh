@@ -7,11 +7,13 @@ from datetime import timedelta
 from app.telegram_bots.callbacks import CallbackRefused
 from app.telegram_bots.config import load_config
 from app.telegram_bots.producer import DeliveryRetry, ProductSourceRetired
+from app.telegram_bots.work_actions import request_for
+from app.telegram_bots.work_interaction_delivery import acknowledged_source
 from app.telegram_bots.work_request_recovery import WorkRequestRecovery, _RecoveryGuard, _RecoveryProjection
 from app.telegram_bots.work_routing import present_routing
 from app.telegram_bots.work_routing_authority import RoutingCandidates
 from deerflow.agent_instances.contract import AgentDenied
-from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
 
 
@@ -32,6 +34,47 @@ class _RoutingSource:
 class WorkRoutingRecovery(WorkRequestRecovery):
     family_versions = {5, 6}
     basis_version = 6
+
+    async def refresh_choice(self, link, callback_id, *, chat_id, message_id, message_thread_id, guard):
+        """Replace shown choices without retrying a refused or unknown command."""
+
+        async def perform():
+            from app.telegram_bots.attention_authority import prepare_attention
+
+            async with self.outbox.sessions() as reader:
+                callback = await reader.get(TelegramCallbackRow, callback_id)
+                if callback is None or callback.link_id != link.id or callback.kind != "route_to" or callback.target_kind != "request":
+                    raise CallbackRefused()
+                request_id = callback.target_id
+            source, settings = await self._source(link, request_id)
+            admission = await prepare_attention(self.reader, link)
+            composed = _RecoveryGuard(self, guard, admission, source)
+            async with self.callbacks.writer(link, composed) as writer:
+                group = await self.callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=composed, session=writer)
+                parent = await writer.get(TelegramOutboxRow, group.anchor_outbox_id, with_for_update=True, populate_existing=True)
+                shown = acknowledged_source(link, parent)
+                if parent.payload["work_request_basis"]["version"] not in self.family_versions or (shown.request["id"], shown.work["id"]) != (request_id, source.work["id"]):
+                    raise CallbackRefused()
+                saved = await writer.get(TelegramActRow, callback_id, with_for_update=True, populate_existing=True)
+                if saved is None:
+                    if any("work_action_id" in row.payload for row in group.rows):
+                        raise CallbackRefused()
+                else:
+                    if (
+                        (saved.link_id, saved.owner_user_id, saved.binding_generation, saved.instance_id, saved.work_id, saved.request_id, saved.kind)
+                        != (link.id, link.owner_user_id, link.binding_generation, link.agent_ref, source.work["id"], request_id, "route")
+                        or saved.state != "refused"
+                        or saved.reason != "recipient-ineligible"
+                        or any(row.payload.get("work_action_id") != saved.id for row in group.rows)
+                    ):
+                        raise CallbackRefused()
+                    body = request_for("route", saved.body, identity=saved.id)
+                    if body.recipient_id != group.selected.payload["recipient_id"] or body.expected_request_revision != group.selected.payload["request_revision"]:
+                        raise CallbackRefused()
+                await self._replace(writer, link, parent, source, settings, choice=callback_id)
+                return parent.id
+
+        return await await_drained(perform())
 
     async def _source(self, link, request_id):
         from deerflow.config.app_config import get_app_config

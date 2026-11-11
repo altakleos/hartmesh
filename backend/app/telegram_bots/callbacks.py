@@ -868,6 +868,18 @@ class CallbackRepository:
                     except ProductSourceRetired:
                         continue
                     show_proofs.add(saved.proof_id)
+                from app.telegram_bots.work_routing_origin import require_choice
+
+                choice_id = parent.payload["work_request_basis"]["choice_origin"].as_string()
+                for saved in await session.scalars(select(parent).where(choice_id.is_not(None))):
+                    identity = saved.payload["work_request_basis"]["choice_origin"]
+                    if type(identity) is not str:
+                        continue
+                    try:
+                        require_choice(by_id.get(identity), saved)
+                    except ProductSourceRetired:
+                        continue
+                    show_proofs.add(identity)
                 removed = 0
                 for row in rows:
                     if row.id in show_proofs:
