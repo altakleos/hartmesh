@@ -1889,7 +1889,7 @@ class TelegramBotChannel(TelegramChannel):
         elif source_key.startswith("work.action."):
             raise PermanentDeliveryError("unsupported-work-outcome-source")
         elif "work_request_basis" in saved.item.payload:
-            if saved.item.payload["work_request_basis"].get("version") == 5:
+            if saved.item.payload["work_request_basis"].get("version") in {5, 6}:
                 work_sources = getattr(self._services, "work_routing_sources", None)
             if work_sources is None:
                 raise PermanentDeliveryError("unsupported-work-request-source")

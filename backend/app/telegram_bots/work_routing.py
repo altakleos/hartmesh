@@ -75,7 +75,7 @@ class WorkRoutingReader(WorkRequestReader):
         if not same_displayed_basis(current, source) or peek_loaded_app_config() is not config or (config.auth.local.enabled is False) != mode:
             raise AgentDenied("Routing source changed")
         recipients.sort(key=lambda row: (row["user_id"] != link.owner_user_id, row["name"].casefold(), row["user_id"]))
-        return RoutingRead(source, tuple(recipients), excluded == link.owner_user_id)
+        return RoutingRead(source, tuple(recipients), excluded == link.owner_user_id and latest["request_revision"] == source.request["request_revision"] and latest["assignment_revision"] == source.request["assignment_revision"])
 
 
 def present_routing(value, *, locale, link, public_base_url, product="HartMesh", concealed=False, outbox_id=None):

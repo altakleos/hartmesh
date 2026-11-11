@@ -851,8 +851,25 @@ class CallbackRepository:
                 # outcome is delivered, even after ordinary prompt expiration.
                 for sources in await session.scalars(select(TelegramInboundMarkRow.delivery_ids).where(TelegramInboundMarkRow.route_kind == "work_input", TelegramInboundMarkRow.state != "done")):
                     unsettled.update(identity for identity in sources if type(identity) is str)
+                # A consumed Show remains proof for later direct refreshes as
+                # long as its outbox exists (live controls pin that parent).
+                from app.telegram_bots.producer import ProductSourceRetired
+                from app.telegram_bots.work_request_source import require_show
+
+                by_id = {row.id: row for row in rows}
+                show_proofs = set()
+                parent = TelegramOutboxRow
+                proof_id = parent.payload["work_request_basis"]["reply_origin"].as_string()
+                for saved in await session.execute(select(parent.id, parent.link_id, parent.chat_id, parent.binding_generation, proof_id.label("proof_id")).where(proof_id.is_not(None))):
+                    try:
+                        require_show(by_id.get(saved.proof_id), saved)
+                    except ProductSourceRetired:
+                        continue
+                    show_proofs.add(saved.proof_id)
                 removed = 0
                 for row in rows:
+                    if row.id in show_proofs:
+                        continue
                     if row.group_id in pending_groups:
                         continue
                     age = _aware(now) - _aware(row.created_at)

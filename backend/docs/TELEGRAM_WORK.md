@@ -31,7 +31,8 @@ summary scheduler is installed by this collector.
 
 `work_routing.py` reads owner-authenticated grants and active accounts before
 capping six recipient buttons. Information needs Use+Inspect; decisions/reviews
-need Manage+Inspect. The latest wrong recipient is excluded; names, never IDs,
+need Manage+Inspect. The latest wrong recipient is excluded, but their follow-up ends when the request
+or assignment revision changes; names, never IDs,
 label choices. `Acts.route` serializes body capture and exact receipt recovery;
 HumanInput's borrowed admission fences binding/account/policy at commit. Routing
 grants no access and ignores the action pause. `work_routing_delivery.py` freezes initial recipient selection in a closed V5
@@ -40,8 +41,19 @@ final joined snapshot of every candidate's grants and account state, including
 the current recipient before wrong-person exclusion. No password hashes enter
 that compact projection. Full ACK alone arms the final button group. Protected
 notifications show only a teaser; ordinary question recovery cannot turn routing
-into an answer prompt. Routing-specific reveal/refresh and reply-owned follow-ups remain prerequisites
-for installation.
+into an answer prompt. Routing-specific recovery uses V6 and the same full-roster final snapshot for
+refresh, acknowledged Show and failed-anchor repair. Generic recovery accepts
+only ordinary V1/V2 questions; it cannot reinterpret interaction drafts.
+Recovery preserves historical ACKs, holds unresolved operations and arms fresh
+controls only after full delivery. Multipart Show clears its teaser first. Failed
+routing anchors require guarded source-aware repair, which starts a new current
+presentation, retaining a consumed Show as reply ownership. Explicit Show and
+its later refreshes bypass proactive preferences; the final source read proves
+the original Show receipt. Retain that exact consumed proof while its parent
+exists, and require it under lock before recovery mutates controls. Complete ACK
+validation precedes control activation,
+and repair cannot consume another presentation’s controls. Reply-owned follow-ups and
+controller installation remain prerequisites for activation.
 Presentation/handlers stay dormant.
 
 `work_routing_admission.py` reserves acknowledged recipient choices in the same
