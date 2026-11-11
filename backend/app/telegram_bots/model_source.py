@@ -387,8 +387,7 @@ class ModelSource:
         return await plan_file_reply(self, record, link, output, guard=guard, shown=shown)
 
     async def retry_file_callback(self, link, row, *, callbacks, guard):
-        from pathlib import PurePosixPath
-
+        from app.telegram_bots.file_source import describe_output
         from app.telegram_bots.links import prepare_publication_guard
 
         saved = await self._outbox.read_file_retry(link, row.id, callbacks=callbacks, guard=guard)
@@ -399,15 +398,7 @@ class ModelSource:
         async def check():
             await prepare_publication_guard(guard)
 
-        await check()
-        try:
-            metadata = await self._http_owner.describe_artifact(link.owner_user_id, record.scope.thread_id, file["path"], before_dispatch=check)
-            if metadata.path != file["path"]:
-                raise ValueError
-            descriptor = {"path": metadata.path, "filename": metadata.filename, "size": metadata.size, "mime_type": metadata.mime_type, "state": "ready"}
-        except Exception:
-            await check()
-            descriptor = {"path": file["path"], "filename": PurePosixPath(file["path"]).name, "size": None, "mime_type": "application/octet-stream", "state": "unavailable"}
+        descriptor = await describe_output(record, file["path"], http_owner=self._http_owner, check=check)
         return await self._outbox.retry_file_callback(link, row.id, metadata=descriptor, callbacks=callbacks, guard=guard)
 
     async def read_file_part(self, captured):

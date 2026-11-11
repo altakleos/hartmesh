@@ -309,8 +309,10 @@ def _output_metadata(descriptors):
             or name in {".", ".."}
             or "/" in name
             or "\\" in name
-            or item["state"] not in {"ready", "unavailable"}
+            or item["state"] not in {"ready", "unavailable", "export"}
             or (size is None if item["state"] == "ready" else False)
+            or item["state"] == "export"
+            and size is not None
             or size is not None
             and (type(size) is not int or size < 0)
         ):
@@ -321,23 +323,24 @@ def _output_metadata(descriptors):
 
 
 def _photo_candidate(item):
-    return item["state"] == "ready" and item["filename"].lower().endswith(_PHOTO_SUFFIXES) and item["size"] <= _PHOTO_MAX_BYTES
+    return item["filename"].lower().endswith(_PHOTO_SUFFIXES) and (item["state"] == "export" or item["state"] == "ready" and item["size"] <= _PHOTO_MAX_BYTES)
 
 
 def _media_part(kind, members, unavailable=None):
     return {"kind": kind, "files": [dict(item) for item in members], "unavailable": unavailable}
 
 
-def _partition_output_photos(members, capacity):
+def _partition_output_photos(members, capacity, max_bytes):
     parts, group, used = [], [], 0
     for item in members:
-        if item["size"] > capacity:
+        ceiling = max_bytes if item["state"] == "export" else item["size"]
+        if type(ceiling) is not int or not 0 <= ceiling <= capacity:
             raise ValueError("output-member-exceeds-capacity") from None
-        if len(group) == 10 or used + item["size"] > capacity:
+        if len(group) == 10 or used + ceiling > capacity:
             parts.append(_media_part("album" if len(group) > 1 else "photo", group))
             group, used = [], 0
         group.append(item)
-        used += item["size"]
+        used += ceiling
     if group:
         parts.append(_media_part("album" if len(group) > 1 else "photo", group))
     return tuple(parts)
@@ -350,7 +353,7 @@ def plan_output_files(descriptors, *, answer_visible: str, capacity: int, max_by
     if type(answer_visible) is not str or type(caption_allowed) is not bool or type(capacity) is not int or type(max_bytes) is not int or not 0 < max_bytes <= min(capacity, 50_000_000):
         raise ValueError("invalid-output-plan") from None
     members = _output_metadata(descriptors)
-    caption = caption_allowed and len(members) == 1 and members[0]["state"] == "ready" and members[0]["size"] <= max_bytes and utf16_units(answer_visible) <= 1024
+    caption = caption_allowed and len(members) == 1 and (members[0]["state"] == "export" or members[0]["state"] == "ready" and members[0]["size"] <= max_bytes) and utf16_units(answer_visible) <= 1024
     if caption:
         return OutputPlan(True, (_media_part("document", members),))
     result, photos = [], []
@@ -358,11 +361,11 @@ def plan_output_files(descriptors, *, answer_visible: str, capacity: int, max_by
     def flush():
         nonlocal photos
         if photos:
-            result.extend(_partition_output_photos(photos, capacity))
+            result.extend(_partition_output_photos(photos, capacity, max_bytes))
             photos = []
 
     for item in members:
-        unavailable = "metadata" if item["state"] == "unavailable" else "oversize" if item["size"] > max_bytes else None
+        unavailable = "metadata" if item["state"] == "unavailable" else "oversize" if item["size"] is not None and item["size"] > max_bytes else None
         if unavailable is not None or not _photo_candidate(item):
             flush()
             result.append(_media_part("document", [item], unavailable))
@@ -404,13 +407,15 @@ def classify_output_part(part, photos: Sequence[bool]) -> tuple[dict, ...]:
     return tuple(result)
 
 
-def repartition_output_part(part, *, capacity: int) -> tuple[dict, ...]:
+def repartition_output_part(part, *, capacity: int, max_bytes: int | None = None) -> tuple[dict, ...]:
     """Repartition an already saved photo group before reading any member."""
     if type(capacity) is not int or capacity <= 0 or type(part) is not dict or type(part.get("kind")) is not str or part["kind"] not in {"photo", "album"}:
         raise ValueError("invalid-output-capacity-part") from None
     members = _output_metadata(part.get("files"))
+    if any(member["state"] == "export" for member in members) and (type(max_bytes) is not int or not 0 < max_bytes <= min(capacity, 50_000_000)):
+        raise ValueError("invalid-output-export-ceiling") from None
     classify_output_part(part, [True] * len(members))
-    return _partition_output_photos(members, capacity)
+    return _partition_output_photos(members, capacity, max_bytes)
 
 
 async def classify_output_photo(filename: str, data: bytes) -> bool:
