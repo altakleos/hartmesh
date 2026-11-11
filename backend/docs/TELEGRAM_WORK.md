@@ -101,3 +101,14 @@ The origin control's age still bounds delayed publication. Prompt ownership is
 not dispatch authority; the full source and current-authority fence remains
 mandatory. Typing submission and stale-draft recovery controllers are not yet
 installed.
+
+`work_control_admission.py` reserves one acknowledged answer choice or second-tap
+decision/acceptance with its immutable Acts operation in the same guarded writer.
+The entire callback group records the selected operation; competing buttons
+cannot create a second response. Admission performs no domain action. The existing
+receipt worker can finish it after restart, using the original body and current
+command authority. Saved bodies use typed JSON equality. Final source, access,
+pause and outer-lifetime checks roll back both journal and reservation on drift.
+First taps cannot acknowledge unchecked sources. Controls remain unconsumed until
+an outcome controller settles them; result delivery and chat installation remain
+outstanding.

@@ -28,7 +28,21 @@ _ID = re.compile(r"^[0-9a-f]{32}$")
 _TOKEN = re.compile(TOKEN_IN_TEXT)
 _SCOPE = ("id", "owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "binding_generation", "token_revision")
 _RESERVED = frozenset(
-    {"label", "label_values", "keyboard_row", "keyboard_column", "anchor_outbox_id", "presentation_version", "presentation_pending", "presentation_history", "message_adopted", "prompt_successor", "publication_owner", "prompt_visibility"}
+    {
+        "label",
+        "label_values",
+        "keyboard_row",
+        "keyboard_column",
+        "anchor_outbox_id",
+        "presentation_version",
+        "presentation_pending",
+        "presentation_history",
+        "message_adopted",
+        "prompt_successor",
+        "publication_owner",
+        "prompt_visibility",
+        "work_action_id",
+    }
 )
 CALLBACK_METADATA_KEYS = _RESERVED
 _SECRET = frozenset({"token", "bot_token", "access_token", "raw_update", "update", "audio", "audio_bytes", "download_url", "temporary_url", "bytes"})
