@@ -44,9 +44,34 @@ def validate_prompt(item, prompt):
     return parts
 
 
+def shown_prompt_messages(item, *, accepted_at=None):
+    """Every alias belongs to the complete, typed and ordered prompt ACK."""
+    messages = []
+    try:
+        for part in prompt_parts(item):
+            if (
+                part["state"] != "sent"
+                or len(part["message_ids"]) != 1
+                or type(part["message_ids"][0]) is not int
+                or part["message_ids"][0] <= 0
+                or part["message_ids"][0] in messages
+                or datetime.fromisoformat(part["sent_at"]).utcoffset() is None
+            ):
+                raise CallbackRefused()
+            if accepted_at is not None:
+                dispatched = datetime.fromisoformat(part["dispatched_at"])
+                if dispatched.utcoffset() is None or dispatched > _aware(accepted_at):
+                    raise CallbackRefused()
+            messages.append(part["message_ids"][0])
+    except (KeyError, TypeError, ValueError):
+        raise CallbackRefused() from None
+    return tuple(messages)
+
+
 def validate_shown_prompt(item, prompt):
     """Match prompt visibility to its exact final ACK; return that ACK time."""
     parts = validate_prompt(item, prompt)
+    shown_prompt_messages(item)
     final = parts[-1]
     visibility = _visibility(prompt.payload.get("prompt_visibility"))
     try:

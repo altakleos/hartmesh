@@ -180,14 +180,20 @@ async def test_capture_requires_prompt_visibility_to_match_its_actual_ack(work_d
 @pytest.mark.asyncio
 @pytest.mark.parametrize("quoted", [False, True])
 async def test_input_accepted_before_prompt_ack_requires_an_exact_quote(work_delivery, quoted):
+    from datetime import datetime, timedelta
+    from unittest.mock import patch
+
     from app.telegram_bots.callbacks import CallbackRefused
 
     e = work_delivery
-    _request, prompt_id, _seen = await prompt(e, shown=False)
+    _request, prompt_id, _seen = await prompt(e)
+    async with e.db.sessions.begin() as writer:
+        row = await writer.get(TelegramOutboxRow, e.identity)
+        acknowledged = datetime.fromisoformat(row.parts[0]["sent_at"])
+        row.parts = [{**part, "dispatched_at": (acknowledged - timedelta(seconds=2)).isoformat()} for part in row.parts]
     inbox = InboxRepository(e.db.sessions)
-    mark, _ = await inbox.accept(e.link, incoming(message=900, update_id=1900, account=e.link.chat_id, reply=802 if quoted else None), sanitized_input={"text": "An earlier accepted message"})
-    await clear_old(e)
-    await dispatch(e, 802)
+    with patch("app.telegram_bots.inbox._now", lambda: acknowledged - timedelta(seconds=1)):
+        mark, _ = await inbox.accept(e.link, incoming(message=900, update_id=1900, account=e.link.chat_id, reply=802 if quoted else None), sanitized_input={"text": "An earlier accepted message"})
     if quoted:
         assert (await capture(e, inbox, mark, prompt_id)).route_kind == "work_input"
     else:

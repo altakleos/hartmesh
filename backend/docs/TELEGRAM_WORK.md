@@ -413,5 +413,14 @@ the same operation and missing marked journals stay held. The final joined read
 reproves complete source ACKs, canonical consumed controls, original input and
 immutable Act after external owner preparation. Captures retain their immutable
 input across routing and delivery bookkeeping instead of adopting late mutations.
-This primitive is not installed by the text controller or supervisor yet; current
-comment-card refresh and closed-input choices still need their own integration.
+The optional text controller uses this primitive for actual Telegram replies,
+observes canonical outcomes and resumes stored inputs without resubmitting an
+unknown operation. A reply predating a newer presentation's dispatch cannot be
+reinterpreted against that presentation. An explicit reply received before the
+host saves its ACK remains eligible once the full delivery is acknowledged.
+
+Replies to any part of a complete prompt use the same prompt owner. Known
+spent cards, closed prompts and input-owned presentations retain a durable
+`work_card_hold` route, never ordinary-chat ownership. This hold is an internal
+recovery foundation; its user choices and current-comment-card refresh remain
+required before activation. The supervisor does not install these controllers.

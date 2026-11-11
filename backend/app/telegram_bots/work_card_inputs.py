@@ -40,6 +40,12 @@ def reply_basis(link, parent, mark, controls, *, consumed):
     for part in parts:
         if len(part["message_ids"]) != 1 or part["message_ids"][0] in messages or datetime.fromisoformat(part["sent_at"]).utcoffset() is None:
             raise CallbackRefused()
+        try:
+            dispatched = datetime.fromisoformat(part["dispatched_at"])
+            if dispatched.utcoffset() is None or dispatched > _aware(mark.accepted_at):
+                raise CallbackRefused()
+        except (KeyError, TypeError, ValueError):
+            raise CallbackRefused() from None
         messages.update(part["message_ids"])
     groups = {part.get("callback_group_id") for part in parts} - {None}
     if quoted not in messages or len(groups) != 1 or not controls or {row.group_id for row in controls} != groups:
