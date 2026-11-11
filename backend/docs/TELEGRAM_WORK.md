@@ -170,3 +170,27 @@ prevent another intent. Captured inbox delivery dependencies retain these views.
 Confirmation admission locks and rechecks the original input proof; restart or
 caller text cannot replace it. Back restores the complete request and its choices
 without applying an action. These components remain dormant until controller wiring.
+
+`work_outcomes.py` renders complete success/refusal/uncertain wording, without
+issuing commands or installing controls. Unknown actions never become a failed
+save. A known attempt-closing refusal keeps the original confirmation; a retained
+uncertain operation offers only its original retry. Plain replies to decisions or
+reviews are comments. Wrong-recipient acknowledgements always use the plain form;
+current managers get the separate routing follow-up. Start/resume navigation is
+web-only at this stage. The central `errors.text_key_for` reads typed refusal codes
+and classes, never exception sentences; `key_for_reader` owns manager wording.
+
+`work_outcome_reads.py` qualifies these views through the exact public service
+receipt, current Work/request and a final joined account/grant/policy/event read.
+It never calls an action or upgrades an uncertain journal to success. A receipt
+found before journal reconciliation defers presentation until receipt-only journal
+reconciliation; this does not authorize an automatic replay of uncertain actions.
+The returned `receipt` is canonical; the journal's cached `act.result` is not a
+source for success content. Delivery still needs its own claim/part fence and
+current read immediately before each SDK call; these readers install no handlers.
+The current attempt's status distinguishes running from starting/stopping/uncertain
+wording; unsettled attempts offer no resume action. An activation whose captured
+expected Work revision includes the canonical action event is a later continuation.
+That comparison uses logical revisions, not wall-clock times. Delayed replies after
+such a continuation confirm only the saved effect and make no claim that work has
+not started. Human-input outcomes match both their request and Work event receipts.
