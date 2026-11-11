@@ -34,9 +34,11 @@ _PAGE_BUTTONS = {
 _INSPECT = {"web.files", "web.work", "web.memory"}
 
 
-def _base_url(base=_CONFIGURED_BASE) -> str | None:
-    if base is _CONFIGURED_BASE:
-        base = load_config(get_app_config()).public_base_url
+def _base_url() -> str | None:
+    return _validated_base(load_config(get_app_config()).public_base_url)
+
+
+def _validated_base(base) -> str | None:
     if type(base) is not str or not base or any(ord(character) <= 32 or ord(character) == 127 for character in base):
         return None
     try:
@@ -77,7 +79,7 @@ def page_address(
     navigation that the supplied reader cannot use. An explicit public_base_url
     (including None) uses captured configuration without loading files.
     """
-    base = _base_url(public_base_url)
+    base = _base_url() if public_base_url is _CONFIGURED_BASE else _validated_base(public_base_url)
     if base is None or link.agent_kind not in _KINDS or _target(link.agent_kind, link.agent_ref) is None:
         return None
 
