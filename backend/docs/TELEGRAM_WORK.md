@@ -287,3 +287,23 @@ for that pass; new records cannot postpone revisiting older deferred actions.
 Acknowledged phases need no new observation. Per-link tasks share eight slots,
 so a held link cannot drop another link's tick. The worker owns and drains all
 tasks across stop/cancellation and fences publication after shutdown. These components remain uninstalled until the full controller wiring.
+
+`work_callbacks.py` is an optional dispatcher for acknowledged previews, typing
+prompts, confirmations, routing, Show and explicit Retry. The adapter consults it
+only when a collaborator is installed; the supervisor does not install it yet.
+It reserves the existing immutable operation before checking it, and lets canonical
+outcome planning own result replies. A result-read failure after saving an action
+is deferred to receipt observation, never reported as a failed save. Direct
+wrong-person routing uses the reply-owned refresh coordinator when a selected
+recipient loses access. General routing refresh, stale-request presentation and
+retained input/draft controllers still need their remaining orchestration.
+
+`work_action_retries.py` accepts only a complete ACK of an uncertain Work outcome
+and the exact original operation/body. Its guarded writer rechecks shown receipts
+after the outer guard awaits. `Acts.check` can compare the captured attempt count
+under the existing operation lock; duplicate presses of one shown Retry return
+the current record without another attempt. A late canonical receipt settles
+without a command; retired callback lifetimes cannot start a new effect. This
+retry primitive never creates an Act or substitutes a current revision. The
+shared `acknowledged_parts` validates ordered unique typed ACKs for outcome
+settlement, routing choices and Retry; source and domain authority remain separate.

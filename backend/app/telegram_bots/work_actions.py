@@ -406,10 +406,19 @@ class WorkActionMethods:
 
         return await await_drained(perform())
 
-    async def check(self, act_id):
+    async def check(self, act_id, *, expected=None, attempt_current=lambda: True):
         async def perform():
             async with self._work_serial(act_id):
-                return await self._attempt_work(await self._work_record(act_id), explicit=True)
+                current = await self._work_record(act_id)
+                if expected is not None:
+                    if expected["id"] != current.id or expected["kind"] != current.kind or not same_body(expected["body"], current.body) or type(expected["attempts"]) is not int:
+                        raise ValueError("work-retry-body-changed")
+                    if expected["attempts"] != current.attempts:
+                        receipt = await self.receipt_for(current)
+                        if receipt is not None and current.state != "done":
+                            return await self._work_outcome(current, state="done", result=receipt)
+                        return current
+                return await self._attempt_work(current, explicit=True, attempt_current=attempt_current)
 
         return await await_drained(perform())
 

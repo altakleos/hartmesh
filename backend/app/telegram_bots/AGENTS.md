@@ -12,6 +12,11 @@ legacy-channel closure; an absent environment key means on. See
 Keep bot network, supervisor and router startup outside configuration loading.
 Use socket-free transports and synthetic credentials in offline tests.
 
+The optional `work_callbacks.py` dispatcher composes existing Work owners; the
+supervisor does not install it yet. Explicit Retry validates the whole shown
+outcome and original Act body, then serializes one attempt for that displayed
+attempt count. Delivery ACK and both kinds of shown controls share
+`acknowledged_parts`; keep full typed receipts before any control authority.
 Work outcome delivery uses canonical receipts and a final source/claim fence.
 Its dormant receipt observer never calls the explicit action-retry path. Routing
 results edit only their command’s exact ACKed selection; missing/incompatible
