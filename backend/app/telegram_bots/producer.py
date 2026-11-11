@@ -2608,7 +2608,7 @@ class OutboxSender:
                 acknowledged.pop("invalid_token_verification_pending", None)
                 acknowledged.update(state="sent", message_ids=message_ids, protect_content=required_protection, sent_at=self.outbox.clock().isoformat())
                 saved.parts = parts
-                if saved.payload.get("reply_basis", {}).get("version") in {5, 7}:
+                if saved.payload.get("reply_basis", {}).get("version") in {5, 7} or saved.payload.get("work_request_basis", {}).get("version") == 3:
                     from app.telegram_bots.callbacks import CallbackRepository, Prompts
 
                     await Prompts(CallbackRepository(self.outbox.sessions, config=self.outbox.config, clock=self.outbox.clock)).acknowledge_part(saved, acknowledged, session=session)

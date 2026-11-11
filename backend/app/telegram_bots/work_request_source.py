@@ -66,7 +66,11 @@ def frozen(captured, *, acknowledged=False):
         basis = captured.item.payload["work_request_basis"]
         if (
             type(basis) is not dict
-            or set(basis) != {"version", "source", "locale", "concealed", "parts", "keyboard"} | ({"reveal", "cleanup_id"} if basis.get("version") in {2, 3} else set()) | ({"interaction", "origin"} if basis.get("version") == 3 else set())
+            or set(basis)
+            != {"version", "source", "locale", "concealed", "parts", "keyboard"}
+            | ({"reveal", "cleanup_id"} if basis.get("version") in {2, 3} else set())
+            | ({"interaction", "origin"} if basis.get("version") == 3 else set())
+            | ({"prompt_id"} if basis.get("version") == 3 and type(basis.get("interaction")) is dict and basis["interaction"].get("view") == "prompt" else set())
             or type(basis["version"]) is not int
             or basis["version"] not in {1, 2, 3}
         ):
@@ -110,6 +114,8 @@ def frozen(captured, *, acknowledged=False):
             if type(origin["presentation_version"]) is not int or origin["presentation_version"] < 0 or type(origin["message_id"]) is not int or origin["message_id"] <= 0 or reveal is not None or basis["concealed"] or cleanup_id is None:
                 raise ValueError()
             presentation = present_interaction(source, basis["interaction"], locale=basis["locale"])
+            if basis["interaction"]["view"] == "prompt" and (type(basis["prompt_id"]) is not str or len(basis["prompt_id"]) != 32 or any(ch not in "0123456789abcdef" for ch in basis["prompt_id"])):
+                raise ValueError()
         else:
             presentation = present_request(source, locale=basis["locale"], concealed=basis["concealed"], outbox_id=captured.item.id)
         if reveal is not None and len(presentation.parts) > 1 and cleanup_id is None:
@@ -119,6 +125,8 @@ def frozen(captured, *, acknowledged=False):
             recipe = {**part, "source_ref": {"key": "work.request.presentation", "values": {"request_id": source.request["id"], "part": index}}}
             if presentation.keyboard and index == len(presentation.parts) - 1:
                 recipe["stored_keyboard"] = True
+            if basis["version"] == 3 and basis["interaction"]["view"] == "prompt" and index == len(presentation.parts) - 1:
+                recipe["force_reply"] = True
             expected.append(recipe)
         if basis["parts"] != expected or basis["keyboard"] != [list(line) for line in presentation.keyboard] or captured.item.payload.get("product_keyboard_basis") != basis["keyboard"]:
             raise ValueError()
@@ -278,6 +286,7 @@ class _RequestProjection:
                     callback.group_id == self.controls_part.get("callback_group_id") if self.controls_part is not None else false(),
                     callback.id == self.basis.get("reveal") if self.basis.get("reveal") else false(),
                     callback.group_id == origin_group if origin else false(),
+                    callback.id == self.basis.get("prompt_id") if self.basis.get("prompt_id") else false(),
                 )
             )
             .scalar_subquery()
@@ -368,6 +377,26 @@ class _RequestProjection:
         cleanup_target = self.basis["origin"]["message_id"] if self.basis["version"] == 3 else reveal.message_id if self.basis.get("reveal") else None
         if self.basis.get("cleanup_id") and rows[0][14].payload["target_message_id"] != cleanup_target:
             raise ProductSourceRetired()
+        if self.basis.get("prompt_id"):
+            from app.telegram_bots.callbacks import _visibility
+            from app.telegram_bots.work_typing import validate_prompt
+
+            prompt = next((row for row in callback_facts if row.id == self.basis["prompt_id"]), None)
+            parts = validate_prompt(latest.item, prompt)
+            visibility = _visibility(prompt.payload.get("prompt_visibility"))
+            if (
+                prompt.consumed_at is not None
+                or "prompt_successor" in prompt.payload
+                or visibility["state"] != "pending"
+                or visibility["part_id"] != parts[-1]["part_id"]
+                or prompt.payload.get("anchor_outbox_id") != delivery.id
+                or prompt.payload.get("presentation_version") != delivery.payload["presentation_version"]
+            ):
+                raise ProductSourceRetired()
+            origin = next(row for row in callback_facts if row.id == self.basis["origin"]["callback_id"])
+            age_now = self.host.callbacks.clock()
+            if age_now >= aware(origin.created_at) + timedelta(days=self.host.callbacks.config.callbacks.max_age_days) or origin.expires_at is not None and age_now >= aware(origin.expires_at):
+                raise ProductSourceRetired()
         if self.controls_part is not None:
             callbacks = {row.id: row for row in callback_facts if row.group_id == self.controls_part["callback_group_id"]}
             _validate_rows(delivery, list(callbacks.values()), part=self.controls_part, allow_pending=True)

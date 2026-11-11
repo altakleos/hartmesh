@@ -85,9 +85,19 @@ The SDK joins those facts to current Work, account, claim, settings and grants,
 including for reply-class delivery. All new controls remain pending until the
 complete sequence is acknowledged. Every chunk checks the complete final control
 group’s inherited lifetime, even when that chunk carries no markup. Pending/failed replies retain origin evidence
-through both outbox and callback sweeps. No typing or voice controller is installed
+through both outbox and callback sweeps. No action, text or voice controller is installed
 by this publication primitive; entry points remain disabled.
 Queued interaction source/locale drift retires delivery without altering the
 unsubmitted basis; generic question recovery must never rewrite it. Controllers
 must recover retained drafts into a fresh complete preview in the current locale
 before these entry points are enabled.
+
+`work_typing.py` identifies deferred prompt ownership for `Prompts.attach` and
+ACK. Answers, cannot/wrong reasons, own decisions, decision notes and changes
+retain their complete source and seen basis. ForceReply appears only on the last
+part; that ACK starts prompt visibility and expiry. SDK authority joins the
+pending prompt and its source: closed/replaced prompts never publish or revive.
+The origin control's age still bounds delayed publication. Prompt ownership is
+not dispatch authority; the full source and current-authority fence remains
+mandatory. Typing submission and stale-draft recovery controllers are not yet
+installed.

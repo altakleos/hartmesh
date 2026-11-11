@@ -994,9 +994,14 @@ class Prompts:
                 from app.telegram_bots.producer import _item
 
                 basis = parent.payload.get("reply_basis", {})
-                if basis.get("version") != 7 and not (basis.get("version") == 5 and basis.get("step_id") is not None and basis.get("outcome", {}).get("request_basis", {}).get("version") == 2):
-                    raise CallbackRefused() from None
-                owned = await await_drained(asyncio.to_thread(human_input_parts, _item(parent)))
+                if parent.payload.get("work_request_basis", {}).get("version") == 3:
+                    from app.telegram_bots.work_typing import validate_prompt
+
+                    owned = validate_prompt(_item(parent), row)
+                else:
+                    if basis.get("version") != 7 and not (basis.get("version") == 5 and basis.get("step_id") is not None and basis.get("outcome", {}).get("request_basis", {}).get("version") == 2):
+                        raise CallbackRefused() from None
+                    owned = await await_drained(asyncio.to_thread(human_input_parts, _item(parent)))
                 if not owned:
                     raise CallbackRefused() from None
                 final = owned[-1]
@@ -1026,7 +1031,8 @@ class Prompts:
 
         self.repository._borrow(session)
         basis = parent.payload.get("reply_basis", {})
-        if basis.get("version") not in {5, 7}:
+        work_prompt = parent.payload.get("work_request_basis", {}).get("version") == 3 and parent.payload["work_request_basis"]["interaction"]["view"] == "prompt"
+        if basis.get("version") not in {5, 7} and not work_prompt:
             return
         pending = list(
             await session.scalars(
@@ -1052,7 +1058,14 @@ class Prompts:
         ]
         if not pending:
             return
-        owned = await await_drained(asyncio.to_thread(human_input_parts, _item(parent)))
+        if work_prompt:
+            from app.telegram_bots.work_typing import validate_prompt
+
+            owned = validate_prompt(_item(parent), pending[0])
+            if len(pending) != 1 or any(value["state"] != "sent" or not value.get("sent_at") or not value.get("message_ids") for value in owned):
+                raise CallbackRefused()
+        else:
+            owned = await await_drained(asyncio.to_thread(human_input_parts, _item(parent)))
         if not owned or owned[-1]["part_id"] != part["part_id"]:
             raise CallbackRefused() from None
         for row in pending:
