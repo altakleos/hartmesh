@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.56] - 2026-11-11
+
 ### Added
 
 - Connect personal Telegram bots to AI assistants and AI employees with current
@@ -19,8 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   messages, saved files, questions and manager-authorized site permission cards;
   starting and managing assignments remains on the web.
 
+### Persistent agents
+
+- Give persistent agents transient local-date context and let normal instance
+  conversations offer web pages for the user to open.
+
 ### Reliability
 
+- Preserve post-tool artifact enrichment in run output evidence and confirm native
+  sandbox cleanup when Docker has already removed a container.
 - Preserve instance input/file receipts and original output evidence across
   cancellation and restart. Recover saved delivery without rerunning a completed
   turn or repeating a confirmed file write. Explain lifecycle, startup and
