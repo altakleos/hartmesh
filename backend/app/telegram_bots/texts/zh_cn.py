@@ -1,6 +1,8 @@
 """Simplified Chinese fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "file.saving": "正在为{name}保存{file}…",
+    "file.waiting": "仍在为{name}保存{file}…",
     "start.ws_1": "正在启动 {name} 的工作环境…",
     "start.ws_30": "仍在启动 {name} 的工作环境。一段时间未使用后，启动可能需要两分钟。",
     "access.agent_off": "你已无法访问 {name}。请联系 {supervisor} 或管理员。",

@@ -1,6 +1,8 @@
 """English fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "file.saving": "Saving {file} for {name}…",
+    "file.waiting": "Still saving {file} for {name}…",
     "start.ws_1": "Starting {name}'s workspace…",
     "start.ws_30": "Still starting {name}'s workspace. After a quiet period this can take up to two minutes.",
     "access.agent_off": "You no longer have access to {name}. Ask {supervisor} or an administrator.",

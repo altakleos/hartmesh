@@ -226,3 +226,15 @@ writer, including a second guarded pass when candidates were found; an empty tak
 needs no file readiness. Borrowed writers must supply a prepared reader and use its `guard(base)` for
 their outer transaction boundary too. These
 consumer primitives still require adapter installation and publication wiring.
+
+
+`adapter.put_instance_file` owns the direct journal/download/write as one
+Application task, also retained by the adapter's file-task drain. Repeated
+cancellation cannot release a byte reservation before the admitted native write
+and its journal writer settle. The existing `_download` leaf reserves bytes
+before SDK getFile and rechecks authority inside limiter waits and capped reads.
+`FileProgress` shows only fixed saving/waiting lines with the current instance
+name. Protected policy uses a protected temporary message; other policy uses a
+fresh draft ID. Cleanup is best effort and cannot replace a committed file
+receipt. Supervisor installation, captioned publication and captionless/retry
+routing must qualify these leaves before activation.
