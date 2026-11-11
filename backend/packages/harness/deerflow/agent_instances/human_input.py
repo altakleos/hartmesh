@@ -370,7 +370,7 @@ class HumanInput:
     async def _response_ids(session, request_id):
         return list((await session.scalars(select(HumanInputResponseRow.id).where(HumanInputResponseRow.request_id == request_id).order_by(HumanInputResponseRow.id))).all())
 
-    async def command(self, *, actor, request_id, request: RequestCommand):
+    async def command(self, *, actor, request_id, request: RequestCommand, admission=None):
         request = RequestCommand.model_validate(request.model_dump(exclude_unset=True))
 
         async def perform():
@@ -380,6 +380,8 @@ class HumanInput:
                 receipt = await self._receipt(session, actor, parent.id, request, request_id)
                 if receipt is not None:
                     return receipt
+                if admission is not None:
+                    await admission(session)
                 if row.state == "closed" or not self._source_current(row, work) or (row.revision, row.request_revision) != (request.expected_revision, request.expected_request_revision):
                     raise AgentConflict("The request changed; reload before acting")
                 await self._mutable_work(session, parent, work)
@@ -400,7 +402,10 @@ class HumanInput:
                 work.updated_at = datetime.now(UTC)
                 await self.work._event(session, actor, work, request, "request_" + request.action)
                 receipt = await self._event(session, actor, row, request, request.action)
-                return {**await self._project(session, actor, parent, work, row), "receipt": receipt}
+                result = {**await self._project(session, actor, parent, work, row), "receipt": receipt}
+                if admission is not None:
+                    await admission(session)
+                return result
 
         return await await_drained(perform())
 

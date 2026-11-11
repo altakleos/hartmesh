@@ -18,7 +18,7 @@ from app.telegram_bots.authority import AccessOff, AuthorityUnavailable, Ceiling
 from app.telegram_bots.links import BotLink
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied, Refusal
 from deerflow.agent_instances.human_input import HumanInput
-from deerflow.agent_instances.human_input_contract import Respond
+from deerflow.agent_instances.human_input_contract import RequestCommand, Respond
 from deerflow.agent_instances.work import INSPECT
 from deerflow.agent_instances.work_contract import WorkCommand
 from deerflow.persistence.agent_instances.human_input import HumanInputRequestRow
@@ -29,7 +29,7 @@ from deerflow.utils.file_io import await_drained
 
 _ACT_SCOPE = ("link_id", "owner_user_id", "bot_id", "binding_generation", "telegram_user_id", "chat_id", "instance_id", "work_id", "request_id", "kind")
 
-WORK_ACT_KINDS = frozenset({"respond", "decide", "accept", "changes_requested"})
+WORK_ACT_KINDS = frozenset({"respond", "decide", "accept", "changes_requested", "route"})
 _SCOPE = ("id", "owner_user_id", "bot_id", "agent_kind", "agent_ref", "binding_generation", "token_revision", "telegram_user_id", "chat_id", "connection_id")
 
 
@@ -44,7 +44,7 @@ def thaw(value):
 def request_for(kind, body, *, identity=None):
     if kind not in WORK_ACT_KINDS:
         raise ValueError("unsupported-work-act")
-    request = (Respond if kind == "respond" else WorkCommand).model_validate(thaw(body))
+    request = (Respond if kind == "respond" else RequestCommand if kind == "route" else WorkCommand).model_validate(thaw(body))
     if identity is not None and request.operation_id != identity or kind != "respond" and request.action != kind:
         raise ValueError("act-source-conflict")
     return request
@@ -108,7 +108,7 @@ class WorkActionMethods:
         body = request_for(act.kind, act.body, identity=act.id)
         async with self.session_factory() as session:
             parent, _ = await self.work._parent(session, actor, act.instance_id, INSPECT)
-            if act.kind == "respond":
+            if act.kind in {"respond", "route"}:
                 return await HumanInput(self.work)._receipt(session, actor, parent.id, body, request_id=act.request_id, work_id=act.work_id)
             return await self.work._receipt(session, actor, parent, body, act.work_id)
 
@@ -278,6 +278,8 @@ class WorkActionMethods:
             admission = self._work_admission(link, act, owner, attempt_current=attempt_current)
             if act.kind == "respond":
                 result = await HumanInput(self.work).respond(actor=actor, request_id=act.request_id, request=body, admission=admission)
+            elif act.kind == "route":
+                result = await HumanInput(self.work).command(actor=actor, request_id=act.request_id, request=body, admission=admission)
             else:
                 result = await self.work.command(actor=actor, instance_id=act.instance_id, work_id=act.work_id, request=body, can_stop=False, admission=admission)
             return await self._work_outcome(act, state="done", result=result)
@@ -315,6 +317,32 @@ class WorkActionMethods:
             raise AgentDenied("Request is unavailable")
         body = Respond(operation_id=operation_id, expected_request_revision=request_revision, expected_assignment_revision=assignment_revision, disposition=disposition, text=text, choice=choice)
         return await self._issue_work(link, kind="respond", request_id=request_id, work_id=current["work_id"], request=body)
+
+    async def route(self, link, *, operation_id, request_id, request_revision, recipient_id):
+        async def perform():
+            async with self._work_serial(operation_id):
+                await self._work_link(link)
+                if type(recipient_id) is not str or not recipient_id:
+                    raise ValueError("invalid-route-recipient")
+                async with self.session_factory() as reader:
+                    saved = await reader.get(TelegramActRow, operation_id)
+                    if saved is not None:
+                        if saved.kind != "route" or saved.link_id != link.id or saved.request_id != request_id or saved.body.get("recipient_id") != recipient_id or saved.body.get("expected_request_revision") != request_revision:
+                            raise ValueError("act-source-conflict")
+                        body = request_for("route", saved.body, identity=operation_id)
+                        work_id = saved.work_id
+                    else:
+                        body = None
+                if body is None:
+                    current = await HumanInput(self.work).get(actor=PrincipalRef("human", link.owner_user_id), request_id=request_id)
+                    if current["instance_id"] != link.agent_ref:
+                        raise AgentDenied("Request is unavailable")
+                    work_id = current["work_id"]
+                    body = RequestCommand(operation_id=operation_id, action="route", expected_revision=current["revision"], expected_request_revision=request_revision, recipient_id=recipient_id)
+                act = await self._save_work_act(link, kind="route", request_id=request_id, work_id=work_id, request=body)
+                return await self._attempt_work(act, explicit=True)
+
+        return await await_drained(perform())
 
     async def _validate_seen(self, link, work_id, request_id, seen):
         actor = PrincipalRef("human", link.owner_user_id)

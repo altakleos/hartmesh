@@ -1,6 +1,11 @@
 """English fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "request.unrouted": 'A question has nobody to answer it\n"{objective}"\n{name} asks: {question}',
+    "request.route_ask": "Noted. Who should answer instead?",
+    "request.route_none": "Nobody else can answer this question yet. Whoever should answer needs access to {name}, which is given in {product} on the web.",
+    "request.routed": "Passed on to {person}.",
+    "label.choose_answerer": "Choose who answers",
     "file.saved": "{file} is saved in {name}'s files.",
     "file.saved_ask": "{file} is saved in {name}'s files. What should {name} do with it?",
     "file.saved_as": "Saved as {file}, because the name was taken or could not be used.",

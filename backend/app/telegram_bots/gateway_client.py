@@ -395,6 +395,11 @@ class GatewayClientOwner:
             raise ChannelExecutionProtocolError()
         return await self._get_gateway_json(owner_user_id, "/api/agent-instances", params={"custody": custody, "limit": 500}, before_dispatch=before_dispatch)
 
+    async def get_agent_instance_grants(self, owner_user_id: str, *, instance_id: str, before_dispatch) -> dict:
+        if type(instance_id) is not str or not re.fullmatch(r"[0-9a-f]{32}", instance_id):
+            raise ChannelExecutionProtocolError()
+        return await self._get_gateway_json(owner_user_id, f"/api/agent-instances/{instance_id}/grants", before_dispatch=before_dispatch)
+
     async def _get_gateway_json(self, owner_user_id, path, *, before_dispatch, params=None):
         if not callable(before_dispatch):
             raise ChannelExecutionProtocolError()
