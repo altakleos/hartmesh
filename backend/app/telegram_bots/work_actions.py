@@ -15,7 +15,7 @@ from datetime import timedelta
 
 from sqlalchemy import select
 
-from app.telegram_bots.authority import AccessOff, AuthorityUnavailable, CeilingRefused, require
+from app.telegram_bots.authority import AccessOff, CeilingRefused, require
 from app.telegram_bots.links import BotLink
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied, Refusal
 from deerflow.agent_instances.human_input import HumanInput
@@ -23,8 +23,7 @@ from deerflow.agent_instances.human_input_contract import RequestCommand, Respon
 from deerflow.agent_instances.work import INSPECT
 from deerflow.agent_instances.work_contract import WorkCommand
 from deerflow.persistence.agent_instances.human_input import HumanInputRequestRow
-from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow, AgentInstanceRow
-from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow, TelegramInstancePolicyRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow
 from deerflow.spaces.contract import PrincipalRef
 from deerflow.utils.file_io import await_drained
 
@@ -170,54 +169,10 @@ class WorkActionMethods:
             await session.flush()
             return _snapshot(row)
 
-    def _work_admission(self, link, act, owner, *, attempt_current):
-        async def admission(writer):
-            self._writer_required(writer)
-            if not attempt_current():
-                raise AuthorityUnavailable()
-            if getattr(getattr(self.authority.app, "state", None), "agent_instances", None) is not self.work.agents:
-                raise AgentDenied("Work authority changed")
-            # Source resources and the instance are already locked by the
-            # domain service. Match policy writers' instance -> bot -> Act order.
-            current = await writer.get(TelegramBotLinkRow, link.id, with_for_update=True, populate_existing=True)
-            saved = await writer.get(TelegramActRow, act.id, with_for_update=True, populate_existing=True)
-            if current is None or any(getattr(current, field) != getattr(link, field) for field in _SCOPE) or current.state != "connected" or current.health != "ok":
-                raise AgentDenied("The bot binding is no longer current")
-            if (
-                saved is None
-                or any(getattr(saved, field) != getattr(act, field) for field in _ACT_SCOPE)
-                or saved.state != "pending"
-                or saved.attempts != act.attempts
-                or saved.binding_generation != act.binding_generation
-                or not same_body(saved.body, act.body)
-                or saved.cancel_requested_at is not None
-            ):
-                raise AgentDenied("The action admission is no longer current")
-            if act.kind in {"decide", "accept"} and current.acts_paused_since is not None:
-                raise AgentDenied("Actions are temporarily paused", reason="actions-paused")
-            instance = await writer.get(AgentInstanceRow, act.instance_id, populate_existing=True)
-            grant = await writer.get(AgentInstanceGrantRow, (act.instance_id, act.owner_user_id), populate_existing=True)
-            policy = await writer.get(TelegramInstancePolicyRow, act.instance_id, populate_existing=True)
-            from app.telegram_bots.policy import POLICIES, pending_discard
+    async def _work_admission(self, link, act, *, attempt_current):
+        from app.telegram_bots.work_effect_authority import prepare_effect_admission
 
-            if (
-                instance is None
-                or instance.status != "active"
-                or grant is None
-                or not 1 <= grant.permissions <= 7
-                or grant.permissions & 3 != 3
-                or policy is not None
-                and policy.policy not in POLICIES - {"off"}
-                or pending_discard(current) is not None
-            ):
-                raise AgentDenied("The bot policy is unavailable")
-            await owner(link.owner_user_id, writer)
-            if not attempt_current():
-                raise AuthorityUnavailable()
-            if getattr(getattr(self.authority.app, "state", None), "agent_instances", None) is not self.work.agents:
-                raise AgentDenied("Work authority changed")
-
-        return admission
+        return await prepare_effect_admission(self, link, act, attempt_current=attempt_current)
 
     async def _attempt_work(self, act, *, explicit=False, attempt_current=lambda: True):
         from app.telegram_bots.acts import _snapshot, _utc
@@ -286,7 +241,7 @@ class WorkActionMethods:
                 await writer.flush()
                 act = _snapshot(saved)
                 await owner(link.owner_user_id, writer)
-            admission = self._work_admission(link, act, owner, attempt_current=attempt_current)
+            admission = await self._work_admission(link, act, attempt_current=attempt_current)
             if act.kind == "respond":
                 result = await HumanInput(self.work).respond(actor=actor, request_id=act.request_id, request=body, admission=admission)
             elif act.kind == "route":
