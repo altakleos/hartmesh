@@ -11,8 +11,10 @@ from app.telegram_bots.producer import DeliveryRetry, ProductSourceRetired
 from app.telegram_bots.work_actions import same_body
 from deerflow.agent_instances.work import UNRESOLVED
 from deerflow.persistence.agent_instances.human_input import HumanInputEventRow, HumanInputRequestRow
+from deerflow.persistence.agent_instances.model import AgentInstanceRow
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow, AgentWorkRow
 from deerflow.persistence.telegram_bots.model import TelegramActRow
+from deerflow.persistence.user.model import UserRow
 from deerflow.utils.file_io import await_drained
 
 
@@ -25,6 +27,8 @@ class WorkOutcomeRead:
     protected: bool
     attempt_status: str | None
     continued: bool
+    supervisor: str | None
+    recipient: str | None
 
     @property
     def attempt_unresolved(self):
@@ -64,7 +68,7 @@ class WorkOutcomeReader:
                 raise ProductSourceRetired()
             projection = _OutcomeProjection(act, source, receipt)
             _held, target = await current_attention(self.requests, link, projection=projection)
-            return WorkOutcomeRead(act, receipt, source, target[0], target[1] == "protected", (source.work.get("attempt") or {}).get("status"), projection.continued)
+            return WorkOutcomeRead(act, receipt, source, target[0], target[1] == "protected", (source.work.get("attempt") or {}).get("status"), projection.continued, projection.supervisor, projection.recipient)
 
         return await await_drained(perform())
 
@@ -75,21 +79,25 @@ class _OutcomeProjection:
     def __init__(self, act, source, receipt):
         self.act, self.source, self.receipt = act, source, receipt
         self.continued = False
+        self.supervisor = self.recipient = None
 
     def extend(self, query):
         act, work, request = TelegramActRow, AgentWorkRow, HumanInputRequestRow
         event = HumanInputEventRow if self.act.kind in {"respond", "route"} else AgentWorkEventRow
         effect = aliased(AgentWorkEventRow)
+        supervisor, recipient = aliased(UserRow), aliased(UserRow)
         other, attempt = aliased(AgentWorkAttemptRow), AgentWorkAttemptRow
         latest = select(other.id).where(other.work_id == work.id).order_by(other.created_at.desc(), other.id.desc()).limit(1).scalar_subquery()
         return (
-            query.add_columns(act, work, request, event, attempt, effect)
+            query.add_columns(act, work, request, event, attempt, effect, supervisor.email, recipient.email)
             .join(act, act.id == self.act.id)
             .join(work, work.id == self.act.work_id)
             .join(request, request.id == self.act.request_id)
             .outerjoin(event, and_(event.instance_id == act.instance_id, event.operation_id == act.id))
             .outerjoin(attempt, attempt.id == latest)
             .outerjoin(effect, and_(effect.instance_id == act.instance_id, effect.operation_id == act.id))
+            .outerjoin(supervisor, supervisor.id == AgentInstanceRow.supervisor_id)
+            .outerjoin(recipient, recipient.id == self.act.body.get("recipient_id"))
         )
 
     def check(self, rows):
@@ -97,6 +105,7 @@ class _OutcomeProjection:
 
         bot, target, permissions, policy = rows[0][:4]
         saved, work, request, event, attempt, effect = rows[0][8:14]
+        self.supervisor, self.recipient = rows[0][14:16]
         # Journal transitions during read must be observed before wording is
         # chosen. This also covers a completed callback replay after restart.
         if _snapshot(saved) != self.act or not same_body(saved.body, self.act.body) or not same_body(saved.result, self.act.result):

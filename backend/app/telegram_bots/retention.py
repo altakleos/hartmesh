@@ -92,15 +92,16 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
             delivery.payload["digest_id"].as_string(),
             delivery.payload["work_request_basis"]["cleanup_id"].as_string(),
             delivery.payload["work_request_basis"]["origin"]["anchor_outbox_id"].as_string(),
+            delivery.payload["work_outcome_basis"]["origin"]["anchor_outbox_id"].as_string(),
         ).where(or_(delivery.class_ == "digest", delivery.state.in_(("pending", "sending", "failed"))))
     )
     graph = {}
-    for identity, kind, state, members, reservation, cleanup, origin in records:
+    for identity, kind, state, members, reservation, cleanup, origin, outcome_origin in records:
         if state in {"pending", "sending"}:
             pinned.add(identity)
             pinned |= _strings(reservation)
         if state in {"pending", "sending", "failed"}:
-            pinned |= _strings(cleanup, origin)
+            pinned |= _strings(cleanup, origin, outcome_origin)
         if kind == "digest" and isinstance(members, list):
             graph[identity] = _strings(*members)
     pending = list(pinned)
@@ -139,13 +140,38 @@ async def _sweep_acts(sessions, now):
     from app.telegram_bots.file_puts import settled_file_journal
 
     async with _writer(sessions) as session:
-        expired = (TelegramActRow.created_at < now - timedelta(days=ACT_RETENTION_DAYS), TelegramActRow.state.in_(_SETTLED_ACTS), TelegramActRow.stop_dispatch.is_(None))
+        delivery = TelegramOutboxRow
+        pending_outcome = (
+            select(delivery.id)
+            .where(
+                delivery.link_id == TelegramActRow.link_id,
+                delivery.binding_generation == TelegramActRow.binding_generation,
+                delivery.state.in_(("pending", "sending", "failed")),
+                delivery.payload["work_outcome_basis"]["context"]["act"]["id"].as_string() == TelegramActRow.id,
+            )
+            .exists()
+        )
+        expired = (~pending_outcome, TelegramActRow.created_at < now - timedelta(days=ACT_RETENTION_DAYS), TelegramActRow.state.in_(_SETTLED_ACTS), TelegramActRow.stop_dispatch.is_(None))
         ordinary = await session.execute(delete(TelegramActRow).where(*expired, TelegramActRow.kind != "file_put", TelegramActRow.continuation.is_(None)))
         candidates = list(await session.scalars(select(TelegramActRow).where(*expired, TelegramActRow.kind == "file_put").with_for_update(skip_locked=True)))
         identities = [row.id for row in candidates if settled_file_journal(row)]
         for start in range(0, len(identities), _BATCH):
             await session.execute(delete(TelegramActRow).where(TelegramActRow.id.in_(identities[start : start + _BATCH])))
-        return ordinary.rowcount + len(identities)
+        from app.telegram_bots.work_actions import WORK_ACT_KINDS
+        from app.telegram_bots.work_outcome_delivery import delivery_receipt
+
+        outcomes = list(await session.scalars(select(TelegramActRow).where(*expired, TelegramActRow.kind.in_(WORK_ACT_KINDS), TelegramActRow.continuation.is_not(None)).with_for_update(skip_locked=True)))
+        settled = []
+        for row in outcomes:
+            try:
+                receipt = delivery_receipt(row.continuation)
+            except (ValueError, TypeError, KeyError):
+                continue
+            if receipt is not None:
+                settled.append(row.id)
+        for start in range(0, len(settled), _BATCH):
+            await session.execute(delete(TelegramActRow).where(TelegramActRow.id.in_(settled[start : start + _BATCH])))
+        return ordinary.rowcount + len(identities) + len(settled)
 
 
 async def sweep_rows(sessions, now: datetime, *, callback_max_age_days: int) -> dict[str, int]:

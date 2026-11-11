@@ -793,8 +793,8 @@ class CallbackRepository:
                 group = part.get("callback_group_id")
                 rows = list(await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group).order_by(TelegramCallbackRow.id)))
                 try:
-                    work_preview = "work_request_basis" in parent.payload
-                    if work_preview:
+                    work_preview = "work_request_basis" in parent.payload or "work_outcome_basis" in parent.payload
+                    if "work_request_basis" in parent.payload:
                         from app.telegram_bots.work_request_source import frozen
 
                         frozen(captured)
@@ -846,6 +846,7 @@ class CallbackRepository:
                 # An unfinished direct Work reply still needs its consumed
                 # source group and acknowledged parent as dispatch evidence.
                 unsettled.update(await session.scalars(select(TelegramOutboxRow.payload["work_request_basis"]["origin"]["anchor_outbox_id"].as_string()).where(TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
+                unsettled.update(await session.scalars(select(TelegramOutboxRow.payload["work_outcome_basis"]["origin"]["anchor_outbox_id"].as_string()).where(TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
                 # A captured Work input still owns its shown prompt until its
                 # outcome is delivered, even after ordinary prompt expiration.
                 for sources in await session.scalars(select(TelegramInboundMarkRow.delivery_ids).where(TelegramInboundMarkRow.route_kind == "work_input", TelegramInboundMarkRow.state != "done")):

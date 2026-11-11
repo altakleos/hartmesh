@@ -12,6 +12,10 @@ legacy-channel closure; an absent environment key means on. See
 Keep bot network, supervisor and router startup outside configuration loading.
 Use socket-free transports and synthetic credentials in offline tests.
 
+Work outcome delivery uses canonical receipts and a final source/claim fence.
+Full ACK alone seals captured input and writes the Work-only continuation receipt;
+keep retention and callback activation aligned with [Work guidance](../../docs/TELEGRAM_WORK.md).
+
 Product text lives in `texts/` in English and Chinese; keep locale keys equal
 and copy English wording from the design. `render` escapes values; `render_plain`
 preserves them for plain labels/alerts. `markdown` accepts only Telegram markup,

@@ -69,6 +69,7 @@ TEXTS: dict[str, str] = {
     "privacy.protected": "{name}'s managers have switched off forwarding and saving in this chat. Messages {name} sends first show their details after a tap on Show.",
     "profile.short.agent": "AI assistant. Private: answers only the person who connected this bot.",
     "profile.description.agent": ("{name} is an AI assistant. Only the person who connected this bot gets an answer, in this chat.\n\nIf this is your bot, use the Open chat button in your web app, then press Start."),
+    "label.open_assignment": "Open assignment",
     "label.open_work": "Open assignments",
     "label.open_access": "Open access settings",
     "label.open_agent_settings": "Open settings",

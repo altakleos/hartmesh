@@ -194,3 +194,21 @@ expected Work revision includes the canonical action event is a later continuati
 That comparison uses logical revisions, not wall-clock times. Delayed replies after
 such a continuation confirm only the saved effect and make no claim that work has
 not started. Human-input outcomes match both their request and Work event receipts.
+
+`work_outcome_delivery.py` publishes receipt-owned result replies. Each send
+re-reads the exact action and canonical receipt and fences current account,
+reader grant, protection, destination, settings, input ownership and claim in one
+final SQL snapshot. Complete escaped text spans ordered parts; only the last part
+carries navigation or the original operation's Retry action. Completed actions
+retire their original controls without repeating the command. Input completion
+and a versioned Work-only delivery receipt in `Act.continuation` commit with the
+complete Telegram ACK. Collected outbox history cannot republish an acknowledged
+phase; pending deliveries retain their action through cleanup. Obsolete unsent
+plans can be replaced while their captured input remains unfinished.
+
+This planner and source remain uninstalled. Source-aware relocation/protection
+repair is an activation prerequisite: generic replacement holds these frozen
+plans with `work-outcome-refresh-required`, preserving ACKed parts, original
+input and action identity. It cannot silently move them or replay the prefix.
+The full controller still owns fresh-request and routing follow-ups, receipt-only
+journal reconciliation, explicit action retries and pending-outcome observation.

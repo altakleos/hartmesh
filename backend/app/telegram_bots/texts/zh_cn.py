@@ -63,6 +63,7 @@ TEXTS: dict[str, str] = {
     "privacy.protected": "{name} 的管理者已关闭此聊天的转发和保存功能。{name} 主动发送的消息需要点按“显示”才能查看详情。",
     "profile.short.agent": "AI 助理。私人聊天：只回答连接此机器人的人。",
     "profile.description.agent": "{name} 是 AI 助理。此聊天只回答连接此机器人的人。\n\n如果这是你的机器人，请在网页版应用中使用“打开聊天”按钮，然后按“开始”。",
+    "label.open_assignment": "打开任务",
     "label.open_work": "打开任务",
     "label.open_access": "打开访问设置",
     "label.open_agent_settings": "打开设置",
