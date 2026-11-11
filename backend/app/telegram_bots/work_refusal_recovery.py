@@ -69,7 +69,7 @@ class WorkRefusalRecovery:
                     parent,
                     source,
                     settings,
-                    {"view": "request"},
+                    {"view": "current"},
                     key=key,
                     chat_id=chat_id,
                     message_id=message_id,

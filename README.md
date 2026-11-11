@@ -2020,7 +2020,9 @@ Those replies can refresh changed recipient choices without resubmitting the res
 Their original input remains available while live choices or pending refreshes need it.
 An optional callback dispatcher connects previews, confirmations and routing to
 those durable operations. Explicit Retry keeps the original operation and body;
-duplicate presses of one shown retry do not start another attempt.
+duplicate presses of one shown retry do not start another attempt. Changed review
+confirmations show the complete current review before offering fresh controls;
+routing choices refresh when a selected person loses access.
 Assignments continue to be managed on the web.
 
 Instance site-permission cards require current Manage access when planned, sent

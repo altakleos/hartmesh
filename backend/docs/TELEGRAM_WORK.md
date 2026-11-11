@@ -295,8 +295,24 @@ It reserves the existing immutable operation before checking it, and lets canoni
 outcome planning own result replies. A result-read failure after saving an action
 is deferred to receipt observation, never reported as a failed save. Direct
 wrong-person routing uses the reply-owned refresh coordinator when a selected
-recipient loses access. General routing refresh, stale-request presentation and
-retained input/draft controllers still need their remaining orchestration.
+recipient loses access. General routing uses a locked acknowledged choice to
+refresh the current roster, admitting only an unreserved choice or its exact
+terminal recipient refusal. Missing journals and unresolved actions cannot be
+replaced. The separate V6 `choice_origin` proves a consumed routing control and
+its complete historical ACK, keeping explicit refreshes as direct replies even
+when notifications are off. It survives refresh/repair and callback retention;
+final SDK admission requires it independently of Show. Known attempt-unresolved
+confirmations consult refusal recovery before
+checking the same operation again. Input-owned V4 confirmations stay with their
+retained-input owner and cannot enter generic refusal recovery.
+
+`work_stale_recovery.py` publishes a complete current request with the fixed
+changed-message notice after an unreserved stale control or its exact conclusive
+conflict. It retains the original action and validates the consumed source group
+through final SDK delivery. The closed `current` interaction view preserves all
+review content and comments; fresh controls arm only after the complete ACK.
+Retained-input drafts, closed/rerouted requests and routing revision conflicts
+still need their remaining orchestration.
 
 `work_action_retries.py` accepts only a complete ACK of an uncertain Work outcome
 and the exact original operation/body. Its guarded writer rechecks shown receipts

@@ -117,7 +117,7 @@ class WorkRequestRecovery:
     def _extras(self, source):
         return {}
 
-    async def _replace(self, writer, link, row, source, settings, *, reveal=None, force_new=False):
+    async def _replace(self, writer, link, row, source, settings, *, reveal=None, force_new=False, choice=None):
         if (row.link_id, row.owner_user_id, row.binding_generation, row.chat_id) != (link.id, link.owner_user_id, link.binding_generation, link.chat_id) or row.payload.get("work_request_basis", {}).get(
             "version"
         ) not in self.family_versions:
@@ -133,7 +133,15 @@ class WorkRequestRecovery:
         unresolved = await writer.scalar(select(TelegramActRow.id).where(TelegramActRow.owner_user_id == link.owner_user_id, TelegramActRow.request_id == request.id, TelegramActRow.state.in_({"pending", "waiting", "uncertain"})).limit(1))
         if unresolved is not None:
             raise DeliveryRetry(timedelta(seconds=5))
-        reply_origin = reveal or row.payload["work_request_basis"].get("reply_origin") or row.payload["work_request_basis"].get("reveal")
+        choice_origin = choice or row.payload["work_request_basis"].get("choice_origin")
+        if choice_origin is not None and self.basis_version != 6:
+            raise ProductSourceRetired()
+        if choice_origin is not None and choice is None:
+            from app.telegram_bots.work_routing_origin import require_choice
+
+            proof = await writer.get(TelegramCallbackRow, choice_origin, with_for_update=True, populate_existing=True)
+            require_choice(proof, row)
+        reply_origin = None if choice_origin is not None else reveal or row.payload["work_request_basis"].get("reply_origin") or row.payload["work_request_basis"].get("reveal")
         if reply_origin is not None:
             proof = await writer.get(TelegramCallbackRow, reply_origin, with_for_update=True, populate_existing=True)
             require_show(proof, row)
@@ -151,12 +159,12 @@ class WorkRequestRecovery:
                 raise ProductSourceRetired()
         for control in controls:
             if control.consumed_at is None:
-                control.consumed_at, control.closed_reason = self.outbox.clock(), "superseded"
+                control.consumed_at, control.closed_reason = self.outbox.clock(), "routing-refresh" if choice is not None else "superseded"
         target = next((part for part in old if part["presentation_version"] == version - 1 and part["state"] == "sent" and part["message_ids"]), None)
         for part in old:
             if part["state"] not in {"sent", "unavailable", "retired"}:
                 part["state"] = "retired"
-        concealed = source.protected and reply_origin is None
+        concealed = source.protected and reply_origin is None and choice_origin is None
         presentation = self._presentation(source, settings, link, row, concealed)
         keyboard = [list(line) for line in presentation.keyboard]
         recipes = []
@@ -179,6 +187,8 @@ class WorkRequestRecovery:
             "cleanup_id": None,
             "reply_origin": reply_origin,
         }
+        if choice_origin is not None:
+            basis["choice_origin"] = choice_origin
         fresh = self.outbox._parts(recipes, version)
         # Telegram cannot add protection to an existing unprotected message.
         # A replacement receives a new anchor only after its complete ACK.
@@ -195,7 +205,7 @@ class WorkRequestRecovery:
                 writer.add(cleanup)
                 if multipart_reveal and control.id == reveal:
                     basis["cleanup_id"] = cleanup.id
-        row.class_ = "reply" if reply_origin is not None else "question"
+        row.class_ = "reply" if reply_origin is not None or choice_origin is not None else "question"
         row.payload = _safe_json({**row.payload, "presentation_version": version, "work_request_basis": basis, "product_keyboard_basis": keyboard})
         row.parts = old + fresh
         row.state, row.not_before = "pending", self.outbox.clock()

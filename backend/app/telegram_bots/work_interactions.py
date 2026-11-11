@@ -15,6 +15,7 @@ from deerflow.agent_instances.work_contract import Statement
 _STATEMENT = TypeAdapter(Statement)
 _FIELDS = {
     "request": {"view"},
+    "current": {"view"},
     "cannot": {"view"},
     "decision": {"view", "decision", "note"},
     "accept": {"view"},
@@ -52,12 +53,12 @@ def interaction_state(value, source):
             raise ValueError("invalid-work-prompt")
         expected = _PROMPTS[state["purpose"]][0]
     else:
-        expected = {"cannot": "information", "decision": "decision", "accept": "review", "changes": "review", "answer": "information", "voice": purpose, "request": purpose}[view]
+        expected = {"cannot": "information", "decision": "decision", "accept": "review", "changes": "review", "answer": "information", "voice": purpose, "request": purpose, "current": purpose}[view]
     if purpose != expected:
         raise ValueError("wrong-work-interaction-purpose")
     if source.request["state"] == "closed" or source.request["needs_routing"]:
         raise AgentConflict("The request is no longer available")
-    responding = view == "request" and purpose == "information" or view in {"cannot", "answer", "voice"} or view == "prompt" and state["purpose"] in {"answer", "cannot", "wrong"}
+    responding = view in {"request", "current"} and purpose == "information" or view in {"cannot", "answer", "voice"} or view == "prompt" and state["purpose"] in {"answer", "cannot", "wrong"}
     if not source.request["can_respond" if responding else "can_manage"]:
         raise AgentDenied("The interaction is unavailable")
     if view == "decision":
@@ -71,6 +72,12 @@ def present_interaction(source, value, *, locale):
     base = present_request(source, locale=locale)
     if view == "request":
         return base
+    if view == "current":
+        html = render("stale.changed_resend", locale) + "\n\n" + "".join(part["html"] for part in base.parts)
+        return WorkRequestPresentation(
+            tuple({"kind": "text", "html": chunk, "visible_text": visible_text(chunk), "protect_content": source.protected} for chunk in split_html(html)),
+            base.keyboard,
+        )
     payload = {"request_id": source.request["id"], "work_id": source.work["id"], "seen": deepcopy(source.seen), "interaction": state}
 
     def button(kind, label):

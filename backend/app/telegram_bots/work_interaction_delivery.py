@@ -16,6 +16,8 @@ from deerflow.agent_instances.contract import AgentConflict
 from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
 
+CURRENT_REQUEST_KINDS = frozenset({"hi_answer", "hi_choice", "hi_cant_open", "hi_cannot", "hi_wrong", "decide_choice", "decide_own", "decide_note", "decide_confirm", "accept_open", "accept_confirm", "changes_open", "back"})
+
 
 def transition(callback, source):
     """Derive a closed preview from the exact saved button, never caller text."""
@@ -68,7 +70,7 @@ def check_origin(link, parent, callbacks, basis, source):
     if selected is None:
         raise ProductSourceRetired()
     previous = acknowledged_source(link, parent)
-    refreshing = basis["interaction"]["view"] == "request" and selected.kind in {"decide_confirm", "accept_confirm"}
+    refreshing = basis["interaction"]["view"] == "request" and selected.kind in {"decide_confirm", "accept_confirm"} or basis["interaction"]["view"] == "current" and selected.kind in CURRENT_REQUEST_KINDS
     if refreshing:
         if (previous.request["id"], previous.work["id"]) != (source.request["id"], source.work["id"]):
             raise ProductSourceRetired()
