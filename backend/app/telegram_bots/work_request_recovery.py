@@ -7,9 +7,10 @@ from datetime import timedelta
 from sqlalchemy import and_, select, true
 
 from app.telegram_bots.attention_authority import prepare_attention
-from app.telegram_bots.callbacks import CallbackRefused
+from app.telegram_bots.callbacks import CallbackRefused, _validate_rows
 from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryRetry, ProductSourceRetired, _safe_json, keyboard_cleanup_row
+from app.telegram_bots.work_request_source import require_show
 from app.telegram_bots.work_requests import present_request
 from deerflow.agent_instances.contract import AgentDenied
 from deerflow.persistence.agent_instances.human_input import HumanInputRequestRow
@@ -19,6 +20,9 @@ from deerflow.utils.file_io import await_drained
 
 
 class WorkRequestRecovery:
+    family_versions = {1, 2}
+    basis_version = 2
+
     def __init__(self, plans):
         self.plans = plans
         self.outbox, self.reader, self.callbacks = plans.outbox, plans.reader, plans.callbacks
@@ -104,8 +108,19 @@ class WorkRequestRecovery:
         if "agents:write" not in held:
             raise AgentDenied("The request is unavailable")
 
-    async def _replace(self, writer, link, row, source, settings, *, reveal=None):
-        if row.payload.get("work_request_basis", {}).get("version") == 5:
+    def _presentation(self, source, settings, link, row, concealed):
+        return present_request(source, locale=settings.locale, concealed=concealed, outbox_id=row.id)
+
+    def _snapshot(self, source):
+        return asdict(source)
+
+    def _extras(self, source):
+        return {}
+
+    async def _replace(self, writer, link, row, source, settings, *, reveal=None, force_new=False):
+        if (row.link_id, row.owner_user_id, row.binding_generation, row.chat_id) != (link.id, link.owner_user_id, link.binding_generation, link.chat_id) or row.payload.get("work_request_basis", {}).get(
+            "version"
+        ) not in self.family_versions:
             raise ProductSourceRetired()
         if (row.instance_id, row.work_id, row.request_id) != (source.request["instance_id"], source.work["id"], source.request["id"]):
             raise ProductSourceRetired()
@@ -118,10 +133,22 @@ class WorkRequestRecovery:
         unresolved = await writer.scalar(select(TelegramActRow.id).where(TelegramActRow.owner_user_id == link.owner_user_id, TelegramActRow.request_id == request.id, TelegramActRow.state.in_({"pending", "waiting", "uncertain"})).limit(1))
         if unresolved is not None:
             raise DeliveryRetry(timedelta(seconds=5))
+        reply_origin = reveal or row.payload["work_request_basis"].get("reply_origin") or row.payload["work_request_basis"].get("reveal")
+        if reply_origin is not None:
+            proof = await writer.get(TelegramCallbackRow, reply_origin, with_for_update=True, populate_existing=True)
+            require_show(proof, row)
         version = row.payload["presentation_version"] + 1
         old = deepcopy(row.parts)
         old_groups = {part.get("callback_group_id") for part in old if part["presentation_version"] == version - 1} - {None}
         controls = list(await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id.in_(old_groups)).order_by(TelegramCallbackRow.id).with_for_update()))
+        try:
+            _validate_rows(row, controls, allow_pending=True)
+        except CallbackRefused:
+            raise ProductSourceRetired() from None
+        for control in controls:
+            own = next((part for part in old if part.get("callback_group_id") == control.group_id and part["presentation_version"] == version - 1), None)
+            if own is None or control.message_id is not None and (own["state"] != "sent" or own["message_ids"] != [control.message_id]):
+                raise ProductSourceRetired()
         for control in controls:
             if control.consumed_at is None:
                 control.consumed_at, control.closed_reason = self.outbox.clock(), "superseded"
@@ -129,8 +156,8 @@ class WorkRequestRecovery:
         for part in old:
             if part["state"] not in {"sent", "unavailable", "retired"}:
                 part["state"] = "retired"
-        concealed = source.protected and reveal is None
-        presentation = present_request(source, locale=settings.locale, concealed=concealed, outbox_id=row.id)
+        concealed = source.protected and reply_origin is None
+        presentation = self._presentation(source, settings, link, row, concealed)
         keyboard = [list(line) for line in presentation.keyboard]
         recipes = []
         for index, supplied in enumerate(presentation.parts):
@@ -138,14 +165,25 @@ class WorkRequestRecovery:
             if index == len(presentation.parts) - 1 and keyboard:
                 recipe["stored_keyboard"] = True
             recipes.append(recipe)
-        snapshot = asdict(source)
+        snapshot = self._snapshot(source)
         snapshot["responses"] = list(snapshot["responses"])
-        basis = {"version": 2, "source": snapshot, "locale": settings.locale, "concealed": concealed, "parts": recipes, "keyboard": keyboard, "reveal": reveal, "cleanup_id": None}
+        basis = {
+            "version": self.basis_version,
+            **self._extras(source),
+            "source": snapshot,
+            "locale": settings.locale,
+            "concealed": concealed,
+            "parts": recipes,
+            "keyboard": keyboard,
+            "reveal": reveal,
+            "cleanup_id": None,
+            "reply_origin": reply_origin,
+        }
         fresh = self.outbox._parts(recipes, version)
         # Telegram cannot add protection to an existing unprotected message.
         # A replacement receives a new anchor only after its complete ACK.
         multipart_reveal = reveal is not None and len(fresh) > 1
-        if target is not None and not multipart_reveal and (not source.protected or target.get("protect_content")):
+        if target is not None and not force_new and not multipart_reveal and (not source.protected or target.get("protect_content")):
             fresh[0].update(kind="edit", target_message_id=target["message_ids"][0], target_protect_content=bool(target.get("protect_content")))
         cleanup_groups = set()
         target_id = fresh[0].get("target_message_id")
@@ -157,6 +195,7 @@ class WorkRequestRecovery:
                 writer.add(cleanup)
                 if multipart_reveal and control.id == reveal:
                     basis["cleanup_id"] = cleanup.id
+        row.class_ = "reply" if reply_origin is not None else "question"
         row.payload = _safe_json({**row.payload, "presentation_version": version, "work_request_basis": basis, "product_keyboard_basis": keyboard})
         row.parts = old + fresh
         row.state, row.not_before = "pending", self.outbox.clock()
@@ -171,6 +210,8 @@ class WorkRequestRecovery:
                 created = min(control.created_at for control in controls)
                 for control in await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group.group_id)):
                     control.created_at = created
+        for control in await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id.in_({part.get("callback_group_id") for part in fresh} - {None}))):
+            control.payload = {**control.payload, "presentation_pending": True}
         await writer.flush()
 
 

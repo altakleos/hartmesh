@@ -2680,7 +2680,7 @@ class OutboxSender:
             await self.outbox.inbox.settle_deliveries(link_id=link_id, session=writer)
 
     async def _replace(self, binding: BotLink, row: OutboxItem, claim: str, *, reason: str) -> None:
-        routing = row.payload.get("work_request_basis", {}).get("version") == 5
+        routing = row.payload.get("work_request_basis", {}).get("version") in {5, 6}
         if "work_outcome_basis" in row.payload or routing:
             # Frozen result and routing recipes need source-aware rematerialization. Never
             # replay their ACKed prefix or silently relocate a result.
@@ -2781,6 +2781,16 @@ class OutboxSender:
             except ValueError:
                 await release_members(session, row, owner=row.claim_owner, claim=row.claim_id)
                 row.state, row.failed_reason, row.closed_at = "failed", "invalid-digest-receipt", now
+                row.claim_owner = row.claim_id = row.claimed_at = None
+                await session.flush()
+                return
+        if "work_request_basis" in row.payload:
+            from app.telegram_bots.work_request_source import acknowledge_request
+
+            try:
+                await acknowledge_request(session, row)
+            except (ProductSourceRetired, PermanentDeliveryError, ValueError, TypeError, KeyError, IndexError):
+                row.state, row.failed_reason, row.closed_at = "failed", "invalid-work-request-receipt", now
                 row.claim_owner = row.claim_id = row.claimed_at = None
                 await session.flush()
                 return

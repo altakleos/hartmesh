@@ -2,26 +2,20 @@
 
 import asyncio
 from dataclasses import asdict
-from datetime import datetime
-from types import SimpleNamespace
 
-from sqlalchemy import func, or_, select
-from sqlalchemy.orm import aliased
+from sqlalchemy import select
 
 from app.telegram_bots.attention_authority import _SCOPE
-from app.telegram_bots.authority import AccessOff, _PreparedLiveOwner
 from app.telegram_bots.config import load_config
-from app.telegram_bots.producer import ProductSourceRetired, _safe_json
+from app.telegram_bots.producer import DeliveryClaimRetired, ProductSourceRetired, _safe_json
 from app.telegram_bots.work_request_delivery import WorkRequestPlans
 from app.telegram_bots.work_request_source import WorkRequestSources, _RequestProjection, frozen, same_displayed_basis
 from app.telegram_bots.work_routing import present_routing
+from app.telegram_bots.work_routing_authority import RoutingCandidates
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied
 from deerflow.persistence.agent_instances.human_input import HumanInputRequestRow
-from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow
 from deerflow.persistence.agent_instances.work import AgentWorkRow
-from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow, TelegramOutboxRow
-from deerflow.persistence.user.access import DisabledIdentityRow
-from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramOutboxRow
 
 
 class WorkRoutingPlans(WorkRequestPlans):
@@ -41,7 +35,7 @@ class WorkRoutingPlans(WorkRequestPlans):
                 raise AgentDenied("The bot binding is no longer current")
             existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == dedupe_key).with_for_update())
             if existing is not None:
-                if existing.binding_generation != link.binding_generation or existing.request_id != request_id or existing.payload.get("work_request_basis", {}).get("version") != 5:
+                if existing.binding_generation != link.binding_generation or existing.request_id != request_id or existing.payload.get("work_request_basis", {}).get("version") not in {5, 6}:
                     raise ValueError("work-routing-source-conflict")
                 return existing.id
             work = await writer.get(AgentWorkRow, source.work["id"])
@@ -90,85 +84,15 @@ class WorkRoutingPlans(WorkRequestPlans):
 
 class _RoutingProjection(_RequestProjection):
     def __init__(self, *args, **kwargs):
-        from deerflow.config.app_config import peek_loaded_app_config
-
         super().__init__(*args, **kwargs)
-        self.config = peek_loaded_app_config()
-        if self.config is None:
-            raise ProductSourceRetired()
-        self.sign_on_only = self.config.auth.local.enabled is False
-        self.public_base_url = load_config(self.config).public_base_url
-
-    def _mode_current(self):
-        from deerflow.config.app_config import peek_loaded_app_config
-
-        if (
-            peek_loaded_app_config() is not self.config
-            or (self.config.auth.local.enabled is False) != self.sign_on_only
-            or load_config(self.config).public_base_url != self.public_base_url
-            or self.basis["routing"]["public_base_url"] != self.public_base_url
-        ):
-            raise ProductSourceRetired()
+        self.candidates = RoutingCandidates(self.host.outbox.sessions, self.captured.link, self.source, self.basis["routing"])
 
     def extend(self, query):
-        # Compact correlated facts keep each complete delivery out of the
-        # candidate/account-disable cross product. Password hashes never enter it.
-        query = super().extend(query)
-        user, grant, disabled = aliased(UserRow), aliased(AgentInstanceGrantRow), aliased(DisabledIdentityRow)
-        fields = {column.name: getattr(user, column.name) for column in UserRow.__table__.columns if column.name != "password_hash"}
-        fields.update(permissions=grant.permissions, disabled_issuer=disabled.issuer, disabled_subject=disabled.subject, disabled_at=disabled.disabled_at)
-        args = [value for pair in fields.items() for value in pair]
-        sqlite = self.host.outbox.sessions.kw["bind"].dialect.name == "sqlite"
-        aggregate = func.json_group_array(func.json_object(*args)) if sqlite else func.json_agg(func.json_build_object(*args))
-        people = (
-            select(aggregate)
-            .select_from(grant)
-            .join(user, user.id == grant.user_id)
-            .outerjoin(disabled, or_(disabled.subject == user.id, disabled.subject == user.oauth_id))
-            .where(grant.instance_id == TelegramBotLinkRow.agent_ref)
-            .correlate(TelegramBotLinkRow)
-            .scalar_subquery()
-        )
-        return query.add_columns(people)
+        return self.candidates.extend(super().extend(query))
 
     def check(self, rows):
-        from app.gateway.deps import bind_user_repo
-
         super().check(rows)
-        self._mode_current()
-        required = 3 if self.source.request["purpose"] == "information" else 6
-        latest_wrong = max((row for row in self.source.responses if row["disposition"] == "wrong_recipient"), key=lambda row: (row["created_at"], row["id"]), default=None)
-        excluded = latest_wrong["actor_id"] if latest_wrong else None
-        users, facts = {}, {}
-        for user in self.objects(rows[0][-1]):
-            users[user.id] = user
-            if user.disabled_issuer is not None:
-                facts.setdefault(user.id, []).append(
-                    SimpleNamespace(issuer=user.disabled_issuer, subject=user.disabled_subject, disabled_at=datetime.fromisoformat(user.disabled_at) if isinstance(user.disabled_at, str) else user.disabled_at)
-                )
-        repository = bind_user_repo(self.host.outbox.sessions)
-        recipients, eligible = [], set()
-        for user in users.values():
-            if user.permissions & required != required:
-                continue
-            user.password_hash = None
-            for key in ("last_sign_in_at", "released_at"):
-                if isinstance(getattr(user, key), str):
-                    setattr(user, key, datetime.fromisoformat(getattr(user, key)))
-            owner = _PreparedLiveOwner(user.id, "", self.sign_on_only, repository, self.host.outbox.sessions.kw["bind"].sync_engine)
-            try:
-                owner.check_snapshot(user, facts.get(user.id, []))
-            except AccessOff:
-                continue
-            eligible.add(user.id)
-            if user.id != excluded:
-                recipients.append({"user_id": user.id, "name": user.email, "permissions": user.permissions})
-        recipients.sort(key=lambda row: (row["user_id"] != self.captured.link.owner_user_id, row["name"].casefold(), row["user_id"]))
-        if not self.basis["routing"]["after_wrong"] and self.source.request["recipient_id"] in eligible:
-            raise ProductSourceRetired()
-        if recipients != self.basis["routing"]["recipients"]:
-            raise ProductSourceRetired()
-        self._mode_current()
+        self.candidates.check(rows)
 
 
 class WorkRoutingSources(WorkRequestSources):
@@ -178,12 +102,22 @@ class WorkRoutingSources(WorkRequestSources):
         from deerflow.config.app_config import peek_loaded_app_config
 
         basis, source, part = frozen(captured)
-        if basis["version"] != 5:
+        if basis["version"] not in {5, 6}:
             raise ProductSourceRetired()
         current = await self.reader.read_routing(captured.link, source.request["id"])
         if current.source.request["state"] == "closed" or not (current.source.request["needs_routing"] or current.after_wrong):
             raise ProductSourceRetired()
         config = peek_loaded_app_config()
-        if config is None or not same_displayed_basis(current.source, source) or basis["routing"] != {"recipients": list(current.recipients), "after_wrong": current.after_wrong, "public_base_url": load_config(config).public_base_url}:
+        if config is None:
+            raise ProductSourceRetired()
+        settings = await self.settings.get(captured.link.owner_user_id)
+        if settings is None:
+            raise ProductSourceRetired()
+        routing = {"recipients": list(current.recipients), "after_wrong": current.after_wrong, "public_base_url": load_config(config).public_base_url}
+        changed = not same_displayed_basis(current.source, source) or settings.locale != basis["locale"] or basis["routing"] != routing
+        if changed:
+            if self.recovery is not None:
+                await self.recovery.refresh(captured)
+                raise DeliveryClaimRetired()
             raise ProductSourceRetired()
         return basis, current.source, part

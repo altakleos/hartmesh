@@ -14,8 +14,9 @@ Use socket-free transports and synthetic credentials in offline tests.
 
 Work outcome delivery uses canonical receipts and a final source/claim fence.
 Its dormant receipt observer never calls the explicit action-retry path.
-Routing V5 has a dedicated recipient/account source and cannot use ordinary
-question recovery. Recipient-choice admission atomically reserves the original
+Routing V5/V6 has a dedicated recipient/account source and cannot use ordinary
+question recovery. Source-aware routing refresh/Show/repair retain ACK history and
+unresolved actions; fresh controls await full delivery. Recipient-choice admission atomically reserves the original
 operation and group; a missing reserved journal never becomes a fresh action.
 Actual Work effects retain instance → link → Act lock order and recheck joined
 authority after provider awaits. Exact receipts precede fresh-effect admission.

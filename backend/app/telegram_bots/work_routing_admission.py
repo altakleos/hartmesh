@@ -87,7 +87,7 @@ class WorkRoutingAdmissions:
                     if saved is None:
                         raise CallbackRefused()
                     parent, rows, selected = await self.callbacks._locked(writer, link, callback_id)
-                if parent.payload.get("work_request_basis", {}).get("version") != 5:
+                if parent.payload.get("work_request_basis", {}).get("version") not in {5, 6}:
                     raise CallbackRefused()
                 captured = acknowledged_source(link, parent)
                 recipient_id = route_choice(selected, captured)
