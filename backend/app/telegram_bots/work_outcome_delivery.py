@@ -122,6 +122,50 @@ def validate_origin(callback, parent, basis, row):
         raise ProductSourceRetired()
 
 
+def validate_edit(callback, parent, basis, row):
+    """An edit uses only the exact acknowledged source of the routing command."""
+    edit = basis.get("edit")
+    if edit is None:
+        return
+    if basis["context"]["act"]["kind"] != "route" or basis["context"]["act"]["state"] != "done" or basis["origin"] is None or parent is None or callback is None:
+        raise ProductSourceRetired()
+    if type(edit) is not dict or set(edit) != {"presentation_version", "part_id", "message_id", "protect_content"}:
+        raise ProductSourceRetired()
+    if type(edit["presentation_version"]) is not int or type(edit["message_id"]) is not int or edit["message_id"] <= 0 or type(edit["protect_content"]) is not bool:
+        raise ProductSourceRetired()
+    part = next((part for part in parent.parts if part["part_id"] == edit["part_id"]), None)
+    if (
+        len(row.parts) != 1
+        or parent.id != basis["origin"]["anchor_outbox_id"]
+        or parent.state != "sent"
+        or parent.payload["presentation_version"] != edit["presentation_version"]
+        or part is None
+        or part["presentation_version"] != edit["presentation_version"]
+        or part.get("callback_group_id") != callback.group_id
+        or callback.message_id != edit["message_id"]
+        or part["state"] != "sent"
+        or part["message_ids"] != [edit["message_id"]]
+        or not part.get("sent_at")
+        or bool(part.get("protect_content")) != edit["protect_content"]
+        or basis["context"]["protected"]
+        and not edit["protect_content"]
+    ):
+        raise ProductSourceRetired()
+    current = row.parts[0]
+    if (
+        current.get("kind") != "edit"
+        or current.get("target_message_id") != edit["message_id"]
+        or current.get("target_protect_content") != edit["protect_content"]
+        or current["state"] == "sent"
+        and current["message_ids"] != [edit["message_id"]]
+    ):
+        raise ProductSourceRetired()
+
+
+def _recipe_matches(part, recipe, *, edit=False):
+    return all(same_body(part.get(key), value) for key, value in recipe.items() if key != "kind" or not edit)
+
+
 async def acknowledge_outcome(session, row):
     """Preserve complete-delivery evidence after the ordinary outbox expires."""
     basis = row.payload["work_outcome_basis"]
@@ -139,7 +183,13 @@ async def acknowledge_outcome(session, row):
         if type(identity) is not str or len(identity) != 32 or identity in identities or any(ch not in "0123456789abcdef" for ch in identity):
             raise ProductSourceRetired()
         identities.add(identity)
-        if type(part["ordinal"]) is not int or part["ordinal"] != index or type(part["presentation_version"]) is not int or part["presentation_version"] != 0 or any(not same_body(part.get(key), value) for key, value in recipe.items()):
+        if (
+            type(part["ordinal"]) is not int
+            or part["ordinal"] != index
+            or type(part["presentation_version"]) is not int
+            or part["presentation_version"] != 0
+            or not _recipe_matches(part, recipe, edit=index == 0 and basis.get("edit") is not None)
+        ):
             raise ProductSourceRetired()
         if part.get("state") != "sent" or type(part.get("message_ids")) is not list or len(part["message_ids"]) != 1 or any(type(value) is not int or value <= 0 or value in message_ids for value in part["message_ids"]):
             raise ProductSourceRetired()
@@ -149,6 +199,7 @@ async def acknowledge_outcome(session, row):
     source_callback = await session.get(TelegramCallbackRow, act.id)
     source_parent = await session.get(TelegramOutboxRow, source_callback.payload.get("anchor_outbox_id")) if source_callback else None
     validate_origin(source_callback, source_parent, basis, row)
+    validate_edit(source_callback, source_parent, basis, row)
     if data["act"]["state"] == "done" and basis["input"] is not None:
         identity = basis["input"]
         mark = await session.get(TelegramInboundMarkRow, (identity["link_id"], identity["message_id"], identity["chat_id"]), with_for_update=True, populate_existing=True)
@@ -183,8 +234,15 @@ class WorkOutcomePlans:
             async with self.callbacks.writer(link, composed) as writer:
                 original, origin, topic = await self._origin(writer, link, read.act)
                 destination = {"chat_id": link.chat_id, "message_thread_id": topic}
+                edit = None
+                if read.act.kind == "route" and read.act.state == "done" and original is not None:
+                    parent = await writer.get(TelegramOutboxRow, original.payload["anchor_outbox_id"], populate_existing=True)
+                    part = next((part for part in parent.parts if part.get("callback_group_id") == original.group_id and part["presentation_version"] == parent.payload["presentation_version"]), None)
+                    if part is not None and parent.state == "sent" and part["state"] == "sent" and part["message_ids"] == [original.message_id] and (not read.protected or part.get("protect_content")):
+                        edit = {"presentation_version": part["presentation_version"], "part_id": part["part_id"], "message_id": original.message_id, "protect_content": bool(part.get("protect_content"))}
                 basis = {
-                    "version": 1,
+                    "version": 2 if edit is not None else 1,
+                    **({"edit": edit} if edit is not None else {}),
                     "context": data,
                     "locale": settings.locale,
                     "timezone": settings.timezone,
@@ -208,6 +266,14 @@ class WorkOutcomePlans:
                         .with_for_update()
                     )
                 )
+                if any(old.failed_reason == "work-outcome-refresh-required" and old.state in {"failed", "skipped"} for old in previous):
+                    # An observed missing/protection-incompatible target must not
+                    # be edited again. Re-read the receipt/source above and build
+                    # a fresh delivery while retaining every old ACK.
+                    edit = None
+                    basis = {**basis, "version": 2, "edit": None}
+                    digest = hashlib.sha256(json.dumps(basis, sort_keys=True).encode()).hexdigest()[:32]
+                    key = "notice:work-outcome:" + act_id + "." + digest
                 for old in previous:
                     if old.state != "skipped" and old.dedupe_key.split("~", 1)[0] == key or old.state == "sent" and same_body(phase(old.payload["work_outcome_basis"]["context"]["act"]), phase(data["act"])):
                         return old.id
@@ -228,6 +294,10 @@ class WorkOutcomePlans:
                 )
                 row = await writer.get(TelegramOutboxRow, identity)
                 saved_parts = self.outbox._parts(parts, 0)
+                if edit is not None:
+                    saved_parts[0].update(kind="edit", target_message_id=edit["message_id"], target_protect_content=edit["protect_content"])
+                    row.parts = saved_parts
+                    validate_edit(original, parent, basis, row)
                 if keyboard:
                     group = await self.callbacks.write_group(link, keyboard, anchor_outbox_id=identity, presentation_version=0, chat_id=link.chat_id, message_id=None, message_thread_id=topic, session=writer)
                     saved_parts[-1]["callback_group_id"] = group.group_id
@@ -239,7 +309,7 @@ class WorkOutcomePlans:
                         parent_id = original.payload.get("anchor_outbox_id")
                         parent = await writer.get(TelegramOutboxRow, parent_id, with_for_update=True, populate_existing=True)
                         if parent is not None:
-                            await self._retire_controls(writer, link, parent, "work-done")
+                            await self._retire_controls(writer, link, parent, "work-done", editing=edit["message_id"] if edit else None)
                 if origin is not None:
                     await self.inbox.register_delivery([InboxRow.from_row(origin)], outbox_id=identity, finish=False, session=writer)
                 return identity
@@ -283,19 +353,32 @@ class WorkOutcomePlans:
             raise ProductSourceRetired()
         return original, origin, topic
 
-    async def _retire_controls(self, writer, link, row, reason):
+    async def _retire_controls(self, writer, link, row, reason, *, editing=None):
         groups = {part.get("callback_group_id") for part in row.parts} - {None}
         controls = list(await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id.in_(groups)).order_by(TelegramCallbackRow.id).with_for_update()))
         cleared = set()
         for control in controls:
-            if control.consumed_at is not None:
+            if control.consumed_at is not None and control.closed_reason != "work-done":
                 continue
-            if (control.link_id, control.chat_id, control.binding_generation) != (link.id, link.chat_id, link.binding_generation):
+            if (row.link_id, row.owner_user_id, row.binding_generation, row.chat_id) != (link.id, link.owner_user_id, link.binding_generation, link.chat_id) or (
+                control.link_id,
+                control.chat_id,
+                control.binding_generation,
+                control.message_thread_id,
+                control.payload.get("anchor_outbox_id"),
+            ) != (link.id, link.chat_id, link.binding_generation, row.message_thread_id, row.id):
                 raise ProductSourceRetired()
-            if control.message_id is not None and control.group_id not in cleared:
+            own = next((part for part in row.parts if part.get("callback_group_id") == control.group_id and part["presentation_version"] == control.payload.get("presentation_version")), None)
+            if own is None or control.message_id is not None and (own["state"] != "sent" or own["message_ids"] != [control.message_id]):
+                raise ProductSourceRetired()
+            if control.message_id is not None and control.message_id != editing and control.group_id not in cleared:
                 cleared.add(control.group_id)
-                writer.add(keyboard_cleanup_row(control, owner_user_id=link.owner_user_id, now=self.outbox.clock(), dedupe_key="notice:work-outcome-cleanup:" + control.group_id))
-            control.consumed_at, control.closed_reason = self.outbox.clock(), reason
+                key = "notice:work-outcome-cleanup:" + control.group_id
+                existing = await writer.scalar(select(TelegramOutboxRow.id).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == key))
+                if existing is None:
+                    writer.add(keyboard_cleanup_row(control, owner_user_id=link.owner_user_id, now=self.outbox.clock(), dedupe_key=key))
+            if control.consumed_at is None:
+                control.consumed_at, control.closed_reason = self.outbox.clock(), reason
 
     async def _retire(self, writer, link, row):
         if row.claim_id is not None:
@@ -344,9 +427,9 @@ class WorkOutcomeSources:
         try:
             if (
                 type(basis) is not dict
-                or set(basis) != {"version", "context", "locale", "timezone", "parts", "keyboard", "destination", "input", "origin"}
+                or set(basis) != {"version", "context", "locale", "timezone", "parts", "keyboard", "destination", "input", "origin"} | ({"edit"} if basis.get("version") == 2 else set())
                 or type(basis["version"]) is not int
-                or basis["version"] != 1
+                or basis["version"] not in {1, 2}
                 or captured.item.class_ != "reply"
             ):
                 raise ValueError()
@@ -391,7 +474,9 @@ class WorkOutcomeSources:
             if type(index) is not int or not 0 <= index < len(parts) or captured.item.parts[index] != captured.part or captured.part["state"] != "sending":
                 raise ValueError()
             identities, message_ids = set(), set()
-            receipts = {"part_id", "presentation_version", "ordinal", "state", "message_ids", "callback_group_id", "sent_at", "dispatched_at", "plain_fallback", "invalid_token_verification_pending"}
+            receipts = {"part_id", "presentation_version", "ordinal", "state", "message_ids", "callback_group_id", "sent_at", "dispatched_at", "plain_fallback", "invalid_token_verification_pending"} | (
+                {"target_message_id", "target_protect_content"} if basis.get("edit") is not None else set()
+            )
             for ordinal, (part, recipe) in enumerate(zip(captured.item.parts, parts, strict=True)):
                 identity = part["part_id"]
                 if type(identity) is not str or len(identity) != 32 or identity in identities or any(ch not in "0123456789abcdef" for ch in identity):
@@ -401,7 +486,7 @@ class WorkOutcomeSources:
                     raise ValueError()
                 if type(part["ordinal"]) is not int or part["ordinal"] != ordinal or type(part["presentation_version"]) is not int or part["presentation_version"] != 0 or set(part) - set(recipe) - receipts:
                     raise ValueError()
-                if any(not same_body(part.get(key), value) for key, value in recipe.items()) or ordinal < len(parts) - 1 and part.get("callback_group_id"):
+                if not _recipe_matches(part, recipe, edit=ordinal == 0 and basis.get("edit") is not None) or ordinal < len(parts) - 1 and part.get("callback_group_id"):
                     raise ValueError()
                 if ordinal < index and (part["state"] != "sent" or not part.get("sent_at") or len(part["message_ids"]) != 1 or any(type(value) is not int or value <= 0 or value in message_ids for value in part["message_ids"])):
                     raise ValueError()
@@ -471,6 +556,7 @@ class _DeliveryProjection(_ContextProjection):
         if bool(delivery.silent or self.captured.part.get("silent") or quiet and not recent) != bool(self.silent):
             raise DeliveryClaimRetired()
         validate_origin(rows[0][20], rows[0][21], delivery.payload["work_outcome_basis"], delivery)
+        validate_edit(rows[0][20], rows[0][21], delivery.payload["work_outcome_basis"], delivery)
         if delivery.payload["work_outcome_basis"]["input"] is not None:
             validate_input(rows[0][19], delivery.payload["work_outcome_basis"], delivery)
         if self.controls_part is not None:
