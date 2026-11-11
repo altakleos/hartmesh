@@ -132,3 +132,42 @@ def classify_creation_refusal(proof: CreationRefusal, scope: ChannelExecutionSco
         return TurnFailure(failure.text_key, failure.retry_later)
     validate_creation_refusal(proof, scope)
     return TurnFailure("busy.thread", True)
+
+
+WORK_DENIALS: Mapping[str, str] = MappingProxyType({"respond": "denied.respond", "decide": "denied.decide", "accept": "denied.accept", "changes_requested": "denied.changes", "route": "denied.route"})
+READER_FORMS: Mapping[str, tuple[str, str]] = MappingProxyType(
+    {
+        "refused.files_full": ("refused.files_full", "refused.files_full_ask"),
+        "file.files_full": ("file.files_full", "file.files_full_ask"),
+        "ask.cant_saved": ("ask.cant_saved_manager", "ask.cant_saved"),
+    }
+)
+
+
+def key_for_reader(key, permissions):
+    forms = READER_FORMS.get(key)
+    return forms[0 if permissions & 4 else 1] if forms else key
+
+
+def text_key_for(kind, exc):
+    """Classify a saved Work call's refusal; unknown outcomes are never failures.
+
+    Routing conflicts need a separate current-request read to choose refresh.
+    This function neither authorizes a retry nor inspects exception sentences.
+    """
+    from app.telegram_bots.authority import AccessOff, CeilingRefused
+    from deerflow.agent_instances.contract import AgentConflict, AgentDenied, Refusal
+
+    if isinstance(exc, (AgentDenied, AgentConflict, Refusal)):
+        reason = exc.reason
+        if reason == "actions-paused" and kind in {"decide", "accept"}:
+            return "link.limited"
+        if reason == "attempt-unresolved":
+            return "decide.wait" if kind in {"decide", "accept"} else "tap.failed"
+    if isinstance(exc, (AgentDenied, CeilingRefused, AccessOff)):
+        return WORK_DENIALS.get(kind, "denied.other")
+    if isinstance(exc, AgentConflict):
+        return "stale.changed_resend" if kind in {"respond", "decide", "accept", "changes_requested"} else "tap.failed"
+    if isinstance(exc, Refusal):
+        return "tap.failed"
+    return "act.unconfirmed"
