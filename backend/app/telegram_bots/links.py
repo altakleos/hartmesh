@@ -258,6 +258,15 @@ class _PublicationGuard:
     def captured_link(self) -> BotLink:
         return deepcopy(self._captured)
 
+    def current(self):
+        """Synchronous lifetime fence for a composed metadata guard."""
+        try:
+            current = self._attempt()
+        except Exception:
+            raise ValueError("publication-stale") from None
+        if current is not True:
+            raise ValueError("publication-stale") from None
+
     async def check(self, writer: AsyncSession) -> BotLink:
         from deerflow.utils.file_io import await_drained
 
@@ -300,12 +309,7 @@ class _PublicationGuard:
         detached = BotLink.from_row(row)
         await self._live_owner(captured.owner_user_id, writer)
         # No authority/SQL await may follow this original-attempt check.
-        try:
-            current = self._attempt()
-        except Exception:
-            raise ValueError("publication-stale") from None
-        if current is not True:
-            raise ValueError("publication-stale") from None
+        self.current()
         return detached
 
 

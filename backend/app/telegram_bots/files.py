@@ -138,16 +138,33 @@ async def write_failed(file, exc: Exception) -> None:
 class PendingFiles:
     """Pending descriptors share the original admitted inbox and guarded writer."""
 
-    def __init__(self, callbacks, inbox, *, guard_factory, config=None, clock=None):
+    def __init__(self, callbacks, inbox, *, guard_factory, config=None, clock=None, instance_receipts=None):
         from datetime import UTC, datetime
 
         from app.telegram_bots.config import TelegramBotsConfig
 
         self.callbacks, self.inbox, self.guard_factory = callbacks, inbox, guard_factory
+        self.instance_receipts = instance_receipts
         self.config = config or TelegramBotsConfig()
         self.clock = clock or (lambda: datetime.now(UTC))
 
-    async def add(self, link, row, file, *, guard=None, session=None):
+    async def _reader(self, link, supplied=None, *, session=None):
+        from app.telegram_bots.file_puts import FileReceiptReader
+
+        if link.agent_kind != "instance":
+            if supplied is not None:
+                raise ValueError("pending-file-reader-conflict") from None
+            return None
+        if supplied is None:
+            if session is not None or self.instance_receipts is None:
+                raise ValueError("pending-file-reader-required") from None
+            supplied = await self.instance_receipts(link)
+        if type(supplied) is not FileReceiptReader:
+            raise ValueError("pending-file-reader-conflict") from None
+        supplied.check_link(link)
+        return supplied
+
+    async def add(self, link, row, file, *, guard=None, session=None, instance_reader=None):
         from copy import deepcopy
 
         from app.telegram_bots.inbox import InboxRow, chat_input_parts
@@ -159,7 +176,9 @@ class PendingFiles:
         guard = guard or self.guard_factory(link)
 
         async def perform():
-            async with self.callbacks.writer(link, guard, session=session) as writer:
+            receipts = await self._reader(link, instance_reader, session=session)
+            metadata_guard = receipts.guard(guard) if receipts is not None else guard
+            async with self.callbacks.writer(link, metadata_guard, session=session) as writer:
                 mark = await writer.get(TelegramInboundMarkRow, (row.link_id, row.message_id, row.chat_id), with_for_update=True, populate_existing=True)
                 if (
                     mark is None
@@ -179,6 +198,7 @@ class PendingFiles:
                 text, descriptors = chat_input_parts(actual, bot_id=link.bot_id)
                 if text.strip() or len(descriptors) != 1 or descriptors[0] != file or any(type(file[key]) is not type(value) for key, value in descriptors[0].items()) or file["message_id"] != mark.message_id:
                     raise ValueError("pending-file-conflict") from None
+                saved = await receipts.completed(file, session=writer) if receipts is not None else None
                 values = {
                     "chat_id": mark.chat_id,
                     "message_thread_id": mark.message_thread_id,
@@ -189,7 +209,7 @@ class PendingFiles:
                     "mime_type": file["mime_type"],
                     "size": -1 if file["size"] is None else file["size"],
                     "is_image": file["type"] == "image",
-                    "agent_file_path": None,
+                    "agent_file_path": saved.result["path"] if saved is not None else None,
                 }
                 existing = await writer.get(TelegramPendingFileRow, (link.id, mark.message_id), with_for_update=True, populate_existing=True)
                 if existing is not None:
@@ -203,7 +223,7 @@ class PendingFiles:
 
         return await await_drained(perform())
 
-    async def take(self, link, row, *, guard=None, session=None):
+    async def take(self, link, row, *, guard=None, session=None, instance_reader=None):
         from datetime import timedelta
 
         from sqlalchemy import select
@@ -213,29 +233,44 @@ class PendingFiles:
         guard = guard or self.guard_factory(link)
 
         async def perform():
-            async with self.callbacks.writer(link, guard, session=session) as writer:
-                actual, taken = await self.inbox.pending_file_take(link, row, session=writer, guard=guard)
-                if taken is not None:
-                    return taken
-                cutoff = self.clock() - timedelta(hours=self.config.files.pending_ttl_hours)
-                selected = list(
-                    await writer.scalars(
-                        select(TelegramPendingFileRow)
-                        .where(
-                            TelegramPendingFileRow.link_id == link.id,
-                            TelegramPendingFileRow.chat_id == actual.chat_id,
-                            TelegramPendingFileRow.message_thread_id == actual.message_thread_id,
-                            TelegramPendingFileRow.binding_generation == link.binding_generation,
-                            TelegramPendingFileRow.created_at > cutoff,
+            receipts = await self._reader(link, instance_reader, session=session) if instance_reader is not None else None
+            while True:
+                metadata_guard = receipts.guard(guard) if receipts is not None else guard
+                async with self.callbacks.writer(link, metadata_guard, session=session) as writer:
+                    actual, taken = await self.inbox.pending_file_take(link, row, session=writer, guard=metadata_guard)
+                    selected = []
+                    if taken is None:
+                        cutoff = self.clock() - timedelta(hours=self.config.files.pending_ttl_hours)
+                        selected = list(
+                            await writer.scalars(
+                                select(TelegramPendingFileRow)
+                                .where(
+                                    TelegramPendingFileRow.link_id == link.id,
+                                    TelegramPendingFileRow.chat_id == actual.chat_id,
+                                    TelegramPendingFileRow.message_thread_id == actual.message_thread_id,
+                                    TelegramPendingFileRow.binding_generation == link.binding_generation,
+                                    TelegramPendingFileRow.created_at > cutoff,
+                                )
+                                .order_by(TelegramPendingFileRow.created_at, TelegramPendingFileRow.message_id)
+                                .with_for_update()
+                                .execution_options(populate_existing=True)
+                            )
                         )
-                        .order_by(TelegramPendingFileRow.created_at, TelegramPendingFileRow.message_id)
-                        .with_for_update()
-                        .execution_options(populate_existing=True)
-                    )
-                )
-                await self.inbox.attach_pending_files(link, actual, selected, session=writer, guard=guard)
-                _fresh, taken = await self.inbox.pending_file_take(link, actual, session=writer, guard=guard)
-                return taken
+                    needs_reader = link.agent_kind == "instance" and bool(taken or selected) and receipts is None
+                    if not needs_reader:
+                        if taken is not None:
+                            if receipts is not None:
+                                for file in taken:
+                                    await receipts.completed(file, session=writer)
+                            return taken
+                        await self.inbox.attach_pending_files(link, actual, selected, session=writer, guard=metadata_guard, instance_receipts=receipts)
+                        _fresh, taken = await self.inbox.pending_file_take(link, actual, session=writer, guard=metadata_guard)
+                        return taken
+                    if session is not None:
+                        raise ValueError("pending-file-reader-required") from None
+                # Prepare external authority with no writer open, then reread
+                # the actual candidates. An empty take already committed above.
+                receipts = await self._reader(link)
 
         return await await_drained(perform())
 

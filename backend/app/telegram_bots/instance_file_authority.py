@@ -14,6 +14,7 @@ from deerflow.agent_instances.agent_files import AgentFileRefusal, AgentFiles
 from deerflow.agent_instances.contract import AgentDenied, AgentPermission
 from deerflow.agent_instances.service import AgentInstances
 from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow, AgentInstanceRow
+from deerflow.persistence.spaces.model import SpaceRow
 from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramInstancePolicyRow
 from deerflow.persistence.user.access import DisabledIdentityRow
 from deerflow.persistence.user.model import UserRow
@@ -51,12 +52,26 @@ class _FileWrite:
             raise ValueError("instance-file-home-changed") from None
         await writer.execute(select(AgentInstanceRow.id).where(AgentInstanceRow.id == self.instance.id).with_for_update())
         await self.guard.check(writer)
+        await self._check_snapshot(writer)
+
+    async def check_receipt(self, writer):
+        """Read a saved path only under current target/Use/custody; no file effect."""
+        self._current()
+        bind = self.authority.links.session_factory.kw.get("bind")
+        if not writer.in_transaction() or not writer.is_active or writer.get_bind() is not getattr(bind, "sync_engine", bind):
+            raise ValueError("instance-file-writer-required") from None
+        current = await self.guard.check(writer)
+        await self._check_snapshot(writer)
+        return current
+
+    async def _check_snapshot(self, writer):
         bot, instance, grant, policy = TelegramBotLinkRow, AgentInstanceRow, AgentInstanceGrantRow, TelegramInstancePolicyRow
         facts = (
             await writer.execute(
-                select(bot, instance, grant.permissions, policy.policy, UserRow, DisabledIdentityRow)
+                select(bot, instance, grant.permissions, policy.policy, SpaceRow.generation, UserRow, DisabledIdentityRow)
                 .join(instance, instance.id == bot.agent_ref)
                 .join(grant, and_(grant.instance_id == instance.id, grant.user_id == bot.owner_user_id))
+                .join(SpaceRow, SpaceRow.id == instance.home_id)
                 .join(UserRow, UserRow.id == bot.owner_user_id)
                 .outerjoin(policy, policy.instance_id == instance.id)
                 .outerjoin(DisabledIdentityRow, or_(DisabledIdentityRow.subject == UserRow.id, DisabledIdentityRow.subject == UserRow.oauth_id))
@@ -66,7 +81,7 @@ class _FileWrite:
         ).all()
         if not facts:
             raise AgentDenied("The file input is no longer available")
-        actual, target, permissions, policy_value, user, _ = facts[0]
+        actual, target, permissions, policy_value, home_generation, user, _ = facts[0]
         self.live_owner.check_snapshot(user, [row[-1] for row in facts])
         policy_value = "allowed" if target.custody == "personal" or policy_value is None else policy_value
         if (
@@ -77,6 +92,7 @@ class _FileWrite:
             or target.custody not in {"personal", "company"}
             or (target.id, target.principal_id, target.home_id, target.generation, target.definition_revision)
             != (self.instance.id, self.instance.principal.subject_id, self.instance.home_id, self.instance.generation, self.instance.definition_revision)
+            or home_generation != self.home_generation
             or type(permissions) is not int
             or not 1 <= permissions <= 7
             or not permissions & int(AgentPermission.USE)

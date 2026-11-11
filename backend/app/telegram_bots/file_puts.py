@@ -7,7 +7,7 @@ import hashlib
 import io
 import re
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -17,6 +17,7 @@ from app.telegram_bots.acts import _snapshot
 from app.telegram_bots.callbacks import CALLBACK_METADATA_KEYS, CallbackRefused
 from app.telegram_bots.inbox import InboxRow, chat_input_parts, validate_chat_file
 from app.telegram_bots.instance_file_authority import prepare_file_write
+from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.producer import keyboard_cleanup_row
 from deerflow.agent_instances.agent_files import AGENT_FILE_REFUSALS, AgentFileRefusal, AgentFileResult
 from deerflow.agent_instances.contract import ResidentFilesBusy
@@ -198,7 +199,7 @@ class FilePuts:
         ).one_or_none()
         if actual is None or tuple(actual) != (target["principal_id"], target["instance_generation"], target["definition_revision"], target["home_id"], target["home_generation"]):
             raise ValueError("file-target-changed") from None
-        access._current()
+        await access.check_receipt(writer)
         return row
 
     async def _prepare(self, link, origin, file, access):
@@ -264,6 +265,31 @@ class FilePuts:
             row.state, row.reason, row.updated_at = state, reason, now
             await writer.flush()
             return _snapshot(row)
+
+    async def receipt_reader(self, link, *, authority, current):
+        """Prepare external authority before a caller opens its metadata writer."""
+
+        async def perform():
+            access = await prepare_file_write(authority, link, current=current)
+            return FileReceiptReader(self, access)
+
+        return await await_drained(perform())
+
+    async def composer_files(self, link, files, *, authority, current):
+        """Project only completed original-target receipts into web-composer shape."""
+        files = [validate_chat_file(file) for file in files]
+
+        async def perform():
+            reader = await self.receipt_reader(link, authority=authority, current=current)
+            async with self.callbacks.writer(link, reader.guard()) as writer:
+                result = []
+                for file in files:
+                    saved = await reader.completed(file, session=writer)
+                    result.append(dict(filename=saved.result["path"].rsplit("/", 1)[-1], size=saved.result["size"], path="/mnt/user-data/" + saved.result["path"], status="uploaded"))
+                reader.access._current()
+                return result
+
+        return await await_drained(perform())
 
     async def put(self, link, origin, file, *, authority, current, download, progress):
         """Save an actually admitted file, without starting a conversation or run."""
@@ -364,3 +390,59 @@ class FilePuts:
                         return await self._transition(link, row, access, state="done", result=result)
         finally:
             await lease.aclose()
+
+
+@dataclass(frozen=True)
+class FileReceiptReader:
+    """Original-target journal reader for the owning metadata transaction."""
+
+    journal: FilePuts
+    access: object
+
+    def check_link(self, link):
+        self.journal.inbox._publication_guard_matches(self.access.guard, link=link)
+        self.access._current()
+
+    def guard(self, base=None):
+        base = self.access.guard if base is None else base
+        if not callable(getattr(base, "current", None)):
+            raise ValueError("file-receipt-lifetime-required") from None
+        self.check_link(base.captured_link)
+        return _FileReceiptGuard(self.access, base)
+
+    async def completed(self, file, *, session=None):
+        file = validate_chat_file(file)
+
+        async def perform():
+            link = self.access.link
+            async with self.journal.callbacks.writer(link, self.guard(), session=session) as writer:
+                row = await self.journal._row(writer, link, file_act_id(link, file), self.access)
+                if row.state != "done" or row.continuation["file"] != file:
+                    raise ValueError("file-receipt-unavailable") from None
+                return _snapshot(row)
+
+        return await await_drained(perform())
+
+
+@dataclass(frozen=True)
+class _FileReceiptGuard:
+    access: object
+    base: object
+
+    @property
+    def captured_link(self):
+        return self.access.guard.captured_link
+
+    def current(self):
+        self.base.current()
+        self.access._current()
+
+    async def prepare(self):
+        await prepare_publication_guard(self.base)
+        self.current()
+
+    async def check(self, writer):
+        await self.base.check(writer)
+        current = await self.access.check_receipt(writer)
+        self.current()
+        return current
