@@ -2034,7 +2034,7 @@ class TelegramBotChannel(TelegramChannel):
             if model_part is None or not model_part.human_input or stored_keyboard is not None or button is not None or part["kind"] != "text":
                 raise PermanentDeliveryError("invalid-human-input-markup")
             markup = ForceReply(selective=True)
-        elif model_part is not None and model_part.human_input and part["kind"] == "edit" and markup is None:
+        elif (model_part is not None and model_part.human_input or work_part is not None) and part["kind"] == "edit" and markup is None:
             markup = {"inline_keyboard": []}
         silent = saved.item.silent or bool(part.get("silent", False)) or await asyncio.to_thread(silent_now, saved.link, settings, self._services.config, self._now())
         current = await self._services.outbox.capture_sending_part(**capture)

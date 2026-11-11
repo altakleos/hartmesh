@@ -225,7 +225,7 @@ def _row(value):
     return CallbackRow(**values)
 
 
-def _validate_rows(parent, rows, *, part=None):
+def _validate_rows(parent, rows, *, part=None, allow_pending=False):
     """A stored row cannot change what its frozen keyboard offered."""
     version = parent.payload.get("presentation_version", 0)
     if type(version) is not int or version < 0:
@@ -259,7 +259,7 @@ def _validate_rows(parent, rows, *, part=None):
             spec is None
             or type(row.payload.get("presentation_version")) is not int
             or row.payload.get("presentation_version") != version
-            or row.payload.get("presentation_pending") is not False
+            or (type(row.payload.get("presentation_pending")) is not bool or row.payload["presentation_pending"] and not allow_pending)
             or (row.link_id, row.chat_id, row.binding_generation, row.message_thread_id, row.payload.get("anchor_outbox_id")) != (parent.link_id, parent.chat_id, parent.binding_generation, parent.message_thread_id, parent.id)
             or (row.kind, row.target_kind, row.target_id, row.payload.get("label")) != (spec["kind"], spec["target_kind"], spec["target_id"], spec["label"])
             or json.dumps(payload, sort_keys=True) != json.dumps(spec["payload"], sort_keys=True)
@@ -779,7 +779,12 @@ class CallbackRepository:
                 group = part.get("callback_group_id")
                 rows = list(await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group).order_by(TelegramCallbackRow.id)))
                 try:
-                    descriptors, positions = _validate_rows(parent, rows, part=part)
+                    work_preview = "work_request_basis" in parent.payload
+                    if work_preview:
+                        from app.telegram_bots.work_request_source import frozen
+
+                        frozen(captured)
+                    descriptors, positions = _validate_rows(parent, rows, part=part, allow_pending=work_preview)
                 except CallbackRefused:
                     raise DeliveryClaimRetired() from None
                 result = []
@@ -801,7 +806,7 @@ class CallbackRepository:
                             row.payload.get("presentation_version"),
                             row.payload.get("presentation_pending"),
                             row.payload.get("label"),
-                        ) != (link.id, parent.chat_id, link.binding_generation, parent.message_thread_id, parent.id, version, False, spec["label"]):
+                        ) != (link.id, parent.chat_id, link.binding_generation, parent.message_thread_id, parent.id, version, row.payload.get("presentation_pending") if work_preview else False, spec["label"]):
                             raise DeliveryClaimRetired() from None
                         try:
                             self._usable(row)

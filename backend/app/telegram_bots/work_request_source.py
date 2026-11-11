@@ -6,7 +6,8 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import JSON, and_, false, func, select
+from sqlalchemy import JSON, and_, false, func, or_, select
+from sqlalchemy.orm import aliased
 
 from app.telegram_bots.attention_authority import current_attention
 from app.telegram_bots.authority import AccessOff, CeilingRefused
@@ -63,23 +64,42 @@ def frozen(captured):
     """A class label or literal template cannot manufacture a Work source."""
     try:
         basis = captured.item.payload["work_request_basis"]
-        if type(basis) is not dict or set(basis) != {"version", "source", "locale", "concealed", "parts", "keyboard"} or type(basis["version"]) is not int or basis["version"] != 1:
+        if (
+            type(basis) is not dict
+            or set(basis) != {"version", "source", "locale", "concealed", "parts", "keyboard"} | ({"reveal", "cleanup_id"} if basis.get("version") == 2 else set())
+            or type(basis["version"]) is not int
+            or basis["version"] not in {1, 2}
+        ):
             raise ValueError()
         if (
             captured.item.class_ != "question"
             or type(basis["concealed"]) is not bool
             or type(basis["locale"]) is not str
             or type(captured.item.payload.get("presentation_version")) is not int
-            or captured.item.payload["presentation_version"] != 0
+            or captured.item.payload["presentation_version"] < 0
         ):
+            raise ValueError()
+        reveal = basis.get("reveal")
+        if reveal is not None and (type(reveal) is not str or len(reveal) != 32 or any(ch not in "0123456789abcdef" for ch in reveal)):
+            raise ValueError()
+        if reveal is not None and basis["concealed"]:
+            raise ValueError()
+        cleanup_id = basis.get("cleanup_id")
+        if cleanup_id is not None and (reveal is None or type(cleanup_id) is not str or len(cleanup_id) != 32 or any(ch not in "0123456789abcdef" for ch in cleanup_id)):
             raise ValueError()
         data = basis["source"]
         source = WorkRequestRead(**{**data, "responses": tuple(data["responses"])})
         if source.request["instance_id"] != captured.link.agent_ref or captured.link.agent_kind != "instance" or source.request["work_id"] != source.work["id"] or source.request["recipient_id"] != captured.link.owner_user_id:
             raise ValueError()
+        if (captured.item.instance_id, captured.item.work_id, captured.item.request_id) != (source.request["instance_id"], source.work["id"], source.request["id"]):
+            raise ValueError()
         if type(source.protected) is not bool or json.dumps(source.seen, sort_keys=True) != json.dumps(seen_basis(source.work, source.request, source.responses), sort_keys=True):
             raise ValueError()
+        if source.protected and not basis["concealed"] and reveal is None:
+            raise ValueError()
         presentation = present_request(source, locale=basis["locale"], concealed=basis["concealed"], outbox_id=captured.item.id)
+        if reveal is not None and len(presentation.parts) > 1 and cleanup_id is None:
+            raise ValueError()
         expected = []
         for index, part in enumerate(presentation.parts):
             recipe = {**part, "source_ref": {"key": "work.request.presentation", "values": {"request_id": source.request["id"], "part": index}}}
@@ -91,19 +111,46 @@ def frozen(captured):
         index = captured.part["source_ref"]["values"]["part"]
         if type(index) is not int or not 0 <= index < len(expected):
             raise ValueError()
-        parts = captured.item.parts
+        version = captured.item.payload["presentation_version"]
+        historical = [part for part in captured.item.parts if part["presentation_version"] < version]
+        if any(part["state"] not in {"sent", "retired", "unavailable"} for part in historical):
+            raise ValueError()
+        parts = [part for part in captured.item.parts if part["presentation_version"] == version]
+        if len(historical) + len(parts) != len(captured.item.parts):
+            raise ValueError()
         if len(parts) != len(expected) or parts[index] != captured.part or captured.part.get("state") != "sending":
             raise ValueError()
-        identities = set()
-        receipts = {"part_id", "presentation_version", "ordinal", "state", "message_ids", "callback_group_id", "sent_at", "dispatched_at", "plain_fallback", "invalid_token_verification_pending"}
+        identities = {part["part_id"] for part in historical}
+        if len(identities) != len(historical):
+            raise ValueError()
+        receipts = {
+            "part_id",
+            "presentation_version",
+            "ordinal",
+            "state",
+            "message_ids",
+            "callback_group_id",
+            "sent_at",
+            "dispatched_at",
+            "plain_fallback",
+            "invalid_token_verification_pending",
+            "target_message_id",
+            "target_protect_content",
+        }
         for ordinal, (part, recipe) in enumerate(zip(parts, expected, strict=True)):
             identity = part.get("part_id")
             if type(identity) is not str or len(identity) != 32 or identity in identities or any(ch not in "0123456789abcdef" for ch in identity):
                 raise ValueError()
             identities.add(identity)
-            if type(part.get("ordinal")) is not int or part["ordinal"] != ordinal or type(part.get("presentation_version")) is not int or part["presentation_version"] != 0:
+            if type(part.get("ordinal")) is not int or part["ordinal"] != ordinal or type(part.get("presentation_version")) is not int or part["presentation_version"] != version:
                 raise ValueError()
-            if set(part) - set(recipe) - receipts or any(part.get(key) != value for key, value in recipe.items() if key != "protect_content"):
+            if part.get("kind") == "edit":
+                anchor = next((old for old in historical if old["state"] == "sent" and part.get("target_message_id") in old.get("message_ids", [])), None)
+                if cleanup_id is not None or ordinal != 0 or anchor is None or bool(anchor.get("protect_content")) != part.get("target_protect_content") or source.protected and not anchor.get("protect_content"):
+                    raise ValueError()
+            elif part.get("kind") != "text" or "target_message_id" in part or "target_protect_content" in part:
+                raise ValueError()
+            if set(part) - set(recipe) - receipts or any(part.get(key) != value for key, value in recipe.items() if key not in {"protect_content", "kind"}):
                 raise ValueError()
             if source.protected and not part.get("protect_content") or ordinal < len(parts) - 1 and part.get("callback_group_id"):
                 raise ValueError()
@@ -116,7 +163,8 @@ def frozen(captured):
 
 
 class WorkRequestSources:
-    def __init__(self, *, reader, outbox, callbacks):
+    def __init__(self, *, reader, outbox, callbacks, recovery=None):
+        self.recovery = recovery
         self.reader, self.outbox, self.callbacks = reader, outbox, callbacks
         self.settings = SettingsRepository(outbox.sessions, outbox.config)
         if reader.links.session_factory.kw.get("bind") is not outbox.sessions.kw.get("bind") or callbacks.sessions.kw.get("bind") is not outbox.sessions.kw.get("bind"):
@@ -125,15 +173,22 @@ class WorkRequestSources:
     async def _prepare(self, captured):
         basis, source, part = frozen(captured)
         current = await self.reader.read_request(captured.link, source.request["id"])
-        if content(current) != content(source) or current.request["state"] != "pending" or current.request["needs_routing"]:
+        if current.request["state"] != "pending" or current.request["needs_routing"]:
             raise ProductSourceRetired()
         if not (current.request["can_respond"] if current.request["purpose"] == "information" else current.request["can_manage"]):
             raise ProductSourceRetired()
-        if current.seen != source.seen:
-            raise DeliveryRetry(timedelta(seconds=5))
-        if current.protected != basis["concealed"]:
-            # Privacy transitions require a durable replacement, never merely
-            # a transport flag on the formerly visible message body.
+        revealed = bool(basis.get("reveal"))
+        changed = content(current) != content(source) or current.seen != source.seen or current.protected != source.protected or current.protected != basis["concealed"] and not revealed
+        if self.recovery is not None:
+            settings = await self.settings.get(captured.link.owner_user_id)
+            if settings is None:
+                raise ProductSourceRetired()
+            if changed or settings.locale != basis["locale"]:
+                await self.recovery.refresh(captured)
+                raise DeliveryClaimRetired()
+        elif content(current) != content(source):
+            raise ProductSourceRetired()
+        elif changed:
             raise DeliveryRetry(timedelta(seconds=5))
         return basis, current, part
 
@@ -197,11 +252,13 @@ class _RequestProjection:
         )
         callbacks = (
             select(aggregate({column.name: column for column in callback.__table__.columns}))
-            .where(callback.group_id == self.captured.part.get("callback_group_id") if self.captured.part.get("callback_group_id") else false())
+            .where(or_(callback.group_id == self.captured.part.get("callback_group_id") if self.captured.part.get("callback_group_id") else false(), callback.id == self.basis.get("reveal") if self.basis.get("reveal") else false()))
             .scalar_subquery()
         )
+        cleanup = aliased(TelegramOutboxRow)
         return (
-            query.add_columns(work, request, delivery, settings, spaces, callbacks)
+            query.add_columns(work, request, delivery, settings, spaces, callbacks, cleanup)
+            .outerjoin(cleanup, cleanup.id == self.basis.get("cleanup_id") if self.basis.get("cleanup_id") else false())
             .join(work, and_(work.id == self.source.work["id"], work.instance_id == bot.agent_ref))
             .join(request, and_(request.id == self.source.request["id"], request.instance_id == bot.agent_ref, request.work_id == work.id))
             .join(delivery, and_(delivery.id == self.captured.item.id, delivery.link_id == bot.id))
@@ -223,6 +280,8 @@ class _RequestProjection:
         current, target, permissions, policy = rows[0][:4]
         work, request, delivery, saved_settings = rows[0][8:12]
         latest = self.host.outbox._sending(current, delivery, link_id=current.id, part_id=self.captured.part["part_id"], claim_owner=self.captured.claim_owner, claim_id=self.captured.claim_id, token_revision=self.captured.token_revision)
+        if (delivery.instance_id, delivery.work_id, delivery.request_id) != (current.agent_ref, work.id, request.id):
+            raise ProductSourceRetired()
         if latest != self.captured:
             raise DeliveryClaimRetired()
         if (request.revision, request.request_revision, request.state, request.recipient_id) != (
@@ -237,7 +296,7 @@ class _RequestProjection:
         if self.source.request["purpose"] != "information" and permissions & 6 != 6:
             raise ProductSourceRetired()
         protected = target.custody == "company" and policy == "protected"
-        if protected != self.basis["concealed"] or protected and not self.captured.part.get("protect_content"):
+        if protected != self.source.protected or protected != self.basis["concealed"] and not self.basis.get("reveal") or protected and not self.captured.part.get("protect_content"):
             raise DeliveryRetry(timedelta(seconds=5))
         actual = _snapshot(saved_settings)
         if actual.locale != self.basis["locale"] or actual.timezone != self.settings.timezone:
@@ -257,9 +316,25 @@ class _RequestProjection:
             seen.add(space.id)
         if seen != self.spaces:
             raise ProductSourceRetired()
+        callback_facts = self.objects(rows[0][13])
+        if self.basis.get("reveal"):
+            reveal = next((row for row in callback_facts if row.id == self.basis["reveal"]), None)
+            if (
+                reveal is None
+                or reveal.kind != "reveal"
+                or reveal.consumed_at is None
+                or reveal.closed_reason != "revealed"
+                or (reveal.link_id, reveal.chat_id, reveal.binding_generation, reveal.target_kind, reveal.target_id, reveal.payload.get("outbox_id"), reveal.payload.get("anchor_outbox_id"))
+                != (current.id, current.chat_id, current.binding_generation, "outbox", delivery.id, delivery.id, delivery.id)
+            ):
+                raise ProductSourceRetired()
+        if not cleanup_ready(delivery, rows[0][14]):
+            raise DeliveryRetry(timedelta(seconds=5))
+        if self.basis.get("cleanup_id") and rows[0][14].payload["target_message_id"] != reveal.message_id:
+            raise ProductSourceRetired()
         if self.captured.part.get("stored_keyboard"):
-            callbacks = {row.id: row for row in self.objects(rows[0][13])}
-            _validate_rows(delivery, list(callbacks.values()), part=self.captured.part)
+            callbacks = {row.id: row for row in callback_facts if row.group_id == self.captured.part["callback_group_id"]}
+            _validate_rows(delivery, list(callbacks.values()), part=self.captured.part, allow_pending=True)
             for callback in callbacks.values():
                 if (
                     callback.link_id != current.id
@@ -268,7 +343,56 @@ class _RequestProjection:
                     or callback.message_thread_id != delivery.message_thread_id
                     or callback.payload.get("anchor_outbox_id") != delivery.id
                     or callback.payload.get("presentation_version") != delivery.payload["presentation_version"]
-                    or callback.payload.get("presentation_pending") is not False
+                    or type(callback.payload.get("presentation_pending")) is not bool
                 ):
                     raise DeliveryClaimRetired()
                 self.host.callbacks._usable(callback)
+
+
+def cleanup_ready(parent, cleanup):
+    """Require an acknowledged clear or its exact host-recorded missing target."""
+    identity = parent.payload.get("work_request_basis", {}).get("cleanup_id")
+    if identity is None:
+        return True
+    if (
+        cleanup is None
+        or cleanup.id != identity
+        or (cleanup.link_id, cleanup.owner_user_id, cleanup.binding_generation, cleanup.chat_id) != (parent.link_id, parent.owner_user_id, parent.binding_generation, parent.chat_id)
+        or cleanup.class_ != "reply"
+        or cleanup.payload.get("kind") != "keyboard_cleanup"
+        or cleanup.payload.get("work_request_parent_id") != parent.id
+        or type(cleanup.parts) is not list
+        or len(cleanup.parts) != 1
+        or type(cleanup.parts[0]) is not dict
+    ):
+        raise ProductSourceRetired()
+    part = cleanup.parts[0]
+    target = cleanup.payload.get("target_message_id")
+    if type(target) is not int or target <= 0 or part.get("kind") != "edit" or part.get("remove_keyboard") is not True or part.get("target_message_id") != target:
+        raise ProductSourceRetired()
+    if (
+        type(part.get("part_id")) is not str
+        or len(part["part_id"]) != 32
+        or any(ch not in "0123456789abcdef" for ch in part["part_id"])
+        or type(part.get("presentation_version")) is not int
+        or part["presentation_version"] != cleanup.payload.get("presentation_version", 0)
+    ):
+        raise ProductSourceRetired()
+    if cleanup.state == "sent":
+        try:
+            datetime.fromisoformat(part.get("sent_at"))
+        except (ValueError, TypeError):
+            raise ProductSourceRetired() from None
+        if part.get("state") != "sent" or not part.get("sent_at") or part.get("message_ids") != [target]:
+            raise ProductSourceRetired()
+        return True
+    if cleanup.state == "skipped":
+        receipt = cleanup.payload.get("cleanup_absent")
+        if cleanup.skip_reason != "superseded" or type(receipt) is not dict or receipt != {"part_id": part.get("part_id"), "presentation_version": part.get("presentation_version"), "target_message_id": target, "at": receipt.get("at")}:
+            raise ProductSourceRetired()
+        try:
+            datetime.fromisoformat(receipt["at"])
+        except (ValueError, TypeError):
+            raise ProductSourceRetired() from None
+        return True
+    return False

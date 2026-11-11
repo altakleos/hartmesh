@@ -306,6 +306,7 @@ async def resolve_route_permissions(
     *,
     is_internal: bool,
     prepared_config: AuthorizationConfig | None = None,
+    prepared_provider: AuthorizationProvider | None = None,
     strict: bool = False,
 ) -> list[str]:
     """Return the route permissions granted to an authenticated user.
@@ -318,10 +319,14 @@ async def resolve_route_permissions(
     Background delivery may supply freshly prepared configuration and request
     strict reads. Those reads offload cold discovery, construct providers on the
     calling loop and raise RouteAuthorityUnavailable for configuration/provider
-    errors, irrespective of the HTTP fail-open setting. The default path reads
+    errors, irrespective of the HTTP fail-open setting. Trusted transactional
+    callers may also capture a provider with that configuration before their
+    writer; evaluation then does no provider discovery inside the transaction. The default path reads
     the config in a worker: ``AuthMiddleware`` calls this for every
     authenticated request.
     """
+    if prepared_provider is not None and prepared_config is None:
+        raise ValueError("A prepared provider requires its captured configuration")
     if prepared_config is not None:
         config = prepared_config
     elif strict:
@@ -337,7 +342,7 @@ async def resolve_route_permissions(
         return list(_ALL_PERMISSIONS)
 
     try:
-        provider = await _aget_cached_route_provider(config) if strict else _get_cached_route_provider(config)
+        provider = prepared_provider if prepared_provider is not None else await _aget_cached_route_provider(config) if strict else _get_cached_route_provider(config)
         if provider is None:
             raise ValueError("authorization is enabled but provider resolution returned None")
     except Exception:

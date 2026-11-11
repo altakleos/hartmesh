@@ -175,6 +175,9 @@ class OutboxItem:
     silent: bool = False
     created_at: datetime | None = None
     state: str = "pending"
+    instance_id: str | None = None
+    work_id: str | None = None
+    request_id: str | None = None
 
 
 _TURN_OUTCOME_KEYS = frozenset(
@@ -2310,7 +2313,21 @@ class OutboxSender:
         if structural is not None:
             return structural
         preferences = await self.outbox.notification_decision(row)
-        return decision if preferences.decision == "allow" else preferences
+        if preferences.decision != "allow":
+            return preferences
+        work_basis = row.payload.get("work_request_basis", {})
+        dependency = work_basis.get("cleanup_id") if type(work_basis) is dict else None
+        if dependency is not None:
+            from app.telegram_bots.work_request_source import cleanup_ready
+
+            async with self.outbox.sessions() as reader:
+                cleanup = await reader.get(TelegramOutboxRow, dependency)
+                try:
+                    if not cleanup_ready(row, cleanup):
+                        return DeliveryEligibility.wait()
+                except ProductSourceRetired:
+                    return DeliveryEligibility.skip("source-gone")
+        return decision
 
     async def _snapshot(self, link_id: str, row_id: str) -> tuple[BotLink | None, OutboxItem | None]:
         async with self.outbox.sessions() as session:
@@ -2820,9 +2837,15 @@ class OutboxSender:
                 row.not_before = now + timedelta(seconds=max(1, seconds))
                 return
             if isinstance(error, (PermanentDeliveryError, BadRequest)):
-                if isinstance(error, BadRequest) and row.payload.get("kind") == "keyboard_cleanup" and any(value in str(error).lower() for value in ("message to edit not found", "message can't be edited", "message cannot be edited")):
-                    await self._skip(session, row, "superseded")
-                    return
+                if isinstance(error, BadRequest) and row.payload.get("kind") == "keyboard_cleanup":
+                    absent = "message to edit not found" in str(error).lower()
+                    uneditable = any(value in str(error).lower() for value in ("message can't be edited", "message cannot be edited"))
+                    if absent:
+                        part = next((part for part in row.parts if part["state"] == "sending"), {})
+                        row.payload = {**row.payload, "cleanup_absent": {"part_id": part.get("part_id"), "presentation_version": part.get("presentation_version"), "target_message_id": part.get("target_message_id"), "at": now.isoformat()}}
+                    if absent or uneditable and not row.payload.get("work_request_parent_id"):
+                        await self._skip(session, row, "superseded")
+                        return
                 part = next((part for part in row.parts if part["state"] == "sending"), {})
                 method = {"text": "sendMessage", "card": "sendMessage", "document": "sendDocument", "photo": "sendPhoto", "album": "sendMediaGroup", "edit": "editMessageText"}.get(part.get("kind"), "sendMessage")
                 if part.get("remove_keyboard"):
