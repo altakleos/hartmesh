@@ -1,11 +1,13 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { ProviderSupportLink } from "@/components/workspace/instances/execution-notice";
+import { hasCeiling } from "@/core/agent-instances/presentation";
 import { useAgents } from "@/core/agents/hooks";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { useBranding, useTelegram } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import type { Bot } from "@/core/telegram-bots/api";
@@ -15,6 +17,11 @@ import {
   useTelegramReader,
 } from "@/core/telegram-bots/hooks";
 import {
+  useTelegramInstanceDiscovery,
+  useTelegramInstanceDetail,
+} from "@/core/telegram-bots/instance-hooks";
+import { instanceConnectBlock } from "@/core/telegram-bots/instance-state";
+import {
   rowOf,
   sectionNoticeOf,
   targetRowsOf,
@@ -23,7 +30,9 @@ import { telegramText } from "@/core/telegram-bots/text";
 import { telegramTargetOf } from "@/core/telegram-bots/web-pages";
 
 import { TelegramAdminBlock } from "./admin-block";
-import { TelegramBotRow } from "./bot-row";
+import { TelegramBotRow, TelegramExecutionNotice } from "./bot-row";
+import { TelegramInstanceSettingsRow } from "./instance-settings-row";
+import { TelegramRemovedNotices } from "./removed-notices";
 import { TelegramRowDialog, type TelegramRowDialogState } from "./row-dialogs";
 import { TelegramSettingsBlock } from "./settings-block";
 import { openTelegramSetup, useTelegramPageState } from "./setup-dialog-store";
@@ -36,6 +45,8 @@ export function TelegramBotsSection() {
   const { t } = useI18n();
   const strings = t.telegramBots;
   const feature = useTelegram();
+  const { user } = useAuth();
+  const discovery = useTelegramInstanceDiscovery();
   const reader = useTelegramReader();
   const { providerName, supportURL } = useBranding();
   const { agents, isLoading: agentsLoading } = useAgents();
@@ -47,6 +58,7 @@ export function TelegramBotsSection() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const data = list.data;
+  const missingList = data === undefined;
   const bots = data?.bots ?? [];
   const limits = data?.limits ?? { per_person: 0, used: 0 };
   const notice = sectionNoticeOf(feature, bots.length > 0);
@@ -61,8 +73,17 @@ export function TelegramBotsSection() {
     chatName: strings.chatName,
     agentNames: agents.map((agent) => agent.name),
     bots,
+    instances: discovery.instances,
+    ownerId: user?.id,
   });
   const wanted = searchParams.get("telegram");
+  const wantedRow = rows.find(
+    ({ target }) => telegramTargetOf(target) === wanted,
+  );
+  const wantedDetail = useTelegramInstanceDetail(
+    wantedRow?.bot ? undefined : wantedRow?.instance,
+  );
+  const firstInstance = rows.find((row) => row.target.kind === "agent");
   // A late answer closes its own dialog, never one opened since.
   const closeDialog = (mine: TelegramRowDialogState) =>
     setDialog((open) => (open === mine ? null : open));
@@ -72,7 +93,14 @@ export function TelegramBotsSection() {
     if (wanted === null || data === undefined || agentsLoading) {
       return;
     }
-    const row = rows.find(({ target }) => telegramTargetOf(target) === wanted);
+    const row = wantedRow;
+    if (wanted.startsWith("agent.") && !row?.bot) {
+      if (
+        !discovery.complete ||
+        (row?.instance && (wantedDetail.isPending || wantedDetail.isError))
+      )
+        return;
+    }
     if (row?.bot) {
       const element = document.querySelector<HTMLElement>(
         `[data-telegram-target="${wanted}"]`,
@@ -80,7 +108,24 @@ export function TelegramBotsSection() {
       element?.scrollIntoView();
       element?.focus();
     } else if (row && blocked === null) {
-      openTelegramSetup(row.target);
+      if (row.target.kind !== "agent") openTelegramSetup(row.target);
+      else if (
+        wantedDetail.data &&
+        !instanceConnectBlock({
+          instance: wantedDetail.data,
+          telegram: feature,
+          feature: discovery.feature,
+          bots: data,
+          canRead: !!user && hasCeiling(user.permissions, "agents:read"),
+        })
+      ) {
+        openTelegramSetup({
+          kind: "agent",
+          id: wantedDetail.data.id,
+          name: wantedDetail.data.name,
+          permissions: wantedDetail.data.permissions,
+        });
+      }
     }
     const next = new URLSearchParams(searchParams);
     next.delete("telegram");
@@ -90,7 +135,13 @@ export function TelegramBotsSection() {
     });
     // Runs when the address or the first answer arrives, and only then.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wanted, data === undefined, agentsLoading]);
+  }, [
+    wanted,
+    missingList,
+    agentsLoading,
+    discovery.complete,
+    wantedDetail.status,
+  ]);
 
   if (!feature.known) {
     return null;
@@ -130,6 +181,7 @@ export function TelegramBotsSection() {
         <h2 className="text-lg font-semibold">{strings.list.title}</h2>
         <p className="text-muted-foreground text-sm">{strings.list.intro}</p>
       </header>
+      <TelegramRemovedNotices events={data?.removed_bots ?? []} />
       {data === undefined && !list.isError ? (
         <p className="text-muted-foreground text-sm">{t.common.loading}</p>
       ) : data === undefined ? (
@@ -146,25 +198,62 @@ export function TelegramBotsSection() {
         </div>
       ) : (
         <ul className="space-y-3">
-          {rows.map((row) => (
-            <TelegramBotRow
-              key={telegramTargetOf(row.target)}
-              row={row}
-              disabledBecause={blocked}
-              now={now}
-              onDialog={setDialog}
-              view={rowOf({
-                name: row.name,
-                bot: row.bot,
-                feature,
-                reader,
-                now,
-                replaced: row.bot ? replaced.has(row.bot.id) : false,
-              })}
-            />
-          ))}
+          {rows.map((row) =>
+            row.target.kind === "agent" ? (
+              <Fragment key={telegramTargetOf(row.target)}>
+                {row === firstInstance &&
+                discovery.feature.known &&
+                discovery.feature.execution === "unavailable" ? (
+                  <li data-testid="telegram-instance-notice">
+                    <TelegramExecutionNotice
+                      reason={discovery.feature.reason}
+                    />
+                  </li>
+                ) : null}
+                <TelegramInstanceSettingsRow
+                  row={row}
+                  complete={discovery.complete}
+                  now={now}
+                  replaced={row.bot ? replaced.has(row.bot.id) : false}
+                  onDialog={setDialog}
+                />
+              </Fragment>
+            ) : (
+              <TelegramBotRow
+                key={telegramTargetOf(row.target)}
+                row={row}
+                disabledBecause={blocked}
+                now={now}
+                onDialog={setDialog}
+                view={rowOf({
+                  name: row.name,
+                  bot: row.bot,
+                  feature,
+                  reader,
+                  now,
+                  replaced: row.bot ? replaced.has(row.bot.id) : false,
+                })}
+              />
+            ),
+          )}
         </ul>
       )}
+      {discovery.pending ? (
+        <p className="text-muted-foreground text-sm">{t.common.loading}</p>
+      ) : null}
+      {discovery.error ? (
+        <div className="space-y-2">
+          <p role="alert">{strings.unavailable.loadError}</p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void discovery.retry()}
+          >
+            {strings.action.tryAgain}
+          </Button>
+        </div>
+      ) : null}
       {data && limits.used >= limits.per_person - 2 ? (
         <p className="text-muted-foreground text-sm">
           {strings.list.count({

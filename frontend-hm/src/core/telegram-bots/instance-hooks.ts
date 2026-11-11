@@ -16,7 +16,6 @@ import {
 import {
   canManageInstance,
   hasCeiling,
-  USE,
 } from "@/core/agent-instances/presentation";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useAgentInstances, useTelegram } from "@/core/features/hooks";
@@ -66,6 +65,7 @@ export function useTelegramInstanceDiscovery() {
   const complete = enabled && queries.every((query) => query.isSuccess);
   return {
     feature,
+    retry: () => Promise.all(queries.map((query) => query.refetch())),
     complete,
     pending: enabled && queries.some((query) => query.isPending),
     error: enabled && queries.some((query) => query.isError),
@@ -73,16 +73,14 @@ export function useTelegramInstanceDiscovery() {
   };
 }
 
-/** The list projection does not carry per-instance execution. Read it with a shared four-request bound. */
-export function useTelegramInstanceDetail(instance: AgentInstance | undefined) {
-  const { user } = useAuth();
-  const client = useQueryClient();
-  const enabled =
-    !!instance &&
-    !!user &&
-    !!(instance.permissions & USE) &&
-    hasCeiling(user.permissions, "agents:read");
-  return useQuery({
+type DetailKey = Pick<AgentInstance, "id"> &
+  Partial<Pick<AgentInstance, "generation" | "permissions">>;
+function detailOptions(
+  client: QueryClient,
+  user: ReturnType<typeof useAuth>["user"],
+  instance?: DetailKey,
+) {
+  return {
     queryKey: [
       "agent-instances",
       user?.id,
@@ -93,10 +91,11 @@ export function useTelegramInstanceDetail(instance: AgentInstance | undefined) {
       instance?.generation,
       instance?.permissions,
     ],
-    enabled,
+    enabled:
+      !!instance && !!user && hasCeiling(user.permissions, "agents:read"),
     retry: false,
     refetchInterval: 10_000,
-    queryFn: ({ signal }) =>
+    queryFn: ({ signal }: { signal: AbortSignal }) =>
       poolOf(client).read(
         signal,
         async (): Promise<AgentInstanceDetail | null> => {
@@ -109,6 +108,22 @@ export function useTelegramInstanceDetail(instance: AgentInstance | undefined) {
           }
         },
       ),
+  };
+}
+
+/** The list projection does not carry per-instance execution. All views share four readers. */
+export function useTelegramInstanceDetail(instance?: DetailKey) {
+  const { user } = useAuth();
+  const client = useQueryClient();
+  return useQuery(detailOptions(client, user, instance));
+}
+
+/** The sidebar reads only owned bot targets, with the same cache and admission bound. */
+export function useTelegramInstanceDetails(instances: DetailKey[]) {
+  const { user } = useAuth();
+  const client = useQueryClient();
+  return useQueries({
+    queries: instances.map((instance) => detailOptions(client, user, instance)),
   });
 }
 

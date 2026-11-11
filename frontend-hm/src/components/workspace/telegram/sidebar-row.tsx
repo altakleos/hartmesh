@@ -11,6 +11,7 @@ import {
   useTelegramClock,
   useTelegramReader,
 } from "@/core/telegram-bots/hooks";
+import { useTelegramInstanceDetails } from "@/core/telegram-bots/instance-hooks";
 import {
   needsAttention,
   rowOf,
@@ -29,9 +30,26 @@ export function TelegramSidebarRow() {
   const now = useTelegramClock();
 
   const bots = data?.bots ?? [];
+  const instanceBots = bots.filter((bot) => bot.agent_kind === "instance");
+  const details = useTelegramInstanceDetails(
+    instanceBots.map((bot) => ({ id: bot.agent_ref })),
+  );
+  const instances = new Map(
+    instanceBots.map((bot, index) => [bot.agent_ref, details[index]?.data]),
+  );
   const rows = bots.map(
     (bot) =>
-      rowOf({ name: bot.agent_name ?? "", bot, feature, reader, now }).row,
+      rowOf({
+        name: bot.agent_name ?? "",
+        bot,
+        feature,
+        reader,
+        now,
+        instance:
+          bot.agent_kind === "instance"
+            ? instances.get(bot.agent_ref)
+            : undefined,
+      }).row,
   );
   const paused = sectionNoticeOf(feature, true) !== null;
   const attention = paused ? 0 : rows.filter(needsAttention).length;

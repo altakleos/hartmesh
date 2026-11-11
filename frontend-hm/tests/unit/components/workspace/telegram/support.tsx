@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render } from "@testing-library/react";
 import type { ReactNode } from "react";
 
+import type { AgentInstanceDetail } from "@/core/agent-instances/api";
 import type { Bot, BotList } from "@/core/telegram-bots/api";
 
 export const ago = (seconds: number) =>
@@ -66,7 +67,9 @@ export interface Call {
 }
 
 /** Answers by `METHOD path`; every call is recorded for the test to read. */
-export function server(routes: Record<string, () => Response>): {
+export function server(
+  routes: Record<string, () => Response | Promise<Response>>,
+): {
   calls: Call[];
   handle: typeof fetch;
 } {
@@ -107,3 +110,38 @@ export function queries(): QueryClient {
 export function clearClients() {
   clients.splice(0).forEach((client) => client.clear());
 }
+
+export function instance(
+  overrides: Partial<AgentInstanceDetail> = {},
+): AgentInstanceDetail {
+  return {
+    id: "a".repeat(32),
+    name: "Mira",
+    custody: "company",
+    owner_id: null,
+    creator_id: "alice",
+    principal: { kind: "nonhuman", subject_id: "a".repeat(32) },
+    supervisor: { kind: "human", subject_id: "alice" },
+    definition_revision: "revision",
+    home_id: "home",
+    status: "active",
+    generation: 1,
+    permissions: 7,
+    activity: {
+      running_runs: 0,
+      running: [],
+      last_active_at: null,
+      open_conversations: 0,
+    },
+    home: { state: "available", workspace: "absent" },
+    execution: { execution: "ready", reason: null },
+    ...overrides,
+  };
+}
+export const INSTANCE_FEATURE = {
+  enabled: true,
+  execution: "ready",
+  reason: null,
+  ai_assistants: { per_user: 3, allowed: 3, in_use: 0, mine: 0 },
+  ai_employees: { allowed: 3, in_use: 0 },
+};

@@ -275,9 +275,9 @@ export function liveConnectOf(
     : undefined;
 }
 
-/** False while the set-up's own steps describe the row: the bot can hear Start. */
+/** False while the set-up’s waiting or Done screen describes the row. */
 export function stopsSetup(row: number): boolean {
-  return row !== 21 && row !== 22 && row !== 23;
+  return row !== 21 && row !== 22 && row !== 23 && !CONNECTED.has(row);
 }
 
 export interface TargetRow {
@@ -332,7 +332,8 @@ export function targetRowsOf({
     (entry) =>
       (entry.permissions & USE) !== 0 &&
       entry.status !== "deleted" &&
-      entry.status !== "provisioning",
+      entry.status !== "provisioning" &&
+      entry.status !== "archived",
   );
   const instanceRows = visible.map(
     (entry): TargetRow => ({
@@ -357,22 +358,27 @@ export function targetRowsOf({
   const employees = instanceRows
     .filter((row) => row.instance?.custody === "company")
     .sort(byName);
-  const gone = Array.from(
-    remaining.values(),
-    (bot): TargetRow => ({
+  const byId = new Map(instances.map((instance) => [instance.id, instance]));
+  const gone = Array.from(remaining.values(), (bot): TargetRow => {
+    const instance =
+      bot.agent_kind === "instance" ? byId.get(bot.agent_ref) : undefined;
+    const name =
+      instance?.name ?? bot.agent_name ?? bot.bot_name ?? bot.agent_ref;
+    return {
       target:
         bot.agent_kind === "instance"
           ? {
               kind: "agent",
               id: bot.agent_ref,
-              name: bot.agent_name ?? bot.bot_name ?? bot.agent_ref,
-              permissions: 0,
+              name,
+              permissions: instance?.permissions ?? 0,
             }
           : { kind: "custom_agent", name: bot.agent_ref },
-      name: bot.agent_name ?? bot.bot_name ?? bot.agent_ref,
+      name,
       bot,
-    }),
-  ).sort(byName);
+      ...(instance ? { instance } : {}),
+    };
+  }).sort(byName);
   return [chat, ...assistants, ...employees, ...agents, ...gone];
 }
 

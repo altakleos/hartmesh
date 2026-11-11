@@ -1,7 +1,7 @@
 "use client";
 
 import { EllipsisVerticalIcon } from "lucide-react";
-import { useId, useState } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -71,7 +71,7 @@ export function TelegramBotRow({
   row: TargetRow;
   view: RowView;
   /** Why a Connect cannot be pressed, shown under it. */
-  disabledBecause: string | null;
+  disabledBecause: ReactNode;
   now: number;
   onDialog: (dialog: TelegramRowDialogState) => void;
 }) {
@@ -197,9 +197,9 @@ export function TelegramBotRow({
           </p>
         ) : null}
         {disabledBecause && !bot ? (
-          <p id={blockedId} className="text-muted-foreground text-xs">
+          <div id={blockedId} className="text-muted-foreground text-xs">
             {disabledBecause}
-          </p>
+          </div>
         ) : null}
       </div>
       <div className="flex max-w-full flex-wrap items-center gap-2">

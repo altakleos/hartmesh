@@ -10,7 +10,13 @@ import {
 
 rs.mock("@/core/api/fetcher", () => ({ fetch: rs.fn() }));
 rs.mock("@/core/config", () => ({ getBackendBaseURL: () => "" }));
-const auth = rs.hoisted(() => ({ user: { id: "alice", system_role: "user" } }));
+const auth = rs.hoisted(() => ({
+  user: {
+    id: "alice",
+    system_role: "user",
+    permissions: ["agents:read"] as string[],
+  },
+}));
 const toast = rs.hoisted(() => ({ success: rs.fn(), error: rs.fn() }));
 const agents = rs.hoisted(() => ({
   list: [] as { name: string }[],
@@ -70,12 +76,15 @@ import {
 } from "@/components/workspace/telegram/setup-dialog-store";
 import { WorkspaceSettingsDeepLink } from "@/components/workspace/workspace-settings-deep-link";
 import { fetch } from "@/core/api/fetcher";
+import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
 import { createEnUS } from "@/core/i18n/locales/en-US";
 import type { BotList, Settings } from "@/core/telegram-bots/api";
 import { telegramTargetOf } from "@/core/telegram-bots/web-pages";
 
 import {
   ago,
+  instance,
+  INSTANCE_FEATURE,
   bot,
   clearClients,
   json,
@@ -104,16 +113,37 @@ const SETTINGS: Settings = {
 function start(
   telegram: unknown,
   list: BotList = listOf([]),
-  routes: Record<string, () => Response> = {},
+  routes: Record<string, () => Response | Promise<Response>> = {},
 ) {
   const { calls, handle } = server({
+    "GET /api/v1/auth/users?ids=alice": () =>
+      json({
+        users: [
+          {
+            id: "alice",
+            name: "Alice",
+            email: "alice@example.test",
+            active: true,
+          },
+        ],
+      }),
+    "GET /api/v1/auth/users?ids=bob": () =>
+      json({
+        users: [
+          { id: "bob", name: "Bob", email: "bob@example.test", active: true },
+        ],
+      }),
     "GET /api/features": () =>
       json({ agents_api: { enabled: true }, telegram }),
     [LIST]: () => json(list),
     ...routes,
   });
   rs.mocked(fetch).mockImplementation(handle);
-  renderWithClient(<TelegramBotsSection />);
+  renderWithClient(
+    <FileActionLifetimeProvider>
+      <TelegramBotsSection />
+    </FileActionLifetimeProvider>,
+  );
   return calls;
 }
 
@@ -139,7 +169,11 @@ afterEach(() => {
   rs.mocked(fetch).mockReset();
   toast.success.mockReset();
   toast.error.mockReset();
-  auth.user = { id: "alice", system_role: "user" };
+  auth.user = {
+    id: "alice",
+    system_role: "user",
+    permissions: ["agents:read"],
+  };
   agents.list = [];
   agents.isLoading = false;
   navigation.query = "";
@@ -193,7 +227,11 @@ describe("the Telegram section", () => {
   });
 
   it("tells an administrator what to quote and whom to ask", async () => {
-    auth.user = { id: "alice", system_role: "admin" };
+    auth.user = {
+      id: "alice",
+      system_role: "admin",
+      permissions: ["agents:read"],
+    };
     start(
       { enabled: true, bots: "unavailable", reason: "secret-missing" },
       undefined,
@@ -265,7 +303,11 @@ describe("the Telegram section", () => {
     rs.mocked(fetch).mockImplementation((url, init) =>
       url === LIST.slice(4) ? new Promise(() => undefined) : handle(url, init),
     );
-    renderWithClient(<TelegramBotsSection />);
+    renderWithClient(
+      <FileActionLifetimeProvider>
+        <TelegramBotsSection />
+      </FileActionLifetimeProvider>,
+    );
     await screen.findByText("Your Telegram bots");
     expect(screen.queryByText("Not connected")).toBeNull();
     expect(
@@ -347,7 +389,11 @@ describe("the Telegram section", () => {
   });
 
   it("the administrator's block shows counts and no username", async () => {
-    auth.user = { id: "alice", system_role: "admin" };
+    auth.user = {
+      id: "alice",
+      system_role: "admin",
+      permissions: ["agents:read"],
+    };
     start(READY, listOf([]), {
       [ADMIN]: () =>
         json({
@@ -370,7 +416,11 @@ describe("the Telegram section", () => {
   });
 
   it("the administrator's block says who can switch voice notes on", async () => {
-    auth.user = { id: "alice", system_role: "admin" };
+    auth.user = {
+      id: "alice",
+      system_role: "admin",
+      permissions: ["agents:read"],
+    };
     start(READY, listOf([]), {
       [ADMIN]: () =>
         json({
@@ -438,7 +488,11 @@ describe("the Telegram section", () => {
   });
 
   it("reads the administrator's counts again with the list", async () => {
-    auth.user = { id: "alice", system_role: "admin" };
+    auth.user = {
+      id: "alice",
+      system_role: "admin",
+      permissions: ["agents:read"],
+    };
     const calls = start(READY, listOf([]), {
       [ADMIN]: () =>
         json({
@@ -882,4 +936,208 @@ describe("the Telegram section", () => {
     });
     expect(link.getAttribute("href")).toBe("https://t.me/x?start=c");
   });
+});
+
+it("discovers assistants before employees and custom agents, excluding unconnected retired targets", async () => {
+  agents.list = [{ name: "Custom" }];
+  const own = instance({
+    id: "11111111111111111111111111111111",
+    name: "Zoe",
+    custody: "personal",
+    owner_id: "alice",
+  });
+  const colleague = instance({
+    id: "22222222222222222222222222222222",
+    name: "Ada",
+    custody: "personal",
+    owner_id: "bob",
+  });
+  const employee = instance();
+  const retired = instance({
+    id: "33333333333333333333333333333333",
+    name: "Retired",
+    status: "archived",
+  });
+  start(READY, undefined, {
+    "GET /api/features": () =>
+      json({
+        telegram: READY,
+        agents_api: { enabled: true },
+        agent_instances: INSTANCE_FEATURE,
+      }),
+    "GET /api/agent-instances?limit=100&offset=0&custody=personal": () =>
+      json({ instances: [colleague, own] }),
+    "GET /api/agent-instances?limit=100&offset=0&custody=company": () =>
+      json({ instances: [retired, employee] }),
+    ...Object.fromEntries(
+      [own, colleague, employee, retired].map((entry) => [
+        `GET /api/agent-instances/${entry.id}?include_deleted=true`,
+        () => json(entry),
+      ]),
+    ),
+  });
+  await waitFor(() =>
+    expect(rowsShown()).toEqual(["HartMesh", "Zoe", "Ada", "Mira", "Custom"]),
+  );
+  await waitFor(() =>
+    expect(
+      screen
+        .getAllByRole<HTMLButtonElement>("button", { name: "Connect Telegram" })
+        .filter((button) => !button.disabled),
+    ).toHaveLength(5),
+  );
+});
+
+it("does not open an instance deep link until its current detail permits Connect", async () => {
+  navigation.query =
+    "settings=channels&telegram=agent.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const current = instance({ permissions: 2 });
+  const calls = start(READY, undefined, {
+    "GET /api/features": () =>
+      json({ telegram: READY, agent_instances: INSTANCE_FEATURE }),
+    "GET /api/agent-instances?limit=100&offset=0&custody=personal": () =>
+      json({ instances: [] }),
+    "GET /api/agent-instances?limit=100&offset=0&custody=company": () =>
+      json({ instances: [instance()] }),
+    "GET /api/agent-instances/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?include_deleted=true":
+      () => json(current),
+  });
+  renderOpened();
+  await waitFor(() =>
+    expect(calls.some((c) => c.url.includes("include_deleted=true"))).toBe(
+      true,
+    ),
+  );
+  await waitFor(() => expect(navigation.replace).toHaveBeenCalled());
+  expect(screen.queryByTestId("set-up-for")).toBeNull();
+  const row = document.querySelector(
+    '[data-telegram-target="agent.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]',
+  )!;
+  expect(row.querySelector<HTMLButtonElement>("button")!.disabled).toBe(true);
+});
+
+it("disables only the unavailable kind", async () => {
+  const own = instance({
+    id: "11111111111111111111111111111111",
+    custody: "personal",
+    owner_id: "alice",
+    name: "Zoe",
+  });
+  const employee = instance();
+  start(READY, undefined, {
+    "GET /api/features": () =>
+      json({
+        telegram: READY,
+        agent_instances: {
+          ...INSTANCE_FEATURE,
+          ai_assistants: { ...INSTANCE_FEATURE.ai_assistants, per_user: 0 },
+        },
+      }),
+    "GET /api/agent-instances?limit=100&offset=0&custody=personal": () =>
+      json({ instances: [own] }),
+    "GET /api/agent-instances?limit=100&offset=0&custody=company": () =>
+      json({ instances: [employee] }),
+    ...Object.fromEntries(
+      [own, employee].map((entry) => [
+        `GET /api/agent-instances/${entry.id}?include_deleted=true`,
+        () => json(entry),
+      ]),
+    ),
+  });
+  await waitFor(() => expect(rowsShown()).toContain("Mira"));
+  await waitFor(() =>
+    expect(
+      document.querySelector<HTMLButtonElement>(
+        '[data-telegram-target="agent.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] button',
+      )!.disabled,
+    ).toBe(false),
+  );
+  expect(
+    document.querySelector<HTMLButtonElement>(
+      '[data-telegram-target="agent.11111111111111111111111111111111"] button',
+    )!.disabled,
+  ).toBe(true);
+  expect(
+    document.querySelector(
+      '[data-telegram-target="agent.11111111111111111111111111111111"]',
+    )!.textContent,
+  ).toContain("AI assistants");
+});
+
+it("keeps an instance deep link pending through delayed discovery and current detail", async () => {
+  navigation.query = `settings=channels&telegram=agent.${"a".repeat(32)}`;
+  let listed!: (answer: Response) => void;
+  let detailed!: (answer: Response) => void;
+  start(READY, undefined, {
+    "GET /api/features": () =>
+      json({ telegram: READY, agent_instances: INSTANCE_FEATURE }),
+    "GET /api/agent-instances?limit=100&offset=0&custody=personal": () =>
+      json({ instances: [] }),
+    "GET /api/agent-instances?limit=100&offset=0&custody=company": () =>
+      new Promise((resolve) => {
+        listed = resolve;
+      }),
+    [`GET /api/agent-instances/${"a".repeat(32)}?include_deleted=true`]: () =>
+      new Promise((resolve) => {
+        detailed = resolve;
+      }),
+  });
+  renderOpened();
+  await waitFor(() => expect(listed).toBeDefined());
+  expect(navigation.replace).not.toHaveBeenCalled();
+  await act(async () => listed(json({ instances: [instance()] })));
+  await waitFor(() => expect(detailed).toBeDefined());
+  expect(screen.queryByTestId("set-up-for")).toBeNull();
+  expect(navigation.replace).not.toHaveBeenCalled();
+  await act(async () => detailed(json(instance())));
+  await screen.findByTestId("set-up-for");
+  expect(navigation.replace).toHaveBeenCalledTimes(1);
+});
+
+it("offers retry after failed discovery without consuming the pending instance deep link", async () => {
+  navigation.query = `settings=channels&telegram=agent.${"a".repeat(32)}`;
+  let fail = true;
+  start(READY, undefined, {
+    "GET /api/features": () =>
+      json({ telegram: READY, agent_instances: INSTANCE_FEATURE }),
+    "GET /api/agent-instances?limit=100&offset=0&custody=personal": () =>
+      json({ instances: [] }),
+    "GET /api/agent-instances?limit=100&offset=0&custody=company": () =>
+      fail ? json({}, 503) : json({ instances: [instance()] }),
+    [`GET /api/agent-instances/${"a".repeat(32)}?include_deleted=true`]: () =>
+      json(instance()),
+  });
+  renderOpened();
+  const retry = await screen.findByRole("button", { name: "Try again" });
+  expect(navigation.replace).not.toHaveBeenCalled();
+  fail = false;
+  fireEvent.click(retry);
+  await screen.findByTestId("set-up-for");
+});
+
+it("shows one deployment execution notice before the instance rows", async () => {
+  start(READY, undefined, {
+    "GET /api/features": () =>
+      json({
+        telegram: READY,
+        agent_instances: {
+          ...INSTANCE_FEATURE,
+          execution: "unavailable",
+          reason: "operator-hold",
+        },
+      }),
+    "GET /api/agent-instances?limit=100&offset=0&custody=personal": () =>
+      json({ instances: [] }),
+    "GET /api/agent-instances?limit=100&offset=0&custody=company": () =>
+      json({ instances: [instance()] }),
+    [`GET /api/agent-instances/${"a".repeat(32)}?include_deleted=true`]: () =>
+      json(instance()),
+  });
+  const notice = await screen.findByTestId("telegram-instance-notice");
+  expect(notice.textContent).toContain(
+    "AI assistants and AI employees are paused",
+  );
+  expect(notice.nextElementSibling?.getAttribute("data-telegram-target")).toBe(
+    `agent.${"a".repeat(32)}`,
+  );
 });

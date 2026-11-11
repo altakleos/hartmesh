@@ -159,3 +159,45 @@ it.each([
     ).toBe(11);
   },
 );
+
+it("keeps Inspect-only owned bots with other inaccessible targets at the end", () => {
+  const retained = {
+    ...instance,
+    id: "inspect-only",
+    name: "Zed",
+    permissions: 2,
+  };
+  const rows = targetRowsOf({
+    chatName: "HartMesh",
+    agentNames: ["Custom"],
+    ownerId: "alice",
+    instances: [retained],
+    bots: [
+      bot({
+        id: "one",
+        agent_kind: "instance",
+        agent_ref: retained.id,
+        agent_name: retained.name,
+      }),
+      bot({
+        id: "two",
+        agent_kind: "instance",
+        agent_ref: "gone",
+        agent_name: "Gone",
+      }),
+    ],
+  });
+  expect(rows.map((row) => row.name)).toEqual([
+    "HartMesh",
+    "Custom",
+    "Gone",
+    "Zed",
+  ]);
+  expect(rows.at(-1)?.instance).toBe(retained);
+  expect(rows.at(-1)?.target).toEqual({
+    kind: "agent",
+    id: retained.id,
+    name: retained.name,
+    permissions: 2,
+  });
+});

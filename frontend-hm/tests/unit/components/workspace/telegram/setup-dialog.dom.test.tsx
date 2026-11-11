@@ -11,7 +11,13 @@ import type { ReactNode } from "react";
 
 rs.mock("@/core/api/fetcher", () => ({ fetch: rs.fn() }));
 rs.mock("@/core/config", () => ({ getBackendBaseURL: () => "" }));
-const auth = rs.hoisted(() => ({ user: { id: "alice", system_role: "user" } }));
+const auth = rs.hoisted(() => ({
+  user: {
+    id: "alice",
+    system_role: "user",
+    permissions: ["agents:read"] as string[],
+  },
+}));
 const page = rs.hoisted(() => ({
   mobile: false,
   agents: [] as { name: string }[],
@@ -66,12 +72,15 @@ import {
   useTelegramPageState,
 } from "@/components/workspace/telegram/setup-dialog-store";
 import { fetch } from "@/core/api/fetcher";
+import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
 import { createEnUS } from "@/core/i18n/locales/en-US";
 import type { Bot, BotList, Settings } from "@/core/telegram-bots/api";
 import type { AgentTarget } from "@/core/telegram-bots/web-pages";
 
 import {
   ago,
+  instance,
+  INSTANCE_FEATURE,
   bot,
   clearClients,
   json,
@@ -110,7 +119,7 @@ let state = listOf([]);
 interface Start {
   list?: () => BotList;
   telegram?: Record<string, unknown>;
-  routes?: Record<string, () => Response>;
+  routes?: Record<string, () => Response | Promise<Response>>;
   target?: AgentTarget;
 }
 
@@ -121,17 +130,48 @@ function start({
   target = { kind: "chat" },
 }: Start = {}) {
   const { calls, handle } = server({
+    "GET /api/v1/auth/users?ids=alice": () =>
+      json({
+        users: [
+          {
+            id: "alice",
+            name: "Alice",
+            email: "alice@example.test",
+            active: true,
+          },
+        ],
+      }),
+    "GET /api/v1/auth/users?ids=bob": () =>
+      json({
+        users: [
+          { id: "bob", name: "Bob", email: "bob@example.test", active: true },
+        ],
+      }),
     "GET /api/features": () =>
       json({
         agents_api: { enabled: true },
+        ...(target.kind === "agent"
+          ? { agent_instances: INSTANCE_FEATURE }
+          : {}),
         telegram: { enabled: true, bots: "ready", reason: null, ...telegram },
       }),
     [LIST]: () => json(list()),
+    ...(target.kind === "agent"
+      ? {
+          [`GET /api/agent-instances/${target.id}?include_deleted=true`]: () =>
+            json(instance({ id: target.id, name: target.name })),
+        }
+      : {}),
     ...routes,
   });
   rs.mocked(fetch).mockImplementation(handle);
-  renderWithClient(<TelegramSetupDialog target={target} />);
+  const tree = renderWithClient(
+    <FileActionLifetimeProvider>
+      <TelegramSetupDialog target={target} />
+    </FileActionLifetimeProvider>,
+  );
   return {
+    tree,
     calls,
     added: () =>
       calls.filter(
@@ -812,9 +852,15 @@ describe("instance setup privacy", () => {
     "keeps the shared-reader notice visible with an existing bot=%s",
     async (hasBot) => {
       start({
-        target: { kind: "agent", id: "agent-a", name: "Mira" },
+        target: {
+          kind: "agent",
+          id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          name: "Mira",
+        },
         list: () =>
-          listOf(hasBot ? [bot()] : [], { read_by_others: ["agent-a"] }),
+          listOf(hasBot ? [bot()] : [], {
+            read_by_others: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+          }),
       });
       await screen.findByText(
         /People at your company who can see all of Mira's work/,
@@ -826,10 +872,19 @@ describe("instance setup privacy", () => {
   );
   it("explains protected delivery only when the list carries that policy", async () => {
     start({
-      target: { kind: "agent", id: "agent-a", name: "Mira" },
+      target: {
+        kind: "agent",
+        id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        name: "Mira",
+      },
       list: () =>
         listOf([], {
-          policies: [{ instance_id: "agent-a", policy: "protected" }],
+          policies: [
+            {
+              instance_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              policy: "protected",
+            },
+          ],
         }),
     });
     await screen.findByText(/A manager has set Telegram for Mira/);
@@ -840,9 +895,195 @@ describe("instance setup privacy", () => {
     ).toBeNull();
   });
   it("does not infer sharing or protection merely from being an instance", async () => {
-    start({ target: { kind: "agent", id: "agent-a", name: "Mira" } });
+    start({
+      target: {
+        kind: "agent",
+        id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        name: "Mira",
+      },
+    });
     await field();
     expect(screen.queryByText(/People at your company/)).toBeNull();
     expect(screen.queryByText(/A manager has set Telegram/)).toBeNull();
   });
+});
+
+it("shows current access refusal instead of success for a connected instance bot", async () => {
+  start({
+    target: {
+      kind: "agent",
+      id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      name: "Mira",
+    },
+    list: () =>
+      listOf([
+        bot({
+          agent_kind: "instance",
+          agent_ref: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          agent_name: "Mira",
+        }),
+      ]),
+    routes: {
+      "GET /api/agent-instances/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?include_deleted=true":
+        () => json(instance({ permissions: 2 })),
+    },
+  });
+  await screen.findByText(
+    "You no longer have access to Mira, so this bot no longer answers.",
+  );
+  expect(screen.queryByText(/Mira is connected/)).toBeNull();
+  expect(screen.queryByLabelText("Bot token")).toBeNull();
+});
+
+it("does not offer a token field when the current employee policy is off", async () => {
+  start({
+    target: {
+      kind: "agent",
+      id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      name: "Mira",
+    },
+    list: () =>
+      listOf([], {
+        policies: [
+          { instance_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", policy: "off" },
+        ],
+      }),
+  });
+  await screen.findByText(/Telegram is turned off for Mira/);
+  expect(screen.queryByLabelText("Bot token")).toBeNull();
+});
+
+it("explains an execution refusal returned after a token was submitted", async () => {
+  start({
+    target: {
+      kind: "agent",
+      id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      name: "Mira",
+    },
+    routes: {
+      "POST /api/telegram-bots": () =>
+        json(
+          {
+            reason: "execution-unavailable",
+            execution_reason: "operator-hold",
+            detail: "never show provider internals",
+          },
+          409,
+        ),
+    },
+  });
+  const input = await field();
+  fireEvent.paste(input, { clipboardData: { getData: () => token } });
+  await screen.findByText(/AI assistants and AI employees are paused by/i);
+  expect(screen.queryByText(/never show provider internals/)).toBeNull();
+});
+
+it("offers a currently connectable instance after finishing the ordinary bot", async () => {
+  start({
+    list: () => listOf([bot()]),
+    routes: {
+      "GET /api/features": () =>
+        json({
+          telegram: { enabled: true, bots: "ready", reason: null },
+          agent_instances: INSTANCE_FEATURE,
+        }),
+      "GET /api/agent-instances?limit=100&offset=0&custody=personal": () =>
+        json({ instances: [] }),
+      "GET /api/agent-instances?limit=100&offset=0&custody=company": () =>
+        json({ instances: [instance()] }),
+      [`GET /api/agent-instances/${"a".repeat(32)}?include_deleted=true`]: () =>
+        json(instance()),
+    },
+  });
+  await screen.findByRole("button", { name: /Mira/ });
+});
+
+it("retires a submitted token when current Use disappears and drops its late answer", async () => {
+  let permissions = 7;
+  let finish!: (answer: Response) => void;
+  const { calls } = start({
+    target: { kind: "agent", id: "a".repeat(32), name: "Mira" },
+    routes: {
+      [`GET /api/agent-instances/${"a".repeat(32)}?include_deleted=true`]: () =>
+        json(instance({ permissions })),
+      "POST /api/telegram-bots": () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    },
+  });
+  await paste(token);
+  await waitFor(() => expect(finish).toBeDefined());
+  const sent = rs
+    .mocked(fetch)
+    .mock.calls.find(([, init]) => init?.method === "POST")!;
+  permissions = 2;
+  await act(async () => {
+    await queries().invalidateQueries({ queryKey: ["agent-instances"] });
+  });
+  await waitFor(() => expect(screen.queryByLabelText("Bot token")).toBeNull());
+  expect(sent[1]?.signal?.aborted).toBe(true);
+  const reads = calls.filter(
+    (call) => call.url === "/api/telegram-bots",
+  ).length;
+  await act(async () =>
+    finish(
+      json({
+        bot: waiting({ agent_kind: "instance", agent_ref: "a".repeat(32) }),
+        connect,
+      }),
+    ),
+  );
+  expect(
+    calls.filter((call) => call.url === "/api/telegram-bots"),
+  ).toHaveLength(reads);
+  expect(screen.queryByText("3. Open the chat and press Start")).toBeNull();
+});
+
+it("skips a next instance whose current Use was withdrawn", async () => {
+  page.agents = [{ name: "Custom" }];
+  start({
+    list: () => listOf([bot()]),
+    routes: {
+      "GET /api/features": () =>
+        json({
+          telegram: { enabled: true, bots: "ready", reason: null },
+          agent_instances: INSTANCE_FEATURE,
+        }),
+      "GET /api/agent-instances?limit=100&offset=0&custody=personal": () =>
+        json({ instances: [] }),
+      "GET /api/agent-instances?limit=100&offset=0&custody=company": () =>
+        json({ instances: [instance()] }),
+      [`GET /api/agent-instances/${"a".repeat(32)}?include_deleted=true`]: () =>
+        json(instance({ permissions: 2 })),
+    },
+  });
+  await screen.findByRole("button", { name: /Custom/ });
+  expect(screen.queryByRole("button", { name: /Mira/ })).toBeNull();
+});
+
+it("explains a policy refusal after submit without claiming a bot was kept", async () => {
+  start({
+    target: { kind: "agent", id: "a".repeat(32), name: "Mira" },
+    routes: {
+      "POST /api/telegram-bots": () => refusal(409, "policy-off"),
+    },
+  });
+  await paste(token);
+  await screen.findByText(/Telegram is turned off for Mira/);
+  expect(screen.queryByText(/The bot is kept/)).toBeNull();
+});
+
+it("names an instance that disappeared before setup without offering a token", async () => {
+  start({
+    target: { kind: "agent", id: "a".repeat(32), name: "Mira" },
+    routes: {
+      [`GET /api/agent-instances/${"a".repeat(32)}?include_deleted=true`]: () =>
+        json({}, 404),
+    },
+  });
+  await screen.findByText(
+    "Mira is no longer available to you, so a bot cannot be connected.",
+  );
+  expect(screen.queryByLabelText("Bot token")).toBeNull();
 });
