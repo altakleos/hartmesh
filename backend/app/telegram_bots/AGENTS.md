@@ -16,6 +16,9 @@ Work outcome delivery uses canonical receipts and a final source/claim fence.
 Its dormant receipt observer never calls the explicit action-retry path. Routing
 results edit only their command’s exact ACKed selection; missing/incompatible
 anchors rematerialize current receipt content without another command.
+A receipt-owned V3 outcome can carry a manager’s wrong-person routing choices.
+Admission rechecks its canonical response, full ACK and selected person in the
+final writer; replay retains the separate original routing operation.
 Routing V5/V6 has a dedicated recipient/account source and cannot use ordinary
 question recovery. Source-aware routing refresh/Show/repair retain ACK history and
 unresolved actions; fresh controls await full delivery. Recipient-choice admission atomically reserves the original

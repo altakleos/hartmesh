@@ -52,8 +52,8 @@ its later refreshes bypass proactive preferences; the final source read proves
 the original Show receipt. Retain that exact consumed proof while its parent
 exists, and require it under lock before recovery mutates controls. Complete ACK
 validation precedes control activation,
-and repair cannot consume another presentation’s controls. Reply-owned follow-ups and
-controller installation remain prerequisites for activation.
+and repair cannot consume another presentation’s controls. Controller installation
+and refresh of acknowledged reply-owned choices remain prerequisites for activation.
 Presentation/handlers stay dormant.
 
 `work_routing_admission.py` reserves acknowledged recipient choices in the same
@@ -212,8 +212,8 @@ without applying an action. These components remain dormant until controller wir
 issuing commands or installing controls. Unknown actions never become a failed
 save. A known attempt-closing refusal keeps the original confirmation; a retained
 uncertain operation offers only its original retry. Plain replies to decisions or
-reviews are comments. Wrong-recipient acknowledgements always use the plain form;
-current managers get the separate routing follow-up. Start/resume navigation is
+reviews are comments. The text renderer uses the plain wrong-recipient acknowledgement;
+the outcome planner can replace it with current manager routing choices. Start/resume navigation is
 web-only at this stage. The central `errors.text_key_for` reads typed refusal codes
 and classes, never exception sentences; `key_for_reader` owns manager wording.
 
@@ -252,8 +252,19 @@ anchors hold with `work-outcome-refresh-required`; the next receipt observation
 replans current content as a new message, retaining old ACKs and the original
 input/action. It never repeats the command. Assignment topics and relocation
 belong to the later topic feature.
-The full controller still owns fresh-request and routing follow-ups, explicit
-action retries and installation of the receipt observer.
+`work_routing_followups.py` gives a completed wrong-person response one direct
+routing reply through a closed V3 outcome basis. It uses the canonical response,
+current manager/source/privacy and full recipient roster; others retain the plain
+acknowledgement. Explicit replies bypass proactive preferences. Full ACK both
+settles the input and enables recipient choices. Routing admission rechecks that
+shown reply, original completed response and both domain events in its final
+writer, alongside current manager and selected-account authority. The new choice
+owns a separate immutable routing operation; its success edits the exact shown
+selection. A damaged ACK cannot supply captured choices. Already acknowledged
+outcomes remain deduplicated; an explicit choice-refresh controller must own
+later roster changes without replaying the completed response.
+The full controller still owns fresh-request recovery, acknowledged routing-choice
+refresh, explicit action retries and installation of the receipt observer.
 
 `work_outcome_recovery.py` observes Work journals without issuing commands.
 `Acts.reconcile_receipt` shares the original operation's local serialization and

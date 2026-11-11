@@ -10,6 +10,7 @@ from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.work_actions import request_for
 from app.telegram_bots.work_interaction_delivery import acknowledged_source
 from app.telegram_bots.work_request_recovery import _RecoveryProjection
+from app.telegram_bots.work_routing_followups import FollowupAdmission, acknowledged_followup
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied
 from deerflow.agent_instances.human_input_contract import RequestCommand
 from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow
@@ -54,6 +55,8 @@ class WorkRoutingAdmissions:
                 if callback is None or callback.link_id != link.id or callback.kind != "route_to" or callback.target_kind != "request":
                     raise CallbackRefused()
                 request_id = callback.target_id
+                parent = await reader.get(TelegramOutboxRow, callback.payload.get("anchor_outbox_id"))
+                followup = FollowupAdmission(link, parent) if parent is not None and "work_outcome_basis" in parent.payload else None
             await self.acts._work_link(link)
             owner = await self.acts.authority.prepare_live_owner(link.owner_user_id)
             if existing is None:
@@ -67,7 +70,7 @@ class WorkRoutingAdmissions:
                     if recipient is None:
                         raise AgentDenied("The recipient can no longer answer", reason="recipient-ineligible")
                     admission = await prepare_attention(self.plans.reader, link)
-                    projection = _RoutingActionProjection(self.plans, source, callback_id, recipient)
+                    projection = _RoutingActionProjection(self.plans, source, callback_id, recipient, followup)
                 except (AgentDenied, AgentConflict, AccessOff, CallbackRefused) as error:
                     # A concurrent press may already own the command. Decide
                     # replay under the writer before applying fresh-source rules.
@@ -87,9 +90,12 @@ class WorkRoutingAdmissions:
                     if saved is None:
                         raise CallbackRefused()
                     parent, rows, selected = await self.callbacks._locked(writer, link, callback_id)
-                if parent.payload.get("work_request_basis", {}).get("version") not in {5, 6}:
+                if followup is not None:
+                    captured = acknowledged_followup(link, parent)
+                elif parent.payload.get("work_request_basis", {}).get("version") in {5, 6}:
+                    captured = acknowledged_source(link, parent)
+                else:
                     raise CallbackRefused()
-                captured = acknowledged_source(link, parent)
                 recipient_id = route_choice(selected, captured)
                 if (selected.chat_id, selected.message_id, selected.message_thread_id) != (chat_id, message_id, message_thread_id):
                     raise CallbackRefused()
@@ -138,12 +144,12 @@ class _RoutingGuard:
 
 
 class _RoutingActionProjection(_RecoveryProjection):
-    def __init__(self, plans, source, identity, recipient):
+    def __init__(self, plans, source, identity, recipient, followup=None):
         from app.gateway.deps import bind_user_repo
         from deerflow.config.app_config import peek_loaded_app_config
 
         super().__init__(source, allowed_act_id=identity)
-        self.recipient = recipient
+        self.recipient, self.followup = recipient, followup
         self.config = peek_loaded_app_config()
         if self.config is None:
             raise AgentDenied("Routing is unavailable")
@@ -153,12 +159,14 @@ class _RoutingActionProjection(_RecoveryProjection):
     def extend(self, query):
         query = super().extend(query)
         user, grant, disabled = aliased(UserRow), aliased(AgentInstanceGrantRow), aliased(DisabledIdentityRow)
-        return (
+        result = (
             query.add_columns(user, grant.permissions, disabled)
             .outerjoin(user, user.id == self.recipient["user_id"])
             .outerjoin(grant, and_(grant.instance_id == TelegramBotLinkRow.agent_ref, grant.user_id == user.id))
             .outerjoin(disabled, or_(disabled.subject == user.id, disabled.subject == user.oauth_id))
         )
+
+        return self.followup.extend(result) if self.followup is not None else result
 
     def check(self, rows):
         from deerflow.config.app_config import peek_loaded_app_config
@@ -180,3 +188,5 @@ class _RoutingActionProjection(_RecoveryProjection):
             raise AgentDenied("The recipient can no longer answer", reason="recipient-ineligible") from None
         if peek_loaded_app_config() is not self.config or (self.config.auth.local.enabled is False) != self.sign_on_only:
             raise AgentDenied("Routing authority changed")
+        if self.followup is not None:
+            self.followup.check(rows)
