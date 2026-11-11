@@ -63,6 +63,15 @@ A changed principal, configuration or source authority retires the read; read-on
 owners retain inspectable content without actionable requests. No chat list or
 summary scheduler is installed by this collector.
 
+`work_requests.py` reads every response before forming request controls and
+retains the complete displayed basis. Review instructions, comments and response
+dispositions are never clipped to a notification title. `work_request_delivery.py`
+atomically freezes a materialized preview and its last-part callback group; a
+retry reuses the original identities. This is a healthy-binding presentation
+primitive, not event ingestion. Unrendered events must retain their intent while
+transport is unavailable. The raw SDK still refuses this entire source family,
+including misclassified replies, until send/reveal authority is integrated.
+
 `commands.py` handles fixed navigation and language settings only. A command closes
 only a typing prompt; `/new` and `/stop` also end the forms and cards in scope.
 `work_actions.py` adds optional Work service actions to `Acts`; supervisor startup

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram delivery
 
+- Prepare complete saved Work question, decision and review previews, including
+  all comments and concealed teasers. Their chat delivery remains disabled.
+
 - Prepare receipt-backed human Work actions for Telegram, including immutable
   retries and transaction-bound custody checks. Chat controls remain disabled.
 

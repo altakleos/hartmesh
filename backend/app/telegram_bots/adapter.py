@@ -1878,11 +1878,32 @@ class TelegramBotChannel(TelegramChannel):
         if saved.item.dedupe_key.startswith(("notice:chat-stream:", "notice:preparation-capacity:", "notice:chat-wait:")) and (turns is None or turns.preview_allowed(self, saved.item) is not True):
             raise PreviewExpired()
         part = saved.part
+        source_key = part.get("source_ref", {}).get("key", "")
+        if "work_request_basis" in saved.item.payload or source_key.startswith(("ask.", "review.", "work.request.")) or source_key in {"concealed.question", "concealed.decision", "concealed.review"}:
+            # This source family remains dormant regardless of a caller's
+            # class label. A reply classification is not source authority.
+            raise PermanentDeliveryError("unsupported-work-request-source")
         if saved.item.class_ != "reply" and (
             set(saved.item.payload) - {"presentation_version", "notification_reserved_at"}
             or set(part.get("source_ref", {})) != {"key", "values"}
             or part.get("source_ref", {}).get("key")
-            in {"agents.presentation", "file.no_access", "net.blocked_ask", "hello.assistant", "hello.employee", "help.agent", "refused.files_full", "refused.interrupted_recovery", "file.files_full", "file.too_large_in"}
+            in {
+                "ask.info",
+                "ask.decision",
+                "ask.comment_line",
+                "review.ready",
+                "work.request.presentation",
+                "agents.presentation",
+                "file.no_access",
+                "net.blocked_ask",
+                "hello.assistant",
+                "hello.employee",
+                "help.agent",
+                "refused.files_full",
+                "refused.interrupted_recovery",
+                "file.files_full",
+                "file.too_large_in",
+            }
             or part.get("url_button")
             or part.get("stored_keyboard")
             or part.get("callback_group_id")

@@ -541,7 +541,7 @@ async def test_sdk_final_snapshot_rejects_authority_retired_during_settings_read
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("unsupported", ["model", "keyboard", "file", "list", "legacy_source", "role", "files_link"])
+@pytest.mark.parametrize("unsupported", ["model", "keyboard", "file", "list", "legacy_source", "role", "files_link", "work", "work_plan", "reply_work"])
 async def test_proactive_source_specific_plans_wait_for_their_final_authority_integration(db, monkeypatch, unsupported):
     from test_telegram_bot_handlers import ingress
 
@@ -549,11 +549,18 @@ async def test_proactive_source_specific_plans_wait_for_their_final_authority_in
     async with db.sessions.begin() as session:
         for row in await session.scalars(select(TelegramOutboxRow)):
             row.state = "sent"
-    await notification(e.services.outbox, e.link, "question")
+    item_class = "reply" if unsupported == "reply_work" else "question"
+    await notification(e.services.outbox, e.link, item_class)
     async with db.sessions.begin() as session:
-        row = await session.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.class_ == "question"))
+        row = await session.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.dedupe_key == "notice:" + item_class))
         if unsupported == "model":
             row.payload = {**row.payload, "source": {"kind": "model_text"}}
+        elif unsupported in {"work", "reply_work"}:
+            row.parts = [
+                {**row.parts[0], "source_ref": {"key": "ask.info", "values": {"objective": "Private assignment", "name": "Reviewer", "question": "Private Work content", "reason": "Check the source", "expected_response": "A reference"}}}
+            ]
+        elif unsupported == "work_plan":
+            row.payload = {**row.payload, "work_request_basis": {"version": 1}}
         elif unsupported == "role":
             row.parts = [{**row.parts[0], "source_ref": {"key": "hello.employee", "values": {"role": "private role"}}}]
         elif unsupported == "files_link":
@@ -568,7 +575,7 @@ async def test_proactive_source_specific_plans_wait_for_their_final_authority_in
     try:
         await sender.tick()
         await sender.drain()
-        row = next(row for row in await rows(db, TelegramOutboxRow) if row.class_ == "question")
+        row = next(row for row in await rows(db, TelegramOutboxRow) if row.dedupe_key == "notice:" + item_class)
         assert row.state == "failed" and row.failed_reason == "invalid-payload"
         assert not any(call.endpoint in {"sendMessage", "sendDocument"} for call in e.request.calls)
     finally:
