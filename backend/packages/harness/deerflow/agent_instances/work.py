@@ -37,10 +37,10 @@ class AgentWork:
         await self.agents._human(actor, session=session)
         grant = await session.get(AgentInstanceGrantRow, (instance_id, actor.subject_id))
         if row is None or grant is None or row.status == "provisioning":
-            raise AgentDenied("Work requires current instance visibility")
+            raise AgentDenied("Work requires current instance visibility", reason="not-visible")
         view = self.agents._view(row, grant.permissions)
         if view.permissions & permission != permission:
-            raise AgentDenied("Work requires Inspect and the relevant Use or Manage grant")
+            raise AgentDenied("Work requires Inspect and the relevant Use or Manage grant", reason="grant-required")
         return row, view
 
     async def _policy(self, session, parent):
@@ -272,7 +272,7 @@ class AgentWork:
         if event is None:
             return None
         if event.actor_kind != "human" or event.actor_id != actor.subject_id or event.request != request.model_dump(mode="json", exclude_unset=True) or (work_id is not None and event.work_id != work_id):
-            raise AgentConflict("Operation identity belongs to another actor, Work or request")
+            raise AgentConflict("Operation identity belongs to another actor, Work or request", reason="operation-mismatch")
         return await self._project(session, actor, parent, event.result)
 
     async def _lock_sources(self, session, sources):
@@ -286,7 +286,7 @@ class AgentWork:
         for source in sources or []:
             payload = source.model_dump()
             if not await self._can_read_source(session, actor, payload):
-                raise AgentDenied("Source is unavailable")
+                raise AgentDenied("Source is unavailable", reason="source-unavailable")
             for member in audience:
                 self.agents._view(parent, member.permissions)
                 principal = PrincipalRef("human", member.user_id)
@@ -295,12 +295,12 @@ class AgentWork:
                 except AgentDenied:
                     continue
                 if not await self._can_read_source(session, principal, payload):
-                    raise AgentDenied("The Work audience cannot inspect this source; no content or locator was copied")
+                    raise AgentDenied("The Work audience cannot inspect this source; no content or locator was copied", reason="source-not-shared")
 
     @staticmethod
     def _responsibility(policy, key):
         if key is not None and (policy is None or key not in {item.key for item in policy.responsibilities}):
-            raise AgentConflict("Responsibility is absent from the adopted mandate")
+            raise AgentConflict("Responsibility is absent from the adopted mandate", reason="responsibility-unknown")
 
     async def _event(self, session, actor, row, request, action):
         await session.flush()
@@ -337,13 +337,13 @@ class AgentWork:
                     return receipt
                 policy = await self._policy(session, parent)
                 if parent.status != "active" or policy is None or not policy.enabled:
-                    raise AgentConflict("New Work requires an active AI employee with an enabled adopted Work policy")
+                    raise AgentConflict("New Work requires an active AI employee with an enabled adopted Work policy", reason="agent-not-active" if parent.status != "active" else "work-off")
                 if await session.scalar(select(AgentLifecycleRow.operation_id).where(AgentLifecycleRow.instance_id == instance_id, AgentLifecycleRow.phase == "pending")):
-                    raise AgentConflict("Resolve the pending lifecycle operation before delegating")
+                    raise AgentConflict("Resolve the pending lifecycle operation before delegating", reason="lifecycle-pending")
                 if request.model_fields_set & {"priority", "due_at", "review_required"} and not view.permissions & AgentPermission.MANAGE:
-                    raise AgentDenied("Assignment overrides require Manage plus Inspect")
+                    raise AgentDenied("Assignment overrides require Manage plus Inspect", reason="manage-required")
                 if policy.review_required and request.review_required is False:
-                    raise AgentConflict("The adopted policy requires review")
+                    raise AgentConflict("The adopted policy requires review", reason="review-required")
                 self._responsibility(policy, request.responsibility)
                 await self._admit_sources(session, actor, parent, request.sources)
                 row = AgentWorkRow(
@@ -412,7 +412,7 @@ class AgentWork:
                     raise Refusal("There is no running attempt to stop", reason="no-running-attempt", status=409)
                 if active_attempt is not None:
                     if request.action not in {"edit", "cancel", "stop", "reconcile_attempt"}:
-                        raise AgentConflict("An unresolved attempt requires host reconciliation")
+                        raise AgentConflict("An unresolved attempt requires host reconciliation", reason="attempt-unresolved")
                     if request.action != "reconcile_attempt" and not can_stop:
                         raise AgentDenied("Changing active Work requires the run cancellation capability")
                     if request.action != "reconcile_attempt":

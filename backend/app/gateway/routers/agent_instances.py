@@ -6,6 +6,7 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from pydantic import Field, model_validator
 
@@ -32,6 +33,8 @@ class InstanceRoute(APIRoute):
             except AgentDenied:
                 raise HTTPException(404, "Agent instance is unavailable") from None
             except AgentConflict as exc:
+                if exc.reason:
+                    return JSONResponse(status_code=409, content={"detail": str(exc), "reason": exc.reason})
                 raise HTTPException(409, str(exc)) from None
             except MemoryConflictError:
                 raise HTTPException(409, "Instance memory changed; reload before retrying") from None

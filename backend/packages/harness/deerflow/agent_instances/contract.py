@@ -15,6 +15,10 @@ from deerflow.spaces.contract import PrincipalRef, validate_generation, validate
 class AgentDenied(PermissionError):
     """Unknown, inaccessible or unauthorized persistent instance."""
 
+    def __init__(self, *args, reason: str | None = None) -> None:
+        super().__init__(*args)
+        self.reason = reason
+
 
 class CompanyProvisioningDenied(AgentDenied):
     """A current human lacks host authority to provision company AI employees."""
@@ -22,6 +26,10 @@ class CompanyProvisioningDenied(AgentDenied):
 
 class AgentConflict(RuntimeError):
     """Stale instance generation or reused creation identity with another intent."""
+
+    def __init__(self, *args, reason: str | None = None) -> None:
+        super().__init__(*args)
+        self.reason = reason
 
 
 class Refusal(Exception):

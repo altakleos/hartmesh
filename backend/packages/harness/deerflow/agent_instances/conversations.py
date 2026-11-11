@@ -414,7 +414,7 @@ class AgentConversations:
         if grant is None or type(grant.permissions) is not int or not 1 <= grant.permissions <= 7 or not grant.permissions & int(AgentPermission.USE) or not await self._can_read(session, binding, execution.requester.subject_id):
             raise AgentDenied("Agent context access changed")
         if mark_work and not grant.permissions & int(AgentPermission.INSPECT):
-            raise AgentDenied("Work context requires current Inspect")
+            raise AgentDenied("Work context requires current Inspect", reason="grant-required")
         source = binding
         if source_thread_id is not None:
             source = await session.get(AgentConversationRow, source_thread_id)

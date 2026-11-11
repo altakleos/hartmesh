@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Persistent agents
+
+- Include the latest reviewer change-request note in later Work attempts, through
+  assignment edits, until acceptance, cancellation or reopening.
+- Add stable Work refusal codes while preserving existing messages and access
+  denial responses; coded conflicts return `reason` beside `detail`.
+
+
 ## [2.2.0+hartmesh.56] - 2026-11-11
 
 ### Added
