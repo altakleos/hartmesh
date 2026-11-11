@@ -8,6 +8,7 @@ from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.work_interaction_delivery import acknowledged_source
 from app.telegram_bots.work_interactions import interaction_state
 from app.telegram_bots.work_request_recovery import WorkRequestRecovery, _RecoveryProjection
+from app.telegram_bots.work_request_source import same_displayed_basis
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied
 from deerflow.agent_instances.human_input_contract import Respond
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramOutboxRow
@@ -65,7 +66,7 @@ class WorkControlAdmissions:
                     group = await self.callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=composed, session=writer)
                     parent = await writer.get(TelegramOutboxRow, group.anchor_outbox_id, populate_existing=True)
                     captured = acknowledged_source(link, parent)
-                    if captured != source:
+                    if not same_displayed_basis(captured, source):
                         raise AgentConflict("Review the current request and all responses")
                     rows = [await writer.get(TelegramCallbackRow, row.id) for row in group.rows]
                     selected = next(row for row in rows if row.id == callback_id)

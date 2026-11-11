@@ -49,6 +49,15 @@ def content(source):
     return ({key: source.request.get(key) for key in request_fields}, {key: source.work.get(key) for key in work_fields}, source.responses, source.people)
 
 
+def same_displayed_basis(left, right):
+    """Compare the complete preview/CAS, excluding unrelated execution probes."""
+
+    def basis(source):
+        return json.dumps((content(source), source.seen, source.protected), sort_keys=True, separators=(",", ":"))
+
+    return basis(left) == basis(right)
+
+
 def _references(value):
     if isinstance(value, dict):
         if value.get("kind") == "space_file":
@@ -200,7 +209,7 @@ class WorkRequestSources:
         if not (current.request["can_respond"] if current.request["purpose"] == "information" else current.request["can_manage"]):
             raise ProductSourceRetired()
         revealed = bool(basis.get("reveal"))
-        changed = content(current) != content(source) or current.seen != source.seen or current.protected != source.protected or current.protected != basis["concealed"] and not revealed and basis["version"] != 3
+        changed = not same_displayed_basis(current, source) or current.protected != basis["concealed"] and not revealed and basis["version"] != 3
         if basis["version"] == 3 and changed:
             raise ProductSourceRetired()
         if self.recovery is not None and basis["version"] != 3:

@@ -11,6 +11,7 @@ from app.telegram_bots.callbacks import CallbackRefused, Prompts, _plain, _valid
 from app.telegram_bots.producer import ProductSourceRetired, _item, _safe_json, keyboard_cleanup_row
 from app.telegram_bots.work_interactions import interaction_state, present_interaction
 from app.telegram_bots.work_request_recovery import WorkRequestRecovery, _RecoveryGuard
+from app.telegram_bots.work_request_source import same_displayed_basis
 from deerflow.agent_instances.contract import AgentConflict
 from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
@@ -63,7 +64,7 @@ def check_origin(link, parent, callbacks, basis, source):
     if refreshing:
         if (previous.request["id"], previous.work["id"]) != (source.request["id"], source.work["id"]):
             raise ProductSourceRetired()
-    elif previous != source:
+    elif not same_displayed_basis(previous, source):
         raise ProductSourceRetired()
     selected = next((row for row in callbacks if row.id == origin["callback_id"]), None)
     if selected is None:
@@ -109,7 +110,7 @@ class WorkInteractionPlans:
                     return existing.id
                 group = await self.callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=composed, session=writer)
                 parent = await writer.get(TelegramOutboxRow, group.anchor_outbox_id, populate_existing=True)
-                if acknowledged_source(link, parent) != source:
+                if not same_displayed_basis(acknowledged_source(link, parent), source):
                     raise AgentConflict("Review the current request and all responses")
                 state = transition(group.selected, source)
                 return await self._publish(writer, link, group, parent, source, settings, state, key=key, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=composed)
