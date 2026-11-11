@@ -2022,7 +2022,9 @@ An optional callback dispatcher connects previews, confirmations and routing to
 those durable operations. Explicit Retry keeps the original operation and body;
 duplicate presses of one shown retry do not start another attempt. Changed review
 confirmations show the complete current review before offering fresh controls;
-routing choices refresh when a selected person loses access.
+routing choices refresh when a selected person loses access. Optional prompt-text
+routing saves answers and unchanged changes notes once, retains changed review
+notes for confirmation, and previews typed decisions before an explicit tap.
 Assignments continue to be managed on the web.
 
 Instance site-permission cards require current Manage access when planned, sent

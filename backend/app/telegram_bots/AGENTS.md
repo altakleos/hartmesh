@@ -12,6 +12,11 @@ legacy-channel closure; an absent environment key means on. See
 Keep bot network, supervisor and router startup outside configuration loading.
 Use socket-free transports and synthetic credentials in offline tests.
 
+Optional `work_text_inputs.py` routes only plain text for a shown Work prompt.
+Capture precedes admission; stored-input resume never reconstructs an Update or
+retries an unknown action. Typed decision confirmations own their original input
+until outcome delivery. Supervisor installation and broader input routing remain deferred.
+
 The optional `work_callbacks.py` dispatcher composes existing Work owners; the
 supervisor does not install it yet. Stale callbacks can refresh only unreserved
 controls or exact conclusive conflicts; retained input has its own owner. Known

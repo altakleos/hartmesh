@@ -1105,6 +1105,10 @@ class TelegramBotChannel(TelegramChannel):
             skill = await self._on_other_slash(update, context)
             if not skill:
                 return
+        work_inputs = getattr(self._services, "work_text_inputs", None)
+        if not skill and work_inputs is not None and await work_inputs.handle_text(self, update, captured_link=self._admission(update).link):
+            self._classified(update)
+            return
         turns = getattr(self._services, "turns", None)
         if turns is not None:
             media = bool(update.message.photo or update.message.document)

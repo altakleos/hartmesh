@@ -323,3 +323,23 @@ without a command; retired callback lifetimes cannot start a new effect. This
 retry primitive never creates an Act or substitutes a current revision. The
 shared `acknowledged_parts` validates ordered unique typed ACKs for outcome
 settlement, routing choices and Retry; source and domain authority remain separate.
+
+
+`work_text_inputs.py` connects accepted plain text to its exact shown Work prompt
+through the optional adapter collaborator. The prompt and original accepted text
+are captured before admission. Answers, inability reasons and unchanged changes
+notes submit once with their displayed basis; changed changes notes retain their
+text and get a complete current review before a new confirmation. Own decisions
+and decision notes always publish a complete input-owned confirmation first.
+
+Duplicate accepted input reads the original receipt after its first attempt.
+`resume` rereads stored input by identity, ignoring caller copies of text/basis;
+it can settle a late canonical receipt without another command. An existing
+ordinary input cannot switch into a new Work prompt. An admitted decision owns
+recovery until its receipt outcome is delivered, so resuming its source input
+cannot create another confirmation. No model run or Work activation is started.
+
+This owner and its startup recovery are not installed by the supervisor yet.
+Direct replies to question cards without a typing prompt, untied text, comments,
+voice/files, expired or replaced prompts, retained-note editing/discard and
+closed/replaced-review recovery remain separate required input flows.
