@@ -67,3 +67,7 @@ the recalled value equals the composer value, skip loading the document so its
 cursor and undo state survive.
 
 **Tests**: `tests/test_tui_*.py` — pure layers via plain pytest, the app/palette/overlays via Textual's pilot harness with a fake in-process session, and `test_tui_persistence.py` for the `threads_meta` round-trip.
+
+A queued spinner tick may run after the status widget is removed during Textual
+teardown. Skip that missing-widget render; do not change run ownership or worker
+shutdown to silence a presentation timer. Keep the unmount regression.
