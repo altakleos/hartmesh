@@ -2680,14 +2680,15 @@ class OutboxSender:
             await self.outbox.inbox.settle_deliveries(link_id=link_id, session=writer)
 
     async def _replace(self, binding: BotLink, row: OutboxItem, claim: str, *, reason: str) -> None:
-        if "work_outcome_basis" in row.payload:
-            # Frozen result recipes need source-aware rematerialization. Never
+        routing = row.payload.get("work_request_basis", {}).get("version") == 5
+        if "work_outcome_basis" in row.payload or routing:
+            # Frozen result and routing recipes need source-aware rematerialization. Never
             # replay their ACKed prefix or silently relocate a result.
             async with self.outbox._writer(binding.id) as (writer, _binding):
                 saved = await writer.get(TelegramOutboxRow, row.id, with_for_update=True)
                 if self.outbox._fenced(saved, generation=binding.binding_generation, owner=self.run_id, claim=claim):
                     self._pending(saved)
-                    saved.state, saved.failed_reason, saved.closed_at = "failed", "work-outcome-refresh-required", self.outbox.clock()
+                    saved.state, saved.failed_reason, saved.closed_at = "failed", "work-routing-refresh-required" if routing else "work-outcome-refresh-required", self.outbox.clock()
             return
         version = row.payload.get("presentation_version", 0)
         parts = []

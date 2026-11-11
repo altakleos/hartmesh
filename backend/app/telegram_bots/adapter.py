@@ -1889,10 +1889,12 @@ class TelegramBotChannel(TelegramChannel):
         elif source_key.startswith("work.action."):
             raise PermanentDeliveryError("unsupported-work-outcome-source")
         elif "work_request_basis" in saved.item.payload:
+            if saved.item.payload["work_request_basis"].get("version") == 5:
+                work_sources = getattr(self._services, "work_routing_sources", None)
             if work_sources is None:
                 raise PermanentDeliveryError("unsupported-work-request-source")
             work_part = await work_sources.read_part(saved)
-        elif source_key.startswith(("ask.", "review.", "decide.", "work.request.")) or source_key in {"concealed.question", "concealed.decision", "concealed.review", "voice.confirm_answer"}:
+        elif source_key.startswith(("ask.", "review.", "decide.", "work.request.", "request.route", "request.unrouted")) or source_key in {"concealed.question", "concealed.decision", "concealed.review", "voice.confirm_answer"}:
             # This source family remains dormant regardless of a caller's
             # class label. A reply classification is not source authority.
             raise PermanentDeliveryError("unsupported-work-request-source")

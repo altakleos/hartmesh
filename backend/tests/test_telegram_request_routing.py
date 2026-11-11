@@ -115,7 +115,7 @@ async def test_recipient_read_uses_owner_http_grants_and_filters_before_cap(acti
     value = await reader.read_routing(e.link, request["id"])
     assert value.recipients[0]["user_id"] == e.actor.subject_id
     assert [row["user_id"] for row in value.recipients[1:]] == people[2:]
-    preview = present_routing(value, locale="en", link=e.link)
+    preview = present_routing(value, locale="en", link=e.link, public_base_url="https://product.example")
     controls = [button for row in preview.keyboard for button in row if button.get("kind") == "route_to"]
     assert len(controls) == 6
     assert all(button["label_values"]["label"] != button["payload"]["recipient_id"] for button in controls)

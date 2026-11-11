@@ -7,7 +7,7 @@ from app.telegram_bots.callbacks import canonical_keyboard
 from app.telegram_bots.pages import page_address
 from app.telegram_bots.render import render
 from app.telegram_bots.split import split_html, visible_text
-from app.telegram_bots.work_requests import WorkRequestPresentation, WorkRequestRead, WorkRequestReader
+from app.telegram_bots.work_requests import WorkRequestPresentation, WorkRequestRead, WorkRequestReader, present_request
 from deerflow.agent_instances.contract import AgentDenied, AgentPermission
 from deerflow.utils.file_io import await_drained
 
@@ -70,14 +70,18 @@ class WorkRoutingReader(WorkRequestReader):
             recipients.append({"user_id": identity, "name": name, "permissions": row["permissions"]})
         current = await self.read_request(link, request_id)
         await check()
-        if current != source or peek_loaded_app_config() is not config or (config.auth.local.enabled is False) != mode:
+        from app.telegram_bots.work_request_source import same_displayed_basis
+
+        if not same_displayed_basis(current, source) or peek_loaded_app_config() is not config or (config.auth.local.enabled is False) != mode:
             raise AgentDenied("Routing source changed")
         recipients.sort(key=lambda row: (row["user_id"] != link.owner_user_id, row["name"].casefold(), row["user_id"]))
         return RoutingRead(source, tuple(recipients), excluded == link.owner_user_id)
 
 
-def present_routing(value, *, locale, link, product="HartMesh"):
+def present_routing(value, *, locale, link, public_base_url, product="HartMesh", concealed=False, outbox_id=None):
     source, recipients = value.source, value.recipients
+    if concealed:
+        return present_request(source, locale=locale, concealed=True, outbox_id=outbox_id)
     request = source.request
     values = {"objective": source.work["objective"], "name": request["instance_name"], "question": request["question"], "product": product}
     key = "request.route_none" if not recipients else "request.route_ask" if value.after_wrong else "request.unrouted"
@@ -96,7 +100,7 @@ def present_routing(value, *, locale, link, product="HartMesh"):
         for row in recipients[:ROUTE_BUTTONS_MAX]
     ]
     if not recipients or len(recipients) > ROUTE_BUTTONS_MAX:
-        address = page_address("web.access" if not recipients else "web.request", link, request_id=request["id"], work_id=source.work["id"], permissions=AgentPermission.MANAGE | AgentPermission.INSPECT)
+        address = page_address("web.access" if not recipients else "web.request", link, request_id=request["id"], work_id=source.work["id"], permissions=AgentPermission.MANAGE | AgentPermission.INSPECT, public_base_url=public_base_url)
         if address:
             keyboard.append([{"label": "label.open_access" if not recipients else "label.choose_answerer", "url": address}])
     return WorkRequestPresentation(tuple({"kind": "text", "html": chunk, "visible_text": visible_text(chunk), "protect_content": source.protected} for chunk in split_html(html)), tuple(tuple(row) for row in canonical_keyboard(keyboard)))
