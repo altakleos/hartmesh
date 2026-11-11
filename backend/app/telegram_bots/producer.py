@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Literal, Protocol
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from sqlalchemy import case, or_, select, text, update
+from sqlalchemy import String, and_, case, cast, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 
@@ -62,7 +62,7 @@ _URL_SOURCES = {
 }
 _TRANSPORT_RECEIPTS = frozenset({"sent_at", "dispatched_at", "unavailable_reason", "invalid_token_verification_pending", "url_button_fallback", "plain_fallback"})
 _PART_IDENTITY = frozenset({"part_id", "presentation_version", "ordinal", "state", "message_ids"})
-_SKIP_REASONS = frozenset({"no-access", "superseded", "link-not-connected", "disabled", "policy-off", "expired", "notifications-off"})
+_SKIP_REASONS = frozenset({"no-access", "superseded", "link-not-connected", "disabled", "policy-off", "expired", "notifications-off", "source-gone"})
 _LIVE_CLAIMS: set[tuple[int, str, str]] = set()
 _TOKEN = re.compile(TOKEN_IN_TEXT)
 _FORBIDDEN_KEYS = frozenset({"token", "bot_token", "access_token", "raw_update", "update", "audio", "audio_bytes", "download_url", "temporary_url", "bytes"})
@@ -966,7 +966,7 @@ class Outbox:
         check_attempt_current: Callable[[], bool] | None = None,
         **targets,
     ) -> tuple[str, bool]:
-        if class_ not in DELIVERY_CLASSES:
+        if class_ not in DELIVERY_CLASSES or class_ == "digest":
             raise ValueError("unsupported-delivery-class")
         if class_ in {"progress", "summary", "reminder"}:
             targets["silent"] = True
@@ -2296,6 +2296,15 @@ class OutboxSender:
         return None
 
     async def _eligibility(self, binding: BotLink | None, row: OutboxItem, part: dict | None) -> DeliveryEligibility:
+        if row.class_ == "digest":
+            from app.telegram_bots.digests import validate
+
+            try:
+                validate(row)
+            except ValueError:
+                return DeliveryEligibility.skip("source-gone")
+        if row.payload.get("digest_id"):
+            return DeliveryEligibility.wait()
         # Current owner/access/policy is required even when transport is waiting.
         if binding is None:
             return DeliveryEligibility.skip("link-not-connected")
@@ -2315,6 +2324,8 @@ class OutboxSender:
         preferences = await self.outbox.notification_decision(row)
         if preferences.decision != "allow":
             return preferences
+        if row.class_ == "digest" and not row.parts:
+            return DeliveryEligibility.wait()
         work_basis = row.payload.get("work_request_basis", {})
         dependency = work_basis.get("cleanup_id") if type(work_basis) is dict else None
         if dependency is not None:
@@ -2363,10 +2374,26 @@ class OutboxSender:
                                 TelegramOutboxRow.id,
                                 TelegramOutboxRow.link_id,
                                 TelegramOutboxRow.created_at,
-                                case((TelegramOutboxRow.class_ == "question", 0), (TelegramOutboxRow.class_.in_(ESSENTIAL_DELIVERY_CLASSES), 1), else_=2).label("priority"),
+                                case(
+                                    (TelegramOutboxRow.class_ == "question", 0),
+                                    (and_(TelegramOutboxRow.class_ == "digest", cast(TelegramOutboxRow.payload["contains_questions"].as_string(), String).in_(("true", "1"))), 0),
+                                    (TelegramOutboxRow.class_.in_(ESSENTIAL_DELIVERY_CLASSES), 1),
+                                    (and_(TelegramOutboxRow.class_ == "digest", TelegramOutboxRow.payload["category"].as_string() == "essential"), 1),
+                                    else_=2,
+                                ).label("priority"),
                             )
                             .where(TelegramOutboxRow.class_.in_(DELIVERY_CLASSES if self.proactive else {"reply"}), TelegramOutboxRow.state == "pending", TelegramOutboxRow.not_before <= self.outbox.clock())
-                            .order_by(case((TelegramOutboxRow.class_ == "question", 0), (TelegramOutboxRow.class_.in_(ESSENTIAL_DELIVERY_CLASSES), 1), else_=2), TelegramOutboxRow.created_at, TelegramOutboxRow.id)
+                            .order_by(
+                                case(
+                                    (TelegramOutboxRow.class_ == "question", 0),
+                                    (and_(TelegramOutboxRow.class_ == "digest", cast(TelegramOutboxRow.payload["contains_questions"].as_string(), String).in_(("true", "1"))), 0),
+                                    (TelegramOutboxRow.class_.in_(ESSENTIAL_DELIVERY_CLASSES), 1),
+                                    (and_(TelegramOutboxRow.class_ == "digest", TelegramOutboxRow.payload["category"].as_string() == "essential"), 1),
+                                    else_=2,
+                                ),
+                                TelegramOutboxRow.created_at,
+                                TelegramOutboxRow.id,
+                            )
                         )
                     ).all()
                 )
@@ -2409,6 +2436,14 @@ class OutboxSender:
                         if len(_LIVE_CLAIMS) >= OUTBOX_SEND_CONCURRENCY:
                             break
                         saved.state, saved.claimed_at, saved.claim_owner, saved.claim_id = "sending", self.outbox.clock(), self.run_id, claim
+                        if saved.class_ == "digest":
+                            from app.telegram_bots.digests import claim_members
+
+                            try:
+                                await claim_members(session, saved)
+                            except ValueError:
+                                await self._skip(session, saved, "source-gone")
+                                continue
                         _LIVE_CLAIMS.add((id(self.outbox.sessions), self.run_id, claim))
                     task = asyncio.create_task(self._run(link_id, row.id, row.binding_generation, claim))
                     self._generations[claim] = row.binding_generation
@@ -2420,6 +2455,17 @@ class OutboxSender:
             return count
 
     async def _skip(self, session: AsyncSession, row: TelegramOutboxRow, reason: str) -> None:
+        if row.class_ == "digest":
+            from app.telegram_bots.digests import abandon_members
+
+            if any(type(part) is dict and (part.get("state") == "sent" or part.get("sent_at")) for part in row.parts):
+                # An invalid historical partial ACK needs reconciliation. Never
+                # release possibly delivered members or retry it automatically.
+                row.state, row.skip_reason, row.closed_at = "failed", reason, self.outbox.clock()
+                row.claim_owner = row.claim_id = row.claimed_at = None
+                await session.flush()
+                return
+            await abandon_members(session, row, now=self.outbox.clock())
         row.state, row.skip_reason, row.closed_at = "skipped", reason, self.outbox.clock()
         row.claim_owner = row.claim_id = row.claimed_at = None
         await session.flush()
@@ -2717,6 +2763,17 @@ class OutboxSender:
         if not current_parts or any(part["state"] not in _FINAL_PARTS for part in current_parts):
             return
         now = self.outbox.clock()
+        if row.class_ == "digest":
+            from app.telegram_bots.digests import acknowledge_members, release_members
+
+            try:
+                await acknowledge_members(session, row, now=now)
+            except ValueError:
+                await release_members(session, row, owner=row.claim_owner, claim=row.claim_id)
+                row.state, row.failed_reason, row.closed_at = "failed", "invalid-digest-receipt", now
+                row.claim_owner = row.claim_id = row.claimed_at = None
+                await session.flush()
+                return
         row.state, row.sent_at, row.closed_at = "sent", now, now
         row.degraded_at = row.failed_reason = None
         row.claim_owner = row.claim_id = row.claimed_at = None
@@ -2926,6 +2983,10 @@ class OutboxSender:
                 row = await session.get(TelegramOutboxRow, row_id, with_for_update=True)
                 if self.outbox._fenced(row, generation=generation, owner=self.run_id, claim=claim):
                     self._pending(row)
+                if row is not None and row.class_ == "digest":
+                    from app.telegram_bots.digests import release_members
+
+                    await release_members(session, row, owner=self.run_id, claim=claim)
         finally:
             _LIVE_CLAIMS.discard((id(self.outbox.sessions), self.run_id, claim))
             self._generations.pop(claim, None)

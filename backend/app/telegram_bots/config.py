@@ -10,6 +10,9 @@ if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
 
 
+DIGEST_MEMBERS_MAX = 10
+
+
 _ClockTime = Annotated[str, Field(min_length=5, max_length=5, pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")]
 
 
@@ -55,7 +58,7 @@ class _OutboxConfig(_StrictConfig):
     per_link_per_minute: PositiveInt = 1
     per_link_per_hour: PositiveInt = 10
     per_person_per_day: PositiveInt = 60
-    digest_threshold: PositiveInt = 3
+    digest_threshold: PositiveInt = Field(default=3, le=DIGEST_MEMBERS_MAX)
     progress_edit_seconds: PositiveInt = 30
     max_attempts: PositiveInt = 5
     recent_act_seconds: PositiveInt = 1800

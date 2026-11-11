@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram delivery
 
+- Prepare immutable digest reservations with shared delivery ownership, original
+  member expiry, one-notification budgets and retained source dependencies.
+  Digest rendering and chat controls remain disabled.
+
 - Prepare durable Work preview refresh, protected reveal and missing-message
   recovery. Refresh retains uncertain action journals, rechecks current authority,
   clears superseded keyboards and delivers complete content before controls.

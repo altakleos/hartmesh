@@ -56,6 +56,14 @@ Model, callback and file notification plans remain refused until their own sourc
 authority joins that snapshot. Local-day calculations run off-loop and preserve
 daylight-saving boundaries.
 
+`digests.py` reserves up to ten due unsolicited rows within one notification
+category; `digest_threshold` accepts 1–10. Membership and original ages stay immutable through shared claims and
+ambiguous retry; ACK alone marks members in-digest. Pre-ACK retirement consumes
+controls before freeing owned members. Digest cards have one text part; invalid
+historical partial ACKs retain members for reconciliation. Retention follows
+transitive source edges. Reservations have no parts until source materialization;
+source dispatch and item/reveal controllers are not installed by this primitive.
+
 `attention.py` exhausts stable Work/request pages before ranking or applying
 presentation caps. `attention_authority.py` prepares route decisions, then joins
 current account/role limits/binding/connection/grants/policy in a final snapshot.
