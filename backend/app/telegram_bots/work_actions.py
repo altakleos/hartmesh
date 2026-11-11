@@ -431,8 +431,11 @@ class WorkActionMethods:
         request = self._acceptance_command(operation_id=operation_id, request_id=request_id, outcome_id=outcome_id, evidence_revision=evidence_revision, seen=seen)
         return await self._issue_work(link, kind="accept", request_id=request_id, work_id=work_id, request=request, seen=seen)
 
+    def _changes_command(self, *, operation_id, request_id, note, seen):
+        return WorkCommand(**self._command_basis(operation_id, request_id, seen), action="changes_requested", note=note)
+
     async def request_changes(self, link, *, operation_id, request_id, work_id, note, seen):
-        request = WorkCommand(**self._command_basis(operation_id, request_id, seen), action="changes_requested", note=note)
+        request = self._changes_command(operation_id=operation_id, request_id=request_id, note=note, seen=seen)
         return await self._issue_work(link, kind="changes_requested", request_id=request_id, work_id=work_id, request=request, seen=seen)
 
     async def check(self, act_id):
