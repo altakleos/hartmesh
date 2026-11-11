@@ -16,7 +16,7 @@ from deerflow.persistence.user.model import UserRow
 _SCOPE = ("id", "owner_user_id", "agent_kind", "agent_ref", "bot_id", "token_revision", "binding_generation", "connection_id", "telegram_user_id", "chat_id")
 
 
-async def current_attention(host, captured):
+async def current_attention(host, captured, *, projection=None):
     from app.gateway.authz import resolve_route_permissions
     from app.gateway.deps import bind_user_repo
     from deerflow.authz.principal import build_principal_from_context
@@ -47,6 +47,9 @@ async def current_attention(host, captured):
         .outerjoin(RoleLimitRow, RoleLimitRow.subject == UserRow.oauth_id)
         .where(bot.id == captured.id)
     )
+
+    if projection is not None:
+        query = projection.extend(query)
 
     async def snapshot():
         async with host.links.session_factory() as reader:
@@ -83,6 +86,8 @@ async def current_attention(host, captured):
             raise AgentDenied("Attention is unavailable")
         limits = [row[7].role for row in rows if row[7] is not None and (not user.oauth_issuer or row[7].issuer == issuer_key(user.oauth_issuer))] if user.oauth_id and user.oauth_provider else []
         limit = min(limits, key=lambda role: ROLES.index(role) if role in ROLES else -1) if limits else None
+        if projection is not None:
+            projection.check(rows)
         return users._row_to_user(user, role_limit=limit), (permissions, value, target.generation, target.definition_revision)
 
     def principal(user):
