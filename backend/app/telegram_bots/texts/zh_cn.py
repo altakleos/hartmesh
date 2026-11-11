@@ -346,3 +346,26 @@ TEXTS.update(
 )
 
 TEXTS.update({"label.cannot_provide": "我没有这项信息", "label.wrong_recipient": "这应该问别人"})
+
+TEXTS.update(
+    {
+        "ask.type_prompt": "请输入对此问题的回答：{question}",
+        "ask.cant_prompt": "请简短说明原因。这会与问题一起保存。",
+        "ask.is_this_answer": "这是你对上方问题的回答吗？",
+        "decide.confirm": "决定选择“{decision}”吗？这将记录为你的决定。",
+        "decide.confirm_note": "决定选择“{decision}”，并附上备注“{note}”吗？",
+        "decide.own_prompt": "请输入你的决定。",
+        "decide.note_prompt": "请输入随决定一起保存的备注。",
+        "review.accept_confirm": "接受此结果吗？你将接受 {name} 在上方报告的内容。没有人为你检查过文件，如果文件很重要，请先打开查看。",
+        "review.changes_prompt": "需要修改什么？{name} 会随任务一起收到此内容。",
+        "review.changes_confirm": "你的备注已保留，但尚未发送：“{note}”。要对上方结果提出这些修改要求吗？",
+        "voice.confirm_answer": "听到：“{text}”。将此内容保存为你的回答吗？",
+        "label.confirm": "确认",
+        "label.add_note": "添加备注",
+        "label.yes_accept": "是，接受",
+        "label.request_these_changes": "请求这些修改",
+        "label.edit_note": "编辑备注",
+        "label.save_answer": "保存为回答",
+        "label.new_message": "这是一条新消息",
+    }
+)
