@@ -49,7 +49,11 @@ def context(read):
     }
 
 
-def materialize(link, data, *, locale, timezone, product):
+def materialize(link, data, *, locale, timezone, product, routing=None):
+    if routing is not None:
+        from app.telegram_bots.work_routing_followups import materialize_followup
+
+        return materialize_followup(link, data, routing, locale=locale)
     act = SimpleNamespace(**data["act"])
     accepted = data["accepted_at"]
     values = {"name": data["name"], "supervisor": data["supervisor"], "person": data["person"], "product": product}
@@ -209,8 +213,8 @@ async def acknowledge_outcome(session, row):
 
 
 class WorkOutcomePlans:
-    def __init__(self, plans, acts, *, product="HartMesh"):
-        self.plans, self.acts, self.product = plans, acts, product
+    def __init__(self, plans, acts, *, product="HartMesh", routing=None):
+        self.plans, self.acts, self.product, self.routing = plans, acts, product, routing
         self.outbox, self.callbacks, self.settings = plans.outbox, plans.callbacks, plans.settings
         self.reader = WorkOutcomeReader(plans.reader, acts)
         self.inbox = InboxRepository(self.outbox.sessions)
@@ -225,12 +229,15 @@ class WorkOutcomePlans:
             receipt = delivery_receipt(read.act.continuation)
             if receipt is not None and same_body(receipt["phase"], phase(data["act"])):
                 return receipt["outbox_id"]
-            shown = await asyncio.to_thread(materialize, link, data, locale=settings.locale, timezone=settings.timezone, product=self.product)
+            from app.telegram_bots.work_routing_followups import read_followup
+
+            routing = await read_followup(self.routing, link, read)
+            shown = await asyncio.to_thread(materialize, link, data, locale=settings.locale, timezone=settings.timezone, product=self.product, routing=routing)
             if shown is None:
                 return None
             parts, keyboard, _text = shown
             prepared = await prepare_attention(self.plans.reader, link)
-            composed = _OutcomeGuard(guard, prepared, read)
+            composed = _OutcomeGuard(guard, prepared, read, routing=_followup_candidates(self, link, data, routing))
             async with self.callbacks.writer(link, composed) as writer:
                 original, origin, topic = await self._origin(writer, link, read.act)
                 destination = {"chat_id": link.chat_id, "message_thread_id": topic}
@@ -241,7 +248,8 @@ class WorkOutcomePlans:
                     if part is not None and parent.state == "sent" and part["state"] == "sent" and part["message_ids"] == [original.message_id] and (not read.protected or part.get("protect_content")):
                         edit = {"presentation_version": part["presentation_version"], "part_id": part["part_id"], "message_id": original.message_id, "protect_content": bool(part.get("protect_content"))}
                 basis = {
-                    "version": 2 if edit is not None else 1,
+                    "version": 3 if routing is not None else 2 if edit is not None else 1,
+                    **({"routing": routing} if routing is not None else {}),
                     **({"edit": edit} if edit is not None else {}),
                     "context": data,
                     "locale": settings.locale,
@@ -271,7 +279,7 @@ class WorkOutcomePlans:
                     # be edited again. Re-read the receipt/source above and build
                     # a fresh delivery while retaining every old ACK.
                     edit = None
-                    basis = {**basis, "version": 2, "edit": None}
+                    basis = {**basis, **({"version": 2, "edit": None} if routing is None else {})}
                     digest = hashlib.sha256(json.dumps(basis, sort_keys=True).encode()).hexdigest()[:32]
                     key = "notice:work-outcome:" + act_id + "." + digest
                 for old in previous:
@@ -393,27 +401,42 @@ class WorkOutcomePlans:
             row.parts = parts
 
 
+def _followup_candidates(plans, link, data, routing):
+    if routing is None:
+        return None
+    from app.telegram_bots.work_routing_authority import RoutingCandidates
+    from app.telegram_bots.work_routing_followups import frozen_followup
+
+    return RoutingCandidates(plans.outbox.sessions, link, frozen_followup(routing, data), routing["routing"])
+
+
 class _ContextProjection(_OutcomeProjection):
-    def __init__(self, read):
+    def __init__(self, read, *, routing=None):
         super().__init__(read.act, read.source, read.receipt)
-        self.read = read
+        self.read, self.routing = read, routing
+
+    def extend(self, query):
+        result = super().extend(query)
+        return self.routing.extend(result) if self.routing is not None else result
 
     def check(self, rows):
         super().check(rows)
         if (rows[0][2], self.supervisor, self.recipient, self.continued) != (self.read.permissions, self.read.supervisor, self.read.recipient, self.read.continued):
             raise ProductSourceRetired()
+        if self.routing is not None:
+            self.routing.check(rows)
 
 
 class _OutcomeGuard:
-    def __init__(self, base, prepared, read):
-        self.base, self.prepared, self.read = base, prepared, read
+    def __init__(self, base, prepared, read, *, routing=None):
+        self.base, self.prepared, self.read, self.routing = base, prepared, read, routing
 
     async def prepare(self):
         await prepare_publication_guard(self.base)
 
     async def check(self, writer):
         current = await self.base.check(writer)
-        await self.prepared(session=writer, projection=_ContextProjection(self.read))
+        await self.prepared(session=writer, projection=_ContextProjection(self.read, routing=self.routing))
         self.base.current()
         return current
 
@@ -427,9 +450,10 @@ class WorkOutcomeSources:
         try:
             if (
                 type(basis) is not dict
-                or set(basis) != {"version", "context", "locale", "timezone", "parts", "keyboard", "destination", "input", "origin"} | ({"edit"} if basis.get("version") == 2 else set())
+                or set(basis)
+                != {"version", "context", "locale", "timezone", "parts", "keyboard", "destination", "input", "origin"} | ({"edit"} if basis.get("version") == 2 else set()) | ({"routing"} if basis.get("version") == 3 else set())
                 or type(basis["version"]) is not int
-                or basis["version"] not in {1, 2}
+                or basis["version"] not in {1, 2, 3}
                 or captured.item.class_ != "reply"
             ):
                 raise ValueError()
@@ -456,7 +480,12 @@ class WorkOutcomeSources:
             settings = await self.plans.settings.get(captured.link.owner_user_id)
             if settings is None or (settings.locale, settings.timezone) != (basis["locale"], basis["timezone"]):
                 raise ProductSourceRetired()
-            result = await asyncio.to_thread(materialize, captured.link, basis["context"], locale=basis["locale"], timezone=basis["timezone"], product=self.plans.product)
+            from app.telegram_bots.work_routing_followups import read_followup, same_followup
+
+            routing = await read_followup(self.plans.routing, captured.link, read)
+            if not same_followup(routing, basis.get("routing")):
+                raise ProductSourceRetired()
+            result = await asyncio.to_thread(materialize, captured.link, basis["context"], locale=basis["locale"], timezone=basis["timezone"], product=self.plans.product, routing=basis.get("routing"))
             if result is None:
                 raise ValueError()
             parts, keyboard, _text = result
@@ -525,12 +554,14 @@ class _DeliveryProjection(_ContextProjection):
         super().__init__(read)
         self.plans, self.captured, self.settings, self.zone, self.silent, self.now = plans, captured, settings, zone, silent, now
         self.controls_part = next((part for part in captured.item.parts if part.get("stored_keyboard")), None)
+        basis = captured.item.payload["work_outcome_basis"]
+        self.candidates = _followup_candidates(plans, captured.link, basis["context"], basis.get("routing"))
 
     def extend(self, query):
         delivery, settings, callback, mark = TelegramOutboxRow, TelegramPersonSettingsRow, TelegramCallbackRow, TelegramInboundMarkRow
         origin = self.captured.item.payload["work_outcome_basis"]["input"]
         source_callback, source_parent = aliased(TelegramCallbackRow), aliased(TelegramOutboxRow)
-        return (
+        result = (
             super()
             .extend(query)
             .add_columns(delivery, settings, callback, mark, source_callback, source_parent)
@@ -541,6 +572,8 @@ class _DeliveryProjection(_ContextProjection):
             .outerjoin(source_callback, source_callback.id == self.read.act.id)
             .outerjoin(source_parent, source_parent.id == source_callback.payload["anchor_outbox_id"].as_string())
         )
+
+        return self.candidates.extend(result) if self.candidates is not None else result
 
     def check(self, rows):
         super().check(rows)
@@ -564,3 +597,5 @@ class _DeliveryProjection(_ContextProjection):
             _validate_rows(delivery, list(callbacks.values()), part=self.controls_part, allow_pending=True)
             for control in callbacks.values():
                 self.plans.callbacks._usable(control)
+        if self.candidates is not None:
+            self.candidates.check(rows)

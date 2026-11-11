@@ -2014,6 +2014,8 @@ original operation. Changes in workspace readiness alone do not invalidate the
 review the person saw. Typed notes can retain their original displayed review
 across a restart before any submission. Unchanged answers and change requests
 can then enter the durable action journal using those original revisions.
+The routing foundation can also attach recipient choices directly to a manager’s
+saved “wrong person” reply, with a separate operation for passing the question on.
 Assignments continue to be managed on the web.
 
 Instance site-permission cards require current Manage access when planned, sent
