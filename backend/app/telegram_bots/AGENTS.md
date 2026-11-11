@@ -13,6 +13,10 @@ Keep bot network, supervisor and router startup outside configuration loading.
 Use socket-free transports and synthetic credentials in offline tests.
 
 Optional `work_text_inputs.py` routes only plain text for a shown Work prompt.
+`work_card_inputs.py` owns explicit replies to complete V1/V2/V3 cards: immutable
+`work_input` version2 proof, consumed source group and one Respond Act. Comments
+never decide or accept. It is not installed; V4/closed-input controllers remain
+separate. Final writer proof binds the original input across its own writes.
 `work_retained_drafts.py` settles a retained review note on Edit/Discard and a typed
 decision on Back/Add note; it creates no Work action. Final input/action/source
 checks include the transition's own settlement. Editing opens a separate prompt
