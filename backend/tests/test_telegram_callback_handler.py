@@ -136,7 +136,7 @@ def test_pause_table_covers_every_declared_conditional_kind():
 
 @pytest.mark.parametrize("age,target,usable", [(timedelta(hours=25), "draft", False), (timedelta(hours=25), "thread", True), (timedelta(days=181), "thread", False)])
 def test_a_draft_lapses_sooner_and_every_button_lapses_at_the_age_limit(age, target, usable):
-    row = SimpleNamespace(consumed_at=None, created_at=NOW - age, expires_at=None, target_kind=target)
+    row = SimpleNamespace(consumed_at=None, created_at=NOW - age, expires_at=None, target_kind=target, kind="back", payload={})
     repo = api().CallbackRepository(None, clock=lambda: NOW)
     if usable:
         repo._usable(row)
