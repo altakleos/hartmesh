@@ -257,8 +257,7 @@ async def test_stale_review_recovery_never_replaces_an_unresolved_or_missing_jou
         assert saved.state == "pending" if journal == "pending" else saved is None
 
 
-@pytest.mark.asyncio
-async def test_known_refusal_keeps_typed_decision_and_input_lineage(work_delivery, monkeypatch):
+async def typed_refused(e, monkeypatch, *, unknown=False):
     from test_telegram_inbox import incoming
     from test_telegram_work_actions import management_request
     from test_telegram_work_control_admission import stage
@@ -266,15 +265,11 @@ async def test_known_refusal_keeps_typed_decision_and_input_lineage(work_deliver
     from test_telegram_work_input_previews import previews
     from test_telegram_work_interaction_delivery import open_view, selected
     from test_telegram_work_preview_recovery import dispatch, install
-    from test_telegram_work_refusal_recovery import comment
     from test_telegram_work_typing_prompts import clear_old
 
     from app.telegram_bots.inbox import InboxRepository
-    from app.telegram_bots.work_outcome_delivery import WorkOutcomePlans
     from deerflow.agent_instances.contract import AgentConflict
-    from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow
 
-    e = work_delivery
     install(e)
     _record, request, _seen = await management_request(e, "decision")
     async with e.db.sessions.begin() as writer:
@@ -295,22 +290,45 @@ async def test_known_refusal_keeps_typed_decision_and_input_lineage(work_deliver
     controls = admissions(e)
     action = await stage(e, controls, callback)
 
+    original = controls.acts.work.command
+
     async def refuse(*args, **kwargs):
+        if unknown:
+            raise TimeoutError()
         raise AgentConflict("The attempt is still closing", reason="attempt-unresolved")
 
     monkeypatch.setattr(controls.acts.work, "command", refuse)
     first = await controls.acts.check(action.id)
+    monkeypatch.setattr(controls.acts.work, "command", original)
+    return controls, request, callback, captured, first
+
+
+@pytest.mark.asyncio
+async def test_known_refusal_keeps_typed_decision_and_input_lineage(work_delivery, monkeypatch):
+    from test_telegram_work_refusal_recovery import comment
+
+    from app.telegram_bots.work_outcome_delivery import WorkOutcomePlans
+    from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow
+
+    e = work_delivery
+    controls, request, callback, captured, first = await typed_refused(e, monkeypatch)
+    old_identity = e.identity
     await comment(e, request)
     install_dispatch(e, WorkOutcomePlans(e.plans, controls.acts))
     await press_work(e, callback, message_id=803)
     async with e.db.sessions() as reader:
-        saved = await reader.get(TelegramActRow, action.id)
-        assert saved.state == "pending" and saved.reason == "attempt-unresolved" and saved.attempts == first.attempts
+        saved = await reader.get(TelegramActRow, first.id)
+        assert saved.state == "conflict" and saved.reason == "changed" and saved.attempts == first.attempts
         assert saved.body["note"] == captured.route_basis["work_input"]["text"]
-        assert saved.cancel_requested_at is None
-        retained = await reader.get(TelegramInboundMarkRow, (mark.link_id, mark.message_id, mark.chat_id))
+        assert saved.cancel_requested_at is not None
+        retained = await reader.get(TelegramInboundMarkRow, (captured.link_id, captured.message_id, captured.chat_id))
         assert retained.route_basis["work_input"] == captured.route_basis["work_input"] and not retained.route_complete
-        assert (await reader.get(TelegramCallbackRow, callback.id)).consumed_at is None
+        assert (await reader.get(TelegramCallbackRow, callback.id)).consumed_at is not None
+        fresh = await reader.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.id != old_identity, TelegramOutboxRow.payload["work_request_basis"]["input"]["operation_id"].as_string() == captured.operation_ids[0]))
+        assert fresh is not None and fresh.payload["work_request_basis"]["interaction"]["decision"] == captured.route_basis["work_input"]["text"]
+        from app.telegram_bots.render import render
+
+        assert "".join(part["html"] for part in fresh.parts).startswith(render("stale.changed_resend", "en") + "\n\n")
         assert not list(await reader.scalars(select(TelegramOutboxRow).where(TelegramOutboxRow.dedupe_key.startswith("notice:work-refusal-refresh:"))))
 
 

@@ -2027,6 +2027,8 @@ routing saves answers and unchanged changes notes once, retains changed review
 notes for confirmation, and previews typed decisions before an explicit tap.
 Retained review notes keep their original 24-hour deadline across refreshes.
 Edit note and Discard retire the old confirmation without submitting it.
+Further review changes preserve the retained text for a fresh complete preview
+and another explicit confirmation. Unknown operations keep their original journal.
 Assignments continue to be managed on the web.
 
 Instance site-permission cards require current Manage access when planned, sent

@@ -10,6 +10,7 @@ from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.work_action_retries import WorkActionRetries
 from app.telegram_bots.work_control_admission import WorkControlAdmissions
 from app.telegram_bots.work_followup_refresh import WorkRoutingFollowupRecovery
+from app.telegram_bots.work_input_refresh import WorkInputRefresh
 from app.telegram_bots.work_interaction_delivery import WorkInteractionPlans
 from app.telegram_bots.work_refusal_recovery import WorkRefusalRecovery
 from app.telegram_bots.work_request_recovery import WorkRequestRecovery
@@ -35,6 +36,7 @@ class WorkCallbacks:
         self.stale = WorkStaleRecovery(self.controls, self.interactions)
         self.recovery = WorkRequestRecovery(outcomes.plans)
         self.drafts = WorkRetainedDrafts(outcomes.plans)
+        self.input_refresh = WorkInputRefresh(self.controls)
         self.routing = WorkRoutingAdmissions(outcomes.routing, self.acts) if outcomes.routing is not None else None
         self.routing_recovery = WorkRoutingRecovery(outcomes.routing) if outcomes.routing is not None else None
         self.followups, self.retries = WorkRoutingFollowupRecovery(outcomes), WorkActionRetries(outcomes)
@@ -88,10 +90,9 @@ class WorkCallbacks:
                     # action constructor. Unknown results remain journal-owned.
                     try:
                         if family == 4 and staged.state == "pending" and staged.reason == "attempt-unresolved":
-                            # Retained typed decisions/notes need their own recovery.
-                            await self._observe(link, staged.id, guard=guard)
-                            return True
-                        if staged.kind in {"decide", "accept"} and staged.state == "pending" and staged.reason == "attempt-unresolved":
+                            if await self.input_refresh.refresh(link, row.id, **scope) is not None:
+                                return True
+                        elif staged.kind in {"decide", "accept"} and staged.state == "pending" and staged.reason == "attempt-unresolved":
                             if await self.refusals.refresh(link, row.id, **scope) is not None:
                                 return True
                         if staged.attempts == 0 or staged.state == "pending" and staged.reason in {"attempt-unresolved", "actions-paused"}:
@@ -105,14 +106,16 @@ class WorkCallbacks:
                     if result.kind == "route" and result.state == "refused" and result.reason == "recipient-ineligible":
                         await self._refresh_routing(link, row, parent, scope)
                     elif result.state == "conflict" and row.kind != "route_to":
-                        if await self.stale.refresh(link, row.id, **scope) is None:
+                        refresh = self.input_refresh if family == 4 else self.stale
+                        if await refresh.refresh(link, row.id, **scope) is None:
                             await self._observe(link, result.id, guard=guard)
                     else:
                         await self._observe(link, result.id, guard=guard)
             except AgentConflict as error:
                 if row.kind != "route_to" and error.reason != "attempt-unresolved":
                     try:
-                        if await self.stale.refresh(link, row.id, **scope) is not None:
+                        refresh = self.input_refresh if family == 4 else self.stale
+                        if await refresh.refresh(link, row.id, **scope) is not None:
                             return True
                     except ProductSourceRetired:
                         raise CallbackRefused("stale.not_waiting") from None

@@ -41,6 +41,8 @@ def interaction_state(value, source):
     state = deepcopy(value)
     view = state["view"]
     fields = _FIELDS[view] | ({"decision"} if view == "prompt" and state.get("purpose") == "decision_note" else set())
+    if view == "decision" and state.get("refreshed") is True:
+        fields = fields | {"refreshed"}
     if set(state) != fields:
         raise ValueError("invalid-work-interaction")
     for key in {"text", "note", "decision"} & fields:
@@ -107,7 +109,7 @@ def present_interaction(source, value, *, locale, expires_at=None):
         if state["purpose"] == "decision_note":
             suffix = escape(state["decision"]) + "\n\n" + suffix
     html = "".join(part["html"] for part in base.parts) + ("\n\n" + suffix if suffix else "")
-    if view == "changes":
+    if view == "changes" or view == "decision" and state.get("refreshed") is True:
         html = render("stale.changed_resend", locale) + "\n\n" + html
     return WorkRequestPresentation(
         tuple({"kind": "text", "html": chunk, "visible_text": visible_text(chunk), "protect_content": source.protected} for chunk in split_html(html)),
