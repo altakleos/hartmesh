@@ -4,7 +4,7 @@ from copy import deepcopy
 from dataclasses import asdict
 from datetime import timedelta
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, select, true
 
 from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.callbacks import CallbackRefused
@@ -193,12 +193,22 @@ class _RecoveryGuard:
 class _RecoveryProjection:
     """Current source, pending actions and privacy in the final account read."""
 
-    def __init__(self, source):
-        self.source = source
+    def __init__(self, source, *, allowed_act_id=None):
+        self.source, self.allowed_act_id = source, allowed_act_id
 
     def extend(self, query):
         work, request, bot = AgentWorkRow, HumanInputRequestRow, TelegramBotLinkRow
-        unresolved = select(TelegramActRow.id).where(TelegramActRow.owner_user_id == bot.owner_user_id, TelegramActRow.request_id == request.id, TelegramActRow.state.in_({"pending", "waiting", "uncertain"})).correlate(bot, request).exists()
+        unresolved = (
+            select(TelegramActRow.id)
+            .where(
+                TelegramActRow.owner_user_id == bot.owner_user_id,
+                TelegramActRow.request_id == request.id,
+                TelegramActRow.state.in_({"pending", "waiting", "uncertain"}),
+                TelegramActRow.id != self.allowed_act_id if self.allowed_act_id is not None else true(),
+            )
+            .correlate(bot, request)
+            .exists()
+        )
         return (
             query.add_columns(work, request, unresolved)
             .join(work, and_(work.id == self.source.work["id"], work.instance_id == bot.agent_ref))

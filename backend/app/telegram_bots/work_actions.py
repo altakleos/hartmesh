@@ -8,6 +8,7 @@ immutable request, local attempt serialization and uncertain-response recovery.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -39,6 +40,11 @@ def thaw(value):
     if isinstance(value, tuple):
         return [thaw(child) for child in value]
     return value
+
+
+def same_body(left, right):
+    """Compare immutable JSON without Python's bool/integer equivalence."""
+    return json.dumps(thaw(left), sort_keys=True, separators=(",", ":")) == json.dumps(thaw(right), sort_keys=True, separators=(",", ":"))
 
 
 def request_for(kind, body, *, identity=None):
@@ -113,12 +119,17 @@ class WorkActionMethods:
             return await self.work._receipt(session, actor, parent, body, act.work_id)
 
     async def _save_work_act(self, link, *, kind, request_id, work_id, request):
-        from app.telegram_bots.acts import _snapshot
-
         await self._work_link(link)
         owner = await self.authority.prepare_live_owner(link.owner_user_id)
+        return await self._stage_work_act(link, kind=kind, request_id=request_id, work_id=work_id, request=request, owner=owner)
+
+    async def _stage_work_act(self, link, *, kind, request_id, work_id, request, owner, session=None):
+        """Store an exact operation in its caller's guarded writer; do not act."""
+        from app.telegram_bots.acts import _snapshot
+
+        request_for(kind, request.model_dump(mode="json", exclude_unset=True), identity=request.operation_id)
         body = request.model_dump(mode="json", exclude_unset=True)
-        async with self.outbox._writer(link.id) as (session, current):
+        async with self.outbox._writer(link.id, session=session) as (session, current):
             if current is None or any(getattr(current, field) != getattr(link, field) for field in _SCOPE) or current.state != "connected" or current.health != "ok":
                 raise AgentDenied("The bot binding is no longer current")
             row = await session.get(TelegramActRow, request.operation_id, with_for_update=True, populate_existing=True)
@@ -135,7 +146,7 @@ class WorkActionMethods:
                 kind=kind,
             )
             if row is not None:
-                if any(getattr(row, key) != value for key, value in scope.items()) or row.body != body:
+                if any(getattr(row, key) != value for key, value in scope.items()) or not same_body(row.body, body):
                     raise ValueError("act-source-conflict")
             else:
                 now = self.outbox.clock()
@@ -153,7 +164,7 @@ class WorkActionMethods:
             row = await session.get(TelegramActRow, captured.id, with_for_update=True, populate_existing=True)
             if row is None:
                 raise ValueError("unsupported-work-act")
-            if row.state == "done" or row.attempts != captured.attempts or any(getattr(row, name) != getattr(captured, name) for name in _ACT_SCOPE) or row.body != thaw(captured.body):
+            if row.state == "done" or row.attempts != captured.attempts or any(getattr(row, name) != getattr(captured, name) for name in _ACT_SCOPE) or not same_body(row.body, captured.body):
                 return _snapshot(row)
             row.state, row.reason, row.result, row.updated_at = state, reason, result, self.outbox.clock()
             await session.flush()
@@ -178,7 +189,7 @@ class WorkActionMethods:
                 or saved.state != "pending"
                 or saved.attempts != act.attempts
                 or saved.binding_generation != act.binding_generation
-                or saved.body != thaw(act.body)
+                or not same_body(saved.body, act.body)
                 or saved.cancel_requested_at is not None
             ):
                 raise AgentDenied("The action admission is no longer current")
@@ -263,7 +274,7 @@ class WorkActionMethods:
                 return act
             async with self.outbox._writer(link.id) as (writer, current):
                 saved = await writer.get(TelegramActRow, act.id, with_for_update=True, populate_existing=True)
-                if saved.state == "done" or saved.attempts != act.attempts or saved.cancel_requested_at is not None or any(getattr(saved, field) != getattr(act, field) for field in _ACT_SCOPE) or saved.body != thaw(act.body):
+                if saved.state == "done" or saved.attempts != act.attempts or saved.cancel_requested_at is not None or any(getattr(saved, field) != getattr(act, field) for field in _ACT_SCOPE) or not same_body(saved.body, act.body):
                     return _snapshot(saved)
                 if current is None or any(getattr(current, field) != getattr(link, field) for field in _SCOPE) or current.state != "connected" or current.health != "ok":
                     raise AgentDenied("The bot binding is no longer current")
@@ -385,7 +396,7 @@ class WorkActionMethods:
             raise ValueError("invalid-review-basis")
         return dict(operation_id=operation_id, expected_revision=seen["work_revision"], expected_assignment_revision=seen["assignment_revision"])
 
-    async def decide(self, link, *, operation_id, request_id, work_id, decision, note, seen):
+    def _decision_command(self, *, operation_id, request_id, decision, note, seen):
         base = self._command_basis(operation_id, request_id, seen)
         request = WorkCommand(
             **base,
@@ -395,9 +406,13 @@ class WorkActionMethods:
             blocker_revision=seen["blocker_revision"],
             request_basis=dict(id=request_id, revision=seen["revision"], request_revision=seen["request_revision"], response_ids=seen["response_ids"]),
         )
+        return request
+
+    async def decide(self, link, *, operation_id, request_id, work_id, decision, note, seen):
+        request = self._decision_command(operation_id=operation_id, request_id=request_id, decision=decision, note=note, seen=seen)
         return await self._issue_work(link, kind="decide", request_id=request_id, work_id=work_id, request=request, seen=seen)
 
-    async def accept(self, link, *, operation_id, request_id, work_id, outcome_id, evidence_revision, seen):
+    def _acceptance_command(self, *, operation_id, request_id, outcome_id, evidence_revision, seen):
         base = self._command_basis(operation_id, request_id, seen)
         if (outcome_id, evidence_revision) != (seen["outcome_id"], seen["evidence_revision"]):
             raise ValueError("invalid-review-basis")
@@ -410,6 +425,10 @@ class WorkActionMethods:
             acknowledge_unchecked_sources=True,
             request_basis=dict(id=request_id, revision=seen["revision"], request_revision=seen["request_revision"], response_ids=seen["response_ids"]),
         )
+        return request
+
+    async def accept(self, link, *, operation_id, request_id, work_id, outcome_id, evidence_revision, seen):
+        request = self._acceptance_command(operation_id=operation_id, request_id=request_id, outcome_id=outcome_id, evidence_revision=evidence_revision, seen=seen)
         return await self._issue_work(link, kind="accept", request_id=request_id, work_id=work_id, request=request, seen=seen)
 
     async def request_changes(self, link, *, operation_id, request_id, work_id, note, seen):

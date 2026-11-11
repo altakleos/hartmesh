@@ -2007,7 +2007,8 @@ menu at their next start.
 Work notifications, question routing and confirmation controls are still in
 preparation and are not enabled in Telegram. Complete first-tap previews now have
 a durable delivery boundary that waits for the entire message before enabling controls
-or typing prompts.
+or typing prompts. Confirmed choices also have durable, single-operation admission
+for recovery after a restart.
 Assignments continue to be managed on the web.
 
 Instance site-permission cards require current Manage access when planned, sent
