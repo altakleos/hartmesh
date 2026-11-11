@@ -10,6 +10,7 @@ TEXTS: dict[str, str] = {
     "file.files_busy": "{name}的文件正在更改，无法确认{file}是否已保存。请过几分钟点击重新发送。",
     "file.unconfirmed": "无法确认{file}是否已保存。请点击重新发送。",
     "file.not_active": "{name}已暂停或停用，无法添加文件。",
+    "file.no_access": "{file}已准备好。打开{name}生成的文件需要“可以查看所有工作”权限。请联系{supervisor}。",
     "file.bad_name": "无法以该名称保存文件。请重命名后重新发送。",
     "file.saving": "正在为{name}保存{file}…",
     "file.waiting": "仍在为{name}保存{file}…",

@@ -1638,6 +1638,11 @@ class TelegramBotChannel(TelegramChannel):
 
         if set(source) != {"key", "values"} or not isinstance(source["key"], str) or not isinstance(source["values"], dict):
             raise PermanentDeliveryError("unsupported-source")
+        if link.agent_kind == "instance" and source["key"] == "file.no_access":
+            from app.telegram_bots.publication import fixed_source
+
+            current = await fixed_source(self._services, link, source["key"])
+            source = {"key": source["key"], "values": {**current["values"], **source["values"]}}
         settings = await await_drained(self._services.settings.get(link.owner_user_id))
         if settings is None:
             raise PermanentDeliveryError("missing-settings")

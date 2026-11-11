@@ -541,7 +541,7 @@ class SourceUnavailable(Exception):
     """
 
     def __init__(self, *, source_ref: dict, reason: str = "source-unavailable") -> None:
-        if reason not in {"source-unavailable", "source-changed"} or set(source_ref) != {"key", "values"} or source_ref["key"] not in {"file.out_failed", "file.too_large_out"} or not isinstance(source_ref["values"], dict):
+        if reason not in {"source-unavailable", "source-changed"} or set(source_ref) != {"key", "values"} or source_ref["key"] not in {"file.out_failed", "file.too_large_out", "file.no_access"} or not isinstance(source_ref["values"], dict):
             raise ValueError("invalid-unavailable-source-notice")
         if set(source_ref["values"]) - {"file", "product"} or any(not isinstance(value, str) or len(value) > 4096 for value in source_ref["values"].values()):
             raise ValueError("invalid-unavailable-source-notice")

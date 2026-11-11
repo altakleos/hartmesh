@@ -52,7 +52,7 @@ class _FileExport:
         if self.current() is not True or state.agent_instances is not self.service or state.storage_spaces is not self.files or self.service.files is not self.files:
             raise ValueError("instance-export-retired") from None
 
-    async def _admit(self, writer, admitted):
+    async def _admit(self, writer, admitted, *, protect_content=None):
         self._current()
         bind = self.authority.links.session_factory.kw.get("bind")
         if not writer.in_transaction() or not writer.is_active or writer.get_bind() is not getattr(bind, "sync_engine", bind):
@@ -99,9 +99,16 @@ class _FileExport:
             raise AgentDenied("The current file recipient is unavailable")
         if home_status != "active" or home_generation != self.home_generation or type(file_permissions) is not int or file_permissions & int(Permission.READ | Permission.EXPORT) != int(Permission.READ | Permission.EXPORT):
             raise SpaceDenied("The original file Home is no longer available")
+        if value == "protected" and protect_content is False:
+            from app.telegram_bots.producer import DeliveryClaimRetired
+
+            raise DeliveryClaimRetired()
         self._current()
 
-    async def authorize(self):
+    async def authorize(self, *, check_delivery=None, protect_content=None):
+        if protect_content is not None and type(protect_content) is not bool or check_delivery is not None and not callable(check_delivery):
+            raise ValueError("instance-export-dispatch-unavailable") from None
+
         async def perform():
             fresh = await prepare_file_export(self.authority, self.link, current=self.current)
             if (
@@ -113,18 +120,29 @@ class _FileExport:
                 raise SpaceDenied("The original file Home is no longer available")
             self._current()
             async with self.files.registry.admitted(actor=PrincipalRef("human", self.link.owner_user_id), requests={self.instance.home_id: (Permission.READ | Permission.EXPORT, self.home_generation)}) as (writer, admitted):
-                await self._admit(writer, admitted)
+                if check_delivery is not None:
+                    await check_delivery(writer)
+                if protect_content is None:
+                    await self._admit(writer, admitted)
+                else:
+                    await self._admit(writer, admitted, protect_content=protect_content)
 
         return await await_drained(perform())
 
-    async def read(self, path, *, max_bytes):
+    async def read(self, path, *, max_bytes, check_delivery=None):
         relative = _relative_output(path)
         if type(max_bytes) is not int or not 0 < max_bytes <= 50_000_000:
             raise ValueError("instance-export-limit-unavailable") from None
 
         async def perform():
-            await self.authorize()
-            return await self.files.export_file(actor=PrincipalRef("human", self.link.owner_user_id), space_id=self.instance.home_id, path=relative, max_bytes=max_bytes, controller_admission=self._admit)
+            await self.authorize(check_delivery=check_delivery)
+
+            async def admitted(writer, rows):
+                if check_delivery is not None:
+                    await check_delivery(writer)
+                await self._admit(writer, rows)
+
+            return await self.files.export_file(actor=PrincipalRef("human", self.link.owner_user_id), space_id=self.instance.home_id, path=relative, max_bytes=max_bytes, controller_admission=admitted)
 
         return await await_drained(perform())
 

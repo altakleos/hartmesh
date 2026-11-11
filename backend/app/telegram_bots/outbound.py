@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+from time import monotonic
+from types import SimpleNamespace
 
 from telegram.error import BadRequest, Forbidden, InvalidToken, NetworkError
 
@@ -13,6 +15,9 @@ from app.telegram_bots.files import OutputBatch, classify_output_part, classify_
 from app.telegram_bots.outbound_upload import _forget_exception
 from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryEligibility, DeliveryRetry, PermanentDeliveryError, SourceUnavailable
 from app.telegram_bots.settings import silent_now
+from deerflow.agent_instances.contract import AgentDenied
+from deerflow.spaces.contract import SpaceConflict, SpaceDenied
+from deerflow.spaces.filesystem import FileTooLarge
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -34,9 +39,24 @@ def _hash_files(files):
         files = data = None
 
 
-def _unavailable(prepared, *, reason="source-unavailable", oversize=False):
+def _unavailable(prepared, *, reason="source-unavailable", oversize=False, no_access=False):
     name = ", ".join(member["filename"] for member in prepared.files)[:4096]
-    return SourceUnavailable(source_ref={"key": "file.too_large_out" if oversize else "file.out_failed", "values": {"file": name}}, reason=reason)
+    return SourceUnavailable(source_ref={"key": "file.no_access" if no_access else "file.too_large_out" if oversize else "file.out_failed", "values": {"file": name}}, reason=reason)
+
+
+async def retry_export(read, *, current, retry_seconds, retry_max_seconds, clock=monotonic, sleep=asyncio.sleep):
+    """Only actual Space contention repeats; no read or reservation is recreated."""
+    deadline = clock() + retry_max_seconds
+    while True:
+        await current()
+        try:
+            return await read()
+        except SpaceConflict:
+            if clock() + retry_seconds > deadline:
+                raise
+            await sleep(retry_seconds)
+            if clock() > deadline:
+                raise
 
 
 async def send_file_part(channel, saved, capture) -> list[int]:
@@ -45,11 +65,13 @@ async def send_file_part(channel, saved, capture) -> list[int]:
 
     services, expected = channel._services, saved
     source, owner = services.model_source, services.thread_client
-    if source is None or owner is None:
+    instance = saved.link.agent_kind == "instance"
+    if source is None or owner is None and not instance:
         raise DeliveryClaimRetired()
     prepared = await source.read_file_part(saved)
     part = saved.part
     original_link = saved.link
+    export = None
 
     def unchanged(captured):
         # The link row's stamps move once a minute, and a stamp is no reason to give up a read file.
@@ -71,10 +93,28 @@ async def send_file_part(channel, saved, capture) -> list[int]:
         if not unchanged(final) or not channel._callback_current(original_link):
             raise DeliveryClaimRetired()
 
+    async def claimed(writer):
+        from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramOutboxRow
+
+        # Hold the exact claimed row through file authorization and native I/O;
+        # a weaker later awaited claim read must not stale the file decision.
+        binding = await writer.get(TelegramBotLinkRow, original_link.id, with_for_update=True, populate_existing=True)
+        row = await writer.get(TelegramOutboxRow, saved.item.id, with_for_update=True, populate_existing=True)
+        fresh = services.outbox._sending(binding, row, **{key: value for key, value in capture.items() if key != "outbox_id"})
+        if not unchanged(fresh):
+            raise DeliveryClaimRetired()
+
     async def dispatch_current():
         # Thread/run rights do not substitute for a current Space/seat read.
         # Limiter waits and short retries must reacquire the same artifact door.
         await current()
+        if instance:
+            if export is None:
+                raise DeliveryClaimRetired()
+            await export.authorize(check_delivery=claimed, protect_content=bool(part.get("protect_content", False)))
+            if not channel._callback_current(original_link):
+                raise DeliveryClaimRetired()
+            return
         try:
             for member in prepared.files:
                 metadata = await owner.describe_artifact(original_link.owner_user_id, prepared.record.scope.thread_id, member["path"], before_dispatch=current)
@@ -95,12 +135,18 @@ async def send_file_part(channel, saved, capture) -> list[int]:
     upload_started = False
     reservation = batch = data = buffers = hash_inputs = None
     try:
-        for member in prepared.files:
-            described = await owner.describe_artifact(original_link.owner_user_id, prepared.record.scope.thread_id, member["path"], before_dispatch=current)
-            if (described.path, described.filename, described.size, described.mime_type) != (member["path"], member["filename"], member["size"], member["mime_type"]):
-                failure = "source-changed"
-                break
-            metadata.append(described)
+        if instance:
+            from app.telegram_bots.instance_file_exports import prepare_file_export
+
+            export = await prepare_file_export(services.authority, original_link, current=lambda: channel._callback_current(original_link))
+            metadata = [SimpleNamespace(**{**member, "size": services.config.files.max_outbound_bytes}) for member in prepared.files]
+        else:
+            for member in prepared.files:
+                described = await owner.describe_artifact(original_link.owner_user_id, prepared.record.scope.thread_id, member["path"], before_dispatch=current)
+                if (described.path, described.filename, described.size, described.mime_type) != (member["path"], member["filename"], member["size"], member["mime_type"]):
+                    failure = "source-changed"
+                    break
+                metadata.append(described)
         if failure is None:
             ceilings = tuple(member.size for member in metadata)
             if any(size > services.config.files.max_outbound_bytes for size in ceilings):
@@ -109,7 +155,7 @@ async def send_file_part(channel, saved, capture) -> list[int]:
                 # A restart may lower the fixed configured capacity after the
                 # original plan. Persist smaller groups before opening bytes.
                 template = {"kind": part["kind"], "files": list(prepared.files), "unavailable": None}
-                replacements = repartition_output_part(template, capacity=services.file_bytes_budget.capacity)
+                replacements = repartition_output_part(template, capacity=services.file_bytes_budget.capacity, max_bytes=services.config.files.max_outbound_bytes)
                 await current()
                 await services.outbox.replace_output_parts(expected, replacements, reason="capacity")
                 failure = "replanned"
@@ -120,13 +166,21 @@ async def send_file_part(channel, saved, capture) -> list[int]:
                 for index, member in enumerate(metadata):
                     closed = batch.begin_transport(index)
                     try:
-                        data = await owner.read_artifact_capped(original_link.owner_user_id, prepared.record.scope.thread_id, member.path, ceiling=member.size, before_dispatch=current, on_failed_close=closed)
+                        if instance:
+                            data = await retry_export(
+                                lambda: export.read(member.path, max_bytes=member.size, check_delivery=claimed),
+                                current=current,
+                                retry_seconds=services.config.files.retry_seconds,
+                                retry_max_seconds=services.config.files.retry_max_seconds,
+                            )
+                        else:
+                            data = await owner.read_artifact_capped(original_link.owner_user_id, prepared.record.scope.thread_id, member.path, ceiling=member.size, before_dispatch=current, on_failed_close=closed)
                         await batch.keep(index, data)
                         data = None
                         await current()
                     finally:
                         data = None
-                        if not owner.retains_failed_close(closed):
+                        if instance or not owner.retains_failed_close(closed):
                             await await_drained(closed())
                     hash_inputs = ((member.path, batch.data(index)),)
 
@@ -182,6 +236,12 @@ async def send_file_part(channel, saved, capture) -> list[int]:
     except asyncio.CancelledError as error:
         _forget_exception(error)
         raise
+    except (SpaceDenied, AgentDenied) as error:
+        _forget_exception(error)
+        failure = "no-access" if instance else "source-unavailable"
+    except FileTooLarge as error:
+        _forget_exception(error)
+        failure = "oversize"
     except Exception as error:
         # Artifact 403/404 and transport failures are file-source outcomes;
         # they must never masquerade as Telegram blocking or token rejection.
@@ -197,7 +257,7 @@ async def send_file_part(channel, saved, capture) -> list[int]:
         raise DeliveryClaimRetired()
     if failure == "upload-ambiguous":
         raise NetworkError("File acknowledgement unavailable")
-    if failure is not None and part["kind"] == "album":
+    if failure is not None and failure != "no-access" and part["kind"] == "album":
         # A member's unavailable bytes must not suppress its healthy siblings.
         # Keep original order/hashes and retry each member independently through
         # the same source door; already-ACKed parts remain untouched.
@@ -207,7 +267,7 @@ async def send_file_part(channel, saved, capture) -> list[int]:
         await services.outbox.replace_output_parts(expected, replacements, reason="photo-classification")
         raise DeliveryClaimRetired()
     if failure is not None:
-        raise _unavailable(prepared, reason="source-changed" if failure == "source-changed" else "source-unavailable", oversize=failure == "oversize")
+        raise _unavailable(prepared, reason="source-changed" if failure == "source-changed" else "source-unavailable", oversize=failure == "oversize", no_access=failure == "no-access")
     if outcome is None:
         raise PermanentDeliveryError("invalid-output-upload")
     if outcome.failure is None:

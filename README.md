@@ -1989,7 +1989,11 @@ The instance file-export boundary requires the recipient's current Inspect and
 Space read/export permissions. It reads the original Home directly, without
 requiring a running workspace. Saved output plans reserve each unknown-size
 file's maximum before reading; albums split to fit the configured memory budget.
-The claimed sender's instance-export integration remains pending.
+The sender holds that reservation through export and Telegram delivery, rechecking
+file access and content protection after limiter waits. A person without Inspect
+receives the text answer and a plain file-access explanation. Only Space
+contention retries automatically; other failures offer the appropriate saved
+notice or explicit Send again control.
 Instance presentation names the assistant or employee, explains who can read
 the conversation, and offers web links according to the person's access.
 Role labels require permission to inspect the adopted definition.

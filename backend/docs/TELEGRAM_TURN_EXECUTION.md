@@ -358,3 +358,29 @@ collection, using that original journal's saved press. A retained delivery
 receipt prevents recreation after outbox collection. Legacy terminal journals
 without this receipt are not automatically republished or upgraded. No extra
 outbox retention pin or schema change is required.
+
+
+## Instance output delivery
+
+The existing claimed sender consumes instance `export` descriptors by calling
+`SpaceFiles.export_file` through the human-authorized Home bridge. It reserves
+all members’ full ceilings atomically before the first read, shrinks completed
+members to actual bytes, records their first SHA-256 and retains the reservation
+through native/hash/SDK users and buffer cleanup. Replanning preserves every ACK;
+no delivered member is reread. Ordinary/custom output retains its existing
+artifact HEAD and capped GET path. No legacy artifact fallback serves instances.
+
+A borrowed Space writer also locks and verifies the exact claimed outbox row
+before and after native reads. After a limiter wait, the final permission-only
+admission keeps that claim through the joined Home/instance/human/policy snapshot,
+including the saved `protect_content` requirement. No weaker asynchronous check
+follows it before SDK dispatch. Source projection checks still belong to the
+original record’s ModelSource; metadata and filenames grant no authority.
+
+Only `SpaceConflict` repeats at the configured interval/deadline, retaining the
+same reservation and original source. A large file produces `file.too_large_out`;
+missing/unavailable files produce `file.out_failed` with saved explicit retry.
+Missing Inspect or human READ/EXPORT produces `file.no_access` without controls.
+A failed captioned file restores the independently verified text first. The
+access explanation resolves the current instance name and supervisor as the
+recipient, and every instance text dispatch keeps its current Use/policy fence.

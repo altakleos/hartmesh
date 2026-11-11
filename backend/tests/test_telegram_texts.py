@@ -35,6 +35,7 @@ STAGE_ONE_KEYS = frozenset(
 INSTANCE_FILE_KEYS = frozenset(
     {"file.saving", "file.waiting", "file.saved_ask", "file.saved", "file.saved_as", "file.same", "file.files_full", "file.files_full_ask", "file.files_busy", "file.unconfirmed", "file.not_active", "file.bad_name"}
 )
+INSTANCE_FILE_KEYS |= {"file.no_access"}
 INSTANCE_AVAILABILITY_KEYS = frozenset("unavailable.off unavailable.paused unavailable.moved unavailable.files_unchecked unavailable.fix".split())
 INSTANCE_FAILURE_KEYS = frozenset("busy.two_conversations busy.starting_elsewhere refused.restarting refused.files_busy start.ws_1 start.ws_30 start.ws_failed refused.files_full refused.files_full_ask".split())
 INSTANCE_FAILURE_KEYS |= {"start.ws_failed_again", "refused.interrupted_manager", "refused.interrupted_recovery", "net.blocked_ask"}

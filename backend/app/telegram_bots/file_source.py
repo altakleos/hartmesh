@@ -286,7 +286,9 @@ def validate_file_parts(item):
                 raise ValueError
         if any(type(value[key]) is not bool for key in ("protect_content", "sent_protect_content", "plain_fallback", "url_button_fallback") if key in value):
             raise ValueError
-        if "file_failure_key" in value and (value["state"] != "unavailable" or value["file_failure_key"] not in {"file.out_failed", "file.too_large_out"}):
+        if "file_failure_key" in value and (value["state"] != "unavailable" or value["file_failure_key"] not in {"file.out_failed", "file.too_large_out", "file.no_access"}):
+            raise ValueError
+        if value.get("file_failure_key") == "file.no_access" and payload["reply_basis"]["publication"]["scope"]["agent_kind"] != "instance":
             raise ValueError
     rows = {value["part_id"]: value for value in item.parts}
     if len(rows) != len(item.parts):
@@ -379,16 +381,17 @@ def unavailable_parts(parent, basis):
             )
     for file in parent["files"]:
         key = parent.get("file_failure_key", "file.too_large_out" if parent["unavailable"] == "oversize" else "file.out_failed")
-        if key not in {"file.out_failed", "file.too_large_out"}:
+        if key not in {"file.out_failed", "file.too_large_out", "file.no_access"}:
             raise ValueError
+        conversation_url = basis["conversation_url"] if key != "file.no_access" else None
         result.append(
             {
                 "kind": "text",
                 "source_ref": {"key": key, "values": {"file": file["filename"]}},
                 "reply_to_message_id": parent["reply_to_message_id"],
                 "file_retry_source": {"thread_id": basis["publication"]["scope"]["thread_id"], "path": file["path"]} if key == "file.out_failed" else None,
-                "conversation_url": basis["conversation_url"],
-                **({"stored_keyboard": True} if key == "file.out_failed" or basis["conversation_url"] is not None else {}),
+                "conversation_url": conversation_url,
+                **({"stored_keyboard": True} if key == "file.out_failed" or conversation_url is not None else {}),
             }
         )
     return result
