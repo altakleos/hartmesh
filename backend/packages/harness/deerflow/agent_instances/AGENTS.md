@@ -298,6 +298,11 @@ Decision locks include original and response-attached sources before instance/Wo
 Read state is separate. Current lifecycle/grants gate responses and inbox counts;
 recipient eligibility never grants access or silently follows supervisor changes.
 History remains inspectable. No request path invokes run or filesystem effects.
+`AgentWork.list_page` and `HumanInput.list_page` use scoped creation-time/id
+cursors with a fixed aware horizon and current authority on every page. Request
+views filter before page counting and scan hidden batches through exhaustion.
+Existing list routes retain their contracts; cursors never grant access.
+Recipient eligibility borrows the caller's SQL session for account reads.
 `AgentWork.command` and `HumanInput.respond` accept an optional trusted
 `admission(session)` condition. It borrows the domain writer after exact receipt
 lookup and source/parent locking, then repeats after projection before commit.

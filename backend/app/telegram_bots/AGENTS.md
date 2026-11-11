@@ -56,6 +56,13 @@ Model, callback and file notification plans remain refused until their own sourc
 authority joins that snapshot. Local-day calculations run off-loop and preserve
 daylight-saving boundaries.
 
+`attention.py` exhausts stable Work/request pages before ranking or applying
+presentation caps. `attention_authority.py` prepares route decisions, then joins
+current account/role limits/binding/connection/grants/policy in a final snapshot.
+A changed principal, configuration or source authority retires the read; read-only
+owners retain inspectable content without actionable requests. No chat list or
+summary scheduler is installed by this collector.
+
 `commands.py` handles fixed navigation and language settings only. A command closes
 only a typing prompt; `/new` and `/stop` also end the forms and cards in scope.
 `work_actions.py` adds optional Work service actions to `Acts`; supervisor startup
