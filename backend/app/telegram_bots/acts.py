@@ -1,6 +1,7 @@
 """Settings actions share one custody, preference and presentation transaction.
 
-Later service actions and their retry workers are deliberately not installed.
+Optional Work service actions retain immutable requests and receipts. Their
+chat handlers and retry worker startup are not installed yet.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.telegram_bots.callbacks import CALLBACK_METADATA_KEYS, CallbackRefused
 from app.telegram_bots.links import BotLink, prepare_publication_guard
 from app.telegram_bots.texts import KEYBOARDS
+from app.telegram_bots.work_actions import ActsWorker as ActsWorker
+from app.telegram_bots.work_actions import WorkActionMethods
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramOutboxRow, TelegramPersonSettingsRow
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.utils.file_io import await_drained
@@ -120,10 +123,12 @@ class _AttemptGuard:
         return link
 
 
-class Acts:
-    def __init__(self, session_factory, *, settings, callbacks, outbox):
+class Acts(WorkActionMethods):
+    def __init__(self, session_factory, *, settings, callbacks, outbox, work=None, authority=None, links=None):
         self.session_factory = session_factory
         self.settings, self.callbacks, self.outbox = settings, callbacks, outbox
+        self.work, self.authority, self.links = work, authority, links
+        self._work_active: set[str] = set()
         self._locks = AsyncKeyedLockTable()
         self._operations: set[asyncio.Task] = set()
 

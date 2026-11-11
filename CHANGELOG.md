@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram delivery
 
+- Prepare receipt-backed human Work actions for Telegram, including immutable
+  retries and transaction-bound custody checks. Chat controls remain disabled.
+
 - Prepare notification preferences, quiet-message classes and durable optional-news
   budgets. Proactive delivery remains disabled until its interaction handlers are
   available; existing reply delivery keeps its transport and authority checks.

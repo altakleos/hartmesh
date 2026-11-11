@@ -369,7 +369,7 @@ class AgentWork:
 
         return await await_drained(perform())
 
-    async def command(self, *, actor, instance_id, work_id, request: WorkCommand, can_stop=False):
+    async def command(self, *, actor, instance_id, work_id, request: WorkCommand, can_stop=False, admission=None):
         request = WorkCommand.model_validate(request.model_dump(exclude_unset=True))
         await self.agents._human(actor)
         decision_sources = []
@@ -405,6 +405,8 @@ class AgentWork:
                 receipt = await self._receipt(session, actor, parent, request, work_id)
                 if receipt is not None:
                     return receipt
+                if admission is not None:
+                    await admission(session)
                 if row.revision != request.expected_revision or row.assignment_revision != request.expected_assignment_revision or row.revision >= 2147483647:
                     raise AgentConflict("Work changed; reload before acting")
                 active_attempt = await session.scalar(select(AgentWorkAttemptRow).where(AgentWorkAttemptRow.work_id == row.id, AgentWorkAttemptRow.status.in_(UNRESOLVED)))
@@ -435,7 +437,10 @@ class AgentWork:
                 row.revision += 1
                 row.updated_at = datetime.now(UTC)
                 snapshot = await self._event(session, actor, row, request, request.action)
-                return await self._project(session, actor, parent, snapshot)
+                result = await self._project(session, actor, parent, snapshot)
+                if admission is not None:
+                    await admission(session)
+                return result
 
         return await await_drained(perform())
 
