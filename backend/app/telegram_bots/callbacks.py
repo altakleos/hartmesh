@@ -829,6 +829,9 @@ class CallbackRepository:
                 unsettled = set()
                 for start in range(0, len(anchors), 500):
                     unsettled.update(await session.scalars(select(TelegramOutboxRow.id).where(TelegramOutboxRow.id.in_(anchors[start : start + 500]), TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
+                # An unfinished direct Work reply still needs its consumed
+                # source group and acknowledged parent as dispatch evidence.
+                unsettled.update(await session.scalars(select(TelegramOutboxRow.payload["work_request_basis"]["origin"]["anchor_outbox_id"].as_string()).where(TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
                 removed = 0
                 for row in rows:
                     if row.group_id in pending_groups:

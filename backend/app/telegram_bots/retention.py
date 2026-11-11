@@ -84,17 +84,23 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
     delivery = TelegramOutboxRow
     # Compact dependency edges preserve complete digests behind live controls.
     records = await session.execute(
-        select(delivery.id, delivery.class_, delivery.state, delivery.payload["member_ids"], delivery.payload["digest_id"].as_string(), delivery.payload["work_request_basis"]["cleanup_id"].as_string()).where(
-            or_(delivery.class_ == "digest", delivery.state.in_(("pending", "sending", "failed")))
-        )
+        select(
+            delivery.id,
+            delivery.class_,
+            delivery.state,
+            delivery.payload["member_ids"],
+            delivery.payload["digest_id"].as_string(),
+            delivery.payload["work_request_basis"]["cleanup_id"].as_string(),
+            delivery.payload["work_request_basis"]["origin"]["anchor_outbox_id"].as_string(),
+        ).where(or_(delivery.class_ == "digest", delivery.state.in_(("pending", "sending", "failed"))))
     )
     graph = {}
-    for identity, kind, state, members, reservation, cleanup in records:
+    for identity, kind, state, members, reservation, cleanup, origin in records:
         if state in {"pending", "sending"}:
             pinned.add(identity)
             pinned |= _strings(reservation)
         if state in {"pending", "sending", "failed"}:
-            pinned |= _strings(cleanup)
+            pinned |= _strings(cleanup, origin)
         if kind == "digest" and isinstance(members, list):
             graph[identity] = _strings(*members)
     pending = list(pinned)

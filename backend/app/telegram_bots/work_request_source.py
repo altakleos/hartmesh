@@ -60,19 +60,19 @@ def _references(value):
             yield from _references(child)
 
 
-def frozen(captured):
+def frozen(captured, *, acknowledged=False):
     """A class label or literal template cannot manufacture a Work source."""
     try:
         basis = captured.item.payload["work_request_basis"]
         if (
             type(basis) is not dict
-            or set(basis) != {"version", "source", "locale", "concealed", "parts", "keyboard"} | ({"reveal", "cleanup_id"} if basis.get("version") == 2 else set())
+            or set(basis) != {"version", "source", "locale", "concealed", "parts", "keyboard"} | ({"reveal", "cleanup_id"} if basis.get("version") in {2, 3} else set()) | ({"interaction", "origin"} if basis.get("version") == 3 else set())
             or type(basis["version"]) is not int
-            or basis["version"] not in {1, 2}
+            or basis["version"] not in {1, 2, 3}
         ):
             raise ValueError()
         if (
-            captured.item.class_ != "question"
+            captured.item.class_ != ("reply" if basis["version"] == 3 else "question")
             or type(basis["concealed"]) is not bool
             or type(basis["locale"]) is not str
             or type(captured.item.payload.get("presentation_version")) is not int
@@ -85,7 +85,7 @@ def frozen(captured):
         if reveal is not None and basis["concealed"]:
             raise ValueError()
         cleanup_id = basis.get("cleanup_id")
-        if cleanup_id is not None and (reveal is None or type(cleanup_id) is not str or len(cleanup_id) != 32 or any(ch not in "0123456789abcdef" for ch in cleanup_id)):
+        if cleanup_id is not None and (reveal is None and basis["version"] != 3 or type(cleanup_id) is not str or len(cleanup_id) != 32 or any(ch not in "0123456789abcdef" for ch in cleanup_id)):
             raise ValueError()
         data = basis["source"]
         source = WorkRequestRead(**{**data, "responses": tuple(data["responses"])})
@@ -95,9 +95,23 @@ def frozen(captured):
             raise ValueError()
         if type(source.protected) is not bool or json.dumps(source.seen, sort_keys=True) != json.dumps(seen_basis(source.work, source.request, source.responses), sort_keys=True):
             raise ValueError()
-        if source.protected and not basis["concealed"] and reveal is None:
+        if source.protected and not basis["concealed"] and reveal is None and basis["version"] != 3:
             raise ValueError()
-        presentation = present_request(source, locale=basis["locale"], concealed=basis["concealed"], outbox_id=captured.item.id)
+        if basis["version"] == 3:
+            from app.telegram_bots.work_interactions import present_interaction
+
+            origin = basis["origin"]
+            if (
+                type(origin) is not dict
+                or set(origin) != {"callback_id", "anchor_outbox_id", "presentation_version", "message_id"}
+                or any(type(origin[key]) is not str or len(origin[key]) != 32 or any(ch not in "0123456789abcdef" for ch in origin[key]) for key in ("callback_id", "anchor_outbox_id"))
+            ):
+                raise ValueError()
+            if type(origin["presentation_version"]) is not int or origin["presentation_version"] < 0 or type(origin["message_id"]) is not int or origin["message_id"] <= 0 or reveal is not None or basis["concealed"] or cleanup_id is None:
+                raise ValueError()
+            presentation = present_interaction(source, basis["interaction"], locale=basis["locale"])
+        else:
+            presentation = present_request(source, locale=basis["locale"], concealed=basis["concealed"], outbox_id=captured.item.id)
         if reveal is not None and len(presentation.parts) > 1 and cleanup_id is None:
             raise ValueError()
         expected = []
@@ -118,7 +132,7 @@ def frozen(captured):
         parts = [part for part in captured.item.parts if part["presentation_version"] == version]
         if len(historical) + len(parts) != len(captured.item.parts):
             raise ValueError()
-        if len(parts) != len(expected) or parts[index] != captured.part or captured.part.get("state") != "sending":
+        if len(parts) != len(expected) or parts[index] != captured.part or captured.part.get("state") != ("sent" if acknowledged else "sending"):
             raise ValueError()
         identities = {part["part_id"] for part in historical}
         if len(identities) != len(historical):
@@ -154,7 +168,7 @@ def frozen(captured):
                 raise ValueError()
             if source.protected and not part.get("protect_content") or ordinal < len(parts) - 1 and part.get("callback_group_id"):
                 raise ValueError()
-            if ordinal < index and (part["state"] != "sent" or not part.get("sent_at") or not part.get("message_ids") or any(type(identity) is not int or identity <= 0 for identity in part["message_ids"])):
+            if (acknowledged or ordinal < index) and (part["state"] != "sent" or not part.get("sent_at") or not part.get("message_ids") or any(type(identity) is not int or identity <= 0 for identity in part["message_ids"])):
                 raise ValueError()
         recipe = expected[index]
         return basis, source, recipe
@@ -178,8 +192,10 @@ class WorkRequestSources:
         if not (current.request["can_respond"] if current.request["purpose"] == "information" else current.request["can_manage"]):
             raise ProductSourceRetired()
         revealed = bool(basis.get("reveal"))
-        changed = content(current) != content(source) or current.seen != source.seen or current.protected != source.protected or current.protected != basis["concealed"] and not revealed
-        if self.recovery is not None:
+        changed = content(current) != content(source) or current.seen != source.seen or current.protected != source.protected or current.protected != basis["concealed"] and not revealed and basis["version"] != 3
+        if basis["version"] == 3 and changed:
+            raise ProductSourceRetired()
+        if self.recovery is not None and basis["version"] != 3:
             settings = await self.settings.get(captured.link.owner_user_id)
             if settings is None:
                 raise ProductSourceRetired()
@@ -227,6 +243,9 @@ class _RequestProjection:
         self.host, self.captured, self.basis, self.source = host, captured, basis, source
         self.settings, self.zone, self.silent, self.now = settings, zone, silent, now
         self.spaces = set(_references((source.request, source.work, source.responses)))
+        # The last part owns markup, but its complete control group must remain
+        # usable before *any* chunk of this presentation reaches Telegram.
+        self.controls_part = next((part for part in captured.item.parts if part["presentation_version"] == captured.item.payload["presentation_version"] and part.get("stored_keyboard")), None)
 
     def extend(self, query):
         bot, delivery, settings = TelegramBotLinkRow, TelegramOutboxRow, TelegramPersonSettingsRow
@@ -250,14 +269,24 @@ class _RequestProjection:
             .correlate(bot)
             .scalar_subquery()
         )
+        origin = self.basis.get("origin", {})
+        origin_group = select(TelegramCallbackRow.group_id).where(TelegramCallbackRow.id == origin.get("callback_id")).scalar_subquery()
         callbacks = (
             select(aggregate({column.name: column for column in callback.__table__.columns}))
-            .where(or_(callback.group_id == self.captured.part.get("callback_group_id") if self.captured.part.get("callback_group_id") else false(), callback.id == self.basis.get("reveal") if self.basis.get("reveal") else false()))
+            .where(
+                or_(
+                    callback.group_id == self.controls_part.get("callback_group_id") if self.controls_part is not None else false(),
+                    callback.id == self.basis.get("reveal") if self.basis.get("reveal") else false(),
+                    callback.group_id == origin_group if origin else false(),
+                )
+            )
             .scalar_subquery()
         )
         cleanup = aliased(TelegramOutboxRow)
+        origin_parent = aliased(TelegramOutboxRow)
         return (
-            query.add_columns(work, request, delivery, settings, spaces, callbacks, cleanup)
+            query.add_columns(work, request, delivery, settings, spaces, callbacks, cleanup, origin_parent)
+            .outerjoin(origin_parent, origin_parent.id == origin.get("anchor_outbox_id") if origin else false())
             .outerjoin(cleanup, cleanup.id == self.basis.get("cleanup_id") if self.basis.get("cleanup_id") else false())
             .join(work, and_(work.id == self.source.work["id"], work.instance_id == bot.agent_ref))
             .join(request, and_(request.id == self.source.request["id"], request.instance_id == bot.agent_ref, request.work_id == work.id))
@@ -296,9 +325,11 @@ class _RequestProjection:
         if self.source.request["purpose"] != "information" and permissions & 6 != 6:
             raise ProductSourceRetired()
         protected = target.custody == "company" and policy == "protected"
-        if protected != self.source.protected or protected != self.basis["concealed"] and not self.basis.get("reveal") or protected and not self.captured.part.get("protect_content"):
+        if protected != self.source.protected or protected != self.basis["concealed"] and not self.basis.get("reveal") and self.basis["version"] != 3 or protected and not self.captured.part.get("protect_content"):
             raise DeliveryRetry(timedelta(seconds=5))
         actual = _snapshot(saved_settings)
+        if self.basis["version"] == 3 and actual.locale != self.basis["locale"]:
+            raise ProductSourceRetired()
         if actual.locale != self.basis["locale"] or actual.timezone != self.settings.timezone:
             raise DeliveryRetry(timedelta(seconds=5))
         if preference_skip(latest.item, actual, self.now):
@@ -330,11 +361,16 @@ class _RequestProjection:
                 raise ProductSourceRetired()
         if not cleanup_ready(delivery, rows[0][14]):
             raise DeliveryRetry(timedelta(seconds=5))
-        if self.basis.get("cleanup_id") and rows[0][14].payload["target_message_id"] != reveal.message_id:
+        if self.basis["version"] == 3:
+            from app.telegram_bots.work_interaction_delivery import check_origin
+
+            check_origin(current, rows[0][15], callback_facts, self.basis, self.source)
+        cleanup_target = self.basis["origin"]["message_id"] if self.basis["version"] == 3 else reveal.message_id if self.basis.get("reveal") else None
+        if self.basis.get("cleanup_id") and rows[0][14].payload["target_message_id"] != cleanup_target:
             raise ProductSourceRetired()
-        if self.captured.part.get("stored_keyboard"):
-            callbacks = {row.id: row for row in callback_facts if row.group_id == self.captured.part["callback_group_id"]}
-            _validate_rows(delivery, list(callbacks.values()), part=self.captured.part, allow_pending=True)
+        if self.controls_part is not None:
+            callbacks = {row.id: row for row in callback_facts if row.group_id == self.controls_part["callback_group_id"]}
+            _validate_rows(delivery, list(callbacks.values()), part=self.controls_part, allow_pending=True)
             for callback in callbacks.values():
                 if (
                     callback.link_id != current.id

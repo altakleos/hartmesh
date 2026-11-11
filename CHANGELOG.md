@@ -10,8 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Telegram delivery
 
 - Prepare complete Work confirmation and prompt views that retain the displayed
-  request basis and unsubmitted text. Their delivery and chat handlers remain
-  uninstalled.
+  request basis and unsubmitted text. First-tap menus and confirmations have
+  durable, source-checked reply delivery with acknowledged origin and keyboard
+  cleanup. Chat handlers and typing/voice integration remain uninstalled.
 
 - Prepare receipt-backed question routing and current eligible-recipient reads.
   Routing grants no access and starts no work; chat controls remain disabled.

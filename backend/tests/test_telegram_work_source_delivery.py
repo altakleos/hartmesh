@@ -217,7 +217,7 @@ async def test_final_query_does_not_multiply_preview_payload_by_spaces_and_butto
         for identity in (home.id, second):
             writer.add(SpaceGrantRow(space_id=identity, principal_kind="human", subject_id=e.link.owner_user_id, permissions=1))
         saved = await writer.get(TelegramOutboxRow, e.identity)
-        captured = SimpleNamespace(item=SimpleNamespace(id=saved.id), part=saved.parts[-1])
+        captured = SimpleNamespace(item=SimpleNamespace(id=saved.id, parts=saved.parts, payload=saved.payload), part=saved.parts[-1])
     source = replace(source, request={**source.request, "sources": [{"kind": "space_file", "space_id": identity, "path": "guide.txt"} for identity in (e.instance.home_id, second)]})
     host = WorkRequestSources(reader=e.reader, outbox=e.channel._services.outbox, callbacks=e.channel._services.callbacks)
     projection = _RequestProjection(host, captured, saved.payload["work_request_basis"], source, None, None, False, None)

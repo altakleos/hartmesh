@@ -44,82 +44,12 @@ Stale lists retire without blocking later messages. Ordinary bots dispatch
 `/assistants` and `/employees` to `handle_list`; their Work words only point to
 those chats. Instance/custom bots do not acquire these ordinary-chat commands.
 
-`notifications.py` owns class preferences and optional-news budgets. The sender's
-`proactive` switch remains false until notification entry points are complete.
-Essential rows bypass discretionary budgets; edits require actual edit parts.
-PostgreSQL serializes cross-bot daily admission with an owner advisory lock;
-SQLite uses the existing writer. Immutable first-dispatch reservations retain a
-logical notification through ambiguous retries; transport pacing is independent.
-`notification_authority.py` checks settings, account, binding, claim and current
-instance grant/policy in one final SQL snapshot at the SDK limiter boundary.
-Model, callback and file notification plans remain refused until their own source
-authority joins that snapshot. Local-day calculations run off-loop and preserve
-daylight-saving boundaries.
-
-`digests.py` reserves up to ten due unsolicited rows within one notification
-category; `digest_threshold` accepts 1–10. Membership and original ages stay immutable through shared claims and
-ambiguous retry; ACK alone marks members in-digest. Pre-ACK retirement consumes
-controls before freeing owned members. Digest cards have one text part; invalid
-historical partial ACKs retain members for reconciliation. Retention follows
-transitive source edges. Reservations have no parts until source materialization;
-source dispatch and item/reveal controllers are not installed by this primitive.
-
-`attention.py` exhausts stable Work/request pages before ranking or applying
-presentation caps. `attention_authority.py` prepares route decisions, then joins
-current account/role limits/binding/connection/grants/policy in a final snapshot.
-A changed principal, configuration or source authority retires the read; read-only
-owners retain inspectable content without actionable requests. No chat list or
-summary scheduler is installed by this collector.
-
-`work_routing.py` reads owner-authenticated grants and active accounts before
-capping six recipient buttons. Information needs Use+Inspect; decisions/reviews
-need Manage+Inspect. The latest wrong recipient is excluded; names, never IDs,
-label choices. `Acts.route` serializes body capture and exact receipt recovery;
-HumanInput's borrowed admission fences binding/account/policy at commit. Routing
-grants no access and ignores the action pause. Presentation/handlers stay dormant.
-
-`work_interactions.py` renders complete unsubmitted confirmation/prompt views.
-Its closed JSON state retains normalized text and the displayed `seen` basis;
-all comments precede separate final-part controls. A stale changes draft requires
-a fresh complete review and explicit confirmation; rendering performs no command.
-Decision/acceptance views grant no acknowledgement or execution permission.
-
-`work_requests.py` reads every response before forming request controls and
-retains the complete displayed basis. Review instructions, comments and response
-dispositions are never clipped to a notification title. `work_request_delivery.py`
-atomically freezes a materialized preview and its last-part callback group; a
-retry reuses the original identities. This is a healthy-binding presentation
-primitive, not event ingestion. Unrendered events must retain their intent while
-transport is unavailable. The raw SDK requires an explicitly installed `WorkRequestSources`; supervisor
-startup does not install it yet. Literal templates and misclassified replies
-cannot bypass this boundary. `work_request_source.py` validates the entire frozen
-part sequence and preceding ACKs, re-proves complete source/seen data and joins
-claim/settings/Work/request/Space/callback facts to the final account/grant read.
-Compact correlated arrays avoid multiplying the full outbox JSON. Privacy, locale
-and Work-only revision drift defer until the optional recovery coordinator is
-installed. `work_request_recovery.py` owns drained refresh and acknowledged Show:
-prepare config and provider off-writer, borrow the final joined account/grant/source check,
-retain uncertain Acts, consume old controls atomically, and clear old keyboards.
-Compose that admission after the outer guard’s last await, then check lifetime synchronously.
-Revealed protected content requires its consumed Show receipt at dispatch. Multipart
-reveal first clears the teaser through a retained cleanup dependency, then sends
-every full chunk as a new protected message; missing cleanup targets settle silently. Current
-presentation versions require every preceding ACK; same-basis anchor repair keeps
-control identities/expiry and moves anchors only after complete delivery. The
-source family stays uninstalled until event and interaction integration.
+Work, notification, digest and interaction contracts are in
+[the Work delivery guide](../../docs/TELEGRAM_WORK.md). Read it before changing
+`attention*`, `notification*`, `digest*`, `work_*` or their sender/callback integration.
 
 `commands.py` handles fixed navigation and language settings only. A command closes
 only a typing prompt; `/new` and `/stop` also end the forms and cards in scope.
-`work_actions.py` adds optional Work service actions to `Acts`; supervisor startup
-does not install them yet. Bound people own immutable request bodies and operation
-ids. Exact service receipts are read without mutation before fresh action guards.
-A generic borrowed-writer admission checks link/account/policy/pause and the exact
-journal attempt before a fresh effect and again before commit. `work_authority.py`
-prepares the route provider off-writer, then evaluates it against the borrowed
-current account/role limit; no nested account checkout is allowed. Review commands
-use the complete displayed basis and captured Work CAS. The bounded worker only
-retries admitted service calls with no conclusive refusal, never settings, files,
-network or transcription. No action here starts or stops an assignment.
 
 `acts.py` commits a saved settings choice, its exact old/new preference, completed
 Act, consumed group and replacement controls in one guarded writer.
