@@ -267,6 +267,9 @@ nonregular leaves and overlong suffixes, never overwrite. Mutation parents rejec
 symlinks; read link policy stays separate. Trusted controller admission borrows
 the mutation transaction before its intent and effect. Human-attributed requests
 retain the canonical six fields; callers drain spool and metadata workers too.
+`export_file` may borrow a trusted controller admission before and after its
+bounded native read, under the admitted Space writer. Mandatory human READ/EXPORT
+grants still apply; a rejected post-read check drops the result before return.
 Only exact ADMIN may catch `_volume`'s `BackingUnavailable`, skipping that
 resource's workflow probe and pending-operation gate. Principal/grant/generation
 and attachment guards remain mandatory; combined file rights and workflow lock

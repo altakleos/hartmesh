@@ -479,10 +479,11 @@ notice is that outcome, and `_file_notice` records it, so no later attempt reads
 tells the person twice or makes the notice false. A read nobody was told about is no
 outcome and runs again. Send again is a new turn, and a restart forgets it.
 
-`file_source.py` qualifies V6 file replies from the same complete matched output
-inventory. Metadata is presentation data, never read authority. The existing
-artifact HEAD and explicit streaming GET retain owner/Space checks; the one
-Gateway client owns their responses. `outbound.py` reserves the whole batch
+`file_source.py` qualifies V6 file replies from complete matched output
+inventory. Metadata grants no authority. Artifact HEAD/GET retain owner/Space
+checks and client response ownership. Instance exports
+use [human grants](../../docs/TELEGRAM_TURN_EXECUTION.md#instance-file-writes).
+`outbound.py` reserves the whole batch
 before reading, records first-read SHA before upload and refuses changed retries.
 Every SDK dispatch rechecks the artifact door after limiter waits; thread/run
 rights alone do not cover independently revoked Space access. Classification and fallback replace saved unsent parts, preserving every ACK.
