@@ -148,3 +148,13 @@ keep an unsubmitted note. Submission must separately recheck current permission,
 request state and the captured basis; stale-note preview and outcome controllers
 remain required before these entry points are installed. Files/voice and expired
 or replaced prompt routing are separate controller paths.
+
+`work_input_admission.py` admits captured answers/reasons and unchanged change
+requests into the existing immutable Act journal. It re-proves the stored input
+in the same final guarded writer; no caller text or fresh revision replaces the
+captured body. A stale preview creates no Act, while a post-admission change is
+rejected by the domain CAS. The receipt worker owns execution after commit.
+Replay requires the original journal row to remain under lock; deletion cannot
+convert replay into a fresh operation. Decision text remains unsubmitted until
+a separate complete preview and explicit confirmation. Capture can borrow only
+an active same-store writer. Result delivery and chat installation remain pending.

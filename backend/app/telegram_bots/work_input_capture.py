@@ -23,11 +23,13 @@ class WorkInputCaptures:
         if inbox.session_factory.kw.get("bind") is not callbacks.sessions.kw.get("bind"):
             raise ValueError("work-input-requires-shared-storage")
 
-    async def capture(self, link, origin, *, prompt_id, guard):
+    async def capture(self, link, origin, *, prompt_id, guard, session=None):
         """Own the input route and close its shown prompt atomically; do not act."""
+        if session is not None:
+            self.inbox._publication_borrow(session)
 
         async def perform():
-            async with self.callbacks.writer(link, guard) as writer:
+            async with self.callbacks.writer(link, guard, session=session) as writer:
                 if origin.link_id != link.id:
                     raise CallbackRefused()
                 mark = (await self.inbox._rows(writer, [origin]))[0]
