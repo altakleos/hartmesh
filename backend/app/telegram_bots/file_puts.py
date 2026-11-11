@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from app.channels.inbound_leases import InboundFileLease
 from app.telegram_bots.acts import _snapshot
-from app.telegram_bots.callbacks import CALLBACK_METADATA_KEYS, CallbackRefused
+from app.telegram_bots.callbacks import CALLBACK_METADATA_KEYS, CallbackRefused, _topic
 from app.telegram_bots.inbox import InboxRow, chat_input_parts, validate_chat_file
 from app.telegram_bots.instance_file_authority import prepare_file_write
 from app.telegram_bots.links import prepare_publication_guard
@@ -23,7 +23,7 @@ from deerflow.agent_instances.agent_files import AGENT_FILE_REFUSALS, AgentFileR
 from deerflow.agent_instances.contract import ResidentFilesBusy
 from deerflow.persistence.agent_instances.model import AgentInstanceRow
 from deerflow.persistence.spaces.model import SpaceRow
-from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramInboundMarkRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramInboundMarkRow, TelegramPendingFileRow
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.utils.file_io import await_drained
 
@@ -80,8 +80,25 @@ def _file_journal(row, *, max_bytes=None):
     if row.kind != "file_put" or type(row.id) is not str or re.fullmatch(r"[0-9a-f]{32}", row.id) is None:
         raise ValueError("file-act-conflict") from None
     continuation = row.continuation
-    if type(continuation) is not dict or set(continuation) != {"version", "file", "labels", "presses", "target"} or type(continuation["version"]) is not int or continuation["version"] != 1:
+    if type(continuation) is not dict or type(continuation.get("version")) is not int or continuation["version"] not in {1, 2}:
         raise ValueError("file-act-conflict") from None
+    if set(continuation) != {"version", "file", "labels", "presses", "target"} | ({"input"} if continuation["version"] == 2 else set()):
+        raise ValueError("file-act-conflict") from None
+    if continuation["version"] == 2:
+        source = continuation["input"]
+        if (
+            type(source) is not dict
+            or set(source) != {"captionless", "topic", "message_ids"}
+            or type(source["captionless"]) is not bool
+            or source["topic"] is not None
+            and (type(source["topic"]) is not int or source["topic"] <= 0)
+            or type(source["message_ids"]) is not list
+            or not 1 <= len(source["message_ids"]) <= 64
+            or any(type(identity) is not int or identity <= 0 for identity in source["message_ids"])
+            or len(set(source["message_ids"])) != len(source["message_ids"])
+            or row.message_id not in source["message_ids"]
+        ):
+            raise ValueError("file-act-conflict") from None
     target = continuation["target"]
     if (
         type(target) is not dict
@@ -115,6 +132,8 @@ def _file_journal(row, *, max_bytes=None):
             for press in presses
         )
     ):
+        raise ValueError("file-act-conflict") from None
+    if continuation["version"] == 2 and any(press["topic"] != continuation["input"]["topic"] for press in presses):
         raise ValueError("file-act-conflict") from None
     if [label for label in labels[1:] if label != "rename"] != [f"retry:{number}" for number in range(2, len(presses) + 2)] or len({press["callback_id"] for press in presses}) != len(presses):
         raise ValueError("file-act-conflict") from None
@@ -202,10 +221,26 @@ class FilePuts:
         await access.check_receipt(writer)
         return row
 
-    async def _prepare(self, link, origin, file, access):
+    async def _input(self, writer, link, origin, origins):
+        """Capture the actual joined input, never a caller's captionless flag."""
+        if not isinstance(origins, (tuple, list)) or not 1 <= len(origins) <= 64 or len({row.message_id for row in origins}) != len(origins) or origin not in origins:
+            raise ValueError("file-input-conflict") from None
+        marks = []
+        for captured in origins:
+            mark = await writer.get(TelegramInboundMarkRow, (link.id, captured.message_id, link.chat_id), with_for_update=True, populate_existing=True)
+            if mark is None or (mark.link_id, mark.chat_id, mark.binding_generation, mark.route_kind, mark.route_target_id) != (link.id, link.chat_id, link.binding_generation, "turn", link.agent_ref) or mark.route_complete:
+                raise ValueError("file-input-conflict") from None
+            self.inbox._publication_snapshot_matches(mark, captured)
+            marks.append(mark)
+        self.inbox._group(marks)
+        ordered = self.inbox._prepublication_members(marks)
+        parts = [chat_input_parts(InboxRow.from_row(mark), bot_id=link.bot_id) for mark in ordered]
+        return dict(captionless=not any(text.strip() for text, _files in parts), topic=ordered[0].message_thread_id, message_ids=[mark.message_id for mark in ordered])
+
+    async def _prepare(self, link, origin, file, access, origins):
         file = validate_chat_file(file)
         identity = file_act_id(link, file)
-        async with self.callbacks.writer(link, access.guard) as writer:
+        async with self.callbacks.writer(link, _FileReceiptGuard(access, access.guard)) as writer:
             saved = await writer.get(TelegramActRow, identity, with_for_update=True, populate_existing=True)
             if saved is not None:
                 row = await self._row(writer, link, identity, access)
@@ -220,6 +255,7 @@ class FilePuts:
             _text, files = chat_input_parts(actual, bot_id=link.bot_id)
             if file not in files or file["message_id"] != mark.message_id:
                 raise ValueError("file-act-conflict") from None
+            source = await self._input(writer, link, origin, origins) if origins is not None else None
             now = datetime.now(UTC)
             row = TelegramActRow(
                 id=identity,
@@ -231,7 +267,7 @@ class FilePuts:
                 operation_ids=[identity],
                 attempts=0,
                 first_attempt_at=None,
-                continuation=dict(version=1, file=file, labels=["initial"], presses=[], target=_target(access)),
+                continuation=dict(version=2 if source is not None else 1, file=file, labels=["initial"], presses=[], target=_target(access), **({"input": source} if source is not None else {})),
                 created_at=now,
                 updated_at=now,
             )
@@ -240,7 +276,7 @@ class FilePuts:
             return _snapshot(row)
 
     async def _transition(self, link, captured, access, *, state, reason=None, result=None, begin=False, rename=False):
-        async with self.callbacks.writer(link, access.guard) as writer:
+        async with self.callbacks.writer(link, _FileReceiptGuard(access, access.guard)) as writer:
             row = await self._row(writer, link, captured.id, access)
             if row.state == "done":
                 return _snapshot(row)
@@ -263,6 +299,28 @@ class FilePuts:
                 row.result = asdict(result)
                 row.body = {**row.body, "size": result.size, "sha256": result.sha256, "path": result.path}
             row.state, row.reason, row.updated_at = state, reason, now
+            if state == "done" and row.continuation.get("input", {}).get("captionless") is True:
+                # Completion and the one pending handoff share a transaction.
+                # The terminal replay above never recreates a consumed handoff.
+                file = row.continuation["file"]
+                values = dict(
+                    chat_id=link.chat_id,
+                    message_thread_id=row.continuation["input"]["topic"],
+                    binding_generation=link.binding_generation,
+                    file_id=file["file_id"],
+                    file_unique_id=file["file_unique_id"],
+                    filename=file["filename"],
+                    mime_type=file["mime_type"],
+                    size=-1 if file["size"] is None else file["size"],
+                    is_image=file["type"] == "image",
+                    agent_file_path=row.result["path"],
+                )
+                existing = await writer.get(TelegramPendingFileRow, (link.id, row.message_id), with_for_update=True, populate_existing=True)
+                if existing is not None:
+                    if any(getattr(existing, key) != value for key, value in values.items()):
+                        raise ValueError("pending-file-conflict") from None
+                else:
+                    writer.add(TelegramPendingFileRow(link_id=link.id, message_id=row.message_id, created_at=now, **values))
             await writer.flush()
             return _snapshot(row)
 
@@ -285,14 +343,14 @@ class FilePuts:
 
         return await await_drained(perform())
 
-    async def put(self, link, origin, file, *, authority, current, download, progress):
+    async def put(self, link, origin, file, *, authority, current, download, progress, origins=None):
         """Save an actually admitted file, without starting a conversation or run."""
         file = validate_chat_file(file)
 
         async def perform():
             async with self._locks.hold(file_act_id(link, file)):
                 access = await prepare_file_write(authority, link, current=current)
-                row = await self._prepare(link, origin, file, access)
+                row = await self._prepare(link, origin, file, access, origins)
                 if row.state in {"pending", "waiting"}:
                     return await self._transition(link, row, access, state="uncertain", reason="interrupted")
                 if row.state != "draft":
@@ -307,12 +365,15 @@ class FilePuts:
         async def perform():
             async with self._locks.hold(identity):
                 access = await prepare_file_write(authority, link, current=current)
-                async with self.callbacks.writer(link, access.guard) as writer:
+                async with self.callbacks.writer(link, _FileReceiptGuard(access, access.guard)) as writer:
                     row = await self._row(writer, link, identity, access, lock=False)
+                    topic = _topic(message_thread_id) if row.continuation["version"] == 2 else message_thread_id
+                    if row.continuation["version"] == 2 and row.continuation["input"]["topic"] != topic:
+                        raise CallbackRefused() from None
                     previous = next((press for press in row.continuation["presses"] if press["callback_id"] == callback_id), None)
                     if previous is not None:
                         row = await self._row(writer, link, identity, access)
-                        if chat_id != link.chat_id or previous != dict(callback_id=callback_id, message_id=message_id, topic=message_thread_id):
+                        if chat_id != link.chat_id or previous != dict(callback_id=callback_id, message_id=message_id, topic=topic):
                             raise CallbackRefused() from None
                         # A redelivered press can read its result, never create
                         # another operation after a process interruption.
@@ -322,14 +383,14 @@ class FilePuts:
                         return _snapshot(row)
                     # Lock ordering stays link, anchor/group, then Act. The
                     # process lock serializes the live file owner for this Act.
-                    group = await self.callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=access.guard, session=writer)
+                    group = await self.callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=topic, guard=access.guard, session=writer)
                     row = await self._row(writer, link, identity, access)
                     selected = group.selected
                     payload = {key: value for key, value in selected.payload.items() if key not in CALLBACK_METADATA_KEYS}
                     if row.state not in {"refused", "uncertain"} or selected.kind != "file_retry" or (selected.target_kind, selected.target_id) != ("act", identity) or payload != {"act_id": identity}:
                         raise CallbackRefused() from None
                     label = f"retry:{len(row.continuation['presses']) + 2}"
-                    row.continuation = {**row.continuation, "labels": [*row.continuation["labels"], label], "presses": [*row.continuation["presses"], dict(callback_id=callback_id, message_id=message_id, topic=message_thread_id)]}
+                    row.continuation = {**row.continuation, "labels": [*row.continuation["labels"], label], "presses": [*row.continuation["presses"], dict(callback_id=callback_id, message_id=message_id, topic=topic)]}
                     row.operation_ids = [*row.operation_ids, child_operation(identity, label)]
                     row.state, row.reason, row.updated_at = "draft", None, datetime.now(UTC)
                     await self.callbacks.consume_group(group, reason="done", session=writer)

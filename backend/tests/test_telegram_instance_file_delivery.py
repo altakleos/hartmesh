@@ -188,6 +188,7 @@ async def test_limiter_rechecks_file_authority_before_any_sdk_effect(file_admiss
     with pytest.raises((AgentDenied, AuthorityUnavailable, DeliveryClaimRetired, ValueError)) as refused:
         await e.channel.put_instance_file(e.link, source, file)
     if change == "lifetime":
-        assert str(refused.value) == "publication-stale"
+        # The composite journal guard now detects retirement during prepare.
+        assert str(refused.value) == "publication-guard-unavailable"
     assert len(request.calls) == before and not reads
     assert not e.channel._file_tasks and e.channel._services.file_bytes_budget.used == 0

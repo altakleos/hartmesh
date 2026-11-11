@@ -199,6 +199,9 @@ class PendingFiles:
                 if text.strip() or len(descriptors) != 1 or descriptors[0] != file or any(type(file[key]) is not type(value) for key, value in descriptors[0].items()) or file["message_id"] != mark.message_id:
                     raise ValueError("pending-file-conflict") from None
                 saved = await receipts.completed(file, session=writer) if receipts is not None else None
+                retained_input = saved.continuation.get("input") if saved is not None else None
+                if retained_input is not None and (not retained_input["captionless"] or retained_input["topic"] != mark.message_thread_id):
+                    raise ValueError("pending-file-conflict") from None
                 values = {
                     "chat_id": mark.chat_id,
                     "message_thread_id": mark.message_thread_id,
@@ -215,7 +218,7 @@ class PendingFiles:
                 if existing is not None:
                     if any(getattr(existing, key) != value for key, value in values.items()):
                         raise ValueError("pending-file-conflict") from None
-                elif not mark.route_complete:
+                elif not mark.route_complete and retained_input is None:
                     writer.add(TelegramPendingFileRow(link_id=link.id, message_id=mark.message_id, created_at=mark.accepted_at, **values))
                 # A completed captionless receipt whose pending row was taken or
                 # swept cannot recreate it on provider redelivery.
