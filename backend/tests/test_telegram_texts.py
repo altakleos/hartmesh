@@ -47,9 +47,12 @@ POLICY_KEYS = frozenset({"policy.off", "policy.on", "policy.on_protected", "poli
 AGENT_LIST_KEYS = frozenset("cmd.other_chat assistants.list assistants.none assistants.colleagues employees.list employees.none agents.line_work agents.line_idle agents.line_plain agents.more agents.presentation".split())
 
 
+WORK_REQUEST_KEYS = frozenset("ask.info ask.decision ask.comment_line review.ready concealed.question concealed.decision concealed.review".split())
+
+
 def test_text_catalog_locales_have_equal_keys():
     assert set(catalog("en")) == set(catalog("zh-CN"))
-    assert AGENT_LIST_KEYS | STAGE_ONE_KEYS | INSTANCE_FILE_KEYS | POLICY_KEYS | INSTANCE_PRESENTATION_KEYS | LIFECYCLE_KEYS | INSTANCE_FAILURE_KEYS | INSTANCE_AVAILABILITY_KEYS == {
+    assert WORK_REQUEST_KEYS | AGENT_LIST_KEYS | STAGE_ONE_KEYS | INSTANCE_FILE_KEYS | POLICY_KEYS | INSTANCE_PRESENTATION_KEYS | LIFECYCLE_KEYS | INSTANCE_FAILURE_KEYS | INSTANCE_AVAILABILITY_KEYS == {
         key for key in catalog("en") if not key.startswith(("label.", "menu."))
     }
     assert catalog("zh_cn") is catalog("zh-CN")
@@ -111,7 +114,7 @@ def test_alert_texts_fit_200_characters():
 
 
 def test_first_keys_are_exact_fixed_notice_subset():
-    assert FIRST_KEYS == POLICY_KEYS | frozenset(
+    assert FIRST_KEYS == POLICY_KEYS | {"ask.info", "ask.decision", "review.ready"} | frozenset(
         {"agent.deleted", "hello.privacy", "link.conflict", "link.conflict_over.plain", "link.conflict_over.chat", "link.conflict_over.custom_agent", "link.back_online", "link.removed", "access.off", "access.back", "delivery.failed"}
     )
 

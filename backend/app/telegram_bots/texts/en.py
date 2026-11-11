@@ -359,3 +359,25 @@ TEXTS.update(
 FORMS["employees.none"] = {"administrator": "No AI employees you can chat with yet."}
 
 TEXTS["agents.presentation"] = "{lines}"
+
+TEXTS.update(
+    {
+        "ask.info": 'Question for "{objective}"\n{name} asks: {question}\nWhy: {reason}\nWanted: {expected_response}',
+        "ask.decision": 'Decision needed for "{objective}"\n{name} asks: {question}\nWhy: {reason}\nWanted: {expected_response}',
+        "ask.comment_line": 'Comment from {person}: "{text}"',
+        "review.ready": 'Ready for review: "{objective}"\n{name} reports: {statement}',
+        "concealed.question": "A question is waiting.",
+        "concealed.decision": "A decision is needed.",
+        "concealed.review": "A result is ready for review.",
+        "label.show": "Show",
+        "label.answer": "Answer",
+        "label.type_answer": "Type an answer",
+        "label.cannot_answer": "I can't answer",
+        "label.decide_own": "Decide in my own words",
+        "label.accept": "Accept",
+        "label.request_changes": "Request changes",
+        "label.colleague": "Colleague",
+    }
+)
+
+TEXTS.update({"label.cannot_provide": "I don't have this", "label.wrong_recipient": "I'm the wrong person"})

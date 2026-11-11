@@ -319,3 +319,25 @@ TEXTS.update(
 FORMS["employees.none"] = {"administrator": "还没有你可以聊天的 AI 员工。"}
 
 TEXTS["agents.presentation"] = "{lines}"
+
+TEXTS.update(
+    {
+        "ask.info": "关于“{objective}”的问题\n{name}问：{question}\n原因：{reason}\n需要：{expected_response}",
+        "ask.decision": "“{objective}”需要决定\n{name}问：{question}\n原因：{reason}\n需要：{expected_response}",
+        "ask.comment_line": "来自{person}的评论：“{text}”",
+        "review.ready": "等待审核：“{objective}”\n{name}报告：{statement}",
+        "concealed.question": "有一个问题等待回答。",
+        "concealed.decision": "需要作出一个决定。",
+        "concealed.review": "有一个结果等待审核。",
+        "label.show": "显示",
+        "label.answer": "回答",
+        "label.type_answer": "输入回答",
+        "label.cannot_answer": "我无法回答",
+        "label.decide_own": "用自己的话决定",
+        "label.accept": "接受",
+        "label.request_changes": "要求修改",
+        "label.colleague": "同事",
+    }
+)
+
+TEXTS.update({"label.cannot_provide": "我没有这项信息", "label.wrong_recipient": "这应该问别人"})
