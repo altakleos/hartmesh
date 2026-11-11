@@ -1983,6 +1983,8 @@ checking their original Home before reuse.
 File messages sent while the target is paused or retired receive a file-specific
 reply. Unavailable execution closes the message without downloading its files
 or starting a conversation; withdrawn chat access takes precedence.
+After a restart, saved files keep their completion receipts and interrupted file
+writes offer an explicit retry. Recovery does not download or write them again.
 Instance presentation names the assistant or employee, explains who can read
 the conversation, and offers web links according to the person's access.
 Role labels require permission to inspect the adopted definition.

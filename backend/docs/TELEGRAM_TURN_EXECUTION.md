@@ -200,15 +200,15 @@ maintenance repeats once; an invalid name gets one fallback under `rename`.
 An actual adopted `file_retry` button targeting the Act allocates `retry:2`, then
 `retry:3`, and so on, and consumes its group in the same writer. Redelivery reads
 the saved result. An interrupted call becomes uncertain and waits for a new press;
-there is no file Act recovery worker. Attempt/operation comparisons reject stale
+startup recovery settles only metadata. Attempt/operation comparisons reject stale
 outcomes, and a saved completion wins over a late error. The byte lease survives
 native work and repeated cancellation. Callback IDs in the closed continuation
 identify completed presses, not delivery dependencies: no extra outbox retention
 pin is needed. The 400-day Act sweep deletes validated done/refused file journals,
 including those whose link was removed; uncertain and malformed records stay.
 The supervisor installs one shared journal for its handlers and pending readers.
-The adapter must still route incoming saves, render results and integrate
-captionless/retry controls before activation.
+The adapter routes incoming saves and renders their captionless/retry outcomes;
+public activation also requires the remaining output and presentation paths.
 
 
 `FileReceiptReader` prepares current file authority before entering a metadata
@@ -270,14 +270,14 @@ responsibility and must be qualified before activation.
 
 Unconfirmed file writes and pending workflow writes use cannot-confirm wording: native bytes may already exist even when the completion receipt is unavailable. Their retry controls remain explicit and journal-fenced.
 
-A file writer supplied the actual joined `origins` records a closed version-2
+A file writer supplied the actual joined `origins` records a closed version-3
 input capsule: captionlessness of the whole group, its topic and source message
 IDs. It validates every original inbox snapshot and joining scope under the
 journal writer. A caption on another album member therefore prevents an extra
-pending attachment. Legacy version-1 journals remain readable and are never
+pending attachment. Legacy version-1/2 journals remain readable and are never
 upgraded by replay.
 
-For a version-2 captionless input, completion and its pending attachment commit
+For a version-2/3 captionless input, completion and its pending attachment commit
 in the same writer. The terminal journal prevents re-creating that context after
 it is taken or swept; an explicit successful retry can create it even after the
 original inbound mark has been collected. Pending consumption then validates the
@@ -299,8 +299,7 @@ original inbox route. It can therefore confirm a save or provide the next exact
 retry control after the old route closes or its mark is collected. Frozen outcome
 plans deduplicate simultaneous presses; replaying an older press cannot publish
 a newer child's result. Successful captioned retries only confirm the file;
-captionless completion retains the one-time pending context. This does not yet
-connect ordinary incoming media routing or qualify process-restart recovery.
+captionless completion retains the one-time pending context.
 
 Incoming instance media now saves each actual source file before queue/thread
 preparation. Files carried from an earlier captionless receipt are recognized by
@@ -318,5 +317,26 @@ precedence. A lifecycle change after inbox admission closes the entire original
 input without publishing its caption. Execution-readiness refusals plan the
 fixed unavailable reply and close the original group under current Use, target,
 policy and custody checks in the final writer. These refusals invent no file
-journal and need no Home or workspace. Process-restart reconciliation remains
-separate.
+journal and need no Home or workspace.
+
+`file_recovery.py` runs inside the existing bounded startup/link-start phases,
+before polling is released. Its internal ticket binds the original phase, loop,
+host, turn controller, adapter and complete link identity. It refuses live file
+owners and active turns; every final writer keeps the ticket and original
+Home/Use/policy/account checks. The ticket retires when the operation returns,
+including cancellation. Recovery never downloads, resumes a native write or
+publishes model input. It settles unfinished file journals as uncertain, plans
+their exact file Retry, and restores a saved captionless question. A caption
+keeps the ordinary explicit chat retry. Unknown groups and unavailable authority
+remain held; a stale input does not block the next independent input.
+
+Version 3 adds a closed delivery receipt for the latest operation. The reply and
+receipt commit together; an ordinary successful initial save records that no
+auxiliary reply is needed. Explicit presses clear the previous delivery receipt
+when allocating their new operation. A simultaneous same-result planner may
+observe only the receipt change, never a newer operation's result. Bounded Act
+pages recover a recorded press's pending outcome even after input/control
+collection, using that original journal's saved press. A retained delivery
+receipt prevents recreation after outbox collection. Legacy terminal journals
+without this receipt are not automatically republished or upgraded. No extra
+outbox retention pin or schema change is required.

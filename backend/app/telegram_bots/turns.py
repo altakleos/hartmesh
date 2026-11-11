@@ -1593,6 +1593,10 @@ class ChatTurns:
             )
 
         await self._close_left_inputs(phase)
+        if phase() and getattr(host, "file_puts", None) is not None:
+            from app.telegram_bots.file_recovery import recover_retries
+
+            await recover_retries(host, phase)
 
     async def recover_link(self, channel):
         """A starting channel owns nothing yet, so what its link saved was left by the one before it.
@@ -1602,7 +1606,15 @@ class ChatTurns:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + LEFT_INPUTS_SECONDS
         link_id = channel.link.id
-        await self._close_left_inputs(lambda: not self._closed and loop.time() < deadline and self.services.channel(link_id) is channel, link_id=link_id)
+
+        def phase():
+            return not self._closed and loop.time() < deadline and self.services.channel(link_id) is channel
+
+        await self._close_left_inputs(phase, link_id=link_id)
+        if phase() and getattr(self.services, "file_puts", None) is not None:
+            from app.telegram_bots.file_recovery import recover_retries
+
+            await recover_retries(self.services, phase, link_id=link_id)
 
     async def _close_left_inputs(self, phase, *, link_id=None):
         after = None
@@ -1649,6 +1661,11 @@ class ChatTurns:
         guard = _Guard(host, channel, captured, current, repair=True)
         if not current():
             return
+        if captured.agent_kind == "instance" and getattr(host, "file_puts", None) is not None:
+            from app.telegram_bots.file_recovery import recover_input
+
+            if await recover_input(host, channel, captured, entry, current):
+                return
         # A note interrupted while working may have reached its provider, so it
         # is never transcribed again. Nothing else in the process owns it now.
         interrupted = entry.hold_reason == "voice_interrupted"
