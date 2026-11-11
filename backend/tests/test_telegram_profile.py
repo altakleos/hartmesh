@@ -169,14 +169,14 @@ async def test_custom_agent_menu_is_new_stop_help(db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_chat_menu_in_stage_1_is_new_stop_settings_help(db, monkeypatch):
+async def test_chat_menu_is_assistants_employees_new_stop_settings_help(db, monkeypatch):
     e = await environment(db, monkeypatch, lead=True)
     script(e)
     try:
         assert await e.sync.push(e.link)
         menu = sent(e, "setMyCommands")["commands"]
-        assert [command["command"] for command in menu] == ["new", "stop", "settings", "help"]
-        assert menu[2]["description"] == "Language"
+        assert [command["command"] for command in menu] == ["assistants", "employees", "new", "stop", "settings", "help"]
+        assert menu[4]["description"] == "Language"
     finally:
         await e.channel.stop()
 

@@ -1065,6 +1065,11 @@ class TelegramBotChannel(TelegramChannel):
             await human_inputs.command(self, update, word, captured_link=self._admission(update).link)
         if word == "stop" and turns is not None:
             await turns.stop_chat(self, update)
+        elif word in {"assistants", "employees"} and self._admission(update).link.agent_kind == "lead_agent" and getattr(self._services, "commands", None) is not None:
+            await self._services.commands.handle_list(self, update, word)
+            self._classified(update, remember=True)
+        elif word in {"work", "assign", "status"} and self._admission(update).link.agent_kind == "lead_agent":
+            await self._fixed_reply(update, "cmd.other_chat", word)
         elif word == "agent":
             await self._fixed_reply(update, "cmd.agent", word)
         elif word == "memory" and self.link.agent_kind == "lead_agent":

@@ -1994,8 +1994,10 @@ filters chat access and shows at most twenty agents, with the person’s own
 assistants first. Names link to the person’s bot or its Telegram settings row.
 Role and Work details require permission to inspect; waiting counts include only
 questions the person can answer. Queued lists recheck access before delivery,
-and obsolete lists retire without delaying later replies. Commands remain
-unavailable until the remaining UI and activation work is complete.
+and obsolete lists retire without delaying later replies. The ordinary bot offers
+`/assistants` and `/employees`; `/work`, `/assign` and `/status` point to those
+chats without starting an assignment. Existing bots receive the updated command
+menu at their next start.
 
 Instance site-permission cards require current Manage access when planned, sent
 and answered. Withdrawing Manage keeps an unsent card from appearing and prevents
@@ -2009,8 +2011,10 @@ first. Answering that question does not cancel an earlier blocked-site notice.
 
 Employee Telegram policy can be read and stored through the browser-session API
 by a person with both Manage and Inspect. Personal assistants use their access
-settings instead. Persistent-agent bot creation remains unavailable while its
-delivery integration is being completed. The host publication path checks the
+settings instead. The browser-session API now accepts instance bots after current
+chat access, employee policy and execution readiness checks, before validating
+the token. It rechecks access and policy in the atomic writer. The host publication
+path checks the
 connecting person's current access and original instance conversation binding,
 and carries their stored time zone into the request. Its direct file-write
 boundary checks current chat access and attributes writes to the connecting

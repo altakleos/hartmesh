@@ -1,4 +1,4 @@
-"""Real admission/SQL/sender/SDK; only the still-inactive command switch is injected."""
+"""Actual command admission, owner reads, SQL, sender and Telegram SDK."""
 
 import asyncio
 
@@ -6,7 +6,6 @@ import pytest
 import pytest_asyncio
 from _telegram_repository_test_support import db as db
 from sqlalchemy import select, update
-from telegram.ext import CommandHandler
 from test_telegram_agent_list_source import lists as lists
 from test_telegram_bot_handlers import message, sent
 from test_telegram_callback_commands import drain
@@ -26,15 +25,6 @@ async def delivery(lists):
     e.services.commands = CallbackCommands(e.services)
     e.services.eligibility = e.live.authority.delivery
 
-    async def route(update, context):
-        word, _ = e.channel._command(update.message)
-        await e.services.commands.handle_list(e.channel, update, word)
-        e.channel._classified(update, remember=True)
-
-    # No production command menu or dispatch switch is activated by this slice.
-    for handler in e.channel.application.handlers[0]:
-        if isinstance(handler, CommandHandler) and "employees" in handler.commands:
-            handler.callback = route
     async with e.db.sessions.begin() as writer:
         for row in await writer.scalars(select(TelegramOutboxRow)):
             row.state, row.skip_reason = "skipped", "superseded"
@@ -230,3 +220,31 @@ async def test_empty_list_keeps_owner_authority_without_any_target_rows(delivery
     call = next(call for call in e.request.calls if call.endpoint == "sendMessage")
     assert call.parameters["text"] == "No AI employees you can chat with yet. Administrators add AI employees."
     assert not call.parameters.get("reply_markup", {}).get("inline_keyboard")
+
+
+@pytest.mark.parametrize("empty", [False, True])
+async def test_assistants_dispatch_reads_the_bound_owners_personal_list(delivery, empty):
+    from deerflow.persistence.agent_instances.model import AgentInstanceRow
+
+    e = delivery
+    async with e.db.sessions.begin() as writer:
+        await writer.execute(update(AgentInstanceRow).values(custody="personal", owner_id=e.link.owner_user_id))
+        if empty:
+            await writer.execute(update(AgentInstanceGrantRow).values(permissions=2))
+    assert await e.channel.handle_update(message(e, 1901, content="/assistants"))
+    e.request.enqueue("sendMessage", result=sent(e, identity=901))
+    await drain(e)
+    text = next(call.parameters["text"] for call in e.request.calls if call.endpoint == "sendMessage")
+    assert ("You have no AI assistants yet." if empty else "Fixture employee") in text
+    assert e.observed and all(entry[2] == e.link.owner_user_id for entry in e.observed)
+
+
+@pytest.mark.parametrize("word", ["work", "assign", "status"])
+async def test_work_commands_only_point_to_the_other_chats(delivery, word):
+    e = delivery
+    assert await e.channel.handle_update(message(e, 1901, content="/" + word))
+    e.request.enqueue("sendMessage", result=sent(e, identity=901))
+    await drain(e)
+    text = next(call.parameters["text"] for call in e.request.calls if call.endpoint == "sendMessage")
+    assert text == "This is the ordinary chat. /assistants and /employees open the chats of AI assistants and AI employees. Start and manage assignments on the web."
+    assert e.observed == []
