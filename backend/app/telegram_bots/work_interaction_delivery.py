@@ -1,0 +1,144 @@
+"""Acknowledged Work controls publish unsubmitted replies, never service actions."""
+
+from dataclasses import asdict
+from types import SimpleNamespace
+
+from sqlalchemy import select
+
+from app.telegram_bots.attention_authority import prepare_attention
+from app.telegram_bots.callbacks import CallbackRefused, _plain, _validate_rows
+from app.telegram_bots.producer import ProductSourceRetired, _item, _safe_json, keyboard_cleanup_row
+from app.telegram_bots.work_interactions import interaction_state, present_interaction
+from app.telegram_bots.work_request_recovery import WorkRequestRecovery, _RecoveryGuard
+from deerflow.agent_instances.contract import AgentConflict
+from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramOutboxRow
+from deerflow.utils.file_io import await_drained
+
+
+def transition(callback, source):
+    """Derive a closed preview from the exact saved button, never caller text."""
+    if callback.target_kind != "request" or callback.target_id != source.request["id"] or callback.payload.get("request_id") != source.request["id"] or callback.payload.get("work_id") != source.work["id"]:
+        raise CallbackRefused()
+    if _plain(callback.payload.get("seen")) != source.seen:
+        raise AgentConflict("Review the current request and all responses")
+    if callback.kind == "hi_cant_open":
+        state = {"view": "cannot"}
+    elif callback.kind == "accept_open":
+        state = {"view": "accept"}
+    elif callback.kind == "decide_choice":
+        state = {"view": "decision", "decision": callback.payload.get("decision"), "note": None}
+    else:
+        raise CallbackRefused()
+    return interaction_state(state, source)
+
+
+def acknowledged_source(link, parent):
+    from app.telegram_bots.work_request_source import frozen
+
+    if parent is None or parent.state != "sent" or (parent.link_id, parent.owner_user_id, parent.binding_generation, parent.chat_id) != (link.id, link.owner_user_id, link.binding_generation, link.chat_id):
+        raise CallbackRefused()
+    parts = [part for part in parent.parts if part.get("presentation_version") == parent.payload.get("presentation_version")]
+    if not parts:
+        raise CallbackRefused()
+    captured = SimpleNamespace(link=link, item=_item(parent), part=parts[-1])
+    basis, source, _recipe = frozen(captured, acknowledged=True)
+    if basis["concealed"]:
+        raise CallbackRefused()
+    return source
+
+
+def check_origin(link, parent, callbacks, basis, source):
+    """A complete ACK and consumed canonical group prove this direct reply."""
+    origin = basis["origin"]
+    if parent is None or parent.id != origin["anchor_outbox_id"] or parent.payload.get("presentation_version") != origin["presentation_version"]:
+        raise ProductSourceRetired()
+    previous = acknowledged_source(link, parent)
+    if previous != source:
+        raise ProductSourceRetired()
+    selected = next((row for row in callbacks if row.id == origin["callback_id"]), None)
+    if selected is None:
+        raise ProductSourceRetired()
+    group = [row for row in callbacks if row.group_id == selected.group_id]
+    _validate_rows(parent, group)
+    if any(row.consumed_at is None or row.closed_reason != "work-preview" or row.message_id != origin["message_id"] for row in group):
+        raise ProductSourceRetired()
+    if transition(selected, source) != basis["interaction"]:
+        raise ProductSourceRetired()
+    part = next((part for part in parent.parts if part.get("callback_group_id") == selected.group_id and part.get("presentation_version") == origin["presentation_version"]), None)
+    if part is None or part.get("message_ids") != [origin["message_id"]]:
+        raise ProductSourceRetired()
+
+
+class WorkInteractionPlans:
+    def __init__(self, plans):
+        self.recovery = WorkRequestRecovery(plans)
+        self.outbox, self.reader, self.callbacks = plans.outbox, plans.reader, plans.callbacks
+
+    async def open(self, link, callback_id, *, chat_id, message_id, message_thread_id, guard):
+        async def perform():
+            async with self.outbox.sessions() as reader:
+                callback = await reader.get(TelegramCallbackRow, callback_id)
+                if callback is None or callback.link_id != link.id or callback.target_kind != "request":
+                    raise CallbackRefused()
+                request_id = callback.target_id
+            source, settings = await self.recovery._source(link, request_id)
+            admission = await prepare_attention(self.reader, link)
+            composed = _RecoveryGuard(self.recovery, guard, admission, source)
+            key = "notice:work-interaction:" + callback_id
+            async with self.callbacks.writer(link, composed) as writer:
+                existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == key).with_for_update())
+                if existing is not None:
+                    basis = existing.payload.get("work_request_basis", {})
+                    origin = basis.get("origin", {})
+                    if (
+                        existing.binding_generation != link.binding_generation
+                        or existing.request_id != request_id
+                        or (origin.get("callback_id"), origin.get("message_id"), existing.chat_id, existing.message_thread_id) != (callback_id, message_id, chat_id, message_thread_id)
+                    ):
+                        raise CallbackRefused()
+                    return existing.id
+                group = await self.callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=composed, session=writer)
+                parent = await writer.get(TelegramOutboxRow, group.anchor_outbox_id, populate_existing=True)
+                if acknowledged_source(link, parent) != source:
+                    raise AgentConflict("Review the current request and all responses")
+                state = transition(group.selected, source)
+                shown = present_interaction(source, state, locale=settings.locale)
+                keyboard = [list(line) for line in shown.keyboard]
+                recipes = [
+                    {**part, "source_ref": {"key": "work.request.presentation", "values": {"request_id": request_id, "part": index}}, **({"stored_keyboard": True} if index == len(shown.parts) - 1 and keyboard else {})}
+                    for index, part in enumerate(shown.parts)
+                ]
+                identity, _ = await self.outbox._add(
+                    link, dedupe_key=key, class_="reply", payload={"parts": recipes}, instance_id=link.agent_ref, work_id=source.work["id"], request_id=request_id, message_thread_id=message_thread_id, session=writer
+                )
+                row = await writer.get(TelegramOutboxRow, identity)
+                snapshot = asdict(source)
+                snapshot["responses"] = list(snapshot["responses"])
+                cleanup = keyboard_cleanup_row(group.selected, owner_user_id=link.owner_user_id, now=self.outbox.clock(), dedupe_key="notice:work-interaction-cleanup:" + callback_id)
+                cleanup.payload = {**cleanup.payload, "work_request_parent_id": identity}
+                writer.add(cleanup)
+                basis = {
+                    "version": 3,
+                    "source": snapshot,
+                    "locale": settings.locale,
+                    "concealed": False,
+                    "parts": recipes,
+                    "keyboard": keyboard,
+                    "reveal": None,
+                    "cleanup_id": cleanup.id,
+                    "interaction": state,
+                    "origin": {"callback_id": callback_id, "anchor_outbox_id": parent.id, "presentation_version": group.presentation_version, "message_id": message_id},
+                }
+                row.payload = _safe_json({**row.payload, "work_request_basis": basis, "product_keyboard_basis": keyboard})
+                parts = self.outbox._parts(recipes, 0)
+                if keyboard:
+                    fresh = await self.callbacks.write_group(link, keyboard, anchor_outbox_id=identity, presentation_version=0, chat_id=chat_id, message_id=None, message_thread_id=message_thread_id, session=writer)
+                    parts[-1]["callback_group_id"] = fresh.group_id
+                    for control in await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == fresh.group_id)):
+                        control.created_at = group.selected.created_at
+                        control.payload = {**control.payload, "presentation_pending": True}
+                row.parts = parts
+                await self.callbacks.consume_group(group, reason="work-preview", session=writer)
+                return identity
+
+        return await await_drained(perform())

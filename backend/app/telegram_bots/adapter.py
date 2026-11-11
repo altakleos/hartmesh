@@ -2157,7 +2157,7 @@ class TelegramBotChannel(TelegramChannel):
                     raise PreviewExpired()
 
             preview_fence = LiveRequestFence(check_instance_part)
-        if current.item.class_ != "reply":
+        if current.item.class_ != "reply" or work_part is not None:
             content_fence = preview_fence
 
             async def check_notification_part():
