@@ -1878,6 +1878,20 @@ class TelegramBotChannel(TelegramChannel):
         if saved.item.dedupe_key.startswith(("notice:chat-stream:", "notice:preparation-capacity:", "notice:chat-wait:")) and (turns is None or turns.preview_allowed(self, saved.item) is not True):
             raise PreviewExpired()
         part = saved.part
+        if saved.item.class_ != "reply" and (
+            set(saved.item.payload) - {"presentation_version", "notification_reserved_at"}
+            or set(part.get("source_ref", {})) != {"key", "values"}
+            or part.get("source_ref", {}).get("key")
+            in {"agents.presentation", "file.no_access", "net.blocked_ask", "hello.assistant", "hello.employee", "help.agent", "refused.files_full", "refused.interrupted_recovery", "file.files_full", "file.too_large_in"}
+            or part.get("url_button")
+            or part.get("stored_keyboard")
+            or part.get("callback_group_id")
+            or part["kind"] not in {"text", "edit"}
+        ):
+            # Work previews and controls need a source-specific final snapshot
+            # alongside preferences; the dormant notification foundation only
+            # admits fixed text plans until that integration is available.
+            raise PermanentDeliveryError("unsupported-notification-source")
         list_presentation = "agent_list_basis" in saved.item.payload or part.get("source_ref", {}).get("key") == "agents.presentation"
         if list_presentation:
             from app.telegram_bots.agent_list_authority import authorize_list
@@ -2110,6 +2124,25 @@ class TelegramBotChannel(TelegramChannel):
                     raise PreviewExpired()
 
             preview_fence = LiveRequestFence(check_instance_part)
+        if current.item.class_ != "reply":
+            content_fence = preview_fence
+
+            async def check_notification_part():
+                if content_fence is not None:
+                    await content_fence.check()
+                latest_notification = await self._services.outbox.capture_sending_part(**capture)
+                if latest_notification.part != part or not self._callback_current(current.link):
+                    raise DeliveryClaimRetired()
+                verdict = await self._services.eligibility(latest_notification.link, latest_notification.item, latest_notification.part)
+                if verdict.decision != "allow" or verdict.protect_content and not part.get("protect_content") or not self._callback_current(current.link):
+                    raise DeliveryClaimRetired()
+                from app.telegram_bots.notification_authority import authorize_notification
+
+                await authorize_notification(self._services, latest_notification, silent=silent, now=self._now())
+                if not self._callback_current(current.link) or not self._send_allowed():
+                    raise DeliveryClaimRetired()
+
+            preview_fence = LiveRequestFence(check_notification_part)
         try:
             if part["kind"] == "edit":
                 target = part.get("target_message_id")
