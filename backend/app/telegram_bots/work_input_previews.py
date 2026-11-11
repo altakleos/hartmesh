@@ -9,7 +9,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import aliased
 
 from app.telegram_bots.attention_authority import prepare_attention
-from app.telegram_bots.callbacks import CallbackGroup, CallbackRefused, _row
+from app.telegram_bots.callbacks import CallbackGroup, CallbackRefused, _aware, _row
 from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.producer import DeliveryRetry, ProductSourceRetired, _item, keyboard_cleanup_row
 from app.telegram_bots.work_actions import same_body
@@ -75,17 +75,21 @@ def blocked_input_actions(identity):
     )
 
 
-def check_input_origin(link, parent, callbacks, mark, blocked, basis, source):
+def check_input_origin(link, parent, callbacks, mark, blocked, basis, source, *, draft_ttl_hours):
     """Final joined SQL facts prove the immutable accepted input and shown prompt."""
     try:
-        _check_input_origin(link, parent, callbacks, mark, blocked, basis, source)
+        _check_input_origin(link, parent, callbacks, mark, blocked, basis, source, draft_ttl_hours=draft_ttl_hours)
     except (KeyError, TypeError, ValueError, IndexError, AttributeError, CallbackRefused):
         raise ProductSourceRetired() from None
 
 
-def _check_input_origin(link, parent, callbacks, mark, blocked, basis, source):
+def _check_input_origin(link, parent, callbacks, mark, blocked, basis, source, *, draft_ttl_hours):
     if mark is None or blocked or mark.state == "done" or mark.route_complete or mark.route_kind != "work_input" or len(mark.operation_ids) != 1 or not same_body(input_identity(mark), basis["input"]):
         raise ProductSourceRetired()
+    if basis["interaction"]["view"] == "changes":
+        expiry = (_aware(mark.accepted_at) + timedelta(hours=draft_ttl_hours)).isoformat()
+        if any(control.get("expires_at") != expiry for line in basis["keyboard"] for control in line):
+            raise ProductSourceRetired()
     origin = basis["origin"]
     previous = acknowledged_source(link, parent)
     prompt = next((row for row in callbacks if row.id == origin["callback_id"]), None)
@@ -110,7 +114,7 @@ def _check_input_origin(link, parent, callbacks, mark, blocked, basis, source):
         raise ProductSourceRetired()
 
 
-async def lock_input_origin(writer, link, parent, source):
+async def lock_input_origin(writer, link, parent, source, *, draft_ttl_hours):
     """Retain the accepted input through confirmation's borrowed service writer."""
     basis = parent.payload["work_request_basis"]
     if basis["version"] != 4:
@@ -121,7 +125,7 @@ async def lock_input_origin(writer, link, parent, source):
     prompt = await writer.get(TelegramCallbackRow, basis["origin"]["callback_id"], with_for_update=True, populate_existing=True)
     mark = await writer.get(TelegramInboundMarkRow, (identity["link_id"], identity["message_id"], identity["chat_id"]), with_for_update=True, populate_existing=True)
     blocked = await writer.scalar(select(blocked_input_actions(identity)))
-    check_input_origin(link, original, [prompt] if prompt is not None else [], mark, blocked, basis, source)
+    check_input_origin(link, original, [prompt] if prompt is not None else [], mark, blocked, basis, source, draft_ttl_hours=draft_ttl_hours)
 
 
 class WorkInputPreviews:

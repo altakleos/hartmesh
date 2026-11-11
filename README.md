@@ -2025,6 +2025,8 @@ confirmations show the complete current review before offering fresh controls;
 routing choices refresh when a selected person loses access. Optional prompt-text
 routing saves answers and unchanged changes notes once, retains changed review
 notes for confirmation, and previews typed decisions before an explicit tap.
+Retained review notes keep their original 24-hour deadline across refreshes.
+Edit note and Discard retire the old confirmation without submitting it.
 Assignments continue to be managed on the web.
 
 Instance site-permission cards require current Manage access when planned, sent

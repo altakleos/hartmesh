@@ -150,7 +150,8 @@ def frozen(captured, *, acknowledged=False):
                 from app.telegram_bots.work_input_previews import validate_input_basis
 
                 validate_input_basis(basis)
-            presentation = present_interaction(source, basis["interaction"], locale=basis["locale"])
+            expires_at = basis["keyboard"][0][0]["expires_at"] if basis["version"] == 4 and basis["interaction"]["view"] == "changes" else None
+            presentation = present_interaction(source, basis["interaction"], locale=basis["locale"], expires_at=expires_at)
             if basis["interaction"]["view"] == "prompt" and (type(basis["prompt_id"]) is not str or len(basis["prompt_id"]) != 32 or any(ch not in "0123456789abcdef" for ch in basis["prompt_id"])):
                 raise ValueError()
         elif basis["version"] in {5, 6}:
@@ -477,7 +478,7 @@ class _RequestProjection:
         elif self.basis["version"] == 4:
             from app.telegram_bots.work_input_previews import check_input_origin
 
-            check_input_origin(current, rows[0][15], callback_facts, rows[0][16], rows[0][17], self.basis, self.source)
+            check_input_origin(current, rows[0][15], callback_facts, rows[0][16], rows[0][17], self.basis, self.source, draft_ttl_hours=self.host.callbacks.config.callbacks.draft_ttl_hours)
         reveal = next((row for row in callback_facts if row.id == self.basis.get("reveal")), None)
         cleanup_target = self.basis["origin"]["message_id"] if self.basis["version"] in {3, 4} else reveal.message_id if self.basis.get("reveal") else None
         if self.basis.get("cleanup_id") and rows[0][14].payload["target_message_id"] != cleanup_target:

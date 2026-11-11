@@ -584,7 +584,9 @@ class CallbackRepository:
     def _usable(self, row):
         now = self.clock()
         created = _aware(row.created_at)
-        too_old = now >= created + timedelta(days=self.config.callbacks.max_age_days) or row.target_kind == "draft" and now >= created + timedelta(hours=self.config.callbacks.draft_ttl_hours)
+        interaction = row.payload.get("interaction")
+        review_note = row.target_kind == "request" and row.kind in {"changes_confirm", "changes_open", "dismiss"} and isinstance(interaction, Mapping) and interaction.get("view") == "changes"
+        too_old = now >= created + timedelta(days=self.config.callbacks.max_age_days) or (row.target_kind == "draft" or review_note) and now >= created + timedelta(hours=self.config.callbacks.draft_ttl_hours)
         if row.consumed_at is not None or too_old or row.expires_at is not None and now >= _aware(row.expires_at):
             raise CallbackRefused() from None
 
