@@ -1,8 +1,9 @@
 """Ownership of deferred Work prompts; source dispatch remains separately fenced."""
 
 import json
+from datetime import datetime, timedelta
 
-from app.telegram_bots.callbacks import CallbackRefused, _plain, _visibility
+from app.telegram_bots.callbacks import CallbackRefused, _aware, _plain, _visibility
 
 PURPOSES = {"answer": "answer", "cannot": "cannot_provide", "wrong": "wrong_recipient", "decision": "decide_own", "decision_note": "decide_note", "changes": "request_changes"}
 
@@ -41,3 +42,30 @@ def validate_prompt(item, prompt):
     if (prompt.link_id, prompt.chat_id, prompt.binding_generation, prompt.message_thread_id) != (item.link_id, item.chat_id, item.binding_generation, item.message_thread_id):
         raise CallbackRefused()
     return parts
+
+
+def validate_shown_prompt(item, prompt):
+    """Match prompt visibility to its exact final ACK; return that ACK time."""
+    parts = validate_prompt(item, prompt)
+    final = parts[-1]
+    visibility = _visibility(prompt.payload.get("prompt_visibility"))
+    try:
+        acknowledged_at = _aware(datetime.fromisoformat(final["sent_at"]))
+        if (
+            visibility["state"] != "visible"
+            or visibility["part_id"] != final["part_id"]
+            or final["state"] != "sent"
+            or not final["message_ids"]
+            or type(prompt.message_id) is not int
+            or prompt.message_id != final["message_ids"][-1]
+            or type(prompt.payload.get("presentation_version")) is not int
+            or prompt.payload["presentation_version"] != item.payload["presentation_version"]
+            or prompt.payload.get("anchor_outbox_id") != item.id
+            or _aware(prompt.created_at) != acknowledged_at
+            or prompt.expires_at is None
+            or _aware(prompt.expires_at) != acknowledged_at + timedelta(seconds=visibility["ttl_seconds"])
+        ):
+            raise CallbackRefused()
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise CallbackRefused() from None
+    return acknowledged_at

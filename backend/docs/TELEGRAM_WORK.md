@@ -130,3 +130,21 @@ Do not compare whole Work projections across reads: attempt workspace readiness
 and execution availability can change without changing anything displayed or its
 revision. Current permission and source admission still run independently; this
 comparison never substitutes for their final joined SQL checks.
+
+`work_input_capture.py` owns accepted plain text and its fully acknowledged Work
+prompt in one guarded transaction. `Inbox.route` can borrow that active same-store
+writer; it never commits it. Capture reads the stored accepted input, never a
+caller's replacement text, retains original seen/interaction and a stable future
+operation ID, attaches the sent source as a delivery dependency, and closes only
+that prompt. Capture matches the shown message, part, version and expiry to the
+final ACK. An exact stored reply may precede host ACK persistence; unquoted text
+requires acceptance after that ACK and a later chat message ID. Earlier inputs
+stay unrouted for separate untied-input handling. Replay preserves this route.
+Pending input pins its prompt evidence
+through callback retention; normal collection resumes after input settlement.
+Capture requires current binding/account custody but does not read a new review,
+submit a command or authorize its effect. Thus a changed or withdrawn review can
+keep an unsubmitted note. Submission must separately recheck current permission,
+request state and the captured basis; stale-note preview and outcome controllers
+remain required before these entry points are installed. Files/voice and expired
+or replaced prompt routing are separate controller paths.

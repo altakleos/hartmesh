@@ -970,7 +970,11 @@ class InboxRepository:
         self.on_callback_confirmed = None
 
     @asynccontextmanager
-    async def _transaction(self) -> AsyncIterator[AsyncSession]:
+    async def _transaction(self, session=None) -> AsyncIterator[AsyncSession]:
+        if session is not None:
+            self._publication_borrow(session)
+            yield session
+            return
         async with self.session_factory() as session, session.begin():
             if session.get_bind().dialect.name == "sqlite":
                 await session.execute(text("BEGIN IMMEDIATE"))
@@ -2980,7 +2984,7 @@ class InboxRepository:
         await guard.check(session)
         return _snapshot(mark)
 
-    async def route(self, row: InboxRow, *, kind: str, target_id: str | None, basis: dict, operation_ids: list[str]) -> InboxRow:
+    async def route(self, row: InboxRow, *, kind: str, target_id: str | None, basis: dict, operation_ids: list[str], session: AsyncSession | None = None) -> InboxRow:
         _identifier(kind, 24, "invalid-inbox-route")
         if target_id is not None:
             _identifier(target_id, 64, "invalid-inbox-route")
@@ -2989,7 +2993,7 @@ class InboxRepository:
             raise ValueError("invalid-inbox-route")
         for operation in operation_ids:
             _identifier(operation, 64, "invalid-inbox-route")
-        async with self._transaction() as session:
+        async with self._transaction(session) as session:
             link = await self._link(session, row.link_id)
             mark = (await self._rows(session, [row]))[0]
             if mark.route_kind is not None:

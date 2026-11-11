@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram delivery
 
+- Prepare durable capture of accepted text against acknowledged Work prompts.
+  Captured notes retain their original review and remain unsubmitted; prompt
+  closure and inbox ownership commit together. Chat submission stays disabled.
+
 - Keep acknowledged Work previews usable when only execution-probe metadata
   changes. Complete displayed content, revisions, response IDs and protection
   still have to match before a confirmation can be admitted.

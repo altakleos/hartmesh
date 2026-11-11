@@ -2011,7 +2011,8 @@ or typing prompts. Confirmed choices also have durable, single-operation admissi
 for recovery after a restart. Temporarily refused confirmations can rebuild a
 changed review before a new confirmation, while uncertain actions retain their
 original operation. Changes in workspace readiness alone do not invalidate the
-review the person saw.
+review the person saw. Typed notes can retain their original displayed review
+across a restart before any submission.
 Assignments continue to be managed on the web.
 
 Instance site-permission cards require current Manage access when planned, sent
