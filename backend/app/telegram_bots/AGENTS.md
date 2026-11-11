@@ -15,7 +15,9 @@ Use socket-free transports and synthetic credentials in offline tests.
 Work outcome delivery uses canonical receipts and a final source/claim fence.
 Its dormant receipt observer never calls the explicit action-retry path.
 Routing V5 has a dedicated recipient/account source and cannot use ordinary
-question recovery. Full ACK alone seals captured input and writes the Work-only continuation receipt;
+question recovery. Recipient-choice admission atomically reserves the original
+operation and group; a missing reserved journal never becomes a fresh action.
+Full ACK alone seals captured input and writes the Work-only continuation receipt;
 keep retention and callback activation aligned with [Work guidance](../../docs/TELEGRAM_WORK.md).
 
 Product text lives in `texts/` in English and Chinese; keep locale keys equal

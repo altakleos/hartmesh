@@ -40,9 +40,21 @@ final joined snapshot of every candidate's grants and account state, including
 the current recipient before wrong-person exclusion. No password hashes enter
 that compact projection. Full ACK alone arms the final button group. Protected
 notifications show only a teaser; ordinary question recovery cannot turn routing
-into an answer prompt. Routing-specific reveal/refresh, selected-recipient
-admission and reply-owned follow-ups remain prerequisites for installation.
+into an answer prompt. Routing-specific reveal/refresh and reply-owned follow-ups remain prerequisites
+for installation.
 Presentation/handlers stay dormant.
+
+`work_routing_admission.py` reserves acknowledged recipient choices in the same
+writer as their immutable Work Act. The command retains the displayed request
+revision and recipient, capturing the current general request CAS only once.
+Replays use the saved body, including after the canonical routing event changes
+the request. A reserved group without its journal cannot recreate an action.
+The borrowed final snapshot checks manager/source and selected-account/grant
+facts; candidate disablement is a recipient refusal, not an owner-account state.
+Routing ignores the action pause and grants no access. The receipt worker owns
+execution; this primitive installs no chat handler. Qualify the actual domain
+commit separately: journal admission does not replace a final selected-recipient
+and binding/grant/policy fence after the service admission provider awaits.
 
 `work_interactions.py` renders complete unsubmitted confirmation/prompt views.
 Its closed JSON state retains normalized text and the displayed `seen` basis;
