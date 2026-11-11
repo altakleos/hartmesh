@@ -25,7 +25,7 @@ from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.spaces.chat_paths import ChatStoragePaths, ThreadMounts
 
 
-async def execute(environment, monkeypatch, tmp_path, *, document_version=2, fail_refresh=False, custom=False):
+async def execute(environment, monkeypatch, tmp_path, *, document_version=2, fail_refresh=False, custom=False, tool_objects=None, responses=None):
     from deerflow.agents.lead_agent import agent
     from deerflow.runtime.runs import worker
 
@@ -34,8 +34,8 @@ async def execute(environment, monkeypatch, tmp_path, *, document_version=2, fai
     base = await asyncio.to_thread(Paths, tmp_path)
     paths = ChatStoragePaths(base, user_id=owner)
     prepared = SimpleNamespace(paths=paths, mounts=ThreadMounts(owner, thread))
-    assembly, _built, model = await asyncio.to_thread(assemble_offline, monkeypatch, custom=custom)
-    model.responses = [AIMessage("Exact viewless answer", id="viewless-answer")]
+    assembly, _built, model = await asyncio.to_thread(assemble_offline, monkeypatch, custom=custom, tool_objects=tool_objects)
+    model.responses = responses if responses is not None else [AIMessage("Exact viewless answer", id="viewless-answer")]
     human = HumanMessage("Question")
     calls, leases = [], []
 

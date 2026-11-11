@@ -37,7 +37,8 @@ from langgraph.types import Command
 
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.skill_usage import MAX_SKILL_SNAPSHOT_CHARS, SKILL_USAGES_KEY
-from deerflow.agents.middlewares.tool_result_meta import restore_tool_result_for_journal
+from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY
+from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, restore_tool_result_for_journal
 from deerflow.runtime.events.catalog import (
     LLM_AI_RESPONSE_EVENT,
     LLM_ERROR_EVENT,
@@ -52,6 +53,8 @@ from deerflow.runtime.events.catalog import (
 from deerflow.runtime.events.store.base import RunEventStore, RunEventStoreNotCommittedError
 from deerflow.runtime.presented_files import presented_files_of
 from deerflow.runtime.runs.capture_io import CaptureIOClosed, current_capture_io_owner
+from deerflow.runtime.runs.output import OutputEvidenceError
+from deerflow.runtime.runs.output_inventory import presentation_fragment_digest
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 from deerflow.utils.llm_text import strip_leading_think_blocks
 from deerflow.utils.messages import message_to_text, restore_original_human_message
@@ -145,6 +148,15 @@ class _PendingLlmResponse:
     events: list[dict]
     message_count: int
     last_ai_message: str | None
+
+
+@dataclass(frozen=True)
+class _ToolArtifactSnapshot:
+    artifact_keys: tuple[str, ...]
+    artifact_digest: str
+    additional_keys: tuple[str, ...]
+    additional_digest: str
+    message_digest: str
 
 
 def _should_persist_human_input_message(message: BaseMessage) -> bool:
@@ -452,6 +464,7 @@ class RunJournal(BaseCallbackHandler):
         self._active_tool_names: dict[str, str] = {}
         self._persisted_ai_message_identities: set[str] = set()
         self._persisted_tool_message_identities: set[str] = set()
+        self._tool_artifact_snapshots: dict[str, _ToolArtifactSnapshot] = {}
 
         # Bumped once per successful event-store write. A reader that cached a
         # "the feed does not hold this message" answer compares this between
@@ -978,6 +991,10 @@ class RunJournal(BaseCallbackHandler):
         """Handle tool end event, append message and clear node data"""
         if self._owned_producers_closed():
             return
+        messages = output.update.get("messages", ()) if isinstance(output, Command) and isinstance(output.update, Mapping) else (output,)
+        for message in messages:
+            if isinstance(message, ToolMessage) and not message.id:
+                message.id = str(uuid4())
         inventory = getattr(self._output_capture, "inventory", None)
         if inventory is not None and not self._closed:
             inventory.tool_end(output, run_id=run_id, parent_run_id=parent_run_id)
@@ -1091,7 +1108,7 @@ class RunJournal(BaseCallbackHandler):
             self._current_tool_result_ids.pop(tool_call_id, None)
             self._terminal_task_results.discard(tool_call_id)
 
-    def _persist_tool_result_message(self, message: BaseMessage) -> None:
+    def _persist_tool_result_message(self, message: BaseMessage, *, enrichment: bool = False) -> None:
         # Tool callbacks run before the graph reducer assigns missing ids.
         # Assign on the returned object so the feed and checkpoint share the
         # same result identity even when a provider reuses its tool_call_id.
@@ -1110,9 +1127,52 @@ class RunJournal(BaseCallbackHandler):
         identity = self._message_identity(message)
         if identity:
             self._persisted_tool_message_identities.add(identity)
+            if isinstance(message, ToolMessage):
+                self._tool_artifact_snapshots.pop(identity, None)
+                artifact = message.artifact if message.artifact is not None else {}
+                if isinstance(artifact, Mapping):
+                    try:
+                        snapshot = _ToolArtifactSnapshot(
+                            tuple(artifact),
+                            presentation_fragment_digest(artifact),
+                            tuple(message.additional_kwargs),
+                            presentation_fragment_digest(message.additional_kwargs),
+                            presentation_fragment_digest(message.model_dump(exclude={"artifact", "additional_kwargs"})),
+                        )
+                    except OutputEvidenceError:
+                        pass
+                    else:
+                        self._tool_artifact_snapshots[identity] = snapshot
         if isinstance(message, ToolMessage) and message.tool_call_id in self._current_run_tool_call_names and message.id:
             self._current_tool_result_ids[message.tool_call_id] = message.id
-        self._record_message_summary(message)
+        if not enrichment:
+            self._record_message_summary(message)
+
+    def _artifact_enrichment(self, message: ToolMessage) -> tuple[str, str] | None:
+        """Recognize bounded additive metadata on this exact lead-call result."""
+        identity = self._message_identity(message)
+        previous = self._tool_artifact_snapshots.get(identity)
+        if previous is None or message.id != self._current_tool_result_ids.get(message.tool_call_id):
+            return None
+        artifact = message.artifact
+        additional = message.additional_kwargs
+        if not isinstance(artifact, Mapping) or len(artifact) <= len(previous.artifact_keys):
+            return None
+        # Normal wrappers add these observation stamps after the raw callback.
+        # No new presentation/control metadata is implied by either stamp.
+        if set(additional).difference(previous.additional_keys, {TOOL_META_KEY, TOOL_RECEIPT_KEY}):
+            return None
+        try:
+            if presentation_fragment_digest(message.model_dump(exclude={"artifact", "additional_kwargs"})) != previous.message_digest:
+                return None
+            if presentation_fragment_digest({key: additional[key] for key in previous.additional_keys}) != previous.additional_digest:
+                return None
+            presentation_fragment_digest(additional)
+            if presentation_fragment_digest({key: artifact[key] for key in previous.artifact_keys}) != previous.artifact_digest:
+                return None
+            return previous.artifact_digest, presentation_fragment_digest(artifact)
+        except (KeyError, OutputEvidenceError):
+            return None
 
     def record_deferred_task_result(self, message: ToolMessage) -> None:
         """Persist the outcome of an owned deferred task, once, for history.
@@ -1207,6 +1267,13 @@ class RunJournal(BaseCallbackHandler):
             message = restore_tool_result_for_journal(message)
             if self._should_reconcile_tool_message(message):
                 self._persist_tool_result_message(message)
+            elif not message.additional_kwargs.get("hide_from_ui") and message.tool_call_id in self._current_run_tool_call_names:
+                enrichment = self._artifact_enrichment(message)
+                if enrichment is not None:
+                    self._persist_tool_result_message(message, enrichment=True)
+                    inventory = getattr(self._output_capture, "inventory", None)
+                    if inventory is not None:
+                        inventory.tool_artifact_enriched(message.id, message.tool_call_id, *enrichment)
 
     def _reconcile_consumed_tool_messages(self, messages: Iterable[Any]) -> None:
         """Reconcile results after the latest current-run tool call."""
@@ -2161,6 +2228,7 @@ class RunJournal(BaseCallbackHandler):
         self._current_tool_result_ids.clear()
         self._persisted_ai_message_identities.clear()
         self._persisted_tool_message_identities.clear()
+        self._tool_artifact_snapshots.clear()
         self._produced_artifacts.clear()
         self._produced_artifact_keys.clear()
         self._presented_files.clear()
