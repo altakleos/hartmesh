@@ -112,3 +112,14 @@ pause and outer-lifetime checks roll back both journal and reservation on drift.
 First taps cannot acknowledge unchecked sources. Controls remain unconsumed until
 an outcome controller settles them; result delivery and chat installation remain
 outstanding.
+
+`work_refusal_recovery.py` refreshes only a conclusively refused pending decision
+or acceptance with reason `attempt-unresolved`. Unchanged seen data keeps the
+original controls and operation. Changed data atomically fences the old operation
+with cancellation/conflict, preserves its body/id and publishes a complete fresh
+request view. The same bot/Act locks serialize against retry admission; unknown
+pending calls remain untouched. Publication consumes the old group with
+`work-refresh`, and final SDK proof requires that exact acknowledged origin plus
+current source/access. A new first tap and confirmation follow full delivery.
+The fresh preview is a direct reply even when proactive notifications are off.
+Entry points and outcome delivery remain uninstalled.

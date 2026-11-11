@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cleanup. Deferred typing prompts retain that basis and become visible only
   after the final ACK. Acknowledged answer choices and second-tap decisions or
   acceptances reserve one immutable operation for receipt-backed recovery.
+  Changed reviews after a conclusive temporary refusal receive a fresh complete
+  preview; unknown action outcomes cannot be superseded.
   Chat action and text/voice handlers remain uninstalled.
 
 - Prepare receipt-backed question routing and current eligible-recipient reads.
