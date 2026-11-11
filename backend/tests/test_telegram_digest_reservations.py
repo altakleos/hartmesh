@@ -430,3 +430,33 @@ async def test_digest_inherits_part_silence(db):
     identity = await digests.reserve(link, category="essential")
     async with db.sessions() as reader:
         assert (await reader.get(TelegramOutboxRow, identity)).silent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", ["payload", "part", "mixed_parts", "uncharged", "minimum_time", "maximum_time"])
+async def test_damaged_historical_digest_does_not_poison_optional_budget(db, damage):
+    from app.telegram_bots.notifications import budget_retry_at
+
+    link, clock, outbox, digests, _ids = await setup(db, ["info"] * 3)
+    identity = await digests.reserve(link, category="discretionary")
+    async with db.sessions.begin() as writer:
+        row = await writer.get(TelegramOutboxRow, identity)
+        part = outbox._parts([{"kind": "text", "source_ref": {"key": "digest.presentation", "values": {}}}], 0)[0]
+        part["dispatched_at"] = clock.now.isoformat()
+        row.parts = [part]
+        row.state, row.closed_at = "skipped", clock.now
+        if damage in {"payload", "uncharged"}:
+            row.payload = []
+            if damage == "uncharged":
+                row.parts = [1, {"sent_at": "not-a-time"}]
+        elif damage in {"minimum_time", "maximum_time"}:
+            row.payload = {**row.payload, "notification_reserved_at": "0001-01-01T00:00:00+01:00" if damage == "minimum_time" else "9999-12-31T23:59:59-01:00"}
+        elif damage == "part":
+            row.payload = {**row.payload, "notification_reserved_at": clock.now.isoformat()}
+            row.parts = [1]
+        else:
+            row.parts = [1, {"sent_at": "not-a-time"}, part]
+    later, _ = await outbox._add(link, dedupe_key="ev:" + uuid4().hex, class_="info", payload={"parts": [{"kind": "text", "source_ref": {"key": "chat.restarted", "values": {}}}]})
+    async with outbox._writer(link.id) as (writer, _binding):
+        result = await budget_retry_at(writer, await writer.get(TelegramOutboxRow, later), now=clock.now, config=outbox.config.outbox)
+        assert result == (None if damage == "uncharged" else clock.now + timedelta(seconds=60))

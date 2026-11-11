@@ -67,8 +67,19 @@ def discretionary(row):
     return row.class_ in DISCRETIONARY_DELIVERY_CLASSES and not row.dedupe_key.startswith("edit:")
 
 
+def _stored_stamp(value):
+    if type(value) is not str:
+        return None
+    try:
+        return aware(datetime.fromisoformat(value))
+    except (ValueError, OverflowError):
+        return None
+
+
 def first_dispatch(parts):
-    stamps = [aware(datetime.fromisoformat(stamp)) for part in parts for stamp in (part.get("sent_at") or part.get("dispatched_at"),) if stamp]
+    if type(parts) not in {list, tuple}:
+        return None
+    stamps = [stamp for part in parts if type(part) is dict for stamp in (_stored_stamp(part.get("sent_at")) or _stored_stamp(part.get("dispatched_at")),) if stamp is not None]
     return min(stamps) if stamps else None
 
 
@@ -118,8 +129,8 @@ async def budget_retry_at(session, row, *, now, config):
             optional = True
         if not optional:
             continue
-        reservation = candidate.payload.get("notification_reserved_at")
-        stamp = aware(datetime.fromisoformat(reservation)) if reservation is not None else first_dispatch(candidate.parts)
+        reservation = candidate.payload.get("notification_reserved_at") if type(candidate.payload) is dict else None
+        stamp = _stored_stamp(reservation) or first_dispatch(candidate.parts)
         if stamp is None:
             continue
         if stamp >= start:
