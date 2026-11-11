@@ -17,6 +17,21 @@ from deerflow.utils.file_io import await_drained
 _TEXT = TypeAdapter(Statement)
 
 
+def accepted_text(mark, prompt, acknowledged_at):
+    """Re-prove plain text and its exact shown-prompt destination/provenance."""
+    raw = mark.sanitized_input
+    if type(raw) is not dict or set(raw) - {"text", "type", "reply_to_message_id"} or raw.get("type", "text") != "text":
+        raise CallbackRefused()
+    if (prompt.link_id, prompt.chat_id, prompt.binding_generation, prompt.message_thread_id) != (mark.link_id, mark.chat_id, mark.binding_generation, mark.message_thread_id):
+        raise CallbackRefused()
+    quoted = raw.get("reply_to_message_id")
+    if quoted is not None and (type(quoted) is not int or quoted != prompt.message_id):
+        raise CallbackRefused()
+    if quoted is None and (_aware(mark.accepted_at) < acknowledged_at or mark.message_id <= prompt.message_id):
+        raise CallbackRefused()
+    return _TEXT.validate_python(raw.get("text"))
+
+
 class WorkInputCaptures:
     def __init__(self, inbox, callbacks):
         self.inbox, self.callbacks = inbox, callbacks
@@ -34,10 +49,6 @@ class WorkInputCaptures:
                     raise CallbackRefused()
                 mark = (await self.inbox._rows(writer, [origin]))[0]
                 self.inbox._current(link, mark)
-                raw = mark.sanitized_input
-                if set(raw) - {"text", "type", "reply_to_message_id"} or raw.get("type", "text") != "text":
-                    raise CallbackRefused()
-                text = _TEXT.validate_python(raw.get("text"))
                 prompt = await writer.get(TelegramCallbackRow, prompt_id, populate_existing=True)
                 if prompt is None or prompt.kind != "prompt" or (prompt.link_id, prompt.chat_id, prompt.binding_generation, prompt.message_thread_id) != (link.id, mark.chat_id, mark.binding_generation, mark.message_thread_id):
                     raise CallbackRefused()
@@ -48,8 +59,7 @@ class WorkInputCaptures:
                     raise CallbackRefused()
                 source = acknowledged_source(link, parent)
                 acknowledged_at = validate_shown_prompt(_item(parent), prompt)
-                if raw.get("reply_to_message_id") not in {None, prompt.message_id}:
-                    raise CallbackRefused()
+                text = accepted_text(mark, prompt, acknowledged_at)
                 basis = {
                     "version": 1,
                     "prompt_id": prompt.id,
@@ -67,8 +77,6 @@ class WorkInputCaptures:
                         raise CallbackRefused()
                     return InboxRow.from_row(mark)
                 self.callbacks._usable(prompt)
-                if raw.get("reply_to_message_id") is None and (_aware(mark.accepted_at) < acknowledged_at or mark.message_id <= prompt.message_id):
-                    raise CallbackRefused()
                 current = await Prompts(self.callbacks).current(link, mark.chat_id, mark.message_thread_id, guard=guard, session=writer)
                 if current is None or current.id != prompt_id:
                     raise CallbackRefused()
