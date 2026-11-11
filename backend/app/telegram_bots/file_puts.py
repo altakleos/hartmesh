@@ -281,13 +281,7 @@ class FilePuts:
 
         async def perform():
             reader = await self.receipt_reader(link, authority=authority, current=current)
-            async with self.callbacks.writer(link, reader.guard()) as writer:
-                result = []
-                for file in files:
-                    saved = await reader.completed(file, session=writer)
-                    result.append(dict(filename=saved.result["path"].rsplit("/", 1)[-1], size=saved.result["size"], path="/mnt/user-data/" + saved.result["path"], status="uploaded"))
-                reader.access._current()
-                return result
+            return await reader.composer_files(files)
 
         return await await_drained(perform())
 
@@ -410,6 +404,29 @@ class FileReceiptReader:
         self.check_link(base.captured_link)
         return _FileReceiptGuard(self.access, base)
 
+    async def composer_files(self, files):
+        files = [validate_chat_file(file) for file in files]
+
+        async def perform():
+            async with self.journal.callbacks.writer(self.access.link, self.guard()) as writer:
+                result = []
+                for file in files:
+                    saved = await self.completed(file, session=writer)
+                    result.append(dict(filename=saved.result["path"].rsplit("/", 1)[-1], size=saved.result["size"], path="/mnt/user-data/" + saved.result["path"], status="uploaded"))
+                self.access._current()
+                return result
+
+        return await await_drained(perform())
+
+    async def authorize_creation(self):
+        """Retain the original Home target through a queued run's actual POST."""
+
+        async def perform():
+            async with self.journal.callbacks.writer(self.access.link, self.guard()):
+                self.access._current()
+
+        return await await_drained(perform())
+
     async def completed(self, file, *, session=None):
         file = validate_chat_file(file)
 
@@ -434,7 +451,8 @@ class _FileReceiptGuard:
         return self.access.guard.captured_link
 
     def current(self):
-        self.base.current()
+        if self.base.current() is False:
+            raise ValueError("publication-stale") from None
         self.access._current()
 
     async def prepare(self):
