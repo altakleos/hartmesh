@@ -27,6 +27,7 @@ class PreparedModelPart:
     plain_text: str
     human_input: bool = False
     page_keys: tuple[str, ...] = ()
+    network_denial_host: str | None = None
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,10 @@ def validate_model_reply_basis(item: OutboxItem, part: dict | None = None) -> Ve
     from app.telegram_bots.producer import FrozenReplyPresentation, OutboxItem, _canonical_primary
 
     try:
+        if type(item) is OutboxItem and type(item.payload) is dict and type(item.payload.get("reply_basis")) is dict and type(item.payload["reply_basis"].get("version")) is int and item.payload["reply_basis"]["version"] == 8:
+            from app.telegram_bots.network_notices import validate_notice
+
+            return validate_notice(item, part)
         if type(item) is OutboxItem and type(item.payload) is dict and type(item.payload.get("reply_basis")) is dict and type(item.payload["reply_basis"].get("version")) is int and item.payload["reply_basis"]["version"] == 7:
             from app.telegram_bots.mixed_source import validate_mixed_reply_basis
 
@@ -423,6 +428,10 @@ class ModelSource:
 
         try:
             private, proof = await _saved_part(captured)
+            if proof.kind == "network_denials":
+                from app.telegram_bots.network_notices import read_notice
+
+                return await await_drained(read_notice(self, private, proof))
             if proof.kind == "human_input_files" and private.part["source_ref"].get("key") != "human_input.presentation":
                 # File warnings retain their own source-verified controls;
                 # they do not acquire question/form authority or currency.

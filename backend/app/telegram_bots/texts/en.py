@@ -130,6 +130,11 @@ TEXTS: dict[str, str] = {
     "refused.interrupted_manager": "A manager of {name} changed {name}'s settings, which restarted {name}'s workspace and stopped this answer. Nothing saved in {name}'s files was lost. Your message is kept.",
     "refused.interrupted_recovery": "{provider} restored or repaired {name}'s files, which closed {name}'s workspace and stopped this answer. Your message is kept. Check the files first, then try again in a few minutes.",
     "net.blocked_ask": "{name} could not reach {host}, which is not on the list of sites allowed here. Ask {supervisor} to allow {host} for a short time, or ask {support} to have {host} added to the list.",
+    "net.blocked": (
+        "{name} could not reach {host}, which is not on the list of sites allowed here. "
+        "To allow {host} for a short time, ask {name} here to reach {host} and allow the site when asked. "
+        "Then ask {name} to try again. The permanent list is set by {provider}."
+    ),
     "refused.interrupted": "{name}'s workspace was restarted, which stopped this answer. Your message is kept.",
     "chat.restarted": "The service restarted before this was answered. Your message is kept.",
     "chat.conversation_deleted": "This conversation was deleted on the web, so no answer to this message can be shown here. Send it again to start a new one.",

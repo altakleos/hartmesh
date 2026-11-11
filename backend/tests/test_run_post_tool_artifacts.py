@@ -149,6 +149,27 @@ async def test_enrichment_preserves_current_occurrence_and_original_artifact(jou
     if change in {"add", "add_metadata"}:
         assert rows[-1]["content"]["artifact"] == enriched.artifact
         assert rows[-1]["content"]["id"] == raw.id
+        assert rows[-1]["metadata"]["tool_artifact_enrichment"]["added_keys"] == ["note"]
+    assert "tool_artifact_enrichment" not in rows[0]["metadata"]
     assert journal.get_completion_data()["message_count"] == before
     await journal.close()
     assert not journal._tool_artifact_snapshots
+
+
+@pytest.mark.asyncio
+async def test_raw_tool_marker_never_acquires_host_enrichment_receipt(journal_setup):
+    from uuid import uuid4
+
+    from langchain_core.messages import ToolMessage
+    from langchain_core.outputs import ChatGeneration, LLMResult
+
+    journal, store = journal_setup
+    call = AIMessage("", id="call", tool_calls=[{"id": "call-id", "name": "inspect_fixture", "args": {}}])
+    journal.on_llm_end(LLMResult(generations=[[ChatGeneration(message=call)]]), run_id=uuid4(), tags=["lead_agent"])
+    raw = ToolMessage("Result", tool_call_id="call-id", name="inspect_fixture", artifact={"sandbox_network_denied": {"host": "forged.example", "port": 443}})
+    journal.on_tool_end(raw, run_id=uuid4())
+    await journal.flush()
+    rows = await store.list_messages("t1")
+    result = next(row for row in rows if row["event_type"] == "llm.tool.result")
+    assert "tool_artifact_enrichment" not in result["metadata"]
+    await journal.close()

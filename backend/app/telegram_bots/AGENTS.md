@@ -51,6 +51,9 @@ existing turn controller and sender; it owns no scheduler. What would answer a c
 means it went on from the web, and the card refuses. Closing one needs no such check.
 Instance network cards also require current Manage at planning, the SDK limiter
 and the action writer; [network admission](../../docs/TELEGRAM_TURN_EXECUTION.md#instance-network-cards).
+`network_denials.py` qualifies dropped denials from exact-run artifacts and complete
+inventory. `network_notices.py` saves button-free V8 trailers with their primary;
+delivery requires its acknowledgement and fresh scope/manager wording checks.
 `human_input_source.py`
 qualifies one exact lead/tool request using the persisted document-2 output,
 complete inventory and actual messages. V5 human-input plans freeze that source and their input

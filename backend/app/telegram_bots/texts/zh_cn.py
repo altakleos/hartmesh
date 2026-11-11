@@ -101,6 +101,7 @@ TEXTS: dict[str, str] = {
     "refused.interrupted_manager": "{name} 的一位管理者更改了设置，导致 {name} 的工作区重启，本次回答已停止。{name} 文件中已保存的内容没有丢失。你的消息已保留。",
     "refused.interrupted_recovery": "{provider}恢复或修复了 {name} 的文件，导致 {name} 的工作区关闭，本次回答已停止。你的消息已保留。请先检查文件，几分钟后再试。",
     "net.blocked_ask": "{name} 无法访问 {host}，因为该网站不在这里允许访问的列表中。请{supervisor}临时允许访问 {host}，或请{support}将 {host} 添加到列表。",
+    "net.blocked": "{name} 无法访问 {host}，因为该网站不在这里允许访问的列表中。如需临时允许访问，请在这里让 {name} 访问 {host}，并在收到请求时允许访问。然后请 {name} 再试一次。永久列表由{provider}设置。",
     "refused.interrupted": "{name} 的工作区已重启，导致本次回答停止。你的消息已保留。",
     "chat.restarted": "服务在回答完成前重启。你的消息已保留。",
     "chat.conversation_deleted": "这个会话已在网页版删除，因此这条消息的回复无法在此显示。重新发送即可开始新会话。",

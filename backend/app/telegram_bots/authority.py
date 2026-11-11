@@ -425,6 +425,12 @@ class TelegramAuthority:
                     return validate_model_reply_basis(item, part)
 
                 proof = await await_drained(asyncio.to_thread(validate_model))
+                if proof.kind == "network_denials":
+                    from app.telegram_bots.network_notices import notice_eligibility
+
+                    decision = await await_drained(notice_eligibility(self, current, item))
+                    if decision is not None:
+                        return decision
                 scope = proof.record.scope
                 if current.id != scope.link_id or any(
                     getattr(current, field) != getattr(scope, field) for field in ("owner_user_id", "agent_kind", "agent_ref", "bot_id", "connection_id", "telegram_user_id", "chat_id", "binding_generation")

@@ -27,7 +27,7 @@ from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["text", "legacy_text", "produced_file", "missing_root", "revoked_home"])
+@pytest.mark.parametrize("case", ["text", "legacy_text", "produced_file", "network_denial", "missing_root", "revoked_home"])
 async def test_instance_worker_seals_current_home_inventory(instances, capture_environment, monkeypatch, case):
     from deerflow.agent_instances import runtime as instance_runtime
     from deerflow.agents.lead_agent import agent
@@ -36,11 +36,25 @@ async def test_instance_worker_seals_current_home_inventory(instances, capture_e
     from deerflow.tools.builtins.present_file_tool import present_file_tool
 
     execution, _, root = await prepared(instances)
+    baseline = None
+    if case == "network_denial":
+        from test_sandbox_middleware import _NetworkPolicyProvider
+
+        from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow
+
+        async with instances[2].begin() as session:
+            grant = await session.get(AgentInstanceGrantRow, (execution.instance.id, execution.requester.subject_id))
+            grant.permissions = 1
+        execution = await execution.authority.execution(actor=execution.requester, thread_id=execution.thread_id)
+        baseline = _NetworkPolicyProvider()
+        baseline.events = [{"request_id": "blocked-request", "host": "example.org", "port": 443}]
+    with_tool = case in {"produced_file", "network_denial"}
     e = capture_environment
-    assembly, built, model = await asyncio.to_thread(assemble_offline, monkeypatch, runtime_context={AGENT_EXECUTION_CONTEXT_KEY: execution}, tools=[present_file_tool] if case == "produced_file" else [])
+    assembly, built, model = await asyncio.to_thread(assemble_offline, monkeypatch, runtime_context={AGENT_EXECUTION_CONTEXT_KEY: execution}, tools=[present_file_tool] if with_tool else [])
     model.responses = [AIMessage("Exact instance answer", id="instance-answer")]
-    if case == "produced_file":
-        model.responses.insert(0, AIMessage("", tool_calls=[{"id": "present-current", "name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/current.txt"]}}]))
+    if with_tool:
+        filename = "current.txt" if case == "produced_file" else "result.txt"
+        model.responses.insert(0, AIMessage("", tool_calls=[{"id": "present-current", "name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/" + filename]}}]))
     assert any(type(m).__name__ == "InstanceAuthorityMiddleware" for m in built["middleware"])
     assert assembly.inventory_profile is not None
     # No ordinary owner path or viewless qualifier may supply instance evidence.
@@ -55,7 +69,7 @@ async def test_instance_worker_seals_current_home_inventory(instances, capture_e
 
     async def prepare(bound, *, app_config, run_id):
         assert bound is execution
-        return InstanceSandboxProvider(bound, sandbox, app_config=app_config, skill_revision="fixture")
+        return InstanceSandboxProvider(bound, sandbox, baseline=baseline, app_config=app_config, skill_revision="fixture")
 
     monkeypatch.setattr(instance_runtime, "prepare_environment", prepare)
     actual_generate = type(model)._agenerate
@@ -83,13 +97,16 @@ async def test_instance_worker_seals_current_home_inventory(instances, capture_e
     ctx = RunContext(checkpointer=None, event_store=e.event_store, app_config=agent.get_app_config(), agent_execution=execution, schedule_stream_cleanup=cleanup, qualify_output_view=OutputViewQualifier(ordinary_qualifier))
     token = set_current_user(SimpleNamespace(id=owner))
     try:
-        await run_agent(bridge, e.manager, record, ctx=ctx, agent_factory=lambda **kwargs: assembly, graph_input={"messages": [HumanMessage("Question")]}, config={"run_id": uuid4(), "configurable": {"thread_id": thread}})
+        graph_input = {"messages": [HumanMessage("Question")]}
+        if baseline is not None:
+            graph_input["sandbox"] = {"sandbox_id": sandbox.id}
+        await run_agent(bridge, e.manager, record, ctx=ctx, agent_factory=lambda **kwargs: assembly, graph_input=graph_input, config={"run_id": uuid4(), "configurable": {"thread_id": thread}})
         events = await e.event_store.list_events(thread, record.run_id, event_types=["run.output_inventory"], limit=2, user_id=owner)
     finally:
         reset_current_user(token)
         await asyncio.gather(*cleanup_tasks)
     row = await e.repository.get(record.run_id, user_id=owner)
-    assert model.invocations == (2 if case == "produced_file" else 1) and close.call_count == 1
+    assert model.invocations == (2 if with_tool else 1) and close.call_count == 1
     if case == "legacy_text":
         assert row["status"] == "success" and not events
         assert row["kwargs"]["output_evidence"]["kind"] == "text"
@@ -106,5 +123,19 @@ async def test_instance_worker_seals_current_home_inventory(instances, capture_e
     elif case == "produced_file":
         assert doc.coverage == "complete"
         assert any(getattr(item, "path", None) == "/mnt/user-data/outputs/current.txt" for item in doc.items)
+    elif case == "network_denial":
+        from deerflow.runtime.runs.output_inventory import presentation_fragment_digest
+
+        assert baseline.decisions == [(sandbox.id, "blocked-request", "deny")]
+        assert doc.coverage == "complete"
+        rows = await e.event_store.list_messages_by_run(thread, record.run_id, user_id=owner)
+        tool_rows = [row for row in rows if row["event_type"] == "llm.tool.result"]
+        assert tool_rows
+        enriched = tool_rows[-1]["content"]
+        assert tool_rows[-1]["metadata"]["tool_artifact_enrichment"]["added_keys"] == ["sandbox_network_denied"]
+        assert enriched["artifact"]["sandbox_network_denied"] == {"host": "example.org", "port": 443}
+        matching = [item for item in doc.items if getattr(item, "value_sha256", None) == presentation_fragment_digest(enriched["artifact"])]
+        assert len(matching) == 1 and matching[0].witness.message_id == enriched["id"]
+        assert any(getattr(item, "path", None) == "/mnt/user-data/outputs/result.txt" for item in doc.items)
     else:
         assert doc.coverage == "incomplete" and doc.reason == ("execution_stopped" if case == "revoked_home" else "scan_incomplete")

@@ -228,6 +228,16 @@ def get_initialized_sandbox_provider() -> SandboxProvider | None:
         return _default_sandbox_provider
 
 
+def get_initialized_execution_provider() -> SandboxProvider | None:
+    """Read the prepared execution provider without initializing a fallback."""
+    from deerflow.agent_instances.runtime import current_environment
+
+    environment = current_environment()
+    if environment is not None:
+        return environment.provider
+    return get_initialized_sandbox_provider()
+
+
 def get_sandbox_provider(**kwargs) -> SandboxProvider:
     from deerflow.agent_instances.contract import AgentDenied
     from deerflow.agent_instances.runtime import current_environment

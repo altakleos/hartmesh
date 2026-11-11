@@ -172,7 +172,9 @@ rollback, read the [checkpoint contracts](../../../../docs/runtime-guidance-deta
 **Message sequence placement:** Keep backend and frontend message identity rules aligned. Tool results use their own message IDs, assigned on missing-ID callback results before persistence; provider call IDs may repeat. Restore pre-capture ID-less copies from the current lead-call result ID; reset it on a new canonical call, not a usage replay. Keep ID-less legacy rows independent. Details: `backend/docs/runtime-guidance-details.md`.
 
 Post-tool artifact enrichment appends one same-ID revision for new bounded mapping
-keys while preserving earlier values, body, status and metadata. Only the standard
+keys with a host `tool_artifact_enrichment` receipt (previous digest, added keys).
+Normalize missing Command-result names before the raw snapshot. Preserve earlier
+values, body, status and metadata. Only the standard
 tool normalization and receipt stamps may be newly added outside the artifact. Require the current lead-call result,
 keep original events and message counts, and deduplicate unchanged reconciliation.
 Inventory accepts the earlier fragment only when the actual visible terminal

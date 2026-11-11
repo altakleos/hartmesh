@@ -1978,6 +1978,9 @@ Instance site-permission cards require current Manage access when planned, sent
 and answered. Withdrawing Manage keeps an unsent card from appearing and prevents
 its buttons from submitting another answer; the person is directed to a manager.
 Cards still come only from a verified pending network request.
+When a site is blocked without a card, a final text/file reply is followed by notices
+for at most three distinct sites. Each notice explains how the recipient can ask
+for access; it grants no permission and creates no action record.
 
 Employee Telegram policy can be read and stored through the browser-session API
 by a person with both Manage and Inspect. Personal assistants use their access
