@@ -1079,3 +1079,14 @@ async def test_down_inside_a_soft_wrapped_line_moves_the_cursor_not_history():
         await pilot.pause()
         assert composer.value == _LONG_PROMPT
         assert composer.cursor_position > 0
+
+
+@pytest.mark.asyncio
+async def test_spinner_tick_after_status_unmount_does_not_crash_shutdown():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._streaming = True
+        await app.query_one("#status").remove()
+        app._tick_spinner()
+        await pilot.pause()

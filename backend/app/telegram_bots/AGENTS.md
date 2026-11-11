@@ -17,6 +17,8 @@ Its dormant receipt observer never calls the explicit action-retry path.
 Routing V5 has a dedicated recipient/account source and cannot use ordinary
 question recovery. Recipient-choice admission atomically reserves the original
 operation and group; a missing reserved journal never becomes a fresh action.
+Actual Work effects retain instance → link → Act lock order and recheck joined
+authority after provider awaits. Exact receipts precede fresh-effect admission.
 Full ACK alone seals captured input and writes the Work-only continuation receipt;
 keep retention and callback activation aligned with [Work guidance](../../docs/TELEGRAM_WORK.md).
 

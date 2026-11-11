@@ -52,9 +52,8 @@ the request. A reserved group without its journal cannot recreate an action.
 The borrowed final snapshot checks manager/source and selected-account/grant
 facts; candidate disablement is a recipient refusal, not an owner-account state.
 Routing ignores the action pause and grants no access. The receipt worker owns
-execution; this primitive installs no chat handler. Qualify the actual domain
-commit separately: journal admission does not replace a final selected-recipient
-and binding/grant/policy fence after the service admission provider awaits.
+execution; this primitive installs no chat handler. Actual effects use the
+separate final authority fence below; journal admission alone grants no effect.
 
 `work_interactions.py` renders complete unsubmitted confirmation/prompt views.
 Its closed JSON state retains normalized text and the displayed `seen` basis;
@@ -91,8 +90,14 @@ does not install them yet. Bound people own immutable request bodies and operati
 ids. Exact service receipts are read without mutation before fresh action guards.
 A generic borrowed-writer admission checks link/account/policy/pause and the exact
 journal attempt before a fresh effect and again before commit. `work_authority.py`
-prepares the route provider off-writer, then evaluates it against the borrowed
-current account/role limit; no nested account checkout is allowed. Review commands
+prepares the journal attempt's route provider off-writer. Domain admission uses
+`work_effect_authority.py`: after the service's instance/Work/request locks, it
+retains link then Act locks through commit. Owner/role/connection/grant/policy,
+exact original Act and selected routing-account/grant facts share the final SQL
+snapshot after provider awaits. No nested account checkout is allowed. Current
+manager access gates management effects; only decide/accept honor the action
+pause. Recipient refusal never disables the actor's account. Canonical receipt
+recovery happens before this fresh-effect gate and never repeats the command. Review commands
 use the complete displayed basis and captured Work CAS. The bounded worker only
 retries admitted service calls with no conclusive refusal, never settings, files,
 network or transcription. No action here starts or stops an assignment.
