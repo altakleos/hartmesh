@@ -235,9 +235,13 @@ replacement flag is derived from original and current request identities; the
 original input time still fixes expiry. With no replacement, old controls retire
 and a fixed closed/withdrawn notice settles the input without an action. Closure
 state/revisions and the unchanged input share the final joined read, including
-after settlement; drift rolls the entire transition back. Already-reserved
-confirmation groups, even with missing journals, cannot enter this unsubmitted
-note path. Their canonical receipt/conflict owner remains responsible.
+after settlement; drift rolls the entire transition back. Reserved confirmations
+may enter only after an exact conclusive conflict: the full shown group, original
+confirm control, Act scope and immutable command must agree. Unknown, pending,
+missing or altered journals stay held. A known non-effect confirmation whose
+review closed first checks its original operation and CAS; receipt reconciliation
+still comes first. Direct text closure after admission uses the same recovery
+only after its immutable operation conclusively conflicts.
 Direct text admission records `route_basis.work_action_id` atomically with its
 Act, preserving the captured `work_input`. Missing marked journals cannot be
 reconstructed by input replay. Preview authority also checks orphaned V4 control

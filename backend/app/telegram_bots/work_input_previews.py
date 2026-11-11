@@ -12,7 +12,7 @@ from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.callbacks import CallbackGroup, CallbackRefused, _aware, _row
 from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.producer import DeliveryRetry, ProductSourceRetired, _item, keyboard_cleanup_row
-from app.telegram_bots.work_actions import same_body
+from app.telegram_bots.work_actions import _ACT_SCOPE, same_body
 from app.telegram_bots.work_input_capture import accepted_text
 from app.telegram_bots.work_interaction_delivery import WorkInteractionPlans, acknowledged_source
 from app.telegram_bots.work_interactions import interaction_state
@@ -171,7 +171,7 @@ class WorkInputPreviews:
         if captures.inbox.session_factory.kw.get("bind") is not plans.outbox.sessions.kw.get("bind"):
             raise ValueError("work-input-requires-shared-storage")
 
-    async def open(self, link, origin, *, guard, request_id=None):
+    async def open(self, link, origin, *, guard, request_id=None, conclusive_act=None):
         async def perform():
             if origin.link_id != link.id:
                 raise CallbackRefused()
@@ -185,7 +185,7 @@ class WorkInputPreviews:
             source, settings = await self.recovery._source(link, request_id or data["request_id"])
             state = input_state(data, source)
             admission = await prepare_attention(self.plans.reader, link)
-            composed = _InputGuard(guard, admission, source, captured)
+            composed = _InputGuard(guard, admission, source, captured, conclusive_act=conclusive_act)
             async with self.plans.callbacks.writer(link, composed) as writer:
                 latest = await self.captures.capture(link, origin, prompt_id=prompt_id, guard=composed, session=writer)
                 if not same_body(latest.route_basis, captured.route_basis) or latest.operation_ids != captured.operation_ids:
@@ -263,15 +263,16 @@ class WorkInputPreviews:
 
 
 class _InputGuard:
-    def __init__(self, base, admission, source, captured):
+    def __init__(self, base, admission, source, captured, *, conclusive_act=None):
         self.base, self.admission, self.source, self.captured = base, admission, source, captured
+        self.conclusive_act = conclusive_act
 
     async def prepare(self):
         await prepare_publication_guard(self.base)
 
     async def check(self, writer):
         current = await self.base.check(writer)
-        held, _target = await self.admission(session=writer, projection=_InputProjection(self.source, self.captured))
+        held, _target = await self.admission(session=writer, projection=_InputProjection(self.source, self.captured, conclusive_act=self.conclusive_act))
         if "agents:write" not in held:
             raise AgentDenied("The preview is unavailable")
         self.base.current()
@@ -279,18 +280,22 @@ class _InputGuard:
 
 
 class _InputProjection(_RecoveryProjection):
-    def __init__(self, source, captured):
+    def __init__(self, source, captured, *, conclusive_act=None):
         super().__init__(source)
-        self.captured = captured
+        self.captured, self.conclusive_act = captured, conclusive_act
 
     def extend(self, query):
         mark = TelegramInboundMarkRow
-        return (
+        query = (
             super()
             .extend(query)
             .add_columns(mark, blocked_input_actions(input_identity(self.captured)))
             .join(mark, and_(mark.link_id == self.captured.link_id, mark.chat_id == self.captured.chat_id, mark.message_id == self.captured.message_id))
         )
+        if self.conclusive_act is not None:
+            saved = aliased(TelegramActRow)
+            query = query.add_columns(saved).outerjoin(saved, saved.id == self.conclusive_act.id)
+        return query
 
     def check(self, rows):
         super().check(rows)
@@ -298,6 +303,17 @@ class _InputProjection(_RecoveryProjection):
 
     def _check_mark(self, rows, *, complete=False):
         mark, blocked = rows[0][11:13]
+        if self.conclusive_act is not None:
+            saved, expected = rows[0][13], self.conclusive_act
+            if (
+                saved is None
+                or saved.state != "conflict"
+                or expected.state != "conflict"
+                or saved.attempts != expected.attempts
+                or any(getattr(saved, field) != getattr(expected, field) for field in _ACT_SCOPE)
+                or not same_body(saved.body, expected.body)
+            ):
+                raise ProductSourceRetired()
         if (
             blocked
             or mark.state == "done"

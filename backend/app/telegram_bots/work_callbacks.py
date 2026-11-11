@@ -38,7 +38,7 @@ class WorkCallbacks:
         self.recovery = WorkRequestRecovery(outcomes.plans)
         self.drafts = WorkRetainedDrafts(outcomes.plans)
         self.input_refresh = WorkInputRefresh(self.controls)
-        self.review_recovery = WorkReviewRecovery(outcomes.plans)
+        self.review_recovery = WorkReviewRecovery(outcomes.plans, controls=self.controls)
         self.routing = WorkRoutingAdmissions(outcomes.routing, self.acts) if outcomes.routing is not None else None
         self.routing_recovery = WorkRoutingRecovery(outcomes.routing) if outcomes.routing is not None else None
         self.followups, self.retries = WorkRoutingFollowupRecovery(outcomes), WorkActionRetries(outcomes)
@@ -92,8 +92,14 @@ class WorkCallbacks:
                     # action constructor. Unknown results remain journal-owned.
                     try:
                         if family == 4 and staged.state == "pending" and staged.reason == "attempt-unresolved":
-                            if await self.input_refresh.refresh(link, row.id, **scope) is not None:
-                                return True
+                            try:
+                                if await self.input_refresh.refresh(link, row.id, **scope) is not None:
+                                    return True
+                            except ProductSourceRetired:
+                                # A known non-effect may still check its original
+                                # immutable operation. Only a conclusive conflict
+                                # can transfer its note to closed-review recovery.
+                                pass
                         elif staged.kind in {"decide", "accept"} and staged.state == "pending" and staged.reason == "attempt-unresolved":
                             if await self.refusals.refresh(link, row.id, **scope) is not None:
                                 return True

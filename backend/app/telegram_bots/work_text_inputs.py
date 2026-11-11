@@ -112,7 +112,11 @@ class WorkTextInputs:
             else:
                 result = await self.callbacks.acts.reconcile_receipt(staged.id)
             if result.kind == "changes_requested" and result.state == "conflict":
-                await self.previews.open(link, captured, guard=guard)
+                try:
+                    await self.previews.open(link, captured, guard=guard, conclusive_act=result)
+                except ProductSourceRetired:
+                    if not await self.callbacks.review_recovery.recover(link, captured, guard=guard, conclusive_act=result):
+                        raise
             else:
                 await self.callbacks._observe(link, result.id, guard=guard)
         except Exception as error:
