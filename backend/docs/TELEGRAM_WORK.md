@@ -52,8 +52,7 @@ its later refreshes bypass proactive preferences; the final source read proves
 the original Show receipt. Retain that exact consumed proof while its parent
 exists, and require it under lock before recovery mutates controls. Complete ACK
 validation precedes control activation,
-and repair cannot consume another presentation’s controls. Controller installation
-and refresh of acknowledged reply-owned choices remain prerequisites for activation.
+and repair cannot consume another presentation’s controls. Controller installation remains a prerequisite for activation.
 Presentation/handlers stay dormant.
 
 `work_routing_admission.py` reserves acknowledged recipient choices in the same
@@ -261,10 +260,22 @@ shown reply, original completed response and both domain events in its final
 writer, alongside current manager and selected-account authority. The new choice
 owns a separate immutable routing operation; its success edits the exact shown
 selection. A damaged ACK cannot supply captured choices. Already acknowledged
-outcomes remain deduplicated; an explicit choice-refresh controller must own
-later roster changes without replaying the completed response.
-The full controller still owns fresh-request recovery, acknowledged routing-choice
-refresh, explicit action retries and installation of the receipt observer.
+outcomes remain deduplicated.
+
+`work_followup_refresh.py` refreshes an acknowledged recipient list only through
+its actual old choice. The V4 outcome carries that consumed refresh proof, while
+keeping the original completed response and input immutable. Known recipient
+refusals may refresh; unresolved routes retain their original operation and controls.
+Fresh choices inherit the old lifetime and activate only after full ACK. Both the
+writer and SDK reprove the consumed choice and original input after other awaits.
+Source drift holds the refresh with `work-outcome-refresh-required`; explicit
+replay can repair that saved intent into a new source-qualified delivery, preserving
+old parts and never repeating the command. The input stays completed throughout.
+Retention pins that exact input while current, unexpired recipient choices or
+pending refreshes need it; pending delivery also retains the consumed proof and
+its old parent. Ordinary age collection resumes when those dependencies end.
+The full controller still owns fresh-request recovery, dispatching explicit action
+retries and refreshes, and installation of the receipt observer.
 
 `work_outcome_recovery.py` observes Work journals without issuing commands.
 `Acts.reconcile_receipt` shares the original operation's local serialization and

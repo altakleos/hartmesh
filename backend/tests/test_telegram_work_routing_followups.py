@@ -15,7 +15,7 @@ from test_work_attention_pages import work_pages as work_pages
 from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
 
 
-async def wrong_person(e, monkeypatch):
+async def wrong_person(e, monkeypatch, *, input_message_id=900, input_update_id=1900):
     from app.gateway.auth.models import User
     from app.gateway.routers import agent_instances
     from app.telegram_bots.inbox import InboxRepository
@@ -41,7 +41,7 @@ async def wrong_person(e, monkeypatch):
     async with e.db.sessions() as reader:
         prompt = (await reader.get(TelegramOutboxRow, e.identity)).payload["work_request_basis"]["prompt_id"]
     inbox = InboxRepository(e.db.sessions)
-    mark, _ = await inbox.accept(e.link, incoming(message=900, update_id=1900, account=e.link.chat_id, reply=803), sanitized_input={"text": "A colleague knows this."})
+    mark, _ = await inbox.accept(e.link, incoming(message=input_message_id, update_id=input_update_id, account=e.link.chat_id, reply=803), sanitized_input={"text": "A colleague knows this."})
     await capture(e, inbox, mark, prompt)
     controls = controller(e, inbox)
     act = await stage_input(e, controls, mark)
@@ -77,11 +77,11 @@ async def test_saved_wrong_person_reply_is_the_acknowledged_routing_question(wor
     assert (await acts.check(staged.id)).state == "done"
 
 
-async def followup(e, monkeypatch, *, acknowledged=True):
+async def followup(e, monkeypatch, *, acknowledged=True, input_message_id=900, input_update_id=1900):
     from app.telegram_bots.work_outcome_delivery import WorkOutcomePlans, WorkOutcomeSources
     from app.telegram_bots.work_routing_admission import WorkRoutingAdmissions
 
-    acts, act, mark, routing = await wrong_person(e, monkeypatch)
+    acts, act, mark, routing = await wrong_person(e, monkeypatch, input_message_id=input_message_id, input_update_id=input_update_id)
     plans = WorkOutcomePlans(e.plans, acts, routing=routing)
     e.channel._services.work_outcome_sources = WorkOutcomeSources(plans)
     identity = await plans.plan(e.link, act.id, guard=await guard_for(e))

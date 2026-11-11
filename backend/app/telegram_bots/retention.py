@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, or_, select, text
+from sqlalchemy import String, and_, cast, delete, or_, select, text
 
 from app.telegram_bots.inbox import CALLBACK_PUBLICATION_KEY, callback_publication_pending
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkEventRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow, TelegramPendingFileRow
@@ -93,15 +93,16 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
             delivery.payload["work_request_basis"]["cleanup_id"].as_string(),
             delivery.payload["work_request_basis"]["origin"]["anchor_outbox_id"].as_string(),
             delivery.payload["work_outcome_basis"]["origin"]["anchor_outbox_id"].as_string(),
+            delivery.payload["work_outcome_basis"]["refresh"]["anchor_outbox_id"].as_string(),
         ).where(or_(delivery.class_ == "digest", delivery.state.in_(("pending", "sending", "failed"))))
     )
     graph = {}
-    for identity, kind, state, members, reservation, cleanup, origin, outcome_origin in records:
+    for identity, kind, state, members, reservation, cleanup, origin, outcome_origin, refresh_origin in records:
         if state in {"pending", "sending"}:
             pinned.add(identity)
             pinned |= _strings(reservation)
         if state in {"pending", "sending", "failed"}:
-            pinned |= _strings(cleanup, origin, outcome_origin)
+            pinned |= _strings(cleanup, origin, outcome_origin, refresh_origin)
         if kind == "digest" and isinstance(members, list):
             graph[identity] = _strings(*members)
     pending = list(pinned)
@@ -174,12 +175,55 @@ async def _sweep_acts(sessions, now):
         return ordinary.rowcount + len(identities) + len(settled)
 
 
+def _live_followup_input(mark, now, callback_max_age_days):
+    """Keep only the exact completed input a live or unfinished reply needs."""
+    delivery, callback, link = TelegramOutboxRow, TelegramCallbackRow, TelegramBotLinkRow
+    basis = delivery.payload["work_outcome_basis"]
+    live = (
+        select(callback.id)
+        .where(
+            callback.link_id == delivery.link_id,
+            callback.binding_generation == delivery.binding_generation,
+            callback.chat_id == delivery.chat_id,
+            callback.message_thread_id.is_(None),
+            callback.payload["anchor_outbox_id"].as_string() == delivery.id,
+            callback.payload["presentation_version"].as_string() == delivery.payload["presentation_version"].as_string(),
+            callback.kind == "route_to",
+            callback.consumed_at.is_(None),
+            callback.created_at > now - timedelta(days=callback_max_age_days),
+            or_(callback.expires_at.is_(None), callback.expires_at > now),
+        )
+        .correlate(delivery)
+        .exists()
+    )
+    return (
+        select(delivery.id)
+        .join(link, and_(link.id == delivery.link_id, link.owner_user_id == delivery.owner_user_id, link.binding_generation == delivery.binding_generation))
+        .where(
+            delivery.link_id == mark.link_id,
+            delivery.chat_id == mark.chat_id,
+            delivery.binding_generation == mark.binding_generation,
+            cast(basis["version"].as_string(), String).in_(("3", "4")),
+            mark.route_kind == "work_input",
+            basis["input"]["link_id"].as_string() == mark.link_id,
+            cast(basis["input"]["chat_id"].as_string(), String) == cast(mark.chat_id, String),
+            cast(basis["input"]["message_id"].as_string(), String) == cast(mark.message_id, String),
+            cast(basis["input"]["update_id"].as_string(), String) == cast(mark.update_id, String),
+            cast(basis["input"]["binding_generation"].as_string(), String) == cast(mark.binding_generation, String),
+            basis["input"]["operation_id"].as_string() == mark.operation_ids[0].as_string(),
+            or_(delivery.state.in_(("pending", "sending", "failed")), live),
+        )
+        .correlate(mark)
+        .exists()
+    )
+
+
 async def sweep_rows(sessions, now: datetime, *, callback_max_age_days: int) -> dict[str, int]:
     now = _aware(now)
     mark = TelegramInboundMarkRow
     open_act = select(TelegramActRow.id).where(TelegramActRow.link_id == mark.link_id, TelegramActRow.chat_id == mark.chat_id, TelegramActRow.message_id == mark.message_id, TelegramActRow.state.not_in(_SETTLED_ACTS))
     # A mark is done only once every delivery it lists is sent or skipped.
-    inbound = await _sweep(sessions, delete(mark).where(mark.closed_at < now - timedelta(days=INBOUND_RETENTION_DAYS), mark.state == "done", ~open_act.exists()))
+    inbound = await _sweep(sessions, delete(mark).where(mark.closed_at < now - timedelta(days=INBOUND_RETENTION_DAYS), mark.state == "done", ~open_act.exists(), ~_live_followup_input(mark, now, callback_max_age_days)))
     outbox = await _sweep_outbox(sessions, now, callback_max_age_days)
     acts = await _sweep_acts(sessions, now)
     events = await _sweep(sessions, delete(TelegramBotLinkEventRow).where(TelegramBotLinkEventRow.created_at < now - timedelta(days=LINK_EVENT_RETENTION_DAYS)))

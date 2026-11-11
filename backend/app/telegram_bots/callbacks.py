@@ -42,6 +42,7 @@ _RESERVED = frozenset(
         "publication_owner",
         "prompt_visibility",
         "work_action_id",
+        "work_followup_outbox_id",
     }
 )
 CALLBACK_METADATA_KEYS = _RESERVED
@@ -847,6 +848,7 @@ class CallbackRepository:
                 # source group and acknowledged parent as dispatch evidence.
                 unsettled.update(await session.scalars(select(TelegramOutboxRow.payload["work_request_basis"]["origin"]["anchor_outbox_id"].as_string()).where(TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
                 unsettled.update(await session.scalars(select(TelegramOutboxRow.payload["work_outcome_basis"]["origin"]["anchor_outbox_id"].as_string()).where(TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
+                unsettled.update(await session.scalars(select(TelegramOutboxRow.payload["work_outcome_basis"]["refresh"]["anchor_outbox_id"].as_string()).where(TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
                 # A captured Work input still owns its shown prompt until its
                 # outcome is delivered, even after ordinary prompt expiration.
                 for sources in await session.scalars(select(TelegramInboundMarkRow.delivery_ids).where(TelegramInboundMarkRow.route_kind == "work_input", TelegramInboundMarkRow.state != "done")):

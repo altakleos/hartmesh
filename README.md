@@ -2016,6 +2016,8 @@ across a restart before any submission. Unchanged answers and change requests
 can then enter the durable action journal using those original revisions.
 The routing foundation can also attach recipient choices directly to a manager’s
 saved “wrong person” reply, with a separate operation for passing the question on.
+Those replies can refresh changed recipient choices without resubmitting the response.
+Their original input remains available while live choices or pending refreshes need it.
 Assignments continue to be managed on the web.
 
 Instance site-permission cards require current Manage access when planned, sent
