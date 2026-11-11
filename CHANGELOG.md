@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram delivery
 
+- Prepare receipt-backed question routing and current eligible-recipient reads.
+  Routing grants no access and starts no work; chat controls remain disabled.
+
 - Prepare immutable digest reservations with shared delivery ownership, original
   member expiry, one-notification budgets and retained source dependencies.
   Digest rendering and chat controls remain disabled.

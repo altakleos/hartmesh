@@ -1,6 +1,11 @@
 """Simplified Chinese fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "request.unrouted": "这个问题还没有人回答\n“{objective}”\n{name} 问：{question}",
+    "request.route_ask": "已记录。应该由谁来回答？",
+    "request.route_none": "目前还没有其他人可以回答这个问题。回答者需要获得 {name} 的访问权限，可在 {product} 网页中授予。",
+    "request.routed": "已转交给 {person}。",
+    "label.choose_answerer": "选择回答者",
     "file.saved": "{file}已保存到{name}的文件中。",
     "file.saved_ask": "{file}已保存到{name}的文件中。需要{name}如何处理？",
     "file.saved_as": "由于名称已被使用或无法使用，文件已另存为{file}。",

@@ -71,6 +71,13 @@ A changed principal, configuration or source authority retires the read; read-on
 owners retain inspectable content without actionable requests. No chat list or
 summary scheduler is installed by this collector.
 
+`work_routing.py` reads owner-authenticated grants and active accounts before
+capping six recipient buttons. Information needs Use+Inspect; decisions/reviews
+need Manage+Inspect. The latest wrong recipient is excluded; names, never IDs,
+label choices. `Acts.route` serializes body capture and exact receipt recovery;
+HumanInput's borrowed admission fences binding/account/policy at commit. Routing
+grants no access and ignores the action pause. Presentation/handlers stay dormant.
+
 `work_requests.py` reads every response before forming request controls and
 retains the complete displayed basis. Review instructions, comments and response
 dispositions are never clipped to a notification title. `work_request_delivery.py`

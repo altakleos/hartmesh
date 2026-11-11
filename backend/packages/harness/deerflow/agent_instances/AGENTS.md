@@ -303,7 +303,7 @@ cursors with a fixed aware horizon and current authority on every page. Request
 views filter before page counting and scan hidden batches through exhaustion.
 Existing list routes retain their contracts; cursors never grant access.
 Recipient eligibility borrows the caller's SQL session for account reads.
-`AgentWork.command` and `HumanInput.respond` accept an optional trusted
+`AgentWork.command`, `HumanInput.respond` and `HumanInput.command` accept an optional trusted
 `admission(session)` condition. It borrows the domain writer after exact receipt
 lookup and source/parent locking, then repeats after projection before commit.
 It adds caller custody checks without replacing human/grant/CAS authority.

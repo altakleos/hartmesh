@@ -47,7 +47,7 @@ POLICY_KEYS = frozenset({"policy.off", "policy.on", "policy.on_protected", "poli
 AGENT_LIST_KEYS = frozenset("cmd.other_chat assistants.list assistants.none assistants.colleagues employees.list employees.none agents.line_work agents.line_idle agents.line_plain agents.more agents.presentation".split())
 
 
-WORK_REQUEST_KEYS = frozenset("ask.info ask.decision ask.comment_line review.ready concealed.question concealed.decision concealed.review".split())
+WORK_REQUEST_KEYS = frozenset("ask.info ask.decision ask.comment_line review.ready concealed.question concealed.decision concealed.review request.unrouted request.route_ask request.route_none request.routed".split())
 
 
 def test_text_catalog_locales_have_equal_keys():
