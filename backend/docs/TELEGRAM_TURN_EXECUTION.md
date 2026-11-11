@@ -252,3 +252,20 @@ name. Protected policy uses a protected temporary message; other policy uses a
 fresh draft ID. Cleanup is best effort and cannot replace a committed file
 receipt. Captioned preflight and captionless/retry routing must qualify these
 leaves before activation.
+
+
+`file_outcomes.FileOutcomes` plans fixed save/refusal replies from an actual
+journal outcome and its original admitted input. Native rename/deduplication
+results supply their wording; retry controls target that exact file Act and keep
+no bytes. A closed `file_put_basis` records the Act, operation and outcome in the
+product reply. Replay returns the same frozen text and controls under current
+authority. The operation's single hash is the dedupe suffix, avoiding accidental
+token-shaped text in internal identifiers. Reply and callback creation borrow one
+receipt-guarded writer; late Use/Home changes roll both back. Manager full-files
+wording and Files links, including the size-limit link, recheck Manage/Inspect at
+the SDK boundary. A size refusal links only to an already existing conversation
+for other readers. Initial save notices are auxiliary; captionless questions,
+explicit retry execution and lifecycle/status refusal routing remain the callers'
+responsibility and must be qualified before activation.
+
+Unconfirmed file writes and pending workflow writes use cannot-confirm wording: native bytes may already exist even when the completion receipt is unavailable. Their retry controls remain explicit and journal-fenced.

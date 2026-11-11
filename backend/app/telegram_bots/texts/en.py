@@ -1,6 +1,15 @@
 """English fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "file.saved_ask": "{file} is saved in {name}'s files. What should {name} do with it?",
+    "file.saved_as": "Saved as {file}, because the name was taken or could not be used.",
+    "file.same": "{name} already has this file.",
+    "file.files_full": "{name}'s files are full, so {file} was not saved. Delete files on the web, or ask {support} for more room.",
+    "file.files_full_ask": "{name}'s files are full, so {file} was not saved. Ask {supervisor} to delete files, or ask {support} for more room.",
+    "file.files_busy": "{name}'s files are being changed right now. The service cannot confirm whether {file} was saved. Try Send again in a few minutes.",
+    "file.unconfirmed": "The service cannot confirm whether {file} was saved. Try Send again.",
+    "file.not_active": "{name} is paused or retired, so files cannot be added.",
+    "file.bad_name": "A file with that name cannot be saved. Rename it and send it again.",
     "file.saving": "Saving {file} for {name}…",
     "file.waiting": "Still saving {file} for {name}…",
     "start.ws_1": "Starting {name}'s workspace…",

@@ -55,6 +55,7 @@ _URL_SOURCES = {
     "chat.restarted": ("web.conversation", "label.open_conversation"),
     "answer.on_web": ("web.conversation", "label.open_conversation"),
     "refused.files_full": ("web.files", "label.open_files"),
+    "file.files_full": ("web.files", "label.open_files"),
     "refused.interrupted_recovery": ("web.files", "label.open_files"),
 }
 _TRANSPORT_RECEIPTS = frozenset({"sent_at", "dispatched_at", "unavailable_reason", "invalid_token_verification_pending", "url_button_fallback", "plain_fallback"})
@@ -87,6 +88,8 @@ def url_button_label(source: dict, button: dict) -> str:
     button = validate_url_button(button)
     if not isinstance(source, dict) or set(source) != {"key", "values"} or not isinstance(source["key"], str) or not isinstance(source["values"], dict):
         raise ValueError("invalid-url-button")
+    if source["key"] == "file.too_large_in" and source["values"].get("reader_is_manager") is True and button["page"] == "web.files":
+        return "label.open_files"
     expected = _URL_SOURCES.get(source["key"])
     if expected is None or expected[0] != button["page"]:
         raise ValueError("invalid-url-button")

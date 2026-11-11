@@ -236,13 +236,19 @@ async def fixed_source(host, link, key):
         "refused.interrupted_manager",
         "refused.interrupted_recovery",
         "net.blocked_ask",
+        "file.files_full",
+        "file.files_busy",
+        "file.not_active",
+        "file.same",
+        "file.saved_ask",
+        "file.too_large_in",
     }:
         from app.telegram_bots.authority import get_local_provider, is_administrator
         from deerflow.agent_instances.contract import AgentPermission
 
         view = await await_drained(host.authority.instance_view(link))
         values = {"name": view.name, "reader_is_administrator": await await_drained(is_administrator(link.owner_user_id))}
-        if key in {"refused.files_full", "net.blocked_ask"}:
+        if key in {"refused.files_full", "net.blocked_ask", "file.files_full", "file.too_large_in"}:
             manager = bool(view.permissions & AgentPermission.MANAGE)
             person = await await_drained(get_local_provider().get_user(view.supervisor.subject_id)) if not manager or key == "net.blocked_ask" else None
             values.update(reader_is_manager=manager, supervisor=person.email if person is not None else None)
@@ -258,14 +264,14 @@ async def fixed_source(host, link, key):
 
 async def failure_button(host, link, key):
     """Recovery needs Files access; deleting full files additionally needs Manage."""
-    if link.agent_kind != "instance" or key not in {"refused.files_full", "refused.interrupted_recovery"}:
+    if link.agent_kind != "instance" or key not in {"refused.files_full", "refused.interrupted_recovery", "file.files_full", "file.too_large_in"}:
         return None
     from app.telegram_bots.pages import page_address
     from app.telegram_bots.presentation import page_permissions
     from deerflow.agent_instances.contract import AgentPermission
 
     access = await await_drained(page_permissions(host.authority, link))
-    if key == "refused.files_full" and not access["permissions"] & AgentPermission.MANAGE:
+    if key in {"refused.files_full", "file.files_full", "file.too_large_in"} and not access["permissions"] & AgentPermission.MANAGE:
         return None
     address = await await_drained(asyncio.to_thread(page_address, "web.files", link, **access))
     return {"page": "web.files", "url": address} if address else None

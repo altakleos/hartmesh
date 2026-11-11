@@ -1,6 +1,15 @@
 """Simplified Chinese fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "file.saved_ask": "{file}已保存到{name}的文件中。需要{name}如何处理？",
+    "file.saved_as": "由于名称已被使用或无法使用，文件已另存为{file}。",
+    "file.same": "{name}已经有这个文件了。",
+    "file.files_full": "{name}的文件已满，未能保存{file}。请在网页上删除文件，或请{support}增加空间。",
+    "file.files_full_ask": "{name}的文件已满，未能保存{file}。请{supervisor}删除文件，或请{support}增加空间。",
+    "file.files_busy": "{name}的文件正在更改，无法确认{file}是否已保存。请过几分钟点击重新发送。",
+    "file.unconfirmed": "无法确认{file}是否已保存。请点击重新发送。",
+    "file.not_active": "{name}已暂停或停用，无法添加文件。",
+    "file.bad_name": "无法以该名称保存文件。请重命名后重新发送。",
     "file.saving": "正在为{name}保存{file}…",
     "file.waiting": "仍在为{name}保存{file}…",
     "start.ws_1": "正在启动 {name} 的工作环境…",
