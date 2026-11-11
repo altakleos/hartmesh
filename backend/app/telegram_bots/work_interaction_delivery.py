@@ -23,7 +23,12 @@ def transition(callback, source):
         raise CallbackRefused()
     if _plain(callback.payload.get("seen")) != source.seen:
         raise AgentConflict("Review the current request and all responses")
-    if callback.kind == "hi_cant_open":
+    if callback.kind == "back":
+        previous = interaction_state(_plain(callback.payload.get("interaction")), source)
+        if previous["view"] not in {"cannot", "decision", "accept"}:
+            raise CallbackRefused()
+        state = {"view": "request"}
+    elif callback.kind == "hi_cant_open":
         state = {"view": "cannot"}
     elif callback.kind == "accept_open":
         state = {"view": "accept"}
@@ -59,15 +64,15 @@ def check_origin(link, parent, callbacks, basis, source):
     origin = basis["origin"]
     if parent is None or parent.id != origin["anchor_outbox_id"] or parent.payload.get("presentation_version") != origin["presentation_version"]:
         raise ProductSourceRetired()
+    selected = next((row for row in callbacks if row.id == origin["callback_id"]), None)
+    if selected is None:
+        raise ProductSourceRetired()
     previous = acknowledged_source(link, parent)
-    refreshing = basis["interaction"]["view"] == "request"
+    refreshing = basis["interaction"]["view"] == "request" and selected.kind in {"decide_confirm", "accept_confirm"}
     if refreshing:
         if (previous.request["id"], previous.work["id"]) != (source.request["id"], source.work["id"]):
             raise ProductSourceRetired()
     elif not same_displayed_basis(previous, source):
-        raise ProductSourceRetired()
-    selected = next((row for row in callbacks if row.id == origin["callback_id"]), None)
-    if selected is None:
         raise ProductSourceRetired()
     group = [row for row in callbacks if row.group_id == selected.group_id]
     _validate_rows(parent, group)
@@ -117,7 +122,7 @@ class WorkInteractionPlans:
 
         return await await_drained(perform())
 
-    async def _publish(self, writer, link, group, parent, source, settings, state, *, key, chat_id, message_id, message_thread_id, guard, reason="work-preview"):
+    async def _publish(self, writer, link, group, parent, source, settings, state, *, key, chat_id, message_id, message_thread_id, guard, reason="work-preview", input_origin=None):
         """Publish a source-checked transition inside its caller's guarded writer."""
         callback_id, request_id, composed = group.selected.id, source.request["id"], guard
         shown = present_interaction(source, state, locale=settings.locale)
@@ -134,21 +139,25 @@ class WorkInteractionPlans:
         row = await writer.get(TelegramOutboxRow, identity)
         snapshot = asdict(source)
         snapshot["responses"] = list(snapshot["responses"])
-        cleanup = keyboard_cleanup_row(group.selected, owner_user_id=link.owner_user_id, now=self.outbox.clock(), dedupe_key="notice:work-interaction-cleanup:" + callback_id)
-        cleanup.payload = {**cleanup.payload, "work_request_parent_id": identity}
-        writer.add(cleanup)
+        cleanup = None
+        if input_origin is None:
+            cleanup = keyboard_cleanup_row(group.selected, owner_user_id=link.owner_user_id, now=self.outbox.clock(), dedupe_key="notice:work-interaction-cleanup:" + callback_id)
+            cleanup.payload = {**cleanup.payload, "work_request_parent_id": identity}
+            writer.add(cleanup)
         basis = {
-            "version": 3,
+            "version": 4 if input_origin is not None else 3,
             "source": snapshot,
             "locale": settings.locale,
             "concealed": False,
             "parts": recipes,
             "keyboard": keyboard,
             "reveal": None,
-            "cleanup_id": cleanup.id,
+            "cleanup_id": cleanup.id if cleanup is not None else None,
             "interaction": state,
             "origin": {"callback_id": callback_id, "anchor_outbox_id": parent.id, "presentation_version": group.presentation_version, "message_id": message_id},
         }
+        if input_origin is not None:
+            basis["input"] = input_origin
         if state["view"] == "prompt":
             basis["prompt_id"] = uuid4().hex
         row.payload = _safe_json({**row.payload, "work_request_basis": basis, "product_keyboard_basis": keyboard})
@@ -167,5 +176,6 @@ class WorkInteractionPlans:
             payload = {"request_id": request_id, "work_id": source.work["id"], "seen": source.seen, "interaction": state}
             await prompts.open(link, PURPOSES[state["purpose"]], payload, chat_id=chat_id, message_thread_id=message_thread_id, message_id=None, prompt_id=basis["prompt_id"], guard=composed, session=writer, defer_visibility=True)
             await prompts.attach(link, basis["prompt_id"], outbox_id=identity, guard=composed, session=writer)
-        await self.callbacks.consume_group(group, reason=reason, session=writer)
+        if input_origin is None:
+            await self.callbacks.consume_group(group, reason=reason, session=writer)
         return identity

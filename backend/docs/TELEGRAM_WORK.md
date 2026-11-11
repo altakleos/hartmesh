@@ -158,3 +158,15 @@ Replay requires the original journal row to remain under lock; deletion cannot
 convert replay into a fresh operation. Decision text remains unsubmitted until
 a separate complete preview and explicit confirmation. Capture can borrow only
 an active same-store writer. Result delivery and chat installation remain pending.
+
+`work_input_previews.py` publishes complete input-owned decision confirmations and
+fresh reviews for retained changes notes. Its V4 source ties every SDK send to the
+original acknowledged typing prompt, accepted inbox text and reserved operation
+identity. A new review preserves that text and gets fresh seen/CAS controls only
+after full delivery. Unchanged changes notes keep the direct submission path.
+Repeated refreshes retire old controls and queue keyboard removal; a claimed send
+must settle first. Pending, uncertain or completed actions from the same input
+prevent another intent. Captured inbox delivery dependencies retain these views.
+Confirmation admission locks and rechecks the original input proof; restart or
+caller text cannot replace it. Back restores the complete request and its choices
+without applying an action. These components remain dormant until controller wiring.

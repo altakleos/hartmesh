@@ -20,7 +20,7 @@ from deerflow.agent_instances.contract import AgentConflict, AgentDenied
 from deerflow.persistence.agent_instances.human_input import HumanInputRequestRow
 from deerflow.persistence.agent_instances.work import AgentWorkRow
 from deerflow.persistence.spaces.model import SpaceGrantRow, SpaceRow
-from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow, TelegramOutboxRow, TelegramPersonSettingsRow
+from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow, TelegramPersonSettingsRow
 from deerflow.spaces.contract import Permission
 from deerflow.utils.file_io import await_drained
 
@@ -77,15 +77,16 @@ def frozen(captured, *, acknowledged=False):
             type(basis) is not dict
             or set(basis)
             != {"version", "source", "locale", "concealed", "parts", "keyboard"}
-            | ({"reveal", "cleanup_id"} if basis.get("version") in {2, 3} else set())
-            | ({"interaction", "origin"} if basis.get("version") == 3 else set())
+            | ({"reveal", "cleanup_id"} if basis.get("version") in {2, 3, 4} else set())
+            | ({"interaction", "origin"} if basis.get("version") in {3, 4} else set())
+            | ({"input"} if basis.get("version") == 4 else set())
             | ({"prompt_id"} if basis.get("version") == 3 and type(basis.get("interaction")) is dict and basis["interaction"].get("view") == "prompt" else set())
             or type(basis["version"]) is not int
-            or basis["version"] not in {1, 2, 3}
+            or basis["version"] not in {1, 2, 3, 4}
         ):
             raise ValueError()
         if (
-            captured.item.class_ != ("reply" if basis["version"] == 3 else "question")
+            captured.item.class_ != ("reply" if basis["version"] in {3, 4} else "question")
             or type(basis["concealed"]) is not bool
             or type(basis["locale"]) is not str
             or type(captured.item.payload.get("presentation_version")) is not int
@@ -98,7 +99,7 @@ def frozen(captured, *, acknowledged=False):
         if reveal is not None and basis["concealed"]:
             raise ValueError()
         cleanup_id = basis.get("cleanup_id")
-        if cleanup_id is not None and (reveal is None and basis["version"] != 3 or type(cleanup_id) is not str or len(cleanup_id) != 32 or any(ch not in "0123456789abcdef" for ch in cleanup_id)):
+        if cleanup_id is not None and (reveal is None and basis["version"] not in {3, 4} or type(cleanup_id) is not str or len(cleanup_id) != 32 or any(ch not in "0123456789abcdef" for ch in cleanup_id)):
             raise ValueError()
         data = basis["source"]
         source = WorkRequestRead(**{**data, "responses": tuple(data["responses"])})
@@ -108,9 +109,9 @@ def frozen(captured, *, acknowledged=False):
             raise ValueError()
         if type(source.protected) is not bool or json.dumps(source.seen, sort_keys=True) != json.dumps(seen_basis(source.work, source.request, source.responses), sort_keys=True):
             raise ValueError()
-        if source.protected and not basis["concealed"] and reveal is None and basis["version"] != 3:
+        if source.protected and not basis["concealed"] and reveal is None and basis["version"] not in {3, 4}:
             raise ValueError()
-        if basis["version"] == 3:
+        if basis["version"] in {3, 4}:
             from app.telegram_bots.work_interactions import present_interaction
 
             origin = basis["origin"]
@@ -120,8 +121,21 @@ def frozen(captured, *, acknowledged=False):
                 or any(type(origin[key]) is not str or len(origin[key]) != 32 or any(ch not in "0123456789abcdef" for ch in origin[key]) for key in ("callback_id", "anchor_outbox_id"))
             ):
                 raise ValueError()
-            if type(origin["presentation_version"]) is not int or origin["presentation_version"] < 0 or type(origin["message_id"]) is not int or origin["message_id"] <= 0 or reveal is not None or basis["concealed"] or cleanup_id is None:
+            if (
+                type(origin["presentation_version"]) is not int
+                or origin["presentation_version"] < 0
+                or type(origin["message_id"]) is not int
+                or origin["message_id"] <= 0
+                or reveal is not None
+                or basis["concealed"]
+                or basis["version"] == 3
+                and cleanup_id is None
+            ):
                 raise ValueError()
+            if basis["version"] == 4:
+                from app.telegram_bots.work_input_previews import validate_input_basis
+
+                validate_input_basis(basis)
             presentation = present_interaction(source, basis["interaction"], locale=basis["locale"])
             if basis["interaction"]["view"] == "prompt" and (type(basis["prompt_id"]) is not str or len(basis["prompt_id"]) != 32 or any(ch not in "0123456789abcdef" for ch in basis["prompt_id"])):
                 raise ValueError()
@@ -209,10 +223,10 @@ class WorkRequestSources:
         if not (current.request["can_respond"] if current.request["purpose"] == "information" else current.request["can_manage"]):
             raise ProductSourceRetired()
         revealed = bool(basis.get("reveal"))
-        changed = not same_displayed_basis(current, source) or current.protected != basis["concealed"] and not revealed and basis["version"] != 3
-        if basis["version"] == 3 and changed:
+        changed = not same_displayed_basis(current, source) or current.protected != basis["concealed"] and not revealed and basis["version"] not in {3, 4}
+        if basis["version"] in {3, 4} and changed:
             raise ProductSourceRetired()
-        if self.recovery is not None and basis["version"] != 3:
+        if self.recovery is not None and basis["version"] not in {3, 4}:
             settings = await self.settings.get(captured.link.owner_user_id)
             if settings is None:
                 raise ProductSourceRetired()
@@ -302,7 +316,7 @@ class _RequestProjection:
         )
         cleanup = aliased(TelegramOutboxRow)
         origin_parent = aliased(TelegramOutboxRow)
-        return (
+        result = (
             query.add_columns(work, request, delivery, settings, spaces, callbacks, cleanup, origin_parent)
             .outerjoin(origin_parent, origin_parent.id == origin.get("anchor_outbox_id") if origin else false())
             .outerjoin(cleanup, cleanup.id == self.basis.get("cleanup_id") if self.basis.get("cleanup_id") else false())
@@ -311,6 +325,12 @@ class _RequestProjection:
             .join(delivery, and_(delivery.id == self.captured.item.id, delivery.link_id == bot.id))
             .join(settings, settings.owner_user_id == bot.owner_user_id)
         )
+        if self.basis["version"] == 4:
+            from app.telegram_bots.work_input_previews import blocked_input_actions
+
+            identity, mark = self.basis["input"], aliased(TelegramInboundMarkRow)
+            result = result.add_columns(mark, blocked_input_actions(identity)).outerjoin(mark, and_(mark.link_id == identity["link_id"], mark.chat_id == identity["chat_id"], mark.message_id == identity["message_id"]))
+        return result
 
     @staticmethod
     def objects(value):
@@ -343,10 +363,10 @@ class _RequestProjection:
         if self.source.request["purpose"] != "information" and permissions & 6 != 6:
             raise ProductSourceRetired()
         protected = target.custody == "company" and policy == "protected"
-        if protected != self.source.protected or protected != self.basis["concealed"] and not self.basis.get("reveal") and self.basis["version"] != 3 or protected and not self.captured.part.get("protect_content"):
+        if protected != self.source.protected or protected != self.basis["concealed"] and not self.basis.get("reveal") and self.basis["version"] not in {3, 4} or protected and not self.captured.part.get("protect_content"):
             raise DeliveryRetry(timedelta(seconds=5))
         actual = _snapshot(saved_settings)
-        if self.basis["version"] == 3 and actual.locale != self.basis["locale"]:
+        if self.basis["version"] in {3, 4} and actual.locale != self.basis["locale"]:
             raise ProductSourceRetired()
         if actual.locale != self.basis["locale"] or actual.timezone != self.settings.timezone:
             raise DeliveryRetry(timedelta(seconds=5))
@@ -383,7 +403,11 @@ class _RequestProjection:
             from app.telegram_bots.work_interaction_delivery import check_origin
 
             check_origin(current, rows[0][15], callback_facts, self.basis, self.source)
-        cleanup_target = self.basis["origin"]["message_id"] if self.basis["version"] == 3 else reveal.message_id if self.basis.get("reveal") else None
+        elif self.basis["version"] == 4:
+            from app.telegram_bots.work_input_previews import check_input_origin
+
+            check_input_origin(current, rows[0][15], callback_facts, rows[0][16], rows[0][17], self.basis, self.source)
+        cleanup_target = self.basis["origin"]["message_id"] if self.basis["version"] in {3, 4} else reveal.message_id if self.basis.get("reveal") else None
         if self.basis.get("cleanup_id") and rows[0][14].payload["target_message_id"] != cleanup_target:
             raise ProductSourceRetired()
         if self.basis.get("prompt_id"):

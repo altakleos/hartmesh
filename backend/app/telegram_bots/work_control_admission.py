@@ -29,6 +29,8 @@ def command(acts, callback, source):
     state = interaction_state(payload.get("interaction"), source)
     if callback.kind == "decide_confirm" and state["view"] == "decision":
         return "decide", acts._decision_command(operation_id=callback.id, request_id=source.request["id"], decision=state["decision"], note=state["note"], seen=seen)
+    if callback.kind == "changes_confirm" and state["view"] == "changes":
+        return "changes_requested", acts._changes_command(operation_id=callback.id, request_id=source.request["id"], note=state["note"], seen=seen)
     if callback.kind == "accept_confirm" and state["view"] == "accept":
         return "accept", acts._acceptance_command(operation_id=callback.id, request_id=source.request["id"], outcome_id=seen["outcome_id"], evidence_revision=seen["evidence_revision"], seen=seen)
     raise CallbackRefused()
@@ -66,6 +68,9 @@ class WorkControlAdmissions:
                     group = await self.callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=composed, session=writer)
                     parent = await writer.get(TelegramOutboxRow, group.anchor_outbox_id, populate_existing=True)
                     captured = acknowledged_source(link, parent)
+                    from app.telegram_bots.work_input_previews import lock_input_origin
+
+                    await lock_input_origin(writer, link, parent, captured)
                     if not same_displayed_basis(captured, source):
                         raise AgentConflict("Review the current request and all responses")
                     rows = [await writer.get(TelegramCallbackRow, row.id) for row in group.rows]
