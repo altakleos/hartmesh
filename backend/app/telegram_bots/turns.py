@@ -72,6 +72,7 @@ class _Guard:
             await self.services.prepare_ingress_values(self.captured_link)
             self.current()
         owner = await self.services.prepare_live_owner(self.captured_link.owner_user_id)
+        self.live_owner = owner
         self.current()
         factory = self.services.links.input_closure_guard if self.input_closure else self.services.links.publication_guard
         self.actual = factory(self.captured_link, check_live_owner=owner, check_attempt_current=self._current)
@@ -532,8 +533,15 @@ class ChatTurns:
                 for file in row.sanitized_input.get("files", []):
                     if file["message_id"] != row.message_id:
                         continue  # Earlier captionless context already has its receipt.
-                    await channel.put_instance_file(link, row, file, origins=origins, current=lambda: self._open(channel, link))
-                    await FileOutcomes(self.services).plan(channel, link, row, file, current=lambda: self._open(channel, link))
+                    try:
+                        await channel.put_instance_file(link, row, file, origins=origins, current=lambda: self._open(channel, link))
+                        await FileOutcomes(self.services).plan(channel, link, row, file, current=lambda: self._open(channel, link))
+                    except Exception as error:
+                        from app.telegram_bots.file_refusals import refuse_file_input
+
+                        if await refuse_file_input(self.services, channel, link, origins, error, current=lambda: self._open(channel, link)):
+                            return
+                        raise
         if not inbound.text.strip() and inbound.files:
             pending = getattr(self.services, "pending_files", None)
             if pending is None:

@@ -1075,7 +1075,7 @@ class TelegramSupervisor:
         channel.link = current
         await self._notice(channel, "access.off")
 
-    async def notice_instance_unavailable(self, link: BotLink) -> None:
+    async def notice_instance_unavailable(self, link: BotLink, *, file_input=False) -> None:
         channel = self.channel(link.id)
         if channel is None or channel.transport_revision != link.token_revision:
             return
@@ -1085,7 +1085,7 @@ class TelegramSupervisor:
         saved = await self.links.set_health(link.id, "agent_unavailable", holds=True, captured_link=link, expected_token_revision=link.token_revision)
         if saved is not None and self.channel(link.id) is channel:
             channel.link = saved
-            await self._notice(channel, key)
+            await self._notice(channel, key, file_input=file_input)
 
     async def eligibility(self, link, item, part=None) -> DeliveryEligibility:
         if self._stopping or self._cause is not None or not self._send_ready:
@@ -1360,7 +1360,7 @@ class TelegramSupervisor:
         self._notices.add(task)
         task.add_done_callback(self._notices.discard)
 
-    async def _notice(self, channel, key, *, throttle=False, silent=False) -> None:
+    async def _notice(self, channel, key, *, throttle=False, silent=False, file_input=False) -> None:
         link = channel.link
         if self._cause is not None or self.channel(link.id) is not channel or link.chat_id is None:
             return
@@ -1417,6 +1417,8 @@ class TelegramSupervisor:
                     access = await await_drained(page_permissions(self.authority, link))
                     address = await await_drained(asyncio.to_thread(page_address, "web.agentSettings", link, **access))
                     button = ("label.open_agent_settings", address) if address else None
+                if file_input and key in {"agent.paused", "agent.retired"}:
+                    render_key, button = "file.not_active", None
             if expected_policy is not None:
                 values["name"] = (await self.authority.instance_identity(link)).name
                 if key == "policy.off":

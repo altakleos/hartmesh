@@ -312,5 +312,11 @@ original-target journals, omits refused/unconfirmed attachments, and includes th
 instance ID in its execution-context comparison. Personal-storage preflight and
 legacy upload are never used for this path. A failed initial file owner can close
 only its own unconfirmed metadata and offer the exact file retry, without another
-effect. Lifecycle/execution refusals before file admission and process-restart
-reconciliation still require their separate integration qualification.
+effect. Before admission, a paused or retired target answers file-specific
+wording under the existing lifecycle notice fence; withdrawn Use still takes
+precedence. A lifecycle change after inbox admission closes the entire original
+input without publishing its caption. Execution-readiness refusals plan the
+fixed unavailable reply and close the original group under current Use, target,
+policy and custody checks in the final writer. These refusals invent no file
+journal and need no Home or workspace. Process-restart reconciliation remains
+separate.
