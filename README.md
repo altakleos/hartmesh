@@ -2004,6 +2004,9 @@ and obsolete lists retire without delaying later replies. The ordinary bot offer
 chats without starting an assignment. Existing bots receive the updated command
 menu at their next start.
 
+Work notification digests are still in preparation and are not enabled in Telegram.
+Assignments continue to be managed on the web.
+
 Instance site-permission cards require current Manage access when planned, sent
 and answered. Withdrawing Manage keeps an unsent card from appearing and prevents
 its buttons from submitting another answer; the person is directed to a manager.

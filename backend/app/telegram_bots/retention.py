@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, or_, select, text
 
 from app.telegram_bots.inbox import CALLBACK_PUBLICATION_KEY, callback_publication_pending
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkEventRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow, TelegramPendingFileRow
@@ -80,10 +80,29 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
             pinned |= _strings(row.target_id if row.target_kind == "outbox" else None)
     for delivery_ids, outbox_id in await session.execute(select(TelegramInboundMarkRow.delivery_ids, TelegramInboundMarkRow.outbox_id).where(TelegramInboundMarkRow.state != "done")):
         pinned |= _strings(outbox_id, *delivery_ids)
-    for payload in await session.scalars(select(TelegramOutboxRow.payload).where(TelegramOutboxRow.state.in_(("pending", "sending", "failed")))):
-        basis = payload.get("work_request_basis", {})
-        pinned |= _strings(basis.get("cleanup_id"))
-    return pinned | anchors | await _first_replies(session, anchors)
+    pinned |= anchors | await _first_replies(session, anchors)
+    delivery = TelegramOutboxRow
+    # Compact dependency edges preserve complete digests behind live controls.
+    records = await session.execute(
+        select(delivery.id, delivery.class_, delivery.state, delivery.payload["member_ids"], delivery.payload["digest_id"].as_string(), delivery.payload["work_request_basis"]["cleanup_id"].as_string()).where(
+            or_(delivery.class_ == "digest", delivery.state.in_(("pending", "sending", "failed")))
+        )
+    )
+    graph = {}
+    for identity, kind, state, members, reservation, cleanup in records:
+        if state in {"pending", "sending"}:
+            pinned.add(identity)
+            pinned |= _strings(reservation)
+        if state in {"pending", "sending", "failed"}:
+            pinned |= _strings(cleanup)
+        if kind == "digest" and isinstance(members, list):
+            graph[identity] = _strings(*members)
+    pending = list(pinned)
+    while pending:
+        children = graph.get(pending.pop(), set()) - pinned
+        pinned |= children
+        pending.extend(children)
+    return pinned
 
 
 async def _sweep_outbox(sessions, now: datetime, callback_max_age_days: int) -> int:

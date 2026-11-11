@@ -20,7 +20,7 @@ from deerflow.utils.file_io import await_drained
 
 ESSENTIAL_DELIVERY_CLASSES = frozenset({"reply", "question", "result", "interrupt", "progress", "service", "reminder"})
 DISCRETIONARY_DELIVERY_CLASSES = frozenset({"info", "summary"})
-DELIVERY_CLASSES = ESSENTIAL_DELIVERY_CLASSES | DISCRETIONARY_DELIVERY_CLASSES
+DELIVERY_CLASSES = ESSENTIAL_DELIVERY_CLASSES | DISCRETIONARY_DELIVERY_CLASSES | {"digest"}
 OUTBOX_INFO_MAX_AGE_HOURS = 24
 
 
@@ -34,6 +34,17 @@ def preference_skip(item, settings, now):
     if kind not in DELIVERY_CLASSES:
         raise ValueError("unsupported-notification-class")
     if kind == "reply":
+        return None
+    if kind == "digest":
+        from types import SimpleNamespace
+
+        from app.telegram_bots.digests import validate
+
+        _identities, kinds, category = validate(item)
+        for member_class, stamp in zip(kinds, item.payload["member_created_at"], strict=True):
+            reason = preference_skip(SimpleNamespace(class_=member_class, state=item.state, dedupe_key="digest-member", created_at=datetime.fromisoformat(stamp)), settings, now)
+            if reason:
+                return reason
         return None
     if kind == "summary":
         if not settings.summary_enabled:
@@ -49,6 +60,10 @@ def preference_skip(item, settings, now):
 
 
 def discretionary(row):
+    if row.class_ == "digest":
+        from app.telegram_bots.digests import validate
+
+        return validate(row)[2] == "discretionary"
     return row.class_ in DISCRETIONARY_DELIVERY_CLASSES and not row.dedupe_key.startswith("edit:")
 
 
@@ -89,14 +104,19 @@ async def budget_retry_at(session, row, *, now, config):
     candidates = await session.scalars(
         select(TelegramOutboxRow).where(
             TelegramOutboxRow.owner_user_id == row.owner_user_id,
-            TelegramOutboxRow.class_.in_(DISCRETIONARY_DELIVERY_CLASSES),
+            TelegramOutboxRow.class_.in_(DISCRETIONARY_DELIVERY_CLASSES | {"digest"}),
             TelegramOutboxRow.id != row.id,
             or_(TelegramOutboxRow.created_at >= cutoff, TelegramOutboxRow.closed_at >= cutoff, TelegramOutboxRow.closed_at.is_(None)),
         )
     )
     link_times, day_times = [], []
     for candidate in candidates:
-        if not discretionary(candidate):
+        try:
+            optional = discretionary(candidate)
+        except ValueError:
+            # A damaged historical capsule cannot erase its charged dispatch.
+            optional = True
+        if not optional:
             continue
         reservation = candidate.payload.get("notification_reserved_at")
         stamp = aware(datetime.fromisoformat(reservation)) if reservation is not None else first_dispatch(candidate.parts)
