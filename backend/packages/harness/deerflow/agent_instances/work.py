@@ -199,6 +199,38 @@ class AgentWork:
                     states[parent.id] = await self.agents.execution_probe(parent.id)
         return [self._execution_projection(record, states.get(parent.id)) for record, (_row, parent, _attempt) in zip(records, results, strict=True)]
 
+    async def list_page(self, *, actor, instance_id, limit=100, cursor=None, as_of=None):
+        """Read one creation-ordered page; mutable status never moves its key."""
+        from deerflow.agent_instances.paging import PageCursor
+
+        basis = PageCursor.read(actor=actor, instance=instance_id, view="work", limit=limit, cursor=cursor, as_of=as_of)
+
+        async def read():
+            await self.agents._human(actor)
+            async with self._sf() as session:
+                await self._parent(session, actor, instance_id, INSPECT)
+                query = self._with_attempt(
+                    select(AgentWorkRow, AgentInstanceRow)
+                    .join(AgentInstanceRow, AgentInstanceRow.id == AgentWorkRow.instance_id)
+                    .join(AgentInstanceGrantRow, AgentInstanceGrantRow.instance_id == AgentInstanceRow.id)
+                    .where(
+                        AgentWorkRow.instance_id == instance_id,
+                        AgentInstanceGrantRow.user_id == actor.subject_id,
+                        AgentInstanceGrantRow.permissions.between(1, 7),
+                        AgentInstanceGrantRow.permissions.op("&")(int(INSPECT)) != 0,
+                        *basis.where(AgentWorkRow),
+                    )
+                    .order_by(AgentWorkRow.created_at, AgentWorkRow.id)
+                    .limit(limit + 1)
+                )
+                rows = list((await session.execute(query)).all())
+                items = [await self._project(session, actor, parent, self._snapshot(row), attempt=attempt) for row, parent, attempt in rows[:limit]]
+                following = basis.next(rows[limit - 1][0]) if len(rows) > limit else None
+            state = await self.agents.execution_probe(instance_id) if self.agents.execution_probe is not None else None
+            return {"items": [self._execution_projection(item, state) for item in items], "next_cursor": following}
+
+        return await await_drained(read())
+
     async def count_active(self, *, actor, instance_id):
         """Count durable unresolved assignments, independent of pagination/residents."""
         return await await_drained(self._count_active(actor=actor, instance_id=instance_id))

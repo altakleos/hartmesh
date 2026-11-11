@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Persistent agents
 
+- Add stable, current-authority Work and human-request pagination for complete
+  attention scans, including older actionable records beyond the first page.
+
 - Include the latest reviewer change-request note in later Work attempts, through
   assignment edits, until acceptance, cancellation or reopening.
 - Add stable Work refusal codes while preserving existing messages and access

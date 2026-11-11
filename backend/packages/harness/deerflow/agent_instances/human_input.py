@@ -28,7 +28,7 @@ class HumanInput:
         if not user_id or parent.status in {"provisioning", "deleted", "archived"}:
             return False
         try:
-            await self.agents._human(PrincipalRef("human", user_id))
+            await self.agents._human(PrincipalRef("human", user_id), session=session)
         except AgentDenied:
             return False
         grant = await session.get(AgentInstanceGrantRow, (parent.id, user_id))
@@ -121,6 +121,56 @@ class HumanInput:
                         page.append(value)
                     matched += 1
             return {"requests": page, "counts": counts, "has_more": matched > offset + limit, "execution_available": False}
+
+    async def list_page(self, *, actor, view, instance_id, limit=100, cursor=None, as_of=None, can_write=True):
+        """Fill an authorized page across bounded SQL batches of stable keys."""
+        from deerflow.agent_instances.paging import PageCursor, stored_time
+
+        if type(can_write) is not bool:
+            raise ValueError("Invalid write projection")
+        if view not in {"pending", "answered", "routing", "all"}:
+            raise ValueError("Unknown Attention view")
+        basis = PageCursor.read(actor=actor, instance=instance_id, view="requests:" + view + (":write" if can_write else ":read"), limit=limit, cursor=cursor, as_of=as_of)
+
+        async def read():
+            await self.agents._human(actor)
+            async with self._sf() as session:
+                await self.work._parent(session, actor, instance_id, INSPECT)
+                scan, found = basis, []
+                while len(found) <= limit:
+                    query = (
+                        select(HumanInputRequestRow, AgentInstanceRow, AgentWorkRow)
+                        .join(AgentInstanceRow, AgentInstanceRow.id == HumanInputRequestRow.instance_id)
+                        .join(AgentWorkRow, AgentWorkRow.id == HumanInputRequestRow.work_id)
+                        .join(AgentInstanceGrantRow, AgentInstanceGrantRow.instance_id == AgentInstanceRow.id)
+                        .where(
+                            HumanInputRequestRow.instance_id == instance_id,
+                            AgentInstanceGrantRow.user_id == actor.subject_id,
+                            AgentInstanceGrantRow.permissions.between(1, 7),
+                            AgentInstanceGrantRow.permissions.op("&")(int(INSPECT)) != 0,
+                            AgentInstanceRow.status != "provisioning",
+                            *scan.where(HumanInputRequestRow),
+                        )
+                        .order_by(HumanInputRequestRow.created_at, HumanInputRequestRow.id)
+                        .limit(100)
+                    )
+                    rows = list((await session.execute(query)).all())
+                    for row, parent, work in rows:
+                        value = await self._project(session, actor, parent, work, row, can_write=can_write)
+                        addressed = row.recipient_id == actor.subject_id and not value["needs_routing"] and can_write
+                        personal = addressed and (value["can_respond"] if row.purpose == "information" else value["can_manage"])
+                        bucket = "routing" if value["needs_routing"] and value["can_manage"] else row.state if personal and row.state in {"pending", "answered"} else None
+                        if view == "all" or bucket == view:
+                            found.append((value, row))
+                            if len(found) > limit:
+                                break
+                    if len(found) > limit or len(rows) < 100:
+                        break
+                    last = rows[-1][0]
+                    scan = PageCursor(basis.actor, basis.instance, basis.view, basis.as_of, (stored_time(last.created_at), last.id))
+                return {"items": [value for value, _row in found[:limit]], "next_cursor": basis.next(found[limit - 1][1]) if len(found) > limit else None}
+
+        return await await_drained(read())
 
     async def responses(self, *, actor, request_id, limit=50, offset=0):
         self.work._pagination(limit, offset)
