@@ -2004,8 +2004,8 @@ and obsolete lists retire without delaying later replies. The ordinary bot offer
 chats without starting an assignment. Existing bots receive the updated command
 menu at their next start.
 
-Work notification digests and question routing are still in preparation and are
-not enabled in Telegram.
+Work notifications, question routing and confirmation controls are still in
+preparation and are not enabled in Telegram.
 Assignments continue to be managed on the web.
 
 Instance site-permission cards require current Manage access when planned, sent

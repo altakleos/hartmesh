@@ -386,3 +386,26 @@ TEXTS.update(
 )
 
 TEXTS.update({"label.cannot_provide": "I don't have this", "label.wrong_recipient": "I'm the wrong person"})
+
+TEXTS.update(
+    {
+        "ask.type_prompt": "Type your answer to: {question}",
+        "ask.cant_prompt": "In a few words, why? This is saved with the question.",
+        "ask.is_this_answer": "Is this your answer to the question above?",
+        "decide.confirm": 'Decide "{decision}"? This is recorded as your decision.',
+        "decide.confirm_note": 'Decide "{decision}" with the note "{note}"?',
+        "decide.own_prompt": "Type your decision.",
+        "decide.note_prompt": "Type the note that goes with your decision.",
+        "review.accept_confirm": "Accept this result? You accept what {name} reported above. Nobody has checked the files for you, so open them first if they matter.",
+        "review.changes_prompt": "What should change? {name} gets this with the assignment.",
+        "review.changes_confirm": 'Your note is kept and has not been sent: "{note}". Request these changes to the result above?',
+        "voice.confirm_answer": 'Heard: "{text}" Save this as your answer?',
+        "label.confirm": "Confirm",
+        "label.add_note": "Add a note",
+        "label.yes_accept": "Yes, accept",
+        "label.request_these_changes": "Request these changes",
+        "label.edit_note": "Edit note",
+        "label.save_answer": "Save as answer",
+        "label.new_message": "It's a new message",
+    }
+)

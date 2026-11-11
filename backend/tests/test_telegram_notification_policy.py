@@ -541,7 +541,7 @@ async def test_sdk_final_snapshot_rejects_authority_retired_during_settings_read
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("unsupported", ["model", "keyboard", "file", "list", "legacy_source", "role", "files_link", "work", "work_plan", "reply_work"])
+@pytest.mark.parametrize("unsupported", ["model", "keyboard", "file", "list", "legacy_source", "role", "files_link", "work", "work_plan", "reply_work", "reply_decision", "reply_voice_answer"])
 async def test_proactive_source_specific_plans_wait_for_their_final_authority_integration(db, monkeypatch, unsupported):
     from test_telegram_bot_handlers import ingress
 
@@ -549,7 +549,7 @@ async def test_proactive_source_specific_plans_wait_for_their_final_authority_in
     async with db.sessions.begin() as session:
         for row in await session.scalars(select(TelegramOutboxRow)):
             row.state = "sent"
-    item_class = "reply" if unsupported == "reply_work" else "question"
+    item_class = "reply" if unsupported.startswith("reply_") else "question"
     await notification(e.services.outbox, e.link, item_class)
     async with db.sessions.begin() as session:
         row = await session.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.dedupe_key == "notice:" + item_class))
@@ -559,6 +559,9 @@ async def test_proactive_source_specific_plans_wait_for_their_final_authority_in
             row.parts = [
                 {**row.parts[0], "source_ref": {"key": "ask.info", "values": {"objective": "Private assignment", "name": "Reviewer", "question": "Private Work content", "reason": "Check the source", "expected_response": "A reference"}}}
             ]
+        elif unsupported in {"reply_decision", "reply_voice_answer"}:
+            key, values = ("decide.confirm", {"decision": "An unsubmitted decision"}) if unsupported == "reply_decision" else ("voice.confirm_answer", {"text": "An unsubmitted answer"})
+            row.parts = [{**row.parts[0], "source_ref": {"key": key, "values": values}}]
         elif unsupported == "work_plan":
             row.payload = {**row.payload, "work_request_basis": {"version": 1}}
         elif unsupported == "role":

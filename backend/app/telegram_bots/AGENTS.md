@@ -78,6 +78,12 @@ label choices. `Acts.route` serializes body capture and exact receipt recovery;
 HumanInput's borrowed admission fences binding/account/policy at commit. Routing
 grants no access and ignores the action pause. Presentation/handlers stay dormant.
 
+`work_interactions.py` renders complete unsubmitted confirmation/prompt views.
+Its closed JSON state retains normalized text and the displayed `seen` basis;
+all comments precede separate final-part controls. A stale changes draft requires
+a fresh complete review and explicit confirmation; rendering performs no command.
+Decision/acceptance views grant no acknowledgement or execution permission.
+
 `work_requests.py` reads every response before forming request controls and
 retains the complete displayed basis. Review instructions, comments and response
 dispositions are never clipped to a notification title. `work_request_delivery.py`
