@@ -1879,35 +1879,45 @@ class TelegramBotChannel(TelegramChannel):
             raise PreviewExpired()
         part = saved.part
         source_key = part.get("source_ref", {}).get("key", "")
-        if "work_request_basis" in saved.item.payload or source_key.startswith(("ask.", "review.", "work.request.")) or source_key in {"concealed.question", "concealed.decision", "concealed.review"}:
+        work_part = None
+        work_sources = getattr(self._services, "work_request_sources", None)
+        if "work_request_basis" in saved.item.payload:
+            if work_sources is None:
+                raise PermanentDeliveryError("unsupported-work-request-source")
+            work_part = await work_sources.read_part(saved)
+        elif source_key.startswith(("ask.", "review.", "work.request.")) or source_key in {"concealed.question", "concealed.decision", "concealed.review"}:
             # This source family remains dormant regardless of a caller's
             # class label. A reply classification is not source authority.
             raise PermanentDeliveryError("unsupported-work-request-source")
-        if saved.item.class_ != "reply" and (
-            set(saved.item.payload) - {"presentation_version", "notification_reserved_at"}
-            or set(part.get("source_ref", {})) != {"key", "values"}
-            or part.get("source_ref", {}).get("key")
-            in {
-                "ask.info",
-                "ask.decision",
-                "ask.comment_line",
-                "review.ready",
-                "work.request.presentation",
-                "agents.presentation",
-                "file.no_access",
-                "net.blocked_ask",
-                "hello.assistant",
-                "hello.employee",
-                "help.agent",
-                "refused.files_full",
-                "refused.interrupted_recovery",
-                "file.files_full",
-                "file.too_large_in",
-            }
-            or part.get("url_button")
-            or part.get("stored_keyboard")
-            or part.get("callback_group_id")
-            or part["kind"] not in {"text", "edit"}
+        if (
+            saved.item.class_ != "reply"
+            and work_part is None
+            and (
+                set(saved.item.payload) - {"presentation_version", "notification_reserved_at"}
+                or set(part.get("source_ref", {})) != {"key", "values"}
+                or part.get("source_ref", {}).get("key")
+                in {
+                    "ask.info",
+                    "ask.decision",
+                    "ask.comment_line",
+                    "review.ready",
+                    "work.request.presentation",
+                    "agents.presentation",
+                    "file.no_access",
+                    "net.blocked_ask",
+                    "hello.assistant",
+                    "hello.employee",
+                    "help.agent",
+                    "refused.files_full",
+                    "refused.interrupted_recovery",
+                    "file.files_full",
+                    "file.too_large_in",
+                }
+                or part.get("url_button")
+                or part.get("stored_keyboard")
+                or part.get("callback_group_id")
+                or part["kind"] not in {"text", "edit"}
+            )
         ):
             # Work previews and controls need a source-specific final snapshot
             # alongside preferences; the dormant notification foundation only
@@ -1973,6 +1983,8 @@ class TelegramBotChannel(TelegramChannel):
             source["key"] = "net.blocked" if notice_manager else "net.blocked_ask"
             source["values"]["host"] = model_part.network_denial_host
             text = await self._render_source(saved.link, source, plain=part.get("plain_fallback", False))
+        elif work_part is not None:
+            text = work_part[1] if part.get("plain_fallback", False) else work_part[0]
         elif model_part is None:
             text = await self._render_source(saved.link, part["source_ref"], plain=part.get("plain_fallback", False))
         else:
@@ -2159,7 +2171,10 @@ class TelegramBotChannel(TelegramChannel):
                     raise DeliveryClaimRetired()
                 from app.telegram_bots.notification_authority import authorize_notification
 
-                await authorize_notification(self._services, latest_notification, silent=silent, now=self._now())
+                if work_part is not None:
+                    await work_sources.authorize(latest_notification, silent=silent, now=self._now())
+                else:
+                    await authorize_notification(self._services, latest_notification, silent=silent, now=self._now())
                 if not self._callback_current(current.link) or not self._send_allowed():
                     raise DeliveryClaimRetired()
 

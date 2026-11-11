@@ -69,8 +69,15 @@ dispositions are never clipped to a notification title. `work_request_delivery.p
 atomically freezes a materialized preview and its last-part callback group; a
 retry reuses the original identities. This is a healthy-binding presentation
 primitive, not event ingestion. Unrendered events must retain their intent while
-transport is unavailable. The raw SDK still refuses this entire source family,
-including misclassified replies, until send/reveal authority is integrated.
+transport is unavailable. The raw SDK requires an explicitly installed `WorkRequestSources`; supervisor
+startup does not install it yet. Literal templates and misclassified replies
+cannot bypass this boundary. `work_request_source.py` validates the entire frozen
+part sequence and preceding ACKs, re-proves complete source/seen data and joins
+claim/settings/Work/request/Space/callback facts to the final account/grant read.
+Compact correlated arrays avoid multiplying the full outbox JSON. Privacy, locale
+and Work-only revision drift preserve delivery for later materialization; actual
+source replacement/closure retires it. Reveal, refresh and anchor repair remain
+separate prerequisites for activation.
 
 `commands.py` handles fixed navigation and language settings only. A command closes
 only a typing prompt; `/new` and `/stop` also end the forms and cards in scope.
