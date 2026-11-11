@@ -324,3 +324,14 @@ export function saveTelegramPolicy(
     body: JSON.stringify({ policy }),
   });
 }
+
+/** Mark only a notice actually rendered on a visible Telegram settings page. */
+export function markTelegramRemovalSeen(
+  eventId: string,
+  signal: AbortSignal,
+): Promise<void> {
+  return call(`/removed/${encodeURIComponent(eventId)}/seen`, {
+    method: "POST",
+    signal: policySignal(signal),
+  });
+}

@@ -1,3 +1,8 @@
+import type {
+  AgentInstance,
+  AgentInstanceDetail,
+} from "@/core/agent-instances/api";
+import { USE } from "@/core/agent-instances/presentation";
 import type { TelegramFeature } from "@/core/features/api";
 
 import type { Bot, Connect } from "./api";
@@ -12,6 +17,8 @@ export interface RowInput {
   now: number;
   /** The row is the answer to a pasted token of another bot. */
   replaced?: boolean;
+  instance?: AgentInstance | null;
+  execution?: AgentInstanceDetail["execution"];
 }
 
 export interface RowLine {
@@ -24,6 +31,7 @@ export interface RowView {
   row: number;
   lines: RowLine[];
   buttons: TelegramKey[];
+  execution?: AgentInstanceDetail["execution"];
 }
 
 const SETTING_UP_MS = 60_000;
@@ -41,6 +49,7 @@ const KNOWN_HEALTH = new Set([
   "unreachable",
   "secret_unreadable",
   "agent_unavailable",
+  "policy_off",
   "stopped",
 ]);
 const ATTENTION = new Set([
@@ -86,6 +95,8 @@ function faultRow(bot: Bot, values: TelegramValues): RowView | null {
       return view(13, ["state.stopped"], ["action.tryNow"], values);
     case "unreachable":
       return view(14, ["state.unreachable"], [], values);
+    case "policy_off":
+      return view(15, ["state.notAllowed"], [], values);
     case "agent_unavailable":
       return bot.agent_kind === "custom_agent"
         ? view(17, ["state.agentGone"], ["action.remove"], values)
@@ -93,6 +104,31 @@ function faultRow(bot: Bot, values: TelegramValues): RowView | null {
     default:
       return null;
   }
+}
+
+/** Newer verified grants/lifecycle do not wait for the poller's health reconciliation. */
+function instanceRow(
+  input: RowInput,
+  bot: Bot,
+  values: TelegramValues,
+): RowView | null {
+  if (
+    bot.agent_kind !== "instance" ||
+    (input.instance === undefined && bot.health !== "agent_unavailable")
+  )
+    return null;
+  const instance = input.instance?.id === bot.agent_ref ? input.instance : null;
+  if (
+    !instance ||
+    !(instance.permissions & USE) ||
+    instance.status === "deleted"
+  )
+    return view(16, ["state.noAccess"], ["action.remove"], values);
+  if (instance.status === "archived")
+    return view(18, ["state.retired"], ["action.remove"], values);
+  if (instance.status === "suspended")
+    return view(19, ["state.paused"], ["action.open"], values);
+  return null;
 }
 
 function waitingRow(
@@ -127,14 +163,24 @@ function connectedRow(
     return view(
       24,
       [
-        bot.agent_kind === "custom_agent"
-          ? "state.afterConflict.custom_agent"
-          : "state.afterConflict.chat",
+        bot.agent_kind === "instance"
+          ? "state.afterConflict.agent"
+          : bot.agent_kind === "custom_agent"
+            ? "state.afterConflict.custom_agent"
+            : "state.afterConflict.chat",
       ],
       ["action.thatWasMe", "action.pasteToken"],
       { ...values, time: new Date(bot.acts_paused_since).toLocaleString() },
     );
   }
+  if (
+    bot.agent_kind === "instance" &&
+    input.execution?.execution === "unavailable"
+  )
+    return {
+      ...view(25, ["state.cannotWork"], ["action.open"], values),
+      execution: input.execution,
+    };
   const delivery: TelegramKey[] = [
     ...(bot.delivery_failed > 0 ? (["state.deliveryFailed"] as const) : []),
     ...(bot.limited_since !== null ? (["state.limited"] as const) : []),
@@ -149,6 +195,8 @@ function connectedRow(
   ) {
     return view(27, ["state.profileStale"], ["action.applyProfile"], values);
   }
+  if (bot.policy === "protected")
+    return view(28, ["state.connectedProtected"], ["action.open"], values);
   return view(29, ["state.connected"], ["action.open"], values);
 }
 
@@ -184,6 +232,8 @@ export function rowOf(input: RowInput): RowView {
   if (bot.health === "token_rejected") {
     return view(0, ["unavailable.unknown"], [], values);
   }
+  const currentInstance = instanceRow(input, bot, values);
+  if (currentInstance) return currentInstance;
   if (bot.state === "blocked") {
     return view(20, ["state.blocked"], ["action.open"], values);
   }
@@ -234,21 +284,26 @@ export interface TargetRow {
   target: AgentTarget;
   name: string;
   bot: Bot | null;
+  instance?: AgentInstance;
 }
 
 function byName(first: { name: string }, second: { name: string }): number {
   return first.name.localeCompare(second.name);
 }
 
-/** The ordinary chat, then custom agents by name, then bots whose target has gone. */
+/** Sidebar order: chat, own/colleague assistants, employees, custom agents, inaccessible targets. */
 export function targetRowsOf({
   chatName,
   agentNames,
   bots,
+  instances = [],
+  ownerId,
 }: {
   chatName: string;
   agentNames: string[];
   bots: Bot[];
+  instances?: AgentInstance[];
+  ownerId?: string;
 }): TargetRow[] {
   const remaining = new Map(
     bots.map((bot) => [`${bot.agent_kind}.${bot.agent_ref}`, bot]),
@@ -273,15 +328,52 @@ export function targetRowsOf({
       }),
     )
     .sort(byName);
+  const visible = instances.filter(
+    (entry) =>
+      (entry.permissions & USE) !== 0 &&
+      entry.status !== "deleted" &&
+      entry.status !== "provisioning",
+  );
+  const instanceRows = visible.map(
+    (entry): TargetRow => ({
+      target: {
+        kind: "agent",
+        id: entry.id,
+        name: entry.name,
+        permissions: entry.permissions,
+      },
+      name: entry.name,
+      bot: claim("instance", entry.id),
+      instance: entry,
+    }),
+  );
+  const assistants = instanceRows
+    .filter((row) => row.instance?.custody === "personal")
+    .sort(
+      (a, b) =>
+        Number(b.instance?.owner_id === ownerId) -
+          Number(a.instance?.owner_id === ownerId) || byName(a, b),
+    );
+  const employees = instanceRows
+    .filter((row) => row.instance?.custody === "company")
+    .sort(byName);
   const gone = Array.from(
     remaining.values(),
     (bot): TargetRow => ({
-      target: { kind: "custom_agent", name: bot.agent_ref },
+      target:
+        bot.agent_kind === "instance"
+          ? {
+              kind: "agent",
+              id: bot.agent_ref,
+              name: bot.agent_name ?? bot.bot_name ?? bot.agent_ref,
+              permissions: 0,
+            }
+          : { kind: "custom_agent", name: bot.agent_ref },
       name: bot.agent_name ?? bot.bot_name ?? bot.agent_ref,
       bot,
     }),
   ).sort(byName);
-  return [chat, ...agents, ...gone];
+  return [chat, ...assistants, ...employees, ...agents, ...gone];
 }
 
 export interface SectionNotice {

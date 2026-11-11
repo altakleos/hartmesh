@@ -2574,6 +2574,8 @@ export function createZhCN(product: string): Translations {
         count: ({ used, limit }) => `${used} / ${limit} 个机器人`,
       },
       kind: {
+        assistant: ({ owner }) => (owner ? `${owner} 的 AI 助理` : "AI 助理"),
+        employee: "AI 员工",
         custom_agent: "自定义智能体",
       },
       row: {
@@ -2623,7 +2625,13 @@ export function createZhCN(product: string): Translations {
         waiting: "待按 Start",
         paused: "已暂停",
       },
+      notice: {
+        agentDeleted: ({ name }) =>
+          `${name} 已被删除，其 Telegram 机器人已断开连接。你可以在 BotFather 中用 /deletebot 删除留下的机器人。`,
+      },
       setup: {
+        protected: ({ name }) =>
+          `管理员已为 ${name} 设置 Telegram 保护：发送的内容不能转发或保存，主动发送的消息需要点按后才显示详情。`,
         title: ({ name }) => `将 ${name} 连接到 Telegram`,
         intro: ({ name }) =>
           `${name} 会在你的 Telegram 中拥有一个机器人：一个只回答你的聊天。你需要用 Telegram 自己的工具 BotFather 创建这个机器人，大约需要几分钟。`,
@@ -2632,6 +2640,8 @@ export function createZhCN(product: string): Translations {
         onPhoneLink: "在手机上继续",
         onPhoneQr: "用手机相机扫描并登录，此设置会在手机上打开。",
         before: {
+          company: ({ name }) =>
+            `公司中可查看 ${name} 全部工作的人，也能在 ${product} 中阅读这段对话，就像在网页上开始的对话一样。你发送的文件保存在 ${name} 的文件中，可查看其全部工作的人都能打开。`,
           title: "连接之前",
           body: `这些聊天由 Telegram 传输。你和 ${product} 在那里发送的所有内容，包括文件和语音消息，都会经过 Telegram 的服务器，并保留在你的 Telegram 账号中，直到你删除。机器人聊天并非端到端加密，因此 Telegram 可以读取内容，${product} 无法代你删除。锁屏通知可能显示消息开头；Telegram 和手机都可以隐藏预览。任何能打开你的 Telegram 的人都可以以你的身份给机器人发消息。请使用屏幕锁。如果手机丢失，请在其他设备上结束该会话（Telegram、设置、设备），并在这里断开机器人的连接。`,
           voice: ({ transcriber }) =>
@@ -2721,6 +2731,16 @@ export function createZhCN(product: string): Translations {
         failed: "操作没有成功。请重试。",
       },
       state: {
+        notAllowed: ({ name }) =>
+          `${name} 的管理员已关闭 Telegram。机器人会保留，重新开启 Telegram 后即可恢复。`,
+        notAllowedConnect: ({ name }) => `${name} 的管理员已关闭 Telegram。`,
+        noAccess: ({ name }) =>
+          `你已失去对 ${name} 的访问权限，因此此机器人不再回复。`,
+        retired: ({ name }) => `${name} 已退役，因此此机器人不再回复。`,
+        paused: ({ name }) => `已连接。${name} 已暂停，恢复后会继续回复。`,
+        cannotWork: ({ name }) => `已连接。${name} 目前无法工作。`,
+        connectedProtected: ({ name, telegramName }) =>
+          `已连接为 ${telegramName}。${name} 发送的内容不能转发或保存。`,
         sectionPaused: "已暂停",
         none: "未连接",
         preparing: "正在设置…",
@@ -2742,6 +2762,8 @@ export function createZhCN(product: string): Translations {
         conflictStopped: "已在 24 小时后停止检查。",
         conflictWebhook: `此机器人已连接到其他服务，因此没有内容到达 ${product}。`,
         afterConflict: {
+          agent: ({ time }) =>
+            `另一个程序于 ${time} 开始使用此机器人的令牌。现已停止，机器人已恢复回复。允许被阻止网站的操作仍暂停，直到你点击“那是我”或更换令牌。`,
           chat: ({ time }) =>
             `另一个程序在 ${time} 开始使用此机器人的令牌。现在已停止，机器人恢复回答。在你按下“那是我”或更换令牌之前，此机器人上仍暂停允许访问被阻止的网站。`,
           custom_agent: ({ time }) =>

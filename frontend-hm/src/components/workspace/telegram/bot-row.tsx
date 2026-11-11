@@ -11,15 +11,25 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ProviderSupportLink } from "@/components/workspace/instances/execution-notice";
-import { useBranding } from "@/core/features/hooks";
+import {
+  ExecutionNotice,
+  ProviderSupportLink,
+} from "@/components/workspace/instances/execution-notice";
+import { usePersonName } from "@/components/workspace/person-name";
+import type { AgentInstance } from "@/core/agent-instances/api";
+import { useAuth } from "@/core/auth/AuthProvider";
+import type { ExecutionReason } from "@/core/features/api";
+import { useBranding, useStorage } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   applyTelegramProfile,
   type Bot,
   retryTelegramBot,
 } from "@/core/telegram-bots/api";
-import { useRefreshTelegramBots } from "@/core/telegram-bots/hooks";
+import {
+  useRefreshTelegramBots,
+  useTelegramReader,
+} from "@/core/telegram-bots/hooks";
 import {
   liveConnectOf,
   type RowView,
@@ -155,6 +165,7 @@ export function TelegramBotRow({
             {strings.kind.custom_agent}
           </p>
         ) : null}
+        {row.instance ? <InstanceKind instance={row.instance} /> : null}
         {bot ? (
           <p className="text-muted-foreground text-xs">@{bot.bot_username}</p>
         ) : null}
@@ -163,6 +174,13 @@ export function TelegramBotRow({
             {telegramText(strings, line.key, line.values)}
           </p>
         ))}
+        {view.execution ? (
+          <TelegramExecutionNotice
+            reason={view.execution.reason}
+            name={name}
+            custody={row.instance?.custody}
+          />
+        ) : null}
         {view.row === 13 && view.lines[0]?.values.admin ? (
           <ProviderSupportLink
             provider={providerName}
@@ -241,5 +259,51 @@ export function TelegramBotRow({
         ) : null}
       </div>
     </li>
+  );
+}
+
+function InstanceKind({ instance }: { instance: AgentInstance }) {
+  const { t } = useI18n();
+  const { user } = useAuth();
+  return (
+    <p className="text-muted-foreground text-xs">
+      {instance.custody === "company" ? (
+        t.telegramBots.kind.employee
+      ) : instance.owner_id && instance.owner_id !== user?.id ? (
+        <ColleagueKind owner={instance.owner_id} />
+      ) : (
+        t.telegramBots.kind.assistant({})
+      )}
+    </p>
+  );
+}
+function ColleagueKind({ owner }: { owner: string }) {
+  const { t } = useI18n();
+  const name = usePersonName(owner);
+  return <>{t.telegramBots.kind.assistant({ owner: name ?? "…" })}</>;
+}
+export function TelegramExecutionNotice({
+  reason,
+  name,
+  custody,
+}: {
+  reason: ExecutionReason | null;
+  name?: string;
+  custody?: AgentInstance["custody"];
+}) {
+  const reader = useTelegramReader();
+  const branding = useBranding();
+  const storage = useStorage();
+  return (
+    <ExecutionNotice
+      area="agent"
+      reason={reason}
+      name={name}
+      kind={custody}
+      administrator={reader.admin}
+      provider={branding.providerName}
+      supportURL={branding.supportURL}
+      storageReason={storage.reason}
+    />
   );
 }

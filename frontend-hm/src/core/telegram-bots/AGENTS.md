@@ -59,3 +59,17 @@ connected-count confirmation. Account, role, ceilings, instance and grant change
 remount the controls and abort owned reads/actions; a late response cannot toast
 or refresh a replacement account. Refusals reread policy; `manage-required` also
 refreshes instance authority. Policy query keys share the bot refresh prefix.
+
+Instance rows consume current instance permissions/status and execution readiness;
+missing Use takes precedence over retirement. Verified instance changes take
+effect before poller health catches up, after transport/policy faults; undefined
+instance means not loaded and explicit null means a completed discovery found none. Policy-off, paused, retired,
+unavailable execution and protected delivery have distinct states. Keep existing
+delivery attention rows when extending the table. Instance discovery/mounting is
+separate from these prepared views. `targetRowsOf` accepts verified instance rows,
+keeps own assistants first and preserves inaccessible bots as instance targets.
+`AgentAvatar` and bot pictures share `pictureOf(name, id)`. Setup privacy follows
+`read_by_others` for both custodies; only the server's protected policy adds its
+protection sentence. `TelegramRemovedNotices` retains rendered deletion notices
+until settings closes, acknowledges each only on a visible Channels page, and
+never consumes an unknown reason. Its owned acknowledgement aborts on retirement.

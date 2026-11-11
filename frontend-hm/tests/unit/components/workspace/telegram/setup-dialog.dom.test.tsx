@@ -68,6 +68,7 @@ import {
 import { fetch } from "@/core/api/fetcher";
 import { createEnUS } from "@/core/i18n/locales/en-US";
 import type { Bot, BotList, Settings } from "@/core/telegram-bots/api";
+import type { AgentTarget } from "@/core/telegram-bots/web-pages";
 
 import {
   ago,
@@ -110,9 +111,15 @@ interface Start {
   list?: () => BotList;
   telegram?: Record<string, unknown>;
   routes?: Record<string, () => Response>;
+  target?: AgentTarget;
 }
 
-function start({ list = () => listOf([]), telegram, routes }: Start = {}) {
+function start({
+  list = () => listOf([]),
+  telegram,
+  routes,
+  target = { kind: "chat" },
+}: Start = {}) {
   const { calls, handle } = server({
     "GET /api/features": () =>
       json({
@@ -123,7 +130,7 @@ function start({ list = () => listOf([]), telegram, routes }: Start = {}) {
     ...routes,
   });
   rs.mocked(fetch).mockImplementation(handle);
-  renderWithClient(<TelegramSetupDialog target={{ kind: "chat" }} />);
+  renderWithClient(<TelegramSetupDialog target={target} />);
   return {
     calls,
     added: () =>
@@ -797,5 +804,45 @@ describe("the set-up dialog", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Disconnect" }));
     await screen.findByText("3. Open the chat and press Start");
     expect(toast.error).not.toHaveBeenCalled();
+  });
+});
+
+describe("instance setup privacy", () => {
+  it.each([false, true])(
+    "keeps the shared-reader notice visible with an existing bot=%s",
+    async (hasBot) => {
+      start({
+        target: { kind: "agent", id: "agent-a", name: "Mira" },
+        list: () =>
+          listOf(hasBot ? [bot()] : [], { read_by_others: ["agent-a"] }),
+      });
+      await screen.findByText(
+        /People at your company who can see all of Mira's work/,
+      );
+      expect(
+        screen.getByText(/Files you send are kept in Mira's files/),
+      ).toBeDefined();
+    },
+  );
+  it("explains protected delivery only when the list carries that policy", async () => {
+    start({
+      target: { kind: "agent", id: "agent-a", name: "Mira" },
+      list: () =>
+        listOf([], {
+          policies: [{ instance_id: "agent-a", policy: "protected" }],
+        }),
+    });
+    await screen.findByText(/A manager has set Telegram for Mira/);
+    expect(
+      screen.queryByText(
+        /People at your company who can see all of Mira's work/,
+      ),
+    ).toBeNull();
+  });
+  it("does not infer sharing or protection merely from being an instance", async () => {
+    start({ target: { kind: "agent", id: "agent-a", name: "Mira" } });
+    await field();
+    expect(screen.queryByText(/People at your company/)).toBeNull();
+    expect(screen.queryByText(/A manager has set Telegram/)).toBeNull();
   });
 });

@@ -1974,6 +1974,12 @@ cleanup when migrating from legacy metadata credentials.
 
 ##### Telegram bots
 
+Instance bot views now distinguish access withdrawal, retirement, pauses,
+execution outages and protected delivery. Setup explains who can read the chat
+and its files; deletion notices remain visible while being read. These views
+await activation. Agent avatars already use the same initials and colors as
+Telegram bot pictures.
+
 The employee policy controls are prepared for the Access tab: managers can allow
 Telegram, prevent forwarding and saving, or turn it off with a connected-bot
 confirmation. They remain unmounted until instance-bot activation is complete.

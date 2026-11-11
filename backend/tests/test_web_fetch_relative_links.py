@@ -18,6 +18,17 @@ def _article(links: str, *, head: str = "") -> str:
     return f"<html><head><title>Guide</title>{head}</head><body><article>{paragraph * 5}<p>{links}</p></article></body></html>"
 
 
+@pytest.fixture
+def uncached_extractor(monkeypatch):
+    from deerflow.utils import readability
+
+    # These comparisons need the real Node parser, independently of a previous
+    # test's cached missing-executable/probe outcome. Restore that state afterward.
+    monkeypatch.setattr(readability, "_readability_js_available_cached", None)
+    monkeypatch.setattr(readability, "_readability_js_launch_failed", False)
+    return ReadabilityExtractor()
+
+
 @pytest.mark.parametrize("provider", ["jina_ai", "browserless", "infoquest"])
 @pytest.mark.anyio
 async def test_web_fetch_resolves_relative_links_through_real_extraction(monkeypatch, provider):
@@ -65,8 +76,8 @@ def test_extract_article_resolves_images_and_relative_document_base():
     assert "![Chart](https://example.com/assets/images/chart.png)" in markdown
 
 
-def test_extract_article_without_url_preserves_legacy_relative_links():
-    article = ReadabilityExtractor().extract_article(_article('<a href="../next">Next</a>'))
+def test_extract_article_without_url_preserves_legacy_relative_links(uncached_extractor):
+    article = uncached_extractor.extract_article(_article('<a href="../next">Next</a>'))
     assert "[Next](../next)" in article.to_markdown()
 
 
@@ -126,9 +137,9 @@ def test_invalid_document_base_does_not_lose_valid_relative_links(base):
         '<a href="https://example.com/next">Outer <a href="https://example.com/inner">Inner</a> Tail</a>',
     ],
 )
-def test_url_resolution_preserves_malformed_markup_extraction(fragment):
+def test_url_resolution_preserves_malformed_markup_extraction(fragment, uncached_extractor):
     html = _article(fragment + '<a href="../next">Next</a>')
-    extractor = ReadabilityExtractor()
+    extractor = uncached_extractor
     assert extractor.extract_article(html, url=PAGE_URL).to_markdown() == extractor.extract_article(html).to_markdown().replace("(../next)", "(https://example.com/next)")
 
 
