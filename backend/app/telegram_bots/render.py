@@ -128,7 +128,7 @@ def _render(
 
     # A role may be absent. Only product-owned punctuation and its empty line go.
     if values.get("role", True) in (None, ""):
-        template = template.replace(" ({role})", "").replace(": {role}", "").replace("（{role}）", "").replace("：{role}", "")
+        template = template.replace(", {role}", "").replace("，{role}", "").replace(" ({role})", "").replace(": {role}", "").replace("（{role}）", "").replace("：{role}", "")
         values["role"] = ""
     if values.get("role_description", True) in (None, ""):
         template = template.replace("{role_description}\n", "").replace("\n{role_description}", "")

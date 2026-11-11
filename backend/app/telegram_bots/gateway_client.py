@@ -386,18 +386,25 @@ class GatewayClientOwner:
         return await self._request(create, before_dispatch)
 
     async def get_features(self, owner_user_id: str, *, before_dispatch) -> dict:
-        """Read storage availability from the separately configured Gateway.
+        """Read storage availability from the separately configured Gateway."""
+        return await self._get_gateway_json(owner_user_id, "/api/features", before_dispatch=before_dispatch)
 
-        Borrow this owner's HTTP client and cleanup, with fresh bound-human
-        headers. The fixed URL never comes from a Telegram file descriptor.
-        """
+    async def get_agent_instances(self, owner_user_id: str, *, custody: str, before_dispatch) -> dict:
+        """Read the bound person's largest supported discovery page."""
+        if custody not in {"personal", "company"}:
+            raise ChannelExecutionProtocolError()
+        return await self._get_gateway_json(owner_user_id, "/api/agent-instances", params={"custody": custody, "limit": 500}, before_dispatch=before_dispatch)
+
+    async def _get_gateway_json(self, owner_user_id, path, *, before_dispatch, params=None):
+        if not callable(before_dispatch):
+            raise ChannelExecutionProtocolError()
+        check = self._dispatch_check("thread_read", before_dispatch)
 
         async def read(_client):
-            self._check_operation("thread_read")
+            await check()
             headers = await self._headers_for(owner_user_id, None)
-            await before_dispatch()
-            self._check_operation("thread_read")
-            response = await self._http_client.send(self._http_client.build_request("GET", self._gateway_url + "/api/features", headers=headers, timeout=httpx.Timeout(30)), stream=True, follow_redirects=False)
+            await check()
+            response = await self._http_client.send(self._http_client.build_request("GET", self._gateway_url + path, params=params, headers=headers, timeout=httpx.Timeout(30)), stream=True, follow_redirects=False)
             self._remember_response(response)
             try:
                 content = await self._response_content(response)
@@ -406,14 +413,13 @@ class GatewayClientOwner:
                 result = await await_drained(asyncio.to_thread(_decode, content))
                 if type(result) is not dict:
                     raise ChannelExecutionProtocolError()
-                await before_dispatch()
-                self._check_operation("thread_read")
-                return result
             finally:
                 await self._close_response(response)
+            await check()
+            return result
 
         try:
-            return await self._request(read, None)
+            return await self._request(read, check)
         except asyncio.CancelledError:
             raise
         except Exception:

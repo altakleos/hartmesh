@@ -289,3 +289,20 @@ FORMS["unavailable.off"] = {
 }
 
 FORMS["net.blocked_ask"] = {"no_host": "{name} 无法访问一个不在这里允许访问列表中的网站。请{supervisor}临时允许访问，或请{support}将其添加到列表。"}
+
+TEXTS.update(
+    {
+        "assistants.list": "你的 AI 助理：\n{lines}",
+        "assistants.none": "你还没有 AI 助理。",
+        "assistants.colleagues": "同事授权你使用的 AI 助理：\n{lines}",
+        "employees.list": "你可以聊天的 AI 员工：\n{lines}",
+        "employees.none": "还没有你可以聊天的 AI 员工。AI 员工由管理员添加。",
+        "agents.line_work": "{name}，{role}：正在处理 {working} 项，{waiting} 项等待你处理",
+        "agents.line_idle": "{name}，{role}：没有正在处理的事",
+        "agents.line_plain": "{name}，{role}",
+        "agents.more": "更多内容请在网页版 {product} 中查看。",
+        "label.open_agent": "打开 {name}",
+        "label.connect_agent": "连接 {name}",
+    }
+)
+FORMS["employees.none"] = {"administrator": "还没有你可以聊天的 AI 员工。"}

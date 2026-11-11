@@ -335,3 +335,20 @@ FORMS["unavailable.off"] = {
 }
 
 FORMS["net.blocked_ask"] = {"no_host": "{name} could not reach a site that is not on the list of sites allowed here. Ask {supervisor} to allow it for a short time, or ask {support} to have it added to the list."}
+
+TEXTS.update(
+    {
+        "assistants.list": "Your AI assistants:\n{lines}",
+        "assistants.none": "You have no AI assistants yet.",
+        "assistants.colleagues": "AI assistants colleagues gave you access to:\n{lines}",
+        "employees.list": "AI employees you can chat with:\n{lines}",
+        "employees.none": "No AI employees you can chat with yet. Administrators add AI employees.",
+        "agents.line_work": "{name}, {role}: working on {working}, {waiting} waiting for you",
+        "agents.line_idle": "{name}, {role}: nothing in progress",
+        "agents.line_plain": "{name}, {role}",
+        "agents.more": "More are in {product} on the web.",
+        "label.open_agent": "Open {name}",
+        "label.connect_agent": "Connect {name}",
+    }
+)
+FORMS["employees.none"] = {"administrator": "No AI employees you can chat with yet."}

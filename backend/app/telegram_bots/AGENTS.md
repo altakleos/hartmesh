@@ -35,6 +35,11 @@ to a press that worked or is working. `_source_for` reads the thread to tell a d
 conversation from a failing Gateway. `keyboard_cleanup_row` takes spent buttons off
 their message in the writer that spends them.
 
+`agent_lists.py` projects at most 20 Use-qualified entries from the Gateway’s
+500-entry page. Inspect gates supplied role/Work details; administrator inventory
+grants nothing. This preparation is unmounted: command publication and final
+per-target send authority must be qualified before activation.
+
 `commands.py` handles fixed navigation and language settings only. A command closes
 only a typing prompt; `/new` and `/stop` also end the forms and cards in scope.
 `acts.py` commits a saved settings choice, its exact old/new preference, completed
