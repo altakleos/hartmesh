@@ -301,3 +301,16 @@ plans deduplicate simultaneous presses; replaying an older press cannot publish
 a newer child's result. Successful captioned retries only confirm the file;
 captionless completion retains the one-time pending context. This does not yet
 connect ordinary incoming media routing or qualify process-restart recovery.
+
+Incoming instance media now saves each actual source file before queue/thread
+preparation. Files carried from an earlier captionless receipt are recognized by
+their original message IDs and are never downloaded again. Captionless input
+plans one receipt-qualified question for its saved members and starts no turn;
+the question and route closure share the final receipt guard. Album members keep
+their shared caption basis. The queued publication preflight reads only settled
+original-target journals, omits refused/unconfirmed attachments, and includes the
+instance ID in its execution-context comparison. Personal-storage preflight and
+legacy upload are never used for this path. A failed initial file owner can close
+only its own unconfirmed metadata and offer the exact file retry, without another
+effect. Lifecycle/execution refusals before file admission and process-restart
+reconciliation still require their separate integration qualification.

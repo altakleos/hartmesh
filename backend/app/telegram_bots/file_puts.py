@@ -403,13 +403,21 @@ class FilePuts:
 
     async def settle_failed_retry(self, link, identity, *, callback_id, authority, current):
         """Close only a consumed press's failed live owner; never retry its effect."""
+        return await self._settle_failed_owner(link, identity, callback_id=callback_id, file=None, authority=authority, current=current)
+
+    async def settle_failed_put(self, link, file, *, authority, current):
+        file = validate_chat_file(file)
+        return await self._settle_failed_owner(link, file_act_id(link, file), callback_id=None, file=file, authority=authority, current=current)
+
+    async def _settle_failed_owner(self, link, identity, *, callback_id, file, authority, current):
 
         async def perform():
             async with self._locks.hold(identity):
                 access = await prepare_file_write(authority, link, current=current)
                 async with self.callbacks.writer(link, _FileReceiptGuard(access, access.guard)) as writer:
                     row = await self._row(writer, link, identity, access)
-                    if not row.continuation["presses"] or row.continuation["presses"][-1]["callback_id"] != callback_id:
+                    presses = row.continuation["presses"]
+                    if callback_id is None and (presses or row.continuation["file"] != file) or callback_id is not None and (not presses or presses[-1]["callback_id"] != callback_id):
                         raise ValueError("file-retry-source-conflict") from None
                     captured = _snapshot(row)
                 if captured.state in {"draft", "pending", "waiting"}:

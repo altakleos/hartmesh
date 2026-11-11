@@ -525,6 +525,15 @@ class ChatTurns:
 
     async def _admit_origins(self, channel, link, origins, *, separate=False):
         inbound = self._inbound(link, origins)
+        if link.agent_kind == "instance" and inbound.files:
+            from app.telegram_bots.file_outcomes import FileOutcomes
+
+            for row in origins:
+                for file in row.sanitized_input.get("files", []):
+                    if file["message_id"] != row.message_id:
+                        continue  # Earlier captionless context already has its receipt.
+                    await channel.put_instance_file(link, row, file, origins=origins, current=lambda: self._open(channel, link))
+                    await FileOutcomes(self.services).plan(channel, link, row, file, current=lambda: self._open(channel, link))
         if not inbound.text.strip() and inbound.files:
             pending = getattr(self.services, "pending_files", None)
             if pending is None:
@@ -545,6 +554,11 @@ class ChatTurns:
                             await self.services.outbox.inbox.finish_route(row, session=writer)
                             await guard.check(writer)
             if saved:
+                if link.agent_kind == "instance":
+                    from app.telegram_bots.file_outcomes import FileOutcomes
+
+                    await FileOutcomes(self.services).question(channel, link, saved, current=lambda: self._open(channel, link))
+                    return
                 # An album is one message, so it gets one question. A photo's own name is made up, so it is not shown.
                 row, file = saved[0]
                 key, values = ("file.saved_ask_many", {"n": len(saved)}) if len(saved) > 1 else ("file.saved_ask_photo", {}) if file["type"] == "image" else ("file.saved_ask_plain", {"file": file["filename"]})
