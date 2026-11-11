@@ -216,3 +216,25 @@ async def test_disappearing_input_action_cannot_be_recreated_on_replay(work_deli
         await stage_input(e, host, mark)
     async with e.db.sessions() as reader:
         assert await reader.get(TelegramActRow, act.id) is None
+
+
+@pytest.mark.asyncio
+async def test_missing_marked_input_journal_cannot_be_admitted_again(work_delivery):
+    from app.telegram_bots.callbacks import CallbackRefused
+    from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow
+
+    e = work_delivery
+    _request, prompt_id, _seen = await prompt(e)
+    inbox, mark = await accept(e)
+    captured = await capture(e, inbox, mark, prompt_id)
+    host = controller(e, inbox)
+    action = await stage_input(e, host, mark)
+    async with e.db.sessions.begin() as writer:
+        saved = await writer.get(TelegramInboundMarkRow, (mark.link_id, mark.message_id, mark.chat_id))
+        assert saved.route_basis["work_action_id"] == action.id
+        assert saved.route_basis["work_input"] == captured.route_basis["work_input"]
+        await writer.delete(await writer.get(TelegramActRow, action.id))
+    with pytest.raises(CallbackRefused):
+        await stage_input(e, controller(e, inbox), mark)
+    async with e.db.sessions() as reader:
+        assert await reader.get(TelegramActRow, action.id) is None

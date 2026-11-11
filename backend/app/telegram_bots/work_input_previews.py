@@ -19,11 +19,14 @@ from app.telegram_bots.work_interactions import interaction_state
 from app.telegram_bots.work_request_recovery import WorkRequestRecovery, _RecoveryProjection
 from app.telegram_bots.work_typing import validate_shown_prompt
 from deerflow.agent_instances.contract import AgentDenied
+from deerflow.persistence.json_compat import json_match
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
 
 
 def input_identity(mark):
+    if "work_action_id" in mark.route_basis and mark.route_basis["work_action_id"] != mark.operation_ids[0]:
+        raise CallbackRefused()
     return {"link_id": mark.link_id, "chat_id": mark.chat_id, "message_id": mark.message_id, "update_id": mark.update_id, "binding_generation": mark.binding_generation, "operation_id": mark.operation_ids[0]}
 
 
@@ -48,6 +51,8 @@ def input_state(data, source):
         if same_body(data["seen"], source.seen):
             raise CallbackRefused()
         value = {"view": "changes", "note": data["text"]}
+        if data["request_id"] != source.request["id"]:
+            value["replaced"] = True
     elif data["purpose"] in {"decide_own", "decide_note"} and data["request_id"] == source.request["id"]:
         value = {"view": "decision", "decision": data["text"] if data["purpose"] == "decide_own" else data["interaction"]["decision"], "note": None if data["purpose"] == "decide_own" else data["text"]}
         if not same_body(data["seen"], source.seen):
@@ -60,7 +65,7 @@ def input_state(data, source):
 def blocked_input_actions(identity):
     """Unknown or completed operations from this input forbid a fresh intent."""
     act, callback, delivery = aliased(TelegramActRow), aliased(TelegramCallbackRow), aliased(TelegramOutboxRow)
-    return (
+    active = (
         select(act.id)
         .outerjoin(callback, callback.id == act.id)
         .outerjoin(delivery, delivery.id == callback.payload["anchor_outbox_id"].as_string())
@@ -75,6 +80,35 @@ def blocked_input_actions(identity):
         )
         .exists()
     )
+    reserved, parent, saved = aliased(TelegramCallbackRow), aliased(TelegramOutboxRow), aliased(TelegramActRow)
+    orphaned_control = (
+        select(reserved.id)
+        .join(parent, parent.id == reserved.payload["anchor_outbox_id"].as_string())
+        .outerjoin(saved, and_(saved.id == reserved.payload["work_action_id"].as_string(), saved.link_id == reserved.link_id, saved.binding_generation == reserved.binding_generation))
+        .where(
+            reserved.link_id == identity["link_id"],
+            reserved.binding_generation == identity["binding_generation"],
+            or_(reserved.payload["work_action_id"].as_string().is_not(None), json_match(reserved.payload, "work_action_id", None)),
+            saved.id.is_(None),
+            parent.payload["work_request_basis"]["input"]["operation_id"].as_string() == identity["operation_id"],
+        )
+        .exists()
+    )
+    mark, original = aliased(TelegramInboundMarkRow), aliased(TelegramActRow)
+    orphaned_input = (
+        select(mark.link_id)
+        .outerjoin(original, and_(original.id == mark.route_basis["work_action_id"].as_string(), original.link_id == mark.link_id, original.binding_generation == mark.binding_generation))
+        .where(
+            mark.link_id == identity["link_id"],
+            mark.chat_id == identity["chat_id"],
+            mark.message_id == identity["message_id"],
+            mark.binding_generation == identity["binding_generation"],
+            or_(mark.route_basis["work_action_id"].as_string().is_not(None), json_match(mark.route_basis, "work_action_id", None)),
+            or_(original.id.is_(None), mark.route_basis["work_action_id"].as_string() != identity["operation_id"]),
+        )
+        .exists()
+    )
+    return or_(active, orphaned_control, orphaned_input)
 
 
 def check_input_origin(link, parent, callbacks, mark, blocked, basis, source, *, draft_ttl_hours):
@@ -260,11 +294,15 @@ class _InputProjection(_RecoveryProjection):
 
     def check(self, rows):
         super().check(rows)
+        self._check_mark(rows)
+
+    def _check_mark(self, rows, *, complete=False):
         mark, blocked = rows[0][11:13]
         if (
             blocked
             or mark.state == "done"
-            or mark.route_complete
+            and not complete
+            or mark.route_complete is not complete
             or not same_body(mark.route_basis, self.captured.route_basis)
             or not same_body(mark.sanitized_input, self.captured.sanitized_input)
             or mark.operation_ids != self.captured.operation_ids

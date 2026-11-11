@@ -20,6 +20,12 @@ against the complete displayed review. Draft controls inherit the original input
 `work_input_refresh.py` preserves typed decisions and review notes across changed
 confirmations. Only unreserved controls or an exact conclusive refusal may refresh;
 unknown/missing journals stay held. A fresh full ACK and press own any new action.
+`work_review_recovery.py` handles closed reviews for unsubmitted notes, including
+text arriving after closure. Replacement lookup stays on the same Work; otherwise
+control retirement, a fixed notice and input settlement share a guarded writer.
+Admitted confirmations remain owned by receipt/conflict recovery.
+Input admission stores its operation marker with the Act. Orphaned input markers
+or V4 control reservations block every fresh preview/recovery entry point.
 Capture precedes admission; stored-input resume never reconstructs an Update or
 retries an unknown action. Typed decision confirmations own their original input
 until outcome delivery. Supervisor installation and broader input routing remain deferred.

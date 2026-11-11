@@ -15,6 +15,7 @@ from app.telegram_bots.work_interaction_delivery import WorkInteractionPlans
 from app.telegram_bots.work_refusal_recovery import WorkRefusalRecovery
 from app.telegram_bots.work_request_recovery import WorkRequestRecovery
 from app.telegram_bots.work_retained_drafts import WorkRetainedDrafts
+from app.telegram_bots.work_review_recovery import WorkReviewRecovery
 from app.telegram_bots.work_routing_admission import WorkRoutingAdmissions
 from app.telegram_bots.work_routing_recovery import WorkRoutingRecovery
 from app.telegram_bots.work_stale_recovery import WorkStaleRecovery
@@ -37,6 +38,7 @@ class WorkCallbacks:
         self.recovery = WorkRequestRecovery(outcomes.plans)
         self.drafts = WorkRetainedDrafts(outcomes.plans)
         self.input_refresh = WorkInputRefresh(self.controls)
+        self.review_recovery = WorkReviewRecovery(outcomes.plans)
         self.routing = WorkRoutingAdmissions(outcomes.routing, self.acts) if outcomes.routing is not None else None
         self.routing_recovery = WorkRoutingRecovery(outcomes.routing) if outcomes.routing is not None else None
         self.followups, self.retries = WorkRoutingFollowupRecovery(outcomes), WorkActionRetries(outcomes)
@@ -122,6 +124,10 @@ class WorkCallbacks:
                 raise CallbackRefused(text_key_for(_ACTIONS.get(row.kind, "respond"), error)) from None
             except (AgentDenied, AccessOff, CeilingRefused) as error:
                 raise CallbackRefused(text_key_for(_ACTIONS.get(row.kind, "respond"), error)) from None
+            except ProductSourceRetired:
+                if family == 4 and row.kind in {"changes_confirm", "changes_open"} and await self.review_recovery.from_callback(link, row.id, **scope):
+                    return True
+                raise CallbackRefused("stale.not_waiting") from None
             except CallbackRefused:
                 raise
             except Exception as error:

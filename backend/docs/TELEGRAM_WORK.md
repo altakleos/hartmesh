@@ -228,6 +228,22 @@ carry a closed flag derived from original seen data, so their stale notice is
 revalidated at delivery without replacing the decision or note. No recovery path
 submits a new action automatically; original Act bodies remain immutable.
 
+`work_review_recovery.py` handles a captured changes note when its original review
+has closed. A current pending review on the same Work can reuse the original note
+only in a complete V4 replacement preview with a new explicit confirmation. The
+replacement flag is derived from original and current request identities; the
+original input time still fixes expiry. With no replacement, old controls retire
+and a fixed closed/withdrawn notice settles the input without an action. Closure
+state/revisions and the unchanged input share the final joined read, including
+after settlement; drift rolls the entire transition back. Already-reserved
+confirmation groups, even with missing journals, cannot enter this unsubmitted
+note path. Their canonical receipt/conflict owner remains responsible.
+Direct text admission records `route_basis.work_action_id` atomically with its
+Act, preserving the captured `work_input`. Missing marked journals cannot be
+reconstructed by input replay. Preview authority also checks orphaned V4 control
+reservations, so restarting from the input cannot bypass a missing confirmation
+journal. These existence probes use opaque text identities on both SQL dialects.
+
 `work_outcomes.py` renders complete success/refusal/uncertain wording, without
 issuing commands or installing controls. Unknown actions never become a failed
 save. A known attempt-closing refusal keeps the original confirmation; a retained
