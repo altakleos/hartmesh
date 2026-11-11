@@ -16,6 +16,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Label, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
@@ -867,7 +868,11 @@ class DeerFlowTUI(App):
     def _tick_spinner(self) -> None:
         if self._streaming:
             self._spinner_idx = (self._spinner_idx + 1) % len(SYMBOLS["spinner"])
-            self._refresh_status()
+            try:
+                self._refresh_status()
+            except NoMatches:
+                # A queued timer may outlive its status widget during shutdown.
+                return
 
     def _thread_label(self) -> str:
         if not self._conv_thread_id:
