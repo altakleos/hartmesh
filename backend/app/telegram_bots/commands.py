@@ -111,6 +111,12 @@ class CallbackCommands:
             return {"key": "privacy.full", "values": {**values, **named}, "keyboard": canonical_keyboard(keyboard)}
         raise CallbackRefused() from None
 
+    async def handle_list(self, channel, update, word):
+        from app.telegram_bots.agent_list_commands import handle_list
+
+        link = channel._admission(update).link
+        return await await_drained(handle_list(self, channel, link, update, word, source_id=channel._source(update, "command")))
+
     async def handle(self, channel, update, word):
         link = channel._admission(update).link
         guard = self._guard(channel, link)

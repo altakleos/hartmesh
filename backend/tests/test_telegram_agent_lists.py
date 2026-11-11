@@ -254,3 +254,19 @@ def test_existing_instance_name_contract_allows_128_characters(monkeypatch):
     result = presentation(monkeypatch, body([entry(1, name=name)]))
     assert name in result.text
     assert result.keyboard[0][0]["label_values"] == {"name": name}
+
+
+def test_list_parts_preserve_both_languages_and_bound_long_names(monkeypatch):
+    from app.telegram_bots.agent_lists import AgentListDetails, list_parts
+    from app.telegram_bots.render import render
+    from app.telegram_bots.split import utf16_units, visible_text
+
+    details = {str(i): AgentListDetails("角色" * 100, 3, 4) for i in range(20)}
+    result = presentation(monkeypatch, body([entry(i, name="名" * 128) for i in range(20)]), details=details)
+    parts = list_parts(result)
+    assert len(parts) > 1
+    for locale in ("en", "zh-CN"):
+        texts = [render(part["source_ref"]["key"], locale, **part["source_ref"]["values"]) for part in parts]
+        assert all(utf16_units(visible_text(text)) <= 4096 for text in texts)
+        assert "\n".join(texts) == render("agents.presentation", locale, lines=result.lines)
+    assert "\n".join(render(part["source_ref"]["key"], "en", **part["source_ref"]["values"]) for part in parts) == result.text

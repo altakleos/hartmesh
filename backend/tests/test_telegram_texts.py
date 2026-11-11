@@ -44,7 +44,7 @@ INSTANCE_PRESENTATION_KEYS = frozenset("hello.assistant hello.employee help.agen
 POLICY_KEYS = frozenset({"policy.off", "policy.on", "policy.on_protected", "policy.protected", "policy.unprotected"})
 
 
-AGENT_LIST_KEYS = frozenset("assistants.list assistants.none assistants.colleagues employees.list employees.none agents.line_work agents.line_idle agents.line_plain agents.more".split())
+AGENT_LIST_KEYS = frozenset("assistants.list assistants.none assistants.colleagues employees.list employees.none agents.line_work agents.line_idle agents.line_plain agents.more agents.presentation".split())
 
 
 def test_text_catalog_locales_have_equal_keys():

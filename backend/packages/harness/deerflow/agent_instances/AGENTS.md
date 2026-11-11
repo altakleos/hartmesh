@@ -313,3 +313,7 @@ columns and request/event attribution; never rewrite0038/0039.
 Instance AIO clients use the baseline provider's validated `max_bash_sessions`,
 matching the native container's Bash capacity; preserve distinct persistent-shell
 headroom and scoped command cancellation.
+
+`AgentWork.count_active` owns a drained SQL read of durable unresolved attempts,
+with current Inspect in the aggregate itself. It has no page cap and does not
+use process-local resident capacity as a count of assignments.

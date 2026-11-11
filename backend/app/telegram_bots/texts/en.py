@@ -352,3 +352,5 @@ TEXTS.update(
     }
 )
 FORMS["employees.none"] = {"administrator": "No AI employees you can chat with yet."}
+
+TEXTS["agents.presentation"] = "{lines}"

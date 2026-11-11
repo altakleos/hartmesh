@@ -1977,7 +1977,10 @@ cleanup when migrating from legacy metadata credentials.
 Assistant and employee list preparation reads the bound person’s discovery page,
 filters chat access and shows at most twenty agents, with the person’s own
 assistants first. Names link to the person’s bot or its Telegram settings row.
-The commands remain unavailable until their delivery and UI activation is complete.
+Role and Work details require permission to inspect; waiting counts include only
+questions the person can answer. Queued lists recheck access before delivery,
+and obsolete lists retire without delaying later replies. Commands remain
+unavailable until the remaining UI and activation work is complete.
 
 Instance site-permission cards require current Manage access when planned, sent
 and answered. Withdrawing Manage keeps an unsent card from appearing and prevents

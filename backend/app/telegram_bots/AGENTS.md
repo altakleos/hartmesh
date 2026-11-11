@@ -36,9 +36,12 @@ conversation from a failing Gateway. `keyboard_cleanup_row` takes spent buttons 
 their message in the writer that spends them.
 
 `agent_lists.py` projects at most 20 Use-qualified entries from the Gateway’s
-500-entry page. Inspect gates supplied role/Work details; administrator inventory
-grants nothing. This preparation is unmounted: command publication and final
-per-target send authority must be qualified before activation.
+500-entry page. `agent_list_source.py` owns drained HTTP/role/Work reads;
+Inspect gates details and Attention owns recipient eligibility. Semantic lines
+fit both locales and render in the current language. `agent_list_authority.py`
+joins owner/role limits/binding/targets/Open-bots/claim in the final SDK check.
+Stale lists retire without blocking later messages. `handle_list` remains
+unmounted until the public activation change.
 
 `commands.py` handles fixed navigation and language settings only. A command closes
 only a typing prompt; `/new` and `/stop` also end the forms and cards in scope.

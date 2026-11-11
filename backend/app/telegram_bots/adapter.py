@@ -1873,6 +1873,11 @@ class TelegramBotChannel(TelegramChannel):
         if saved.item.dedupe_key.startswith(("notice:chat-stream:", "notice:preparation-capacity:", "notice:chat-wait:")) and (turns is None or turns.preview_allowed(self, saved.item) is not True):
             raise PreviewExpired()
         part = saved.part
+        list_presentation = "agent_list_basis" in saved.item.payload or part.get("source_ref", {}).get("key") == "agents.presentation"
+        if list_presentation:
+            from app.telegram_bots.agent_list_authority import authorize_list
+
+            await authorize_list(self._services, saved)
         pending = part.get("invalid_token_verification_pending")
         if pending is not None:
             if (
@@ -2058,6 +2063,16 @@ class TelegramBotChannel(TelegramChannel):
                     raise DeliveryClaimRetired()
 
             preview_fence = LiveRequestFence(check_human_input)
+        if list_presentation:
+
+            async def check_list_part():
+                if not self._callback_current(current.link):
+                    raise DeliveryClaimRetired()
+                await authorize_list(self._services, current)
+                if not self._callback_current(current.link):
+                    raise DeliveryClaimRetired()
+
+            preview_fence = LiveRequestFence(check_list_part)
         if current.link.agent_kind == "instance":
             presentation_fence = preview_fence
 
