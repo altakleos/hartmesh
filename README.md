@@ -2010,7 +2010,8 @@ a durable delivery boundary that waits for the entire message before enabling co
 or typing prompts. Confirmed choices also have durable, single-operation admission
 for recovery after a restart. Temporarily refused confirmations can rebuild a
 changed review before a new confirmation, while uncertain actions retain their
-original operation.
+original operation. Changes in workspace readiness alone do not invalidate the
+review the person saw.
 Assignments continue to be managed on the web.
 
 Instance site-permission cards require current Manage access when planned, sent

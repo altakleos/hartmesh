@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram delivery
 
+- Keep acknowledged Work previews usable when only execution-probe metadata
+  changes. Complete displayed content, revisions, response IDs and protection
+  still have to match before a confirmation can be admitted.
+
 - Prepare complete Work confirmation and prompt views that retain the displayed
   request basis and unsubmitted text. First-tap menus and confirmations have
   durable, source-checked reply delivery with acknowledged origin and keyboard

@@ -123,3 +123,10 @@ pending calls remain untouched. Publication consumes the old group with
 current source/access. A new first tap and confirmation follow full delivery.
 The fresh preview is a direct reply even when proactive notifications are off.
 Entry points and outcome delivery remain uninstalled.
+
+`same_displayed_basis` is the common preview/confirmation comparison: complete
+rendered source fields, all responses and people, typed seen/CAS data and protection.
+Do not compare whole Work projections across reads: attempt workspace readiness
+and execution availability can change without changing anything displayed or its
+revision. Current permission and source admission still run independently; this
+comparison never substitutes for their final joined SQL checks.
