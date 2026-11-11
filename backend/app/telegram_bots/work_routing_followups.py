@@ -2,7 +2,6 @@
 
 import asyncio
 from dataclasses import asdict
-from datetime import datetime
 
 from app.telegram_bots.config import load_config
 from app.telegram_bots.producer import ProductSourceRetired
@@ -142,29 +141,9 @@ def acknowledged_followup(link, parent):
             raise ValueError()
         if len(parts) != len(parent.parts) or not parts:
             raise ValueError()
-        identities, messages = set(), set()
-        receipts = {"part_id", "presentation_version", "ordinal", "state", "message_ids", "callback_group_id", "sent_at", "dispatched_at", "plain_fallback", "invalid_token_verification_pending"}
-        for index, (part, recipe) in enumerate(zip(parent.parts, parts, strict=True)):
-            identity = part["part_id"]
-            if type(identity) is not str or len(identity) != 32 or identity in identities or any(ch not in "0123456789abcdef" for ch in identity):
-                raise ValueError()
-            identities.add(identity)
-            if (
-                part["state"] != "sent"
-                or type(part["ordinal"]) is not int
-                or part["ordinal"] != index
-                or type(part["presentation_version"]) is not int
-                or part["presentation_version"] != 0
-                or type(part["message_ids"]) is not list
-                or len(part["message_ids"]) != 1
-                or any(type(value) is not int or value <= 0 or value in messages for value in part["message_ids"])
-                or datetime.fromisoformat(part["sent_at"]).utcoffset() is None
-                or set(part) - set(recipe) - receipts
-                or bool(part.get("callback_group_id")) != bool(recipe.get("stored_keyboard"))
-                or any(not same_body(part.get(key), value) for key, value in recipe.items())
-            ):
-                raise ValueError()
-            messages.update(part["message_ids"])
+        from app.telegram_bots.work_outcome_delivery import acknowledged_parts
+
+        acknowledged_parts(parent, parts)
         return source
     except (KeyError, TypeError, ValueError):
         raise ProductSourceRetired() from None

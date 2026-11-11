@@ -2018,6 +2018,9 @@ The routing foundation can also attach recipient choices directly to a manager�
 saved “wrong person” reply, with a separate operation for passing the question on.
 Those replies can refresh changed recipient choices without resubmitting the response.
 Their original input remains available while live choices or pending refreshes need it.
+An optional callback dispatcher connects previews, confirmations and routing to
+those durable operations. Explicit Retry keeps the original operation and body;
+duplicate presses of one shown retry do not start another attempt.
 Assignments continue to be managed on the web.
 
 Instance site-permission cards require current Manage access when planned, sent

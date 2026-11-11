@@ -860,6 +860,9 @@ class TelegramBotChannel(TelegramChannel):
         await self.send_text(key, source_id=f"press:{row.id}:{update_id}", reply_to=row.message_id, thread=row.message_thread_id, _captured_link=link)
 
     async def execute_callback(self, row, *, query_id=None, update_id=None):
+        work_callbacks = getattr(self._services, "work_callbacks", None)
+        if work_callbacks is not None and await work_callbacks.execute_callback(self, row, update_id=update_id, query_id=query_id):
+            return
         if self.link.agent_kind == "instance" and row.kind == "file_retry" and row.target_kind == "act":
             return await self.retry_instance_file(deepcopy(self.link), row)
         human_inputs = getattr(self._services, "human_inputs", None)

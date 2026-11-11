@@ -172,19 +172,15 @@ def _recipe_matches(part, recipe, *, edit=False):
     return all(same_body(part.get(key), value) for key, value in recipe.items() if key != "kind" or not edit)
 
 
-async def acknowledge_outcome(session, row):
-    """Preserve complete-delivery evidence after the ordinary outbox expires."""
-    basis = row.payload["work_outcome_basis"]
-    data = basis["context"]
-    act = await session.get(TelegramActRow, data["act"]["id"], with_for_update=True, populate_existing=True)
-    if act is None or (act.link_id, act.owner_user_id, act.binding_generation, act.work_id, act.request_id) != (row.link_id, row.owner_user_id, row.binding_generation, row.work_id, row.request_id):
+def acknowledged_parts(row, recipes, *, edit=False):
+    """Complete typed transport proof shared by outcome ACK and shown controls."""
+    if type(row.payload["presentation_version"]) is not int or row.payload["presentation_version"] != 0 or len(row.parts) != len(recipes) or not row.parts:
         raise ProductSourceRetired()
-    if act.kind != data["act"]["kind"] or not same_body(act.body, data["act"]["body"]):
-        raise ProductSourceRetired()
-    if type(row.payload["presentation_version"]) is not int or row.payload["presentation_version"] != 0 or len(row.parts) != len(basis["parts"]) or not row.parts:
-        raise ProductSourceRetired()
+    receipts = {"part_id", "presentation_version", "ordinal", "state", "message_ids", "callback_group_id", "sent_at", "dispatched_at", "plain_fallback", "invalid_token_verification_pending"} | (
+        {"target_message_id", "target_protect_content"} if edit else set()
+    )
     identities, message_ids = set(), set()
-    for index, (part, recipe) in enumerate(zip(row.parts, basis["parts"], strict=True)):
+    for index, (part, recipe) in enumerate(zip(row.parts, recipes, strict=True)):
         identity = part["part_id"]
         if type(identity) is not str or len(identity) != 32 or identity in identities or any(ch not in "0123456789abcdef" for ch in identity):
             raise ProductSourceRetired()
@@ -194,7 +190,9 @@ async def acknowledge_outcome(session, row):
             or part["ordinal"] != index
             or type(part["presentation_version"]) is not int
             or part["presentation_version"] != 0
-            or not _recipe_matches(part, recipe, edit=index == 0 and basis.get("edit") is not None)
+            or set(part) - set(recipe) - receipts
+            or bool(part.get("callback_group_id")) != bool(recipe.get("stored_keyboard"))
+            or not _recipe_matches(part, recipe, edit=index == 0 and edit)
         ):
             raise ProductSourceRetired()
         if part.get("state") != "sent" or type(part.get("message_ids")) is not list or len(part["message_ids"]) != 1 or any(type(value) is not int or value <= 0 or value in message_ids for value in part["message_ids"]):
@@ -202,6 +200,18 @@ async def acknowledge_outcome(session, row):
         message_ids.update(part["message_ids"])
         if datetime.fromisoformat(part["sent_at"]).utcoffset() is None:
             raise ProductSourceRetired()
+
+
+async def acknowledge_outcome(session, row):
+    """Preserve complete-delivery evidence after the ordinary outbox expires."""
+    basis = row.payload["work_outcome_basis"]
+    data = basis["context"]
+    act = await session.get(TelegramActRow, data["act"]["id"], with_for_update=True, populate_existing=True)
+    if act is None or (act.link_id, act.owner_user_id, act.binding_generation, act.work_id, act.request_id) != (row.link_id, row.owner_user_id, row.binding_generation, row.work_id, row.request_id):
+        raise ProductSourceRetired()
+    if act.kind != data["act"]["kind"] or not same_body(act.body, data["act"]["body"]):
+        raise ProductSourceRetired()
+    acknowledged_parts(row, basis["parts"], edit=basis.get("edit") is not None)
     source_callback = await session.get(TelegramCallbackRow, act.id)
     source_parent = await session.get(TelegramOutboxRow, source_callback.payload.get("anchor_outbox_id")) if source_callback else None
     validate_origin(source_callback, source_parent, basis, row)
