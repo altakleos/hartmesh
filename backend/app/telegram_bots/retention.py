@@ -80,6 +80,9 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
             pinned |= _strings(row.target_id if row.target_kind == "outbox" else None)
     for delivery_ids, outbox_id in await session.execute(select(TelegramInboundMarkRow.delivery_ids, TelegramInboundMarkRow.outbox_id).where(TelegramInboundMarkRow.state != "done")):
         pinned |= _strings(outbox_id, *delivery_ids)
+    for payload in await session.scalars(select(TelegramOutboxRow.payload).where(TelegramOutboxRow.state.in_(("pending", "sending", "failed")))):
+        basis = payload.get("work_request_basis", {})
+        pinned |= _strings(basis.get("cleanup_id"))
     return pinned | anchors | await _first_replies(session, anchors)
 
 

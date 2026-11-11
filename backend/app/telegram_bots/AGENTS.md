@@ -75,9 +75,17 @@ cannot bypass this boundary. `work_request_source.py` validates the entire froze
 part sequence and preceding ACKs, re-proves complete source/seen data and joins
 claim/settings/Work/request/Space/callback facts to the final account/grant read.
 Compact correlated arrays avoid multiplying the full outbox JSON. Privacy, locale
-and Work-only revision drift preserve delivery for later materialization; actual
-source replacement/closure retires it. Reveal, refresh and anchor repair remain
-separate prerequisites for activation.
+and Work-only revision drift defer until the optional recovery coordinator is
+installed. `work_request_recovery.py` owns drained refresh and acknowledged Show:
+prepare config and provider off-writer, borrow the final joined account/grant/source check,
+retain uncertain Acts, consume old controls atomically, and clear old keyboards.
+Compose that admission after the outer guard’s last await, then check lifetime synchronously.
+Revealed protected content requires its consumed Show receipt at dispatch. Multipart
+reveal first clears the teaser through a retained cleanup dependency, then sends
+every full chunk as a new protected message; missing cleanup targets settle silently. Current
+presentation versions require every preceding ACK; same-basis anchor repair keeps
+control identities/expiry and moves anchors only after complete delivery. The
+source family stays uninstalled until event and interaction integration.
 
 `commands.py` handles fixed navigation and language settings only. A command closes
 only a typing prompt; `/new` and `/stop` also end the forms and cards in scope.

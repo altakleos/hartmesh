@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram delivery
 
+- Prepare durable Work preview refresh, protected reveal and missing-message
+  recovery. Refresh retains uncertain action journals, rechecks current authority,
+  clears superseded keyboards and delivers complete content before controls.
+  These services remain uninstalled pending notification integration.
+
 - Add opt-in source authorization for saved Work previews at the raw send
   boundary, including complete preview ordering and current file-reference
   access. Supervisor startup keeps Work delivery disabled.

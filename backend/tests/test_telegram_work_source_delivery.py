@@ -220,7 +220,7 @@ async def test_final_query_does_not_multiply_preview_payload_by_spaces_and_butto
         captured = SimpleNamespace(item=SimpleNamespace(id=saved.id), part=saved.parts[-1])
     source = replace(source, request={**source.request, "sources": [{"kind": "space_file", "space_id": identity, "path": "guide.txt"} for identity in (e.instance.home_id, second)]})
     host = WorkRequestSources(reader=e.reader, outbox=e.channel._services.outbox, callbacks=e.channel._services.callbacks)
-    projection = _RequestProjection(host, captured, None, source, None, None, False, None)
+    projection = _RequestProjection(host, captured, saved.payload["work_request_basis"], source, None, None, False, None)
     query = projection.extend(select(*[literal(0) for _ in range(8)]).select_from(TelegramBotLinkRow).where(TelegramBotLinkRow.id == e.link.id))
     async with e.db.sessions() as reader:
         rows = (await reader.execute(query)).all()
