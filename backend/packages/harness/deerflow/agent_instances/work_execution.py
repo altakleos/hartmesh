@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied
 from deerflow.agent_instances.human_input import HumanInput
-from deerflow.agent_instances.work import DELEGATE, UNRESOLVED, AgentWork
+from deerflow.agent_instances.work import DELEGATE, UNRESOLVED, AgentWork, _date
 from deerflow.agent_instances.work_contract import WorkSource
 from deerflow.agent_instances.work_execution_contract import ActivateWork, ReportWork
 from deerflow.persistence.agent_instances.human_input import HumanInputEventRow, HumanInputRequestRow, HumanInputResponseRow
@@ -109,13 +109,13 @@ class WorkExecution:
         row = (await session.execute(select(AgentWorkRow).where(AgentWorkRow.id == work_id, AgentWorkRow.instance_id == parent.id).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
         binding = await session.get(AgentConversationRow, execution.thread_id)
         if row is None or thread is None or thread.incarnation != execution.thread_incarnation or binding is None or binding.instance_id != parent.id:
-            raise AgentDenied("Work conversation binding changed")
+            raise AgentDenied("Work conversation binding changed", reason="conversation-changed")
         home = await session.get(SpaceRow, execution.instance.home_id)
         if home is None or home.status != "active" or home.generation != execution.home_generation:
-            raise AgentDenied("Work Home changed")
+            raise AgentDenied("Work Home changed", reason="space-changed")
         await execution.authority.destination_audience(session, execution.instance, binding, memory=True)
         if sources != await self._sources(session, row):
-            raise AgentConflict("Work sources changed; reload before acting")
+            raise AgentConflict("Work sources changed; reload before acting", reason="sources-changed")
         return parent, row
 
     async def _admit(self, session, execution, parent, row):
@@ -128,18 +128,26 @@ class WorkExecution:
             or not policy
             or not policy.enabled
         ):
-            raise AgentDenied("Work requires an active reconciled mandate")
+            if parent.status != "active":
+                reason = "agent-not-active"
+            elif parent.generation != execution.instance.generation or parent.definition_revision != execution.definition.revision:
+                reason = "execution-stale"
+            elif row.definition_revision != parent.definition_revision:
+                reason = "brief-changed"
+            else:
+                reason = "work-off"
+            raise AgentDenied("Work requires an active reconciled mandate", reason=reason)
         if await session.scalar(select(AgentLifecycleRow.operation_id).where(AgentLifecycleRow.instance_id == parent.id, AgentLifecycleRow.phase == "pending")):
-            raise AgentDenied("Lifecycle containment is pending")
+            raise AgentDenied("Lifecycle containment is pending", reason="lifecycle-pending")
         if row.status not in {"open", "blocked"}:
-            raise AgentConflict("Work requires Changes requested or Reopen before activation")
+            raise AgentConflict("Work requires Changes requested or Reopen before activation", reason="awaiting-review" if row.status == "submitted" else "work-closed")
         await self.work._admit_sources(session, execution.requester, parent, [WorkSource.model_validate(s) for s in await self._sources(session, row)])
         return policy
 
     async def reserve(self, *, execution, work_id, request: ActivateWork, before_admit: Callable[[str], None] | None = None, on_rollback: Callable[[], None] | None = None):
         request = ActivateWork.model_validate(request.model_dump())
         if request.thread_id != execution.thread_id or not execution.execution_allowed:
-            raise AgentDenied("Activation requires the admitted conversation")
+            raise AgentDenied("Activation requires the admitted conversation", reason="conversation-mismatch")
         await execution.authority.validate(execution)
         # Shared Work remains protected after memory is disabled, restart or branching.
         await execution.authority.context_admission(execution, mark_work=True)
@@ -150,13 +158,14 @@ class WorkExecution:
                 attempt = await session.scalar(select(AgentWorkAttemptRow).where(AgentWorkAttemptRow.work_id == row.id, AgentWorkAttemptRow.activation_id == request.operation_id))
                 if attempt is not None:
                     if attempt.requester_id != execution.requester.subject_id or attempt.request != request.model_dump(mode="json"):
-                        raise AgentConflict("Activation identity belongs to another request")
+                        raise AgentConflict("Activation identity belongs to another request", reason="operation-mismatch")
                     return WorkAttempt(self, row.id, attempt.id, attempt.run_id, attempt.status not in UNRESOLVED)
                 await self._admit(session, execution, parent, row)
                 if (row.revision, row.assignment_revision) != (request.expected_revision, request.expected_assignment_revision):
-                    raise AgentConflict("Work changed; reload before activation")
-                if await session.scalar(select(AgentWorkAttemptRow.id).where(AgentWorkAttemptRow.work_id == row.id, AgentWorkAttemptRow.status.in_(UNRESOLVED))):
-                    raise AgentConflict("Reconcile the prior attempt before activating")
+                    raise AgentConflict("Work changed; reload before activation", reason="work-changed")
+                unresolved = await session.scalar(select(AgentWorkAttemptRow.status).where(AgentWorkAttemptRow.work_id == row.id, AgentWorkAttemptRow.status.in_(UNRESOLVED)))
+                if unresolved is not None:
+                    raise AgentConflict("Reconcile the prior attempt before activating", reason="attempt-running" if unresolved in {"starting", "running"} else "attempt-unsettled")
                 attempt_id = uuid4().hex
                 # Exact replay and current authority precede this pure host
                 # predicate. Capacity/physical work belongs outside SQL; bind
@@ -392,7 +401,7 @@ class WorkExecution:
     @staticmethod
     def _advance(row):
         if row.revision >= 2147483647:
-            raise AgentConflict("Work revision exhausted")
+            raise AgentConflict("Work revision exhausted", reason="revision-exhausted")
         row.revision += 1
         row.updated_at = datetime.now(UTC)
 
@@ -407,10 +416,14 @@ class WorkExecution:
                 replies = (
                     await session.scalars(select(HumanInputResponseRow).where(HumanInputResponseRow.request_id == request.id).order_by(HumanInputResponseRow.created_at, HumanInputResponseRow.id).offset(response_offset).limit(9))
                 ).all()
+            last = await session.scalar(
+                select(AgentWorkEventRow).where(AgentWorkEventRow.work_id == row.id, AgentWorkEventRow.action.in_(("changes_requested", "accept", "cancel", "reopen"))).order_by(AgentWorkEventRow.revision.desc()).limit(1)
+            )
             # Bound each model projection; assessment still requires the full exact set.
             return {
                 "work": await self.work._project(session, execution.requester, parent, self.work._snapshot(row)),
                 "candidate": attempt.candidate,
+                "changes_requested": {"note": (last.request or {}).get("note"), "actor_id": last.actor_id, "at": _date(last.created_at)} if last is not None and last.action == "changes_requested" else None,
                 "request": {"id": request.id, "revision": request.revision, "request_revision": request.request_revision, "purpose": request.purpose} if request else None,
                 "responses": [{"id": r.id, "actor_kind": "human", "actor_id": r.actor_id, "text": r.text, "choice": r.choice, "disposition": r.disposition, "sources": r.sources} for r in replies[:8]],
                 "next_response_offset": response_offset + 8 if len(replies) > 8 else None,

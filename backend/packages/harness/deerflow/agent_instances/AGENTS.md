@@ -241,6 +241,12 @@ memory scope; never persist this projection or accept it from a client. The
 bounded operational-facts disclosure exception excludes prompts, SOUL, credentials,
 authority objects, internal host details and membership lists.
 
+`AgentDenied` and `AgentConflict` accept an optional keyword-only `reason` without
+changing positional arguments or sentences. Coded conflicts expose it at HTTP 409;
+denials retain the private 404 envelope. Work context selects the newest
+changes-requested/accept/cancel/reopen event by revision: only changes-requested
+retains the attributed note, through later edits. This context grants no authority.
+
 `AgentWork` owns obligations and human commands; `WorkExecution` owns host attempts. Current Inspect
 filters before pagination; delegation/factual input adds Use, management adds
 Manage, and HTTP read/write ceilings remain independent. Never add status,

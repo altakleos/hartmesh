@@ -109,6 +109,19 @@ access is not restored by a receipt. The UI retains uncertain requests and
 requires explicit reference replacement when unavailable references would be
 removed. Concurrency conflicts require reviewing the current record.
 
+Conflicts with a stable reason return HTTP 409 with `reason` beside `detail`.
+Uncoded conflicts keep their existing `detail` body; access denials remain 404
+without a reason. Clients should use the code rather than parse the sentence.
+Activation codes are `conversation-changed`, `space-changed`, `sources-changed`,
+`agent-not-active`, `execution-stale`, `brief-changed`, `work-off`,
+`lifecycle-pending`, `awaiting-review`, `work-closed`, `conversation-mismatch`,
+`operation-mismatch`, `work-changed`, `attempt-running`, `attempt-unsettled` and
+`revision-exhausted`. Delegation and shared admission also use `not-visible`,
+`grant-required`, `source-unavailable`, `source-not-shared`,
+`responsibility-unknown`, `manage-required` and `review-required`.
+Decisions and acceptance refused during an unresolved attempt carry
+`attempt-unresolved`; this does not authorize an automatic retry or new run.
+
 ## Persistence and compatibility
 
 Migration `0038_agent_work` follows published `0037_agent_lifecycle` and adds
@@ -139,6 +152,11 @@ Activation adds the current `runs:create` ceiling to Use plus Inspect and
 `threads:write`. The server checks the adopted mandate, exact assignment, current
 source access and audience of the conversation and the agent’s files before dispatch. Shared Work context
 marks the conversation Inspect-protected even when memory is off.
+
+The latest request-for-changes note, its author and timestamp are included in
+`changes_requested` in every later attempt's Work context, including after an
+assignment edit. Acceptance, cancellation or reopening clears that context entry.
+The note remains attributed human input and never starts work by itself.
 
 An attempt records its actual conversation/run identity. Starting, Running,
 Stop pending and Outcome uncertain all prohibit a replacement attempt. Retry the

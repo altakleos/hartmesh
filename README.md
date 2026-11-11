@@ -124,6 +124,8 @@ conversations. Enable Work in a custom definition’s settings, then explicitly
 adopt that definition for the instance. **Work on this** and **Resume** explicitly
 start an AI employee attempt; saving an assignment or response never starts a run.
 The Work page separates progress, blockers, execution attempts and human review.
+A reviewer’s request-for-changes note stays in later attempts’ context until the
+result is accepted or the assignment is cancelled or reopened.
 Current Inspect grants control visibility; referenced files retain separate access
 checks. Uncertain execution requires qualified containment and explicit recovery.
 The Work command API can stop one exact running attempt without cancelling the

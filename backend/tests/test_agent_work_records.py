@@ -131,8 +131,10 @@ async def test_sources_require_shared_audience_and_are_redacted_after_revocation
 
     service, instance, sf = work
     private = await service.agents.files.create(actor=ALICE, name="Private source", custody=Custody.personal(ALICE), mode=MutationMode.NATIVE)
-    with pytest.raises(AgentDenied):
+    with pytest.raises(AgentDenied) as caught:
         await delegate(service, instance, sources=[WorkSource(space_id=private.id, path="private.txt")])
+    assert caught.value.reason == "source-not-shared"
+    assert str(caught.value) == "The Work audience cannot inspect this source; no content or locator was copied"
     ref = WorkSource(space_id=instance.home_id, path="docs/guide.txt")
     request = DelegateWork(operation_id=operation(), objective="Review guide", success_criteria="List gaps", sources=[ref])
     first = await service.delegate(actor=ALICE, instance_id=instance.id, request=request)
