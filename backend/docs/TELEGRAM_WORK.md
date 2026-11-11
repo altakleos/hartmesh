@@ -243,11 +243,15 @@ complete Telegram ACK. Collected outbox history cannot republish an acknowledged
 phase; pending deliveries retain their action through cleanup. Obsolete unsent
 plans can be replaced while their captured input remains unfinished.
 
-This planner and source remain uninstalled. Source-aware protection repair is
-an activation prerequisite; assignment topics and their relocation belong to
-the later topic feature. For either replacement, generic replacement holds these frozen
-plans with `work-outcome-refresh-required`, preserving ACKed parts, original
-input and action identity. It cannot silently move them or replay the prefix.
+This planner and source remain uninstalled. Completed routing uses a closed V2
+edit proof tied to the original command's acknowledged selection, message and
+protection. The final SDK check and ACK settlement recheck that proof. Protection
+upgrades use a new protected reply and clear the previous keyboard, including
+when an earlier queued result already consumed its controls. Missing/incompatible
+anchors hold with `work-outcome-refresh-required`; the next receipt observation
+replans current content as a new message, retaining old ACKs and the original
+input/action. It never repeats the command. Assignment topics and relocation
+belong to the later topic feature.
 The full controller still owns fresh-request and routing follow-ups, explicit
 action retries and installation of the receipt observer.
 

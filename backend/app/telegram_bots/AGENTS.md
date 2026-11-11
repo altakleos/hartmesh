@@ -13,7 +13,9 @@ Keep bot network, supervisor and router startup outside configuration loading.
 Use socket-free transports and synthetic credentials in offline tests.
 
 Work outcome delivery uses canonical receipts and a final source/claim fence.
-Its dormant receipt observer never calls the explicit action-retry path.
+Its dormant receipt observer never calls the explicit action-retry path. Routing
+results edit only their command’s exact ACKed selection; missing/incompatible
+anchors rematerialize current receipt content without another command.
 Routing V5/V6 has a dedicated recipient/account source and cannot use ordinary
 question recovery. Source-aware routing refresh/Show/repair retain ACK history and
 unresolved actions; fresh controls await full delivery. Recipient-choice admission atomically reserves the original
