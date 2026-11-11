@@ -2680,6 +2680,15 @@ class OutboxSender:
             await self.outbox.inbox.settle_deliveries(link_id=link_id, session=writer)
 
     async def _replace(self, binding: BotLink, row: OutboxItem, claim: str, *, reason: str) -> None:
+        if "work_outcome_basis" in row.payload:
+            # Frozen result recipes need source-aware rematerialization. Never
+            # replay their ACKed prefix or silently relocate a result.
+            async with self.outbox._writer(binding.id) as (writer, _binding):
+                saved = await writer.get(TelegramOutboxRow, row.id, with_for_update=True)
+                if self.outbox._fenced(saved, generation=binding.binding_generation, owner=self.run_id, claim=claim):
+                    self._pending(saved)
+                    saved.state, saved.failed_reason, saved.closed_at = "failed", "work-outcome-refresh-required", self.outbox.clock()
+            return
         version = row.payload.get("presentation_version", 0)
         parts = []
         for part in row.parts:
@@ -2771,6 +2780,16 @@ class OutboxSender:
             except ValueError:
                 await release_members(session, row, owner=row.claim_owner, claim=row.claim_id)
                 row.state, row.failed_reason, row.closed_at = "failed", "invalid-digest-receipt", now
+                row.claim_owner = row.claim_id = row.claimed_at = None
+                await session.flush()
+                return
+        if "work_outcome_basis" in row.payload:
+            from app.telegram_bots.work_outcome_delivery import acknowledge_outcome
+
+            try:
+                await acknowledge_outcome(session, row)
+            except (ProductSourceRetired, ValueError, TypeError, KeyError, IndexError):
+                row.state, row.failed_reason, row.closed_at = "failed", "invalid-work-outcome-receipt", now
                 row.claim_owner = row.claim_id = row.claimed_at = None
                 await session.flush()
                 return

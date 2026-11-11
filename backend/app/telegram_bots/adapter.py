@@ -1881,7 +1881,14 @@ class TelegramBotChannel(TelegramChannel):
         source_key = part.get("source_ref", {}).get("key", "")
         work_part = None
         work_sources = getattr(self._services, "work_request_sources", None)
-        if "work_request_basis" in saved.item.payload:
+        if "work_outcome_basis" in saved.item.payload:
+            work_sources = getattr(self._services, "work_outcome_sources", None)
+            if work_sources is None or "work_request_basis" in saved.item.payload:
+                raise PermanentDeliveryError("unsupported-work-outcome-source")
+            work_part = await work_sources.read_part(saved)
+        elif source_key.startswith("work.action."):
+            raise PermanentDeliveryError("unsupported-work-outcome-source")
+        elif "work_request_basis" in saved.item.payload:
             if work_sources is None:
                 raise PermanentDeliveryError("unsupported-work-request-source")
             work_part = await work_sources.read_part(saved)
