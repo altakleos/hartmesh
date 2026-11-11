@@ -1,6 +1,7 @@
 """English fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "file.saved": "{file} is saved in {name}'s files.",
     "file.saved_ask": "{file} is saved in {name}'s files. What should {name} do with it?",
     "file.saved_as": "Saved as {file}, because the name was taken or could not be used.",
     "file.same": "{name} already has this file.",

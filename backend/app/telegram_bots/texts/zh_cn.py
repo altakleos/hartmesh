@@ -1,6 +1,7 @@
 """Simplified Chinese fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "file.saved": "{file}已保存到{name}的文件中。",
     "file.saved_ask": "{file}已保存到{name}的文件中。需要{name}如何处理？",
     "file.saved_as": "由于名称已被使用或无法使用，文件已另存为{file}。",
     "file.same": "{name}已经有这个文件了。",

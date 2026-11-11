@@ -15,7 +15,7 @@ from app.telegram_bots.files import FileBytesBudget
 pytestmark = pytest.mark.asyncio
 
 
-async def delivery(e, monkeypatch, *, size=4, too_big=False):
+async def delivery(e, monkeypatch, *, size=4, too_big=False, text=""):
     services = e.channel._services
     services.authority = e.live.authority
     services.callbacks = CallbackRepository(e.db.sessions)
@@ -23,7 +23,7 @@ async def delivery(e, monkeypatch, *, size=4, too_big=False):
     services.file_bytes_budget = FileBytesBudget(e.db.config.files.in_memory_max_bytes)
     services.prepare_live_owner = e.live.authority.prepare_live_owner
     services.protect_notice = e.live.authority.protect_notice
-    source, file = await admitted(e, size=size)
+    source, file = await admitted(e, size=size, text=text)
     request, reads = e.channel._requests[0], []
     request.enqueue("sendMessageDraft", result=True)
     request.enqueue("sendMessageDraft", result=True)
