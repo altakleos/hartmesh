@@ -1,0 +1,446 @@
+"""Receipt-backed human Work actions; never run or activate an assignment.
+
+This service is dormant until the chat controller supplies it. The existing
+Work/HumanInput transaction owns each effect; the Telegram journal owns the
+immutable request, local attempt serialization and uncertain-response recovery.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Mapping
+from contextlib import asynccontextmanager
+from datetime import timedelta
+
+from sqlalchemy import select
+
+from app.telegram_bots.authority import AccessOff, AuthorityUnavailable, CeilingRefused, require
+from app.telegram_bots.links import BotLink
+from deerflow.agent_instances.contract import AgentConflict, AgentDenied, Refusal
+from deerflow.agent_instances.human_input import HumanInput
+from deerflow.agent_instances.human_input_contract import Respond
+from deerflow.agent_instances.work import INSPECT
+from deerflow.agent_instances.work_contract import WorkCommand
+from deerflow.persistence.agent_instances.human_input import HumanInputRequestRow
+from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow, AgentInstanceRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow, TelegramInstancePolicyRow
+from deerflow.spaces.contract import PrincipalRef
+from deerflow.utils.file_io import await_drained
+
+_ACT_SCOPE = ("link_id", "owner_user_id", "bot_id", "binding_generation", "telegram_user_id", "chat_id", "instance_id", "work_id", "request_id", "kind")
+
+WORK_ACT_KINDS = frozenset({"respond", "decide", "accept", "changes_requested"})
+_SCOPE = ("id", "owner_user_id", "bot_id", "agent_kind", "agent_ref", "binding_generation", "token_revision", "telegram_user_id", "chat_id", "connection_id")
+
+
+def thaw(value):
+    if isinstance(value, Mapping):
+        return {key: thaw(child) for key, child in value.items()}
+    if isinstance(value, tuple):
+        return [thaw(child) for child in value]
+    return value
+
+
+def request_for(kind, body, *, identity=None):
+    if kind not in WORK_ACT_KINDS:
+        raise ValueError("unsupported-work-act")
+    request = (Respond if kind == "respond" else WorkCommand).model_validate(thaw(body))
+    if identity is not None and request.operation_id != identity or kind != "respond" and request.action != kind:
+        raise ValueError("act-source-conflict")
+    return request
+
+
+class WorkActionMethods:
+    """Methods mixed into the existing Acts journal; no independent lifecycle."""
+
+    @asynccontextmanager
+    async def _work_serial(self, identity):
+        async with self._locks.hold(identity):
+            self._work_active.add(identity)
+            try:
+                yield
+            finally:
+                self._work_active.discard(identity)
+
+    async def _work_link(self, link, *, kind=None, writable=False):
+        if self.work is None or self.authority is None or self.links is None:
+            raise AgentDenied("Work actions are not available")
+        if self.work._sf.kw.get("bind") is not self.session_factory.kw.get("bind"):
+            raise AgentDenied("Work actions require the shared store")
+        if getattr(getattr(self.authority.app, "state", None), "agent_instances", None) is not self.work.agents:
+            raise AgentDenied("Work authority changed")
+        await require(link.owner_user_id, "agents:read", *(("agents:write",) if writable else ()))
+        current = await self.links.get(link.id)
+        if current is None or any(getattr(current, field) != getattr(link, field) for field in _SCOPE) or current.agent_kind != "instance" or current.state != "connected" or current.health != "ok":
+            raise AgentDenied("The bot binding is no longer current")
+        if writable and kind in {"decide", "accept"} and current.acts_paused_since is not None:
+            raise AgentDenied("Actions are temporarily paused", reason="actions-paused")
+        if await self.authority.instance_send_policy(current, require_use=True, require_inspect=True) in {"off", "restoring"}:
+            raise AgentDenied("The bot policy is unavailable")
+        return current
+
+    async def _work_record(self, identity):
+        from app.telegram_bots.acts import _snapshot
+
+        async with self.session_factory() as session:
+            row = await session.get(TelegramActRow, identity)
+            if row is None or row.kind not in WORK_ACT_KINDS:
+                raise ValueError("unsupported-work-act")
+            return _snapshot(row)
+
+    async def receipt_for(self, act):
+        """Read an exact service receipt without calling a command or activation."""
+        return await await_drained(self._receipt_for(act))
+
+    async def _receipt_for(self, act):
+        link = await self.links.get(act.link_id) if act.link_id else None
+        if link is None or (link.owner_user_id, link.bot_id, link.agent_ref, link.binding_generation, link.telegram_user_id, link.chat_id) != (
+            act.owner_user_id,
+            act.bot_id,
+            act.instance_id,
+            act.binding_generation,
+            act.telegram_user_id,
+            act.chat_id,
+        ):
+            raise AgentDenied("The action's binding is no longer current")
+        await self._work_link(link)
+        actor = PrincipalRef("human", link.owner_user_id)
+        body = request_for(act.kind, act.body, identity=act.id)
+        async with self.session_factory() as session:
+            parent, _ = await self.work._parent(session, actor, act.instance_id, INSPECT)
+            if act.kind == "respond":
+                return await HumanInput(self.work)._receipt(session, actor, parent.id, body, request_id=act.request_id, work_id=act.work_id)
+            return await self.work._receipt(session, actor, parent, body, act.work_id)
+
+    async def _save_work_act(self, link, *, kind, request_id, work_id, request):
+        from app.telegram_bots.acts import _snapshot
+
+        await self._work_link(link)
+        owner = await self.authority.prepare_live_owner(link.owner_user_id)
+        body = request.model_dump(mode="json", exclude_unset=True)
+        async with self.outbox._writer(link.id) as (session, current):
+            if current is None or any(getattr(current, field) != getattr(link, field) for field in _SCOPE) or current.state != "connected" or current.health != "ok":
+                raise AgentDenied("The bot binding is no longer current")
+            row = await session.get(TelegramActRow, request.operation_id, with_for_update=True, populate_existing=True)
+            scope = dict(
+                link_id=link.id,
+                bot_id=link.bot_id,
+                owner_user_id=link.owner_user_id,
+                binding_generation=link.binding_generation,
+                telegram_user_id=link.telegram_user_id,
+                chat_id=link.chat_id,
+                instance_id=link.agent_ref,
+                work_id=work_id,
+                request_id=request_id,
+                kind=kind,
+            )
+            if row is not None:
+                if any(getattr(row, key) != value for key, value in scope.items()) or row.body != body:
+                    raise ValueError("act-source-conflict")
+            else:
+                now = self.outbox.clock()
+                row = TelegramActRow(id=request.operation_id, **scope, body=body, state="pending", operation_ids=[], attempts=0, first_attempt_at=now, created_at=now, updated_at=now)
+                session.add(row)
+                await session.flush()
+            result = _snapshot(row)
+            await owner(link.owner_user_id, session)
+        return result
+
+    async def _work_outcome(self, captured, *, state, reason=None, result=None):
+        from app.telegram_bots.acts import _snapshot
+
+        async with self.outbox._writer(captured.link_id) as (session, link):
+            row = await session.get(TelegramActRow, captured.id, with_for_update=True, populate_existing=True)
+            if row is None:
+                raise ValueError("unsupported-work-act")
+            if row.state == "done" or row.attempts != captured.attempts or any(getattr(row, name) != getattr(captured, name) for name in _ACT_SCOPE) or row.body != thaw(captured.body):
+                return _snapshot(row)
+            row.state, row.reason, row.result, row.updated_at = state, reason, result, self.outbox.clock()
+            await session.flush()
+            return _snapshot(row)
+
+    def _work_admission(self, link, act, owner, *, attempt_current):
+        async def admission(writer):
+            self._writer_required(writer)
+            if not attempt_current():
+                raise AuthorityUnavailable()
+            if getattr(getattr(self.authority.app, "state", None), "agent_instances", None) is not self.work.agents:
+                raise AgentDenied("Work authority changed")
+            # Source resources and the instance are already locked by the
+            # domain service. Match policy writers' instance -> bot -> Act order.
+            current = await writer.get(TelegramBotLinkRow, link.id, with_for_update=True, populate_existing=True)
+            saved = await writer.get(TelegramActRow, act.id, with_for_update=True, populate_existing=True)
+            if current is None or any(getattr(current, field) != getattr(link, field) for field in _SCOPE) or current.state != "connected" or current.health != "ok":
+                raise AgentDenied("The bot binding is no longer current")
+            if (
+                saved is None
+                or any(getattr(saved, field) != getattr(act, field) for field in _ACT_SCOPE)
+                or saved.state != "pending"
+                or saved.attempts != act.attempts
+                or saved.binding_generation != act.binding_generation
+                or saved.body != thaw(act.body)
+                or saved.cancel_requested_at is not None
+            ):
+                raise AgentDenied("The action admission is no longer current")
+            if act.kind in {"decide", "accept"} and current.acts_paused_since is not None:
+                raise AgentDenied("Actions are temporarily paused", reason="actions-paused")
+            instance = await writer.get(AgentInstanceRow, act.instance_id, populate_existing=True)
+            grant = await writer.get(AgentInstanceGrantRow, (act.instance_id, act.owner_user_id), populate_existing=True)
+            policy = await writer.get(TelegramInstancePolicyRow, act.instance_id, populate_existing=True)
+            from app.telegram_bots.policy import POLICIES, pending_discard
+
+            if (
+                instance is None
+                or instance.status != "active"
+                or grant is None
+                or not 1 <= grant.permissions <= 7
+                or grant.permissions & 3 != 3
+                or policy is not None
+                and policy.policy not in POLICIES - {"off"}
+                or pending_discard(current) is not None
+            ):
+                raise AgentDenied("The bot policy is unavailable")
+            await owner(link.owner_user_id, writer)
+            if not attempt_current():
+                raise AuthorityUnavailable()
+            if getattr(getattr(self.authority.app, "state", None), "agent_instances", None) is not self.work.agents:
+                raise AgentDenied("Work authority changed")
+
+        return admission
+
+    async def _attempt_work(self, act, *, explicit=False, attempt_current=lambda: True):
+        from app.telegram_bots.acts import _snapshot, _utc
+
+        try:
+            request_for(act.kind, act.body, identity=act.id)
+        except ValueError:
+            return await self._work_outcome(act, state="refused", reason="invalid")
+        now = self.outbox.clock()
+        expired = act.first_attempt_at is not None and (now - _utc(act.first_attempt_at) >= timedelta(hours=1) or act.attempts >= self.outbox.config.acts.max_attempts)
+        if act.state == "done":
+            # Replays still require current receipt/read authority.
+            await self.receipt_for(act)
+            return act
+        if act.state in {"conflict", "refused"} or act.cancel_requested_at is not None:
+            return act
+        if act.attempts:
+            try:
+                receipt = await self.receipt_for(act)
+            except Exception:
+                # An unreadable receipt grants no permission to mutate.
+                return await self._work_outcome(act, state="uncertain") if expired and not explicit else act
+            if receipt is not None:
+                return await self._work_outcome(act, state="done", result=receipt)
+        now = self.outbox.clock()
+        if not explicit and (act.reason is not None or act.state != "pending"):
+            return act
+        if not explicit and expired:
+            return await self._work_outcome(act, state="uncertain")
+        link = await self.links.get(act.link_id)
+        try:
+            if link is None or (link.owner_user_id, link.bot_id, link.agent_ref, link.binding_generation, link.telegram_user_id, link.chat_id) != (
+                act.owner_user_id,
+                act.bot_id,
+                act.instance_id,
+                act.binding_generation,
+                act.telegram_user_id,
+                act.chat_id,
+            ):
+                raise AgentDenied("The action's binding is no longer current")
+            await self._work_link(link, kind=act.kind, writable=True)
+            actor = PrincipalRef("human", link.owner_user_id)
+            body = request_for(act.kind, act.body, identity=act.id)
+            # Verify the action's recorded request belongs to this binding. A
+            # replay receipt above is intentionally checked before open/CAS rules.
+            async with self.session_factory() as reader:
+                request = await reader.get(HumanInputRequestRow, act.request_id)
+                if request is None or request.instance_id != act.instance_id or request.work_id != act.work_id:
+                    raise AgentDenied("Request is unavailable")
+            from app.telegram_bots.work_authority import prepare_work_owner
+
+            owner = await prepare_work_owner(self.authority, link.owner_user_id)
+            if not attempt_current():
+                return act
+            async with self.outbox._writer(link.id) as (writer, current):
+                saved = await writer.get(TelegramActRow, act.id, with_for_update=True, populate_existing=True)
+                if saved.state == "done" or saved.attempts != act.attempts or saved.cancel_requested_at is not None or any(getattr(saved, field) != getattr(act, field) for field in _ACT_SCOPE) or saved.body != thaw(act.body):
+                    return _snapshot(saved)
+                if current is None or any(getattr(current, field) != getattr(link, field) for field in _SCOPE) or current.state != "connected" or current.health != "ok":
+                    raise AgentDenied("The bot binding is no longer current")
+                if act.kind in {"decide", "accept"} and current.acts_paused_since is not None:
+                    raise AgentDenied("Actions are temporarily paused", reason="actions-paused")
+                saved.attempts += 1
+                saved.first_attempt_at = saved.first_attempt_at or now
+                saved.updated_at, saved.reason, saved.state = now, None, "pending"
+                await writer.flush()
+                act = _snapshot(saved)
+                await owner(link.owner_user_id, writer)
+            admission = self._work_admission(link, act, owner, attempt_current=attempt_current)
+            if act.kind == "respond":
+                result = await HumanInput(self.work).respond(actor=actor, request_id=act.request_id, request=body, admission=admission)
+            else:
+                result = await self.work.command(actor=actor, instance_id=act.instance_id, work_id=act.work_id, request=body, can_stop=False, admission=admission)
+            return await self._work_outcome(act, state="done", result=result)
+        except AgentConflict as exc:
+            reason = getattr(exc, "reason", None)
+            return await self._work_outcome(act, state="pending" if reason == "attempt-unresolved" else "conflict", reason=reason or "changed")
+        except (AgentDenied, AccessOff, CeilingRefused, Refusal, ValueError) as exc:
+            if getattr(exc, "reason", None) == "actions-paused":
+                return await self._work_outcome(act, state="pending", reason="actions-paused")
+            return await self._work_outcome(act, state="refused", reason=getattr(exc, "reason", None) or ("access-off" if isinstance(exc, AccessOff) else "invalid" if isinstance(exc, ValueError) else "denied"))
+        except Exception:
+            # Do not invent a failure after an unknown service/commit result.
+            if act.attempts >= self.outbox.config.acts.max_attempts:
+                return await self._work_outcome(act, state="uncertain")
+            return act
+
+    async def _issue_work(self, link, *, kind, request_id, work_id, request, seen=None):
+        async def perform():
+            async with self._work_serial(request.operation_id):
+                act = await self._save_work_act(link, kind=kind, request_id=request_id, work_id=work_id, request=request)
+                if act.state == "pending" and not act.attempts and seen is not None:
+                    try:
+                        await self._validate_seen(link, work_id, request_id, seen)
+                    except AgentConflict:
+                        return await self._work_outcome(act, state="conflict", reason="changed")
+                return await self._attempt_work(act, explicit=True)
+
+        return await await_drained(perform())
+
+    async def respond(self, link: BotLink, *, operation_id, request_id, request_revision, assignment_revision, disposition="supplied", text=None, choice=None):
+        await self._work_link(link)
+        actor = PrincipalRef("human", link.owner_user_id)
+        current = await HumanInput(self.work).get(actor=actor, request_id=request_id)
+        if current["instance_id"] != link.agent_ref:
+            raise AgentDenied("Request is unavailable")
+        body = Respond(operation_id=operation_id, expected_request_revision=request_revision, expected_assignment_revision=assignment_revision, disposition=disposition, text=text, choice=choice)
+        return await self._issue_work(link, kind="respond", request_id=request_id, work_id=current["work_id"], request=body)
+
+    async def _validate_seen(self, link, work_id, request_id, seen):
+        actor = PrincipalRef("human", link.owner_user_id)
+        human = HumanInput(self.work)
+        current = await human.get(actor=actor, request_id=request_id)
+        response_ids = []
+        offset = 0
+        while True:
+            page = await human.responses(actor=actor, request_id=request_id, limit=100, offset=offset)
+            response_ids.extend(row["id"] for row in page["responses"])
+            if not page["has_more"]:
+                break
+            offset += len(page["responses"])
+            if not page["responses"] or offset > 200:
+                raise AgentConflict("The review changed")
+        record = await self.work.get(actor=actor, instance_id=link.agent_ref, work_id=work_id)
+        actual = dict(
+            work_revision=record["revision"],
+            assignment_revision=record["assignment_revision"],
+            request_id=current["id"],
+            revision=current["revision"],
+            request_revision=current["request_revision"],
+            response_ids=sorted(response_ids),
+            outcome_id=record.get("outcome_id"),
+            evidence_revision=(record.get("outcome") or {}).get("evidence_revision"),
+            blocker_id=(record.get("blocker") or {}).get("id"),
+            blocker_revision=(record.get("blocker") or {}).get("revision"),
+        )
+        expected = {**seen, "response_ids": sorted(seen["response_ids"])}
+        if current["work_id"] != work_id or current["state"] == "closed" or actual != expected:
+            raise AgentConflict("Review the current request and all responses")
+        # Every human-content mutation advances Work.revision atomically. The
+        # captured WorkCommand CAS closes changes after this read, including
+        # changes_requested, which intentionally has no request_basis DTO field.
+
+    @staticmethod
+    def _command_basis(operation_id, request_id, seen):
+        fields = {"work_revision", "assignment_revision", "request_id", "revision", "request_revision", "response_ids", "outcome_id", "evidence_revision", "blocker_id", "blocker_revision"}
+        if type(seen) is not dict or set(seen) != fields or seen["request_id"] != request_id:
+            raise ValueError("invalid-review-basis")
+        return dict(operation_id=operation_id, expected_revision=seen["work_revision"], expected_assignment_revision=seen["assignment_revision"])
+
+    async def decide(self, link, *, operation_id, request_id, work_id, decision, note, seen):
+        base = self._command_basis(operation_id, request_id, seen)
+        request = WorkCommand(
+            **base,
+            action="decide",
+            note=decision + ("\n\n" + note if note else ""),
+            blocker_id=seen["blocker_id"],
+            blocker_revision=seen["blocker_revision"],
+            request_basis=dict(id=request_id, revision=seen["revision"], request_revision=seen["request_revision"], response_ids=seen["response_ids"]),
+        )
+        return await self._issue_work(link, kind="decide", request_id=request_id, work_id=work_id, request=request, seen=seen)
+
+    async def accept(self, link, *, operation_id, request_id, work_id, outcome_id, evidence_revision, seen):
+        base = self._command_basis(operation_id, request_id, seen)
+        if (outcome_id, evidence_revision) != (seen["outcome_id"], seen["evidence_revision"]):
+            raise ValueError("invalid-review-basis")
+        request = WorkCommand(
+            **base,
+            action="accept",
+            outcome_id=outcome_id,
+            evidence_revision=evidence_revision,
+            basis="outcome_statement",
+            acknowledge_unchecked_sources=True,
+            request_basis=dict(id=request_id, revision=seen["revision"], request_revision=seen["request_revision"], response_ids=seen["response_ids"]),
+        )
+        return await self._issue_work(link, kind="accept", request_id=request_id, work_id=work_id, request=request, seen=seen)
+
+    async def request_changes(self, link, *, operation_id, request_id, work_id, note, seen):
+        request = WorkCommand(**self._command_basis(operation_id, request_id, seen), action="changes_requested", note=note)
+        return await self._issue_work(link, kind="changes_requested", request_id=request_id, work_id=work_id, request=request, seen=seen)
+
+    async def check(self, act_id):
+        async def perform():
+            async with self._work_serial(act_id):
+                return await self._attempt_work(await self._work_record(act_id), explicit=True)
+
+        return await await_drained(perform())
+
+
+class ActsWorker:
+    """Retry only admitted Work service calls; settings/network/files stay owned."""
+
+    def __init__(self, acts):
+        self.acts = acts
+        self._task = None
+        self._stopping = False
+
+    async def stop(self):
+        self._stopping = True
+        if self._task is not None:
+            await await_drained(self._task)
+
+    async def tick(self):
+        if self._stopping or self._task is not None:
+            return
+        task = self._task = asyncio.create_task(self._tick())
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            self._stopping = True
+            await await_drained(task)
+            raise
+        finally:
+            self._task = None
+
+    async def _tick(self):
+        from app.telegram_bots.acts import _utc
+
+        now = self.acts.outbox.clock()
+        async with self.acts.session_factory() as reader:
+            ids = list(
+                await reader.scalars(
+                    select(TelegramActRow.id)
+                    .where(TelegramActRow.kind.in_(WORK_ACT_KINDS), TelegramActRow.state == "pending", TelegramActRow.reason.is_(None), TelegramActRow.first_attempt_at.is_not(None))
+                    .order_by(TelegramActRow.updated_at, TelegramActRow.id)
+                    .limit(100)
+                )
+            )
+        for identity in ids:
+            if self._stopping:
+                break
+            if identity in self.acts._work_active:
+                continue
+            async with self.acts._work_serial(identity):
+                act = await self.acts._work_record(identity)
+                if now - _utc(act.updated_at) >= timedelta(seconds=self.acts.outbox.config.acts.retry_seconds):
+                    await await_drained(self.acts._attempt_work(act, attempt_current=lambda: not self._stopping))

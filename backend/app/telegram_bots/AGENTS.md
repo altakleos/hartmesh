@@ -58,6 +58,17 @@ daylight-saving boundaries.
 
 `commands.py` handles fixed navigation and language settings only. A command closes
 only a typing prompt; `/new` and `/stop` also end the forms and cards in scope.
+`work_actions.py` adds optional Work service actions to `Acts`; supervisor startup
+does not install them yet. Bound people own immutable request bodies and operation
+ids. Exact service receipts are read without mutation before fresh action guards.
+A generic borrowed-writer admission checks link/account/policy/pause and the exact
+journal attempt before a fresh effect and again before commit. `work_authority.py`
+prepares the route provider off-writer, then evaluates it against the borrowed
+current account/role limit; no nested account checkout is allowed. Review commands
+use the complete displayed basis and captured Work CAS. The bounded worker only
+retries admitted service calls with no conclusive refusal, never settings, files,
+network or transcription. No action here starts or stops an assignment.
+
 `acts.py` commits a saved settings choice, its exact old/new preference, completed
 Act, consumed group and replacement controls in one guarded writer.
 `SettingsRepository.update(session=...)` borrows the owning engine/writer without

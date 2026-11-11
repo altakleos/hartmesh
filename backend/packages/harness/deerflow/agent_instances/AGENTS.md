@@ -298,6 +298,12 @@ Decision locks include original and response-attached sources before instance/Wo
 Read state is separate. Current lifecycle/grants gate responses and inbox counts;
 recipient eligibility never grants access or silently follows supervisor changes.
 History remains inspectable. No request path invokes run or filesystem effects.
+`AgentWork.command` and `HumanInput.respond` accept an optional trusted
+`admission(session)` condition. It borrows the domain writer after exact receipt
+lookup and source/parent locking, then repeats after projection before commit.
+It adds caller custody checks without replacing human/grant/CAS authority.
+Exact receipt replay is read-only and bypasses fresh-effect admission. Callbacks
+must not open a nested session or acquire resources ahead of the locked parent.
 See `docs/HUMAN_INPUT_REQUESTS.md`; additive0039 owns the four new tables.
 
 Work attempts bind the exact host run before native dispatch. Current Use+Inspect,
