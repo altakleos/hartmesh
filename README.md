@@ -1974,6 +1974,11 @@ cleanup when migrating from legacy metadata credentials.
 
 ##### Telegram bots
 
+Prepared instance page controls explain why a Telegram bot cannot be connected,
+open an existing bot or its settings, and show rename/delete effects. Assistant
+and employee discovery reads complete lists and retires reads when the account
+changes. The page controls and discovery still await activation.
+
 Instance bot views now distinguish access withdrawal, retirement, pauses,
 execution outages and protected delivery. Setup explains who can read the chat
 and its files; deletion notices remain visible while being read. These views

@@ -2593,7 +2593,15 @@ export function createZhCN(product: string): Translations {
       card: {
         state: ({ state }) => `Telegram：${state}`,
       },
+      page: {
+        label: "Telegram",
+        renameNote: ({ name }) =>
+          `重命名 ${name} 也会重命名其 Telegram 机器人。`,
+        deleteNote: ({ name, count }) =>
+          `连接到 ${name} 的 ${count} 个 Telegram 机器人将停止回复。`,
+      },
       action: {
+        settings: "Telegram 设置",
         connect: "连接 Telegram",
         open: "在 Telegram 中打开",
         openChat: ({ name }) => `打开与 ${name} 的聊天`,
@@ -2610,6 +2618,7 @@ export function createZhCN(product: string): Translations {
         useHere: "在这里使用",
       },
       offer: {
+        tip: ({ name }) => `在 Telegram 上与 ${name} 聊天。`,
         chatTitle: `随身带上 ${product}`,
         chatBody: `在 Telegram 上与 ${product} 聊天：在手机上提问、发送文件并获得回答。设置需要几分钟。`,
         companyTitle: "随身带上此聊天",

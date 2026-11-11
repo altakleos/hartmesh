@@ -73,3 +73,14 @@ keeps own assistants first and preserves inaccessible bots as instance targets.
 protection sentence. `TelegramRemovedNotices` retains rendered deletion notices
 until settings closes, acknowledges each only on a visible Channels page, and
 never consumes an unknown reason. Its owned acknowledgement aborts on retirement.
+
+Prepared instance controls share `instanceConnectBlock` for section, policy,
+Use, lifecycle, kind count, execution and quota precedence. A paused instance or
+busy Home alone does not prevent connecting. Full discovery reads both custody
+lists through their last 100-row page before interpreting absence as lost access;
+partial/retired discovery is never published. Instance-detail reads use a
+QueryClient-owned four-request pool; queued reads retire before admission. Page
+controls are account/role/ceiling scoped. Employee rename/delete notes read current
+manager policy counts; personal notes use only the reader's own connected bot and
+never call that company-only route. These components remain unmounted pending
+activation. Initial bot-list failure shows a failure sentence, not endless loading.
