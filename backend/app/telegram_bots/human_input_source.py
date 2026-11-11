@@ -159,6 +159,9 @@ def validate_request_basis(record, basis):
         ):
             _refuse()
         items = content_items(inventory.document)
+        from app.telegram_bots.network_denials import request_content_items
+
+        items = request_content_items(record, basis, items)
         if basis["version"] == 1:
             if len(items) != 1:
                 _refuse()

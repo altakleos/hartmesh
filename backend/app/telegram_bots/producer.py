@@ -783,6 +783,11 @@ class Outbox:
         link = _guard_publication_link(record, guard)
         parts, keyboard = deepcopy(parts), deepcopy(keyboard)
         dedupe = "reply:" + record.turn_id if step_id is None else human_input_step_key(record, step_id)
+        denials = None
+        if step_id is None and record.scope.agent_kind == "instance" and self.network_denials is not None:
+            from app.telegram_bots.network_denials import from_human_input
+
+            denials = await await_drained(asyncio.to_thread(from_human_input, source, record))
 
         async def check(writer):
             check_qualified_request(source, record)
@@ -861,6 +866,10 @@ class Outbox:
                         changed[-1]["callback_group_id"] = group.group_id
                         saved.parts = changed
                 if step_id is None and existing is None:
+                    if denials is not None and denials.hosts:
+                        from app.telegram_bots.network_notices import add_notice
+
+                        await add_notice(self, fresh, denials, identity, writer=writer, link=link)
                     await self.inbox.seal_publication(fresh, outbox_id=identity, assistant_message_id=None, session=writer)
                 await writer.flush()
                 await check(writer)

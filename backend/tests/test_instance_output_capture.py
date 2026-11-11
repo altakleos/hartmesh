@@ -27,17 +27,18 @@ from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["text", "legacy_text", "produced_file", "network_denial", "missing_root", "revoked_home"])
+@pytest.mark.parametrize("case", ["text", "legacy_text", "produced_file", "network_denial", "network_question", "missing_root", "revoked_home"])
 async def test_instance_worker_seals_current_home_inventory(instances, capture_environment, monkeypatch, case):
     from deerflow.agent_instances import runtime as instance_runtime
     from deerflow.agents.lead_agent import agent
     from deerflow.persistence.spaces.model import SpaceRow
     from deerflow.runtime.runs import worker
+    from deerflow.tools.builtins.clarification_tool import ask_clarification_tool
     from deerflow.tools.builtins.present_file_tool import present_file_tool
 
     execution, _, root = await prepared(instances)
     baseline = None
-    if case == "network_denial":
+    if case in {"network_denial", "network_question"}:
         from test_sandbox_middleware import _NetworkPolicyProvider
 
         from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow
@@ -48,13 +49,18 @@ async def test_instance_worker_seals_current_home_inventory(instances, capture_e
         execution = await execution.authority.execution(actor=execution.requester, thread_id=execution.thread_id)
         baseline = _NetworkPolicyProvider()
         baseline.events = [{"request_id": "blocked-request", "host": "example.org", "port": 443}]
-    with_tool = case in {"produced_file", "network_denial"}
+    with_tool = case in {"produced_file", "network_denial", "network_question"}
     e = capture_environment
-    assembly, built, model = await asyncio.to_thread(assemble_offline, monkeypatch, runtime_context={AGENT_EXECUTION_CONTEXT_KEY: execution}, tools=[present_file_tool] if with_tool else [])
+    tools = [present_file_tool] if with_tool else []
+    if case == "network_question":
+        tools.append(ask_clarification_tool)
+    assembly, built, model = await asyncio.to_thread(assemble_offline, monkeypatch, runtime_context={AGENT_EXECUTION_CONTEXT_KEY: execution}, tools=tools)
     model.responses = [AIMessage("Exact instance answer", id="instance-answer")]
     if with_tool:
         filename = "current.txt" if case == "produced_file" else "result.txt"
         model.responses.insert(0, AIMessage("", tool_calls=[{"id": "present-current", "name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/" + filename]}}]))
+        if case == "network_question":
+            model.responses[1] = AIMessage("", tool_calls=[{"id": "question-current", "name": "ask_clarification", "args": {"question": "Which source should I use?"}}])
     assert any(type(m).__name__ == "InstanceAuthorityMiddleware" for m in built["middleware"])
     assert assembly.inventory_profile is not None
     # No ordinary owner path or viewless qualifier may supply instance evidence.
@@ -115,7 +121,7 @@ async def test_instance_worker_seals_current_home_inventory(instances, capture_e
     assert len(events) == 1
     doc = validate_inventory_document(events[0]["content"])
     assert doc.version == 2
-    assert row["kwargs"]["output_evidence"]["kind"] == ("unavailable" if case == "revoked_home" else "text")
+    assert row["kwargs"]["output_evidence"]["kind"] == ("unavailable" if case in {"revoked_home", "network_question"} else "text")
     assert row["kwargs"]["inventory_evidence"]["inventory_event_seq"] == events[0]["seq"]
     if case == "text":
         assert row["status"] == "success" and doc.coverage == "complete" and doc.items == ()
@@ -123,7 +129,7 @@ async def test_instance_worker_seals_current_home_inventory(instances, capture_e
     elif case == "produced_file":
         assert doc.coverage == "complete"
         assert any(getattr(item, "path", None) == "/mnt/user-data/outputs/current.txt" for item in doc.items)
-    elif case == "network_denial":
+    elif case in {"network_denial", "network_question"}:
         from deerflow.runtime.runs.output_inventory import presentation_fragment_digest
 
         assert baseline.decisions == [(sandbox.id, "blocked-request", "deny")]
@@ -131,11 +137,17 @@ async def test_instance_worker_seals_current_home_inventory(instances, capture_e
         rows = await e.event_store.list_messages_by_run(thread, record.run_id, user_id=owner)
         tool_rows = [row for row in rows if row["event_type"] == "llm.tool.result"]
         assert tool_rows
-        enriched = tool_rows[-1]["content"]
-        assert tool_rows[-1]["metadata"]["tool_artifact_enrichment"]["added_keys"] == ["sandbox_network_denied"]
+        result = next(row for row in tool_rows if "sandbox_network_denied" in (row["content"].get("artifact") or {}))
+        enriched = result["content"]
+        assert result["metadata"]["tool_artifact_enrichment"]["added_keys"] == ["sandbox_network_denied"]
         assert enriched["artifact"]["sandbox_network_denied"] == {"host": "example.org", "port": 443}
         matching = [item for item in doc.items if getattr(item, "value_sha256", None) == presentation_fragment_digest(enriched["artifact"])]
         assert len(matching) == 1 and matching[0].witness.message_id == enriched["id"]
         assert any(getattr(item, "path", None) == "/mnt/user-data/outputs/result.txt" for item in doc.items)
+        if case == "network_question":
+            assert row["kwargs"]["output_evidence"]["reason"] == "human_input_required"
+            request = tool_rows[-1]["content"]["artifact"]["human_input"]
+            assert request["question"] == "Which source should I use?"
+            assert len([item for item in doc.items if item.kind == "structured"]) == 2
     else:
         assert doc.coverage == "incomplete" and doc.reason == ("execution_stopped" if case == "revoked_home" else "scan_incomplete")
