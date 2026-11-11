@@ -115,10 +115,14 @@ def acknowledged_followup(link, parent):
     """A shown outcome supplies captured choices, never current action rights."""
     try:
         basis = parent.payload["work_outcome_basis"]
-        if type(basis) is not dict or set(basis) != {"version", "context", "locale", "timezone", "parts", "keyboard", "destination", "input", "origin", "routing"}:
+        if type(basis) is not dict or set(basis) != {"version", "context", "locale", "timezone", "parts", "keyboard", "destination", "input", "origin", "routing"} | ({"refresh"} if basis.get("version") == 4 else set()):
             raise ValueError()
-        if parent.state != "sent" or parent.class_ != "reply" or basis["version"] != 3 or type(basis["version"]) is not int or type(basis["locale"]) is not str:
+        if parent.state != "sent" or parent.class_ != "reply" or basis["version"] not in {3, 4} or type(basis["version"]) is not int or type(basis["locale"]) is not str:
             raise ValueError()
+        if basis["version"] == 4:
+            from app.telegram_bots.work_followup_refresh import refresh_identity
+
+            refresh_identity(basis)
         source = frozen_followup(basis["routing"], basis["context"])
         if link.agent_kind != "instance" or (parent.instance_id, parent.work_id, parent.request_id) != (link.agent_ref, source.work["id"], source.request["id"]) or source.request["instance_id"] != link.agent_ref:
             raise ValueError()

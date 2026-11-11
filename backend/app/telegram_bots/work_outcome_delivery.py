@@ -101,7 +101,9 @@ def validate_input(mark, basis, row):
         mark is None
         or not same_body(input_identity(mark), basis["input"])
         or mark.route_kind != "work_input"
-        or row.id not in mark.delivery_ids
+        or (basis.get("refresh", {}).get("input_outbox_id", row.id)) not in mark.delivery_ids
+        or "refresh" in basis
+        and not mark.route_complete
         or mark.route_basis.get("work_input", {}).get("work_id") != row.work_id
         or mark.message_thread_id != basis["destination"]["message_thread_id"]
     ):
@@ -204,6 +206,13 @@ async def acknowledge_outcome(session, row):
     source_parent = await session.get(TelegramOutboxRow, source_callback.payload.get("anchor_outbox_id")) if source_callback else None
     validate_origin(source_callback, source_parent, basis, row)
     validate_edit(source_callback, source_parent, basis, row)
+    if "refresh" in basis:
+        from app.telegram_bots.work_followup_refresh import validate_refresh
+
+        refresh = basis["refresh"]
+        refresh_callback = await session.get(TelegramCallbackRow, refresh["callback_id"])
+        refresh_parent = await session.get(TelegramOutboxRow, refresh["anchor_outbox_id"])
+        validate_refresh(refresh_callback, refresh_parent, basis, row)
     if data["act"]["state"] == "done" and basis["input"] is not None:
         identity = basis["input"]
         mark = await session.get(TelegramInboundMarkRow, (identity["link_id"], identity["message_id"], identity["chat_id"]), with_for_update=True, populate_existing=True)
@@ -451,12 +460,19 @@ class WorkOutcomeSources:
             if (
                 type(basis) is not dict
                 or set(basis)
-                != {"version", "context", "locale", "timezone", "parts", "keyboard", "destination", "input", "origin"} | ({"edit"} if basis.get("version") == 2 else set()) | ({"routing"} if basis.get("version") == 3 else set())
+                != {"version", "context", "locale", "timezone", "parts", "keyboard", "destination", "input", "origin"}
+                | ({"edit"} if basis.get("version") == 2 else set())
+                | ({"routing"} if basis.get("version") in {3, 4} else set())
+                | ({"refresh"} if basis.get("version") == 4 else set())
                 or type(basis["version"]) is not int
-                or basis["version"] not in {1, 2, 3}
+                or basis["version"] not in {1, 2, 3, 4}
                 or captured.item.class_ != "reply"
             ):
                 raise ValueError()
+            if basis["version"] == 4:
+                from app.telegram_bots.work_followup_refresh import refresh_identity
+
+                refresh_identity(basis)
             destination = basis["destination"]
             if not same_body(destination, {"chat_id": captured.item.chat_id, "message_thread_id": captured.item.message_thread_id}) or captured.item.chat_id != captured.link.chat_id:
                 raise ValueError()
@@ -561,16 +577,20 @@ class _DeliveryProjection(_ContextProjection):
         delivery, settings, callback, mark = TelegramOutboxRow, TelegramPersonSettingsRow, TelegramCallbackRow, TelegramInboundMarkRow
         origin = self.captured.item.payload["work_outcome_basis"]["input"]
         source_callback, source_parent = aliased(TelegramCallbackRow), aliased(TelegramOutboxRow)
+        refresh_callback, refresh_parent = aliased(TelegramCallbackRow), aliased(TelegramOutboxRow)
+        refresh = self.captured.item.payload["work_outcome_basis"].get("refresh")
         result = (
             super()
             .extend(query)
-            .add_columns(delivery, settings, callback, mark, source_callback, source_parent)
+            .add_columns(delivery, settings, callback, mark, source_callback, source_parent, refresh_callback, refresh_parent)
             .join(delivery, delivery.id == self.captured.item.id)
             .join(settings, settings.owner_user_id == delivery.owner_user_id)
             .outerjoin(callback, callback.group_id == self.controls_part["callback_group_id"] if self.controls_part else false())
             .outerjoin(mark, and_(mark.link_id == origin["link_id"], mark.message_id == origin["message_id"], mark.chat_id == origin["chat_id"]) if origin else false())
             .outerjoin(source_callback, source_callback.id == self.read.act.id)
             .outerjoin(source_parent, source_parent.id == source_callback.payload["anchor_outbox_id"].as_string())
+            .outerjoin(refresh_callback, refresh_callback.id == refresh["callback_id"] if refresh else false())
+            .outerjoin(refresh_parent, refresh_parent.id == refresh["anchor_outbox_id"] if refresh else false())
         )
 
         return self.candidates.extend(result) if self.candidates is not None else result
@@ -590,6 +610,10 @@ class _DeliveryProjection(_ContextProjection):
             raise DeliveryClaimRetired()
         validate_origin(rows[0][20], rows[0][21], delivery.payload["work_outcome_basis"], delivery)
         validate_edit(rows[0][20], rows[0][21], delivery.payload["work_outcome_basis"], delivery)
+        if "refresh" in delivery.payload["work_outcome_basis"]:
+            from app.telegram_bots.work_followup_refresh import validate_refresh
+
+            validate_refresh(rows[0][22], rows[0][23], delivery.payload["work_outcome_basis"], delivery)
         if delivery.payload["work_outcome_basis"]["input"] is not None:
             validate_input(rows[0][19], delivery.payload["work_outcome_basis"], delivery)
         if self.controls_part is not None:

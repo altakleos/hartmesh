@@ -2580,7 +2580,14 @@ class OutboxSender:
                 async with self.outbox._writer(link_id) as (writer, _binding):
                     obsolete = await writer.get(TelegramOutboxRow, row_id, with_for_update=True)
                     if self.outbox._fenced(obsolete, generation=generation, owner=self.run_id, claim=claim):
-                        await self._skip(writer, obsolete, "superseded")
+                        if obsolete.payload.get("work_outcome_basis", {}).get("version") == 4:
+                            # This reply is an explicit refresh of an ACKed phase.
+                            # Its original input is already done; retain its own
+                            # repair evidence instead of losing that intent.
+                            self._pending(obsolete)
+                            obsolete.state, obsolete.failed_reason, obsolete.closed_at = "failed", "work-outcome-refresh-required", self.outbox.clock()
+                        else:
+                            await self._skip(writer, obsolete, "superseded")
                 return
             except DeliveryClaimRetired:
                 return
