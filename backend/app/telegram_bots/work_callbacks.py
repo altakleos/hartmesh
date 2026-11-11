@@ -63,7 +63,7 @@ class WorkCallbacks:
                 return channel._callback_current(link)
 
             try:
-                if family == 4 and row.kind in {"changes_open", "dismiss"}:
+                if family == 4 and row.kind in {"changes_open", "dismiss", "back", "decide_note"}:
                     await self.drafts.navigate(link, row.id, **scope)
                 elif row.kind == "dismiss":
                     return False

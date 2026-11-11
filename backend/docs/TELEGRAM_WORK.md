@@ -382,5 +382,17 @@ cannot create another confirmation. No model run or Work activation is started.
 
 This owner and its startup recovery are not installed by the supervisor yet.
 Direct replies to question cards without a typing prompt, untied text, comments,
-voice/files, expired or replaced prompts, retained-note editing/discard and
-closed/replaced-review recovery remain separate required input flows.
+voice/files and expired or replaced prompts remain separate required input flows.
+
+
+Input-owned navigation settles a V4 decision's original input on Back or Add a
+note, just as review Edit/Discard settles a retained note. The old typed value
+stays visible and immutable; a new prompt owns a separate input and any eventual
+confirmation. The transition's final joined read rechecks original input and
+blocked actions even after its own settlement. Back/Add note/Edit also recheck
+the displayed source and current permissions. Discard does not require the old
+review to remain pending. A changed unreserved decision keeps the original text
+in a complete fresh preview instead of applying navigation to an unseen basis.
+Back/Add note remain available while actions are paused, including their
+unreserved stale refresh. An admitted unresolved confirmation continues to own
+recovery.
