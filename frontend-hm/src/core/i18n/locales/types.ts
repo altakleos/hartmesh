@@ -2127,6 +2127,31 @@ export interface Translations {
     };
   };
   telegramBots: {
+    policy: {
+      heading: string;
+      count: (values: {
+        name: string;
+        connected: number;
+        people: number;
+      }) => string;
+      label: (values: { name: string }) => string;
+      allowed: { title: string; help: (values: { name: string }) => string };
+      protected: { title: string; help: (values: { name: string }) => string };
+      off: { title: string; help: (values: { name: string }) => string };
+      save: string;
+      offConfirm: {
+        title: (values: { name: string }) => string;
+        none: string;
+        some: (values: { count: number }) => string;
+        button: string;
+      };
+      saved: {
+        allowed: (values: { name: string }) => string;
+        protected: (values: { name: string }) => string;
+        off: (values: { name: string }) => string;
+      };
+      failed: string;
+    };
     sectionLabel: string;
     chatName: string;
     list: {

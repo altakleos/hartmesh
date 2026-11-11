@@ -2700,6 +2700,47 @@ export function createEnUS(product: string): Translations {
       },
     },
     telegramBots: {
+      policy: {
+        heading: "Telegram",
+        count: ({ name, connected, people }) =>
+          connected === 0
+            ? `Nobody has connected a Telegram bot to ${name} yet.`
+            : `${connected} of ${people} people who can chat with ${name} ${connected === 1 ? "has" : "have"} connected a Telegram bot.`,
+        label: ({ name }) => `May people chat with ${name} on Telegram?`,
+        allowed: {
+          title: "Yes",
+          help: ({ name }) =>
+            `Everyone who can chat with ${name} may connect a Telegram bot. What ${name} sends there can be forwarded and saved like any Telegram message.`,
+        },
+        protected: {
+          title: "Yes, without forwarding or saving",
+          help: ({ name }) =>
+            `Telegram stops people from forwarding or saving what ${name} sends, files included. Messages ${name} sends first show their details only after a tap; an answer to a person's own message is shown as usual. A person who needs a file outside Telegram opens the file in ${product}. A screenshot is still possible.`,
+        },
+        off: {
+          title: "No",
+          help: ({ name }) =>
+            `Nobody chats with ${name} on Telegram. Bots already connected stop answering and say why once. Conversations in ${product} go on as before.`,
+        },
+        save: "Save",
+        offConfirm: {
+          title: ({ name }) => `Turn Telegram off for ${name}?`,
+          none: "Nobody has connected a bot yet. Nobody will be able to connect one.",
+          some: ({ count }) =>
+            count === 1
+              ? "1 bot stops answering now, and the owner is told once in Telegram. Turning Telegram on again brings the bot back without a new set-up."
+              : `${count} bots stop answering now, and each owner is told once in Telegram. Turning Telegram on again brings the bots back without a new set-up.`,
+          button: "Turn off",
+        },
+        saved: {
+          allowed: ({ name }) =>
+            `Saved. People can chat with ${name} on Telegram.`,
+          protected: ({ name }) =>
+            `Saved. From now on Telegram stops forwarding and saving of what ${name} sends. Messages ${name} sends first show their details only after a tap; an answer to a person's own message is shown as usual. Messages already sent are not affected.`,
+          off: ({ name }) => `Saved. ${name}'s Telegram bots have stopped.`,
+        },
+        failed: "The setting could not be saved. Try again.",
+      },
       sectionLabel: "Telegram",
       chatName: `${product}`,
       list: {

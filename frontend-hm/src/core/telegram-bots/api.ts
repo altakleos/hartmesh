@@ -1,3 +1,4 @@
+import { awaitAbortable } from "@/core/api/abort";
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
@@ -176,18 +177,28 @@ export function telegramRefusalKey(
 }
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(
+  init?.signal?.throwIfAborted();
+  const pending = fetch(
     `${getBackendBaseURL()}/api/telegram-bots${path}`,
     init,
   );
+  const response = init?.signal
+    ? await awaitAbortable(pending, init.signal, (late) => {
+        void late.body?.cancel().catch(() => undefined);
+      })
+    : await pending;
+  const read = () =>
+    init?.signal
+      ? awaitAbortable(response.json() as Promise<unknown>, init.signal)
+      : (response.json() as Promise<unknown>);
   if (!response.ok) {
-    const body = (await response.json().catch(() => ({}))) as Record<
-      string,
-      unknown
-    >;
+    const body = (await read().catch(() => {
+      init?.signal?.throwIfAborted();
+      return {};
+    })) as Record<string, unknown>;
     throw new TelegramRefusal(response.status, body);
   }
-  return (response.status === 204 ? undefined : response.json()) as Promise<T>;
+  return (response.status === 204 ? undefined : read()) as Promise<T>;
 }
 
 function post<T>(path: string, body?: unknown): Promise<T> {
@@ -280,4 +291,36 @@ export function newTelegramOperationId(): string {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
+}
+
+export type TelegramPolicy = "allowed" | "protected" | "off";
+export interface TelegramPolicyAnswer {
+  policy: TelegramPolicy;
+  people: number;
+  connected: number;
+}
+
+function policyPath(instanceId: string) {
+  return `/instances/${encodeURIComponent(instanceId)}/policy`;
+}
+function policySignal(signal: AbortSignal) {
+  return AbortSignal.any([signal, AbortSignal.timeout(20_000)]);
+}
+export function getTelegramPolicy(
+  instanceId: string,
+  signal: AbortSignal,
+): Promise<TelegramPolicyAnswer> {
+  return call(policyPath(instanceId), { signal: policySignal(signal) });
+}
+export function saveTelegramPolicy(
+  instanceId: string,
+  policy: TelegramPolicy,
+  signal: AbortSignal,
+): Promise<TelegramPolicyAnswer> {
+  return call(policyPath(instanceId), {
+    method: "PUT",
+    signal: policySignal(signal),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ policy }),
+  });
 }
