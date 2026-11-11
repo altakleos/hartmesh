@@ -1,6 +1,11 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
+import type { AgentInstanceDetail } from "../../src/core/agent-instances/api";
 import { enUS } from "../../src/core/i18n/locales/en-US";
+import type {
+  RemovedBot,
+  TelegramPolicy,
+} from "../../src/core/telegram-bots/api";
 
 import { mockLangGraphAPI, type MockThread } from "./utils/mock-api";
 
@@ -49,7 +54,7 @@ function bot(overrides: Record<string, unknown> = {}) {
     delivery_failed: 0,
     webhook_host: null,
     topics_enabled: false,
-    policy: null,
+    policy: null as string | null,
     last_update_at: null,
     created_at: "2026-01-01T00:00:00Z",
     ...overrides,
@@ -73,6 +78,8 @@ const SETTINGS = {
 };
 
 interface Telegram {
+  policies: { instance_id: string; policy: string }[];
+  removed: RemovedBot[];
   bots: ReturnType<typeof bot>[];
   settings: typeof SETTINGS | null;
   /** The answer of `METHOD /path`, the path after `/api/telegram-bots`. */
@@ -103,7 +110,14 @@ async function mockTelegram(
     threads?: MockThread[];
   } = {},
 ): Promise<Telegram> {
-  const state: Telegram = { bots, settings, answers, calls: [] };
+  const state: Telegram = {
+    bots,
+    settings,
+    answers,
+    calls: [],
+    policies: [],
+    removed: [],
+  };
   mockLangGraphAPI(page, {
     features: { telegram: telegram as Record<string, unknown> | null },
     threads,
@@ -129,8 +143,8 @@ async function mockTelegram(
             manager_username: null,
           },
           pending_creation: null,
-          removed_bots: [],
-          policies: [],
+          removed_bots: state.removed,
+          policies: state.policies,
           read_by_others: [],
         },
       });
@@ -798,5 +812,390 @@ test.describe("Telegram bots", () => {
     await expect(
       page.getByRole("menuitem", { name: strings.action.remove }),
     ).toBeVisible();
+  });
+});
+
+const EMPLOYEE_ID = "a".repeat(32);
+const ASSISTANT_ID = "c".repeat(32);
+const INSTANCE_READY = {
+  enabled: true,
+  execution: "ready",
+  reason: null as string | null,
+  ai_assistants: { per_user: 3, allowed: 8, in_use: 1, mine: 0 },
+  ai_employees: { allowed: 4, in_use: 1 },
+};
+function telegramInstance(
+  overrides: Partial<AgentInstanceDetail> = {},
+): AgentInstanceDetail {
+  return {
+    id: EMPLOYEE_ID,
+    name: "Mira",
+    principal: { kind: "nonhuman", subject_id: `agent:${EMPLOYEE_ID}` },
+    custody: "company",
+    owner_id: null,
+    creator_id: "default",
+    supervisor: { kind: "human", subject_id: "default" },
+    definition_revision: "d".repeat(64),
+    home_id: "e".repeat(32),
+    status: "active",
+    generation: 1,
+    permissions: 7,
+    activity: {
+      running_runs: 0,
+      running: [],
+      last_active_at: null,
+      open_conversations: 0,
+    },
+    home: { state: "available", workspace: "absent" },
+    execution: { execution: "ready", reason: null },
+    ...overrides,
+  };
+}
+async function mockInstanceTelegram(page: Page) {
+  const state = Object.assign(await mockTelegram(page), {
+    instances: [
+      telegramInstance(),
+      telegramInstance({
+        id: ASSISTANT_ID,
+        name: "Ada",
+        custody: "personal",
+        owner_id: "colleague",
+      }),
+    ],
+    feature: structuredClone(INSTANCE_READY),
+    policy: "allowed" as TelegramPolicy,
+    companyListFails: false,
+    detailGate: null as Promise<void> | null,
+    detailReads: 0,
+  });
+  await page.route("**/api/features", (route) =>
+    route.fulfill({
+      json: {
+        agents_api: { enabled: true },
+        agent_instances: state.feature,
+        telegram: READY,
+        storage_spaces: {
+          enabled: true,
+          state: "ready",
+          own: "ready",
+          reason: null,
+          user_spaces: true,
+        },
+      },
+    }),
+  );
+  await page.route("**/api/v1/auth/users**", (route) => {
+    const ids =
+      new URL(route.request().url()).searchParams.get("ids")?.split(",") ?? [];
+    return route.fulfill({
+      json: {
+        users: ids.map((id) => ({
+          id,
+          name: id === "colleague" ? "Alex" : "Reader",
+          email: `${id}@example.test`,
+          active: true,
+        })),
+      },
+    });
+  });
+  await page.route("**/api/agent-instances**", async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    if (path.endsWith("/agent-instances")) {
+      if (
+        state.companyListFails &&
+        url.searchParams.get("custody") === "company"
+      )
+        return route.fulfill({ status: 503, json: {} });
+      const custody = url.searchParams.get("custody");
+      return route.fulfill({
+        json: {
+          instances: state.instances.filter(
+            (instance) => !custody || instance.custody === custody,
+          ),
+        },
+      });
+    }
+    if (path.endsWith("/definition"))
+      return route.fulfill({
+        json: {
+          revision: "d".repeat(64),
+          config: { name: "analyst", description: "Helps with documents." },
+          soul: "Read and summarize.",
+        },
+      });
+    if (path.endsWith("/lifecycle"))
+      return route.fulfill({ json: { operations: [] } });
+    if (path.endsWith("/grants"))
+      return route.fulfill({
+        json: {
+          grants: [
+            { user_id: "default", permissions: 7 },
+            { user_id: "colleague", permissions: 3 },
+          ],
+        },
+      });
+    if (path.endsWith("/work")) return route.fulfill({ json: { work: [] } });
+    if (path.endsWith("/conversations"))
+      return route.fulfill({ json: { conversations: [] } });
+    if (path.endsWith("/memory"))
+      return route.fulfill({ status: 501, json: {} });
+    const instance = state.instances.find((instance) =>
+      path.endsWith(`/${instance.id}`),
+    );
+    if (instance) {
+      state.detailReads++;
+      await state.detailGate;
+      return route.fulfill({ json: instance });
+    }
+    return route.fulfill({ status: 404, json: {} });
+  });
+  const policyPath = `/instances/${EMPLOYEE_ID}/policy`;
+  state.answers[`GET ${policyPath}`] = () => [
+    200,
+    { policy: state.policy, people: 2, connected: 1 },
+  ];
+  state.answers[`PUT ${policyPath}`] = (body) => {
+    state.policy = (body as { policy: TelegramPolicy }).policy;
+    state.policies =
+      state.policy === "allowed"
+        ? []
+        : [{ instance_id: EMPLOYEE_ID, policy: state.policy }];
+    state.bots = state.bots.map((entry) =>
+      entry.agent_ref === EMPLOYEE_ID
+        ? {
+            ...entry,
+            policy: state.policy,
+            health: state.policy === "off" ? "policy_off" : "ok",
+          }
+        : entry,
+    );
+    return [200, { policy: state.policy, people: 2, connected: 1 }];
+  };
+  return state;
+}
+const instanceRow = (page: Page, id = EMPLOYEE_ID) =>
+  page.locator(`[data-telegram-target="agent.${id}"]`);
+
+test.describe("Telegram instance bots", () => {
+  test("availability waits for complete reads and explains deployment and kind limits", async ({
+    page,
+  }) => {
+    const state = await mockInstanceTelegram(page);
+    state.companyListFails = true;
+    let finish!: () => void;
+    state.detailGate = new Promise((resolve) => {
+      finish = resolve;
+    });
+    await page.goto(DEEP_LINK, { waitUntil: "domcontentloaded" });
+    // Workspace hydration is separate from the failed-discovery assertion.
+    await expect(section(page)).toBeVisible({ timeout: 30_000 });
+    await expect(
+      page.getByRole("button", { name: strings.action.tryAgain, exact: true }),
+    ).toBeVisible();
+    state.companyListFails = false;
+    await page
+      .getByRole("button", { name: strings.action.tryAgain, exact: true })
+      .click();
+    await expect(
+      instanceRow(page).getByRole("button", { name: strings.action.connect }),
+    ).toBeDisabled();
+    await expect.poll(() => state.detailReads).toBeGreaterThan(0);
+    finish();
+    state.detailGate = null;
+    await expect(
+      instanceRow(page).getByRole("button", { name: strings.action.connect }),
+    ).toBeEnabled();
+    await expect(instanceRow(page, ASSISTANT_ID)).toContainText(
+      "Alex's AI assistant",
+    );
+    for (const reason of ["operator-hold", "agents-none", "host-replaced"]) {
+      state.feature = {
+        ...structuredClone(INSTANCE_READY),
+        execution: "unavailable",
+        reason,
+      };
+      if (reason === "agents-none") {
+        state.feature.ai_assistants.per_user = 0;
+        state.feature.ai_employees.allowed = 0;
+      }
+      await page.reload();
+      await expect(page.getByTestId("telegram-instance-notice")).toBeVisible();
+      await expect(
+        instanceRow(page).getByRole("button", { name: strings.action.connect }),
+      ).toBeDisabled();
+      await expect(
+        instanceRow(page, ASSISTANT_ID).getByRole("button", {
+          name: strings.action.connect,
+        }),
+      ).toBeDisabled();
+    }
+    state.feature = structuredClone(INSTANCE_READY);
+    state.feature.ai_assistants.per_user = 0;
+    await page.reload();
+    await expect(
+      instanceRow(page, ASSISTANT_ID).getByRole("button", {
+        name: strings.action.connect,
+      }),
+    ).toBeDisabled();
+    await expect(
+      instanceRow(page).getByRole("button", { name: strings.action.connect }),
+    ).toBeEnabled();
+  });
+
+  test("instance page shows its bot, current access, and rename and delete effects", async ({
+    page,
+  }) => {
+    const state = await mockInstanceTelegram(page);
+    state.bots = [
+      bot({
+        agent_kind: "instance",
+        agent_ref: EMPLOYEE_ID,
+        agent_name: "Mira",
+      }),
+    ];
+    await page.goto(
+      `/workspace/instances?instance=${EMPLOYEE_ID}&tab=settings`,
+    );
+    await expect(
+      page.getByRole("link", { name: strings.action.open, exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Connected as Rosa", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText(strings.page.renameNote({ name: "Mira" })),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Delete", exact: true }).click();
+    await expect(
+      page
+        .getByRole("dialog")
+        .getByText(strings.page.deleteNote({ name: "Mira", count: 1 })),
+    ).toBeVisible();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click();
+    state.instances[0]!.permissions = 2;
+    await page.reload();
+    await expect(
+      page.getByText(strings.state.noAccess({ name: "Mira" })),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: strings.action.open, exact: true }),
+    ).toHaveCount(0);
+  });
+
+  test("manager policy offers three choices and disables an employee connection for colleagues", async ({
+    page,
+  }) => {
+    const state = await mockInstanceTelegram(page);
+    state.bots = [
+      bot({
+        agent_kind: "instance",
+        agent_ref: EMPLOYEE_ID,
+        agent_name: "Mira",
+      }),
+    ];
+    await page.goto(`/workspace/instances?instance=${EMPLOYEE_ID}&tab=access`);
+    await expect(
+      page.getByRole("radio", { name: "Yes", exact: true }),
+    ).toBeChecked();
+    await page
+      .getByRole("radio", { name: strings.policy.protected.title, exact: true })
+      .check();
+    await page
+      .getByRole("button", { name: strings.policy.save, exact: true })
+      .click();
+    await expect.poll(() => state.policy).toBe("protected");
+    await page.getByRole("radio", { name: "No", exact: true }).check();
+    await page
+      .getByRole("button", { name: strings.policy.save, exact: true })
+      .click();
+    await expect(page.getByRole("dialog")).toContainText(
+      "1 bot stops answering now",
+    );
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: strings.policy.offConfirm.button })
+      .click();
+    await expect.poll(() => state.policy).toBe("off");
+    await page.goto(DEEP_LINK);
+    await expect(instanceRow(page)).toContainText(
+      strings.state.notAllowed({ name: "Mira" }),
+    );
+    state.bots = [];
+    state.instances[0]!.permissions = 3;
+    await page.route("**/api/v1/auth/me", (route) =>
+      route.fulfill({
+        json: {
+          id: "colleague",
+          email: "colleague@example.test",
+          system_role: "user",
+          needs_setup: false,
+        },
+      }),
+    );
+    await page.reload();
+    await expect(
+      instanceRow(page).getByRole("button", { name: strings.action.connect }),
+    ).toBeDisabled();
+    await expect(instanceRow(page)).toContainText(
+      strings.state.notAllowedConnect({ name: "Mira" }),
+    );
+  });
+
+  test("deleted instance notices are acknowledged once only while visible and stay until Settings closes", async ({
+    page,
+  }) => {
+    const state = await mockInstanceTelegram(page);
+    state.removed = [
+      {
+        id: "deleted-event",
+        reason: "agent-deleted",
+        agent_kind: "instance",
+        agent_ref: EMPLOYEE_ID,
+        agent_name: "Mira",
+        bot_username: "fixture_bot",
+        at: new Date().toISOString(),
+      },
+    ];
+    state.answers["POST /removed/deleted-event/seen"] = () => {
+      state.removed = [];
+      return [204, null];
+    };
+    await page.addInitScript(() =>
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "hidden",
+      }),
+    );
+    await page.goto(DEEP_LINK);
+    const notice = page.getByText(
+      strings.notice.agentDeleted({ name: "Mira" }),
+    );
+    await expect(notice).toBeVisible();
+    expect(
+      state.calls.filter((call) => call.path.endsWith("/seen")),
+    ).toHaveLength(0);
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "visible",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await expect
+      .poll(
+        () => state.calls.filter((call) => call.path.endsWith("/seen")).length,
+      )
+      .toBe(1);
+    await expect(notice).toBeVisible();
+    await page.reload();
+    await expect(section(page)).toBeVisible();
+    await expect(notice).toHaveCount(0);
+    expect(
+      state.calls.filter((call) => call.path.endsWith("/seen")),
+    ).toHaveLength(1);
   });
 });

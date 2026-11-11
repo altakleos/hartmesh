@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { TelegramInstanceNote } from "@/components/workspace/telegram/instance-controls";
 import * as api from "@/core/agent-instances/api";
 import { agentBlock, INSPECT } from "@/core/agent-instances/presentation";
 import { awaitAbortable } from "@/core/api/abort";
@@ -122,6 +123,7 @@ function SettingsControls() {
         />
         {error && <p role="alert">{error}</p>}
         {unconfirmed && <p role="status">{copy.unconfirmed}</p>}
+        <TelegramInstanceNote instance={instance} kind="rename" />
         <Button type="button" disabled={disabled} onClick={() => void rename()}>
           {unconfirmed ? copy.retry : copy.rename}
         </Button>

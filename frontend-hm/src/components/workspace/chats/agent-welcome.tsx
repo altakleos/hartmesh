@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { usePromptInputController } from "@/components/ai-elements/prompt-input";
 import { AgentAvatar } from "@/components/workspace/instances/agent-avatar";
+import { TelegramInstanceTip } from "@/components/workspace/telegram/instance-controls";
 import {
   getInstanceDefinition,
   type AgentInstanceDetail,
@@ -116,6 +117,7 @@ export function AgentWelcome({
           </li>
         )}
       </ul>
+      {detail && <TelegramInstanceTip instance={detail} />}
       {binding.custody === "company" && (
         <p>{copy.companyNotice(binding.name)}</p>
       )}

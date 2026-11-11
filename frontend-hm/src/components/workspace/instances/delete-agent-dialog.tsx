@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { TelegramInstanceNote } from "@/components/workspace/telegram/instance-controls";
 import { useBranding } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 
@@ -57,6 +58,7 @@ export function DeleteAgentDialog({
               )
             : copy.settings.deleteConfirm(instance.name, instance.custody)}
         </DialogDescription>
+        <TelegramInstanceNote instance={instance} kind="delete" />
         {instance.activity.running_runs > 0 && (
           <p>{copy.settings.runningNow(instance.name)}</p>
         )}

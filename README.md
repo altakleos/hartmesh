@@ -1974,22 +1974,23 @@ cleanup when migrating from legacy metadata credentials.
 
 ##### Telegram bots
 
-Prepared instance page controls explain why a Telegram bot cannot be connected,
-open an existing bot or its settings, and show rename/delete effects. Assistant
-and employee discovery reads complete lists and retires reads when the account
-changes. Settings now lists these targets and opens setup only after reading
-current access, policy and execution readiness. Page controls still await mounting.
+Assistant and employee pages offer Connect Telegram, Open in Telegram, or
+Telegram settings according to the current bot state. The header explains
+current access, policy and execution availability. A paused agent or busy files
+alone does not prevent connecting. Rename and delete dialogs explain the effects
+on connected bots; a new conversation offers the same connection flow.
 
-Instance bot views now distinguish access withdrawal, retirement, pauses,
-execution outages and protected delivery. Setup explains who can read the chat
-and its files; deletion notices remain visible while Settings stays open.
-The Done screen offers the first currently connectable target. Agent avatars use
-the same initials and colors as
-Telegram bot pictures.
+Settings lists the ordinary chat, assistants, employees and custom agents, with
+inaccessible owned bots retained at the end. Discovery waits for complete lists
+and current access before opening setup. Setup explains shared readers and
+protected delivery, retires late replies after access changes, and offers the
+first currently connectable next target. Deletion notices remain visible until
+Settings closes. Agent avatars share Telegram bot initials and colors.
 
-The employee policy controls are prepared for the Access tab: managers can allow
-Telegram, prevent forwarding and saving, or turn it off with a connected-bot
-confirmation. They remain unmounted until instance-bot activation is complete.
+On an employee's Access tab, managers can allow Telegram, prevent forwarding and
+saving, or turn it off after confirming the connected-bot count. This policy
+remains editable during an execution hold. Personal assistants follow their
+existing access settings.
 
 Assistant and employee list preparation reads the bound person’s discovery page,
 filters chat access and shows at most twenty agents, with the person’s own

@@ -11,7 +11,7 @@ import {
   type RemovedBot,
 } from "@/core/telegram-bots/api";
 
-/** Prepared for the settings list; a read alone never consumes a notice. */
+/** A list read alone never consumes a notice; visible Settings owns it. */
 export function TelegramRemovedNotices({ events }: { events: RemovedBot[] }) {
   const { user } = useAuth();
   const settings = useSettingsDialog();

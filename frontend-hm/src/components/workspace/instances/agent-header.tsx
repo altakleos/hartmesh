@@ -8,6 +8,10 @@ import {
   usePersonName,
   useSupervisorName,
 } from "@/components/workspace/person-name";
+import {
+  TelegramInstanceConnect,
+  TelegramInstanceState,
+} from "@/components/workspace/telegram/instance-controls";
 import * as api from "@/core/agent-instances/api";
 import {
   agentBlock,
@@ -183,6 +187,7 @@ function HeaderContent({
           </p>
         </div>
       </div>
+      <TelegramInstanceState instance={instance} />
       {status !== "deleted" && status !== "provisioning" && (
         <div className="space-y-2">
           <Button
@@ -202,6 +207,7 @@ function HeaderContent({
           )}
         </div>
       )}
+      <TelegramInstanceConnect instance={instance} />
       {(instance.permissions & INSPECT) !== 0 &&
         brief !== undefined &&
         status !== "deleted" && (
