@@ -44,6 +44,18 @@ Stale lists retire without blocking later messages. Ordinary bots dispatch
 `/assistants` and `/employees` to `handle_list`; their Work words only point to
 those chats. Instance/custom bots do not acquire these ordinary-chat commands.
 
+`notifications.py` owns class preferences and optional-news budgets. The sender's
+`proactive` switch remains false until notification entry points are complete.
+Essential rows bypass discretionary budgets; edits require actual edit parts.
+PostgreSQL serializes cross-bot daily admission with an owner advisory lock;
+SQLite uses the existing writer. Immutable first-dispatch reservations retain a
+logical notification through ambiguous retries; transport pacing is independent.
+`notification_authority.py` checks settings, account, binding, claim and current
+instance grant/policy in one final SQL snapshot at the SDK limiter boundary.
+Model, callback and file notification plans remain refused until their own source
+authority joins that snapshot. Local-day calculations run off-loop and preserve
+daylight-saving boundaries.
+
 `commands.py` handles fixed navigation and language settings only. A command closes
 only a typing prompt; `/new` and `/stop` also end the forms and cards in scope.
 `acts.py` commits a saved settings choice, its exact old/new preference, completed

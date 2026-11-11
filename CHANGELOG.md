@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Telegram delivery
+
+- Prepare notification preferences, quiet-message classes and durable optional-news
+  budgets. Proactive delivery remains disabled until its interaction handlers are
+  available; existing reply delivery keeps its transport and authority checks.
+
 ### Persistent agents
 
 - Include the latest reviewer change-request note in later Work attempts, through

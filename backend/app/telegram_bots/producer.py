@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Literal, Protocol
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from sqlalchemy import or_, select, text, update
+from sqlalchemy import case, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 
@@ -31,6 +31,8 @@ from app.telegram_bots.api_logging import log_call_failure
 from app.telegram_bots.config import TelegramBotsConfig
 from app.telegram_bots.errors import CAPACITY_KEYS, INSTANCE_RUN_STOP_REASONS
 from app.telegram_bots.links import BotLink
+from app.telegram_bots.notifications import DELIVERY_CLASSES, ESSENTIAL_DELIVERY_CLASSES, budget_retry_at, preference_skip
+from app.telegram_bots.settings import SettingsRepository
 from app.telegram_bots.token_pattern import TOKEN_IN_TEXT
 from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow, TelegramOutboxRow
 from deerflow.runtime.runs.terminal import failure_chain
@@ -60,7 +62,7 @@ _URL_SOURCES = {
 }
 _TRANSPORT_RECEIPTS = frozenset({"sent_at", "dispatched_at", "unavailable_reason", "invalid_token_verification_pending", "url_button_fallback", "plain_fallback"})
 _PART_IDENTITY = frozenset({"part_id", "presentation_version", "ordinal", "state", "message_ids"})
-_SKIP_REASONS = frozenset({"no-access", "superseded", "link-not-connected", "disabled", "policy-off", "expired"})
+_SKIP_REASONS = frozenset({"no-access", "superseded", "link-not-connected", "disabled", "policy-off", "expired", "notifications-off"})
 _LIVE_CLAIMS: set[tuple[int, str, str]] = set()
 _TOKEN = re.compile(TOKEN_IN_TEXT)
 _FORBIDDEN_KEYS = frozenset({"token", "bot_token", "access_token", "raw_update", "update", "audio", "audio_bytes", "download_url", "temporary_url", "bytes"})
@@ -171,6 +173,8 @@ class OutboxItem:
     message_thread_id: int | None
     attempts: int = 0
     silent: bool = False
+    created_at: datetime | None = None
+    state: str = "pending"
 
 
 _TURN_OUTCOME_KEYS = frozenset(
@@ -959,8 +963,12 @@ class Outbox:
         check_attempt_current: Callable[[], bool] | None = None,
         **targets,
     ) -> tuple[str, bool]:
-        if class_ != "reply":
-            raise ValueError("reply-only-outbox")
+        if class_ not in DELIVERY_CLASSES:
+            raise ValueError("unsupported-delivery-class")
+        if class_ in {"progress", "summary", "reminder"}:
+            targets["silent"] = True
+        if "notification_reserved_at" in payload:
+            raise ValueError("reserved-notification-budget")
         if payload.get("delivery_kind") == "status_notice" and not server_status:
             raise ValueError("reserved-status-notice")
         if not dedupe_key or len(dedupe_key) > 96 or _TOKEN.search(dedupe_key):
@@ -982,6 +990,8 @@ class Outbox:
                 return existing.id, False
             frozen_payload = _safe_json(payload)
             parts = self._parts(frozen_payload.pop("parts", []), 0)
+            if dedupe_key.startswith("edit:") and any(part["kind"] != "edit" or type(part.get("target_message_id")) is not int for part in parts):
+                raise ValueError("invalid-notification-edit")
             frozen_payload["presentation_version"] = 0
             now = self.clock()
             row = TelegramOutboxRow(
@@ -1008,6 +1018,15 @@ class Outbox:
 
     async def add(self, link: BotLink, *, dedupe_key: str, class_: str, payload: dict, not_before: datetime | None = None, session: AsyncSession | None = None, **targets) -> bool:
         return (await self._add(link, dedupe_key=dedupe_key, class_=class_, payload=payload, not_before=not_before, session=session, **targets))[1]
+
+    async def notification_decision(self, item):
+        if item.class_ == "reply":
+            return DeliveryEligibility.allow()
+        settings = await SettingsRepository(self.sessions, self.config).get(item.owner_user_id)
+        if settings is None:
+            return DeliveryEligibility.wait()
+        reason = preference_skip(item, settings, self.clock())
+        return DeliveryEligibility.skip(reason) if reason else DeliveryEligibility.allow()
 
     async def plan_product(self, link: BotLink, *, source_id: str, parts: list[dict], inbox_rows: Sequence = (), finish_route: bool = False, message_thread_id: int | None = None, session: AsyncSession | None = None) -> str:
         """Save a fixed product delivery, retaining its exact origin and purpose."""
@@ -2204,12 +2223,14 @@ class OutboxSender:
         concurrency: int = OUTBOX_SEND_CONCURRENCY,
         jitter: Callable[[], float] = random.random,
         cleanup_caption=None,
+        proactive: bool = False,
     ) -> None:
         if not run_id or len(run_id) > 32 or not 1 <= concurrency <= OUTBOX_SEND_CONCURRENCY:
             raise ValueError("invalid-delivery-worker-settings")
         self.outbox, self.run_id, self.deliver_part, self.eligibility = outbox, run_id, deliver_part, eligibility
         self.concurrency, self.jitter = concurrency, jitter
         self.cleanup_caption = cleanup_caption
+        self.proactive = proactive
         self._workers: dict[str, tuple[str, str, asyncio.Task]] = {}
         self._generations: dict[str, int] = {}
         self._callbacks: set[asyncio.Task] = set()
@@ -2285,7 +2306,11 @@ class OutboxSender:
             raise ValueError("invalid-delivery-eligibility")
         if decision.decision != "allow":
             return decision
-        return self._structural(binding, row) or decision
+        structural = self._structural(binding, row)
+        if structural is not None:
+            return structural
+        preferences = await self.outbox.notification_decision(row)
+        return decision if preferences.decision == "allow" else preferences
 
     async def _snapshot(self, link_id: str, row_id: str) -> tuple[BotLink | None, OutboxItem | None]:
         async with self.outbox.sessions() as session:
@@ -2317,9 +2342,14 @@ class OutboxSender:
                 due = list(
                     (
                         await session.execute(
-                            select(TelegramOutboxRow.id, TelegramOutboxRow.link_id, TelegramOutboxRow.created_at)
-                            .where(TelegramOutboxRow.class_ == "reply", TelegramOutboxRow.state == "pending", TelegramOutboxRow.not_before <= self.outbox.clock())
-                            .order_by(TelegramOutboxRow.created_at, TelegramOutboxRow.id)
+                            select(
+                                TelegramOutboxRow.id,
+                                TelegramOutboxRow.link_id,
+                                TelegramOutboxRow.created_at,
+                                case((TelegramOutboxRow.class_ == "question", 0), (TelegramOutboxRow.class_.in_(ESSENTIAL_DELIVERY_CLASSES), 1), else_=2).label("priority"),
+                            )
+                            .where(TelegramOutboxRow.class_.in_(DELIVERY_CLASSES if self.proactive else {"reply"}), TelegramOutboxRow.state == "pending", TelegramOutboxRow.not_before <= self.outbox.clock())
+                            .order_by(case((TelegramOutboxRow.class_ == "question", 0), (TelegramOutboxRow.class_.in_(ESSENTIAL_DELIVERY_CLASSES), 1), else_=2), TelegramOutboxRow.created_at, TelegramOutboxRow.id)
                         )
                     ).all()
                 )
@@ -2328,14 +2358,15 @@ class OutboxSender:
                 offset = links.index(self._last_link) + 1
                 links = links[offset:] + links[:offset]
             count = 0
-            for link_id in links:
+            batches = [(link, [row for row in due if row.link_id == link and row.priority == priority]) for priority in (0, 1, 2) for link in links]
+            for link_id, candidates in batches:
                 if count >= free:
                     break
                 if link_id in self._workers or link_id in self._retirements:
                     continue
-                # Oldest due reply per link. A waiting row must not block a later
-                # fixed repair/status notice on the same link.
-                for candidate in (row for row in due if row.link_id == link_id):
+                # Rotate links within each priority, before considering optional
+                # news. Ineligible rows never hide another link's essential work.
+                for candidate in candidates:
                     binding, row = await self._snapshot(link_id, candidate.id)
                     if row is None:
                         continue
@@ -2443,6 +2474,11 @@ class OutboxSender:
                 if last is not None and last + timedelta(seconds=1) > now:
                     self._pending(saved)
                     saved.not_before = last + timedelta(seconds=1)
+                    return
+                budget_at = await budget_retry_at(session, saved, now=now, config=self.outbox.config.outbox)
+                if budget_at is not None:
+                    self._pending(saved)
+                    saved.not_before = max(_aware(saved.not_before), budget_at)
                     return
                 parts = deepcopy(saved.parts)
                 sending = next(value for value in parts if value["part_id"] == part["part_id"])
