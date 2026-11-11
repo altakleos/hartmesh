@@ -405,6 +405,10 @@ class TelegramAuthority:
                     and value.get("url_button", {}).get("page") == "web.files"
                     for value in files_replies
                 )
+                if current.agent_kind == "instance" and uses_model_source(item):
+                    from app.telegram_bots.network import is_network_card
+
+                    manager_text = manager_text or is_network_card(item, part)
                 value = await self.instance_send_policy(current, require_use=target == "ok", require_inspect=bool(role_visible) or files_link, require_manage=manager_text) if current.agent_kind == "instance" else "allowed"
                 if value == "off":
                     return DeliveryEligibility.skip("policy-off")

@@ -1638,7 +1638,7 @@ class TelegramBotChannel(TelegramChannel):
 
         if set(source) != {"key", "values"} or not isinstance(source["key"], str) or not isinstance(source["values"], dict):
             raise PermanentDeliveryError("unsupported-source")
-        if link.agent_kind == "instance" and source["key"] == "file.no_access":
+        if link.agent_kind == "instance" and source["key"] in {"file.no_access", "net.blocked_ask"}:
             from app.telegram_bots.publication import fixed_source
 
             current = await fixed_source(self._services, link, source["key"])
@@ -2063,6 +2063,12 @@ class TelegramBotChannel(TelegramChannel):
                 verdict = await self._services.eligibility(latest_part.link, latest_part.item, latest_part.part)
                 if not isinstance(verdict, DeliveryEligibility) or verdict.decision != "allow" or verdict.protect_content and not part.get("protect_content") or not self._callback_current(current.link):
                     raise DeliveryClaimRetired()
+                from app.telegram_bots.network import authorize_network_card, is_network_card
+
+                if is_network_card(latest_part.item, latest_part.part):
+                    await authorize_network_card(self._services, latest_part)
+                    if not self._callback_current(current.link):
+                        raise DeliveryClaimRetired()
                 # Waiting/preview custody can end during the final SQL read.
                 # Keep this local check synchronous with the raw SDK callback.
                 if preview and turns.preview_allowed(self, latest_part.item) is not True:

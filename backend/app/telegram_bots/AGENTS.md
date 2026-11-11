@@ -49,6 +49,8 @@ The supervisor constructs these services after resolving default repositories.
 existing turn controller and sender; it owns no scheduler. What would answer a card takes
 `_waiting_source`: only Telegram input closes a card, so a newer run in the conversation
 means it went on from the web, and the card refuses. Closing one needs no such check.
+Instance network cards also require current Manage at planning, the SDK limiter
+and the action writer; [network admission](../../docs/TELEGRAM_TURN_EXECUTION.md#instance-network-cards).
 `human_input_source.py`
 qualifies one exact lead/tool request using the persisted document-2 output,
 complete inventory and actual messages. V5 human-input plans freeze that source and their input

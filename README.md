@@ -1969,6 +1969,11 @@ cleanup when migrating from legacy metadata credentials.
 
 ##### Telegram bots
 
+Instance site-permission cards require current Manage access when planned, sent
+and answered. Withdrawing Manage keeps an unsent card from appearing and prevents
+its buttons from submitting another answer; the person is directed to a manager.
+Cards still come only from a verified pending network request.
+
 Employee Telegram policy can be read and stored through the browser-session API
 by a person with both Manage and Inspect. Personal assistants use their access
 settings instead. Persistent-agent bot creation remains unavailable while its
