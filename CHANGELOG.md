@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prepare complete Work confirmation and prompt views that retain the displayed
   request basis and unsubmitted text. First-tap menus and confirmations have
   durable, source-checked reply delivery with acknowledged origin and keyboard
-  cleanup. Chat handlers and typing/voice integration remain uninstalled.
+  cleanup. Deferred typing prompts retain that basis and become visible only
+  after the final ACK. Chat action and text/voice handlers remain uninstalled.
 
 - Prepare receipt-backed question routing and current eligible-recipient reads.
   Routing grants no access and starts no work; chat controls remain disabled.

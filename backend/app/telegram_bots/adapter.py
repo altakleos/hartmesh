@@ -2031,7 +2031,7 @@ class TelegramBotChannel(TelegramChannel):
         if part.get("force_reply"):
             from telegram import ForceReply
 
-            if model_part is None or not model_part.human_input or stored_keyboard is not None or button is not None or part["kind"] != "text":
+            if (model_part is None or not model_part.human_input) and work_part is None or stored_keyboard is not None or button is not None or part["kind"] != "text":
                 raise PermanentDeliveryError("invalid-human-input-markup")
             markup = ForceReply(selective=True)
         elif (model_part is not None and model_part.human_input or work_part is not None) and part["kind"] == "edit" and markup is None:

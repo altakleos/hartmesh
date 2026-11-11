@@ -2,11 +2,12 @@
 
 from dataclasses import asdict
 from types import SimpleNamespace
+from uuid import uuid4
 
 from sqlalchemy import select
 
 from app.telegram_bots.attention_authority import prepare_attention
-from app.telegram_bots.callbacks import CallbackRefused, _plain, _validate_rows
+from app.telegram_bots.callbacks import CallbackRefused, Prompts, _plain, _validate_rows
 from app.telegram_bots.producer import ProductSourceRetired, _item, _safe_json, keyboard_cleanup_row
 from app.telegram_bots.work_interactions import interaction_state, present_interaction
 from app.telegram_bots.work_request_recovery import WorkRequestRecovery, _RecoveryGuard
@@ -27,6 +28,11 @@ def transition(callback, source):
         state = {"view": "accept"}
     elif callback.kind == "decide_choice":
         state = {"view": "decision", "decision": callback.payload.get("decision"), "note": None}
+    elif callback.kind in {"hi_answer", "hi_cannot", "hi_wrong", "decide_own", "decide_note", "changes_open"}:
+        purpose = {"hi_answer": "answer", "hi_cannot": "cannot", "hi_wrong": "wrong", "decide_own": "decision", "decide_note": "decision_note", "changes_open": "changes"}[callback.kind]
+        state = {"view": "prompt", "purpose": purpose}
+        if purpose == "decision_note":
+            state["decision"] = callback.payload.get("interaction", {}).get("decision")
     else:
         raise CallbackRefused()
     return interaction_state(state, source)
@@ -108,6 +114,8 @@ class WorkInteractionPlans:
                     {**part, "source_ref": {"key": "work.request.presentation", "values": {"request_id": request_id, "part": index}}, **({"stored_keyboard": True} if index == len(shown.parts) - 1 and keyboard else {})}
                     for index, part in enumerate(shown.parts)
                 ]
+                if state["view"] == "prompt":
+                    recipes[-1]["force_reply"] = True
                 identity, _ = await self.outbox._add(
                     link, dedupe_key=key, class_="reply", payload={"parts": recipes}, instance_id=link.agent_ref, work_id=source.work["id"], request_id=request_id, message_thread_id=message_thread_id, session=writer
                 )
@@ -129,6 +137,8 @@ class WorkInteractionPlans:
                     "interaction": state,
                     "origin": {"callback_id": callback_id, "anchor_outbox_id": parent.id, "presentation_version": group.presentation_version, "message_id": message_id},
                 }
+                if state["view"] == "prompt":
+                    basis["prompt_id"] = uuid4().hex
                 row.payload = _safe_json({**row.payload, "work_request_basis": basis, "product_keyboard_basis": keyboard})
                 parts = self.outbox._parts(recipes, 0)
                 if keyboard:
@@ -138,6 +148,13 @@ class WorkInteractionPlans:
                         control.created_at = group.selected.created_at
                         control.payload = {**control.payload, "presentation_pending": True}
                 row.parts = parts
+                if state["view"] == "prompt":
+                    from app.telegram_bots.work_typing import PURPOSES
+
+                    prompts = Prompts(self.callbacks)
+                    payload = {"request_id": request_id, "work_id": source.work["id"], "seen": source.seen, "interaction": state}
+                    await prompts.open(link, PURPOSES[state["purpose"]], payload, chat_id=chat_id, message_thread_id=message_thread_id, message_id=None, prompt_id=basis["prompt_id"], guard=composed, session=writer, defer_visibility=True)
+                    await prompts.attach(link, basis["prompt_id"], outbox_id=identity, guard=composed, session=writer)
                 await self.callbacks.consume_group(group, reason="work-preview", session=writer)
                 return identity
 
