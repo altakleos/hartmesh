@@ -438,6 +438,19 @@ class WorkActionMethods:
         request = self._changes_command(operation_id=operation_id, request_id=request_id, note=note, seen=seen)
         return await self._issue_work(link, kind="changes_requested", request_id=request_id, work_id=work_id, request=request, seen=seen)
 
+    async def reconcile_receipt(self, act_id):
+        """Settle only an exact committed receipt; absence never authorizes retry."""
+
+        async def perform():
+            async with self._work_serial(act_id):
+                act = await self._work_record(act_id)
+                receipt = await self.receipt_for(act)
+                if receipt is None or act.state == "done":
+                    return act
+                return await self._work_outcome(act, state="done", result=receipt)
+
+        return await await_drained(perform())
+
     async def check(self, act_id):
         async def perform():
             async with self._work_serial(act_id):

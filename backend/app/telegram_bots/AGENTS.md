@@ -13,6 +13,7 @@ Keep bot network, supervisor and router startup outside configuration loading.
 Use socket-free transports and synthetic credentials in offline tests.
 
 Work outcome delivery uses canonical receipts and a final source/claim fence.
+Its dormant receipt observer never calls the explicit action-retry path.
 Full ACK alone seals captured input and writes the Work-only continuation receipt;
 keep retention and callback activation aligned with [Work guidance](../../docs/TELEGRAM_WORK.md).
 

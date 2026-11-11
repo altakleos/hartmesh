@@ -210,5 +210,16 @@ This planner and source remain uninstalled. Source-aware relocation/protection
 repair is an activation prerequisite: generic replacement holds these frozen
 plans with `work-outcome-refresh-required`, preserving ACKed parts, original
 input and action identity. It cannot silently move them or replay the prefix.
-The full controller still owns fresh-request and routing follow-ups, receipt-only
-journal reconciliation, explicit action retries and pending-outcome observation.
+The full controller still owns fresh-request and routing follow-ups, explicit
+action retries and installation of the receipt observer.
+
+`work_outcome_recovery.py` observes Work journals without issuing commands.
+`Acts.reconcile_receipt` shares the original operation's local serialization and
+settles only an exact canonical receipt under current reader/binding authority;
+absence leaves the action unchanged. This differs from an explicit `Acts.check`,
+which can repeat the original command. Observation never calls that retry path.
+Each tick scans one bounded keyset page for one binding with a fixed maximum ID
+for that pass; new records cannot postpone revisiting older deferred actions.
+Acknowledged phases need no new observation. Per-link tasks share eight slots,
+so a held link cannot drop another link's tick. The worker owns and drains all
+tasks across stop/cancellation and fences publication after shutdown. These components remain uninstalled until the full controller wiring.

@@ -26,11 +26,12 @@ async def test_completed_acceptance_delivers_once_and_retires_original_controls(
     plans = WorkOutcomePlans(e.plans, actions.acts)
     e.channel._services.work_outcome_sources = WorkOutcomeSources(plans)
     identity = await plans.plan(e.link, saved.id, guard=await guard_for(e))
+    e.outcome_identity = identity
     assert await plans.plan(e.link, saved.id, guard=await guard_for(e)) == identity
     async with e.db.sessions() as reader:
         assert (await reader.get(TelegramCallbackRow, control.id)).closed_reason == "work-done"
         assert (await reader.get(TelegramActRow, saved.id)).attempts == done.attempts
-    await clear_old(e)
+    await clear_outcome_cleanup(e)
     await dispatch(e, 803)
     async with e.db.sessions() as reader:
         row = await reader.get(TelegramOutboxRow, identity)
@@ -38,6 +39,22 @@ async def test_completed_acceptance_delivers_once_and_retires_original_controls(
         assert len(list(await reader.scalars(select(TelegramActRow)))) == 1
     call = [call for call in e.channel.bot.request.calls if call.endpoint == "sendMessage"][-1]
     assert "Accepted by you" in call.parameters["text"]
+
+
+async def clear_outcome_cleanup(e):
+    from datetime import timedelta
+
+    # Removal and result are independent reply rows. Park the result while
+    # scripting its cleanup so UUID tie order cannot consume the wrong reply.
+    async with e.db.sessions.begin() as writer:
+        row = await writer.get(TelegramOutboxRow, e.outcome_identity)
+        deadline = row.not_before
+        row.not_before = e.clock() + timedelta(hours=1)
+    try:
+        await clear_old(e)
+    finally:
+        async with e.db.sessions.begin() as writer:
+            (await writer.get(TelegramOutboxRow, e.outcome_identity)).not_before = deadline
 
 
 async def outcome(e, *, uncertain=False):
@@ -55,6 +72,7 @@ async def outcome(e, *, uncertain=False):
     plans = WorkOutcomePlans(e.plans, actions.acts)
     e.channel._services.work_outcome_sources = WorkOutcomeSources(plans)
     identity = await plans.plan(e.link, saved.id, guard=await guard_for(e))
+    e.outcome_identity = identity
     return plans, saved.id, identity
 
 
@@ -128,28 +146,33 @@ async def test_input_completion_waits_for_outcome_ack(work_delivery):
 @pytest.mark.parametrize("damage", ["grant", "journal", "supervisor"])
 async def test_final_result_authority_rejects_late_changes(work_delivery, monkeypatch, damage):
     import app.telegram_bots.work_outcome_delivery as module
+    from app.telegram_bots.producer import DeliveryRetry, ProductSourceRetired
     from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow, AgentInstanceRow
 
     e = work_delivery
     _plans, act_id, identity = await outcome(e)
-    await clear_old(e)
+    await clear_outcome_cleanup(e)
     original = module.current_attention
 
     async def changed(*args, **kwargs):
         async with e.db.sessions.begin() as writer:
             if damage == "grant":
                 grant = await writer.scalar(select(AgentInstanceGrantRow).where(AgentInstanceGrantRow.instance_id == e.link.agent_ref, AgentInstanceGrantRow.user_id == e.link.owner_user_id))
-                grant.permissions = 0
+                grant.permissions = 1
             elif damage == "journal":
                 (await writer.get(TelegramActRow, act_id)).state = "uncertain"
             else:
-                (await writer.get(AgentInstanceRow, e.link.agent_ref)).supervisor_id = None
+                from deerflow.persistence.user.model import UserRow
+
+                instance = await writer.get(AgentInstanceRow, e.link.agent_ref)
+                (await writer.get(UserRow, instance.supervisor_id)).email = "renamed-supervisor@example.com"
         return await original(*args, **kwargs)
 
     monkeypatch.setattr(module, "current_attention", changed)
     before = len(e.channel.bot.request.calls)
     await dispatch(e, 803)
     assert len(e.channel.bot.request.calls) == before
+    assert e.dispatch_errors and all(isinstance(error, (DeliveryRetry, ProductSourceRetired)) for error in e.dispatch_errors)
     async with e.db.sessions() as reader:
         assert (await reader.get(TelegramOutboxRow, identity)).state != "sent"
 
@@ -161,7 +184,7 @@ async def test_forged_result_plan_never_reaches_sdk(work_delivery, damage):
 
     e = work_delivery
     _plans, _act_id, identity = await outcome(e)
-    await clear_old(e)
+    await clear_outcome_cleanup(e)
     async with e.db.sessions.begin() as writer:
         row = await writer.get(TelegramOutboxRow, identity)
         if damage in {"topic", "topic_and_basis"}:
@@ -195,7 +218,7 @@ async def test_forged_result_plan_never_reaches_sdk(work_delivery, damage):
 async def test_collected_acknowledged_reply_is_not_republished(work_delivery):
     e = work_delivery
     plans, act_id, identity = await outcome(e)
-    await clear_old(e)
+    await clear_outcome_cleanup(e)
     await dispatch(e, 803)
     async with e.db.sessions.begin() as writer:
         row = await writer.get(TelegramOutboxRow, identity)
@@ -384,7 +407,7 @@ async def test_settled_work_receipt_expires_but_unknown_continuations_are_retain
 
     e = work_delivery
     _plans, act_id, _identity = await outcome(e)
-    await clear_old(e)
+    await clear_outcome_cleanup(e)
     await dispatch(e, 803)
     now = e.clock()
     async with e.db.sessions.begin() as writer:
