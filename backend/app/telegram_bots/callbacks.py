@@ -19,7 +19,7 @@ from app.telegram_bots.inbox import callback_publication_pending
 from app.telegram_bots.links import BotLink
 from app.telegram_bots.token_pattern import TOKEN_IN_TEXT
 from deerflow.persistence.channel_connections.model import ChannelConnectionRow
-from deerflow.persistence.telegram_bots.model import TelegramAccountRow, TelegramActRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramOutboxRow
+from deerflow.persistence.telegram_bots.model import TelegramAccountRow, TelegramActRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
 
 CALLBACK_PREFIX = "h1:"
@@ -846,6 +846,10 @@ class CallbackRepository:
                 # An unfinished direct Work reply still needs its consumed
                 # source group and acknowledged parent as dispatch evidence.
                 unsettled.update(await session.scalars(select(TelegramOutboxRow.payload["work_request_basis"]["origin"]["anchor_outbox_id"].as_string()).where(TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
+                # A captured Work input still owns its shown prompt until its
+                # outcome is delivered, even after ordinary prompt expiration.
+                for sources in await session.scalars(select(TelegramInboundMarkRow.delivery_ids).where(TelegramInboundMarkRow.route_kind == "work_input", TelegramInboundMarkRow.state != "done")):
+                    unsettled.update(identity for identity in sources if type(identity) is str)
                 removed = 0
                 for row in rows:
                     if row.group_id in pending_groups:
