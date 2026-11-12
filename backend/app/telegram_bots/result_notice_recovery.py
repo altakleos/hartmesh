@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from dataclasses import asdict
+from hashlib import sha256
 from types import SimpleNamespace
 
 from sqlalchemy import select
@@ -154,7 +155,7 @@ class ResultNoticeRecovery:
         for control in controls:
             if control.message_id is not None and control.group_id not in cleaned:
                 cleaned.add(control.group_id)
-                cleanup = keyboard_cleanup_row(control, owner_user_id=link.owner_user_id, now=self.outbox.clock(), dedupe_key=f"notice:result-preview-cleanup:{row.id}:{version}:{control.group_id}")
+                cleanup = keyboard_cleanup_row(control, owner_user_id=link.owner_user_id, now=self.outbox.clock(), dedupe_key="result-preview:" + sha256(f"{row.id}:{version}:{control.group_id}".encode("ascii")).hexdigest())
                 cleanup.payload = {**cleanup.payload, "work_request_parent_id": row.id}
                 writer.add(cleanup)
                 if control.id == reveal:
