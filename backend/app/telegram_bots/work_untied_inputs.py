@@ -2,13 +2,12 @@
 
 from copy import deepcopy
 from dataclasses import replace
-from datetime import datetime
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import aliased
 
 from app.telegram_bots.attention_authority import prepare_attention
-from app.telegram_bots.callbacks import CallbackRefused, _aware, _validate_rows
+from app.telegram_bots.callbacks import CallbackRefused, _validate_rows
 from app.telegram_bots.inbox import InboxRow
 from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.producer import ProductSourceRetired
@@ -18,7 +17,7 @@ from app.telegram_bots.work_interaction_delivery import acknowledged_source
 from app.telegram_bots.work_outcome_delivery import acknowledged_parts
 from app.telegram_bots.work_request_recovery import WorkRequestRecovery, _RecoveryProjection
 from app.telegram_bots.work_request_source import _RequestProjection, same_displayed_basis
-from app.telegram_bots.work_untied_delivery import WorkAnswerNotice, answer_data, answer_keyboard, callback_facts, same_input
+from app.telegram_bots.work_untied_delivery import WorkAnswerNotice, answer_data, answer_input, answer_keyboard, answer_parts, answer_source_group, answer_source_input, callback_facts, notice_recipes, same_input
 from app.telegram_bots.work_untied_source import WorkUntiedSource
 from deerflow.agent_instances.contract import AgentDenied
 from deerflow.agent_instances.human_input_contract import Respond
@@ -57,24 +56,26 @@ class WorkUntiedInputs:
                 "seen": found.source.seen,
                 "text": text,
             }
-            keyboard = answer_keyboard(data, mark.message_id)
             await self.inbox.register_delivery([InboxRow.from_row(mark)], outbox_id=found.outbox_id, primary=False, finish=False, session=writer)
             await self.inbox.route(InboxRow.from_row(mark), kind="work_answer", target_id=data["request_id"], basis={"work_answer": data}, operation_ids=[], session=writer)
-            identity = await self.services.outbox.plan_product_keyboard(
-                link,
-                source_id="work-answer:" + str(mark.message_id),
-                parts=[{"kind": "text", "source_ref": {"key": "ask.is_this_answer", "values": {}}, "reply_to_message_id": mark.message_id}],
-                keyboard=keyboard,
-                callbacks=self.callbacks,
-                guard=guard,
-                inbox_rows=[InboxRow.from_row(mark)],
-                finish_route=False,
-                message_thread_id=mark.message_thread_id,
-                session=writer,
-            )
-            mark.route_basis = {"work_answer": {**data, "notice_id": identity}}
-            await writer.flush()
-            return identity
+            return await self.publish_choice(link, mark, data, guard=guard, writer=writer)
+
+    async def publish_choice(self, link, mark, data, *, guard, writer):
+        identity = await self.services.outbox.plan_product_keyboard(
+            link,
+            source_id="work-answer:" + str(mark.message_id),
+            parts=answer_parts(data, mark.message_id),
+            keyboard=answer_keyboard(data, mark.message_id),
+            callbacks=self.callbacks,
+            guard=guard,
+            inbox_rows=[InboxRow.from_row(mark)],
+            finish_route=False,
+            message_thread_id=mark.message_thread_id,
+            session=writer,
+        )
+        mark.route_basis = {**mark.route_basis, "work_answer": {**data, "notice_id": identity}}
+        await writer.flush()
+        return identity
 
     async def handle(self, channel, update, *, link, replay_only=False):
         async def perform():
@@ -99,7 +100,7 @@ class WorkUntiedInputs:
         return await await_drained(perform())
 
     async def execute_callback(self, channel, row, *, update_id):
-        if row.kind not in {"answer_yes", "answer_no"}:
+        if row.kind not in {"answer_yes", "answer_no", "voice_save_answer", "voice_discard"}:
             return False
 
         async def perform():
@@ -115,6 +116,9 @@ class WorkUntiedInputs:
                     return False
                 answer_data(mark)
                 origin = InboxRow.from_row(mark)
+            if row.kind == "voice_discard":
+                await self.discard_voice(link, origin, row, guard=guard)
+                return True
             if row.kind == "answer_no":
                 async with self.callbacks.writer(link, guard) as writer:
                     group = await self.callbacks.lock_current(link, row.id, chat_id=row.chat_id, message_id=row.message_id, message_thread_id=row.message_thread_id, guard=guard, session=writer)
@@ -147,6 +151,34 @@ class WorkUntiedInputs:
             return True
 
         return await await_drained(perform())
+
+    async def discard_voice(self, link, origin, row, *, guard):
+        async with self.callbacks.writer(link, guard) as writer:
+            group = await self.callbacks.lock_current(link, row.id, chat_id=row.chat_id, message_id=row.message_id, message_thread_id=row.message_thread_id, guard=guard, session=writer)
+            mark = (await self.inbox._rows(writer, [origin]))[0]
+            self.inbox._current(link, mark)
+            data = answer_data(mark)
+            if data["version"] != 2 or data["notice_id"] != group.anchor_outbox_id or mark.route_kind != "work_answer" or mark.route_complete or mark.operation_ids or any("work_action_id" in member.payload for member in group.rows):
+                raise CallbackRefused()
+            await self.services.acts.finish_voice_note(link, message_id=mark.message_id, duration=data["original"]["voice"]["duration"], used_as="discarded", session=writer)
+            await self.callbacks.consume_group(group, session=writer)
+            for member in group.rows:
+                saved = await writer.get(TelegramCallbackRow, member.id)
+                saved.payload = {key: value for key, value in saved.payload.items() if key != "transcript"}
+            parent = await writer.get(TelegramOutboxRow, group.anchor_outbox_id)
+            parent.payload = {**parent.payload, "product_keyboard_basis": answer_keyboard(data, mark.message_id, cleared=True)}
+            await self.services.outbox.plan_product_keyboard(
+                link,
+                source_id="work-voice-discard:" + row.id,
+                parts=[{"kind": "edit", "source_ref": {"key": "voice.discarded", "values": {}}, "target_message_id": row.message_id}],
+                keyboard=[],
+                callbacks=self.callbacks,
+                guard=guard,
+                inbox_rows=[InboxRow.from_row(mark)],
+                finish_route=True,
+                message_thread_id=mark.message_thread_id,
+                session=writer,
+            )
 
     async def resume(self, channel, link, origin, *, guard):
         return await await_drained(self._resume(channel, link, origin, guard=guard))
@@ -184,7 +216,7 @@ class WorkUntiedInputs:
             if data["notice_id"] != group.anchor_outbox_id:
                 raise CallbackRefused()
             mark.route_kind, mark.route_target_id = "work_card_hold", data["source_outbox_id"]
-            mark.route_basis = {"source_outbox_id": data["source_outbox_id"]}
+            mark.route_basis = {**{key: value for key, value in mark.route_basis.items() if key != "work_answer"}, "source_outbox_id": data["source_outbox_id"]}
             await self.callbacks.consume_group(group, session=writer)
         await self.services.work_callbacks.closed.offer(link, origin, guard=guard)
 
@@ -219,7 +251,13 @@ class WorkUntiedInputs:
                 _parent, rows, selected = await self.callbacks._locked(writer, link, row.id)
                 if (selected.chat_id, selected.message_id, selected.message_thread_id) != (row.chat_id, row.message_id, row.message_thread_id):
                     raise CallbackRefused()
-            request = Respond(operation_id=row.id, expected_request_revision=data["seen"]["request_revision"], expected_assignment_revision=data["seen"]["assignment_revision"], text=data["text"])
+            request = Respond(
+                operation_id=row.id,
+                expected_request_revision=data["seen"]["request_revision"],
+                expected_assignment_revision=data["seen"]["assignment_revision"],
+                text=data["text"],
+                disposition=data["purpose"] if data.get("purpose") in {"cannot_provide", "wrong_recipient"} else "supplied",
+            )
             result = await self.controls.acts._stage_work_act(link, kind="respond", request_id=data["request_id"], work_id=data["work_id"], request=request, owner=owner, session=writer)
             mark = (await self.inbox._rows(writer, [origin]))[0]
             if existing is None:
@@ -233,6 +271,10 @@ class WorkUntiedInputs:
                 for member in group.rows:
                     control = await writer.get(TelegramCallbackRow, member.id)
                     control.payload = {**control.payload, "work_action_id": result.id}
+                if data.get("prompt_id") is not None:
+                    prompt = await writer.get(TelegramCallbackRow, data["prompt_id"])
+                    prompt.consumed_at, prompt.closed_reason = self.callbacks.clock(), "answered"
+                    prompt.payload = {**prompt.payload, "work_action_id": result.id}
             composed.captured = (
                 replace(
                     captured,
@@ -309,10 +351,10 @@ class _AnswerProjection(_RecoveryProjection):
         controls = _RequestProjection.objects(rows[0][14])
         original = [row for row in controls if row.group_id == data["group_id"]]
         selected = next((row for row in controls if row.id == g.identity), None)
-        if selected is None or selected.kind != "answer_yes" or selected.target_kind != "request" or selected.target_id != data["request_id"]:
+        if selected is None or selected.kind != ("voice_save_answer" if data["version"] == 2 else "answer_yes") or selected.target_kind != "request" or selected.target_id != data["request_id"]:
             raise CallbackRefused()
         choices = [row for row in controls if row.group_id == selected.group_id]
-        _validate_rows(parent, original)
+        answer_source_group(parent, original, data)
         _validate_rows(notice, choices)
         if parent.payload["presentation_version"] != data["presentation_version"] or not same_displayed_basis(acknowledged_source(g.link, parent), g.source):
             raise CallbackRefused()
@@ -321,36 +363,41 @@ class _AnswerProjection(_RecoveryProjection):
         if any(row.payload.get("work_action_id") != g.identity for row in choices) and act is not None:
             raise CallbackRefused()
         if g.fresh:
-            if any(row.consumed_at is not None or "work_action_id" in row.payload for row in original):
+            owns_prompt = data.get("prompt_id") is not None and g.action is not None and all(row.consumed_at is not None and row.closed_reason == "answered" and row.payload.get("work_action_id") == g.identity for row in original)
+            if not owns_prompt and any(row.consumed_at is not None or "work_action_id" in row.payload for row in original):
                 raise ProductSourceRetired()
-            for row in original + choices:
+            try:
+                for row in [] if owns_prompt else original:
+                    g.callbacks._usable(row)
+            except CallbackRefused:
+                raise ProductSourceRetired() from None
+            for row in choices:
                 g.callbacks._usable(row)
-            for part in parent.parts:
-                if part["presentation_version"] == data["presentation_version"] and (any(value >= mark.message_id for value in part["message_ids"]) or _aware(datetime.fromisoformat(part["sent_at"])) > _aware(mark.accepted_at)):
-                    raise CallbackRefused()
+            answer_source_input(parent, mark, data)
         basis = notice.payload.get("product_basis", {})
         if (
             notice.state != "sent"
             or basis.get("origins") != [[mark.link_id, mark.message_id, mark.chat_id]]
             or basis.get("finish_route") is not False
             or not basis.get("parts")
-            or any(part.get("source_ref", {}).get("key") != "ask.is_this_answer" for part in basis["parts"])
+            or not same_body(basis["parts"], answer_parts(data, mark.message_id))
         ):
             raise CallbackRefused()
-        if len(notice.parts) != 1 or type(notice.parts[0].get("protect_content")) is not bool:
+        if any(type(part.get("protect_content")) is not bool for part in notice.parts):
             raise CallbackRefused()
-        acknowledged_parts(notice, [{**part, "stored_keyboard": True, "protect_content": notice.parts[0]["protect_content"]} for part in basis["parts"]])
+        acknowledged_parts(notice, notice_recipes(notice, data, mark.message_id))
         if any(row.message_id != notice.parts[-1]["message_ids"][0] for row in choices):
             raise CallbackRefused()
         if not same_input(mark, expected):
             raise CallbackRefused()
-        if mark.route_kind not in {"work_answer", "work_input"} or mark.message_thread_id != notice.message_thread_id or mark.message_thread_id != parent.message_thread_id or mark.sanitized_input != {"type": "text", "text": data["text"]}:
+        if mark.route_kind not in {"work_answer", "work_input"} or mark.message_thread_id != notice.message_thread_id or mark.message_thread_id != parent.message_thread_id or not answer_input(mark, data):
             raise CallbackRefused()
         if (parent.link_id, parent.owner_user_id, parent.binding_generation, parent.chat_id) != (g.link.id, g.link.owner_user_id, g.link.binding_generation, g.link.chat_id):
             raise CallbackRefused()
         if not same_body(data["seen"], g.source.seen) or (data["request_id"], data["work_id"]) != (g.source.request["id"], g.source.work["id"]):
             raise CallbackRefused()
-        if not same_body(notice.payload.get("product_keyboard_basis"), answer_keyboard(data, mark.message_id)):
+        cleared = data["version"] == 2 and not g.fresh and act is not None and act.state == "done" and "transcript" not in selected.payload and all(row.consumed_at is not None and row.closed_reason == "work-done" for row in choices)
+        if not same_body(notice.payload.get("product_keyboard_basis"), answer_keyboard(data, mark.message_id, cleared=cleared)):
             raise CallbackRefused()
         if "work_action_id" in mark.route_basis and (act is None or mark.route_basis["work_action_id"] != g.identity or mark.operation_ids != [g.identity]):
             raise CallbackRefused()

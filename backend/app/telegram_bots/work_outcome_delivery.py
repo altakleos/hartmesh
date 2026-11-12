@@ -129,13 +129,13 @@ def validate_origin(callback, parent, basis, row):
     if parent.owner_user_id != row.owner_user_id or callback.payload.get("work_action_id") != data["act"]["id"] or callback.group_id not in {part.get("callback_group_id") for part in parent.parts}:
         raise ProductSourceRetired()
     original_input = parent.payload.get("work_request_basis", {}).get("input")
-    if callback.kind == "answer_yes" and original_input is None and mark is not None:
+    if callback.kind in {"answer_yes", "voice_save_answer"} and original_input is None and mark is not None:
         fixed = parent.payload.get("product_basis", {})
         if (
             fixed.get("origins") != [[mark["link_id"], mark["message_id"], mark["chat_id"]]]
             or fixed.get("finish_route") is not False
             or not fixed.get("parts")
-            or any(part.get("source_ref", {}).get("key") != "ask.is_this_answer" for part in fixed["parts"])
+            or any(part.get("source_ref", {}).get("key") != ("voice.confirm_answer" if callback.kind == "voice_save_answer" else "ask.is_this_answer") for part in fixed["parts"])
         ):
             raise ProductSourceRetired()
         original_input = mark
@@ -187,7 +187,7 @@ def _recipe_matches(part, recipe, *, edit=False):
     return all(same_body(part.get(key), value) for key, value in recipe.items() if key != "kind" or not edit)
 
 
-def acknowledged_parts(row, recipes, *, edit=False):
+def acknowledged_parts(row, recipes, *, edit=False, sending_part_id=None):
     """Complete typed transport proof shared by outcome ACK and shown controls."""
     if type(row.payload["presentation_version"]) is not int or row.payload["presentation_version"] != 0 or len(row.parts) != len(recipes) or not row.parts:
         raise ProductSourceRetired()
@@ -195,6 +195,9 @@ def acknowledged_parts(row, recipes, *, edit=False):
         {"target_message_id", "target_protect_content"} if edit else set()
     )
     identities, message_ids = set(), set()
+    sending = next((index for index, part in enumerate(row.parts) if part.get("part_id") == sending_part_id), None)
+    if sending_part_id is not None and sending is None:
+        raise ProductSourceRetired()
     for index, (part, recipe) in enumerate(zip(row.parts, recipes, strict=True)):
         identity = part["part_id"]
         if type(identity) is not str or len(identity) != 32 or identity in identities or any(ch not in "0123456789abcdef" for ch in identity):
@@ -210,6 +213,10 @@ def acknowledged_parts(row, recipes, *, edit=False):
             or not _recipe_matches(part, recipe, edit=index == 0 and edit)
         ):
             raise ProductSourceRetired()
+        if sending is not None and index >= sending:
+            if part.get("state") != ("sending" if index == sending else "pending") or part.get("message_ids") != []:
+                raise ProductSourceRetired()
+            continue
         if part.get("state") != "sent" or type(part.get("message_ids")) is not list or len(part["message_ids"]) != 1 or any(type(value) is not int or value <= 0 or value in message_ids for value in part["message_ids"]):
             raise ProductSourceRetired()
         message_ids.update(part["message_ids"])
@@ -431,6 +438,14 @@ class WorkOutcomePlans:
                     writer.add(keyboard_cleanup_row(control, owner_user_id=link.owner_user_id, now=self.outbox.clock(), dedupe_key=key))
             if control.consumed_at is None:
                 control.consumed_at, control.closed_reason = self.outbox.clock(), reason
+            if reason == "work-done" and control.kind == "voice_save_answer":
+                control.payload = {key: value for key, value in control.payload.items() if key != "transcript"}
+                keyboard = deepcopy(row.payload["product_keyboard_basis"])
+                for line in keyboard:
+                    for descriptor in line:
+                        if descriptor.get("kind") == "voice_save_answer":
+                            descriptor["payload"].pop("transcript", None)
+                row.payload = {**row.payload, "product_keyboard_basis": keyboard}
 
     async def _retire(self, writer, link, row):
         if row.claim_id is not None:

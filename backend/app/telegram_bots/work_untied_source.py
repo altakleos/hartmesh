@@ -26,7 +26,7 @@ class WorkUntiedSource:
     def __init__(self, plans):
         self.plans, self.inbox, self.callbacks = plans, plans.outbox.inbox, plans.callbacks
 
-    async def find(self, link, origin, *, guard, session=None):
+    async def find(self, link, origin, *, guard, session=None, voice=False):
         """Return a locator, never route text or infer consent to save it."""
 
         async def perform():
@@ -34,7 +34,10 @@ class WorkUntiedSource:
                 mark = (await self.inbox._rows(writer, [origin]))[0]
                 self.inbox._current(link, mark)
                 raw = mark.sanitized_input
-                if link.agent_kind != "instance" or mark.route_kind is not None or type(raw) is not dict or set(raw) - {"type", "text"} or raw.get("type", "text") != "text" or type(raw.get("text")) is not str or not raw["text"].strip():
+                valid = type(raw) is dict and (
+                    set(raw) == {"type", "voice"} and raw["type"] == "voice" if voice else not set(raw) - {"type", "text"} and raw.get("type", "text") == "text" and type(raw.get("text")) is str and bool(raw["text"].strip())
+                )
+                if link.agent_kind != "instance" or mark.route_kind is not None or not valid:
                     return None
                 previous = await writer.scalar(
                     select(func.max(TelegramInboundMarkRow.message_id)).where(

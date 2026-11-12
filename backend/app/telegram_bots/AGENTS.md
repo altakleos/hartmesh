@@ -251,14 +251,17 @@ imports lazy and suppress SDK payload logging only inside the voice context.
 The package emits fixed qualification reasons, never keys, audio or transcripts.
 SDK imports, TLS client construction and sync closes run off-loop.
 
-`VoiceNotes` treats a voice note as typed text that arrives late. The inbox row
+`VoiceNotes` routes ordinary transcripts as typed text. Optional `work_voice_inputs.py`
+captures Work ownership before transcription and requires explicit confirmation;
+its source, retention and audit rules are in [Work guidance](../../docs/TELEGRAM_WORK.md).
+The inbox row
 is its only state: route `voice` with target `working` until it has an outcome,
 or `asked` while its consent question waits. There are no other phases, no
-worker and no provider retry. `complete_voice` rewrites the row as ordinary plain
-or forwarded input in the writer that saves the `voice_note` audit and the
-`voice.heard` echo, retaining the recording's descriptor in `voice_note` only to
-compare a redelivered update. Everything after that is the typed path: prompts,
-pending files, joins, queue, Stop, recovery and Try again need no voice branch.
+worker and no provider retry. `complete_voice` retains captured Work context in
+the same writer as its audit and consent plan. Ordinary transcripts become plain
+or forwarded input with a `voice.heard` echo. The recording descriptor remains
+in `voice_note` to compare redelivery. Ordinary prompts, pending files, joins,
+queue, Stop, recovery and Try again continue through the typed path.
 The per-owner lock spans bots, covers checks through the audit commit, and is
 released before the transcript is routed. Queued notes hold no audio; audio lives
 only inside `_transcribe`, charged to the shared byte budget through the provider

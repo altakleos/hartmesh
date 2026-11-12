@@ -1904,7 +1904,7 @@ class TelegramBotChannel(TelegramChannel):
             if work_sources is None:
                 raise PermanentDeliveryError("unsupported-work-request-source")
             work_part = await work_sources.read_part(saved)
-        elif source_key == "ask.is_this_answer":
+        elif source_key in {"ask.is_this_answer", "voice.confirm_answer"}:
             controller = getattr(self._services, "work_callbacks", None)
             work_sources = getattr(getattr(controller, "untied", None), "notice", None)
             if work_sources is None:

@@ -1169,12 +1169,19 @@ class InboxRepository:
                 ):
                     raise ValueError("submission-conflict") from None
                 basis = parent.payload.get("product_basis") if parent is not None else None
+                mark = await writer.get(TelegramInboundMarkRow, (link.id, payload["message_id"], chat_id), with_for_update=True)
+                closed_voice = kind == "prompt_send_new" and mark is not None and "voice_note" in mark.route_basis
+                if closed_voice:
+                    from app.telegram_bots.work_closed_inputs import validate_closed_voice
+
+                    validate_closed_voice(parent, mark)
                 expected = [[link.id, payload["message_id"], chat_id]]
                 if (
                     type(basis) is not dict
                     or basis.get("origins") != expected
                     or basis.get("finish_route") is not False
-                    or any(part.get("source_ref", {}).get("key") not in ({"prompt.closed", "prompt.unavailable"} if kind == "prompt_send_new" else {"ask.is_this_answer"}) for part in basis.get("parts", []))
+                    or not closed_voice
+                    and any(part.get("source_ref", {}).get("key") not in ({"prompt.closed", "prompt.unavailable"} if kind == "prompt_send_new" else {"ask.is_this_answer"}) for part in basis.get("parts", []))
                     or not basis.get("parts")
                 ):
                     raise ValueError("submission-conflict") from None
@@ -2981,13 +2988,16 @@ class InboxRepository:
         self._current(current, mark)
         original = _input(mark.sanitized_input)
         forwarded, origin = mark.route_basis.get("forwarded"), mark.route_basis.get("origin")
+        if _canonical({"work_voice": mark.route_basis.get("work_voice")}) != _canonical({"work_voice": row.route_basis.get("work_voice")}):
+            raise ValueError("voice-note-conflict") from None
         if mark.route_kind != "voice" or mark.route_target_id != "working" or mark.route_complete or original.get("type") != "voice" or type(forwarded) is not bool or type(text) is not str or not text.strip():
             raise ValueError("voice-note-conflict") from None
         quoted = {"reply_to_message_id": original["reply_to_message_id"]} if "reply_to_message_id" in original else {}
         profile = {"version": 2, "kind": "chat_input", "forwarded": True, "origin": origin} if forwarded else {"version": 1, "kind": "plain_text", "forwarded": False}
         mark.sanitized_input = _input({"type": "text", "text": text, **quoted})
         mark.route_kind, mark.route_target_id = "turn", link.agent_ref
-        mark.route_basis = {"input_profile": profile, "voice_note": {"version": 1, "original": original}}
+        work_voice = {"work_voice": deepcopy(mark.route_basis["work_voice"])} if "work_voice" in mark.route_basis else {}
+        mark.route_basis = {"input_profile": profile, "voice_note": {"version": 1, "original": original}, **work_voice}
         await session.flush()
         await guard.check(session)
         return _snapshot(mark)
@@ -3012,7 +3022,7 @@ class InboxRepository:
             if mark.route_complete:
                 raise ValueError("inbox-route-complete")
             # Host facts written before route selection remain server-owned.
-            saved_host = {key: deepcopy(value) for key, value in mark.route_basis.items() if key in {"human_input_ui", "pending_files"}}
+            saved_host = {key: deepcopy(value) for key, value in mark.route_basis.items() if key in {"human_input_ui", "pending_files", "voice_note", "work_voice"}}
             routed_basis = {**basis, **saved_host}
             mark.route_kind, mark.route_target_id, mark.route_basis, mark.operation_ids = kind, target_id, routed_basis, deepcopy(operation_ids)
             await session.flush()

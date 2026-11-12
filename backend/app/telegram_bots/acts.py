@@ -248,6 +248,27 @@ class Acts(WorkActionMethods):
         await session.flush()
         return _snapshot(row)
 
+    async def finish_voice_note(self, link: BotLink, *, message_id: int, duration: int, used_as: str, session: AsyncSession):
+        """Classify the original transcription without another call or charge."""
+        self._writer_required(session)
+        identity = hashlib.sha256(f"telegram:{link.id}:{link.chat_id}:{message_id}:voice_note".encode()).hexdigest()[:32]
+        row = await session.get(TelegramActRow, identity, with_for_update=True, populate_existing=True)
+        if (
+            used_as not in {"message", "discarded"}
+            or row is None
+            or (row.link_id, row.bot_id, row.owner_user_id, row.binding_generation, row.telegram_user_id, row.chat_id, row.message_id, row.kind, row.state)
+            != (link.id, link.bot_id, link.owner_user_id, link.binding_generation, link.telegram_user_id, link.chat_id, message_id, "voice_note", "done")
+            or set(row.body) != {"duration", "provider", "used_as"}
+            or type(row.body["duration"]) is not int
+            or row.body["duration"] != duration
+            or row.body["provider"] not in {"openai", "gemini"}
+            or row.body["used_as"] not in {"answer", used_as}
+        ):
+            raise ValueError("invalid-voice-act") from None
+        row.body = {**row.body, "used_as": used_as}
+        row.updated_at = datetime.now(UTC)
+        await session.flush()
+
     async def write(self, link: BotLink, *, act_id: str, kind: str, body: dict, state: str = "pending", session: AsyncSession, **targets) -> ActRow:
         """Borrowed stage-one metadata only; the effect owner supplies custody."""
         self._writer_required(session)

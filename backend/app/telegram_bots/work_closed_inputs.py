@@ -1,14 +1,41 @@
 """Explicit recovery choices for retained replies to closed Work presentations."""
 
+from html import escape
 from uuid import uuid4
 
 from app.telegram_bots.callbacks import CallbackRefused, Prompts
 from app.telegram_bots.inbox import InboxRow
 from app.telegram_bots.producer import ProductSourceRetired
+from app.telegram_bots.split import split_html, visible_text
 from app.telegram_bots.work_request_recovery import WorkRequestRecovery
 from deerflow.agent_instances.contract import AgentDenied
 from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
+
+
+def closed_parts(mark, *, available):
+    parts = []
+    if "voice_note" in mark.route_basis:
+        parts.extend({"kind": "text", "source_ref": {"key": "voice.transcript_part", "values": {"text": visible_text(chunk)}}, "reply_to_message_id": mark.message_id} for chunk in split_html(escape(mark.sanitized_input["text"])))
+    refusal = "prompt.unavailable" if not available else "voice.answer_too_long" if mark.route_basis.get("work_voice_refusal") == "too_long" else "prompt.closed"
+    parts.append({"kind": "text", "source_ref": {"key": refusal, "values": {}}, "reply_to_message_id": mark.message_id})
+    return parts
+
+
+def validate_closed_voice(parent, mark):
+    if "voice_note" not in mark.route_basis:
+        return
+    from app.telegram_bots.work_actions import same_body
+    from app.telegram_bots.work_outcome_delivery import acknowledged_parts
+
+    basis = parent.payload.get("product_basis", {})
+    parts = basis.get("parts", [])
+    if not parts or parent.state != "sent" or not same_body(parts, closed_parts(mark, available=parts[-1].get("source_ref", {}).get("key") != "prompt.unavailable")):
+        raise CallbackRefused()
+    if len(parts) != len(parent.parts) or any(type(part.get("protect_content")) is not bool for part in parent.parts):
+        raise CallbackRefused()
+    recipes = [{**part, "protect_content": parent.parts[index]["protect_content"], **({"stored_keyboard": True} if index == len(parts) - 1 else {})} for index, part in enumerate(parts)]
+    acknowledged_parts(parent, recipes)
 
 
 class WorkClosedInputs:
@@ -83,7 +110,7 @@ class WorkClosedInputs:
                 notice_id = await self.services.outbox.plan_product_keyboard(
                     link,
                     source_id="work-closed:" + source_id + "." + str(mark.message_id),
-                    parts=[{"kind": "text", "source_ref": {"key": "prompt.closed" if available else "prompt.unavailable", "values": {}}, "reply_to_message_id": mark.message_id}],
+                    parts=closed_parts(mark, available=available),
                     keyboard=keyboard,
                     callbacks=self.callbacks,
                     guard=guard,
@@ -127,7 +154,7 @@ class WorkClosedInputs:
             notice_id = await self.services.outbox.plan_product_keyboard(
                 link,
                 source_id="work-closed-unavailable:" + selected.id,
-                parts=[{"kind": "edit", "source_ref": {"key": "prompt.unavailable", "values": {}}, "target_message_id": selected.message_id}],
+                parts=closed_parts(mark, available=False) if "voice_note" in mark.route_basis else [{"kind": "edit", "source_ref": {"key": "prompt.unavailable", "values": {}}, "target_message_id": selected.message_id}],
                 keyboard=[[{"kind": kind, "label": label, "target_kind": "request", "target_id": closed["request_id"], "payload": payload}] for kind, label in (("prompt_send_new", "label.send_new"), ("prompt_discard", "label.discard"))],
                 callbacks=self.callbacks,
                 guard=guard,
@@ -155,6 +182,10 @@ class WorkClosedInputs:
                 if mark is None or "work_closed" not in mark.route_basis:
                     return False
                 self.inbox._current(link, mark)
+                parent = await writer.get(TelegramOutboxRow, row.payload.get("anchor_outbox_id"))
+                if parent is None:
+                    raise CallbackRefused()
+                validate_closed_voice(parent, mark)
                 origin = InboxRow.from_row(mark)
             if row.kind == "prompt_reopen":
                 from app.telegram_bots.work_reopen import WorkReopen
@@ -169,6 +200,8 @@ class WorkClosedInputs:
                 if mark is None:
                     raise CallbackRefused()
                 self.inbox._current(link, mark)
+                parent = await writer.get(TelegramOutboxRow, group.anchor_outbox_id)
+                validate_closed_voice(parent, mark)
                 closed = mark.route_basis.get("work_closed", {})
                 if (
                     mark.message_thread_id != selected.message_thread_id
@@ -182,6 +215,14 @@ class WorkClosedInputs:
                 publishing = [member for member in group.rows if "publication_owner" in member.payload]
                 if publishing and (selected.kind != "prompt_send_new" or not any(member.id == selected.id for member in publishing)):
                     raise CallbackRefused()
+                if "voice_note" in mark.route_basis:
+                    await self.services.acts.finish_voice_note(
+                        link,
+                        message_id=mark.message_id,
+                        duration=mark.route_basis["voice_note"]["original"]["voice"]["duration"],
+                        used_as="message" if selected.kind == "prompt_send_new" else "discarded",
+                        session=writer,
+                    )
                 if selected.kind == "prompt_send_new":
                     if not publishing:
                         if mark.route_kind != "work_card_hold":

@@ -36,12 +36,15 @@ def validate_reopen(value):
 
 
 def check_reopen_origin(link, parent, callbacks, mark, basis, source, outbox_id):
+    from app.telegram_bots.work_closed_inputs import validate_closed_voice
+
     reopened = validate_reopen(basis["reopen"])
     origin = basis["origin"]
     selected = next((row for row in callbacks if row.id == origin["callback_id"]), None)
     old_prompt = next((row for row in callbacks if row.id == reopened["prompt_id"]), None)
     if mark is None or parent is None or selected is None or old_prompt is None:
         raise ProductSourceRetired()
+    validate_closed_voice(parent, mark)
     closed = mark.route_basis.get("work_closed", {})
     scope = (link.id, link.chat_id, link.binding_generation, mark.message_thread_id)
     if (

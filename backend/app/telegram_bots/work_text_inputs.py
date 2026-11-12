@@ -13,6 +13,7 @@ from app.telegram_bots.work_input_admission import WorkInputAdmissions
 from app.telegram_bots.work_input_capture import WorkInputCaptures
 from app.telegram_bots.work_input_previews import WorkInputPreviews, blocked_input_actions, input_identity
 from app.telegram_bots.work_typing import PURPOSES, shown_prompt_messages
+from app.telegram_bots.work_voice_inputs import WorkVoiceInputs
 from deerflow.agent_instances.contract import AgentConflict
 from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
@@ -30,6 +31,7 @@ class WorkTextInputs:
         self.captures = WorkInputCaptures(self.inbox, services.callbacks)
         self.admissions = WorkInputAdmissions(callbacks.controls, self.captures)
         self.previews = WorkInputPreviews(callbacks.outcomes.plans, self.captures)
+        self.voice = WorkVoiceInputs(self)
 
     async def handle_text(self, channel, update, *, captured_link=None):
         async def perform():
@@ -113,7 +115,7 @@ class WorkTextInputs:
 
     async def _apply(self, channel, link, captured, guard):
         data = captured.route_basis["work_input"]
-        if data["purpose"] in {"decide_own", "decide_note"}:
+        if data["purpose"] in {"decide_own", "decide_note"} or data["purpose"] == "request_changes" and "voice_note" in captured.route_basis:
             async with self.services.callbacks.writer(link, guard) as writer:
                 if await writer.scalar(select(blocked_input_actions(input_identity(captured)))):
                     # Its confirmation owns progress now; receipt observation

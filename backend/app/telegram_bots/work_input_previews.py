@@ -44,13 +44,15 @@ def validate_input_basis(basis):
         raise ValueError("invalid-work-input-view")
 
 
-def input_state(data, source):
+def input_state(data, source, *, voice=False):
     if data["work_id"] != source.work["id"]:
         raise CallbackRefused()
     if data["purpose"] == "request_changes":
-        if same_body(data["seen"], source.seen):
+        if same_body(data["seen"], source.seen) and not voice:
             raise CallbackRefused()
         value = {"view": "changes", "note": data["text"]}
+        if voice and same_body(data["seen"], source.seen):
+            value["refreshed"] = False
         if data["request_id"] != source.request["id"]:
             value["replaced"] = True
     elif data["purpose"] in {"decide_own", "decide_note"} and data["request_id"] == source.request["id"]:
@@ -146,7 +148,7 @@ def _check_input_origin(link, parent, callbacks, mark, blocked, basis, source, *
         "seen": previous.seen,
         "text": accepted_text(mark, prompt, acknowledged_at, message_ids=shown_prompt_messages(_item(parent), accepted_at=mark.accepted_at)),
     }
-    if not same_body(data, mark.route_basis.get("work_input")) or not same_body(input_state(data, source), basis["interaction"]):
+    if not same_body(data, mark.route_basis.get("work_input")) or not same_body(input_state(data, source, voice="voice_note" in mark.route_basis), basis["interaction"]):
         raise ProductSourceRetired()
 
 
@@ -183,7 +185,7 @@ class WorkInputPreviews:
             captured = await self.captures.capture(link, origin, prompt_id=prompt_id, guard=guard)
             data = captured.route_basis["work_input"]
             source, settings = await self.recovery._source(link, request_id or data["request_id"])
-            state = input_state(data, source)
+            state = input_state(data, source, voice="voice_note" in captured.route_basis)
             admission = await prepare_attention(self.plans.reader, link)
             composed = _InputGuard(guard, admission, source, captured, conclusive_act=conclusive_act)
             async with self.plans.callbacks.writer(link, composed) as writer:

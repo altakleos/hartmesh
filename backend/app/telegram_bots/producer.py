@@ -2600,7 +2600,17 @@ class OutboxSender:
                     missing = any(value in description for value in ("message to edit not found", "message can't be edited", "message cannot be edited"))
                     topic_missing = "message thread not found" in description
                     if (missing or topic_missing) and row.payload.get("kind") != "keyboard_cleanup":
-                        await self._replace(binding, row, claim, reason="topic-missing" if topic_missing else "edit-anchor-missing")
+                        consent = any(
+                            part.get("source_ref", {}).get("key") in {"ask.is_this_answer", "voice.confirm_answer", "voice.transcript_part", "voice.answer_too_long"} for part in row.payload.get("product_basis", {}).get("parts", [])
+                        )
+                        if consent:
+                            # Input consent belongs to its original destination
+                            # and complete transcript. Preserve every ACK and
+                            # use ordinary delivery-only Retry; relocation would
+                            # invalidate its proof and resend an ACKed prefix.
+                            await self._failure(link_id, row_id, generation, claim, error)
+                        else:
+                            await self._replace(binding, row, claim, reason="topic-missing" if topic_missing else "edit-anchor-missing")
                         return
                 await self._failure(link_id, row_id, generation, claim, error)
                 return

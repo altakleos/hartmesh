@@ -196,6 +196,8 @@ TEXTS: dict[str, str] = {
     "voice.not_used": "Not turned into text. Type the message instead.",
     "voice.writing": "Writing down your voice note…",
     "voice.heard": 'Heard: "{text}"',
+    "voice.transcript_part": "{text}",
+    "voice.answer_too_long": "This transcript is too long to save as an answer. Nothing was saved. Reopen the question to type an answer of up to 4,096 characters, send this as a new message, or discard it.",
     "voice.failed": "The voice note could not be turned into text just now. Send it again or type it.",
     "voice.unclear": "That voice note could not be understood. Try again or type it.",
     "media.unsupported": "This chat takes text, voice notes, photos and files. That kind of message is not passed on. A video or a recording can be sent as a file.",
