@@ -2041,6 +2041,8 @@ refresh preserves delivered files. Colleague notices also have delivery, protect
 Show and recovery foundations, including answers and stopped attempts. Proposed
 assignments show their complete objective and completion criteria, with Open
 assignment on the web and Not now to clear the buttons without changing Work.
+Interruption and failure notices use the recorded attempt and reason, with
+protected previews and links to that assignment's original conversation.
 These workers remain uninstalled; remaining notification forms and startup
 integration are still pending.
 Background recovery preserves newer

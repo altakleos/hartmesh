@@ -66,6 +66,16 @@ WORK_NEWS_KEYS = frozenset(
 WORK_NEWS_FIRST_KEYS = frozenset(
     "request.answered decision.recorded result.accepted result.changes work.cancelled work.changed work.reopened attempt.stopped attempt.stopped_changed attempt.stopped_withdrawn work.proposed remind.ready_to_resume".split()
 )
+WORK_NEWS_KEYS |= frozenset(
+    (
+        "interrupted interrupted.title_not_started interrupted.reason.container-absent interrupted.reason.run-orphaned interrupted.reason.run-never-started interrupted.reason.start-failed "
+        "interrupted.reason.outcome-uncertain interrupted.reason.idle interrupted.reason.lifecycle interrupted.reason.storage-recovery interrupted.reason.operator interrupted.reason.host-replaced interrupted.reason.unknown "
+        "attempt.work_kept attempt.stopped_restart attempt.failed attempt.failed.busy attempt.failed.run-limit attempt.failed.restarting attempt.failed.starting-elsewhere attempt.failed.start-failed "
+        "attempt.failed.files-full attempt.failed.files-full_ask attempt.failed.storage-busy attempt.failed.other attempt.no_result attempt.no_result_excerpt attempt.latest attempt.wrote_last "
+        "concealed.no_result concealed.interrupted concealed.not_started"
+    ).split()
+)
+WORK_NEWS_FIRST_KEYS |= frozenset("interrupted interrupted.title_not_started attempt.failed attempt.failed.other attempt.stopped_restart attempt.no_result attempt.no_result_excerpt".split())
 
 
 def test_text_catalog_locales_have_equal_keys():

@@ -9,6 +9,13 @@ _CATALOGS = {"en": MappingProxyType(en.TEXTS), "zh-CN": MappingProxyType(zh_cn.T
 
 FIRST_KEYS: frozenset[str] = frozenset(
     {
+        "interrupted",
+        "interrupted.title_not_started",
+        "attempt.failed",
+        "attempt.failed.other",
+        "attempt.stopped_restart",
+        "attempt.no_result",
+        "attempt.no_result_excerpt",
         "request.answered",
         "decision.recorded",
         "result.accepted",

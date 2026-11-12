@@ -859,3 +859,21 @@ an explicit protected Show is still served. Resumed or changed Work retires as
 `resumed`. The source-owned sender preserves these closed skip reasons under its
 exact claim fence. Refresh/Show history keeps the original reminder class, and
 the only navigation is a web assignment link. Installation remains pending.
+
+`work_attempt_notices.py` qualifies failed, contained, service-restarted and
+no-result settlements against their explicit attempt and activation. Current
+run metadata, when retained, must match the Work, attempt, requester, thread and
+idempotency key; failure wording uses only its closed `stop_reason` vocabulary.
+Host containment uses the exact event/attempt reason and attachment. A restart
+notice refuses an intervening stop/edit/cancel. Saved progress belongs to the
+settlement snapshot, and conversation navigation keeps that attempt's thread
+even after a later activation. Manager and administrator forms come from the
+current joined grant and account/role limits. Files-full advice exposes Files
+only to managers; containment reasons have their specified files handover.
+`attempt_text.py` renders complete escaped progress and both locales, omitting
+claims that work was kept for unstarted, restored, moved or unknown outcomes.
+Protected Show and refresh reuse the source-owned ACK/history boundary while
+retaining the interrupt class. Generic fixed replies cannot impersonate these
+notices. Verified last-output excerpts still need their own source reader;
+until then no-result delivery uses its conversation link. Installation remains
+pending.
