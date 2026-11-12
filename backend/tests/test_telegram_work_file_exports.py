@@ -23,6 +23,16 @@ from deerflow.spaces.contract import Permission, SpaceDenied
 @pytest_asyncio.fixture
 async def work_exports(work_delivery, tmp_path, monkeypatch, request):
     e = await prepare_file_home(work_delivery, tmp_path, monkeypatch)
+    mode = getattr(request, "param", None)
+    if mode in {"review_event", "review_empty_event"}:
+        from app.telegram_bots.work_event_cursors import WorkEventCursors
+        from app.telegram_bots.work_event_intents import WorkEventIntents
+        from app.telegram_bots.work_event_reader import WorkEventReader
+
+        await WorkEventCursors(e.db.links).initialize()
+        projection = WorkEventIntents(links=e.db.links, human=e.human)
+        e.event_worker = WorkEventReader(links=e.db.links, project=projection.project)
+        mode = mode.removesuffix("_event")
     e.http_app.state.storage_spaces = e.files
     e.instance = await e.file_service.get(actor=e.actor, instance_id=e.link.agent_ref)
     e.home = await e.files.registry.get(actor=e.instance.principal, space_id=e.home.id)
@@ -31,23 +41,23 @@ async def work_exports(work_delivery, tmp_path, monkeypatch, request):
     async with e.db.sessions.begin() as writer:
         writer.add(SpaceGrantRow(space_id=e.home.id, principal_kind="human", subject_id=e.actor.subject_id, permissions=int(Permission.READ | Permission.EXPORT)))
     e.source_space = e.home
-    if getattr(request, "param", None) in {"external", "review_album"}:
+    if mode in {"external", "review_album"}:
         from deerflow.spaces.contract import Custody, MutationMode
 
         e.source_space = await e.files.create(actor=e.actor, name="Shared evidence", custody=Custody.personal(e.actor), mode=MutationMode.NATIVE)
         await e.files.mkdir(actor=e.actor, space_id=e.source_space.id, expected_generation=e.source_space.generation, operation_id=uuid4().hex, path="outputs")
         await e.files.write(actor=e.actor, space_id=e.source_space.id, expected_generation=e.source_space.generation, operation_id=uuid4().hex, path="outputs/result.txt", content=b"external result", create=True)
     sources = [WorkSource(space_id=e.source_space.id, path="outputs/result.txt")]
-    if getattr(request, "param", None) == "review_album":
+    if mode == "review_album":
         from test_telegram_output_planning import png_header
 
         sources = []
         for space, actor in ((e.home, e.instance.principal), (e.source_space, e.actor)):
             await e.files.write(actor=actor, space_id=space.id, expected_generation=space.generation, operation_id=uuid4().hex, path="outputs/picture.png", content=png_header(2, 2), create=True)
             sources.append(WorkSource(space_id=space.id, path="outputs/picture.png"))
-    if getattr(request, "param", None) == "review_empty":
+    if mode == "review_empty":
         sources = []
-    review = {"review_required": True} if getattr(request, "param", None) in {"review", "review_album", "review_empty"} else {}
+    review = {"review_required": True} if mode in {"review", "review_album", "review_empty"} else {}
     record = await e.human.work.delegate(actor=e.actor, instance_id=e.instance.id, request=DelegateWork(operation_id=uuid4().hex, objective="Report the findings", success_criteria="Provide evidence", **review))
     conversations = e.http_app.state.agent_conversations
     chat = await conversations.create(actor=e.actor, instance_id=e.instance.id, creation_id=uuid4().hex)

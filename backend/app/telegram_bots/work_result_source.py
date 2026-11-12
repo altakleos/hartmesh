@@ -3,9 +3,14 @@
 import asyncio
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import and_
+from sqlalchemy.orm import aliased
+
 from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.work_request_source import WorkRequestSources, _RequestProjection
 from app.telegram_bots.work_result_identity import result_identity
+from app.telegram_bots.work_result_navigation import NavigationOrigin, require_navigation
+from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkRow
 from deerflow.utils.file_io import await_drained
 
 
@@ -35,9 +40,29 @@ class WorkResultSources(WorkRequestSources):
 
 
 class _ResultProjection(_RequestProjection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.navigation_origin = NavigationOrigin() if "work_result_navigation" in self.captured.item.payload else None
+
+    def extend(self, query):
+        result = super().extend(query)
+        self.navigation_column = None
+        navigation = self.captured.item.payload.get("work_result_navigation")
+        if navigation is not None:
+            attempt = aliased(AgentWorkAttemptRow)
+            self.navigation_column = len(result.column_descriptions)
+            result = result.add_columns(attempt).outerjoin(attempt, and_(attempt.id == navigation["attempt_id"], attempt.work_id == AgentWorkRow.id))
+        return result
+
     def check(self, rows):
         if result_identity(rows[0][self.column]) != self.captured.item.payload.get("work_result_identity"):
             raise ProductSourceRetired()
+        if self.navigation_column is not None:
+            self.navigation_origin.check(self.captured.item.payload["work_result_navigation"])
+            try:
+                require_navigation(self.captured.item.payload["work_result_navigation"], rows[0][self.navigation_column], self.source.work["id"])
+            except ValueError:
+                raise ProductSourceRetired() from None
         super().check(rows)
 
 

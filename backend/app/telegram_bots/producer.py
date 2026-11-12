@@ -51,6 +51,8 @@ _KINDS = frozenset({"text", "document", "photo", "album", "edit", "card"})
 _FINAL_PARTS = frozenset({"sent", "unavailable", "retired"})
 _STATUS_KEYS = frozenset({"access.agent_off", "agent.paused", "agent.retired", "unavailable.fix", "unavailable.off", "unavailable.paused", "unavailable.moved", "unavailable.files_unchecked", "refused.interrupted", "custom_agent.deleted"})
 _URL_SOURCES = {
+    "file.out_failed": ("web.conversation", "label.open_conversation"),
+    "file.too_large_out": ("web.conversation", "label.open_conversation"),
     "file.too_large_in": ("web.conversation", "label.open_conversation"),
     "web.memory": ("web.memory", "label.open_memory"),
     "custom_agent.deleted": ("web.telegram", "label.open_telegram"),
