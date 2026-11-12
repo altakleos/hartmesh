@@ -198,6 +198,7 @@ TEXTS: dict[str, str] = {
     "voice.writing": "Writing down your voice note…",
     "voice.heard": 'Heard: "{text}"',
     "voice.transcript_part": "{text}",
+    "ask.answer_too_long": "This answer is too long to save. Reopen the question to send a shorter answer, send these files as a new message, or discard them.",
     "voice.answer_too_long": "This transcript is too long to save as an answer. Nothing was saved. Reopen the question to type an answer of up to 4,096 characters, send this as a new message, or discard it.",
     "voice.failed": "The voice note could not be turned into text just now. Send it again or type it.",
     "voice.unclear": "That voice note could not be understood. Try again or type it.",

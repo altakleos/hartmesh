@@ -54,7 +54,7 @@ class FileOutcomes:
             return check_recovery(recovery, self.services, channel, link) and (current is None or current() is True)
         return channel._callback_current(link) and (current is None or current() is True)
 
-    async def question(self, channel, link, saved, *, current=None, _recovery=None, _settle=None):
+    async def question(self, channel, link, saved, *, current=None, _recovery=None, _settle=None, _explicit_group=None):
         """One captionless question closes only actually saved input members."""
         if not saved or len(saved) > 64:
             raise ValueError("file-question-conflict") from None
@@ -67,6 +67,11 @@ class FileOutcomes:
             key = "file.saved_ask" if len(saved) == 1 else "file.saved_ask_many"
             source = await fixed_source(self.services, link, key)
             guard = reader.guard()
+            if _explicit_group is not None:
+                from app.telegram_bots.work_album_guard import AlbumGuard
+                from app.telegram_bots.work_album_handoff import handoff
+
+                guard = AlbumGuard(guard, _explicit_group, reader=self.services.work_text_inputs.callbacks.closed.plans.reader, callback_id=handoff(_explicit_group[0])["callback_id"])
             async with self.services.callbacks.writer(link, guard) as writer:
                 receipts, origins = [], []
                 for origin, file in saved:
@@ -83,8 +88,19 @@ class FileOutcomes:
                         raise ValueError("file-question-conflict") from None
                     receipts.append(receipt)
                     origins.append(origin)
-                self.services.file_puts.inbox._group(origins)
+                if _explicit_group is None:
+                    self.services.file_puts.inbox._group(origins)
+                else:
+                    from app.telegram_bots.work_album_handoff import handoff_members
+
+                    if _settle is None:
+                        raise ValueError("file-question-conflict")
+                    actual = await handoff_members(self.services.file_puts.inbox, writer, link, _explicit_group[0])
+                    if [row.message_id for row in actual] != [row.message_id for row in _explicit_group] or not {row.message_id for row in origins} <= {row.message_id for row in actual}:
+                        raise ValueError("file-question-conflict")
                 if _settle is not None:
+                    if _explicit_group is not None:
+                        guard.allow_finish = True
                     await _settle(writer)
                 first = origins[0]
                 identity = f"file-received:{link.chat_id}:{first.message_id}"
@@ -95,7 +111,7 @@ class FileOutcomes:
                         raise ValueError("file-question-conflict") from None
                     return existing.id
                 source["values"].update({"file": receipts[0].result["path"].rsplit("/", 1)[-1]} if len(saved) == 1 else {"n": len(saved)})
-                return await self.services.outbox._plan_product_keyboard(
+                identity = await self.services.outbox._plan_product_keyboard(
                     link,
                     source_id=identity,
                     parts=[{"kind": "text", "source_ref": source, "reply_to_message_id": first.message_id}],
@@ -108,6 +124,16 @@ class FileOutcomes:
                     session=writer,
                     _extra={"file_question_basis": basis},
                 )
+                if _explicit_group is not None:
+                    from app.telegram_bots.inbox import InboxRow
+
+                    marks = await self.services.file_puts.inbox._rows(writer, _explicit_group)
+                    if not all(mark.route_complete for mark in marks):
+                        raise ValueError("file-question-conflict")
+                    indexed = {mark.message_id: mark for mark in marks}
+                    guard.expect([InboxRow.from_row(indexed[origin.message_id]) for origin in _explicit_group])
+                    guard.allow_finish = False
+                return identity
 
         return await await_drained(perform())
 

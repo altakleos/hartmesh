@@ -143,7 +143,7 @@ class WorkFileInputs:
             if message.media_group_id is not None:
                 async with self.services.callbacks.writer(link, guard) as writer:
                     mark = await writer.get(TelegramInboundMarkRow, (link.id, message.message_id, message.chat_id))
-                    if mark is not None and (mark.route_kind == "work_file_album" or "work_album" in mark.route_basis):
+                    if mark is not None and (mark.route_kind == "work_file_album" or "work_album" in mark.route_basis or "work_album_recovery" in mark.route_basis):
                         self.inbox._current(link, mark)
                         return True
                 return False  # The shared ingress joins the whole album before classification.
@@ -230,13 +230,31 @@ class WorkFileInputs:
         async with self.services.callbacks.writer(link, guard) as writer:
             mark = (await self.inbox._rows(writer, [origin]))[0]
             self.inbox._current(link, mark)
-            album = mark.route_kind == "work_file_album" or "work_album" in mark.route_basis
+            album = mark.route_kind == "work_file_album" or "work_album" in mark.route_basis or "work_album_recovery" in mark.route_basis
             if not album and mark.route_kind != "work_file_new" and (mark.route_kind != "work_input" or mark.route_basis.get("work_input", {}).get("version") != 4):
                 return False
             if mark.route_complete:
                 return True
             captured = InboxRow.from_row(mark)
 
+        if "work_album_handoff" in captured.route_basis:
+            from app.telegram_bots.callbacks import _row
+            from app.telegram_bots.work_album_handoff import handoff, send_album_as_new
+            from app.telegram_bots.work_album_recovery import WorkAlbumRecovery
+            from deerflow.persistence.telegram_bots.model import TelegramCallbackRow
+
+            choice = handoff(captured)
+            async with self.services.callbacks.writer(link, guard) as writer:
+                callback = await writer.get(TelegramCallbackRow, choice["callback_id"])
+                if callback is None:
+                    raise CallbackRefused()
+                selected = _row(callback)
+            return await send_album_as_new(WorkAlbumRecovery(self), channel, link, selected, update_id=choice["update_id"], guard=guard, recover=True)
+        if "work_album_recovery" in captured.route_basis:
+            from app.telegram_bots.work_album_recovery import WorkAlbumRecovery
+
+            await WorkAlbumRecovery(self).offer(channel, captured)
+            return True
         if album:
             from app.telegram_bots.work_album_answers import WorkAlbumAnswers
 

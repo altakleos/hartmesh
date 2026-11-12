@@ -183,14 +183,48 @@ async def _sweep_acts(sessions, now):
                 mark.route_complete.is_(False),
                 or_(
                     and_(cast(mark.route_basis["work_input"]["version"].as_string(), String) == "4", cast(TelegramActRow.continuation["version"].as_string(), String) == "4"),
-                    and_(mark.route_kind == "work_album_member", cast(TelegramActRow.continuation["version"].as_string(), String) == "4", cast(TelegramActRow.continuation["work"]["version"].as_string(), String) == "2"),
+                    and_(mark.route_basis["work_album"].as_string().is_not(None), cast(TelegramActRow.continuation["version"].as_string(), String) == "4", cast(TelegramActRow.continuation["work"]["version"].as_string(), String) == "2"),
                     and_(mark.route_kind == "work_file_new", cast(TelegramActRow.continuation["version"].as_string(), String) == "3"),
                 ),
             )
             .exists()
         )
+        from types import SimpleNamespace
+
+        from app.telegram_bots.file_puts import file_act_id
+        from app.telegram_bots.inbox import _callback_owner, chat_input_parts
+
+        # Callback publication snapshots outlive the original inbox rows. Read
+        # exact file dependencies from those validated owners, including Retry
+        # successors, rather than pinning every file in a busy chat.
+        group_files = set()
+        callback = TelegramCallbackRow
+        live_retry_parents = set()
+        retries = await session.execute(
+            select(callback.link_id, callback.chat_id, callback.binding_generation, callback.message_thread_id, callback.payload).where(
+                callback.kind == "retry_message", callback.consumed_at.is_(None), or_(callback.expires_at.is_(None), callback.expires_at > now)
+            )
+        )
+        for link_id, chat_id, generation, topic, payload in retries:
+            if isinstance(payload, Mapping) and type(payload.get("anchor_outbox_id")) is str:
+                live_retry_parents.add((link_id, chat_id, generation, topic, payload["anchor_outbox_id"]))
+        owners = await session.execute(select(callback.id, callback.link_id, callback.chat_id, callback.binding_generation, callback.message_thread_id, callback.payload).where(callback.payload["publication_owner"].as_string().is_not(None)))
+        for identity, link_id, chat_id, generation, topic, payload in owners:
+            try:
+                _data, stage = _callback_owner(payload, identity)
+                if stage.state == "done" and (link_id, chat_id, generation, topic, _data["outbox_id"]) not in live_retry_parents:
+                    continue
+                for origin in stage.origins:
+                    if "work_album_handoff" not in origin.route_basis:
+                        continue
+                    if (origin.link_id, origin.chat_id, origin.binding_generation, origin.message_thread_id) != (link_id, chat_id, generation, topic):
+                        continue
+                    _text, files = chat_input_parts(origin)
+                    group_files.update(file_act_id(SimpleNamespace(id=link_id), file) for file in files)
+            except (ValueError, TypeError, KeyError, AttributeError):
+                continue
         candidates = list(await session.scalars(select(TelegramActRow).where(*expired, TelegramActRow.kind == "file_put", ~work_file_input).with_for_update(skip_locked=True)))
-        identities = [row.id for row in candidates if settled_file_journal(row)]
+        identities = [row.id for row in candidates if row.id not in group_files and settled_file_journal(row)]
         for start in range(0, len(identities), _BATCH):
             await session.execute(delete(TelegramActRow).where(TelegramActRow.id.in_(identities[start : start + _BATCH])))
         from app.telegram_bots.work_actions import WORK_ACT_KINDS

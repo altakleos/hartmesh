@@ -48,6 +48,12 @@ class WorkCallbacks:
         self.followups, self.retries = WorkRoutingFollowupRecovery(outcomes), WorkActionRetries(outcomes)
 
     async def execute_callback(self, channel, row, *, update_id=None, query_id=None):
+        inputs = getattr(self.services, "work_text_inputs", None)
+        if inputs is not None:
+            from app.telegram_bots.work_album_recovery import WorkAlbumRecovery
+
+            if await WorkAlbumRecovery(inputs.files).execute_callback(channel, row, update_id=update_id):
+                return True
         if await self.untied.execute_callback(channel, row, update_id=update_id):
             return True
         if await self.closed.execute_callback(channel, row, update_id=update_id):

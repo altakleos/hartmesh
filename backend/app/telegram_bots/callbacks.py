@@ -842,6 +842,57 @@ class CallbackRepository:
             async with self._writer() as session:
                 rows = list(await session.scalars(select(TelegramCallbackRow).order_by(TelegramCallbackRow.id).with_for_update()))
                 pending_groups = {row.group_id for row in rows if callback_publication_pending(row.payload)}
+                # A live Retry reads its predecessor's immutable callback-owned
+                # input, even after the predecessor's delivery has completed.
+                # Keep only exact same-scope dependencies, not an entire chat.
+                from app.telegram_bots.inbox import _callback_owner
+
+                links = {link.id: link for link in await session.scalars(select(TelegramBotLinkRow))}
+                by_identity = {row.id: row for row in rows}
+                dependencies = {}
+                for row in rows:
+                    if not isinstance(row.payload, Mapping):
+                        continue
+                    link = links.get(row.link_id)
+                    if link is None or (row.chat_id, row.binding_generation) != (link.chat_id, link.binding_generation):
+                        continue
+                    live_retry = (
+                        row.kind == "retry_message"
+                        and row.consumed_at is None
+                        and _aware(now) - _aware(row.created_at) < timedelta(days=self.config.callbacks.max_age_days)
+                        and (row.expires_at is None or _aware(row.expires_at) > _aware(now))
+                    )
+                    source_id = row.payload.get("anchor_outbox_id") if live_retry else None
+                    if callback_publication_pending(row.payload):
+                        try:
+                            data, _stage = _callback_owner(row.payload, row.id)
+                            source_id = data["source_outbox_id"]
+                        except (ValueError, TypeError, KeyError):
+                            continue
+                    if type(source_id) is str:
+                        dependencies.setdefault(source_id, []).append(row)
+                source_ids = sorted(dependencies)
+                for start in range(0, len(source_ids), 500):
+                    for parent in await session.scalars(select(TelegramOutboxRow).where(TelegramOutboxRow.id.in_(source_ids[start : start + 500]))):
+                        if not isinstance(parent.payload, Mapping):
+                            continue
+                        basis = parent.payload.get("reply_basis", parent.payload.get("turn_outcome_basis", {}))
+                        source = basis.get("publication") if isinstance(basis, Mapping) else None
+                        identity = parent.payload.get("input_owner_callback_id") or (source.get("owner_callback_id") if isinstance(source, Mapping) else None)
+                        owner = by_identity.get(identity) if type(identity) is str else None
+                        if owner is None:
+                            continue
+                        scope = (parent.link_id, parent.chat_id, parent.binding_generation, parent.message_thread_id)
+                        if (owner.link_id, owner.chat_id, owner.binding_generation, owner.message_thread_id) != scope:
+                            continue
+                        if not any((row.link_id, row.chat_id, row.binding_generation, row.message_thread_id) == scope for row in dependencies[parent.id]):
+                            continue
+                        try:
+                            data, _stage = _callback_owner(owner.payload, owner.id)
+                        except (ValueError, TypeError, KeyError):
+                            continue
+                        if data["outbox_id"] == parent.id and parent.id in data["delivery_ids"]:
+                            pending_groups.add(owner.group_id)
                 anchors = sorted({anchor for row in rows if row.group_id not in pending_groups and type(anchor := row.payload.get("anchor_outbox_id")) is str})
                 unsettled = set()
                 for start in range(0, len(anchors), 500):

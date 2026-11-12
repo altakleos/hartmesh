@@ -400,7 +400,15 @@ class _RequestProjection:
             result = result.add_columns(mark, blocked_input_actions(identity)).outerjoin(mark, and_(mark.link_id == identity["link_id"], mark.chat_id == identity["chat_id"], mark.message_id == identity["message_id"]))
         if "reopen" in self.basis:
             identity, mark = self.basis["reopen"]["input"], aliased(TelegramInboundMarkRow)
-            result = result.add_columns(mark).outerjoin(mark, and_(mark.link_id == identity["link_id"], mark.chat_id == identity["chat_id"], mark.message_id == identity["message_id"]))
+            if self.basis["reopen"]["version"] == 2:
+                from app.telegram_bots.work_album_reopen import RecoveryGroupProof
+
+                origin = SimpleNamespace(**identity, route_basis={"work_album_recovery": self.basis["reopen"]["album"]})
+                # The selector only needs identity; column names are fixed by
+                # the projection, never supplied by this detached locator.
+                result = result.add_columns(RecoveryGroupProof(origin, sqlite=sqlite).expression())
+            else:
+                result = result.add_columns(mark).outerjoin(mark, and_(mark.link_id == identity["link_id"], mark.chat_id == identity["chat_id"], mark.message_id == identity["message_id"]))
         return result
 
     @staticmethod

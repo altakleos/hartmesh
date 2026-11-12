@@ -1,7 +1,7 @@
 """Collect actual instance album members before choosing their input owner."""
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from sqlalchemy import select, tuple_
 
@@ -19,6 +19,28 @@ class AlbumCapture:
 
 def album_manifest(origin, link):
     """Only the closed stored decision can establish a prior cohort's owner."""
+    if "work_album_recovery" in origin.route_basis:
+        from app.telegram_bots.work_album_inputs import album_context
+        from app.telegram_bots.work_album_recovery import recovery_context
+
+        recovery_context(origin)
+        captured = origin if isinstance(origin, InboxRow) else InboxRow.from_row(origin)
+        if "work_album_handoff" in origin.route_basis:
+            from app.telegram_bots.work_album_handoff import handoff
+
+            handoff(origin)
+            if origin.route_kind not in {"work_file_new", "turn"} or origin.route_target_id != link.agent_ref or origin.operation_ids:
+                raise CallbackRefused()
+        elif origin.route_kind != "work_album_hold":
+            raise CallbackRefused()
+        basis = {key: value for key, value in origin.route_basis.items() if key not in {"work_album_recovery", "work_album_handoff"}}
+        if "work_album" in basis:
+            context = album_context(origin)
+            root = origin.message_id == context["root_message_id"]
+            captured = replace(captured, route_kind="work_input" if root else "work_album_member", route_target_id=context["request_id"], operation_ids=[context["operation_id"]] if root else [], route_basis=basis)
+        else:
+            captured = replace(captured, route_kind="work_file_album", route_target_id=basis.get("source_outbox_id"), route_basis=basis)
+        return album_manifest(captured, link)
     album = origin.route_basis.get("album")
     keys = {"version", "id", "message_ids", "source_ids", "state", "root_message_id", "prior_message_ids"}
     if type(album) is not dict or set(album) != keys or type(album["version"]) is not int or album["version"] != 1 or type(album["id"]) is not str or not album["id"] or album["id"] != origin.sanitized_input.get("media_group_id"):
@@ -195,7 +217,7 @@ class WorkFileAlbums:
                     else:
                         sources.add(source)
                         quoted_roots.append(origin)
-            prior_work = any(origin.route_kind == "work_file_album" or "work_album" in origin.route_basis for origin in prior)
+            prior_work = any(origin.route_kind == "work_file_album" or "work_album" in origin.route_basis or "work_album_recovery" in origin.route_basis for origin in prior)
             work_owned = bool(sources) or prior_work
             state, root = "ordinary", None
             if work_owned:

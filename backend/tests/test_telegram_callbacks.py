@@ -273,3 +273,30 @@ async def test_admitted_actual_update_drains_commit_through_repeated_caller_canc
         with pytest.raises(asyncio.CancelledError):
             await task
     assert [(await e.callbacks.get(identity)).message_id for identity in plan.group.callback_ids] == [902, 902]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", ["callback", "parent", "reply_basis", "turn_outcome_basis"])
+async def test_retry_dependency_sweep_isolates_malformed_history(callbacks_environment, damage):
+    from datetime import timedelta
+
+    e = callbacks_environment
+    retry = await e.plan(source="retry-dependency", keyboard=[[dict(label="label.try_again", kind="retry_message", target_kind="request", target_id="1" * 32)]])
+    expired = await e.plan(source="unrelated-expired")
+    async with e.sessions.begin() as writer:
+        parent = await writer.get(TelegramOutboxRow, retry.outbox_id)
+        parent.state = "sent"
+        if damage == "callback":
+            (await writer.get(TelegramCallbackRow, retry.group.callback_ids[0])).payload = []
+        elif damage == "parent":
+            parent.payload = []
+        else:
+            parent.payload = {**parent.payload, damage: []}
+        (await writer.get(TelegramOutboxRow, expired.outbox_id)).state = "sent"
+        for identity in expired.group.callback_ids:
+            row = await writer.get(TelegramCallbackRow, identity)
+            row.created_at = row.consumed_at = NOW - timedelta(days=8)
+    assert await e.callbacks.sweep(NOW) == 2
+    async with e.sessions() as reader:
+        assert await reader.get(TelegramCallbackRow, retry.group.callback_ids[0]) is not None
+        assert all([await reader.get(TelegramCallbackRow, identity) is None for identity in expired.group.callback_ids])

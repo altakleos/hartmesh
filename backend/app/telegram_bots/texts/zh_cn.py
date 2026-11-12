@@ -171,6 +171,7 @@ TEXTS: dict[str, str] = {
     "voice.writing": "正在将语音消息转为文字…",
     "voice.heard": "识别内容：“{text}”",
     "voice.transcript_part": "{text}",
+    "ask.answer_too_long": "这份回答过长，无法保存。你可以重新打开问题，发送更短的回答，将这些文件作为新消息发送，或丢弃。",
     "voice.answer_too_long": "这段识别文字过长，无法保存为回答。尚未保存任何内容。你可以重新打开问题，输入不超过 4,096 个字符的回答，将此内容作为新消息发送，或丢弃。",
     "voice.failed": "暂时无法将语音消息转为文字。请重发或输入文字。",
     "voice.unclear": "未能听清这条语音消息。请重试或输入文字。",

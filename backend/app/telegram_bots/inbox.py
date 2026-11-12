@@ -1241,6 +1241,53 @@ class InboxRepository:
 
         return await await_drained(perform())
 
+    async def stage_held_group(self, link, *, callback_id, update_id, origins, callbacks, guard, session):
+        """One explicit, acknowledged choice owns all original held inputs."""
+        from app.telegram_bots.work_album_handoff import validate_staged_group
+
+        self._publication_borrow(session)
+        self._publication_guard_matches(guard, link=link)
+        if type(update_id) is not int or not 0 <= update_id < 2**63:
+            raise ValueError("submission-conflict")
+        await guard.check(session)
+        row = await session.get(TelegramCallbackRow, callback_id)
+        if row is None:
+            raise ValueError("submission-conflict")
+        if CALLBACK_PUBLICATION_KEY in row.payload:
+            saved = await self.lock_callback_input(link, callback_id, session=session)
+        else:
+            group = await callbacks.lock_current(link, callback_id, chat_id=row.chat_id, message_id=row.message_id, message_thread_id=row.message_thread_id, guard=guard, session=session)
+            marks = await self._rows(session, origins)
+            origins = await validate_staged_group(self, session, link, group, marks, update_id)
+            owner = {
+                "version": 1,
+                "update_id": update_id,
+                "inputs": _saved_inputs(origins),
+                "input_sha256": _publication_input(origins),
+                "source_outbox_id": group.anchor_outbox_id,
+                "source_publication": None,
+                "thread_preparation": None,
+                "scope": None,
+                "turn_id": callback_id,
+                "publications": [],
+                "current_publication_id": None,
+                "confirmed_publication_id": None,
+                "assistant_message_id": None,
+                "outbox_id": None,
+                "delivery_ids": [],
+                "route_complete": False,
+                "state": "accepted",
+                "closed_at": None,
+            }
+            if any("work_action_id" in item.payload or CALLBACK_PUBLICATION_KEY in item.payload for item in group.rows):
+                raise ValueError("submission-conflict")
+            row.payload = {**deepcopy(row.payload), CALLBACK_PUBLICATION_KEY: owner}
+            await self.register_delivery(origins, outbox_id=group.anchor_outbox_id, primary=False, finish=True, session=session)
+            _data, saved = _callback_owner(row.payload, callback_id)
+        await session.flush()
+        await guard.check(session)
+        return SubmissionInputStage(saved.origins, saved.text, {}, saved.thread_id, None, callback_id, saved.record, saved.route_complete)
+
     async def stage_submission(
         self,
         link: BotLink,
@@ -1558,7 +1605,19 @@ class InboxRepository:
                         if turns != {None}:
                             if len(turns) != 1 or None in turns or {_identity(mark) for mark in await self._turn(session, marks[0].turn_id)} != {_identity(mark) for mark in marks}:
                                 raise ValueError("callback-publication-conflict") from None
-                    self._group(marks)
+                    if source_owner_id is not None or source is not None and previous.owner_callback_id is not None:
+                        # These are authenticated, immutable callback-owned
+                        # originals. Their explicit choice may join different
+                        # raw reply targets; ordinary grouping stays strict.
+                        first = marks[0]
+                        if any(
+                            (mark.link_id, mark.chat_id, mark.binding_generation, mark.message_thread_id, mark.route_kind, mark.route_target_id)
+                            != (link.id, link.chat_id, link.binding_generation, first.message_thread_id, "turn", link.agent_ref)
+                            for mark in marks
+                        ):
+                            raise ValueError("callback-publication-conflict")
+                    else:
+                        self._group(marks)
                     if source is not None and previous.owner_callback_id is not None:
                         _source_row, source_data = await self._callback_state(previous, session)
                         closed_source = source_data["route_complete"] and source_data["outbox_id"] == parent.id
