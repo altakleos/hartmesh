@@ -57,13 +57,27 @@ def frozen_notice(captured, *, acknowledged=False, pending=False):
         item, basis = captured.item, captured.item.payload["result_notice_basis"]
         if (
             type(basis) is not dict
-            or set(basis) != {"version", "source", "locale", "concealed", "result_files", "parts", "keyboard"} | ({"reveal", "cleanup_id"} if basis.get("version") == 2 else set())
+            or set(basis)
+            != {"version", "source", "locale", "concealed", "result_files", "parts", "keyboard"}
+            | ({"reveal", "cleanup_id"} if basis.get("version") == 2 else set())
+            | ({"navigation_origin"} if basis.get("version") == 1 and "navigation_origin" in basis else set())
             or type(basis["version"]) is not int
             or basis["version"] not in {1, 2}
         ):
             raise ValueError()
         reveal = basis.get("reveal")
-        if type(item.payload["presentation_version"]) is not int or (item.payload["presentation_version"] != 0 if basis["version"] == 1 else item.payload["presentation_version"] < 1) or item.class_ != ("reply" if reveal else "result"):
+        navigation = basis.get("navigation_origin")
+        if "navigation_origin" in basis:
+            from app.telegram_bots.work_navigation_origin import validate_origin
+
+            validate_origin(navigation)
+            if basis["concealed"] or item.dedupe_key != "notice:work-navigation:" + navigation["query_key"]:
+                raise ValueError()
+        if (
+            type(item.payload["presentation_version"]) is not int
+            or (item.payload["presentation_version"] != 0 if basis["version"] == 1 else item.payload["presentation_version"] < 1)
+            or item.class_ != ("reply" if reveal or navigation else "result")
+        ):
             raise ValueError()
         if basis["version"] == 2 and (
             (reveal is None) != (basis["cleanup_id"] is None)
@@ -77,7 +91,7 @@ def frozen_notice(captured, *, acknowledged=False, pending=False):
             or (source.work["instance_id"], source.work["id"]) != (captured.link.agent_ref, item.work_id)
             or type(source.protected) is not bool
             or type(basis["concealed"]) is not bool
-            or basis["concealed"] != (source.protected and reveal is None)
+            or basis["concealed"] != (source.protected and reveal is None and navigation is None)
             or source.identity != item.payload["work_result_identity"]
             or source.navigation != item.payload["work_result_navigation"]
         ):
@@ -159,11 +173,12 @@ class _MaterializationProjection(ResultNoticeProjection):
 class ResultNoticeSources:
     require_write = False
 
-    def __init__(self, plans):
+    def __init__(self, plans, *, navigation=None):
         from app.telegram_bots.result_notice_recovery import ResultNoticeRecovery
 
         self.reader, self.outbox, self.callbacks, self.settings = plans.reader, plans.outbox, plans.callbacks, plans.settings
         self.recovery = ResultNoticeRecovery(plans)
+        self.navigation = navigation
 
     async def _prepare(self, captured):
         basis, source, part = frozen_notice(captured)
@@ -174,6 +189,8 @@ class ResultNoticeSources:
         if settings is None:
             raise ProductSourceRetired()
         if not same_body(asdict(current), asdict(source)) or settings.locale != basis["locale"]:
+            if "navigation_origin" in basis:
+                raise ProductSourceRetired()
             await self.recovery.refresh(captured)
             raise DeliveryClaimRetired()
         return basis, source, part
@@ -191,7 +208,9 @@ class ResultNoticeSources:
         if settings is None:
             raise ProductSourceRetired()
         zone = await asyncio.to_thread(ZoneInfo, settings.timezone)
-        return _SendProjection(self, captured, source, basis, settings, zone, now, silent)
+        from app.telegram_bots.work_navigation_sources import qualify_navigation
+
+        return await qualify_navigation(self.navigation, captured, basis, source, _SendProjection(self, captured, source, basis, settings, zone, now, silent), family="result_notice_basis")
 
     async def authorize(self, captured, *, silent, now):
         async def read():

@@ -86,7 +86,7 @@ def frozen(captured, *, acknowledged=False, pending=False, replay=False):
             | ({"reply_origin"} if basis.get("version") in {2, 6} and "reply_origin" in basis else set())
             | ({"choice_origin"} if basis.get("version") == 6 and "choice_origin" in basis else set())
             | ({"result_files"} if basis.get("version") in {1, 2} and "result_files" in basis else set())
-            | ({"navigation_origin"} if basis.get("version") in {1, 2} and "navigation_origin" in basis else set())
+            | ({"navigation_origin"} if basis.get("version") in {1, 2, 5, 6} and "navigation_origin" in basis else set())
             | ({"prompt_id"} if basis.get("version") == 3 and type(basis.get("interaction")) is dict and basis["interaction"].get("view") == "prompt" else set())
             or type(basis["version"]) is not int
             or basis["version"] not in {1, 2, 3, 4, 5, 6}
@@ -114,7 +114,7 @@ def frozen(captured, *, acknowledged=False, pending=False, replay=False):
             from app.telegram_bots.work_navigation_origin import validate_origin
 
             validate_origin(navigation_origin)
-            if basis["concealed"] or "result_files" in basis or captured.item.dedupe_key != "notice:work-navigation:" + navigation_origin["query_key"]:
+            if basis["concealed"] or captured.item.dedupe_key != "notice:work-navigation:" + navigation_origin["query_key"]:
                 raise ValueError()
         if reply_origin is not None and (type(reply_origin) is not str or len(reply_origin) != 32 or any(ch not in "0123456789abcdef" for ch in reply_origin)):
             raise ValueError()
@@ -131,8 +131,6 @@ def frozen(captured, *, acknowledged=False, pending=False, replay=False):
             raise ValueError()
         data = basis["source"]
         source = WorkRequestRead(**{**data, "responses": tuple(data["responses"])})
-        if navigation_origin is not None and source.request["purpose"] not in {"information", "decision"}:
-            raise ValueError()
         if (
             source.request["instance_id"] != captured.link.agent_ref
             or captured.link.agent_kind != "instance"
@@ -408,19 +406,9 @@ class WorkRequestSources:
             raise ProductSourceRetired() from None
 
     async def qualify_navigation(self, captured, basis, source, projection):
-        if "navigation_origin" not in basis:
-            return projection
-        if self.navigation is None:
-            raise ProductSourceRetired()
-        from app.telegram_bots.work_digest_members import require_request_origin
-        from app.telegram_bots.work_digest_projection import DigestProjection
-        from app.telegram_bots.work_navigation_origin import NavigationOriginProjection
+        from app.telegram_bots.work_navigation_sources import qualify_navigation
 
-        origin = await self.navigation.restore(captured.link, basis["navigation_origin"])
-        if "work_request_basis" not in origin.member.item.payload:
-            raise ProductSourceRetired()
-        require_request_origin(origin.member.source, source)
-        return DigestProjection(captured.link, [projection, NavigationOriginProjection(origin)])
+        return await qualify_navigation(self.navigation, captured, basis, source, projection, family="work_request_basis")
 
 
 class _RequestProjection:

@@ -1028,7 +1028,8 @@ uses the same closed, typed ledger and presentation receipts; a row's `sent` sta
 alone never proves cleanup. Pin operations and all referenced presentations stay
 retained until exact cleanup is acknowledged. Installation remains deferred.
 
-`work_digest_items.DigestItems` publishes ordinary question/decision full previews
+`work_digest_items.DigestItems` publishes question, decision, review, routing,
+colleague-news and completed-result full previews
 as separate reply rows. The explicit navigation origin and Telegram query key
 preserve original batch membership and reusable controls. Publication qualifies
 source, exact anchor and the complete new pending group before and after its
@@ -1039,5 +1040,8 @@ follows preview → navigation anchor → original batch → members.
 ordinary previews with the same origin, full protection and original callback age.
 It qualifies the current source, retained anchor, exact delivery/claim and complete
 replacement group before and after mutation. Ordinary recovery refuses these
-origins without that explicit proof. Review/routing/news/result previews and
-installation remain separate work.
+origins without that explicit proof. Review/routing/news/result recovery and
+installation remain separate work. Their new previews reuse the family renderers
+and media ledgers; both final SDK admission and native file reads compose current
+family authority with the complete original digest proof. Pending previews retain
+their navigation evidence through cleanup without extending callback usability.

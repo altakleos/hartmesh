@@ -94,6 +94,9 @@ class ResultNoticeProjection:
         suggestion_attempt = rows[0][self.column + 8]
         intent = self.item.payload.get("work_event_intent", {})
         key = intent.get("key")
+        from app.telegram_bots.work_navigation_sources import delivery_scope
+
+        expected_class, expected_key = delivery_scope(self.item, "result_notice_basis", "reply" if self.item.payload.get("result_notice_basis", {}).get("reveal") else "result", "event:" + event.id + ":result")
         if (
             key not in {"result.done", "result.waiting_review"}
             or type(intent.get("version")) is not int
@@ -102,14 +105,14 @@ class ResultNoticeProjection:
             or type(intent.get("assignment_revision")) is not int
             or any(getattr(bot, name) != getattr(self.link, name) for name in _SCOPE)
             or (delivery.link_id, delivery.owner_user_id, delivery.binding_generation, delivery.chat_id, delivery.instance_id, delivery.class_)
-            != (self.link.id, self.link.owner_user_id, self.link.binding_generation, self.link.chat_id, self.link.agent_ref, "reply" if self.item.payload.get("result_notice_basis", {}).get("reveal") else "result")
+            != (self.link.id, self.link.owner_user_id, self.link.binding_generation, self.link.chat_id, self.link.agent_ref, expected_class)
             or _item(delivery) != self.item
             or (event.instance_id, event.work_id, event.revision, event.assignment_revision, event.action) != (self.link.agent_ref, work.id, intent["event_revision"], intent["assignment_revision"], "attempt_settled")
             or event.request.get("status") != "succeeded"
             or event.result.get("status") != ("completed" if key == "result.done" else "submitted")
             or event.actor_kind == "human"
             and event.actor_id == self.link.owner_user_id
-            or delivery.dedupe_key != "event:" + event.id + ":result"
+            or delivery.dedupe_key != expected_key
             or event.request.get("attempt_id") != attempt.id
             or attempt.status != "succeeded"
             or work.outcome is None

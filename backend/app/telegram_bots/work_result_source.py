@@ -36,7 +36,8 @@ class WorkResultSources(WorkRequestSources):
         if settings is None:
             raise ProductSourceRetired()
         zone = await asyncio.to_thread(ZoneInfo, settings.timezone)
-        return _ResultProjection(self, captured, basis, source, settings, zone, True, now)
+        projection = _ResultProjection(self, captured, basis, source, settings, zone, True, now)
+        return await self.qualify_navigation(captured, basis, source, projection)
 
 
 class _ResultProjection(_RequestProjection):
