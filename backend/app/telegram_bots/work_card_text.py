@@ -95,7 +95,7 @@ class WorkCardText:
                 page = list(await reader.scalars(query.order_by(TelegramOutboxRow.id).limit(100)))
                 for row in page:
                     basis = row.payload.get("work_request_basis", {})
-                    if basis.get("version") not in {1, 2, 3, 4, 5, 6}:
+                    if basis.get("version") not in {1, 2, 3, 4, 5, 6} and row.payload.get("work_outcome_basis", {}).get("version") != 5:
                         continue
                     if any(any(type(value) is int and value == message_id for value in part.get("message_ids", [])) for part in row.parts):
                         found.append(row.id)

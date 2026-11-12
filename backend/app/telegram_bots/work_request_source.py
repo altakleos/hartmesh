@@ -19,9 +19,7 @@ from app.telegram_bots.work_requests import WorkRequestRead, present_request, se
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied
 from deerflow.persistence.agent_instances.human_input import HumanInputRequestRow
 from deerflow.persistence.agent_instances.work import AgentWorkRow
-from deerflow.persistence.spaces.model import SpaceGrantRow, SpaceRow
 from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow, TelegramPersonSettingsRow
-from deerflow.spaces.contract import Permission
 from deerflow.utils.file_io import await_drained
 
 
@@ -341,14 +339,16 @@ class _RequestProjection:
     def __init__(self, host, captured, basis, source, settings, zone, silent, now):
         self.host, self.captured, self.basis, self.source = host, captured, basis, source
         self.settings, self.zone, self.silent, self.now = settings, zone, silent, now
-        self.spaces = set(_references((source.request, source.work, source.responses)))
+        from app.telegram_bots.work_source_spaces import ReferencedSpaces
+
+        self.references = ReferencedSpaces(host.reader, host.outbox.sessions, source)
         # The last part owns markup, but its complete control group must remain
         # usable before *any* chunk of this presentation reaches Telegram.
         self.controls_part = next((part for part in captured.item.parts if part["presentation_version"] == captured.item.payload["presentation_version"] and part.get("stored_keyboard")), None)
 
     def extend(self, query):
         bot, delivery, settings = TelegramBotLinkRow, TelegramOutboxRow, TelegramPersonSettingsRow
-        request, work, space, grant, callback = HumanInputRequestRow, AgentWorkRow, SpaceRow, SpaceGrantRow, TelegramCallbackRow
+        request, work, callback = HumanInputRequestRow, AgentWorkRow, TelegramCallbackRow
         sqlite = self.host.outbox.sessions.kw["bind"].dialect.name == "sqlite"
 
         def aggregate(fields):
@@ -359,15 +359,7 @@ class _RequestProjection:
 
         # Correlated compact arrays keep the complete outbox JSON out of the
         # Space x callback product. These facts still share the final statement.
-        fields = {column.name: column for column in space.__table__.columns if column.name not in {"created_at", "updated_at"}}
-        spaces = (
-            select(aggregate({**fields, "permissions": grant.permissions}))
-            .select_from(space)
-            .outerjoin(grant, and_(grant.space_id == space.id, grant.principal_kind == "human", grant.subject_id == bot.owner_user_id))
-            .where(space.id.in_(self.spaces) if self.spaces else false())
-            .correlate(bot)
-            .scalar_subquery()
-        )
+        spaces = self.references.expression()
         origin = self.basis.get("origin", {})
         origin_group = select(TelegramCallbackRow.group_id).where(TelegramCallbackRow.id == origin.get("callback_id")).scalar_subquery()
         callbacks = (
@@ -453,13 +445,7 @@ class _RequestProjection:
         recent = current.last_update_at is not None and self.now - aware(current.last_update_at) <= timedelta(seconds=self.host.outbox.config.outbox.recent_act_seconds)
         if bool(delivery.silent or self.captured.part.get("silent") or quiet and not recent) != bool(self.silent):
             raise DeliveryClaimRetired()
-        seen = set()
-        for space in self.objects(rows[0][12]):
-            if space.status not in {"active", "archived"} or space.permissions is None or not self.host.reader.work.agents.files.registry._view(space, space.permissions).permissions & Permission.READ:
-                raise ProductSourceRetired()
-            seen.add(space.id)
-        if seen != self.spaces:
-            raise ProductSourceRetired()
+        self.references.check(rows[0][12])
         callback_facts = self.objects(rows[0][13])
         for identity in {self.basis.get("reveal"), self.basis.get("reply_origin")} - {None}:
             reveal = next((row for row in callback_facts if row.id == identity), None)

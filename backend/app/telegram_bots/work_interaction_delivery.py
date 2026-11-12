@@ -50,6 +50,11 @@ def transition(callback, source):
 def acknowledged_source(link, parent):
     from app.telegram_bots.work_request_source import frozen
 
+    if parent is not None and parent.payload.get("work_outcome_basis", {}).get("version") == 5:
+        from app.telegram_bots.work_comment_cards import acknowledged_comment
+
+        return acknowledged_comment(link, parent)
+
     if parent is None or parent.state != "sent" or (parent.link_id, parent.owner_user_id, parent.binding_generation, parent.chat_id) != (link.id, link.owner_user_id, link.binding_generation, link.chat_id):
         raise CallbackRefused()
     parts = [part for part in parent.parts if part.get("presentation_version") == parent.payload.get("presentation_version")]

@@ -26,8 +26,9 @@ from deerflow.utils.file_io import await_drained
 
 def reply_basis(link, parent, mark, controls, *, consumed):
     source = acknowledged_source(link, parent)
-    basis = parent.payload["work_request_basis"]
-    if basis["version"] not in {1, 2, 3} or basis.get("interaction", {}).get("view") == "prompt":
+    basis = parent.payload.get("work_request_basis", {})
+    comment = parent.payload.get("work_outcome_basis", {}).get("version") == 5
+    if not comment and (basis.get("version") not in {1, 2, 3} or basis.get("interaction", {}).get("view") == "prompt"):
         raise CallbackRefused()
     raw = mark.sanitized_input
     if type(raw) is not dict or set(raw) - {"type", "text", "reply_to_message_id"} or raw.get("type", "text") != "text":

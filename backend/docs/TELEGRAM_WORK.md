@@ -422,5 +422,19 @@ host saves its ACK remains eligible once the full delivery is acknowledged.
 Replies to any part of a complete prompt use the same prompt owner. Known
 spent cards, closed prompts and input-owned presentations retain a durable
 `work_card_hold` route, never ordinary-chat ownership. This hold is an internal
-recovery foundation; its user choices and current-comment-card refresh remain
-required before activation. The supervisor does not install these controllers.
+recovery foundation; its user choices remain required before activation. The supervisor does not install these controllers.
+
+Completed decision/review comments can use outcome V5: the canonical response
+receipt owns a complete current request and fresh controls in the same delivered
+reply. Only a still-pending request for the current recipient with management
+rights gets those controls. Other saved comments keep the plain acknowledgment.
+The input settles after the entire card is acknowledged; each later reply owns
+a new Respond operation, while a decision or acceptance still requires its own
+preview and press. Existing V1 acknowledgments remain deliverable.
+
+Both request previews and full comment outcomes use `work_source_spaces.py` to
+join all referenced Space statuses and READ grants into the final SQL statement.
+The comment planner checks the same facts before publication. No extra provider
+read or prior successful read substitutes for that last dispatch check. A failed
+multipart replacement preserves its ACK history and rebuilds from the original
+response receipt; it never repeats the comment command.
