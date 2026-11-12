@@ -113,9 +113,9 @@ def _file_journal(row, *, max_bytes=None):
         work = continuation["work"]
         if (
             type(work) is not dict
-            or set(work) != {"version", "request_id", "source_outbox_id", "operation_id", "update_id", "input_sha256"}
+            or set(work) != {"version", "request_id", "source_outbox_id", "operation_id", "update_id", "input_sha256"} | ({"album"} if work.get("version") == 2 else set())
             or type(work["version"]) is not int
-            or work["version"] != 1
+            or work["version"] not in {1, 2}
             or type(work["update_id"]) is not int
             or not 0 <= work["update_id"] < 2**63
         ):
@@ -124,6 +124,12 @@ def _file_journal(row, *, max_bytes=None):
             raise ValueError("file-work-input-conflict") from None
         if any(type(work[key]) is not str or re.fullmatch(r"[0-9a-f]{32}", work[key]) is None for key in ("request_id", "source_outbox_id", "operation_id")) or continuation["input"]["message_ids"] != [row.message_id]:
             raise ValueError("file-work-input-conflict") from None
+        if work["version"] == 2:
+            from app.telegram_bots.work_album_inputs import AlbumJournalScope, album_context
+
+            capsule = album_context(AlbumJournalScope.from_receipt(row))
+            if row.message_id not in capsule["member_ids"] or any(work[key] != capsule[key] for key in ("request_id", "source_outbox_id", "operation_id")):
+                raise ValueError("file-work-input-conflict") from None
     target = continuation["target"]
     if (
         type(target) is not dict
@@ -307,7 +313,8 @@ class FilePuts:
                 return _snapshot(row)
             mark = await writer.get(TelegramInboundMarkRow, (origin.link_id, origin.message_id, origin.chat_id), with_for_update=True, populate_existing=True)
             new_file = mark is not None and mark.route_kind == "work_file_new" and access.input_projection is not None
-            work_file = mark is not None and mark.route_kind == "work_input" and mark.route_basis.get("work_input", {}).get("version") == 4 and mark.route_target_id == mark.route_basis["work_input"].get("request_id")
+            group_file = mark is not None and mark.route_kind in {"work_input", "work_album_member"} and "work_album" in mark.route_basis
+            work_file = group_file or mark is not None and mark.route_kind == "work_input" and mark.route_basis.get("work_input", {}).get("version") == 4 and mark.route_target_id == mark.route_basis["work_input"].get("request_id")
             if (
                 mark is None
                 or (mark.link_id, mark.chat_id, mark.binding_generation) != (link.id, link.chat_id, link.binding_generation)
@@ -326,7 +333,23 @@ class FilePuts:
             work = None
             if new_file:
                 source = {"captionless": not _text.strip(), "topic": mark.message_thread_id, "message_ids": [mark.message_id]}
-            if work_file:
+            if group_file:
+                from app.telegram_bots.work_album_inputs import AlbumInputProof, album_context, album_input_digest
+
+                capsule = album_context(mark)
+                proof = AlbumInputProof(writer.get_bind().dialect.name == "sqlite", actual)
+                proof.check(await writer.scalar(select(proof.expression())))
+                source = {"captionless": not _text.strip(), "topic": mark.message_thread_id, "message_ids": [mark.message_id]}
+                work = {
+                    "version": 2,
+                    "request_id": capsule["request_id"],
+                    "source_outbox_id": capsule["source_outbox_id"],
+                    "operation_id": capsule["operation_id"],
+                    "update_id": mark.update_id,
+                    "input_sha256": album_input_digest(mark),
+                    "album": capsule,
+                }
+            elif work_file:
                 data = mark.route_basis["work_input"]
                 if data.get("files") != files or len(mark.operation_ids) != 1:
                     raise ValueError("file-work-input-conflict") from None
@@ -548,7 +571,13 @@ class FilePuts:
                         if row.continuation["version"] == 4:
                             from app.telegram_bots.work_file_inputs import WorkFileWriteProjection
 
-                            write_access = replace(access, input_projection=WorkFileWriteProjection(link, row))
+                            if row.continuation["work"]["version"] == 2:
+                                from app.telegram_bots.work_album_inputs import AlbumFileWriteProjection
+
+                                projection = AlbumFileWriteProjection(link, row, sqlite=self.callbacks.sessions.kw["bind"].dialect.name == "sqlite")
+                            else:
+                                projection = WorkFileWriteProjection(link, row)
+                            write_access = replace(access, input_projection=projection)
                         result = await write_access.apply(operation_id=row.operation_ids[-1], name=row.body["name"], content=content, size=len(lease.data))
                     except (AgentFileRefusal, ResidentFilesBusy) as exc:
                         reason = exc.reason

@@ -540,8 +540,52 @@ entry points drain repeated cancellation. Unfinished Work file inputs retain nat
 receipts beyond the ordinary terminal-journal age; historical JSON filters use text
 comparisons before closed-shape validation, never PostgreSQL integer casts.
 
-The single-file controller retains recognized album members as `work_file_album`
-without consuming the question, uploading a first member or admitting a partial
-response. Whole-album collection, including members preceding the quoted member,
-and startup/controller installation remain activation prerequisites. This dormant
-primitive does not enable Telegram Work interactions.
+The optional album collector commits `work_album_pending` with the first actual
+input, before the quiet-window join is acknowledged. It resolves the complete
+stored cohort before ordinary file effects, including an unquoted member preceding
+the quoted question. Exact scope includes link, chat, topic and binding generation;
+prompt boundaries remain distinct. Ordinary decisions persist before admission,
+which still partitions by each original reply/prompt scope. A Work cohort retains
+all actual members and pins its sources without consuming controls or uploading.
+
+The closed album manifest records member IDs, prior cohorts, sources and an actual
+quoted root only for one unambiguous source. Conflicting explicit quotes have no
+selected root. Later members retain the prior Work owner; a late Work quote cannot
+repurpose an already ordinary cohort. Malformed or oversized groups stay held.
+Classification failures expose no ordinary Retry button. Startup classifies pending
+metadata before generic interrupted-input recovery, without downloading, writing
+files or starting a model. Pending collection conservatively pins potential Work
+source outboxes in the same scope until classification; source removal must not
+change a Work reply into ordinary chat.
+
+`work_album_inputs.py` captures a ready cohort in the same guarded writer as
+source-control consumption and its sole Respond operation. The actual quoted root
+keeps Work input V4 and its own single-file raw media; followers use
+`work_album_member`, never a duplicate Work action marker. The closed `work_album`
+capsule binds every immutable actual input, root reply basis and operation. Complete
+captions plus bounded native fallback/collision name growth must fit Statement
+before any file write. An oversized cohort stays retained without uploads.
+
+Native journal V4 uses Work context V2 for a member, including its original input
+digest and frozen group context. Final native admission checks the complete group,
+including newly pending/late members and competing publication/action ownership.
+`work_album_files.py` reads every completed native journal with full scope and target
+proof before one Respond. Its final compact SQL packet revalidates the entire
+journal after provider awaits. No ordinary pending-file context or chat run is
+created. A failed member gets its own File Retry; recovery reconciles missing or
+interrupted siblings as uncertain instead of downloading them automatically.
+
+`work_album_answers.py` owns live submission and metadata recovery. Once a Respond
+journal exists, replay reconciles its fixed body/receipt before any native file
+work, including after Home changes or file-journal collection. Work file V2 freezes
+all actual saved paths and captions. The existing outcome evidence column carries
+root/member proofs without shifting the shared delivery projection. The outcome
+records the original group context and frozen-file digest; a whole ACK must match
+that identity even after SDK I/O. Every original member registers that outcome and
+is sealed together after its final part. Unfinished followers retain their native
+receipts, and root/member SDK redeliveries cannot enter ordinary chat.
+
+Late or conflicting cohorts remain held without another response. Explicit
+closed/ambiguous/overlong group recovery choices remain an activation prerequisite;
+the single-file recovery path refuses group roots. All Work controllers remain
+dormant, with notification production and lifecycle installation still outstanding.

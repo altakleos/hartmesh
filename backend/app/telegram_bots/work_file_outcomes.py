@@ -38,6 +38,28 @@ class FileAnswerProof:
             raise ProductSourceRetired()
 
 
+class AlbumAnswerProof(FileAnswerProof):
+    def expression(self):
+        from app.telegram_bots.work_album_inputs import AlbumInputProof
+
+        sqlite = self.sessions.kw["bind"].dialect.name == "sqlite"
+        root = super().expression()
+        members = AlbumInputProof(sqlite, self.mark, complete=True).expression()
+        return (func.json_object("root", func.json(root), "members", func.json(members), type_=JSON) if sqlite else func.json_build_object("root", root, "members", members, type_=JSON)).label("work_file_evidence")
+
+    def check(self, packet):
+        from app.telegram_bots.callbacks import CallbackRefused
+        from app.telegram_bots.work_album_inputs import AlbumInputProof
+
+        if type(packet) is not dict or set(packet) != {"root", "members"}:
+            raise ProductSourceRetired()
+        super().check(packet["root"])
+        try:
+            AlbumInputProof(self.sessions.kw["bind"].dialect.name == "sqlite", self.mark, complete=True).check(packet["members"])
+        except CallbackRefused:
+            raise ProductSourceRetired() from None
+
+
 async def file_answer_proof(host, link, act):
     if act.kind != "respond" or act.state != "done":
         return None
@@ -53,9 +75,12 @@ async def file_answer_proof(host, link, act):
     mark = marks[0]
     data = mark.route_basis["work_input"]
     saved_file_text(mark)
+    frozen = mark.route_basis["work_file"]
+    group = "work_album" in mark.route_basis
+    targets = [file["target"] for file in frozen["files"]] if group else [frozen["target"]]
     if (
         act.message_id != mark.message_id
-        or mark.route_basis["work_file"]["target"]["instance_id"] != act.instance_id
+        or any(target["instance_id"] != act.instance_id for target in targets)
         or mark.route_kind != "work_input"
         or data["request_id"] != act.request_id
         or data["work_id"] != act.work_id
@@ -64,6 +89,14 @@ async def file_answer_proof(host, link, act):
         or not same_body(response(mark).model_dump(mode="json", exclude_unset=True), act.body)
     ):
         raise ProductSourceRetired()
-    frozen = mark.route_basis["work_file"]
+    if group:
+        from app.telegram_bots.work_album_inputs import album_context, inputs_digest
+
+        shown = {
+            "files": [file["result"]["path"].rsplit("/", 1)[-1] for file in frozen["files"]],
+            "caption": "\n\n".join(packet["sanitized_input"]["text"] for packet in frozen["inputs"] if packet["sanitized_input"]["text"].strip()),
+            "album": {"version": 1, "context": deepcopy(album_context(mark)), "file_sha256": inputs_digest(frozen)},
+        }
+        return AlbumAnswerProof(host.requests.links.session_factory, InboxRow.from_row(mark), {name: deepcopy(getattr(mark, name)) for name in _FIELDS}, shown)
     shown = {"file": frozen["result"]["path"].rsplit("/", 1)[-1], "caption": data["text"]}
     return FileAnswerProof(host.requests.links.session_factory, InboxRow.from_row(mark), {name: deepcopy(getattr(mark, name)) for name in _FIELDS}, shown)

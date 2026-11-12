@@ -83,6 +83,23 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
         pinned |= _strings(outbox_id, *delivery_ids)
     pinned |= anchors | await _first_replies(session, anchors)
     delivery = TelegramOutboxRow
+    # Until album collection classifies its quotes, removing a candidate card
+    # could turn a Work answer into an ordinary message at restart.
+    mark = TelegramInboundMarkRow
+    unresolved_album = (
+        select(mark.message_id)
+        .where(
+            mark.link_id == delivery.link_id,
+            mark.chat_id == delivery.chat_id,
+            mark.binding_generation == delivery.binding_generation,
+            mark.message_thread_id.is_not_distinct_from(delivery.message_thread_id),
+            mark.route_kind == "work_album_pending",
+            mark.route_complete.is_(False),
+        )
+        .correlate(delivery)
+        .exists()
+    )
+    pinned.update(await session.scalars(select(delivery.id).where(delivery.request_id.is_not(None), unresolved_album)))
     # Compact dependency edges preserve complete digests behind live controls.
     records = await session.execute(
         select(
@@ -166,6 +183,7 @@ async def _sweep_acts(sessions, now):
                 mark.route_complete.is_(False),
                 or_(
                     and_(cast(mark.route_basis["work_input"]["version"].as_string(), String) == "4", cast(TelegramActRow.continuation["version"].as_string(), String) == "4"),
+                    and_(mark.route_kind == "work_album_member", cast(TelegramActRow.continuation["version"].as_string(), String) == "4", cast(TelegramActRow.continuation["work"]["version"].as_string(), String) == "2"),
                     and_(mark.route_kind == "work_file_new", cast(TelegramActRow.continuation["version"].as_string(), String) == "3"),
                 ),
             )

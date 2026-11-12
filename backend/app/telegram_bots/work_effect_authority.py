@@ -70,14 +70,15 @@ class _EffectProjection:
         )
 
         if self.file_effect is not None:
+            from app.telegram_bots.work_album_files import AlbumFileBundle
+
             captured, receipt = self.file_effect
             mark, file = aliased(TelegramInboundMarkRow), aliased(TelegramActRow)
-            result = (
-                result.add_columns(mark, file, SpaceRow.generation)
-                .join(mark, and_(mark.link_id == captured.link_id, mark.chat_id == captured.chat_id, mark.message_id == captured.message_id))
-                .join(file, file.id == receipt[0].id)
-                .join(SpaceRow, SpaceRow.id == AgentInstanceRow.home_id)
-            )
+            if isinstance(receipt, AlbumFileBundle):
+                result = result.add_columns(mark, receipt.expression(), SpaceRow.generation)
+            else:
+                result = result.add_columns(mark, file, SpaceRow.generation).join(file, file.id == receipt[0].id)
+            result = result.join(mark, and_(mark.link_id == captured.link_id, mark.chat_id == captured.chat_id, mark.message_id == captured.message_id)).join(SpaceRow, SpaceRow.id == AgentInstanceRow.home_id)
         return result
 
     def check(self, rows):

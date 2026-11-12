@@ -24,7 +24,8 @@ complete presentation must have been dispatched before the input was accepted;
 a delayed host ACK does not invalidate an explicit reply.
 `work_file_inputs.py` owns single-file answers (input/journal V4), immutable native
 receipts and named-file ACKs. `work_file_handoff.py` transfers explicit Send-as-new
-choices before chat publication. Album holds and all controllers remain dormant;
+choices before chat publication. `work_file_albums.py` collects; `work_album_*`
+owns group capture, receipts and whole ACK. All controllers remain dormant;
 see [Work guidance](../../docs/TELEGRAM_WORK.md).
 `work_untied_inputs.py` asks before saving unquoted text after the last acknowledged
 Work question, after ordinary clarification routing. Its durable `work_answer`
