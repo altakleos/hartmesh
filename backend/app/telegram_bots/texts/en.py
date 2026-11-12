@@ -1,6 +1,11 @@
 """English fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "request.answered_elsewhere": "Answered by you on the web, {time}.",
+    "request.answered_by": "Answered by {person}, {time}.",
+    "request.assessed": "{name} has read the answers and closed the question.",
+    "request.rerouted": "Passed on to {person}.",
+    "request.withdrawn": "This question was withdrawn.",
     "interrupted": 'Interrupted: "{objective}"',
     "interrupted.title_not_started": 'Did not start: "{objective}"',
     "interrupted.reason.container-absent": "{name}'s workspace stopped unexpectedly.",

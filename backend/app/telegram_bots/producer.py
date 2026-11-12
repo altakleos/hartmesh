@@ -2555,7 +2555,7 @@ class OutboxSender:
                 parts = deepcopy(saved.parts)
                 sending = next(value for value in parts if value["part_id"] == part["part_id"])
                 sending["state"] = "sending"
-                if "work_news_basis" not in saved.payload and "result_notice_basis" not in saved.payload and "result_files" not in saved.payload.get("work_request_basis", {}):
+                if not {"work_news_basis", "work_question_update", "result_notice_basis"}.intersection(saved.payload) and "result_files" not in saved.payload.get("work_request_basis", {}):
                     sending["protect_content"] = bool(sending.get("protect_content") or decision.protect_content)
                 # A frozen Work plan owns its protection transition, including
                 # a new Show teaser. Its adapter rejects weaker protection before
@@ -2710,6 +2710,16 @@ class OutboxSender:
             await self.outbox.inbox.settle_deliveries(link_id=link_id, session=writer)
 
     async def _replace(self, binding: BotLink, row: OutboxItem, claim: str, *, reason: str) -> None:
+        if "work_question_update" in row.payload:
+            async with self.outbox._writer(binding.id) as (writer, _binding):
+                saved = await writer.get(TelegramOutboxRow, row.id, with_for_update=True)
+                if self.outbox._fenced(saved, generation=binding.binding_generation, owner=self.run_id, claim=claim):
+                    if reason in {"edit-anchor-missing", "topic-missing"}:
+                        await self._skip(writer, saved, "superseded")
+                    else:
+                        self._pending(saved)
+                        saved.state, saved.failed_reason, saved.closed_at = "failed", "work-question-refresh-required", self.outbox.clock()
+            return
         routing = row.payload.get("work_request_basis", {}).get("version") in {5, 6}
         result_files = "result_notice_basis" in row.payload or "result_files" in row.payload.get("work_request_basis", {})
         news = "work_news_basis" in row.payload
@@ -2823,6 +2833,16 @@ class OutboxSender:
         if not current_parts or any(part["state"] not in _FINAL_PARTS for part in current_parts):
             return
         now = self.outbox.clock()
+        if "work_question_update" in row.payload:
+            from app.telegram_bots.work_question_edits import acknowledge_question_update
+
+            try:
+                await acknowledge_question_update(session, row)
+            except (ProductSourceRetired, PermanentDeliveryError, ValueError, TypeError, KeyError, IndexError):
+                row.state, row.failed_reason, row.closed_at = "failed", "invalid-work-question-receipt", now
+                row.claim_owner = row.claim_id = row.claimed_at = None
+                await session.flush()
+                return
         if row.class_ == "digest":
             from app.telegram_bots.digests import acknowledge_members, release_members
 

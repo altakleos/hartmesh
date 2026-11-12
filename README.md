@@ -2045,6 +2045,10 @@ Interruption and failure notices use the recorded attempt and reason, with
 protected previews and access-qualified links to the original conversation.
 A no-result notice includes a short excerpt only when the exact attempt's
 output can be verified and the recipient can read it.
+Question-update delivery follows web answers, assessments, routing and withdrawal.
+It removes the original controls, preserves the question text, and prevents a
+delayed update from overwriting a newer closure. Protected replacements move the
+message target only after Telegram acknowledges them.
 These workers remain uninstalled; remaining notification forms and startup
 integration are still pending.
 Background recovery preserves newer

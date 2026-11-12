@@ -59,6 +59,7 @@ WORK_REQUEST_KEYS = frozenset(
 
 
 WORK_NEWS_KEYS = frozenset(
+    "request.answered_elsewhere request.answered_by request.assessed request.rerouted request.withdrawn "
     "request.answered decision.recorded decision.note result.accepted result.changes "
     "work.cancelled work.changed work.reopened attempt.stopped attempt.stopped_changed "
     "attempt.stopped_withdrawn work.proposed remind.ready_to_resume concealed.info concealed.proposed".split()

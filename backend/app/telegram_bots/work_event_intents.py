@@ -67,7 +67,7 @@ class _Projection:
     async def save(self, key, class_, *, recipient=None, actor=False, edit=False, response=None, hold=False, edit_request_revision=None):
         if recipient != self.person or not actor and self.event.actor_kind == "human" and self.event.actor_id == self.person:
             return
-        if class_ in {"question", "reminder"} and self.settings.notify not in {"all", "questions"} or class_ in {"result", "interrupt", "info"} and self.settings.notify != "all":
+        if not edit and (class_ in {"question", "reminder"} and self.settings.notify not in {"all", "questions"} or class_ in {"result", "interrupt", "info"} and self.settings.notify != "all"):
             return
         event, link = self.event, self.link
         # A settlement may both ask a manager to route its new review and tell
