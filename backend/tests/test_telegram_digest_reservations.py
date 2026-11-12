@@ -288,7 +288,7 @@ async def test_invalid_batch_does_not_block_independent_delivery(db, damage):
 
 
 @pytest.mark.asyncio
-async def test_digest_preserves_original_member_expiry_and_strictest_silence(db):
+async def test_digest_preserves_original_member_expiry_without_silencing_audible_news(db):
     from app.telegram_bots.notifications import preference_skip
     from app.telegram_bots.producer import _item
     from app.telegram_bots.settings import _snapshot
@@ -301,7 +301,7 @@ async def test_digest_preserves_original_member_expiry_and_strictest_silence(db)
     async with db.sessions() as reader:
         parent = await reader.get(TelegramOutboxRow, identity)
         settings = _snapshot(await reader.get(TelegramPersonSettingsRow, link.owner_user_id))
-        assert parent.silent
+        assert not parent.silent
         assert preference_skip(_item(parent), settings, clock.now) == "expired"
 
 
@@ -421,15 +421,48 @@ async def test_empty_transport_receipt_cannot_acknowledge_members(db):
 
 
 @pytest.mark.asyncio
-async def test_digest_inherits_part_silence(db):
+@pytest.mark.parametrize("silent_members", [1, 3])
+async def test_digest_is_silent_only_when_every_member_would_be_silent(db, silent_members):
     link, clock, outbox, digests, ids = await setup(db, ["result"] * 3)
     async with db.sessions.begin() as writer:
-        row = await writer.get(TelegramOutboxRow, ids[0])
-        assert not row.silent
-        row.parts = [{**part, "silent": True} for part in row.parts]
+        for identity in ids[:silent_members]:
+            row = await writer.get(TelegramOutboxRow, identity)
+            assert not row.silent
+            row.parts = [{**part, "silent": True} for part in row.parts]
     identity = await digests.reserve(link, category="essential")
     async with db.sessions() as reader:
-        assert (await reader.get(TelegramOutboxRow, identity)).silent
+        assert (await reader.get(TelegramOutboxRow, identity)).silent is (silent_members == 3)
+
+
+@pytest.mark.asyncio
+async def test_digest_reserves_canonical_event_intents(db):
+    link, _clock, _outbox, digests, ids = await setup(db, ["question"] * 3)
+    async with db.sessions.begin() as writer:
+        for identity in ids:
+            row = await writer.get(TelegramOutboxRow, identity)
+            row.dedupe_key = row.dedupe_key.replace("ev:", "event:", 1)
+    identity = await digests.reserve(link, category="essential")
+    assert identity is not None
+    async with db.sessions() as reader:
+        assert (await reader.get(TelegramOutboxRow, identity)).payload["member_ids"] == ids
+
+
+@pytest.mark.asyncio
+async def test_digest_keeps_sound_when_only_preview_prefix_is_silent(db):
+    link, _clock, outbox, digests, ids = await setup(db, ["question"] * 3)
+    async with db.sessions.begin() as writer:
+        for identity in ids:
+            row = await writer.get(TelegramOutboxRow, identity)
+            row.parts = outbox._parts(
+                [
+                    {"kind": "text", "source_ref": {"key": "chat.restarted", "values": {}}, "silent": True},
+                    {"kind": "text", "source_ref": {"key": "chat.restarted", "values": {}}, "silent": False},
+                ],
+                0,
+            )
+    identity = await digests.reserve(link, category="essential")
+    async with db.sessions() as reader:
+        assert not (await reader.get(TelegramOutboxRow, identity)).silent
 
 
 @pytest.mark.asyncio

@@ -168,6 +168,68 @@ controls before freeing owned members. Digest cards have one text part; invalid
 historical partial ACKs retain members for reconciliation. Retention follows
 transitive source edges. Reservations have no parts until source materialization;
 source dispatch and item/reveal controllers are not installed by this primitive.
+Reservations recognize canonical `event:` intents as well as retained `ev:` rows.
+A digest is silent only if every member would be silent; quiet hours are still
+applied at dispatch. Silent preview prefixes do not silence an audible final part.
+`work_digest_text.py` supplies bounded navigation in both locales: at most ten
+items, one 32-character item button per row, question/decision/review phrases and
+product first lines for other news. Concealed navigation exposes only a count and
+Show. These bounded titles fit one message; item activation must still deliver a
+fresh complete member preview. This pure renderer supplies no source authority or
+callback admission and remains uninstalled with the reservation primitive.
+
+`work_digest_projection.py` composes up to ten source projections into one final
+authority statement, preserving each member's route permissions and distinct
+source roles. Each mapped entity occupies one JSON result column so complex
+batches stay below PostgreSQL's result-column limit. Nested JSON keeps its exact
+types; only SQL dates and booleans are normalized into read-only source facts.
+Account and role joins occur once outside member subqueries. Missing members
+fail qualification; compiling a dialect is not evidence of runtime execution.
+
+`work_digest_members.py` derives navigation from current question, routing,
+review, result and colleague-news owners. Saved sources must be untouched,
+unsent presentations; a pending-preview validator never invents a dispatch.
+Final projections retain source events, exact claims, referenced Spaces, routing
+rosters, result identities and optional route permissions. Digest titles do not
+read file bytes or grant action authority. Delivery and item controllers still
+own whole-batch claims, acknowledgements and complete preview admission.
+
+Digest ACKs must match the detached manifest admitted before the SDK await.
+A conflicting receipt retains the original manifest, parts and returned message
+IDs for reconciliation; it cannot settle a different membership or release the
+original reservations. Retention keeps this evidence and its original members.
+Parent silence is derived from the current member choices, not independently
+trusted from the batch row.
+
+`work_digest_navigation.py` reads current full sources behind an acknowledged
+digest. Its final composed snapshot retains the exact batch receipt, every
+reservation edge, the complete acknowledged callback group and the selected
+member's authority. Reading a preview never consumes controls or changes the
+original delivery receipt. This admission helper is not a controller and remains
+uninstalled until Show and item presentation owners are integrated. Its explicit
+consumed-origin mode accepts only a revealed Show and still applies the original
+control age limit.
+
+`work_digest_views.py` publishes the protected Show as a separate reply owner that
+edits the exact original message. The batch's membership and whole ACK stay
+unchanged. Final source/claim/provider checks bind the consumed original Show,
+original protected receipt, every member edge, current full source and the new
+pending group. Controls retain their original age. SDK edits drain at shutdown;
+ACKs must identify the actual edit target. Retention follows the view to its
+original batch and members, and callback sweeping retains the consumed Show as
+long as its view exists. A missing edit target is held for source-aware repair;
+item previews and repair are separate pending work. No startup installation yet.
+
+`work_digest_delivery.py` freezes one bounded navigation card and its complete
+pending keyboard. The adapter requires this owner for digest delivery; raw class
+labels and templates do not supply source authority. The final compound read
+rechecks every member plus the parent's claim, callback group, preferences,
+quiet hours and reminder due time. Changed source or presentation choices retire
+the pre-ACK group and release its original members explicitly. Transient retries
+keep membership reserved; typed whole-card ACKs settle members together. An
+admitted digest SDK call drains during shutdown, preserving ambiguous receipts
+and reservations. These plans and sources remain uninstalled; Show/item handling
+and startup integration are still required.
 
 `attention.py` exhausts stable Work/request pages before ranking or applying
 presentation caps. `attention_authority.py` prepares route decisions, then joins

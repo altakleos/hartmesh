@@ -72,7 +72,7 @@ def frozen(captured, *, acknowledged=False, pending=False):
     """A class label or literal template cannot manufacture a Work source."""
     try:
         basis = captured.item.payload["work_request_basis"]
-        if pending and (acknowledged or "result_files" not in basis):
+        if pending and acknowledged:
             raise ValueError()
         if (
             type(basis) is not dict
@@ -229,7 +229,7 @@ def frozen(captured, *, acknowledged=False, pending=False):
         parts = [part for part in captured.item.parts if part["presentation_version"] == version]
         if len(historical) + len(parts) != len(captured.item.parts):
             raise ValueError()
-        if len(parts) != len(expected) or parts[index] != captured.part or captured.part.get("state") != ("sent" if acknowledged else "sending"):
+        if len(parts) != len(expected) or parts[index] != captured.part or captured.part.get("state") != ("sent" if acknowledged else "pending" if pending else "sending"):
             raise ValueError()
         identities = {part["part_id"] for part in historical}
         if len(identities) != len(historical):
@@ -265,7 +265,9 @@ def frozen(captured, *, acknowledged=False, pending=False):
                 raise ValueError()
             if source.protected and not part.get("protect_content") or ordinal < len(parts) - 1 and part.get("callback_group_id"):
                 raise ValueError()
-            if (acknowledged or ordinal < index) and (part["state"] != "sent" or not part.get("sent_at") or not part.get("message_ids") or any(type(identity) is not int or identity <= 0 for identity in part["message_ids"])):
+            if (acknowledged or ordinal < index and not pending) and (part["state"] != "sent" or not part.get("sent_at") or not part.get("message_ids") or any(type(identity) is not int or identity <= 0 for identity in part["message_ids"])):
+                raise ValueError()
+            if pending and (part["state"] != "pending" or part.get("message_ids") or part.get("sent_at") or part.get("dispatched_at")):
                 raise ValueError()
         recipe = expected[index]
         return basis, source, recipe

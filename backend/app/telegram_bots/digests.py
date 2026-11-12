@@ -37,6 +37,8 @@ def validate(row):
     data = row.payload
     if type(data) is not dict:
         raise ValueError("invalid-digest-source")
+    if "digest_dispatch_conflict" in data:
+        raise ValueError("digest-reconciliation-required")
     identities, kinds, category = data.get("member_ids"), data.get("member_classes"), data.get("category")
     if (
         row.class_ != "digest"
@@ -70,7 +72,7 @@ def validate(row):
 def unsolicited(row):
     return (
         row.class_ in MEMBER_CLASSES
-        and row.dedupe_key.startswith(("ev:", "summary:", "remind:", "rejected:", "free:"))
+        and row.dedupe_key.startswith(("event:", "ev:", "summary:", "remind:", "rejected:", "free:"))
         and not row.payload.get("digest_id")
         and bool(row.parts)
         and all(part.get("kind") != "edit" and part.get("state") == "pending" and not part.get("dispatched_at") and not part.get("sent_at") for part in row.parts)
@@ -152,7 +154,7 @@ class DigestReservations:
                 },
                 parts=[],
                 state="pending",
-                silent=any(bool(member.silent) or any(part.get("silent") is True for part in member.parts) or member.class_ in {"summary", "reminder"} for member in members),
+                silent=all(bool(member.silent) or all(part.get("silent") is True for part in member.parts) or member.class_ in {"summary", "reminder"} for member in members),
                 not_before=now,
                 created_at=now,
             )
@@ -260,6 +262,8 @@ async def _retire_controls(writer, parent, groups, now):
 
 
 async def abandon_members(writer, parent, *, now):
+    if "digest_dispatch_conflict" in parent.payload:
+        raise ValueError("digest-reconciliation-required")
     if parent.state == "sent" or any(type(part) is dict and (part.get("state") == "sent" or part.get("sent_at")) for part in parent.parts):
         raise ValueError("digest-already-acknowledged")
     await _retire_controls(writer, parent, {part.get("callback_group_id") for part in parent.parts if type(part) is dict} - {None}, now)
