@@ -278,7 +278,8 @@ def frozen(captured, *, acknowledged=False, pending=False, replay=False):
                 raise ValueError()
             if source.protected and not part.get("protect_content") or ordinal < len(parts) - 1 and part.get("callback_group_id"):
                 raise ValueError()
-            if (acknowledged or ordinal < index and (not pending or replay)) and (part["state"] != "sent" or not part.get("sent_at") or not part.get("message_ids") or any(type(identity) is not int or identity <= 0 for identity in part["message_ids"])):
+            needs_receipt = acknowledged or ordinal < index and (not pending or replay)
+            if needs_receipt and (part["state"] != "sent" or not part.get("sent_at") or not part.get("message_ids") or any(type(identity) is not int or identity <= 0 for identity in part["message_ids"])):
                 raise ValueError()
             if pending and (not replay or ordinal >= index) and (part["state"] != "pending" or part.get("message_ids") or part.get("sent_at") or not replay and part.get("dispatched_at")):
                 raise ValueError()

@@ -50,9 +50,7 @@ class DigestItems:
                     if not current_parts:
                         raise ProductSourceRetired()
                     selected = next((part for part in current_parts if part["state"] in {"pending", "sending"}), current_parts[-1])
-                    saved, _source, _part = frozen(
-                        SimpleNamespace(link=link, item=_item(existing), part=selected), pending=selected["state"] == "pending", replay=True, acknowledged=selected["state"] == "sent"
-                    )
+                    saved, _source, _part = frozen(SimpleNamespace(link=link, item=_item(existing), part=selected), pending=selected["state"] == "pending", replay=True, acknowledged=selected["state"] == "sent")
                     if not same_body(saved.get("navigation_origin"), origin.value):
                         raise ProductSourceRetired()
                     return existing.id
