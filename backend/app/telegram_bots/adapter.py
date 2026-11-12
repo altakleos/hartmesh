@@ -1978,6 +1978,7 @@ class TelegramBotChannel(TelegramChannel):
             "concealed.interrupted",
             "concealed.not_started",
             "concealed.progress",
+            "concealed.summary",
             "voice.confirm_answer",
             "request.assessed",
             "request.withdrawn",

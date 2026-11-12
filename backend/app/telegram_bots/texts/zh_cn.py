@@ -1,6 +1,17 @@
 """Simplified Chinese fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "summary.header": "早上好。自昨天 {time} 起：",
+    "summary.finished": "已完成：“{objective}”",
+    "summary.working": "正在处理：“{objective}”",
+    "summary.interrupted": "已中断：“{objective}”",
+    "summary.waiting": "等待你处理：{items}",
+    "summary.item.resume": "“{objective}”，可继续",
+    "summary.item.start": "“{objective}”，尚未开始",
+    "summary.more": "以及另外 {n} 项",
+    "summary.button.off": "停止这些摘要",
+    "summary.off": "已关闭所有 AI 助手和 AI 员工的摘要。可通过 /settings 重新开启。",
+    "concealed.summary": "早上好。摘要已准备好。",
     "digest.header": "有 {n} 件事需要你处理：",
     "digest.header_news": "有 {n} 条新消息：",
     "concealed.digest": "有 {n} 件事需要你处理。",

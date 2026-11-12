@@ -1051,3 +1051,12 @@ file reads compose current family authority with the complete original digest pr
 Pending previews retain navigation evidence without extending callback usability.
 Optional `work_digest_items` callback dispatch preserves per-query dedupe and leaves
 reusable digest controls intact. Supervisor installation remains separate work.
+
+
+`summary.sections` ranks a complete `AttentionReader.collect` result before
+`summary_text.present_summary` applies five-item display limits. Old requests
+precede start/resume lines; those lines have no execution buttons. The renderer
+uses request-target navigation and a web Work handover for omitted items.
+`due_date` uses the owner's local calendar date, defers to quiet end, and retains
+the scheduled day across an overnight delay; duplicate local times retain one
+date key. These pure helpers do not install a scheduler or authorize a delivery.

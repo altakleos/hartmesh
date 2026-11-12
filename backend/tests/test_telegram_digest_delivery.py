@@ -16,7 +16,7 @@ from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("key", ["digest.header", "summary.item.question", "concealed.digest_news"])
+@pytest.mark.parametrize("key", ["digest.header", "summary.item.question", "concealed.digest_news", "concealed.summary"])
 async def test_generic_reply_cannot_impersonate_a_digest(work_delivery, key):
     e = work_delivery
     async with e.db.sessions.begin() as writer:
