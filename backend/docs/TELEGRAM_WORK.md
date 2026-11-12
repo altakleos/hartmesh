@@ -80,6 +80,8 @@ Generic fixed text cannot impersonate this source family.
 actual acknowledged teaser, waits for durable keyboard cleanup, then sends files
 and the complete card. Waiting-review notices retain their forced-silent flag.
 Consumed Show proofs and unfinished cleanup dependencies survive retention.
+Result preview cleanup hashes its parent/version/group identity so its
+deduplication key fits the outbox's 96-character SQL limit on both dialects.
 Locale, visible-source and policy changes rebuild the current presentation while
 preserving actual media ACKs, initial byte hashes and photo-rejection fallback.
 The originating event and raw outcome identity cannot change. Historical media

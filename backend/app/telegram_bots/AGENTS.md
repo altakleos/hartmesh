@@ -107,8 +107,7 @@ Past the acknowledgement `_tell_press_failed` owns the outcome: a refusal's key 
 `tap.failed`, as a reply. A spent row or a keyless refusal stays silent, having lost
 to a press that worked or is working. `_source_for` reads the thread to tell a deleted
 conversation from a failing Gateway. `keyboard_cleanup_row` takes spent buttons off
-their message in the writer that spends them. Result preview cleanup hashes the
-parent/version/group identity to fit the outbox's 96-character deduplication key.
+their message in the writer that spends them.
 
 `agent_lists.py` projects at most 20 Use-qualified entries from the Gateway’s
 500-entry page. `agent_list_source.py` owns drained HTTP/role/Work reads;
