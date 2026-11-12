@@ -1,6 +1,16 @@
 """Simplified Chinese fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "status.starting": "“{objective}”\n正在启动{name}的工作区…",
+    "status.working": "“{objective}”\n从{time}开始工作。\n最新进展：{progress}",
+    "status.waiting_you": "“{objective}”\n正在等待你的回答。问题在下方。",
+    "status.waiting_answer": "“{objective}”\n正在等待{person}的回答。",
+    "status.checking": "“{objective}”\n正在核查发生了什么。{name}的上一步没有返回结果，其工作区正在安全关闭。通常不到一分钟。",
+    "status.stopping": "“{objective}”\n正在停止…这可能需要一分钟。",
+    "status.stopped": "“{objective}”\n已于{time}停止。目前的工作已保留。",
+    "status.finished": "“{objective}”\n已于{time}完成。",
+    "status.ended": "“{objective}”\n已于{time}结束。",
+    "concealed.progress": "一项任务已开始执行。",
     "request.answered_elsewhere": "你已在网页上回答，{time}。",
     "request.answered_by": "{person}已回答，{time}。",
     "request.assessed": "{name}已阅读答案并关闭了问题。",

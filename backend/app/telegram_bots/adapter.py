@@ -733,6 +733,11 @@ class TelegramBotChannel(TelegramChannel):
         if update.my_chat_member is not None:
             return
         message = update.message
+        pins = getattr(self._services, "work_status_pins", None)
+        if pins is not None and message is not None and message.pinned_message is not None and user is not None and user.is_bot and user.id == link.bot_id and chat is not None and chat.id == link.chat_id and link.state == "connected":
+            await pins.delete_service(self, link, message)
+            self._classified(update)
+            raise ApplicationHandlerStop
         word, arguments = self._command(message) if message is not None else ("", [])
         if link.state == "waiting_connect" and word == "start" and arguments and link.bind_mode == "code" and user is not None and not user.is_bot:
             return
@@ -1896,16 +1901,31 @@ class TelegramBotChannel(TelegramChannel):
         if saved.item.dedupe_key.startswith(("notice:chat-stream:", "notice:preparation-capacity:", "notice:chat-wait:")) and (turns is None or turns.preview_allowed(self, saved.item) is not True):
             raise PreviewExpired()
         part = saved.part
+        if "work_status_pin" in saved.item.payload or part["kind"] == "pin":
+            pins = getattr(self._services, "work_status_pins", None)
+            if pins is None or "work_status_pin" not in saved.item.payload or part["kind"] != "pin":
+                raise PermanentDeliveryError("unsupported-status-pin")
+            return await pins.send(self, saved)
         source_key = part.get("source_ref", {}).get("key", "")
         work_part = None
         work_sources = getattr(self._services, "work_request_sources", None)
-        if "work_question_update" in saved.item.payload:
+        if "work_status_update" in saved.item.payload:
+            work_sources = getattr(self._services, "work_status_update_sources", None)
+            if work_sources is None or any(key in saved.item.payload for key in ("work_question_update", "work_news_basis", "result_notice_basis", "work_request_basis", "work_outcome_basis")):
+                raise PermanentDeliveryError("unsupported-work-status-update")
+            work_part = await work_sources.read_part(saved)
+        elif "work_question_update" in saved.item.payload:
             work_sources = getattr(self._services, "work_question_edit_sources", None)
             if work_sources is None or any(key in saved.item.payload for key in ("work_news_basis", "result_notice_basis", "work_request_basis", "work_outcome_basis")):
                 raise PermanentDeliveryError("unsupported-work-question-update")
             work_part = await work_sources.read_part(saved)
         elif "work_news_basis" in saved.item.payload:
-            work_sources = getattr(self._services, "work_news_sources", None)
+            from app.telegram_bots.work_news import news_owner
+
+            owner = news_owner(saved.item.payload)
+            if owner is None:
+                raise PermanentDeliveryError("invalid-work-news-source")
+            work_sources = getattr(self._services, owner, None)
             if work_sources is None or any(key in saved.item.payload for key in ("result_notice_basis", "work_request_basis", "work_outcome_basis")):
                 raise PermanentDeliveryError("unsupported-work-news-source")
             work_part = await work_sources.read_part(saved)
@@ -1935,7 +1955,7 @@ class TelegramBotChannel(TelegramChannel):
             if work_sources is None:
                 raise PermanentDeliveryError("unsupported-work-request-source")
             work_part = await work_sources.read_part(saved)
-        elif source_key.startswith(("ask.", "review.", "decide.", "work.", "request.route", "request.unrouted", "request.answered", "result.", "decision.recorded", "attempt.", "interrupted", "remind.")) or source_key in {
+        elif source_key.startswith(("ask.", "review.", "decide.", "work.", "request.route", "request.unrouted", "request.answered", "result.", "decision.recorded", "attempt.", "interrupted", "remind.", "status.")) or source_key in {
             "concealed.question",
             "concealed.decision",
             "concealed.review",
@@ -1945,6 +1965,7 @@ class TelegramBotChannel(TelegramChannel):
             "concealed.no_result",
             "concealed.interrupted",
             "concealed.not_started",
+            "concealed.progress",
             "voice.confirm_answer",
             "request.assessed",
             "request.withdrawn",

@@ -84,7 +84,7 @@ operation and group; a missing reserved journal never becomes a fresh action.
 Work effects lock instance → link → Act, recheck authority after providers, and
 check receipts before fresh admission. Full ACK seals input and continuation.
 Result refresh preserves media ACKs; changed origin events retire delivery.
-Notices, output, question cleanup: [Work guide](../../docs/TELEGRAM_WORK.md).
+Notices, output, question/status updates, pins: [Work guide](../../docs/TELEGRAM_WORK.md).
 
 Product text lives in `texts/` in English and Chinese; keep locale keys equal
 and copy English wording from the design. `render` escapes values; `render_plain`

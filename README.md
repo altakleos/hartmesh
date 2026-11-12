@@ -2049,6 +2049,14 @@ Question-update delivery follows web answers, assessments, routing and withdrawa
 It removes the original controls, preserves the question text, and prevents a
 delayed update from overwriting a newer closure. Protected replacements move the
 message target only after Telegram acknowledges them.
+Status-message foundations read the exact attempt and its current progress,
+question or completion. Initial delivery is silent, protected previews wait for
+Show, and Show reads current status. Updates coalesce at most every 30 seconds,
+preserve complete progress text, and replace deleted messages only after current
+access checks. A replacement becomes the target after Telegram acknowledges all
+its parts. Silent pins follow the acknowledged status message and are removed
+when work ends. A replacement moves the pin only after complete delivery;
+pin failures preserve the status text and never start or stop work.
 These workers remain uninstalled; remaining notification forms and startup
 integration are still pending.
 Background recovery preserves newer

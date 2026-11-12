@@ -87,6 +87,36 @@ def question_cleanup_anchors():
     return select(delivery.id).where(delivery.class_ == "question", ~delivery.dedupe_key.startswith("edit:"), awaiting_cleanup)
 
 
+async def status_cleanup_anchors(session):
+    """Status roots survive their attempt and any unfinished final update."""
+    from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow
+
+    delivery, edit = TelegramOutboxRow, aliased(TelegramOutboxRow)
+    unfinished = (
+        select(edit.id)
+        .where(
+            edit.link_id == delivery.link_id,
+            edit.binding_generation == delivery.binding_generation,
+            edit.class_ == "progress",
+            edit.dedupe_key.startswith("edit:"),
+            edit.state.in_(("pending", "sending", "failed")),
+            edit.payload["work_event_intent"]["attempt_id"].as_string() == delivery.payload["work_event_intent"]["attempt_id"].as_string(),
+        )
+        .correlate(delivery)
+        .exists()
+    )
+    roots = list(await session.execute(select(delivery.id, delivery.payload["work_event_intent"]["attempt_id"].as_string(), unfinished).where(delivery.dedupe_key.startswith("progress:"), delivery.instance_id.is_not(None))))
+    pinned = {identity for identity, _attempt, pending in roots if pending}
+    candidates = sorted({attempt for _identity, attempt, _pending in roots if type(attempt) is str})
+    active = set()
+    for start in range(0, len(candidates), _BATCH):
+        active.update(await session.scalars(select(AgentWorkAttemptRow.id).where(AgentWorkAttemptRow.id.in_(candidates[start : start + _BATCH]), AgentWorkAttemptRow.status.in_(("starting", "running", "stopping", "uncertain")))))
+    from app.telegram_bots.work_status_pins import pin_cleanup_anchors
+
+    pinned.update(await pin_cleanup_anchors(session))
+    return pinned | {identity for identity, attempt, _pending in roots if attempt in active}
+
+
 async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int) -> set[str]:
     """The ids and ``reply:`` keys of outbox rows a live control or unfinished delivery needs."""
     generations = dict((await session.execute(select(TelegramBotLinkRow.id, TelegramBotLinkRow.binding_generation))).all())
@@ -122,6 +152,7 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
     )
     pinned.update(await session.scalars(select(delivery.id).where(delivery.request_id.is_not(None), unresolved_album)))
     pinned.update(await session.scalars(question_cleanup_anchors()))
+    pinned.update(await status_cleanup_anchors(session))
     # Compact dependency edges preserve complete digests behind live controls.
     records = await session.execute(
         select(
@@ -136,17 +167,41 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
             delivery.payload["work_outcome_basis"]["refresh"]["anchor_outbox_id"].as_string(),
             delivery.payload["work_question_update"]["anchor"]["outbox_id"].as_string(),
             delivery.payload["question_anchor"]["outbox_id"].as_string(),
-        ).where(or_(delivery.class_ == "digest", delivery.state.in_(("pending", "sending", "failed")), delivery.payload["question_anchor"]["outbox_id"].as_string().is_not(None)))
+            delivery.payload["work_status_update"]["anchor"]["outbox_id"].as_string(),
+            delivery.payload["status_anchor"]["outbox_id"].as_string(),
+            delivery.payload["work_status_pin"]["root_id"].as_string(),
+            delivery.payload["status_pin_steps"],
+            delivery.payload["work_status_pin"]["presentation_id"].as_string(),
+            delivery.payload["status_pin_tail"].as_string(),
+        ).where(
+            or_(
+                delivery.class_ == "digest",
+                delivery.state.in_(("pending", "sending", "failed")),
+                delivery.payload["question_anchor"]["outbox_id"].as_string().is_not(None),
+                delivery.payload["status_anchor"]["outbox_id"].as_string().is_not(None),
+                delivery.payload["status_pin_steps"][0].as_string().is_not(None),
+                delivery.payload["work_status_pin"]["presentation_id"].as_string().is_not(None),
+                delivery.payload["status_pin_tail"].as_string().is_not(None),
+            )
+        )
     )
     graph = {}
-    for identity, kind, state, members, reservation, cleanup, origin, outcome_origin, refresh_origin, question_origin, question_anchor in records:
+    for identity, kind, state, members, reservation, cleanup, origin, outcome_origin, refresh_origin, question_origin, question_anchor, status_origin, status_anchor, pin_root, pin_steps, pin_presentation, pin_tail in records:
         if state in {"pending", "sending"}:
             pinned.add(identity)
             pinned |= _strings(reservation)
         if state in {"pending", "sending", "failed"}:
-            pinned |= _strings(cleanup, origin, outcome_origin, refresh_origin, question_origin)
+            pinned |= _strings(cleanup, origin, outcome_origin, refresh_origin, question_origin, status_origin, pin_root)
         if question_anchor:
             graph.setdefault(identity, set()).update(_strings(question_anchor))
+        if status_anchor:
+            graph.setdefault(identity, set()).update(_strings(status_anchor))
+        if isinstance(pin_steps, list):
+            graph.setdefault(identity, set()).update(_strings(*pin_steps))
+        if pin_presentation:
+            graph.setdefault(identity, set()).update(_strings(pin_presentation))
+        if pin_tail:
+            graph.setdefault(identity, set()).update(_strings(pin_tail))
         if kind == "digest" and isinstance(members, list):
             graph.setdefault(identity, set()).update(_strings(*members))
     pending = list(pinned)

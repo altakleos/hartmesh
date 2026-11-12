@@ -75,6 +75,12 @@ class WorkCallbacks:
                 result_files = "result_files" in parent.payload.get("work_request_basis", {})
                 notice = "result_notice_basis" in parent.payload or "work_news_basis" in parent.payload
                 notice_owner = "work_news_sources" if "work_news_basis" in parent.payload else "result_notice_sources"
+                if "work_news_basis" in parent.payload:
+                    from app.telegram_bots.work_news import news_owner
+
+                    notice_owner = news_owner(parent.payload)
+                    if notice_owner is None:
+                        raise CallbackRefused()
             guard = self.services.commands._guard(channel, link)
             scope = {"chat_id": row.chat_id, "message_id": row.message_id, "message_thread_id": row.message_thread_id, "guard": guard}
 

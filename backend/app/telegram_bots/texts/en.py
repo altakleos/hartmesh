@@ -1,6 +1,16 @@
 """English fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "status.starting": '"{objective}"\nStarting {name}\'s workspace…',
+    "status.working": '"{objective}"\nWorking since {time}.\nLatest: {progress}',
+    "status.waiting_you": '"{objective}"\nWaiting for your answer. The question is below.',
+    "status.waiting_answer": '"{objective}"\nWaiting for an answer from {person}.',
+    "status.checking": "\"{objective}\"\nChecking what happened. {name}'s last step did not report back, and {name}'s workspace is being closed safely. This usually takes under a minute.",
+    "status.stopping": '"{objective}"\nStopping… This can take up to a minute.',
+    "status.stopped": '"{objective}"\nStopped at {time}. Work so far is kept.',
+    "status.finished": '"{objective}"\nFinished {time}.',
+    "status.ended": '"{objective}"\nEnded {time}.',
+    "concealed.progress": "Work has started on an assignment.",
     "request.answered_elsewhere": "Answered by you on the web, {time}.",
     "request.answered_by": "Answered by {person}, {time}.",
     "request.assessed": "{name} has read the answers and closed the question.",

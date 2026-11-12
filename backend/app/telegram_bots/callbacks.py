@@ -903,9 +903,10 @@ class CallbackRepository:
                             pending_groups.add(owner.group_id)
                 anchors = sorted({anchor for row in rows if row.group_id not in pending_groups and type(anchor := row.payload.get("anchor_outbox_id")) is str})
                 unsettled = set()
-                from app.telegram_bots.retention import question_cleanup_anchors
+                from app.telegram_bots.retention import question_cleanup_anchors, status_cleanup_anchors
 
                 unsettled.update(await session.scalars(question_cleanup_anchors()))
+                unsettled.update(await status_cleanup_anchors(session))
                 for start in range(0, len(anchors), 500):
                     unsettled.update(await session.scalars(select(TelegramOutboxRow.id).where(TelegramOutboxRow.id.in_(anchors[start : start + 500]), TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
                 # An unfinished direct Work reply still needs its consumed

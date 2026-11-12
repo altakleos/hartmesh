@@ -908,3 +908,46 @@ Display changes refresh a flat presentation history; canonical event changes
 retire. Explicit repair accepts only a held known refresh failure with no claim.
 Pending intents and updates retain their original and moved message evidence.
 This owner remains uninstalled until notification integration is complete.
+
+`work_status.py` reads one admitted attempt through its original activation,
+canonical progress/question events and terminal settlement. Retained run metadata
+must agree with that attempt. A broken blocker/request join cannot become a working
+status. Provider-final snapshots retain current account, role, grant and policy
+checks. `work_status_events.py` qualifies nonhuman reports and human creation
+receipts; JSON revision joins use text comparisons before strict Python validation.
+
+`work_status_delivery.py` composes these reads with the existing Work notice
+plans, complete ACK validation, protected Show and display refresh. Notice delivery
+accepts a source projection owner so status authority stays separate from colleague
+events. Refresh may adopt later progress, but cannot rewrite an already used event.
+Raw status templates require this source owner. Initial status sends are silent,
+including when discretionary notices are disabled, and expose no execution controls.
+`work_status_updates.py` coalesces newer progress into that attempt's fully
+acknowledged presentation. Every edit is silent, with the 30-second interval
+checked again immediately before dispatch. A missing message, changed protection
+or different part count uses a complete replacement; only its complete typed
+acknowledgement moves the target. Later updates require that retained target and
+its monotonically advancing acknowledged revision. They cannot fall back to an
+obsolete message. Ordinary transport retries retain acknowledged parts; display
+refresh and known missing-target repair retain a flat presentation history.
+Current authority and immutable source evidence are checked after provider waits.
+A late locale change preserves delivery for refresh, while revoked access or
+changed source retires it. Retention keeps original and moved presentations while
+the attempt or an update remains unresolved. These owners remain dormant pending
+supervisor installation.
+
+`work_status_pins.py` owns a durable, serialized pin ledger for each status root.
+Every operation binds an exact complete acknowledged presentation and its first
+message ID; the final joined account/grant/source/claim read includes that retained
+presentation. Pinning is silent. A moved message unpins the old exact target before
+pinning the fully acknowledged replacement; a terminal attempt only unpins.
+Possible dispatch and confirmed pin are distinct. A skipped attempt can be retried
+on the same target; a known refused target waits for a new presentation. Failed
+unpin repair admits only a claim-free cleanup of that same possibly pinned ID.
+Pin failures produce no generic message-delivery retry card. Ordinary transport
+retries retain their operation, and shutdown drains an admitted SDK call.
+Bot-authored pin service messages are deleted through ingress only when the ledger
+proves their pinned target, with fresh checks inside the SDK limiter. Retention
+uses the same closed, typed ledger and presentation receipts; a row's `sent` state
+alone never proves cleanup. Pin operations and all referenced presentations stay
+retained until exact cleanup is acknowledged. Installation remains deferred.

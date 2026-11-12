@@ -19,7 +19,7 @@ from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryRetry, Perm
 from app.telegram_bots.settings import SettingsRepository, _snapshot
 from app.telegram_bots.work_actions import same_body
 from app.telegram_bots.work_news import news_class, present_news
-from app.telegram_bots.work_news_sources import WorkNewsProjection, WorkNewsRead
+from app.telegram_bots.work_news_sources import WorkNewsProjection, WorkNewsRead, same_news_origin
 from app.telegram_bots.work_request_source import cleanup_ready, require_show
 from app.telegram_bots.work_result_navigation import NavigationOrigin
 from app.telegram_bots.work_stop_news import NewsClock
@@ -223,8 +223,9 @@ def require_teaser(callback, parent):
 
 
 class WorkNewsPlans:
-    def __init__(self, *, reader, outbox, callbacks):
+    def __init__(self, *, reader, outbox, callbacks, projection=WorkNewsProjection):
         self.reader, self.outbox, self.callbacks = reader, outbox, callbacks
+        self.projection = projection
         self.settings = SettingsRepository(outbox.sessions, outbox.config)
         if reader.links.session_factory.kw.get("bind") is not outbox.sessions.kw.get("bind") or callbacks.sessions.kw.get("bind") is not outbox.sessions.kw.get("bind"):
             raise ValueError("work-news-requires-shared-storage")
@@ -254,7 +255,7 @@ class WorkNewsPlans:
             row = await writer.get(TelegramOutboxRow, identity, with_for_update=True, populate_existing=True)
             if binding is None or any(getattr(binding, field) != getattr(link, field) for field in _SCOPE) or row is None or _item(row) != item:
                 raise DeliveryClaimRetired()
-            await admission(session=writer, projection=WorkNewsProjection(self.reader, link, item, source, clock=clock))
+            await admission(session=writer, projection=self.projection(self.reader, link, item, source, clock=clock))
             basis = {"version": 1, "source": asdict(source), "locale": settings.locale, "concealed": source.protected, "public_base_url": origin.base}
             parts, keyboard = recipes(source, basis, identity, link)
             row.parts = self.outbox._parts(parts, 0)
@@ -267,7 +268,7 @@ class WorkNewsPlans:
                 for control in await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group.group_id)):
                     control.payload = {**control.payload, "presentation_pending": True}
             await writer.flush()
-            await admission(session=writer, projection=WorkNewsProjection(self.reader, link, _item(row), source, clock=clock))
+            await admission(session=writer, projection=self.projection(self.reader, link, _item(row), source, clock=clock))
             origin.check(basis)
             return True
 
@@ -277,13 +278,14 @@ class WorkNewsSources:
         from app.telegram_bots.work_news_recovery import WorkNewsRecovery
 
         self.reader, self.outbox, self.callbacks, self.settings = plans.reader, plans.outbox, plans.callbacks, plans.settings
+        self.projection = plans.projection
         self.recovery = WorkNewsRecovery(plans)
 
     async def read_part(self, captured):
         async def read():
             basis, source, part = frozen_news(captured)
             current = await self.reader.read(captured.link, captured.item)
-            if current.event_signature != source.event_signature:
+            if not same_news_origin(source, current):
                 raise ProductSourceRetired()
             settings = await self.settings.get(captured.link.owner_user_id)
             if settings is None:
@@ -308,22 +310,23 @@ class WorkNewsSources:
                 # The failed final fence has admitted no SDK call. Recheck
                 # authority before distinguishing display drift from retirement.
                 current = await self.reader.read(captured.link, captured.item)
-                if current.event_signature == source.event_signature and (not same_body(asdict(current), asdict(source)) or NavigationOrigin().base != basis["public_base_url"]):
+                if same_news_origin(source, current) and (not same_body(asdict(current), asdict(source)) or NavigationOrigin().base != basis["public_base_url"]):
                     raise DeliveryRetry(timedelta(seconds=1)) from None
                 raise
 
         return await await_drained(read())
 
 
-class _SendProjection(WorkNewsProjection):
+class _SendProjection:
     def __init__(self, host, captured, source, basis, settings, zone, now, silent):
-        super().__init__(host.reader, captured.link, captured.item, source, clock=NewsClock(settings, zone, host.reader.clock))
+        self.projection = host.projection(host.reader, captured.link, captured.item, source, clock=NewsClock(settings, zone, host.reader.clock))
+        self.link, self.item, self.source = captured.link, captured.item, source
         self.host, self.captured, self.basis, self.settings, self.zone, self.now, self.silent = host, captured, basis, settings, zone, now, silent
         self.group = captured.item.parts[-1].get("callback_group_id")
         self.origin = NavigationOrigin()
 
     def extend(self, query):
-        result = super().extend(query)
+        result = self.projection.extend(query)
         self.send_column = len(result.column_descriptions)
         cleanup = aliased(TelegramOutboxRow)
         return (
@@ -334,8 +337,19 @@ class _SendProjection(WorkNewsProjection):
         )
 
     def check(self, rows):
-        super().check(rows)
-        delivery = rows[0][self.column + 5]
+        self.projection.check(rows)
+        self.check_delivery(rows)
+
+    def check_with_permissions(self, rows, held):
+        qualified = getattr(self.projection, "check_with_permissions", None)
+        if qualified is not None:
+            qualified(rows, held)
+        else:
+            self.projection.check(rows)
+        self.check_delivery(rows)
+
+    def check_delivery(self, rows):
+        delivery = rows[0][self.projection.delivery_column]
         latest = self.host.outbox._sending(
             rows[0][0], delivery, link_id=self.link.id, part_id=self.captured.part["part_id"], claim_owner=self.captured.claim_owner, claim_id=self.captured.claim_id, token_revision=self.captured.token_revision
         )
