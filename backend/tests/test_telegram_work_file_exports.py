@@ -24,6 +24,9 @@ from deerflow.spaces.contract import Permission, SpaceDenied
 async def work_exports(work_delivery, tmp_path, monkeypatch, request):
     e = await prepare_file_home(work_delivery, tmp_path, monkeypatch)
     mode = getattr(request, "param", None)
+    album = mode == "done_album_event"
+    if album:
+        mode = "done_event"
     suggestion = mode == "done_suggestion_event"
     if suggestion:
         mode = "done_event"
@@ -67,14 +70,14 @@ async def work_exports(work_delivery, tmp_path, monkeypatch, request):
         async with e.db.sessions.begin() as writer:
             (await writer.get(AgentInstanceRow, e.instance.id)).supervisor_id = "missing-reviewer"
     e.source_space = e.home
-    if mode in {"external", "review_album"}:
+    if album or mode in {"external", "review_album"}:
         from deerflow.spaces.contract import Custody, MutationMode
 
         e.source_space = await e.files.create(actor=e.actor, name="Shared evidence", custody=Custody.personal(e.actor), mode=MutationMode.NATIVE)
         await e.files.mkdir(actor=e.actor, space_id=e.source_space.id, expected_generation=e.source_space.generation, operation_id=uuid4().hex, path="outputs")
         await e.files.write(actor=e.actor, space_id=e.source_space.id, expected_generation=e.source_space.generation, operation_id=uuid4().hex, path="outputs/result.txt", content=b"external result", create=True)
     sources = [WorkSource(space_id=e.source_space.id, path="outputs/result.txt")]
-    if mode == "review_album":
+    if album or mode == "review_album":
         from test_telegram_output_planning import png_header
 
         sources = []

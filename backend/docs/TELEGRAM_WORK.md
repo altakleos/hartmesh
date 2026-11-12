@@ -76,13 +76,19 @@ hours, Show controls and protection. This read-only result path needs current
 Use+Inspect and per-file READ+EXPORT; it does not require a review write ceiling.
 Generic fixed text cannot impersonate this source family.
 
-`result_notice_recovery.py` currently owns protected Show only. It consumes the
+`result_notice_recovery.py` owns protected Show and source-aware refresh. It consumes the
 actual acknowledged teaser, waits for durable keyboard cleanup, then sends files
 and the complete card. Waiting-review notices retain their forced-silent flag.
 Consumed Show proofs and unfinished cleanup dependencies survive retention.
-These owners remain dormant. Source-aware refresh after partial delivery,
-policy upgrades and explicit failed-transport repair remain outstanding for
-non-review result notices; current source changes safely retire the old send.
+Locale, visible-source and policy changes rebuild the current presentation while
+preserving actual media ACKs, initial byte hashes and photo-rejection fallback.
+The originating event and raw outcome identity cannot change. Historical media
+proof version 2 binds this family's result recipes; review proofs retain version
+1 and cannot cross families. A protection upgrade requires a fresh Show before
+the remaining content, without relabeling or repeating an earlier upload.
+Explicit repair accepts only known held General failures with no claim fields;
+active/uncertain sends and retained non-General destinations stay untouched.
+These owners remain dormant pending the remaining notification integration.
 
 `work_event_intents.py` projects current recipient/grant/preferences into empty,
 content-free delivery intents in `WorkEventReader`'s pair writer. Ordinary

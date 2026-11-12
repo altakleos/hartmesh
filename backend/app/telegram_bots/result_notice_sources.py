@@ -41,6 +41,7 @@ class ResultNoticeRead:
     identity: dict
     navigation: dict
     signature: str
+    event_signature: str
 
 
 class ResultNoticeReader(AttentionReader):
@@ -163,7 +164,7 @@ class ResultNoticeProjection:
                 event_signature(event, None, intent),
             ]
         )
-        fresh = ResultNoticeRead(self.work, key, instance.name, person, self.protected, identity, navigation, signature)
+        fresh = ResultNoticeRead(self.work, key, instance.name, person, self.protected, identity, navigation, signature, event_signature(event, None, intent))
         if self.source is not None and self.source != fresh:
             raise ProductSourceRetired()
         self.source = fresh

@@ -81,10 +81,10 @@ Routing V5/V6 has a dedicated recipient/account source and cannot use ordinary
 question recovery. Source-aware routing refresh/Show/repair retain ACK history and
 unresolved actions; fresh controls await full delivery. Recipient-choice admission atomically reserves the original
 operation and group; a missing reserved journal never becomes a fresh action.
-Actual Work effects retain instance → link → Act lock order and recheck joined
-authority after provider awaits. Exact receipts precede fresh-effect admission.
-Full ACK alone seals captured input and writes the Work-only continuation receipt;
-keep retention and callback activation aligned with [Work guidance](../../docs/TELEGRAM_WORK.md).
+Work effects lock instance → link → Act, recheck authority after providers, and
+check receipts before fresh admission. Full ACK seals input and continuation.
+Result refresh preserves media ACKs; changed origin events retire delivery.
+Retention/activation: [Work guide](../../docs/TELEGRAM_WORK.md).
 
 Product text lives in `texts/` in English and Chinese; keep locale keys equal
 and copy English wording from the design. `render` escapes values; `render_plain`

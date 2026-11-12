@@ -19,6 +19,7 @@ from app.telegram_bots.settings import SettingsRepository, _snapshot
 from app.telegram_bots.work_actions import same_body
 from app.telegram_bots.work_request_source import cleanup_ready, require_show
 from app.telegram_bots.work_result_files import result_options
+from app.telegram_bots.work_result_history import qualified_history
 from app.telegram_bots.work_result_identity import qualify_identity
 from app.telegram_bots.work_result_ledger import initial_ledger, qualify_result_parts
 from app.telegram_bots.work_result_navigation import qualify_navigation
@@ -64,7 +65,11 @@ def frozen_notice(captured, *, acknowledged=False, pending=False):
         reveal = basis.get("reveal")
         if type(item.payload["presentation_version"]) is not int or (item.payload["presentation_version"] != 0 if basis["version"] == 1 else item.payload["presentation_version"] < 1) or item.class_ != ("reply" if reveal else "result"):
             raise ValueError()
-        if basis["version"] == 2 and (any(type(value) is not str or len(value) != 32 or any(char not in "0123456789abcdef" for char in value) for value in (reveal, basis["cleanup_id"])) or basis["concealed"]):
+        if basis["version"] == 2 and (
+            (reveal is None) != (basis["cleanup_id"] is None)
+            or reveal is not None
+            and (any(type(value) is not str or len(value) != 32 or any(char not in "0123456789abcdef" for char in value) for value in (reveal, basis["cleanup_id"])) or basis["concealed"])
+        ):
             raise ValueError()
         source = ResultNoticeRead(**basis["source"])
         if (
@@ -82,7 +87,8 @@ def frozen_notice(captured, *, acknowledged=False, pending=False):
         parts, controls = recipes(source, basis, item.id)
         if not same_body(parts, basis["parts"]) or not same_body(controls, basis["keyboard"]) or not same_body(controls, item.payload["product_keyboard_basis"]):
             raise ValueError()
-        recipe = qualify_result_parts(item, parts, selected=captured.part, acknowledged=acknowledged, pending=pending)
+        carried, hashes = qualified_history(item, source)
+        recipe = qualify_result_parts(item, parts, selected=captured.part, acknowledged=acknowledged, pending=pending, carried=carried, known_hashes=hashes)
         return basis, source, recipe
     except (KeyError, TypeError, ValueError, IndexError):
         raise PermanentDeliveryError("invalid-result-notice-source") from None
@@ -162,8 +168,14 @@ class ResultNoticeSources:
     async def _prepare(self, captured):
         basis, source, part = frozen_notice(captured)
         current = await self.reader.read(captured.link, captured.item)
-        if current != source:
+        if current.event_signature != source.event_signature or current.identity != source.identity:
             raise ProductSourceRetired()
+        settings = await self.settings.get(captured.link.owner_user_id)
+        if settings is None:
+            raise ProductSourceRetired()
+        if not same_body(asdict(current), asdict(source)) or settings.locale != basis["locale"]:
+            await self.recovery.refresh(captured)
+            raise DeliveryClaimRetired()
         return basis, source, part
 
     async def read_part(self, captured):
