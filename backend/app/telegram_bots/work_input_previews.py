@@ -152,8 +152,8 @@ def _check_input_origin(link, parent, callbacks, mark, blocked, basis, source, *
 
 async def lock_input_origin(writer, link, parent, source, *, draft_ttl_hours):
     """Retain the accepted input through confirmation's borrowed service writer."""
-    basis = parent.payload["work_request_basis"]
-    if basis["version"] != 4:
+    basis = parent.payload.get("work_request_basis", {})
+    if basis.get("version") != 4:
         return
     identity = basis["input"]
     # Lock delivery before callback, as the publication paths do.

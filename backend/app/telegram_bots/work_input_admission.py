@@ -16,12 +16,12 @@ from deerflow.utils.file_io import await_drained
 def command(acts, captured):
     data = captured.route_basis["work_input"]
     identity, seen = captured.operation_ids[0], data["seen"]
-    if data["purpose"] in {"answer", "cannot_provide", "wrong_recipient"}:
+    if data["purpose"] in {"answer", "cannot_provide", "wrong_recipient", "work_comment"}:
         return "respond", Respond(
             operation_id=identity,
             expected_request_revision=seen["request_revision"],
             expected_assignment_revision=seen["assignment_revision"],
-            disposition="supplied" if data["purpose"] == "answer" else data["purpose"],
+            disposition="supplied" if data["purpose"] in {"answer", "work_comment"} else data["purpose"],
             text=data["text"],
         )
     if data["purpose"] == "request_changes":

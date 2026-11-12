@@ -64,6 +64,8 @@ class WorkTextInputs:
                     origin, prompt_id = None, prompt.id
             if origin is None:
                 origin, _ = await self.inbox.accept(link, update, sanitized_input={"type": "text", "text": message.text})
+                await self.cards._apply(channel, link, origin, parent.id, guard, prompt_id=prompt_id)
+                return True
             captured = await self.captures.capture(link, origin, prompt_id=prompt_id, guard=guard)
             return await self._apply(channel, link, captured, guard)
 

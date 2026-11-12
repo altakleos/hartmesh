@@ -41,6 +41,13 @@ Capture precedes admission; stored-input resume never reconstructs an Update or
 retries an unknown action. Typed decision confirmations own their original input
 until outcome delivery. Supervisor installation and broader input routing remain deferred.
 
+`work_comment_cards.py` supplies receipt-owned outcome V5: saved comments return
+a full current decision/review with fresh controls, while legacy plain outcome
+ACKs remain readable. Further replies own distinct Respond operations. Request
+previews and full comment outcomes share `work_source_spaces.py` for final joined
+Space READ checks; comment publication uses that proof too. Multipart recovery
+preserves the original operation and ACKs. Supervisor installation remains pending.
+
 The optional `work_callbacks.py` dispatcher composes existing Work owners; the
 supervisor does not install it yet. Stale callbacks can refresh only unreserved
 controls or exact conclusive conflicts; retained input has its own owner. Known

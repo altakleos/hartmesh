@@ -39,7 +39,8 @@ class WorkStaleRecovery:
                 group = await self.callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=composed, session=writer)
                 parent = await writer.get(TelegramOutboxRow, group.anchor_outbox_id, populate_existing=True)
                 shown = acknowledged_source(link, parent)
-                if parent.payload["work_request_basis"]["version"] not in {1, 2, 3} or (shown.work["id"], shown.request["id"]) != (source.work["id"], request_id):
+                supported = parent.payload.get("work_request_basis", {}).get("version") in {1, 2, 3} or parent.payload.get("work_outcome_basis", {}).get("version") == 5
+                if not supported or (shown.work["id"], shown.request["id"]) != (source.work["id"], request_id):
                     # Input-owned drafts have their own preservation/review flow.
                     raise CallbackRefused()
                 saved = await writer.get(TelegramActRow, callback_id, with_for_update=True, populate_existing=True)

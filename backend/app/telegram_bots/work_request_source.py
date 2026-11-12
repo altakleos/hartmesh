@@ -19,9 +19,7 @@ from app.telegram_bots.work_requests import WorkRequestRead, present_request, se
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied
 from deerflow.persistence.agent_instances.human_input import HumanInputRequestRow
 from deerflow.persistence.agent_instances.work import AgentWorkRow
-from deerflow.persistence.spaces.model import SpaceGrantRow, SpaceRow
 from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow, TelegramPersonSettingsRow
-from deerflow.spaces.contract import Permission
 from deerflow.utils.file_io import await_drained
 
 
@@ -80,6 +78,7 @@ def frozen(captured, *, acknowledged=False):
             | ({"reveal", "cleanup_id"} if basis.get("version") in {2, 3, 4, 6} else set())
             | ({"interaction", "origin"} if basis.get("version") in {3, 4} else set())
             | ({"input"} if basis.get("version") == 4 else set())
+            | ({"reopen"} if basis.get("version") == 3 and "reopen" in basis else set())
             | ({"routing"} if basis.get("version") in {5, 6} else set())
             | ({"reply_origin"} if basis.get("version") in {2, 6} and "reply_origin" in basis else set())
             | ({"choice_origin"} if basis.get("version") == 6 and "choice_origin" in basis else set())
@@ -96,6 +95,12 @@ def frozen(captured, *, acknowledged=False):
             or captured.item.payload["presentation_version"] < 0
         ):
             raise ValueError()
+        if "reopen" in basis:
+            from app.telegram_bots.work_reopen import validate_reopen
+
+            validate_reopen(basis["reopen"])
+            if basis.get("interaction", {}).get("view") != "prompt":
+                raise ValueError()
         reply_origin = basis.get("reply_origin")
         if reply_origin is not None and (type(reply_origin) is not str or len(reply_origin) != 32 or any(ch not in "0123456789abcdef" for ch in reply_origin)):
             raise ValueError()
@@ -341,14 +346,16 @@ class _RequestProjection:
     def __init__(self, host, captured, basis, source, settings, zone, silent, now):
         self.host, self.captured, self.basis, self.source = host, captured, basis, source
         self.settings, self.zone, self.silent, self.now = settings, zone, silent, now
-        self.spaces = set(_references((source.request, source.work, source.responses)))
+        from app.telegram_bots.work_source_spaces import ReferencedSpaces
+
+        self.references = ReferencedSpaces(host.reader, host.outbox.sessions, source)
         # The last part owns markup, but its complete control group must remain
         # usable before *any* chunk of this presentation reaches Telegram.
         self.controls_part = next((part for part in captured.item.parts if part["presentation_version"] == captured.item.payload["presentation_version"] and part.get("stored_keyboard")), None)
 
     def extend(self, query):
         bot, delivery, settings = TelegramBotLinkRow, TelegramOutboxRow, TelegramPersonSettingsRow
-        request, work, space, grant, callback = HumanInputRequestRow, AgentWorkRow, SpaceRow, SpaceGrantRow, TelegramCallbackRow
+        request, work, callback = HumanInputRequestRow, AgentWorkRow, TelegramCallbackRow
         sqlite = self.host.outbox.sessions.kw["bind"].dialect.name == "sqlite"
 
         def aggregate(fields):
@@ -359,15 +366,7 @@ class _RequestProjection:
 
         # Correlated compact arrays keep the complete outbox JSON out of the
         # Space x callback product. These facts still share the final statement.
-        fields = {column.name: column for column in space.__table__.columns if column.name not in {"created_at", "updated_at"}}
-        spaces = (
-            select(aggregate({**fields, "permissions": grant.permissions}))
-            .select_from(space)
-            .outerjoin(grant, and_(grant.space_id == space.id, grant.principal_kind == "human", grant.subject_id == bot.owner_user_id))
-            .where(space.id.in_(self.spaces) if self.spaces else false())
-            .correlate(bot)
-            .scalar_subquery()
-        )
+        spaces = self.references.expression()
         origin = self.basis.get("origin", {})
         origin_group = select(TelegramCallbackRow.group_id).where(TelegramCallbackRow.id == origin.get("callback_id")).scalar_subquery()
         callbacks = (
@@ -378,6 +377,7 @@ class _RequestProjection:
                     callback.id.in_({self.basis.get("reveal"), self.basis.get("reply_origin"), self.basis.get("choice_origin")} - {None}),
                     callback.group_id == origin_group if origin else false(),
                     callback.id == self.basis.get("prompt_id") if self.basis.get("prompt_id") else false(),
+                    callback.id == self.basis.get("reopen", {}).get("prompt_id") if self.basis.get("reopen") else false(),
                 )
             )
             .scalar_subquery()
@@ -398,6 +398,9 @@ class _RequestProjection:
 
             identity, mark = self.basis["input"], aliased(TelegramInboundMarkRow)
             result = result.add_columns(mark, blocked_input_actions(identity)).outerjoin(mark, and_(mark.link_id == identity["link_id"], mark.chat_id == identity["chat_id"], mark.message_id == identity["message_id"]))
+        if "reopen" in self.basis:
+            identity, mark = self.basis["reopen"]["input"], aliased(TelegramInboundMarkRow)
+            result = result.add_columns(mark).outerjoin(mark, and_(mark.link_id == identity["link_id"], mark.chat_id == identity["chat_id"], mark.message_id == identity["message_id"]))
         return result
 
     @staticmethod
@@ -453,13 +456,7 @@ class _RequestProjection:
         recent = current.last_update_at is not None and self.now - aware(current.last_update_at) <= timedelta(seconds=self.host.outbox.config.outbox.recent_act_seconds)
         if bool(delivery.silent or self.captured.part.get("silent") or quiet and not recent) != bool(self.silent):
             raise DeliveryClaimRetired()
-        seen = set()
-        for space in self.objects(rows[0][12]):
-            if space.status not in {"active", "archived"} or space.permissions is None or not self.host.reader.work.agents.files.registry._view(space, space.permissions).permissions & Permission.READ:
-                raise ProductSourceRetired()
-            seen.add(space.id)
-        if seen != self.spaces:
-            raise ProductSourceRetired()
+        self.references.check(rows[0][12])
         callback_facts = self.objects(rows[0][13])
         for identity in {self.basis.get("reveal"), self.basis.get("reply_origin")} - {None}:
             reveal = next((row for row in callback_facts if row.id == identity), None)
@@ -474,7 +471,7 @@ class _RequestProjection:
         if self.basis["version"] == 3:
             from app.telegram_bots.work_interaction_delivery import check_origin
 
-            check_origin(current, rows[0][15], callback_facts, self.basis, self.source)
+            check_origin(current, rows[0][15], callback_facts, self.basis, self.source, reopened_mark=rows[0][16] if "reopen" in self.basis else None, outbox_id=delivery.id)
         elif self.basis["version"] == 4:
             from app.telegram_bots.work_input_previews import check_input_origin
 

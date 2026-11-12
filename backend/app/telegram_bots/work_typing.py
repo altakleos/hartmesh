@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 from app.telegram_bots.callbacks import CallbackRefused, _aware, _plain, _visibility
 
-PURPOSES = {"answer": "answer", "cannot": "cannot_provide", "wrong": "wrong_recipient", "decision": "decide_own", "decision_note": "decide_note", "changes": "request_changes"}
+PURPOSES = {"comment": "work_comment", "answer": "answer", "cannot": "cannot_provide", "wrong": "wrong_recipient", "decision": "decide_own", "decision_note": "decide_note", "changes": "request_changes"}
 
 
 def prompt_parts(item):

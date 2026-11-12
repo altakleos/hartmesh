@@ -862,6 +862,29 @@ class CallbackRepository:
 
                 by_id = {row.id: row for row in rows}
                 show_proofs = set()
+                # Closed-input recovery needs the original purpose until its
+                # explicit choice and any fresh prompt have actually settled.
+                for mark in await session.scalars(
+                    select(TelegramInboundMarkRow)
+                    .join(TelegramBotLinkRow, TelegramBotLinkRow.id == TelegramInboundMarkRow.link_id)
+                    .where(
+                        TelegramInboundMarkRow.state != "done",
+                        TelegramInboundMarkRow.route_kind.in_(("work_card_hold", "turn")),
+                        TelegramInboundMarkRow.binding_generation == TelegramBotLinkRow.binding_generation,
+                        TelegramInboundMarkRow.chat_id == TelegramBotLinkRow.chat_id,
+                    )
+                ):
+                    closed = mark.route_basis.get("work_closed", {})
+                    if type(closed) is not dict or type(closed.get("prompt_id")) is not str or type(closed.get("source_outbox_id")) is not str:
+                        continue
+                    prompt = by_id.get(closed.get("prompt_id"))
+                    if (
+                        prompt is not None
+                        and prompt.kind == "prompt"
+                        and (prompt.link_id, prompt.chat_id, prompt.binding_generation, prompt.message_thread_id, prompt.payload.get("anchor_outbox_id"))
+                        == (mark.link_id, mark.chat_id, mark.binding_generation, mark.message_thread_id, closed.get("source_outbox_id"))
+                    ):
+                        show_proofs.add(prompt.id)
                 parent = TelegramOutboxRow
                 proof_id = parent.payload["work_request_basis"]["reply_origin"].as_string()
                 for saved in await session.execute(select(parent.id, parent.link_id, parent.chat_id, parent.binding_generation, proof_id.label("proof_id")).where(proof_id.is_not(None))):
